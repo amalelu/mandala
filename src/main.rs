@@ -24,7 +24,7 @@ fn main() {
             should_exit: false,
             window_mode: WindowMode::WindowedFullscreen,
             ui_scale: 0,
-            window_title_text: "Goosh Goosh",
+            window_title_text: "God is Great",
             input_mode: InputMode::MappedToInstruction,
             key_bindings: default_keybindings,
             avail_cores: num_cpus::get(),
