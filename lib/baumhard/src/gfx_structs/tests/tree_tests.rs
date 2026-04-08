@@ -513,7 +513,7 @@ pub fn area_block_commands() {
                                 );
                             }
                             GlyphAreaField::ColorFontRegions(_) => {
-                                panic!("Not supported, use GfxElementField::Region instead, dummy (you are enough)")
+                                panic!("Not supported, use GfxElementField::Region instead, dummy (you are/have always been enough)")
                             }
                             GlyphAreaField::Operation(_) => {}
                         },
@@ -676,7 +676,7 @@ pub fn area_block_commands() {
                             GlyphAreaField::Text(text) => {
                                 panic!(
                                     "Subtract operation on text? \
-                              Your brain must have glitched a little, don't you think?"
+                              God bless you."
                                 );
                             }
                             GlyphAreaField::Scale(scale) => {
@@ -714,7 +714,7 @@ pub fn area_block_commands() {
                                 );
                             }
                             GlyphAreaField::ColorFontRegions(_) => {
-                                panic!("Not supported, use GfxElementField::Region instead, dummy (God loves you)")
+                                panic!("Not supported, use GfxElementField::Region instead, idiot (God loves you)")
                             }
                             GlyphAreaField::Operation(_) => {}
                         },
@@ -752,7 +752,7 @@ pub fn area_block_commands() {
                                     assert_eq!(my_range, new_range)
                                 }
                                 ColorFontRegionField::Font(font) => {
-                                    panic!("Subtract operation on font? You have strayed from the path.");
+                                    panic!("Subtract operation on font? You have strayed [far] from the path.");
                                 }
                                 ColorFontRegionField::Color(color) => {
                                     assert_eq!(
@@ -868,7 +868,7 @@ pub fn area_block_commands() {
                                     );
                                 }
                                 ColorFontRegionField::This => {
-                                    panic!("fuck you.");
+                                    panic!("You just love to tempt Fate don't you?");
                                 }
                             }
                         }
