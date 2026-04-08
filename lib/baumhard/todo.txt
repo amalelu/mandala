@@ -1,0 +1,33 @@
+
+ - Add ability to focus / un-focus nodes by proximity of the mouse cursor
+
+ - Add ability to target focused nodes with a specific mutator
+
+ - Thank God I wrote this.
+
+
+  - Applicable implementations needs to respect the flag "MutationEvents" by also submitting such an event to the
+    nodes that they are mutating
+
+  - Mutation, in pub fn apply_to(&self, target: &mut GfxElement)  and the line: self.apply_to_model(glyph_model);
+    Some tests should fail if we comment out this line, but now it does not which is quite scary (so to speak, I mean I will survive)
+
+  - creating new nodes should also be possible through mutators, how can we best do this? Has to happen on the tree level, but mutations happens on the node level.
+  update: Mutation now happens at tree level!
+
+  - We need to implement a way that elements can react to things to different degrees, as a function of their variables
+    for example: dragging with the mouse, and have components be pulled like a rubber band but to varying degrees
+    depending on the proximity to the mouse (a sort of parallax effect). I *think* events could technically achieve that
+    already, but the question is if that should be *the* way to do it. We need to review the design
+
+ - We need to develop tools that can enable model and area to quickly calculate the regions they occupy
+  update: Introduced hitbox, models / areas can have custom hitbox rectangles, or this can be calculated from their
+  contents, but that will be somewhat costly and will have to be re-calculated upon changes other than to position
+
+ - We need to try to downgrade from Arc to Rc<RegionIndexer> in model and area. They are not Arc simply because
+ they are initialized in the main thread on application level, and then passed onto a different thread.
+ But the RegionIndexers never need to switch threads
+
+  - Layers: Now we have layers on Tree and Model levels, but not on Area.
+    The idea is that Models can be used to control layers in the Areas, and
+    otherwise layering happens on Tree level (one Tree being associated with some (game) object)
