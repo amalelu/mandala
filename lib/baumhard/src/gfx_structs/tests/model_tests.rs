@@ -354,7 +354,7 @@ pub fn matrix_add_assign_2() {
    modifier_matrix.push(GlyphLine::new_with_vec(
       vec![
          GlyphComponent::space(3),
-         GlyphComponent::text("HELP", AppFont::HelpMe, Color::black()),
+         GlyphComponent::text("HELP", AppFont::Evilz, Color::black()),
       ],
       true,
    ));
@@ -362,7 +362,7 @@ pub fn matrix_add_assign_2() {
    modifier_matrix.push(GlyphLine::new_with_vec(
       vec![
          GlyphComponent::space(3),
-         GlyphComponent::text("HELP", AppFont::HelpMe, Color::black()),
+         GlyphComponent::text("HELP", AppFont::Evilz, Color::black()),
       ],
       true,
    ));
@@ -370,7 +370,7 @@ pub fn matrix_add_assign_2() {
    modifier_matrix.push(GlyphLine::new_with_vec(
       vec![
          GlyphComponent::space(3),
-         GlyphComponent::text("HELP", AppFont::HelpMe, Color::black()),
+         GlyphComponent::text("HELP", AppFont::Evilz, Color::black()),
       ],
       true,
    ));
@@ -378,7 +378,7 @@ pub fn matrix_add_assign_2() {
    modifier_matrix.push(GlyphLine::new_with_vec(
       vec![
          GlyphComponent::space(3),
-         GlyphComponent::text("HELP", AppFont::HelpMe, Color::black()),
+         GlyphComponent::text("HELP", AppFont::Evilz, Color::black()),
       ],
       true,
    ));
@@ -421,22 +421,22 @@ pub fn matrix_add_assign_1() {
    let mut modifier_matrix = GlyphMatrix::new();
    modifier_matrix.push(GlyphLine::new_with(GlyphComponent::text(
       "HELP",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    )));
    modifier_matrix.push(GlyphLine::new_with(GlyphComponent::text(
       "HELP",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    )));
    modifier_matrix.push(GlyphLine::new_with(GlyphComponent::text(
       "HELP",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    )));
    modifier_matrix.push(GlyphLine::new_with(GlyphComponent::text(
       "HELP",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    )));
 
@@ -469,22 +469,22 @@ pub fn matrix_mul_assign_1() {
    let mut modifier_matrix = GlyphMatrix::new();
    modifier_matrix.push(GlyphLine::new_with(GlyphComponent::text(
       "HELP",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    )));
    modifier_matrix.push(GlyphLine::new_with(GlyphComponent::text(
       "HELP",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    )));
    modifier_matrix.push(GlyphLine::new_with(GlyphComponent::text(
       "HELP",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    )));
    modifier_matrix.push(GlyphLine::new_with(GlyphComponent::text(
       "HELP",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    )));
 
@@ -1154,7 +1154,7 @@ pub fn overriding_insert_10() {
    ));
    glyph_line.push(GlyphComponent::text(
       "Ook? Ook! Ook? Ook.",
-      AppFont::HelpMe,
+      AppFont::Evilz,
       Color::black(),
    ));
    assert_eq!(glyph_line.line.len(), 3);
@@ -1169,7 +1169,7 @@ pub fn overriding_insert_10() {
    assert_eq!(glyph_line.get(2).unwrap().as_str(), "Ook! Ook? Ook.");
    assert_eq!(glyph_line.get(0).unwrap().font, AppFont::AppleTea);
    assert_eq!(glyph_line.get(1).unwrap().font, AppFont::Any);
-   assert_eq!(glyph_line.get(2).unwrap().font, AppFont::HelpMe);
+   assert_eq!(glyph_line.get(2).unwrap().font, AppFont::Evilz);
    assert_eq!(glyph_line.get(0).unwrap().color, Color::black());
    assert_eq!(glyph_line.get(1).unwrap().color, Color::black());
    assert_eq!(glyph_line.get(2).unwrap().color, Color::black());

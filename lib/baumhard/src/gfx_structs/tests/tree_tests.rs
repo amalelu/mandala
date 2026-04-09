@@ -1,6 +1,6 @@
 use crossbeam_channel::unbounded;
 use glam::Vec2;
-use indextree::{Arena, NodeId};
+use indextree::{NodeId};
 use lazy_static::lazy_static;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex};
@@ -8,13 +8,11 @@ use strum::IntoEnumIterator;
 
 use crate::font::fonts;
 use crate::font::fonts::AppFont;
-use crate::font::fonts::AppFont::AliceInWonderland;
+use crate::font::fonts::AppFont::{AliceInWonderland, Evilz};
 use crate::font::fonts::AppFont::AlphaMusicMan;
 use crate::font::fonts::AppFont::AppleTea;
 use crate::font::fonts::AppFont::Casanova;
 use crate::font::fonts::AppFont::DenseLetters;
-use crate::font::fonts::AppFont::HelpMe;
-use crate::font::fonts::AppFont::LoveRomance;
 use crate::font::fonts::AppFont::NorseBold;
 use crate::gfx_structs::area::{
     DeltaGlyphArea, GlyphArea, GlyphAreaCommand, GlyphAreaCommandType, GlyphAreaField,
@@ -26,7 +24,7 @@ use crate::gfx_structs::model::{
 };
 use crate::gfx_structs::mutator::Instruction::RepeatWhile;
 use crate::gfx_structs::mutator::{
-    GfxMutator, GlyphTreeEvent, GlyphTreeEventInstance, Instruction, Mutation,
+    GfxMutator, GlyphTreeEvent, GlyphTreeEventInstance, Mutation,
 };
 use crate::gfx_structs::tree::{BranchChannel, EventSubscriber, MutatorTree, Tree};
 use crate::gfx_structs::tree_walker::walk_tree_from;
@@ -474,7 +472,7 @@ pub fn area_block_commands() {
                         GfxElementField::GlyphArea(field) => match field {
                             GlyphAreaField::Text(text) => {
                                 let my_text = my_block.glyph_area().unwrap().text.as_str();
-                                let mut reference_text =
+                                let reference_text =
                                     reference_block.glyph_area().unwrap().text.as_str();
                                 assert_eq!(my_text, reference_text.to_owned() + text.as_str())
                             }
@@ -2099,7 +2097,7 @@ pub fn simple_tree_mutation() {
 
     let mutator_ba = mutator.arena.new_node(GfxMutator::new(
         Mutation::area_delta(make_mutator(
-            Some(LoveRomance),
+            Some(Evilz),
             None,
             Vec2::new(-25.0, 25.0),
         )),
@@ -2107,7 +2105,7 @@ pub fn simple_tree_mutation() {
     ));
 
     let mutator_bb = mutator.arena.new_node(GfxMutator::new(
-        Mutation::area_delta(make_mutator(Some(HelpMe), None, Vec2::new(25.0, 25.0))),
+        Mutation::area_delta(make_mutator(Some(Evilz), None, Vec2::new(25.0, 25.0))),
         2,
     ));
 
@@ -2167,7 +2165,7 @@ pub fn simple_tree_mutation() {
         vec![
             GlyphAreaField::position(35.0, 105.0),
             GlyphAreaField::ColorFontRegions(ColorFontRegions::new_from(vec![
-                ColorFontRegion::new(Range::new(0, 1), Some(LoveRomance), None),
+                ColorFontRegion::new(Range::new(0, 1), Some(Evilz), None),
             ])),
         ],
     );
@@ -2178,7 +2176,7 @@ pub fn simple_tree_mutation() {
         vec![
             GlyphAreaField::position(105.0, 105.0),
             GlyphAreaField::ColorFontRegions(ColorFontRegions::new_from(vec![
-                ColorFontRegion::new(Range::new(0, 1), Some(HelpMe), None),
+                ColorFontRegion::new(Range::new(0, 1), Some(Evilz), None),
             ])),
         ],
     );

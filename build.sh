@@ -1,10 +1,11 @@
 #!/bin/bash
 # This script builds codebound properly for release
 # Any files that should be included in a release-build will have to be excluded here
-
+EXECUTABLE_NAME="mandala"
 # Define the common exclusion patterns
-EXCLUDE_PATTERN="! -name 'codebound' ! -name 'codebound.exe' ! -name 'build.log' ! -name '*.so' ! -name '*.a' ! -name '*.lib'"
+EXCLUDE_PATTERN="! -name '${EXECUTABLE_NAME}' ! -name '${EXECUTABLE_NAME}.exe' ! -name 'build.log' ! -name '*.so' ! -name '*.a' ! -name '*.lib'"
 
+echo $EXCLUDE_PATTERN
 # Default variables
 BUILD_DIR="target"
 PROFILE="release"
@@ -81,9 +82,9 @@ fi
 echo "Cleaning directory: $TARGET_DIR"
 
 # First, find and delete all files within the target directory
-eval "find \"$TARGET_DIR\" -mindepth 1 -type f \( $EXCLUDE_PATTERN \) -exec rm -f {} +"
+#eval "find \"$TARGET_DIR\" -mindepth 1 -type f \( $EXCLUDE_PATTERN \) -exec rm -f {} +"
 # eval: It takes the command string with variable substitutions and executes it as a shell command.
 # Next, find and delete all directories within the target directory
-eval "find \"$TARGET_DIR\" -mindepth 1 -type d \( $EXCLUDE_PATTERN \) -exec rm -rf {} +"
+#eval "find \"$TARGET_DIR\" -mindepth 1 -type d \( $EXCLUDE_PATTERN \) -exec rm -rf {} +"
 
 exit 0

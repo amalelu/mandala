@@ -21,6 +21,7 @@ lazy_static! {
                 "🙏🏻🍕🍕🍕🍕"
             ),
             ("🏳️‍🌈👩‍👧‍👦👯‍♂️👰‍♂️👨‍🚀", 3, "🏳️‍🌈👩‍👧‍👦👯‍♂️", "👰‍♂️👨‍🚀"),
+            ("", 2, "", ""),
         ];
         pub static ref REMOVE_PREFIX_TESTS: Vec<(&'static str, usize, &'static str)> = vec![
             ("abcd🍕1234", 3, "d🍕1234"),
