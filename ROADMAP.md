@@ -22,8 +22,8 @@ tool inspired by miMind but with superior capabilities.
 1. **Single-threaded architecture** - Collapse multi-threaded Decree system to direct method calls. Simpler state management, matches WASM reality, better for editing UX
 2. **Model-View separation** - MindMapDocument owns the MindMap, Renderer receives RenderScene snapshots
 3. **RenderScene as intermediary** - Formalizes the 1:N mapping (one node -> text + border + connection elements)
-4. **Multi-parent via Vec** - `parent_ids: Vec<String>` where [0] is primary, rest are secondary
-5. **Portals as strict pairs** - PortalPair struct with exactly two endpoints, rendered as matching glyph markers (like circuit vias)
+4. **Single-parent tree preserved** - `parent_id: Option<String>` maps directly to Baumhard's indextree. Non-hierarchical relationships use arbitrary connections (`edge_type: "cross_link"`), not multi-parent.
+5. **Portals deferred** - Portal system (non-hierarchical node links) planned for a later milestone
 6. **Everything is glyphs** - Connections, borders, portals all rendered as positioned font glyphs via cosmic-text
 7. **Game code removed** - All World/Scene/GameObject/GameResource types deleted. Clean mindmap-focused codebase
 8. **Backward-compatible format** - v1 files load in v2 loader via serde defaults + migration
@@ -41,26 +41,28 @@ tool inspired by miMind but with superior capabilities.
 - **Multi-target** - native + WASM builds via Trunk
 
 ### What needs change
-- **Renderer owns MindMap** - `renderer.rs:548` stores `self.mindmap = Some(map)` and builds buffers directly
 - **No editing layer** - no input handling for node selection, drag, connect
-- **Connections not rendered** - MindEdge/GlyphConnectionConfig defined but render code absent
-- **Single parent only** - `MindNode.parent_id: Option<String>` allows only one parent
-- **No portal concept** in the format
-- **Game engine leftovers** in `common.rs` and `game_concepts.rs`
-- **Hardcoded load path** - no file picker or CLI arg
+- **No portal concept** in the format (deferred)
+- **Borders not in tree** - borders still rendered via flat pipeline, not part of Baumhard tree
+- **No mutation application** - tree bridge exists but no MutatorTrees are applied yet
 
 ### Key Files Reference
-| File | LOC | Role |
-|------|-----|------|
-| `src/application/app.rs` | 665 | Event loop, window, thread management |
-| `src/application/renderer.rs` | 902 | GPU pipeline, mindmap buffer building |
-| `src/application/common.rs` | 470 | Decree system + game leftovers |
-| `src/application/game_concepts.rs` | 213 | Game state (to be removed) |
-| `lib/baumhard/src/mindmap/model.rs` | 303 | MindMap, MindNode, MindEdge structs |
-| `lib/baumhard/src/mindmap/loader.rs` | ~50 | JSON loading |
-| `lib/baumhard/src/mindmap/border.rs` | 147 | BorderGlyphSet, BorderStyle |
-| `lib/baumhard/src/gfx_structs/element.rs` | ~200 | GfxElement enum |
-| `lib/baumhard/src/gfx_structs/tree_walker.rs` | 323 | Mutation tree walking |
+| File | Role |
+|------|------|
+| `src/application/app.rs` | Event loop, window, tree+scene pipeline wiring |
+| `src/application/renderer.rs` | GPU pipeline: tree-based node rendering + flat border/connection rendering |
+| `src/application/document.rs` | Owns MindMap, provides `build_tree()` and `build_scene()` |
+| `src/application/common.rs` | RenderDecree, WindowMode, InputMode, timing |
+| `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge structs |
+| `lib/baumhard/src/mindmap/tree_builder.rs` | MindMap → Tree<GfxElement, GfxMutator> bridge |
+| `lib/baumhard/src/mindmap/scene_builder.rs` | MindMap → flat RenderScene (connections, borders) |
+| `lib/baumhard/src/mindmap/loader.rs` | JSON loading |
+| `lib/baumhard/src/mindmap/border.rs` | BorderGlyphSet, BorderStyle |
+| `lib/baumhard/src/mindmap/connection.rs` | Path computation, Bezier curves, glyph sampling |
+| `lib/baumhard/src/gfx_structs/tree.rs` | Tree<T,M>, MutatorTree<T> |
+| `lib/baumhard/src/gfx_structs/tree_walker.rs` | Mutation tree walking algorithm |
+| `lib/baumhard/src/gfx_structs/element.rs` | GfxElement enum (GlyphArea, GlyphModel, Void) |
+| `lib/baumhard/src/gfx_structs/mutator.rs` | GfxMutator, Mutation, Instruction types |
 
 ---
 
@@ -69,11 +71,11 @@ tool inspired by miMind but with superior capabilities.
 ```
 M1 (Architecture) --+--> M2 (Connections) ---+
                      |                        +--> M6 (Connection Editing)
-                     +--> M3 (Format v2) ----+      6A: Select/delete edges
+                     +--> M3 (Tree Bridge) --+      6A: Select/delete edges
                      |                        |     6B: Create connections
                      +--> M4 (Selection) -+   |     6C: Path/anchor manipulation
                      |                    |   |     6D: Style/label editing
-                     |                    |   +---> 6E: Portal creation (needs M3)
+                     |                    |   +---> 6E: Portal creation
                      |                    |
                      |                    +--> M5 (Move/Reparent) --> M7 (Text Edit)
                      |
@@ -186,37 +188,38 @@ M1 (Architecture) --+--> M2 (Connections) ---+
 
 ---
 
-## Milestone 3: JSON Format v2
+## Milestone 3: Baumhard Tree Bridge
 
-**Goal**: Evolve the format to support multi-parent, portals, and richer glyph semantics.
+**Goal**: Bridge MindMap hierarchy into Baumhard's mutation tree system, enabling creative animation of the mindmap through the Tree<GfxElement, GfxMutator> + MutatorTree pipeline.
 
-### Session 3A: Multi-parent support
+**Architectural decision**: Multi-parent support is dropped. The single-parent tree (`parent_id: Option<String>`) maps directly to Baumhard's indextree hierarchy and is the correct model. Non-hierarchical relationships use arbitrary connections (`edge_type: "cross_link"`), which don't participate in tree structure. Portal system is deferred to a later milestone.
 
-**What**: Change node parent model from single to multi-parent.
+### Session 3: MindMap-to-Baumhard tree pipeline
 
-- [ ] Change `MindNode.parent_id: Option<String>` to `parent_ids: Vec<String>`
-- [ ] Implement serde backward compatibility: accept both `parent_id` (v1) and `parent_ids` (v2)
-- [ ] Update `root_nodes()` - nodes with empty `parent_ids`
-- [ ] Update `children_of()` - check if `parent_ids` contains the given parent
-- [ ] Update `is_hidden_by_fold()` - fold based on primary parent `[0]` only
-- [ ] Update `find_schema_root()` - walk primary parent chain
-- [ ] Update existing tests, add multi-parent tests
+**What**: Build a Tree<GfxElement, GfxMutator> from the MindMap's parent-child hierarchy and render through it.
 
-**Verify**: Existing v1 mindmap loads unchanged, new multi-parent JSON loads correctly
+- [x] Create `lib/baumhard/src/mindmap/tree_builder.rs` with `build_mindmap_tree()`
+- [x] Convert MindNode → GlyphArea (text, position, size, ColorFontRegions)
+- [x] Recursively build tree following `parent_id` hierarchy
+- [x] Exclude nodes hidden by fold state via `is_hidden_by_fold()`
+- [x] Return `MindMapTree` with tree + node_map (MindNode ID → NodeId)
+- [x] Add `rebuild_buffers_from_tree()` to Renderer (walks tree, creates cosmic-text buffers)
+- [x] Add `fit_camera_to_tree()` to Renderer
+- [x] Split out `rebuild_border_buffers()` and `rebuild_connection_buffers()` as flat pipeline
+- [x] Add `build_tree()` to MindMapDocument
+- [x] Wire up app.rs: nodes via tree, connections+borders via flat scene
+- [x] 7 unit tests for tree structure, GlyphArea properties, hierarchy preservation
+- [x] All 120 tests pass, visual rendering preserved
 
-### Session 3B: Portal system & format v2 spec
+**Key files**:
+- `lib/baumhard/src/mindmap/tree_builder.rs` (new) - MindMap → Baumhard Tree bridge
+- `src/application/renderer.rs` - tree-based rendering path + split flat methods
+- `src/application/document.rs` - `build_tree()` method
+- `src/application/app.rs` - wired to tree flow (native + WASM)
 
-**What**: Add portal data model and document the v2 format.
+**What this enables**: MutatorTree<GfxMutator> can now be applied to the mindmap tree, cascading mutations (position, scale, color, text) through the parent-child hierarchy. This is the foundation for creative animation of the mindmap.
 
-- [ ] Add `PortalPair`, `PortalEndpoint`, `PortalGlyph` structs to `model.rs`
-- [ ] Add `portals: Vec<PortalPair>` to `MindMap` with `#[serde(default)]`
-- [ ] Add `AnchorPosition` enum (Auto, Top, Bottom, Left, Right, Custom)
-- [ ] Implement v1 -> v2 migration in loader (parent_id -> parent_ids, add empty portals)
-- [ ] Bump format to `"version": "2.0"`
-- [ ] Update `maps/docs/mindmap-json-format.md` with v2 spec
-- [ ] Add portal rendering elements to scene builder (glyph markers at anchor points)
-
-**Verify**: v1 and v2 files both load, portal glyphs render on nodes
+**Verify**: `cargo test -p baumhard -p mandala` passes (120 tests), `cargo run -- maps/testament.mindmap.json` renders correctly
 
 ---
 
