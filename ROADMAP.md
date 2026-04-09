@@ -30,7 +30,7 @@ The application has two layers:
 
 ---
 
-## Current State (after Session 3)
+## Current State (after Session 4)
 
 ### What works
 - **MindMap data model** — serde-based structs, JSON loading, hierarchy queries
@@ -39,21 +39,25 @@ The application has two layers:
 - **Border rendering** — glyph-based box-drawing borders (flat pipeline)
 - **Connection rendering** — glyph-based edge paths with Bezier curves (flat pipeline)
 - **Camera** — pan/zoom with fit-to-content
+- **Node selection** — click to select, shift+click for multi-select, click empty to deselect
+- **Selection highlight** — selected nodes highlighted via GlyphArea color region mutation (cyan)
+- **Click vs drag** — left-click selects, left-drag pans (5px threshold), middle-drag pans
 - **Multi-target** — native + WASM builds
-- **120 tests passing**
+- **126 tests passing**
 
 ### What needs work
-- **No mutation application** — tree bridge exists but no MutatorTrees are applied yet
-- **No editing layer** — no input handling for selection, drag, text editing
+- **No node movement** — selection exists but nodes can't be dragged to new positions
+- **No text editing** — no inline text editing or node creation
 - **Borders not in tree** — borders render via flat pipeline, not as GlyphModel children in the Baumhard tree
 - **No save/persistence** — document dirty flag exists but no serialization
+- **WASM input** — selection not yet wired up on WASM (TODOs in event loop)
 
 ### Key Files Reference
 | File | Role |
 |------|------|
 | `src/application/app.rs` | Event loop, window, tree+scene pipeline wiring |
 | `src/application/renderer.rs` | GPU pipeline: tree-based node rendering + flat border/connection rendering |
-| `src/application/document.rs` | Owns MindMap, provides `build_tree()` and `build_scene()` |
+| `src/application/document.rs` | Owns MindMap + SelectionState, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()` |
 | `src/application/common.rs` | RenderDecree, WindowMode, InputMode, timing |
 | `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge structs |
 | `lib/baumhard/src/mindmap/tree_builder.rs` | MindMap → Tree<GfxElement, GfxMutator> bridge |
@@ -77,7 +81,7 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
                        |                          |
                        |    M3 enables mutation-  |
                        |    based interaction:    |
-                       |                          +--> M4 (Selection)
+                       |                          +--> M4 (Selection) ✓
                        |                          |      via color/highlight mutations
                        |                          |
                        |                          +--> M5 (Move/Reparent)
@@ -226,7 +230,7 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
 
 **What this enables**: MutatorTree<GfxMutator> can now be applied to the mindmap tree, cascading mutations (position, scale, color, text) through the parent-child hierarchy. This is the foundation for creative animation of the mindmap.
 
-**Verify**: `cargo test -p baumhard -p mandala` passes (120 tests), `cargo run -- maps/testament.mindmap.json` renders correctly
+**Verify**: `cargo test -p baumhard -p mandala` passes (120 tests at end of session 3), `cargo run -- maps/testament.mindmap.json` renders correctly
 
 ---
 
@@ -238,14 +242,21 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
 
 **What**: Click nodes to select them, with visual feedback via tree mutations.
 
-- [ ] Implement node hit testing: click position → Camera2D.screen_to_canvas() → find node by bounds using node_map + GlyphArea positions
-- [ ] Add `SelectionState` to Document (None, Single(NodeId), Multi(Vec<NodeId>))
-- [ ] Handle click events in app event loop → delegate to Document
-- [ ] Shift+click for multi-select, click empty space to deselect
-- [ ] Selection highlight via Baumhard mutation: apply a MutatorTree that changes the selected node's color/style (e.g., color region mutation, or a border highlight)
-- [ ] Rebuild affected tree elements on selection change
+- [x] Implement node hit testing: click position → Camera2D.screen_to_canvas() → find node by bounds using node_map + GlyphArea positions
+- [x] Add `SelectionState` to Document (None, Single(String), Multi(Vec<String>))
+- [x] Handle click events in app event loop → delegate to Document
+- [x] Shift+click for multi-select, click empty space to deselect
+- [x] Selection highlight via GlyphArea color region mutation (cyan highlight, restored on deselect via tree rebuild)
+- [x] Rebuild tree and renderer buffers on selection change
+- [x] Click vs drag distinction: left-click selects, left-drag pans (5px threshold)
+- [x] 6 new tests: hit_test_direct_hit, hit_test_miss, hit_test_returns_smallest_on_overlap, selection_state_is_selected, apply_selection_highlight, highlight_does_not_affect_unselected
 
-**Verify**: Clicking nodes selects them with visual feedback
+**Key files**:
+- `src/application/document.rs` — SelectionState, hit_test(), apply_selection_highlight()
+- `src/application/app.rs` — persistent document/tree in event loop, click handling, modifier tracking
+- `src/application/renderer.rs` — screen_to_canvas()
+
+**Verify**: `cargo test -p baumhard -p mandala` passes (126 tests), clicking nodes selects them with visual feedback
 
 ---
 

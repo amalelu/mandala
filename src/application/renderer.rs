@@ -922,6 +922,11 @@ impl Renderer {
         }
     }
 
+    /// Convert screen coordinates to canvas (world) coordinates using the camera transform.
+    pub fn screen_to_canvas(&self, screen_x: f32, screen_y: f32) -> Vec2 {
+        self.camera.screen_to_canvas(Vec2::new(screen_x, screen_y))
+    }
+
     /// Process a single decree directly
     pub fn process_decree(&mut self, decree: RenderDecree) {
         self.handle_render_decree(decree);
