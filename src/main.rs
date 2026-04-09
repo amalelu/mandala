@@ -2,13 +2,17 @@
 
 use crate::application::app::{Application, Options};
 use crate::application::common::{InputMode, WindowMode};
-use log::{debug, error, info, trace, warn};
-use rustc_hash::FxHashMap;
+use log::info;
 
 mod application;
 
+const DEFAULT_MINDMAP: &str = "maps/testament.mindmap.json";
+
 fn create_options() -> Options {
-    let default_keybindings = FxHashMap::default();
+    // Read mindmap path from CLI args or use default
+    let mindmap_path = std::env::args().nth(1)
+        .unwrap_or_else(|| DEFAULT_MINDMAP.to_string());
+
     Options {
         launch_gpu_prefer_low_power: false,
         should_exit: false,
@@ -16,12 +20,12 @@ fn create_options() -> Options {
         ui_scale: 0,
         window_title_text: "Mandala",
         input_mode: InputMode::MappedToInstruction,
-        key_bindings: default_keybindings,
         #[cfg(not(target_arch = "wasm32"))]
         avail_cores: num_cpus::get(),
         #[cfg(target_arch = "wasm32")]
         avail_cores: 1,
         render_must_be_main: false,
+        mindmap_path,
     }
 }
 
