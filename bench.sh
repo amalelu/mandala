@@ -1,1 +1,1 @@
-cargo bench -p baumhard -p codebound
+cargo bench -p baumhard -p mandala

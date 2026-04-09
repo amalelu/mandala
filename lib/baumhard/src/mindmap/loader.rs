@@ -130,6 +130,65 @@ mod tests {
     }
 
     #[test]
+    fn test_testament_edges_produce_paths() {
+        use crate::mindmap::connection;
+        use glam::Vec2;
+
+        let path = test_map_path();
+        let map = load_from_file(&path).unwrap();
+
+        let mut straight_count = 0;
+        let mut bezier_count = 0;
+        for edge in &map.edges {
+            let from_node = map.nodes.get(&edge.from_id).expect("Missing from_node");
+            let to_node = map.nodes.get(&edge.to_id).expect("Missing to_node");
+
+            let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+            let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+            let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+            let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+
+            let conn_path = connection::build_connection_path(
+                from_pos, from_size, edge.anchor_from,
+                to_pos, to_size, edge.anchor_to,
+                &edge.control_points,
+            );
+            match conn_path {
+                connection::ConnectionPath::Straight { .. } => straight_count += 1,
+                connection::ConnectionPath::CubicBezier { .. } => bezier_count += 1,
+            }
+
+            // Verify sampling produces non-empty result
+            let samples = connection::sample_path(&conn_path, 7.2);
+            assert!(!samples.is_empty(), "Edge {}→{} produced no samples", edge.from_id, edge.to_id);
+        }
+        assert_eq!(straight_count + bezier_count, 250);
+        assert!(straight_count > 200, "Expected most edges to be straight");
+        assert!(bezier_count > 0, "Expected some Bezier edges");
+    }
+
+    #[test]
+    fn test_testament_scene_has_connections() {
+        use crate::mindmap::scene_builder;
+
+        let path = test_map_path();
+        let map = load_from_file(&path).unwrap();
+        let scene = scene_builder::build_scene(&map);
+
+        // All visible edges should produce connection elements
+        let visible_edges = map.edges.iter().filter(|e| e.visible).count();
+        assert_eq!(scene.connection_elements.len(), visible_edges,
+            "Expected {} connection elements, got {}", visible_edges, scene.connection_elements.len());
+
+        // Each connection element should have glyph positions
+        for elem in &scene.connection_elements {
+            assert!(!elem.glyph_positions.is_empty(), "Connection has no glyph positions");
+            assert!(!elem.body_glyph.is_empty(), "Connection has no body glyph");
+            assert!(!elem.color.is_empty(), "Connection has no color");
+        }
+    }
+
+    #[test]
     fn test_is_hidden_by_fold() {
         let path = test_map_path();
         let map = load_from_file(&path).unwrap();

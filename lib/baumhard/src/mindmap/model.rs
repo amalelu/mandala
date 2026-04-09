@@ -213,6 +213,20 @@ pub struct GlyphConnectionConfig {
 fn default_connection_body() -> String { "\u{00B7}".to_string() } // middle dot ·
 fn default_connection_font_size() -> f32 { 12.0 }
 
+impl Default for GlyphConnectionConfig {
+    fn default() -> Self {
+        GlyphConnectionConfig {
+            body: default_connection_body(),
+            cap_start: None,
+            cap_end: None,
+            font: None,
+            font_size_pt: default_connection_font_size(),
+            color: None,
+            spacing: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlPoint {
     pub x: f64,
