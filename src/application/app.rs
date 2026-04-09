@@ -9,7 +9,7 @@ use winit::event_loop::ControlFlow;
 use winit::{event_loop::EventLoop, window::Window};
 
 use crate::application::common::{InputMode, RenderDecree, WindowMode};
-use crate::application::document::MindMapDocument;
+use crate::application::document::{MindMapDocument, SelectionState, hit_test, apply_selection_highlight};
 use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;
@@ -39,6 +39,8 @@ impl Application {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn run(mut self) {
+        use baumhard::mindmap::tree_builder::MindMapTree;
+
         // Single-threaded architecture: App owns the Renderer directly
         baumhard::font::fonts::init();
 
@@ -64,18 +66,24 @@ impl Application {
         // Update arena buffers
         renderer.process_decree(RenderDecree::ArenaUpdate);
 
-        // Load mindmap through Document -> Tree + Scene -> Renderer flow
+        // Load mindmap — document and tree persist for interactive use
+        let mut document: Option<MindMapDocument> = None;
+        let mut mindmap_tree: Option<MindMapTree> = None;
+
         match MindMapDocument::load(&self.options.mindmap_path) {
-            Ok(document) => {
+            Ok(doc) => {
                 // Nodes: build Baumhard tree from MindMap hierarchy
-                let mindmap_tree = document.build_tree();
-                renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
-                renderer.fit_camera_to_tree(&mindmap_tree.tree);
+                let tree = doc.build_tree();
+                renderer.rebuild_buffers_from_tree(&tree.tree);
+                renderer.fit_camera_to_tree(&tree.tree);
 
                 // Connections + borders: flat pipeline from RenderScene
-                let scene = document.build_scene();
+                let scene = doc.build_scene();
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 renderer.rebuild_border_buffers(&scene.border_elements);
+
+                mindmap_tree = Some(tree);
+                document = Some(doc);
             }
             Err(e) => {
                 log::error!("{}", e);
@@ -85,8 +93,12 @@ impl Application {
         // Start rendering
         renderer.process_decree(RenderDecree::StartRender);
 
+        // Input state
         let mut cursor_pos: (f64, f64) = (0.0, 0.0);
         let mut is_panning = false;
+        let mut left_mouse_down = false;
+        let mut left_mouse_down_pos: (f64, f64) = (0.0, 0.0);
+        let mut shift_pressed = false;
 
         self.event_loop.run(move |event, _window_target| {
             _ = (&self.window, &mut self.options);
@@ -117,8 +129,30 @@ impl Application {
                     event: WindowEvent::MouseInput { state, button, .. },
                     ..
                 } => {
-                    if button == MouseButton::Left || button == MouseButton::Middle {
-                        is_panning = state == ElementState::Pressed;
+                    match button {
+                        MouseButton::Middle => {
+                            is_panning = state == ElementState::Pressed;
+                        }
+                        MouseButton::Left => {
+                            if state == ElementState::Pressed {
+                                left_mouse_down = true;
+                                left_mouse_down_pos = cursor_pos;
+                            } else {
+                                // Released — if no drag occurred, treat as click
+                                if left_mouse_down && !is_panning {
+                                    handle_click(
+                                        cursor_pos,
+                                        shift_pressed,
+                                        &mut document,
+                                        &mut mindmap_tree,
+                                        &mut renderer,
+                                    );
+                                }
+                                left_mouse_down = false;
+                                is_panning = false;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Event::WindowEvent {
@@ -145,7 +179,24 @@ impl Application {
                     cursor_pos = (position.x, position.y);
                     if is_panning {
                         renderer.process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
+                    } else if left_mouse_down {
+                        // Detect drag: if moved > 5px from press position, start panning
+                        let dist_x = cursor_pos.0 - left_mouse_down_pos.0;
+                        let dist_y = cursor_pos.1 - left_mouse_down_pos.1;
+                        if dist_x * dist_x + dist_y * dist_y > 25.0 {
+                            is_panning = true;
+                            renderer.process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
+                        }
                     }
+                }
+                ////////////////////
+                //// KEYBOARD ////
+                //////////////////
+                Event::WindowEvent {
+                    event: WindowEvent::ModifiersChanged(modifiers),
+                    ..
+                } => {
+                    shift_pressed = modifiers.state().shift_key();
                 }
                 Event::AboutToWait => {
                     // Drive the render loop each frame
@@ -290,6 +341,75 @@ fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
         .unwrap()
         .request_animation_frame(f.as_ref().unchecked_ref())
         .unwrap();
+}
+
+/// Handle a click event: hit test, update selection, rebuild tree with highlight.
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_click(
+    cursor_pos: (f64, f64),
+    shift_pressed: bool,
+    document: &mut Option<MindMapDocument>,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let doc = match document.as_mut() {
+        Some(d) => d,
+        None => return,
+    };
+
+    // Hit test against current tree
+    let hit = mindmap_tree.as_ref().and_then(|tree| {
+        let canvas_pos = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
+        hit_test(canvas_pos, tree)
+    });
+
+    // Update selection state
+    match (&hit, shift_pressed) {
+        (Some(id), false) => {
+            doc.selection = SelectionState::Single(id.clone());
+        }
+        (Some(id), true) => {
+            // Shift+click: toggle node in/out of multi-selection
+            match &doc.selection {
+                SelectionState::None => {
+                    doc.selection = SelectionState::Single(id.clone());
+                }
+                SelectionState::Single(existing) => {
+                    if existing == id {
+                        doc.selection = SelectionState::None;
+                    } else {
+                        doc.selection = SelectionState::Multi(vec![existing.clone(), id.clone()]);
+                    }
+                }
+                SelectionState::Multi(existing) => {
+                    let mut ids = existing.clone();
+                    if let Some(pos) = ids.iter().position(|i| i == id) {
+                        ids.remove(pos);
+                        doc.selection = match ids.len() {
+                            0 => SelectionState::None,
+                            1 => SelectionState::Single(ids.into_iter().next().unwrap()),
+                            _ => SelectionState::Multi(ids),
+                        };
+                    } else {
+                        ids.push(id.clone());
+                        doc.selection = SelectionState::Multi(ids);
+                    }
+                }
+            }
+        }
+        (None, false) => {
+            doc.selection = SelectionState::None;
+        }
+        (None, true) => {
+            // Shift+click on empty space: keep current selection
+        }
+    }
+
+    // Rebuild tree with selection highlight applied
+    let mut new_tree = doc.build_tree();
+    apply_selection_highlight(&mut new_tree, &doc.selection);
+    renderer.rebuild_buffers_from_tree(&new_tree.tree);
+    *mindmap_tree = Some(new_tree);
 }
 
 /**
