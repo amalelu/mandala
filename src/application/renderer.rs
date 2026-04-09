@@ -25,13 +25,15 @@ use baumhard::font::fonts::AppFont;
 use baumhard::util::grapheme_chad;
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::area::GlyphArea;
+use baumhard::gfx_structs::mutator::GfxMutator;
+use baumhard::gfx_structs::tree::Tree;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
 use crate::application::baumhard_adapter::to_cosmic_text;
 use baumhard::gfx_structs::camera::Camera2D;
 use baumhard::mindmap::model::MindMap;
 use baumhard::mindmap::loader;
 use baumhard::mindmap::border::BorderStyle;
-use baumhard::mindmap::scene_builder::RenderScene;
+use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement};
 use glam::Vec2;
 use std::path::Path;
 
@@ -499,9 +501,17 @@ impl Renderer {
         match loader::load_from_file(Path::new(path)) {
             Ok(map) => {
                 info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
+
+                // Nodes via Baumhard tree
+                let mindmap_tree = baumhard::mindmap::tree_builder::build_mindmap_tree(&map);
+                self.rebuild_buffers_from_tree(&mindmap_tree.tree);
+                self.fit_camera_to_tree(&mindmap_tree.tree);
+
+                // Connections + borders via flat scene
                 let scene = baumhard::mindmap::scene_builder::build_scene(&map);
-                self.rebuild_buffers_from_scene(&scene);
-                self.fit_camera_to_scene(&scene);
+                self.rebuild_connection_buffers(&scene.connection_elements);
+                self.rebuild_border_buffers(&scene.border_elements);
+
                 self.should_render = true;
             }
             Err(e) => {
@@ -697,6 +707,219 @@ impl Renderer {
             Vec2::new(max_x, max_y),
             0.05,
         );
+    }
+
+    /// Rebuild text buffers from a Baumhard tree (nodes rendered from GlyphArea elements).
+    /// This replaces the text portion of rebuild_buffers_from_scene — nodes are now
+    /// sourced from the mutation tree instead of the flat RenderScene.
+    pub fn rebuild_buffers_from_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>) {
+        self.mindmap_buffers.clear();
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        for descendant_id in tree.root().descendants(&tree.arena) {
+            let node = match tree.arena.get(descendant_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            let element = node.get();
+            let area = match element.glyph_area() {
+                Some(a) => a,
+                None => continue, // Skip Void and GlyphModel nodes
+            };
+
+            if area.text.is_empty() {
+                continue;
+            }
+
+            let scale = area.scale.0;
+            let line_height = area.line_height.0;
+            let bound_x = area.render_bounds.x.0;
+            let bound_y = area.render_bounds.y.0;
+
+            let mut buffer = cosmic_text::Buffer::new(
+                &mut font_system,
+                cosmic_text::Metrics::new(scale, line_height),
+            );
+            buffer.set_size(&mut font_system, Some(bound_x), Some(bound_y));
+            buffer.set_wrap(&mut font_system, cosmic_text::Wrap::Word);
+
+            // Build spans from ColorFontRegions
+            let text = &area.text;
+            let spans: Vec<(&str, Attrs)> = if area.regions.num_regions() == 0 {
+                vec![(text.as_str(), Attrs::new())]
+            } else {
+                area.regions.all_regions().iter().filter_map(|region| {
+                    let start = grapheme_chad::find_byte_index_of_char(text, region.range.start)
+                        .unwrap_or(text.len());
+                    let end = grapheme_chad::find_byte_index_of_char(text, region.range.end)
+                        .unwrap_or(text.len());
+                    if start >= end {
+                        return None;
+                    }
+                    let slice = &text[start..end];
+                    let mut attrs = Attrs::new();
+                    if let Some(rgba) = region.color {
+                        let u8c = baumhard::util::color::convert_f32_to_u8(&rgba);
+                        attrs = attrs.color(cosmic_text::Color::rgba(u8c[0], u8c[1], u8c[2], u8c[3]));
+                    }
+                    attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
+                    Some((slice, attrs))
+                }).collect()
+            };
+
+            buffer.set_rich_text(
+                &mut font_system,
+                spans,
+                &Attrs::new(),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut font_system, false);
+
+            let text_buffer = MindMapTextBuffer {
+                buffer,
+                pos: (area.position.x.0, area.position.y.0),
+                bounds: (bound_x, bound_y),
+            };
+            self.mindmap_buffers.insert(element.unique_id().to_string(), text_buffer);
+        }
+    }
+
+    /// Rebuild border buffers from flat border elements (from RenderScene).
+    pub fn rebuild_border_buffers(&mut self, border_elements: &[BorderElement]) {
+        self.border_buffers.clear();
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        for elem in border_elements {
+            let border_color = parse_hex_color(&elem.border_style.color)
+                .unwrap_or(cosmic_text::Color::rgba(255, 255, 255, 255));
+            let font_size = elem.border_style.font_size_pt;
+            let glyph_set = &elem.border_style.glyph_set;
+
+            let approx_char_width = font_size * 0.6;
+            let char_count = (elem.node_size.0 / approx_char_width).max(3.0) as usize;
+            let border_attrs = Attrs::new()
+                .color(border_color)
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+
+            let (nx, ny) = elem.node_position;
+            let (nw, nh) = elem.node_size;
+            let h_width = nw + approx_char_width * 2.0;
+            let v_width = approx_char_width * 2.0;
+
+            let top_text = glyph_set.top_border(char_count);
+            self.border_buffers.push(create_border_buffer(
+                &mut font_system, &top_text, &border_attrs, font_size,
+                (nx - approx_char_width, ny - font_size),
+                (h_width, font_size * 1.5),
+            ));
+
+            let bottom_text = glyph_set.bottom_border(char_count);
+            self.border_buffers.push(create_border_buffer(
+                &mut font_system, &bottom_text, &border_attrs, font_size,
+                (nx - approx_char_width, ny + nh),
+                (h_width, font_size * 1.5),
+            ));
+
+            let row_count = (nh / font_size).max(1.0) as usize;
+            let left_text: String = std::iter::repeat_n(format!("{}\n", glyph_set.left_char()), row_count).collect();
+            self.border_buffers.push(create_border_buffer(
+                &mut font_system, &left_text, &border_attrs, font_size,
+                (nx - approx_char_width, ny),
+                (v_width, nh),
+            ));
+
+            let right_text: String = std::iter::repeat_n(format!("{}\n", glyph_set.right_char()), row_count).collect();
+            self.border_buffers.push(create_border_buffer(
+                &mut font_system, &right_text, &border_attrs, font_size,
+                (nx + nw, ny),
+                (v_width, nh),
+            ));
+        }
+    }
+
+    /// Rebuild connection buffers from flat connection elements (from RenderScene).
+    pub fn rebuild_connection_buffers(&mut self, connection_elements: &[ConnectionElement]) {
+        self.connection_buffers.clear();
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        for elem in connection_elements {
+            let conn_color = parse_hex_color(&elem.color)
+                .unwrap_or(cosmic_text::Color::rgba(200, 200, 200, 255));
+            let font_size = elem.font_size_pt;
+            let half_glyph = font_size * 0.3;
+            let half_height = font_size * 0.5;
+            let glyph_bounds = (font_size, font_size);
+            let conn_attrs = Attrs::new()
+                .color(conn_color)
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+
+            if let Some((ref cap_text, cap_pos)) = elem.cap_start {
+                self.connection_buffers.push(create_border_buffer(
+                    &mut font_system, cap_text, &conn_attrs, font_size,
+                    (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
+                    glyph_bounds,
+                ));
+            }
+
+            for &pos in &elem.glyph_positions {
+                self.connection_buffers.push(create_border_buffer(
+                    &mut font_system, &elem.body_glyph, &conn_attrs, font_size,
+                    (pos.0 - half_glyph, pos.1 - half_height),
+                    glyph_bounds,
+                ));
+            }
+
+            if let Some((ref cap_text, cap_pos)) = elem.cap_end {
+                self.connection_buffers.push(create_border_buffer(
+                    &mut font_system, cap_text, &conn_attrs, font_size,
+                    (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
+                    glyph_bounds,
+                ));
+            }
+        }
+    }
+
+    /// Fit the camera to show a Baumhard tree's content.
+    pub fn fit_camera_to_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>) {
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        let mut found_any = false;
+
+        for descendant_id in tree.root().descendants(&tree.arena) {
+            let element = match tree.arena.get(descendant_id) {
+                Some(n) => n.get(),
+                None => continue,
+            };
+            let area = match element.glyph_area() {
+                Some(a) => a,
+                None => continue,
+            };
+            let x = area.position.x.0;
+            let y = area.position.y.0;
+            let w = area.render_bounds.x.0;
+            let h = area.render_bounds.y.0;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x + w);
+            max_y = max_y.max(y + h);
+            found_any = true;
+        }
+        if found_any {
+            self.camera.fit_to_bounds(
+                Vec2::new(min_x, min_y),
+                Vec2::new(max_x, max_y),
+                0.05,
+            );
+        }
     }
 
     /// Process a single decree directly

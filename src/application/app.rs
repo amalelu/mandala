@@ -64,12 +64,18 @@ impl Application {
         // Update arena buffers
         renderer.process_decree(RenderDecree::ArenaUpdate);
 
-        // Load mindmap through Document -> Scene -> Renderer flow
+        // Load mindmap through Document -> Tree + Scene -> Renderer flow
         match MindMapDocument::load(&self.options.mindmap_path) {
             Ok(document) => {
+                // Nodes: build Baumhard tree from MindMap hierarchy
+                let mindmap_tree = document.build_tree();
+                renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
+                renderer.fit_camera_to_tree(&mindmap_tree.tree);
+
+                // Connections + borders: flat pipeline from RenderScene
                 let scene = document.build_scene();
-                renderer.rebuild_buffers_from_scene(&scene);
-                renderer.fit_camera_to_scene(&scene);
+                renderer.rebuild_connection_buffers(&scene.connection_elements);
+                renderer.rebuild_border_buffers(&scene.border_elements);
             }
             Err(e) => {
                 log::error!("{}", e);
@@ -198,11 +204,17 @@ impl Application {
             let height = canvas.height();
             renderer.process_decree(RenderDecree::SetSurfaceSize(size, height));
 
-            // Load mindmap through Document -> Scene -> Renderer flow
+            // Load mindmap through Document -> Tree + Scene -> Renderer flow
             if let Ok(document) = MindMapDocument::load(&mindmap_path) {
+                // Nodes: build Baumhard tree from MindMap hierarchy
+                let mindmap_tree = document.build_tree();
+                renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
+                renderer.fit_camera_to_tree(&mindmap_tree.tree);
+
+                // Connections + borders: flat pipeline from RenderScene
                 let scene = document.build_scene();
-                renderer.rebuild_buffers_from_scene(&scene);
-                renderer.fit_camera_to_scene(&scene);
+                renderer.rebuild_connection_buffers(&scene.connection_elements);
+                renderer.rebuild_border_buffers(&scene.border_elements);
             }
 
             renderer.process_decree(RenderDecree::StartRender);
