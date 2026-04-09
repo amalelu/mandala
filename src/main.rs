@@ -7,31 +7,39 @@ use rustc_hash::FxHashMap;
 
 mod application;
 
+fn create_options() -> Options {
+    let default_keybindings = FxHashMap::default();
+    Options {
+        launch_gpu_prefer_low_power: false,
+        should_exit: false,
+        window_mode: WindowMode::WindowedFullscreen,
+        ui_scale: 0,
+        window_title_text: "Mandala",
+        input_mode: InputMode::MappedToInstruction,
+        key_bindings: default_keybindings,
+        #[cfg(not(target_arch = "wasm32"))]
+        avail_cores: num_cpus::get(),
+        #[cfg(target_arch = "wasm32")]
+        avail_cores: 1,
+        render_must_be_main: false,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     env_logger::init();
-    error!("This is the error output");
-    warn!("This is the warn output");
-    info!("This is the info output");
-    debug!("This is the debug output");
-    trace!("This is the trace output");
+    info!("Starting Mandala (native)");
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let default_keybindings = FxHashMap::default();
-        // Temporarily avoid srgb formats for the swapchain on the web
-        let options = Options {
-            launch_gpu_prefer_low_power: false,
-            should_exit: false,
-            window_mode: WindowMode::WindowedFullscreen,
-            ui_scale: 0,
-            window_title_text: "God is Great",
-            input_mode: InputMode::MappedToInstruction,
-            key_bindings: default_keybindings,
-            avail_cores: num_cpus::get(),
-            render_must_be_main: false,
-        };
+    let app = Application::new(create_options());
+    app.run();
+}
 
-        let app = Application::new(options);
-        app.run();
-    }
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+    console_log::init_with_level(log::Level::Info).expect("Failed to init logger");
+    info!("Starting Mandala (WASM)");
+
+    let app = Application::new(create_options());
+    app.run();
 }

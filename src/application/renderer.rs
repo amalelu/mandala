@@ -8,7 +8,8 @@ use cosmic_text::{Attrs, AttrsList, Buffer, BufferRef, Edit, Editor, FontSystem}
 use crossbeam_channel::{Receiver, Sender};
 use enum_map::EnumMap;
 use glam::{Mat4, Quat, Vec3};
-use glyphon::{Cache, Family, Resolution, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
+use cosmic_text::{Family, Style};
+use glyphon::{Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
 use indextree::Arena;
 use log::{debug, error, info};
 use rustc_hash::{FxHashMap, FxHasher};
@@ -31,6 +32,12 @@ use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
 use crate::application::baumhard_adapter::to_cosmic_text;
+use baumhard::gfx_structs::camera::Camera2D;
+use baumhard::mindmap::model::MindMap;
+use baumhard::mindmap::loader;
+use baumhard::mindmap::border::BorderStyle;
+use glam::Vec2;
+use std::path::Path;
 
 pub struct Renderer {
     // The renderer is updated by the application loop, and keeps a local copy of the scene view
@@ -75,6 +82,10 @@ pub struct Renderer {
     fps_clock: usize,
 
     acknowledge: EnumMap<AckKey, usize>,
+    camera: Camera2D,
+    mindmap: Option<MindMap>,
+    mindmap_buffers: FxHashMap<String, MindMapTextBuffer>,
+    border_buffers: Vec<MindMapTextBuffer>,
 }
 
 impl Renderer {
@@ -120,6 +131,7 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let viewport = Viewport::new(&device, &glyphon_cache);
+        let camera = Camera2D::new(size.width, size.height);
         let output = Renderer {
             this_sender,
             this_receiver,
@@ -152,6 +164,10 @@ impl Renderer {
             buffer_cache: Default::default(),
             glyphon_cache,
             viewport,
+            camera,
+            mindmap: None,
+            mindmap_buffers: Default::default(),
+            border_buffers: Vec::new(),
         };
 
         output
@@ -187,20 +203,20 @@ impl Renderer {
             layout: Some(pipeline_layout),
             vertex: wgpu::VertexState {
                 module: shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(texture_format.into())],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             // most desktop GPU drivers will manage their own caches, meaning that little advantage
             // can be gained from this on those platforms. However, on some platforms,
             // especially Android, drivers leave this to the application to implement.
@@ -227,7 +243,7 @@ impl Renderer {
         device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         })
     }
 
@@ -241,8 +257,9 @@ impl Renderer {
                     required_limits: wgpu::Limits::downlevel_defaults()
                         .using_resolution(adapter.limits()),
                     memory_hints: Default::default(),
+                    trace: Default::default(),
+                    experimental_features: Default::default(),
                 },
-                None,
             )
             .await
             .expect("Failed to create device")
@@ -400,7 +417,63 @@ impl Renderer {
             return;
         }
         let mut text_areas: Vec<TextArea> = Vec::new();
-        // Later we have to filter out everything that isn't visible, but for now fetch everything
+        let vp_w = self.config.width as i32;
+        let vp_h = self.config.height as i32;
+
+        // Render mindmap buffers with camera transform
+        for text_buffer in self.mindmap_buffers.values() {
+            let canvas_pos = Vec2::new(text_buffer.pos.0, text_buffer.pos.1);
+            let canvas_size = Vec2::new(text_buffer.bounds.0, text_buffer.bounds.1);
+
+            // Viewport culling
+            if !self.camera.is_visible(canvas_pos, canvas_size) {
+                continue;
+            }
+
+            let screen_pos = self.camera.canvas_to_screen(canvas_pos);
+            let t = TextArea {
+                buffer: &text_buffer.buffer,
+                left: screen_pos.x,
+                top: screen_pos.y,
+                scale: self.camera.zoom,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: vp_w,
+                    bottom: vp_h,
+                },
+                default_color: cosmic_text::Color::rgba(255, 255, 255, 255),
+                custom_glyphs: &[],
+            };
+            text_areas.push(t);
+        }
+
+        // Render border buffers with camera transform
+        for text_buffer in self.border_buffers.iter() {
+            let canvas_pos = Vec2::new(text_buffer.pos.0, text_buffer.pos.1);
+            let canvas_size = Vec2::new(text_buffer.bounds.0, text_buffer.bounds.1);
+            if !self.camera.is_visible(canvas_pos, canvas_size) {
+                continue;
+            }
+            let screen_pos = self.camera.canvas_to_screen(canvas_pos);
+            let t = TextArea {
+                buffer: &text_buffer.buffer,
+                left: screen_pos.x,
+                top: screen_pos.y,
+                scale: self.camera.zoom,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: vp_w,
+                    bottom: vp_h,
+                },
+                default_color: cosmic_text::Color::rgba(255, 255, 255, 255),
+                custom_glyphs: &[],
+            };
+            text_areas.push(t);
+        }
+
+        // Also render legacy arena-based buffers
         for text_buffer in self.buffer_cache.values() {
             let t = TextArea {
                 buffer: text_buffer.buffer(),
@@ -408,10 +481,10 @@ impl Renderer {
                 top: text_buffer.pos.1,
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: 20,
-                    top: 20,
-                    right: 1000,
-                    bottom: 1000,
+                    left: 0,
+                    top: 0,
+                    right: vp_w,
+                    bottom: vp_h,
                 },
                 default_color: cosmic_text::Color::rgba(255, 255, 255, 255),
                 custom_glyphs: &[],
@@ -451,6 +524,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(Color::BLACK),
                         store: StoreOp::Store,
@@ -459,15 +533,13 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).unwrap();
         }
-        let mut staging_belt = wgpu::util::StagingBelt::new(1024);
-        staging_belt.finish();
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         self.atlas.trim();
-        staging_belt.recall();
     }
 
     #[inline]
@@ -495,7 +567,299 @@ impl Renderer {
         self.config.height = height;
 
         self.surface.configure(&self.device, &self.config);
-        self.viewport.update(&self.queue, Resolution { width, height })
+        self.viewport.update(&self.queue, Resolution { width, height });
+        self.camera.set_viewport_size(width, height);
+    }
+
+    fn load_mindmap(&mut self, path: &str) {
+        match loader::load_from_file(Path::new(path)) {
+            Ok(map) => {
+                info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
+                self.rebuild_mindmap_buffers(&map);
+                self.fit_camera_to_mindmap(&map);
+                self.mindmap = Some(map);
+                self.should_render = true;
+            }
+            Err(e) => {
+                error!("Failed to load mindmap: {}", e);
+            }
+        }
+    }
+
+    fn fit_camera_to_mindmap(&mut self, map: &MindMap) {
+        if map.nodes.is_empty() {
+            return;
+        }
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for node in map.nodes.values() {
+            let x = node.position.x as f32;
+            let y = node.position.y as f32;
+            let w = node.size.width as f32;
+            let h = node.size.height as f32;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x + w);
+            max_y = max_y.max(y + h);
+        }
+        self.camera.fit_to_bounds(
+            Vec2::new(min_x, min_y),
+            Vec2::new(max_x, max_y),
+            0.05,
+        );
+    }
+
+    fn rebuild_mindmap_buffers(&mut self, map: &MindMap) {
+        self.mindmap_buffers.clear();
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        for node in map.nodes.values() {
+            if node.text.is_empty() {
+                continue;
+            }
+            // Skip folded children
+            if let Some(ref pid) = node.parent_id {
+                if let Some(parent) = map.nodes.get(pid.as_str()) {
+                    if parent.folded {
+                        continue;
+                    }
+                }
+            }
+
+            // Determine font scale from the first text run, or default
+            let scale = node.text_runs.first()
+                .map(|r| r.size_pt as f32)
+                .unwrap_or(14.0);
+            let line_height = scale * 1.2;
+            let bound_x = node.size.width as f32;
+            let bound_y = node.size.height as f32;
+
+            let mut buffer = cosmic_text::Buffer::new(
+                &mut font_system,
+                cosmic_text::Metrics::new(scale, line_height),
+            );
+            buffer.set_size(&mut font_system, Some(bound_x), Some(bound_y));
+            buffer.set_wrap(&mut font_system, cosmic_text::Wrap::Word);
+
+            // Build rich text spans: Vec<(&str, Attrs)>
+            let text = &node.text;
+            let spans: Vec<(&str, Attrs)> = if node.text_runs.is_empty() {
+                vec![(text.as_str(), Attrs::new())]
+            } else {
+                node.text_runs.iter().filter_map(|run| {
+                    let start = run.start.min(text.len());
+                    let end = run.end.min(text.len());
+                    if start >= end {
+                        return None;
+                    }
+                    let slice = &text[start..end];
+                    let mut attrs = Attrs::new();
+                    if let Some(color) = parse_hex_color(&run.color) {
+                        attrs = attrs.color(color);
+                    }
+                    if run.bold {
+                        attrs = attrs.weight(cosmic_text::Weight::BOLD);
+                    }
+                    if run.italic {
+                        attrs = attrs.style(Style::Italic);
+                    }
+                    attrs = attrs.metrics(cosmic_text::Metrics::new(
+                        run.size_pt as f32,
+                        run.size_pt as f32 * 1.2,
+                    ));
+                    Some((slice, attrs))
+                }).collect()
+            };
+
+            buffer.set_rich_text(
+                &mut font_system,
+                spans,
+                &Attrs::new(),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut font_system, false);
+
+            let text_buffer = MindMapTextBuffer {
+                buffer,
+                pos: (node.position.x as f32, node.position.y as f32),
+                bounds: (bound_x, bound_y),
+            };
+            self.mindmap_buffers.insert(node.id.clone(), text_buffer);
+        }
+
+        // Build border buffers for nodes with show_frame = true
+        self.border_buffers.clear();
+        for node in map.nodes.values() {
+            if !node.style.show_frame {
+                continue;
+            }
+            // Skip folded children
+            if let Some(ref pid) = node.parent_id {
+                if let Some(parent) = map.nodes.get(pid.as_str()) {
+                    if parent.folded {
+                        continue;
+                    }
+                }
+            }
+
+            let border_style = BorderStyle::default_with_color(&node.style.frame_color);
+            let border_color = parse_hex_color(&border_style.color)
+                .unwrap_or(cosmic_text::Color::rgba(255, 255, 255, 255));
+            let font_size = border_style.font_size_pt;
+            let glyph_set = &border_style.glyph_set;
+
+            // Estimate character width for the border (node width / approximate glyph width)
+            let approx_char_width = font_size * 0.6;
+            let char_count = (node.size.width as f32 / approx_char_width).max(3.0) as usize;
+
+            let border_attrs = Attrs::new()
+                .color(border_color)
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+
+            // Top border
+            let top_text = glyph_set.top_border(char_count);
+            let mut top_buf = cosmic_text::Buffer::new(
+                &mut font_system,
+                cosmic_text::Metrics::new(font_size, font_size),
+            );
+            top_buf.set_size(&mut font_system, Some(node.size.width as f32 + approx_char_width * 2.0), Some(font_size * 1.5));
+            top_buf.set_rich_text(
+                &mut font_system,
+                vec![(top_text.as_str(), border_attrs.clone())],
+                &Attrs::new(),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+            top_buf.shape_until_scroll(&mut font_system, false);
+            self.border_buffers.push(MindMapTextBuffer {
+                buffer: top_buf,
+                pos: (
+                    node.position.x as f32 - approx_char_width,
+                    node.position.y as f32 - font_size,
+                ),
+                bounds: (node.size.width as f32 + approx_char_width * 2.0, font_size * 1.5),
+            });
+
+            // Bottom border
+            let bottom_text = glyph_set.bottom_border(char_count);
+            let mut bottom_buf = cosmic_text::Buffer::new(
+                &mut font_system,
+                cosmic_text::Metrics::new(font_size, font_size),
+            );
+            bottom_buf.set_size(&mut font_system, Some(node.size.width as f32 + approx_char_width * 2.0), Some(font_size * 1.5));
+            bottom_buf.set_rich_text(
+                &mut font_system,
+                vec![(bottom_text.as_str(), border_attrs.clone())],
+                &Attrs::new(),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+            bottom_buf.shape_until_scroll(&mut font_system, false);
+            self.border_buffers.push(MindMapTextBuffer {
+                buffer: bottom_buf,
+                pos: (
+                    node.position.x as f32 - approx_char_width,
+                    node.position.y as f32 + node.size.height as f32,
+                ),
+                bounds: (node.size.width as f32 + approx_char_width * 2.0, font_size * 1.5),
+            });
+
+            // Left side - one character per row
+            let row_count = (node.size.height as f32 / font_size).max(1.0) as usize;
+            let left_text: String = (0..row_count)
+                .map(|_| format!("{}\n", glyph_set.left_char()))
+                .collect();
+            let mut left_buf = cosmic_text::Buffer::new(
+                &mut font_system,
+                cosmic_text::Metrics::new(font_size, font_size),
+            );
+            left_buf.set_size(&mut font_system, Some(approx_char_width * 2.0), Some(node.size.height as f32));
+            left_buf.set_rich_text(
+                &mut font_system,
+                vec![(left_text.as_str(), border_attrs.clone())],
+                &Attrs::new(),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+            left_buf.shape_until_scroll(&mut font_system, false);
+            self.border_buffers.push(MindMapTextBuffer {
+                buffer: left_buf,
+                pos: (
+                    node.position.x as f32 - approx_char_width,
+                    node.position.y as f32,
+                ),
+                bounds: (approx_char_width * 2.0, node.size.height as f32),
+            });
+
+            // Right side
+            let right_text: String = (0..row_count)
+                .map(|_| format!("{}\n", glyph_set.right_char()))
+                .collect();
+            let mut right_buf = cosmic_text::Buffer::new(
+                &mut font_system,
+                cosmic_text::Metrics::new(font_size, font_size),
+            );
+            right_buf.set_size(&mut font_system, Some(approx_char_width * 2.0), Some(node.size.height as f32));
+            right_buf.set_rich_text(
+                &mut font_system,
+                vec![(right_text.as_str(), border_attrs)],
+                &Attrs::new(),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+            right_buf.shape_until_scroll(&mut font_system, false);
+            self.border_buffers.push(MindMapTextBuffer {
+                buffer: right_buf,
+                pos: (
+                    node.position.x as f32 + node.size.width as f32,
+                    node.position.y as f32,
+                ),
+                bounds: (approx_char_width * 2.0, node.size.height as f32),
+            });
+        }
+    }
+
+    /// Process a single decree directly (used for WASM single-threaded mode)
+    pub fn process_decree(&mut self, decree: Decree) {
+        match decree {
+            Decree::Render(render_decree) => {
+                match render_decree {
+                    RenderDecree::DisplayFps => {}
+                    RenderDecree::StartRender => {
+                        self.should_render = true;
+                    }
+                    RenderDecree::StopRender => {
+                        self.should_render = false;
+                    }
+                    RenderDecree::ReinitAdapter => {}
+                    RenderDecree::SetSurfaceSize(x, y) => {
+                        self.update_surface_size(x, y);
+                    }
+                    RenderDecree::Terminate => {
+                        self.run = false;
+                    }
+                    RenderDecree::Noop => {}
+                    RenderDecree::ArenaUpdate => {
+                        self.update_buffer_cache();
+                    }
+                    RenderDecree::CameraPan(dx, dy) => {
+                        self.camera.pan(Vec2::new(dx, dy));
+                    }
+                    RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
+                        self.camera.zoom_at(Vec2::new(screen_x, screen_y), factor);
+                    }
+                    RenderDecree::LoadMindMap(path) => {
+                        self.load_mindmap(&path);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn check_for_decrees(&mut self) {
@@ -535,6 +899,15 @@ impl Renderer {
                             }
                             RenderDecree::ArenaUpdate => {
                                 self.update_buffer_cache();
+                            }
+                            RenderDecree::CameraPan(dx, dy) => {
+                                self.camera.pan(Vec2::new(dx, dy));
+                            }
+                            RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
+                                self.camera.zoom_at(Vec2::new(screen_x, screen_y), factor);
+                            }
+                            RenderDecree::LoadMindMap(path) => {
+                                self.load_mindmap(&path);
                             }
                         }
                     }
@@ -600,10 +973,10 @@ impl TextBuffer {
 pub fn example_attrib(font_system: &mut FontSystem) -> AttrsList {
     let evilz_font = fonts::COMPILED_FONT_ID_MAP.get(&AppFont::Evilz).unwrap();
     let evilz_face = font_system.db().face(evilz_font[0]).unwrap();
-    let mut attr_list = AttrsList::new(Attrs::new());
+    let mut attr_list = AttrsList::new(&Attrs::new());
     attr_list.add_span(
         Range { start: 0, end: 10 },
-        Attrs::new()
+        &Attrs::new()
             .style(Style::Normal)
             .color(cosmic_text::Color::rgba(102, 51, 51, 255))
             .family(Family::Name(evilz_face.families[0].0.as_ref())),
@@ -617,11 +990,28 @@ pub fn example_attrib(font_system: &mut FontSystem) -> AttrsList {
             start: 11,
             end: 500,
         },
-        Attrs::new()
+        &Attrs::new()
             .style(Style::Normal)
             .color(cosmic_text::Color::rgba(0, 153, 51, 255))
             .family(Family::Name(nightcrow_face.families[0].0.as_ref())),
     );
 
     attr_list
+}
+
+pub struct MindMapTextBuffer {
+    pub buffer: Buffer,
+    pub pos: (f32, f32),
+    pub bounds: (f32, f32),
+}
+
+fn parse_hex_color(hex: &str) -> Option<cosmic_text::Color> {
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(cosmic_text::Color::rgba(r, g, b, 255))
 }

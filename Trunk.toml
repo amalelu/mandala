@@ -1,0 +1,6 @@
+[build]
+target = "web/index.html"
+dist = "dist"
+
+[watch]
+watch = ["src", "lib", "web"]
