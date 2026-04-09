@@ -1,1 +1,1 @@
-cargo test -p baumhard -p codebound
+cargo test -p baumhard -p mandala

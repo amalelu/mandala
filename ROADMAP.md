@@ -86,14 +86,14 @@ M1 (Architecture) --+--> M2 (Connections) ---------> M6 (Connection Editing)
 
 **What**: Strip all game-specific code and collapse multi-threaded architecture.
 
-- [ ] Delete `src/application/game_concepts.rs` entirely (World, Scene, GameObject, etc.)
-- [ ] Delete `src/application/main_menu.rs`
-- [ ] Remove from `common.rs`: all game types (GameResourceType, GameStatModifier, GameObjectFlags, GameItemProperty, GameResourceAspect, StatModifier, etc. - lines 284-405)
-- [ ] Remove `Decree`/`Instruction`/`AckKey` channel infrastructure from `common.rs`
-- [ ] Remove `HostDecree` game variants (MasterSound*, Load/Save/Pause/ExitInstance)
-- [ ] Keep from `common.rs`: `WindowMode`, `InputMode`, `RedrawMode`, `KeyPress`, `StopWatch`, `PollTimer`
-- [ ] Refactor `app.rs` to single-threaded: remove crossbeam channels, collapse event loop to own Renderer directly
-- [ ] Ensure it compiles and renders the existing mindmap
+- [x] Delete `src/application/game_concepts.rs` entirely (World, Scene, GameObject, etc.)
+- [x] Delete `src/application/main_menu.rs`
+- [x] Remove from `common.rs`: all game types (GameResourceType, GameStatModifier, GameObjectFlags, GameItemProperty, GameResourceAspect, StatModifier, etc. - lines 284-405)
+- [x] Remove `Decree`/`Instruction`/`AckKey` channel infrastructure from `common.rs`
+- [x] Remove `HostDecree` game variants (MasterSound*, Load/Save/Pause/ExitInstance)
+- [x] Keep from `common.rs`: `WindowMode`, `InputMode`, `RedrawMode`, `KeyPress`, `StopWatch`, `PollTimer`
+- [x] Refactor `app.rs` to single-threaded: remove crossbeam channels, collapse event loop to own Renderer directly
+- [x] Ensure it compiles and renders the existing mindmap
 
 **Verify**: `cargo build` succeeds, `cargo run` renders testament mindmap as before
 
@@ -101,13 +101,13 @@ M1 (Architecture) --+--> M2 (Connections) ---------> M6 (Connection Editing)
 
 **What**: Clean Model-View separation with the Document and RenderScene abstractions.
 
-- [ ] Create `src/application/document.rs` with `MindMapDocument` struct (owns `MindMap`, `SelectionState`, `dirty` flag, `undo_stack`)
-- [ ] Move `self.mindmap` out of Renderer into Document
-- [ ] Create `lib/baumhard/src/mindmap/scene_builder.rs` with `RenderScene` struct
-- [ ] Extract scene-building logic from `renderer.rs:582-716` (`rebuild_mindmap_buffers`) into scene_builder
-- [ ] `RenderScene` contains: `text_elements`, `border_elements` (connection/portal elements as empty Vecs for now)
-- [ ] Renderer receives `&RenderScene` and builds cosmic-text buffers from it
-- [ ] Application owns both Document and Renderer, wires them together
+- [x] Create `src/application/document.rs` with `MindMapDocument` struct (owns `MindMap`, `SelectionState`, `dirty` flag, `undo_stack`)
+- [x] Move `self.mindmap` out of Renderer into Document
+- [x] Create `lib/baumhard/src/mindmap/scene_builder.rs` with `RenderScene` struct
+- [x] Extract scene-building logic from `renderer.rs:582-716` (`rebuild_mindmap_buffers`) into scene_builder
+- [x] `RenderScene` contains: `text_elements`, `border_elements` (connection/portal elements as empty Vecs for now)
+- [x] Renderer receives `&RenderScene` and builds cosmic-text buffers from it
+- [x] Application owns both Document and Renderer, wires them together
 
 **Verify**: `cargo build` + `cargo run` renders same result, `cargo test` passes
 
@@ -115,13 +115,39 @@ M1 (Architecture) --+--> M2 (Connections) ---------> M6 (Connection Editing)
 
 **What**: Load any `.mindmap.json` from CLI args or WASM URL.
 
-- [ ] Accept mindmap file path as CLI argument (`std::env::args`)
-- [ ] Default to `maps/testament.mindmap.json` if no arg provided
-- [ ] For WASM: read from URL query parameter or embedded default
-- [ ] Application creates Document from loaded MindMap, passes to Renderer
-- [ ] Test with multiple mindmap files
+- [x] Accept mindmap file path as CLI argument (`std::env::args`)
+- [x] Default to `maps/testament.mindmap.json` if no arg provided
+- [x] For WASM: read from URL query parameter or embedded default
+- [x] Application creates Document from loaded MindMap, passes to Renderer
+- [x] Test with multiple mindmap files
 
 **Verify**: `cargo run -- maps/testament.mindmap.json` works, `cargo run -- other.mindmap.json` works
+
+---
+
+## Milestone 1.5: Border Rendering
+
+**Goal**: Render node borders using glyph-based box-drawing characters. Everything is glyphs.
+
+**Status**: Complete (implemented pre-roadmap, documented here for tracking).
+
+### Border system implementation
+
+**What**: Node borders composed entirely of positioned font glyphs (Unicode box-drawing characters).
+
+- [x] Create `lib/baumhard/src/mindmap/border.rs` with `BorderGlyphSet` and `BorderStyle`
+- [x] Implement 4 glyph presets: light (`┌─┐`), heavy (`┏━┓`), double (`╔═╗`), rounded (`╭─╮`)
+- [x] Generate top/bottom border strings with corner glyphs and repeated edge glyphs
+- [x] Generate left/right side columns with repeated vertical glyphs
+- [x] Add `GlyphBorderConfig` to JSON format with preset selection and custom glyph support
+- [x] Add `CustomBorderGlyphs` for user-defined glyph overrides when preset = "custom"
+- [x] Support per-node border config via `NodeStyle.border` field
+- [x] Support canvas-level default border via `Canvas.default_border` field
+- [x] Scene builder generates `BorderElement` for nodes with `show_frame = true`
+- [x] Renderer builds 4 cosmic-text buffers per border (top, bottom, left, right segments)
+- [x] Border color inherited from `frame_color`, overridable via config
+
+**Key files**: `lib/baumhard/src/mindmap/border.rs`, `lib/baumhard/src/mindmap/model.rs` (GlyphBorderConfig), `lib/baumhard/src/mindmap/scene_builder.rs` (BorderElement), `src/application/renderer.rs` (border buffer rendering)
 
 ---
 
@@ -133,11 +159,11 @@ M1 (Architecture) --+--> M2 (Connections) ---------> M6 (Connection Editing)
 
 **What**: Compute paths between connected nodes and lay out glyphs along them.
 
-- [ ] Create `lib/baumhard/src/mindmap/connection.rs`
-- [ ] Implement path computation: source anchor -> target anchor (straight line)
-- [ ] Add Bezier curve support using existing `control_points` data
-- [ ] Sample points along path at intervals matching glyph spacing
-- [ ] Define anchor point system: 0=auto, 1-4=top/bottom/left/right
+- [x] Create `lib/baumhard/src/mindmap/connection.rs`
+- [x] Implement path computation: source anchor -> target anchor (straight line)
+- [x] Add Bezier curve support using existing `control_points` data
+- [x] Sample points along path at intervals matching glyph spacing
+- [x] Define anchor point system: 0=auto, 1-4=top/bottom/left/right
 
 **Verify**: Unit tests for path computation and point sampling
 
@@ -145,12 +171,12 @@ M1 (Architecture) --+--> M2 (Connections) ---------> M6 (Connection Editing)
 
 **What**: Generate render elements for connections and display them.
 
-- [ ] Add `ConnectionElement` to `RenderScene`
-- [ ] Scene builder generates connection elements from `MindEdge` data
-- [ ] Use `GlyphConnectionConfig.body` as repeating glyph (default: middle dot)
-- [ ] Place `cap_start`/`cap_end` glyphs at endpoints
-- [ ] Renderer builds cosmic-text buffers for connections
-- [ ] Fall back to canvas `default_connection` when edge has no `glyph_connection`
+- [x] Add `ConnectionElement` to `RenderScene`
+- [x] Scene builder generates connection elements from `MindEdge` data
+- [x] Use `GlyphConnectionConfig.body` as repeating glyph (default: middle dot)
+- [x] Place `cap_start`/`cap_end` glyphs at endpoints
+- [x] Renderer builds cosmic-text buffers for connections
+- [x] Fall back to canvas `default_connection` when edge has no `glyph_connection`
 
 **Verify**: Edges visible between nodes in testament mindmap
 

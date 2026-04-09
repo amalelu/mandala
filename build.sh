@@ -1,5 +1,5 @@
 #!/bin/bash
-# This script builds codebound properly for release
+# This script builds mandala properly for release
 # Any files that should be included in a release-build will have to be excluded here
 EXECUTABLE_NAME="mandala"
 # Define the common exclusion patterns

@@ -66,6 +66,7 @@ pub struct Renderer {
     camera: Camera2D,
     mindmap_buffers: FxHashMap<String, MindMapTextBuffer>,
     border_buffers: Vec<MindMapTextBuffer>,
+    connection_buffers: Vec<MindMapTextBuffer>,
 }
 
 impl Renderer {
@@ -137,6 +138,7 @@ impl Renderer {
             camera,
             mindmap_buffers: Default::default(),
             border_buffers: Vec::new(),
+            connection_buffers: Vec::new(),
         }
     }
 
@@ -378,9 +380,10 @@ impl Renderer {
         let vp_bounds = TextBounds { left: 0, top: 0, right: vp_w, bottom: vp_h };
         let default_color = cosmic_text::Color::rgba(255, 255, 255, 255);
 
-        // Collect all camera-transformed mindmap + border buffers with viewport culling
+        // Collect all camera-transformed mindmap + border + connection buffers with viewport culling
         let mut text_areas: Vec<TextArea> = self.mindmap_buffers.values()
             .chain(self.border_buffers.iter())
+            .chain(self.connection_buffers.iter())
             .filter_map(|tb| {
                 let canvas_pos = Vec2::new(tb.pos.0, tb.pos.1);
                 let canvas_size = Vec2::new(tb.bounds.0, tb.bounds.1);
@@ -628,6 +631,47 @@ impl Renderer {
                 (nx + nw, ny),
                 (v_width, nh),
             ));
+        }
+
+        // Build connection buffers
+        self.connection_buffers.clear();
+        for elem in &scene.connection_elements {
+            let conn_color = parse_hex_color(&elem.color)
+                .unwrap_or(cosmic_text::Color::rgba(200, 200, 200, 255));
+            let font_size = elem.font_size_pt;
+            let half_glyph = font_size * 0.3;
+            let half_height = font_size * 0.5;
+            let glyph_bounds = (font_size, font_size);
+            let conn_attrs = Attrs::new()
+                .color(conn_color)
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+
+            // Start cap
+            if let Some((ref cap_text, cap_pos)) = elem.cap_start {
+                self.connection_buffers.push(create_border_buffer(
+                    &mut font_system, cap_text, &conn_attrs, font_size,
+                    (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
+                    glyph_bounds,
+                ));
+            }
+
+            // Body glyphs
+            for &pos in &elem.glyph_positions {
+                self.connection_buffers.push(create_border_buffer(
+                    &mut font_system, &elem.body_glyph, &conn_attrs, font_size,
+                    (pos.0 - half_glyph, pos.1 - half_height),
+                    glyph_bounds,
+                ));
+            }
+
+            // End cap
+            if let Some((ref cap_text, cap_pos)) = elem.cap_end {
+                self.connection_buffers.push(create_border_buffer(
+                    &mut font_system, cap_text, &conn_attrs, font_size,
+                    (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
+                    glyph_bounds,
+                ));
+            }
         }
     }
 

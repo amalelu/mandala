@@ -1,5 +1,7 @@
 use crate::mindmap::border::BorderStyle;
-use crate::mindmap::model::{MindMap, TextRun};
+use crate::mindmap::connection;
+use crate::mindmap::model::{GlyphConnectionConfig, MindMap, TextRun};
+use glam::Vec2;
 
 /// Intermediate representation between MindMap data and GPU rendering.
 /// Produced by `build_scene()`, consumed by Renderer to create cosmic-text buffers.
@@ -28,8 +30,23 @@ pub struct BorderElement {
     pub node_size: (f32, f32),
 }
 
-/// Placeholder for future connection rendering (M2).
-pub struct ConnectionElement {}
+/// A connection (edge) between two nodes, with pre-computed glyph positions.
+pub struct ConnectionElement {
+    /// Sampled glyph positions along the path (canvas coordinates).
+    pub glyph_positions: Vec<(f32, f32)>,
+    /// The body glyph string repeated at each position.
+    pub body_glyph: String,
+    /// Optional start cap glyph and its position.
+    pub cap_start: Option<(String, (f32, f32))>,
+    /// Optional end cap glyph and its position.
+    pub cap_end: Option<(String, (f32, f32))>,
+    /// Font family name, if specified.
+    pub font: Option<String>,
+    /// Font size in points.
+    pub font_size_pt: f32,
+    /// Color as #RRGGBB hex string.
+    pub color: String,
+}
 
 /// Placeholder for future portal rendering (M3).
 pub struct PortalElement {}
@@ -68,10 +85,76 @@ pub fn build_scene(map: &MindMap) -> RenderScene {
         }
     }
 
+    // Build connection elements from edges
+    let default_config = GlyphConnectionConfig::default();
+    let mut connection_elements = Vec::new();
+    for edge in &map.edges {
+        if !edge.visible {
+            continue;
+        }
+        let from_node = match map.nodes.get(&edge.from_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        let to_node = match map.nodes.get(&edge.to_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        if map.is_hidden_by_fold(from_node) || map.is_hidden_by_fold(to_node) {
+            continue;
+        }
+
+        // Resolve glyph config: edge override > canvas default > hardcoded default
+        let config = edge.glyph_connection.as_ref()
+            .or(map.canvas.default_connection.as_ref())
+            .unwrap_or(&default_config);
+
+        let color = config.color.clone().unwrap_or_else(|| edge.color.clone());
+        let font_size = config.font_size_pt;
+        let approx_glyph_width = font_size * 0.6;
+        let effective_spacing = approx_glyph_width + config.spacing;
+
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+
+        let path = connection::build_connection_path(
+            from_pos, from_size, edge.anchor_from,
+            to_pos, to_size, edge.anchor_to,
+            &edge.control_points,
+        );
+        let samples = connection::sample_path(&path, effective_spacing);
+        if samples.is_empty() {
+            continue;
+        }
+
+        let glyph_positions: Vec<(f32, f32)> = samples.iter()
+            .map(|s| (s.position.x, s.position.y))
+            .collect();
+
+        let cap_start = config.cap_start.as_ref().map(|glyph| {
+            (glyph.clone(), glyph_positions[0])
+        });
+        let cap_end = config.cap_end.as_ref().map(|glyph| {
+            (glyph.clone(), *glyph_positions.last().unwrap())
+        });
+
+        connection_elements.push(ConnectionElement {
+            glyph_positions,
+            body_glyph: config.body.clone(),
+            cap_start,
+            cap_end,
+            font: config.font.clone(),
+            font_size_pt: font_size,
+            color,
+        });
+    }
+
     RenderScene {
         text_elements,
         border_elements,
-        connection_elements: Vec::new(),
+        connection_elements,
         portal_elements: Vec::new(),
         background_color: map.canvas.background_color.clone(),
     }
