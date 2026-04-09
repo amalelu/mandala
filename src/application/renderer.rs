@@ -1,12 +1,10 @@
 use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
-use std::ops::{Range};
+use std::ops::Range;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use cosmic_text::{Attrs, AttrsList, Buffer, BufferRef, Edit, Editor, FontSystem};
-use crossbeam_channel::{Receiver, Sender};
-use enum_map::EnumMap;
 use glam::{Mat4, Quat, Vec3};
 use cosmic_text::{Family, Style};
 use glyphon::{Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
@@ -21,11 +19,7 @@ use wgpu::{
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::application::common::Decree::Acknowledge;
-use crate::application::common::{
-    acknowledge_instruction, AckKey, Decree, Instruction, PollTimer, RedrawMode, RenderDecree,
-    StopWatch,
-};
+use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch};
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
 use baumhard::util::grapheme_chad;
@@ -37,16 +31,11 @@ use baumhard::gfx_structs::camera::Camera2D;
 use baumhard::mindmap::model::MindMap;
 use baumhard::mindmap::loader;
 use baumhard::mindmap::border::BorderStyle;
+use baumhard::mindmap::scene_builder::RenderScene;
 use glam::Vec2;
 use std::path::Path;
 
 pub struct Renderer {
-    // The renderer is updated by the application loop, and keeps a local copy of the scene view
-    // that the player should see, and a little bit more (for smooth scrolling)
-    this_sender: Sender<Instruction>,
-    this_receiver: Receiver<Instruction>,
-    ui_sender: Sender<Instruction>,
-    game_sender: Sender<Instruction>,
     instance: Instance,
     surface: Surface<'static>,
     window: Arc<Window>,
@@ -56,14 +45,10 @@ pub struct Renderer {
     queue: Queue,
     viewport: Viewport,
     graphics_arena: Arc<RwLock<Arena<GfxElement>>>,
-    // This is what will be actually shown on screen, but it is a mirror of the graphics arena
     buffer_cache: FxHashMap<usize, TextBuffer>,
-    // I have no idea what these caches are for, just that they are needed
     swash_cache: SwashCache,
     glyphon_cache: Cache,
     atlas: TextAtlas,
-    /// For each render pass, set the timer to expire in (target_duration - last_render_time)
-    /// If the result is negative, then start next pass immediately
     timer: PollTimer,
     target_duration_between_renders: Duration,
     last_render_time: Duration,
@@ -75,16 +60,10 @@ pub struct Renderer {
     redraw_mode: RedrawMode,
     run: bool,
     should_render: bool,
-    // the fps is a metric that measures how many times a picture is rendered each second
-    // but we are not going to buffer a second of frames just to show this metric.
-    // So we'll be displaying how many frames per second we would be putting out if
-    // every frame took the same amount of time to render as the last
     fps: Option<usize>,
     fps_clock: usize,
 
-    acknowledge: EnumMap<AckKey, usize>,
     camera: Camera2D,
-    mindmap: Option<MindMap>,
     mindmap_buffers: FxHashMap<String, MindMapTextBuffer>,
     border_buffers: Vec<MindMapTextBuffer>,
 }
@@ -94,14 +73,9 @@ impl Renderer {
         instance: Instance,
         surface: Surface<'static>,
         window: Arc<Window>,
-        this_sender: Sender<Instruction>,
-        this_receiver: Receiver<Instruction>,
-        ui_sender: Sender<Instruction>,
-        game_sender: Sender<Instruction>,
         arena: Arc<RwLock<Arena<GfxElement>>>,
     ) -> Renderer {
         let adapter = Self::get_adapter(&instance, &surface).await;
-        // Create the logical device and command queue
         let (device, queue) = Self::get_device(&adapter).await;
         let mut shaders = FxHashMap::default();
         Self::load_shaders(&device, &mut shaders);
@@ -127,17 +101,13 @@ impl Renderer {
             PhysicalSize::new(size.width, size.height),
         );
         let glyphon_cache = Cache::new(&device);
-        
+
         let mut atlas = TextAtlas::new(&device, &queue, &glyphon_cache, swapchain_format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let viewport = Viewport::new(&device, &glyphon_cache);
         let camera = Camera2D::new(size.width, size.height);
-        let output = Renderer {
-            this_sender,
-            this_receiver,
-            ui_sender,
-            game_sender,
+        Renderer {
             instance,
             surface,
             window,
@@ -151,7 +121,6 @@ impl Renderer {
             target_duration_between_renders: Duration::from_millis(10),
             last_render_time: Duration::from_millis(16),
             shaders,
-            acknowledge: EnumMap::default(),
             render_pipeline,
             text_renderer,
             texture_format,
@@ -166,12 +135,9 @@ impl Renderer {
             glyphon_cache,
             viewport,
             camera,
-            mindmap: None,
             mindmap_buffers: Default::default(),
             border_buffers: Vec::new(),
-        };
-
-        output
+        }
     }
 
     #[inline]
@@ -218,9 +184,6 @@ impl Renderer {
             depth_stencil: None,
             multisample: MultisampleState::default(),
             multiview_mask: None,
-            // most desktop GPU drivers will manage their own caches, meaning that little advantage
-            // can be gained from this on those platforms. However, on some platforms,
-            // especially Android, drivers leave this to the application to implement.
             cache: None,
         })
     }
@@ -272,7 +235,6 @@ impl Renderer {
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
-                // Request an adapter which can render to our surface
                 compatible_surface: Some(&surface),
             })
             .await
@@ -283,16 +245,12 @@ impl Renderer {
 
     #[inline]
     pub fn process(&mut self) -> bool {
-        self.check_for_decrees();
-
         match self.redraw_mode {
             RedrawMode::OnRequest => {
                 self.fps = Some(0);
             }
             RedrawMode::FpsLimit(_) => {
                 if self.timer.is_expired() {
-                    // For each render pass, set the timer to expire in (target_duration - last_render_time)
-                    // If the result is negative, then start next pass immediately
                     let delta_duration =
                         self.target_duration_between_renders - self.last_render_time;
                     if delta_duration.le(&Self::ZERO_DURATION) {
@@ -336,10 +294,6 @@ impl Renderer {
 
     #[inline]
     fn calculate_fps(&mut self, delta_time: Duration) {
-        // duration between renders means the time from when a render function call is issued
-        // until the next render function call is issued.
-
-        // 1 second / time_it_took_to_render + max(the_time_waited, 0) = fps estimate
         self.fps = Some(
             usize::try_from(Duration::from_secs(1).as_micros()).unwrap()
                 / usize::try_from(
@@ -374,7 +328,6 @@ impl Renderer {
             existing_hash = k.block_hash;
         }
         if !contains_id || existing_hash != block_hash {
-            // convert block to buffer, update the cache, return
             let mut editor = fonts::create_cosmic_editor(
                block.scale.0,
                block.line_height.0,
@@ -447,7 +400,7 @@ impl Renderer {
             })
             .collect();
 
-        // Legacy arena-based buffers (no camera transform)
+        // GfxElement arena-based buffers (no camera transform)
         for text_buffer in self.buffer_cache.values() {
             text_areas.push(TextArea {
                 buffer: text_buffer.buffer(),
@@ -543,9 +496,9 @@ impl Renderer {
         match loader::load_from_file(Path::new(path)) {
             Ok(map) => {
                 info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
-                self.rebuild_mindmap_buffers(&map);
-                self.fit_camera_to_mindmap(&map);
-                self.mindmap = Some(map);
+                let scene = baumhard::mindmap::scene_builder::build_scene(&map);
+                self.rebuild_buffers_from_scene(&scene);
+                self.fit_camera_to_scene(&scene);
                 self.should_render = true;
             }
             Err(e) => {
@@ -554,49 +507,20 @@ impl Renderer {
         }
     }
 
-    fn fit_camera_to_mindmap(&mut self, map: &MindMap) {
-        if map.nodes.is_empty() {
-            return;
-        }
-        let mut min_x = f32::MAX;
-        let mut min_y = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut max_y = f32::MIN;
-        for node in map.nodes.values() {
-            let x = node.position.x as f32;
-            let y = node.position.y as f32;
-            let w = node.size.width as f32;
-            let h = node.size.height as f32;
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x + w);
-            max_y = max_y.max(y + h);
-        }
-        self.camera.fit_to_bounds(
-            Vec2::new(min_x, min_y),
-            Vec2::new(max_x, max_y),
-            0.05,
-        );
-    }
-
-    fn rebuild_mindmap_buffers(&mut self, map: &MindMap) {
+    /// Rebuild rendering buffers from a RenderScene (produced by MindMapDocument).
+    /// This is the primary rendering path: scene data -> cosmic-text buffers.
+    pub fn rebuild_buffers_from_scene(&mut self, scene: &RenderScene) {
         self.mindmap_buffers.clear();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
 
-        for node in map.nodes.values() {
-            if node.text.is_empty() || map.is_hidden_by_fold(node) {
-                continue;
-            }
-
-            // Determine font scale from the first text run, or default
-            let scale = node.text_runs.first()
+        for elem in &scene.text_elements {
+            let scale = elem.text_runs.first()
                 .map(|r| r.size_pt as f32)
                 .unwrap_or(14.0);
             let line_height = scale * 1.2;
-            let bound_x = node.size.width as f32;
-            let bound_y = node.size.height as f32;
+            let (bound_x, bound_y) = elem.size;
 
             let mut buffer = cosmic_text::Buffer::new(
                 &mut font_system,
@@ -605,12 +529,11 @@ impl Renderer {
             buffer.set_size(&mut font_system, Some(bound_x), Some(bound_y));
             buffer.set_wrap(&mut font_system, cosmic_text::Wrap::Word);
 
-            // Build rich text spans: Vec<(&str, Attrs)>
-            let text = &node.text;
-            let spans: Vec<(&str, Attrs)> = if node.text_runs.is_empty() {
+            let text = &elem.text;
+            let spans: Vec<(&str, Attrs)> = if elem.text_runs.is_empty() {
                 vec![(text.as_str(), Attrs::new())]
             } else {
-                node.text_runs.iter().filter_map(|run| {
+                elem.text_runs.iter().filter_map(|run| {
                     let start = grapheme_chad::find_byte_index_of_char(text, run.start)
                         .unwrap_or(text.len());
                     let end = grapheme_chad::find_byte_index_of_char(text, run.end)
@@ -648,35 +571,28 @@ impl Renderer {
 
             let text_buffer = MindMapTextBuffer {
                 buffer,
-                pos: (node.position.x as f32, node.position.y as f32),
+                pos: elem.position,
                 bounds: (bound_x, bound_y),
             };
-            self.mindmap_buffers.insert(node.id.clone(), text_buffer);
+            self.mindmap_buffers.insert(elem.node_id.clone(), text_buffer);
         }
 
-        // Build border buffers for nodes with show_frame = true
+        // Build border buffers
         self.border_buffers.clear();
-        for node in map.nodes.values() {
-            if !node.style.show_frame || map.is_hidden_by_fold(node) {
-                continue;
-            }
-
-            let border_style = BorderStyle::default_with_color(&node.style.frame_color);
-            let border_color = parse_hex_color(&border_style.color)
+        for elem in &scene.border_elements {
+            let border_color = parse_hex_color(&elem.border_style.color)
                 .unwrap_or(cosmic_text::Color::rgba(255, 255, 255, 255));
-            let font_size = border_style.font_size_pt;
-            let glyph_set = &border_style.glyph_set;
+            let font_size = elem.border_style.font_size_pt;
+            let glyph_set = &elem.border_style.glyph_set;
 
             let approx_char_width = font_size * 0.6;
-            let char_count = (node.size.width as f32 / approx_char_width).max(3.0) as usize;
+            let char_count = (elem.node_size.0 / approx_char_width).max(3.0) as usize;
             let border_attrs = Attrs::new()
                 .color(border_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
 
-            let nx = node.position.x as f32;
-            let ny = node.position.y as f32;
-            let nw = node.size.width as f32;
-            let nh = node.size.height as f32;
+            let (nx, ny) = elem.node_position;
+            let (nw, nh) = elem.node_size;
             let h_width = nw + approx_char_width * 2.0;
             let v_width = approx_char_width * 2.0;
 
@@ -696,7 +612,7 @@ impl Renderer {
                 (h_width, font_size * 1.5),
             ));
 
-            // Left side — one glyph per row
+            // Left side
             let row_count = (nh / font_size).max(1.0) as usize;
             let left_text: String = std::iter::repeat_n(format!("{}\n", glyph_set.left_char()), row_count).collect();
             self.border_buffers.push(create_border_buffer(
@@ -715,12 +631,33 @@ impl Renderer {
         }
     }
 
-    /// Process a single decree directly (used for WASM single-threaded mode)
-    pub fn process_decree(&mut self, decree: Decree) {
-        match decree {
-            Decree::Render(render_decree) => self.handle_render_decree(render_decree),
-            _ => {}
+    /// Fit the camera to show a RenderScene's content.
+    pub fn fit_camera_to_scene(&mut self, scene: &RenderScene) {
+        if scene.text_elements.is_empty() {
+            return;
         }
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for elem in &scene.text_elements {
+            let (x, y) = elem.position;
+            let (w, h) = elem.size;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x + w);
+            max_y = max_y.max(y + h);
+        }
+        self.camera.fit_to_bounds(
+            Vec2::new(min_x, min_y),
+            Vec2::new(max_x, max_y),
+            0.05,
+        );
+    }
+
+    /// Process a single decree directly
+    pub fn process_decree(&mut self, decree: RenderDecree) {
+        self.handle_render_decree(decree);
     }
 
     fn handle_render_decree(&mut self, decree: RenderDecree) {
@@ -757,27 +694,6 @@ impl Renderer {
             }
         }
     }
-
-    fn check_for_decrees(&mut self) {
-        while !self.this_receiver.is_empty() {
-            let result = self.this_receiver.recv();
-            if result.is_err() {
-                error!("Error receiving mandate");
-            } else {
-                let instruction = result.unwrap();
-                let acknowledge = instruction.acknowledge;
-                let ack_sender = instruction.ack_sender;
-                match instruction.decree {
-                    Decree::Render(render_decree) => self.handle_render_decree(render_decree),
-                    Acknowledge(ack_key, ack) => {
-                        AckKey::check_ack(ack_key, &mut self.acknowledge, ack);
-                    }
-                    _ => {}
-                }
-                acknowledge_instruction(acknowledge.0, acknowledge.1, ack_sender);
-            }
-        }
-    }
 }
 
 pub struct TextBuffer {
@@ -806,28 +722,6 @@ impl TextBuffer {
     }
 }
 
-/*
-       let mut font_system = fonts::FONT_SYSTEM
-           .try_write()
-           .expect("FontSystem lock failure");
-       let mut buffer = Buffer::new(&mut font_system, Metrics::new(30.0, 30.0));
-
-       let fon = fonts::COMPILED_FONT_ID_MAP.get(&AppFont::Evilz).unwrap();
-       let face = font_system.db().face(fon[0]).unwrap();
-
-       buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
-
-       let mut editor_original = Editor::new(buffer);
-       editor_original.insert_string(
-           "🙏🏻hi🙏🏻\nThis is rendered with 🦅 glyphon 🦁\n\
-     The text below should be partially clipped.\na b c d e f g h i j k l \
-     m n o p q r s t u v w x y z\n",
-           Some(attr_list),
-       );
-
-       editor_original.insert_string("yokaba dosh\n", Some(attr_list_2));
-       editor_original.shape_as_needed(&mut font_system);
-*/
 pub fn example_attrib(font_system: &mut FontSystem) -> AttrsList {
     let evilz_font = fonts::COMPILED_FONT_ID_MAP.get(&AppFont::Evilz).unwrap();
     let evilz_face = font_system.db().face(evilz_font[0]).unwrap();

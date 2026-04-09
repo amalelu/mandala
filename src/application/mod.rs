@@ -1,6 +1,5 @@
 pub(crate) mod app;
 pub(crate) mod common;
-pub(crate) mod game_concepts;
+pub(crate) mod document;
 pub mod renderer;
-pub mod main_menu;
 mod baumhard_adapter;

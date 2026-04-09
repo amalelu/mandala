@@ -20,7 +20,6 @@ tinyvec = "1.8.0"
 # Alternative: https://crates.io/crates/ab_glyph
 glam = {version = "0.29.0", features = ["serde"]}
 futures = "0.3.30"
-crossbeam-channel = "0.5.13"
 winit = "0.30.1"
 serde = {version = "1.0.194", features = ["derive"]}
 serde-lexpr = "0.1.3"
@@ -31,9 +30,6 @@ env_logger = "0.11.3"
 smol_str = "0.3.1"
 indextree = {version = "4.7.2", features = ["serde"]}
 ttf-parser = "0.25.0"
-enum-map = "2.7.3"
-strum = "0.26.1"
-strum_macros = "0.26.1"
 baumhard = {path="./lib/baumhard"}
 
 [build-dependencies]
