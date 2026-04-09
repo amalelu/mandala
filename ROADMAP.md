@@ -2,49 +2,51 @@
 
 ## Context
 
-Mandala is a Rust mindmap application (~10,300 LOC) built on WebGPU (wgpu) with the
-Baumhard glyph animation library. It currently renders a specific mindmap as read-only.
-The app needs to evolve from a hardcoded viewer into a general-purpose, editable mindmap
-tool inspired by miMind but with superior capabilities.
+Mandala is a Rust mindmap application built on WebGPU (wgpu) with the Baumhard
+glyph animation library. It renders `.mindmap.json` files as interactive canvases
+where every visual element — text, borders, connections — is a positioned font glyph.
+
+The application has two layers:
+- **MindMap data model** — flat `HashMap<String, MindNode>` with `parent_id` references forming a tree. Loaded from JSON, queried for hierarchy, fold state, and theme colors.
+- **Baumhard mutation tree** — `Tree<GfxElement, GfxMutator>` built from the MindMap hierarchy. Each MindNode becomes a GlyphArea in the tree. MutatorTrees can be applied to cascade transformations (position, scale, color, text) through the parent-child structure. This is the creative engine — it enables animation and interactive manipulation of the mindmap.
 
 **Key drivers:**
 
-1. The app currently loads one specific mindmap file - it should open any `.mindmap.json`
-2. Application logic lives partly inside the Renderer - needs clean separation
-3. The JSON format needs evolution to support multi-parent nodes, portals, and richer glyph-based visuals
-4. No editing exists - users need intuitive node manipulation (move, reparent, connect, portal creation)
-5. The 1:N relationship between mindmap nodes and GlyphElements must be formalized
+1. The Baumhard mutation tree is the core creative tool — selection highlights, node movement, fold animation, and visual effects should all be expressed as mutations cascading through the tree
+2. The single-parent tree structure (`parent_id: Option<String>`) is preserved — it maps directly to Baumhard's indextree. Non-hierarchical relationships use arbitrary connections (`edge_type: "cross_link"`), not multi-parent
+3. Editing capabilities needed — selection, move, reparent, connect, text editing
+4. Connections and borders currently render via a flat pipeline alongside the tree; borders should eventually move into the tree as GlyphModel children
 
 ---
 
 ## Architectural Decisions
 
-1. **Single-threaded architecture** - Collapse multi-threaded Decree system to direct method calls. Simpler state management, matches WASM reality, better for editing UX
-2. **Model-View separation** - MindMapDocument owns the MindMap, Renderer receives RenderScene snapshots
-3. **RenderScene as intermediary** - Formalizes the 1:N mapping (one node -> text + border + connection elements)
-4. **Single-parent tree preserved** - `parent_id: Option<String>` maps directly to Baumhard's indextree. Non-hierarchical relationships use arbitrary connections (`edge_type: "cross_link"`), not multi-parent.
-5. **Portals deferred** - Portal system (non-hierarchical node links) planned for a later milestone
-6. **Everything is glyphs** - Connections, borders, portals all rendered as positioned font glyphs via cosmic-text
-7. **Game code removed** - All World/Scene/GameObject/GameResource types deleted. Clean mindmap-focused codebase
-8. **Backward-compatible format** - v1 files load in v2 loader via serde defaults + migration
+1. **Single-threaded architecture** — Direct method calls, no message channels. Matches WASM reality, simpler state management
+2. **Model-View separation** — MindMapDocument owns the MindMap, provides `build_tree()` and `build_scene()`
+3. **Dual rendering pipeline** — Nodes render through the Baumhard tree (tree_builder → Tree → renderer walks tree for cosmic-text buffers). Connections and borders render through the flat RenderScene pipeline (scene_builder → flat Vecs → renderer). Borders will eventually migrate into the tree as GlyphModel children
+4. **Single-parent tree** — `parent_id: Option<String>` maps to indextree. Non-hierarchical links are arbitrary connections, not multi-parent nodes
+5. **Everything is glyphs** — Text, borders, connections all rendered as positioned font glyphs via cosmic-text/glyphon
+6. **Mutations as the interaction model** — User actions (select, move, edit) should be expressed as MutatorTree applications where possible, so the tree walker handles cascading effects naturally
 
 ---
 
-## Current Architecture Assessment
+## Current State (after Session 3)
 
-### What exists and works well
-- **Baumhard library** (`lib/baumhard/`) - solid glyph rendering primitives, tree/mutation system
-- **MindMap data model** (`lib/baumhard/src/mindmap/model.rs`) - clean serde-based structs
-- **Border system** (`lib/baumhard/src/mindmap/border.rs`) - glyph-based borders with presets
-- **JSON format v1.0** with v1.1 glyph extensions (GlyphBorderConfig, GlyphConnectionConfig)
-- **Renderer** (`src/application/renderer.rs`) - working wgpu+glyphon pipeline with camera
-- **Multi-target** - native + WASM builds via Trunk
+### What works
+- **MindMap data model** — serde-based structs, JSON loading, hierarchy queries
+- **Baumhard tree bridge** — MindMap → Tree<GfxElement, GfxMutator> with parent-child hierarchy preserved
+- **Node rendering via tree** — renderer walks Baumhard tree to create cosmic-text buffers
+- **Border rendering** — glyph-based box-drawing borders (flat pipeline)
+- **Connection rendering** — glyph-based edge paths with Bezier curves (flat pipeline)
+- **Camera** — pan/zoom with fit-to-content
+- **Multi-target** — native + WASM builds
+- **120 tests passing**
 
-### What needs change
-- **No editing layer** - no input handling for node selection, drag, connect
-- **No portal concept** in the format (deferred)
-- **Borders not in tree** - borders still rendered via flat pipeline, not part of Baumhard tree
-- **No mutation application** - tree bridge exists but no MutatorTrees are applied yet
+### What needs work
+- **No mutation application** — tree bridge exists but no MutatorTrees are applied yet
+- **No editing layer** — no input handling for selection, drag, text editing
+- **Borders not in tree** — borders render via flat pipeline, not as GlyphModel children in the Baumhard tree
+- **No save/persistence** — document dirty flag exists but no serialization
 
 ### Key Files Reference
 | File | Role |
@@ -60,26 +62,31 @@ tool inspired by miMind but with superior capabilities.
 | `lib/baumhard/src/mindmap/border.rs` | BorderGlyphSet, BorderStyle |
 | `lib/baumhard/src/mindmap/connection.rs` | Path computation, Bezier curves, glyph sampling |
 | `lib/baumhard/src/gfx_structs/tree.rs` | Tree<T,M>, MutatorTree<T> |
-| `lib/baumhard/src/gfx_structs/tree_walker.rs` | Mutation tree walking algorithm |
+| `lib/baumhard/src/gfx_structs/tree_walker.rs` | Mutation tree walking (channel-aligned, with RepeatWhile) |
 | `lib/baumhard/src/gfx_structs/element.rs` | GfxElement enum (GlyphArea, GlyphModel, Void) |
-| `lib/baumhard/src/gfx_structs/mutator.rs` | GfxMutator, Mutation, Instruction types |
+| `lib/baumhard/src/gfx_structs/mutator.rs` | GfxMutator, Mutation, Instruction, Predicate types |
 
 ---
 
 ## Milestone Dependency Graph
 
 ```
-M1 (Architecture) --+--> M2 (Connections) ---+
-                     |                        +--> M6 (Connection Editing)
-                     +--> M3 (Tree Bridge) --+      6A: Select/delete edges
-                     |                        |     6B: Create connections
-                     +--> M4 (Selection) -+   |     6C: Path/anchor manipulation
-                     |                    |   |     6D: Style/label editing
-                     |                    |   +---> 6E: Portal creation
-                     |                    |
-                     |                    +--> M5 (Move/Reparent) --> M7 (Text Edit)
-                     |
-                     +--> M8 (Save/File) [can start after M1]
+M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
+                       |                              +--> M6 (Connection Editing)
+                       +--> M3 (Tree Bridge) ✓ --+
+                       |                          |
+                       |    M3 enables mutation-  |
+                       |    based interaction:    |
+                       |                          +--> M4 (Selection)
+                       |                          |      via color/highlight mutations
+                       |                          |
+                       |                          +--> M5 (Move/Reparent)
+                       |                          |      via position mutations cascading through tree
+                       |                          |
+                       |                          +--> M7 (Text Edit)
+                       |                                 via GlyphArea text mutations
+                       |
+                       +--> M8 (Save/File) [can start any time]
 ```
 
 ---
@@ -225,18 +232,18 @@ M1 (Architecture) --+--> M2 (Connections) ---+
 
 ## Milestone 4: Selection & Basic Interaction
 
-**Goal**: Users can select, highlight, and inspect nodes.
+**Goal**: Users can select, highlight, and inspect nodes. Selection highlight expressed as a mutation on the Baumhard tree.
 
 ### Session 4A: Hit testing and selection
 
-**What**: Click nodes to select them, with visual feedback.
+**What**: Click nodes to select them, with visual feedback via tree mutations.
 
-- [ ] Add `screen_to_canvas()` method to Camera2D (inverse of `canvas_to_screen`)
-- [ ] Implement node hit testing: click position -> find node by bounds
-- [ ] Add `SelectionState` enum to Document (None, Single, Multi, Edge, Portal)
-- [ ] Handle click events in app event loop -> delegate to Document
+- [ ] Implement node hit testing: click position → Camera2D.screen_to_canvas() → find node by bounds using node_map + GlyphArea positions
+- [ ] Add `SelectionState` to Document (None, Single(NodeId), Multi(Vec<NodeId>))
+- [ ] Handle click events in app event loop → delegate to Document
 - [ ] Shift+click for multi-select, click empty space to deselect
-- [ ] Renderer draws highlight border/glow on selected nodes
+- [ ] Selection highlight via Baumhard mutation: apply a MutatorTree that changes the selected node's color/style (e.g., color region mutation, or a border highlight)
+- [ ] Rebuild affected tree elements on selection change
 
 **Verify**: Clicking nodes selects them with visual feedback
 
@@ -244,17 +251,17 @@ M1 (Architecture) --+--> M2 (Connections) ---+
 
 ## Milestone 5: Node Editing - Move & Reparent
 
-**Goal**: Drag nodes to reposition, reparent via drag-and-drop.
+**Goal**: Drag nodes to reposition, reparent via drag-and-drop. Movement expressed as position mutations on the Baumhard tree.
 
 ### Session 5A: Node movement
 
 **What**: Drag to move nodes, with subtree and individual modes.
 
-- [ ] Implement drag gesture detection (mouse down -> move -> mouse up)
-- [ ] Default drag: move node + all descendants (translate subtree)
-- [ ] Long press + drag: move individual node only
+- [ ] Implement drag gesture detection (mouse down → move → mouse up)
+- [ ] Default drag: move node + all descendants — apply NudgeDown/NudgeRight MutatorTree to subtree, then sync positions back to MindMap model
+- [ ] Alt+drag: move individual node only (apply mutation to single node, not descendants)
 - [ ] Update positions in MindMap model, mark document dirty
-- [ ] Rebuild affected render elements on change
+- [ ] Rebuild tree from updated model (or apply mutations directly to existing tree)
 - [ ] Add undo support: push `MoveAction` to undo stack
 
 **Verify**: Nodes can be dragged around, subtrees move together
@@ -264,8 +271,9 @@ M1 (Architecture) --+--> M2 (Connections) ---+
 **What**: Drag a node onto another to reparent it.
 
 - [ ] Detect drag-over-node: highlight potential parent target
-- [ ] On release over node: reparent (update `parent_ids[0]`, recalculate index)
+- [ ] On release over node: reparent (update `parent_id`, recalculate index)
 - [ ] Support drop as first child, last child, or between siblings
+- [ ] Rebuild Baumhard tree after reparent (tree structure changed)
 - [ ] Visual indicators for drop position
 - [ ] Undo support for reparent operations
 
@@ -297,8 +305,8 @@ M1 (Architecture) --+--> M2 (Connections) ---+
 - [ ] "Connect mode": select source node, click target to create edge
 - [ ] Visual feedback: temporary connection following cursor from source anchor
 - [ ] Create new `MindEdge` with default glyph style from canvas config
-- [ ] Support edge types: `parent_child`, `cross_link`, `arbitrary`
-- [ ] Multi-parent: connecting as additional parent adds to `parent_ids`
+- [ ] Support edge types: `parent_child`, `cross_link`
+- [ ] Cross-links are arbitrary connections — they don't affect the tree hierarchy
 - [ ] Undo support for connection creation
 
 **Verify**: New connections can be created between any two nodes
@@ -349,19 +357,19 @@ M1 (Architecture) --+--> M2 (Connections) ---+
 
 ## Milestone 7: Text Editing
 
-**Goal**: Edit node text content inline.
+**Goal**: Edit node text content inline. Text changes modify the GlyphArea in the Baumhard tree, then sync back to the MindMap model.
 
 ### Session 7A: Inline text editor and node creation
 
 **What**: Double-click to edit node text, create new nodes.
 
-- [ ] Double-click node -> enter edit mode with cursor
+- [ ] Double-click node → enter edit mode with cursor (GlyphArea text mutation for cursor display)
 - [ ] Text input, deletion, cursor movement, text selection
-- [ ] Rich text: Ctrl+B bold, Ctrl+I italic
-- [ ] Esc or click outside -> exit edit mode, save to model
-- [ ] Double-click empty space -> create new node
-- [ ] Tab from selected node -> create child node
-- [ ] Enter from selected node -> create sibling node
+- [ ] Rich text: Ctrl+B bold, Ctrl+I italic (ColorFontRegion mutations)
+- [ ] Esc or click outside → exit edit mode, sync text back to MindMap model
+- [ ] Double-click empty space → create new root node (new GlyphArea in tree)
+- [ ] Tab from selected node → create child node
+- [ ] Enter from selected node → create sibling node
 
 **Verify**: Text can be edited inline, new nodes can be created
 
