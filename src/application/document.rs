@@ -127,10 +127,15 @@ pub fn apply_selection_highlight(tree: &mut MindMapTree, selection: &SelectionSt
         };
         let element = node.get_mut();
         if let Some(glyph_area) = element.glyph_area_mut() {
-            let text_len = glyph_area.text.len();
-            if text_len > 0 {
-                let range = Range::new(0, text_len);
-                glyph_area.set_region_color(&range, &HIGHLIGHT_COLOR);
+            // Collect existing region ranges first, then update each one's color.
+            // Using the exact existing ranges ensures set_or_insert finds a match
+            // and updates in place rather than inserting a duplicate region.
+            let ranges: Vec<Range> = glyph_area.regions.all_regions()
+                .iter()
+                .map(|r| r.range)
+                .collect();
+            for range in &ranges {
+                glyph_area.set_region_color(range, &HIGHLIGHT_COLOR);
             }
         }
     }
