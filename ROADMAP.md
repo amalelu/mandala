@@ -67,11 +67,15 @@ tool inspired by miMind but with superior capabilities.
 ## Milestone Dependency Graph
 
 ```
-M1 (Architecture) --+--> M2 (Connections) ---------> M6 (Connection Editing)
-                     |
-                     +--> M3 (Format v2) -----------> M6 (Portal Creation)
-                     |
-                     +--> M4 (Selection) --> M5 (Move/Reparent) --> M7 (Text Edit)
+M1 (Architecture) --+--> M2 (Connections) ---+
+                     |                        +--> M6 (Connection Editing)
+                     +--> M3 (Format v2) ----+      6A: Select/delete edges
+                     |                        |     6B: Create connections
+                     +--> M4 (Selection) -+   |     6C: Path/anchor manipulation
+                     |                    |   |     6D: Style/label editing
+                     |                    |   +---> 6E: Portal creation (needs M3)
+                     |                    |
+                     |                    +--> M5 (Move/Reparent) --> M7 (Text Edit)
                      |
                      +--> M8 (Save/File) [can start after M1]
 ```
@@ -268,31 +272,75 @@ M1 (Architecture) --+--> M2 (Connections) ---------> M6 (Connection Editing)
 
 ## Milestone 6: Connection Editing
 
-**Goal**: Create, delete, and modify connections between nodes.
+**Goal**: Create, delete, and fully customize connections between nodes.
 
-### Session 6A: Create and delete connections
+### Session 6A: Connection selection and deletion
 
-**What**: Draw connections between nodes and delete existing ones.
+**What**: Select connections and delete them, with visual feedback.
+
+- [ ] Click on a connection glyph path to select the edge
+- [ ] Hit testing for connections: click position -> find nearest edge by glyph proximity
+- [ ] Visual feedback: highlight selected connection (color change, thicker glyphs, or glow)
+- [ ] Display edge info on selection (type, color, label, anchor points)
+- [ ] Delete selected connection (Delete key or context action)
+- [ ] Undo support for connection deletion (push `DeleteEdgeAction` to undo stack)
+
+**Verify**: Connections can be clicked to select and deleted with undo
+
+### Session 6B: Create connections
+
+**What**: Draw new connections between nodes.
 
 - [ ] "Connect mode": select source node, click target to create edge
-- [ ] Visual feedback: temporary connection following cursor
-- [ ] Create new `MindEdge` with default glyph style
+- [ ] Visual feedback: temporary connection following cursor from source anchor
+- [ ] Create new `MindEdge` with default glyph style from canvas config
 - [ ] Support edge types: `parent_child`, `cross_link`, `arbitrary`
 - [ ] Multi-parent: connecting as additional parent adds to `parent_ids`
-- [ ] Delete selected connection (delete key or context action)
+- [ ] Undo support for connection creation
 
-**Verify**: New connections can be created and deleted
+**Verify**: New connections can be created between any two nodes
 
-### Session 6B: Portal creation and connection manipulation
+### Session 6C: Connection path manipulation
 
-**What**: Create portal pairs and edit connection paths.
+**What**: Edit connection paths, control points, and anchor positions.
+
+- [ ] Drag control points to curve existing straight connections (adds Bezier control points)
+- [ ] Drag existing control points to reshape curved connections
+- [ ] Visual handles: render draggable control point markers on selected connections
+- [ ] Change anchor points: drag connection endpoints to different sides of a node (top/right/bottom/left)
+- [ ] Snap anchor to nearest edge midpoint on release
+- [ ] Reset connection to straight line (remove control points)
+- [ ] Undo support for all path modifications
+
+**Verify**: Connections can be curved, reshaped, and anchor points moved
+
+### Session 6D: Connection style and label editing
+
+**What**: Customize connection appearance and add/edit labels.
+
+- [ ] Change connection glyph: body, cap_start, cap_end via selection panel or keyboard shortcut
+- [ ] Change connection color (color picker or preset palette)
+- [ ] Change connection font and font size
+- [ ] Change glyph spacing (tight, normal, wide)
+- [ ] Edit connection label: click to add/edit text label on connection
+- [ ] Position label along connection path (start, middle, end, or custom offset)
+- [ ] Change edge type (parent_child, cross_link, arbitrary) on existing connections
+- [ ] Apply canvas default style to selected connections (reset to default)
+
+**Verify**: Connection appearance can be fully customized, labels can be added and edited
+
+### Session 6E: Portal creation and management
+
+**What**: Create and manage portal pairs for non-hierarchical node relationships.
 
 - [ ] "Create Portal" action: select two nodes -> generate PortalPair
 - [ ] Auto-assign labels (A, B, C...) with matching glyph symbols
-- [ ] Drag control points to curve existing connections
-- [ ] Change connection style (glyph, color, width) via selection
+- [ ] Portal glyphs rendered as markers on both endpoint nodes
+- [ ] Select and delete portal pairs
+- [ ] Edit portal glyph symbols and colors
+- [ ] Undo support for portal operations
 
-**Verify**: Portals render as matching glyph markers, connections can be curved
+**Verify**: Portals render as matching glyph markers, can be created and deleted
 
 ---
 
