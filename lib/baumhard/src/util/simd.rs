@@ -1,6 +1,8 @@
 // This module contains simd operations used anywhere in the application engine
 // https://doc.rust-lang.org/core/arch/index.html
+#[cfg(target_arch = "x86_64")]
 use core::arch::x86_64;
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::_mm256_set_ps;
 
 fn foo() {

@@ -5,7 +5,7 @@ use baumhard::font::fonts;
 use baumhard::core::primitives::ColorFontRegions;
 
 pub fn to_cosmic_text(source: &ColorFontRegions, font_system: &mut FontSystem) -> AttrsList {
-   let mut attr_list = AttrsList::new(Attrs::new());
+   let mut attr_list = AttrsList::new(&Attrs::new());
    for region in &source.regions {
       let mut attrs = Attrs::new();
       attrs = attrs.style(Style::Normal);
@@ -24,7 +24,7 @@ pub fn to_cosmic_text(source: &ColorFontRegions, font_system: &mut FontSystem) -
       } else {
          attrs = attrs.family(Family::Monospace);
       }
-      attr_list.add_span(region.range.to_rust_range(), attrs);
+      attr_list.add_span(region.range.to_rust_range(), &attrs);
    }
    attr_list
 }

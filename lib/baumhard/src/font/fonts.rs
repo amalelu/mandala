@@ -76,7 +76,7 @@ pub const DEFAULT_FONT_COLOR: Color = Color::rgba(0, 0, 0, 255);
 
 pub fn get_default_attr_list(font_family_name: &str) -> AttrsList {
     AttrsList::new(
-        Attrs::new()
+        &Attrs::new()
             .family(Family::Name(font_family_name))
             .color(DEFAULT_FONT_COLOR)
             .style(Style::Normal)

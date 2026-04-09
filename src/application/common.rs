@@ -131,7 +131,7 @@ impl Default for Decree {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum RenderDecree {
     Noop,
     ArenaUpdate,
@@ -141,6 +141,9 @@ pub enum RenderDecree {
     ReinitAdapter,
     SetSurfaceSize(u32, u32),
     Terminate,
+    CameraPan(f32, f32),
+    CameraZoom { screen_x: f32, screen_y: f32, factor: f32 },
+    LoadMindMap(String),
 }
 
 impl Default for RenderDecree {

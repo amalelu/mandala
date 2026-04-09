@@ -1,5 +1,7 @@
 use std::sync::{Arc, RwLock};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -7,11 +9,12 @@ use enum_map::EnumMap;
 use glam::f32::Vec2;
 use indextree::Arena;
 use log::{debug, error};
+#[cfg(not(target_arch = "wasm32"))]
 use pollster::block_on;
 use rustc_hash::FxHashMap;
 use wgpu::{Instance, SurfaceTargetUnsafe};
 use winit::dpi::PhysicalSize;
-use winit::event::{DeviceId, Event, KeyEvent, WindowEvent};
+use winit::event::{DeviceId, ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow};
 use winit::window::WindowId;
 use winit::{event_loop::EventLoop, window::Window};
@@ -177,6 +180,7 @@ impl Application {
         true
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn run(mut self) {
         // Bootstrap - initialize necessary resources, application threads, etc..
         // This thread will be the UI and winit eventloop thread
@@ -294,10 +298,19 @@ impl Application {
         debug!("notified renderer of window size");
         *ack_index += 1;
         let mut render_switch = false;
+        let mut cursor_pos: (f64, f64) = (0.0, 0.0);
+        let mut is_panning = false;
 
         render_sender
             .send(Instruction::new(Decree::Render(RenderDecree::ArenaUpdate)))
             .expect("Could not update arena");
+
+        // Load the default mindmap
+        render_sender
+            .send(Instruction::new(Decree::Render(RenderDecree::LoadMindMap(
+                "maps/testament.mindmap.json".to_string(),
+            ))))
+            .expect("Could not send mindmap load command");
 
         // Have the closure take ownership of the application
         // `event_loop.run` never returns, therefore we must do this to ensure
@@ -423,28 +436,39 @@ impl Application {
                 //// MOUSE ////
                 //////////////
                 Event::WindowEvent {
-                    window_id,
                     event:
                         WindowEvent::MouseInput {
-                            device_id,
                             state,
                             button,
                             ..
                         },
+                    ..
                 } => {
-                    // Handle mouse input
+                    // Left or middle mouse button for panning
+                    if button == MouseButton::Left || button == MouseButton::Middle {
+                        is_panning = state == ElementState::Pressed;
+                    }
                 }
                 Event::WindowEvent {
-                    window_id,
                     event:
                         WindowEvent::MouseWheel {
-                            device_id,
                             delta,
-                            phase,
                             ..
                         },
+                    ..
                 } => {
-                    // Handle mousewheel event
+                    let scroll_y = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        MouseScrollDelta::PixelDelta(pos) => pos.y / 50.0,
+                    };
+                    let factor = if scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                    let _ = render_sender.send(Instruction::new(Decree::Render(
+                        RenderDecree::CameraZoom {
+                            screen_x: cursor_pos.0 as f32,
+                            screen_y: cursor_pos.1 as f32,
+                            factor: factor as f32,
+                        },
+                    )));
                 }
                 //// CURSOR ////
                 Event::WindowEvent {
@@ -454,15 +478,21 @@ impl Application {
                     // Alert application stack that cursor has entered window
                 }
                 Event::WindowEvent {
-                    window_id,
                     event:
                         WindowEvent::CursorMoved {
-                            device_id,
                             position,
                             ..
                         },
+                    ..
                 } => {
-                    // Alert application stack that cursor has moved
+                    let dx = position.x - cursor_pos.0;
+                    let dy = position.y - cursor_pos.1;
+                    cursor_pos = (position.x, position.y);
+                    if is_panning {
+                        let _ = render_sender.send(Instruction::new(Decree::Render(
+                            RenderDecree::CameraPan(dx as f32, dy as f32),
+                        )));
+                    }
                 }
                 Event::WindowEvent {
                     window_id,
@@ -474,6 +504,146 @@ impl Application {
             }
         }).expect("Some kind of unexpected error appears to have taken place")
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn run(mut self) {
+        use wasm_bindgen::JsCast;
+        use winit::platform::web::WindowExtWebSys;
+
+        baumhard::font::fonts::init();
+
+        // Attach canvas to DOM
+        let canvas = self.window.canvas().expect("Failed to get canvas");
+        let web_window = web_sys::window().expect("No global window");
+        let document = web_window.document().expect("No document");
+        let body = document.body().expect("No body");
+        body.append_child(&canvas).expect("Failed to append canvas");
+        canvas.set_width(web_window.inner_width().unwrap().as_f64().unwrap() as u32);
+        canvas.set_height(web_window.inner_height().unwrap().as_f64().unwrap() as u32);
+
+        let (render_sender, renderer_receiver) = unbounded();
+        let (game_sender, _game_receiver) = unbounded();
+        let (this_sender, this_receiver) = unbounded();
+
+        let render_sender_for_init = render_sender.clone();
+        let this_sender_clone = this_sender.clone();
+        let game_sender_clone = game_sender.clone();
+        let gfx_arena: Arc<RwLock<Arena<GfxElement>>> = Arc::new(RwLock::new(Arena::new()));
+        let renderer_window = Arc::clone(&self.window);
+
+        // On WASM we run single-threaded — spawn the renderer init as a future
+        wasm_bindgen_futures::spawn_local(async move {
+            let instance = Instance::default();
+            let surface = instance
+                .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+                .expect("Failed to create surface");
+            let mut renderer = Renderer::new(
+                instance,
+                surface,
+                renderer_window,
+                render_sender_for_init,
+                renderer_receiver,
+                this_sender_clone,
+                game_sender_clone,
+                gfx_arena.clone(),
+            )
+            .await;
+
+            let size = canvas.width();
+            let height = canvas.height();
+            renderer.process_decree(Decree::Render(RenderDecree::SetSurfaceSize(size, height)));
+            renderer.process_decree(Decree::Render(RenderDecree::LoadMindMap(
+                "maps/testament.mindmap.json".to_string(),
+            )));
+            renderer.process_decree(Decree::Render(RenderDecree::StartRender));
+
+            // Store renderer in a RefCell for the event loop
+            let renderer = std::cell::RefCell::new(renderer);
+
+            // WASM render loop via requestAnimationFrame
+            use wasm_bindgen::closure::Closure;
+            let f: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
+                std::rc::Rc::new(std::cell::RefCell::new(None));
+            let g = f.clone();
+
+            *g.borrow_mut() = Some(Closure::new(move || {
+                renderer.borrow_mut().process();
+                request_animation_frame(f.borrow().as_ref().unwrap());
+            }));
+            request_animation_frame(g.borrow().as_ref().unwrap());
+        });
+
+        // The event loop handles input but doesn't block on WASM
+        let mut cursor_pos: (f64, f64) = (0.0, 0.0);
+        let mut is_panning = false;
+        let mut acknowledge: EnumMap<AckKey, usize> = EnumMap::default();
+
+        self.event_loop.run(move |event, _window_target| {
+            _ = (&self.window, &mut self.options);
+
+            match event {
+                Event::WindowEvent {
+                    event: WindowEvent::Resized(size), ..
+                } => {
+                    let _ = render_sender.send(Instruction::new(Decree::Render(
+                        RenderDecree::SetSurfaceSize(size.width, size.height),
+                    )));
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested, ..
+                } => {
+                    let _ = render_sender.send(Instruction::new(Decree::Render(
+                        RenderDecree::Terminate,
+                    )));
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::MouseInput { state, button, .. }, ..
+                } => {
+                    if button == MouseButton::Left || button == MouseButton::Middle {
+                        is_panning = state == ElementState::Pressed;
+                    }
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::MouseWheel { delta, .. }, ..
+                } => {
+                    let scroll_y = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        MouseScrollDelta::PixelDelta(pos) => pos.y / 50.0,
+                    };
+                    let factor = if scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                    let _ = render_sender.send(Instruction::new(Decree::Render(
+                        RenderDecree::CameraZoom {
+                            screen_x: cursor_pos.0 as f32,
+                            screen_y: cursor_pos.1 as f32,
+                            factor: factor as f32,
+                        },
+                    )));
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::CursorMoved { position, .. }, ..
+                } => {
+                    let dx = position.x - cursor_pos.0;
+                    let dy = position.y - cursor_pos.1;
+                    cursor_pos = (position.x, position.y);
+                    if is_panning {
+                        let _ = render_sender.send(Instruction::new(Decree::Render(
+                            RenderDecree::CameraPan(dx as f32, dy as f32),
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }).expect("Event loop error");
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
+    use wasm_bindgen::JsCast;
+    web_sys::window()
+        .unwrap()
+        .request_animation_frame(f.as_ref().unchecked_ref())
+        .unwrap();
 }
 
 /**

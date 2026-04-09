@@ -257,6 +257,86 @@ to find the ColorGroup at the appropriate index.
 Ordered list of intermediate points that define the curve of the connection.
 Empty array for straight connections.
 
+## Glyph Border Configuration (v1.1 extension)
+
+All glyph rendering extensions are **optional**. Existing v1.0 files continue
+to load unchanged — the renderer applies tasteful defaults when properties are
+absent.
+
+### Canvas-level Defaults
+
+The `canvas` object may include default glyph styles applied to all nodes/edges:
+
+```json
+{
+  "canvas": {
+    "background_color": "#141414",
+    "default_border": { ... },
+    "default_connection": { ... }
+  }
+}
+```
+
+### GlyphBorderConfig (on `style.border`)
+
+```json
+{
+  "preset": "rounded",
+  "font": null,
+  "font_size_pt": 14.0,
+  "color": null,
+  "padding": 4.0,
+  "glyphs": null
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `preset` | string | `"rounded"` | Glyph preset: `"light"`, `"heavy"`, `"double"`, `"rounded"`, `"custom"` |
+| `font` | string \| null | null | Font family for border glyphs (null = system default) |
+| `font_size_pt` | float | 14.0 | Font size in points |
+| `color` | string \| null | null | Border color `#RRGGBB` (null = inherit `frame_color`) |
+| `padding` | float | 4.0 | Padding between border and node content (pixels) |
+| `glyphs` | object \| null | null | Custom glyph definitions (only when preset = "custom") |
+
+### CustomBorderGlyphs (on `style.border.glyphs`)
+
+```json
+{
+  "top": "─", "bottom": "─",
+  "left": "│", "right": "│",
+  "top_left": "╭", "top_right": "╮",
+  "bottom_left": "╰", "bottom_right": "╯"
+}
+```
+
+Each field is a string containing the glyph(s) for that border segment.
+Multi-character strings are allowed for decorative borders.
+
+### GlyphConnectionConfig (on edge `glyph_connection`)
+
+```json
+{
+  "body": "·",
+  "cap_start": null,
+  "cap_end": "→",
+  "font": null,
+  "font_size_pt": 12.0,
+  "color": null,
+  "spacing": 0.0
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `body` | string | `"·"` | Glyph(s) repeated along the connection path |
+| `cap_start` | string \| null | null | Glyph at the source end |
+| `cap_end` | string \| null | null | Glyph at the target end (e.g. arrowhead) |
+| `font` | string \| null | null | Font family (null = system default) |
+| `font_size_pt` | float | 12.0 | Font size in points |
+| `color` | string \| null | null | Color `#RRGGBB` (null = inherit edge `color`) |
+| `spacing` | float | 0.0 | Gap between repeated body glyphs (0 = tight) |
+
 ## Coordinate System
 
 - Origin (0, 0) is an arbitrary point on the canvas

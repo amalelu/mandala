@@ -8,3 +8,4 @@ pub mod mutator;
 pub mod tests;
 pub mod scene;
 pub mod util;
+pub mod camera;

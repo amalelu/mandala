@@ -11,19 +11,15 @@ lto = "fat"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-num_cpus = "1.16.0"
-# Look into Ropey for text backend (for handling larger texts)
-rustix = "0.38.28"
 rustc-hash = "2.0.0"
 unicode-segmentation = "1.11.0"
-wgpu = "22.0.0"
+wgpu = "28.0"
 glyphon = "0.10.0"
-cosmic-text = "0.12.0"
+cosmic-text = "0.15.0"
 tinyvec = "1.8.0"
 # Alternative: https://crates.io/crates/ab_glyph
 glam = {version = "0.29.0", features = ["serde"]}
 futures = "0.3.30"
-pollster = "0.3.0"
 crossbeam-channel = "0.5.13"
 winit = "0.30.1"
 serde = {version = "1.0.194", features = ["derive"]}
@@ -46,6 +42,19 @@ path-slash = "0.2.1"
 ttf-parser = "0.25.0"
 regex = "1.11.0"
 lazy_static = "1.5.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+num_cpus = "1.16.0"
+rustix = "0.38.28"
+pollster = "0.3.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement"] }
+console_log = "1"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
