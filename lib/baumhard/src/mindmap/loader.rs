@@ -128,4 +128,20 @@ mod tests {
         let colors = map.resolve_theme_colors(root_node).unwrap();
         assert_eq!(colors.frame, "#30b082");
     }
+
+    #[test]
+    fn test_is_hidden_by_fold() {
+        let path = test_map_path();
+        let map = load_from_file(&path).unwrap();
+
+        // Root node has no parent, so it should never be hidden
+        let root = map.nodes.get("348068464").unwrap();
+        assert!(!map.is_hidden_by_fold(root));
+
+        // A child of a non-folded parent should not be hidden
+        let children = map.children_of("348068464");
+        assert!(!children.is_empty());
+        // The root is not folded by default, so its children are visible
+        assert!(!map.is_hidden_by_fold(children[0]));
+    }
 }

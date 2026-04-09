@@ -268,6 +268,24 @@ impl MindMap {
         }
     }
 
+    /// Returns true if any ancestor of this node is folded, meaning
+    /// this node should be hidden from view.
+    pub fn is_hidden_by_fold(&self, node: &MindNode) -> bool {
+        let mut current_id = node.parent_id.as_deref();
+        while let Some(pid) = current_id {
+            match self.nodes.get(pid) {
+                Some(parent) => {
+                    if parent.folded {
+                        return true;
+                    }
+                    current_id = parent.parent_id.as_deref();
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// Resolves the effective colors for a themed node.
     /// Returns (background, frame, text, title) hex color strings.
     pub fn resolve_theme_colors<'a>(&'a self, node: &'a MindNode) -> Option<&'a ColorGroup> {
