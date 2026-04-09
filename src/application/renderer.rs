@@ -28,6 +28,7 @@ use crate::application::common::{
 };
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
+use baumhard::util::grapheme_chad;
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
@@ -610,8 +611,10 @@ impl Renderer {
                 vec![(text.as_str(), Attrs::new())]
             } else {
                 node.text_runs.iter().filter_map(|run| {
-                    let start = run.start.min(text.len());
-                    let end = run.end.min(text.len());
+                    let start = grapheme_chad::find_byte_index_of_char(text, run.start)
+                        .unwrap_or(text.len());
+                    let end = grapheme_chad::find_byte_index_of_char(text, run.end)
+                        .unwrap_or(text.len());
                     if start >= end {
                         return None;
                     }

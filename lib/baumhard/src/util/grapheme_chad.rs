@@ -44,6 +44,10 @@ pub fn replace_graphemes_until_newline(
     }
 }
 
+pub fn find_byte_index_of_char(s: &str, index: usize) -> Option<usize> {
+    s.char_indices().nth(index).map(|(byte_idx, _)| byte_idx)
+}
+
 pub fn find_byte_index_of_grapheme(s: &str, index: usize) -> Option<usize> {
     let mut byte_index = 0;
     for (i, grapheme) in s.graphemes(true).enumerate() {
