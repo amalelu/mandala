@@ -322,6 +322,8 @@ Multi-character strings are allowed for decorative borders.
   "cap_end": "→",
   "font": null,
   "font_size_pt": 12.0,
+  "min_font_size_pt": 8.0,
+  "max_font_size_pt": 24.0,
   "color": null,
   "spacing": 0.0
 }
@@ -333,9 +335,18 @@ Multi-character strings are allowed for decorative borders.
 | `cap_start` | string \| null | null | Glyph at the source end |
 | `cap_end` | string \| null | null | Glyph at the target end (e.g. arrowhead) |
 | `font` | string \| null | null | Font family (null = system default) |
-| `font_size_pt` | float | 12.0 | Font size in points |
+| `font_size_pt` | float | 12.0 | Target on-screen glyph size at `camera.zoom == 1.0`. At other zoom levels the canvas-space font size is derived from this base and clamped — see note below. |
+| `min_font_size_pt` | float | 8.0 | Lower bound on the on-screen glyph size. Prevents glyphs from collapsing into an unreadable dust cloud at extreme zoom-out; the canvas-space size inflates to keep on-screen size ≥ this value, which also reduces the per-edge glyph count. |
+| `max_font_size_pt` | float | 24.0 | Upper bound on the on-screen glyph size. Prevents glyphs from rendering as a few enormous boulders at extreme zoom-in; the canvas-space size shrinks to compensate, so more densely-sampled glyphs follow the path. |
 | `color` | string \| null | null | Color `#RRGGBB` (null = inherit edge `color`) |
 | `spacing` | float | 0.0 | Gap between repeated body glyphs (0 = tight) |
+
+The effective canvas-space font size at any given zoom is
+`clamp(font_size_pt * camera.zoom, min_font_size_pt, max_font_size_pt) / camera.zoom`.
+Sample spacing along the connection path is proportional to that
+effective size, so glyph count rises and falls automatically as the
+user zooms — fewer-but-larger glyphs when zoomed out, more-but-smaller
+glyphs when zoomed in.
 
 ## Coordinate System
 

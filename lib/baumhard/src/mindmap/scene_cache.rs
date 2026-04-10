@@ -19,10 +19,13 @@
 //!
 //! - The cache is always safe to drop. Clearing it just forces a full
 //!   re-sample on the next build.
-//! - Samples are stored in canvas space and are independent of the camera.
-//!   Camera pan/zoom does not invalidate the cache; only the *downstream*
-//!   renderer-side glyph buffers need to be rebuilt when the viewport
-//!   changes.
+//! - Samples are stored in canvas space. Camera *pan* does not invalidate
+//!   the cache. Camera *zoom*, however, DOES change the effective
+//!   canvas-space font size (and therefore the sample spacing) via
+//!   `GlyphConnectionConfig::effective_font_size_pt`, so zoom changes
+//!   force a full re-sample. This is enforced automatically by
+//!   `ensure_zoom`, which the scene builder calls on entry — callers
+//!   don't need to remember to flush the cache on zoom themselves.
 //! - Structural edge changes (add/remove, endpoint change, control points,
 //!   glyph config) are handled by the caller clearing the relevant entries
 //!   (`invalidate_edge`) or dropping the whole cache (`clear`). Selection
@@ -84,7 +87,22 @@ pub struct CachedConnection {
 pub struct SceneConnectionCache {
     entries: HashMap<EdgeKey, CachedConnection>,
     by_node: HashMap<String, Vec<EdgeKey>>,
+    /// Camera zoom level at which the cached samples were taken. `None`
+    /// means "cache is empty / zoom unknown". When the scene builder is
+    /// asked to build at a zoom that differs from this (beyond
+    /// `ZOOM_EPSILON`), `ensure_zoom` flushes the cache so stale sample
+    /// spacings don't leak into the new frame. Kept out of
+    /// `CachedConnection` because it's a whole-cache property, not a
+    /// per-edge one.
+    scene_zoom: Option<f32>,
 }
+
+/// Threshold for "zoom changed enough to invalidate cached samples".
+/// The sample spacing is `effective_font * 0.6 + spacing`, so sub-0.1%
+/// zoom deltas shift spacing by a fraction of a pixel — cheaper to
+/// ignore than to rebuild. 0.1% matches the lower bound of what a user
+/// can deliberately produce with the wheel-zoom step (10%).
+const ZOOM_EPSILON: f32 = 1.0e-3;
 
 impl SceneConnectionCache {
     pub fn new() -> Self {
@@ -97,6 +115,29 @@ impl SceneConnectionCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.by_node.clear();
+        self.scene_zoom = None;
+    }
+
+    /// Ensure the cache is consistent with `camera_zoom`. If the stored
+    /// zoom differs from the incoming one beyond `ZOOM_EPSILON`, drop
+    /// all cached samples; either way, stamp the new zoom. Called by
+    /// `build_scene_with_cache` on entry so the invariant is enforced
+    /// locally instead of requiring every caller to remember to flush
+    /// on zoom changes.
+    ///
+    /// When `scene_zoom` is `None` (fresh cache, post-`clear`, or
+    /// pre-stamp) we just stamp without invalidating — any existing
+    /// entries are assumed to be correct for `camera_zoom` (in
+    /// production the scene builder stamps before inserting).
+    pub fn ensure_zoom(&mut self, camera_zoom: f32) {
+        let z = camera_zoom.max(f32::EPSILON);
+        if let Some(prev) = self.scene_zoom {
+            if (prev - z).abs() > ZOOM_EPSILON {
+                self.entries.clear();
+                self.by_node.clear();
+            }
+        }
+        self.scene_zoom = Some(z);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -286,5 +327,52 @@ mod tests {
         assert_eq!(cache.edges_touching("a").len(), 1);
         assert_eq!(cache.edges_touching("b").len(), 1);
         assert_eq!(cache.get(&key).unwrap().color, "#222");
+    }
+
+    #[test]
+    fn ensure_zoom_preserves_cache_on_matching_zoom() {
+        let mut cache = SceneConnectionCache::new();
+        let key = EdgeKey::new("a", "b", "cross_link");
+        cache.insert(key.clone(), mk_entry("#fff"));
+        cache.ensure_zoom(1.0);
+        // Same zoom again — nothing should change.
+        cache.ensure_zoom(1.0);
+        assert!(cache.get(&key).is_some());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn ensure_zoom_invalidates_on_zoom_change() {
+        let mut cache = SceneConnectionCache::new();
+        let key = EdgeKey::new("a", "b", "cross_link");
+        cache.insert(key.clone(), mk_entry("#fff"));
+        cache.ensure_zoom(1.0);
+        // Wheel-tick to 1.1 — entries must be dropped.
+        cache.ensure_zoom(1.1);
+        assert!(cache.get(&key).is_none());
+        assert!(cache.edges_touching("a").is_empty());
+    }
+
+    #[test]
+    fn ensure_zoom_tolerates_sub_epsilon_drift() {
+        let mut cache = SceneConnectionCache::new();
+        let key = EdgeKey::new("a", "b", "cross_link");
+        cache.insert(key.clone(), mk_entry("#fff"));
+        cache.ensure_zoom(1.0);
+        // Tiny floating-point drift well below ZOOM_EPSILON (1e-3).
+        cache.ensure_zoom(1.0 + 1.0e-6);
+        assert!(cache.get(&key).is_some(), "sub-epsilon drift should not flush");
+    }
+
+    #[test]
+    fn ensure_zoom_after_clear_just_stamps() {
+        let mut cache = SceneConnectionCache::new();
+        // Empty cache + ensure_zoom should just stamp, not panic or
+        // touch anything.
+        cache.ensure_zoom(0.5);
+        cache.insert(EdgeKey::new("a", "b", "cross_link"), mk_entry("#111"));
+        // Same zoom — preserved.
+        cache.ensure_zoom(0.5);
+        assert_eq!(cache.len(), 1);
     }
 }

@@ -173,7 +173,7 @@ mod tests {
 
         let path = test_map_path();
         let map = load_from_file(&path).unwrap();
-        let scene = scene_builder::build_scene(&map);
+        let scene = scene_builder::build_scene(&map, 1.0);
 
         // All visible edges should produce connection elements
         let visible_edges = map.edges.iter().filter(|e| e.visible).count();
@@ -240,7 +240,7 @@ mod tests {
         use crate::mindmap::scene_builder;
         let path = theme_demo_path();
         let map = load_from_file(&path).unwrap();
-        let scene = scene_builder::build_scene(&map);
+        let scene = scene_builder::build_scene(&map, 1.0);
         // Background should resolve through the dark theme var set.
         assert_eq!(scene.background_color, "#141414");
     }

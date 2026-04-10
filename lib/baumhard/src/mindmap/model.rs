@@ -223,9 +223,27 @@ pub struct GlyphConnectionConfig {
     /// Font family name for connection glyphs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font: Option<String>,
-    /// Font size in points.
+    /// Font size in points. Interpreted as the *target* on-screen glyph
+    /// size at `camera.zoom == 1.0`. At other zoom levels the effective
+    /// canvas-space size is derived from this base and clamped into
+    /// `[min_font_size_pt, max_font_size_pt]` in screen space — see
+    /// [`GlyphConnectionConfig::effective_font_size_pt`].
     #[serde(default = "default_connection_font_size")]
     pub font_size_pt: f32,
+    /// Lower bound (in points) on the on-screen glyph size. When zooming
+    /// out, this clamp kicks in so glyphs don't collapse into an
+    /// unreadable dust cloud; the canvas-space font size is inflated to
+    /// keep the on-screen size ≥ this value, which also reduces the
+    /// number of sampled glyphs along the connection path.
+    #[serde(default = "default_connection_min_font_size")]
+    pub min_font_size_pt: f32,
+    /// Upper bound (in points) on the on-screen glyph size. When zooming
+    /// in, this clamp caps how large individual glyphs can get so a
+    /// heavily-magnified connection doesn't render as a few enormous
+    /// boulders; the canvas-space font size shrinks to compensate, so
+    /// more densely-sampled glyphs follow the path.
+    #[serde(default = "default_connection_max_font_size")]
+    pub max_font_size_pt: f32,
     /// Color override as #RRGGBB. None = inherit from edge color.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
@@ -236,6 +254,8 @@ pub struct GlyphConnectionConfig {
 
 fn default_connection_body() -> String { "\u{00B7}".to_string() } // middle dot ·
 fn default_connection_font_size() -> f32 { 12.0 }
+fn default_connection_min_font_size() -> f32 { 8.0 }
+fn default_connection_max_font_size() -> f32 { 24.0 }
 
 impl Default for GlyphConnectionConfig {
     fn default() -> Self {
@@ -245,9 +265,32 @@ impl Default for GlyphConnectionConfig {
             cap_end: None,
             font: None,
             font_size_pt: default_connection_font_size(),
+            min_font_size_pt: default_connection_min_font_size(),
+            max_font_size_pt: default_connection_max_font_size(),
             color: None,
             spacing: 0.0,
         }
+    }
+}
+
+impl GlyphConnectionConfig {
+    /// Effective canvas-space font size for this connection at the given
+    /// camera zoom. The renderer applies `TextArea.scale = camera.zoom`
+    /// to every connection glyph, so a canvas-space `S` pt glyph ends
+    /// up `S * camera_zoom` on screen. To keep the on-screen size inside
+    /// `[min_font_size_pt, max_font_size_pt]`, we clamp the target
+    /// screen size and divide back through the zoom.
+    ///
+    /// Because the scene builder uses this value to compute sample
+    /// spacing (`effective_font * 0.6 + spacing`), the glyph count along
+    /// a connection automatically drops when zoomed out and rises when
+    /// zoomed in — the key LOD lever that prevents the dust-cloud
+    /// failure mode at extreme zoom levels.
+    pub fn effective_font_size_pt(&self, camera_zoom: f32) -> f32 {
+        let z = camera_zoom.max(f32::EPSILON);
+        let target_screen = (self.font_size_pt * z)
+            .clamp(self.min_font_size_pt, self.max_font_size_pt);
+        target_screen / z
     }
 }
 
@@ -482,5 +525,92 @@ mod tests {
         // Also check: the first root and some node whose parent chain does not
         // include it (pick an unrelated subtree if available).
         // The above two-sibling-roots case is sufficient for testament.
+    }
+
+    /// Tiny tolerance for floating-point comparisons in the
+    /// `effective_font_size_pt` tests below — the formula is just two
+    /// multiplies and a divide, so anything tighter than this means a
+    /// real bug.
+    const EFFECTIVE_FONT_EPSILON: f32 = 1.0e-4;
+
+    #[test]
+    fn effective_font_size_unity_zoom_returns_base() {
+        let cfg = GlyphConnectionConfig::default(); // 12 / 8 / 24
+        // At zoom = 1.0 the base 12 is inside [8, 24], so screen size
+        // = 12 and canvas size = 12 / 1 = 12.
+        assert!(
+            (cfg.effective_font_size_pt(1.0) - 12.0).abs() < EFFECTIVE_FONT_EPSILON,
+            "expected 12.0 at zoom 1.0, got {}",
+            cfg.effective_font_size_pt(1.0)
+        );
+    }
+
+    #[test]
+    fn effective_font_size_zoomed_out_floors_to_min() {
+        let cfg = GlyphConnectionConfig::default();
+        // At zoom = 0.1: base * zoom = 1.2 → clamp up to 8 → canvas
+        // = 8 / 0.1 = 80.
+        let got = cfg.effective_font_size_pt(0.1);
+        assert!(
+            (got - 80.0).abs() < EFFECTIVE_FONT_EPSILON,
+            "expected 80.0 at zoom 0.1, got {got}"
+        );
+
+        // At zoom = 0.5: base * zoom = 6 → clamp up to 8 → canvas
+        // = 8 / 0.5 = 16.
+        let got = cfg.effective_font_size_pt(0.5);
+        assert!(
+            (got - 16.0).abs() < EFFECTIVE_FONT_EPSILON,
+            "expected 16.0 at zoom 0.5, got {got}"
+        );
+    }
+
+    #[test]
+    fn effective_font_size_zoomed_in_ceils_to_max() {
+        let cfg = GlyphConnectionConfig::default();
+        // At zoom = 2.0: base * zoom = 24 (right at the cap) → canvas
+        // = 24 / 2 = 12.
+        let got = cfg.effective_font_size_pt(2.0);
+        assert!(
+            (got - 12.0).abs() < EFFECTIVE_FONT_EPSILON,
+            "expected 12.0 at zoom 2.0, got {got}"
+        );
+
+        // At zoom = 5.0: base * zoom = 60 → clamp down to 24 → canvas
+        // = 24 / 5 = 4.8.
+        let got = cfg.effective_font_size_pt(5.0);
+        assert!(
+            (got - 4.8).abs() < EFFECTIVE_FONT_EPSILON,
+            "expected 4.8 at zoom 5.0, got {got}"
+        );
+    }
+
+    #[test]
+    fn effective_font_size_handles_zero_and_negative_zoom() {
+        // Zero or negative zoom would divide by zero / produce a
+        // negative font; the implementation guards with EPSILON. Just
+        // assert it returns a finite, positive value rather than
+        // panicking or returning NaN.
+        let cfg = GlyphConnectionConfig::default();
+        let z0 = cfg.effective_font_size_pt(0.0);
+        assert!(z0.is_finite() && z0 > 0.0, "expected finite > 0, got {z0}");
+        let zn = cfg.effective_font_size_pt(-1.0);
+        assert!(zn.is_finite() && zn > 0.0, "expected finite > 0, got {zn}");
+    }
+
+    #[test]
+    fn effective_font_size_respects_custom_bounds() {
+        // Tighter clamp: [10, 14] with the same base.
+        let cfg = GlyphConnectionConfig {
+            min_font_size_pt: 10.0,
+            max_font_size_pt: 14.0,
+            ..GlyphConnectionConfig::default()
+        };
+        // zoom = 1.0: 12 in [10, 14] → canvas 12.
+        assert!((cfg.effective_font_size_pt(1.0) - 12.0).abs() < EFFECTIVE_FONT_EPSILON);
+        // zoom = 0.5: 6 → up to 10 → canvas 20.
+        assert!((cfg.effective_font_size_pt(0.5) - 20.0).abs() < EFFECTIVE_FONT_EPSILON);
+        // zoom = 2.0: 24 → down to 14 → canvas 7.
+        assert!((cfg.effective_font_size_pt(2.0) - 7.0).abs() < EFFECTIVE_FONT_EPSILON);
     }
 }

@@ -273,14 +273,23 @@ impl MindMapDocument {
 
     /// Build a RenderScene from the current MindMap state.
     /// Used for connections and borders (flat pipeline).
-    pub fn build_scene(&self) -> RenderScene {
-        scene_builder::build_scene(&self.mindmap)
+    ///
+    /// `camera_zoom` is forwarded through to the scene builder so
+    /// connection glyphs can be sized via
+    /// `GlyphConnectionConfig::effective_font_size_pt` — see
+    /// `baumhard::mindmap::scene_builder::build_scene` for details.
+    pub fn build_scene(&self, camera_zoom: f32) -> RenderScene {
+        scene_builder::build_scene(&self.mindmap, camera_zoom)
     }
 
     /// Build a RenderScene with position offsets applied to specific nodes.
     /// Used during drag to update connections and borders in real-time.
-    pub fn build_scene_with_offsets(&self, offsets: &HashMap<String, (f32, f32)>) -> RenderScene {
-        scene_builder::build_scene_with_offsets(&self.mindmap, offsets)
+    pub fn build_scene_with_offsets(
+        &self,
+        offsets: &HashMap<String, (f32, f32)>,
+        camera_zoom: f32,
+    ) -> RenderScene {
+        scene_builder::build_scene_with_offsets(&self.mindmap, offsets, camera_zoom)
     }
 
     /// Cache-aware scene build. The drag drain in `app.rs` calls this
@@ -292,22 +301,24 @@ impl MindMapDocument {
         &self,
         offsets: &HashMap<String, (f32, f32)>,
         cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
+        camera_zoom: f32,
     ) -> RenderScene {
         let sel = self.selection.selected_edge()
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
-        scene_builder::build_scene_with_cache(&self.mindmap, offsets, sel, cache)
+        scene_builder::build_scene_with_cache(&self.mindmap, offsets, sel, cache, camera_zoom)
     }
 
     /// Build a RenderScene that also reflects the current edge selection.
     /// The selected edge (if any) gets a cyan color override baked into its
     /// ConnectionElement so the renderer paints it in the highlight color.
-    pub fn build_scene_with_selection(&self) -> RenderScene {
+    pub fn build_scene_with_selection(&self, camera_zoom: f32) -> RenderScene {
         let sel = self.selection.selected_edge()
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
         scene_builder::build_scene_with_offsets_and_selection(
             &self.mindmap,
             &HashMap::new(),
             sel,
+            camera_zoom,
         )
     }
 
@@ -2071,14 +2082,14 @@ mod tests {
         let (edge_ref, _) = pick_test_edge(&doc);
 
         // Without selection: the edge renders with its model color
-        let scene_normal = doc.build_scene_with_selection();
+        let scene_normal = doc.build_scene_with_selection(1.0);
         let normal_colors: Vec<String> = scene_normal.connection_elements.iter()
             .map(|c| c.color.clone())
             .collect();
 
         // With edge selected: its element color should be the cyan highlight
         doc.selection = SelectionState::Edge(edge_ref);
-        let scene_selected = doc.build_scene_with_selection();
+        let scene_selected = doc.build_scene_with_selection(1.0);
         let highlighted_count = scene_selected.connection_elements.iter()
             .filter(|c| c.color.eq_ignore_ascii_case("#00E5FF"))
             .count();

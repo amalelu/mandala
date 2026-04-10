@@ -65,16 +65,25 @@ const SELECTED_EDGE_COLOR: &str = "#00E5FF";
 
 /// Builds a RenderScene from a MindMap, determining which nodes and borders
 /// are visible (accounting for fold state) and extracting their layout data.
-pub fn build_scene(map: &MindMap) -> RenderScene {
-    build_scene_with_offsets_and_selection(map, &HashMap::new(), None)
+///
+/// `camera_zoom` is used to compute the effective (clamped) canvas-space
+/// font size for each connection — see
+/// [`crate::mindmap::model::GlyphConnectionConfig::effective_font_size_pt`].
+/// Pass `1.0` if no camera context applies (e.g. loader tests).
+pub fn build_scene(map: &MindMap, camera_zoom: f32) -> RenderScene {
+    build_scene_with_offsets_and_selection(map, &HashMap::new(), None, camera_zoom)
 }
 
 /// Builds a RenderScene with position offsets applied to specific nodes.
 /// Used during drag to update connections and borders in real-time without
 /// modifying the MindMap model. Each entry in `offsets` maps a node ID to
 /// a (dx, dy) delta that is added to the node's model position.
-pub fn build_scene_with_offsets(map: &MindMap, offsets: &HashMap<String, (f32, f32)>) -> RenderScene {
-    build_scene_with_offsets_and_selection(map, offsets, None)
+pub fn build_scene_with_offsets(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+    camera_zoom: f32,
+) -> RenderScene {
+    build_scene_with_offsets_and_selection(map, offsets, None, camera_zoom)
 }
 
 /// Thin wrapper over the cache-aware builder that uses a scratch
@@ -84,9 +93,10 @@ pub fn build_scene_with_offsets_and_selection(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
+    camera_zoom: f32,
 ) -> RenderScene {
     let mut scratch = SceneConnectionCache::new();
-    build_scene_with_cache(map, offsets, selected_edge, &mut scratch)
+    build_scene_with_cache(map, offsets, selected_edge, &mut scratch, camera_zoom)
 }
 
 /// Cache-aware scene builder. For each edge:
@@ -107,7 +117,14 @@ pub fn build_scene_with_cache(
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
     cache: &mut SceneConnectionCache,
+    camera_zoom: f32,
 ) -> RenderScene {
+    // The per-edge sample spacing depends on the effective font size,
+    // which depends on `camera_zoom`. Flush cached samples if the
+    // incoming zoom differs from the one the cache was built at, so
+    // stale spacing doesn't leak into this frame.
+    cache.ensure_zoom(camera_zoom);
+
     let mut text_elements = Vec::new();
     let mut border_elements = Vec::new();
     // Axis-aligned bounding boxes of every visible node (with drag offsets
@@ -285,7 +302,13 @@ pub fn build_scene_with_cache(
         } else {
             stored_color.clone()
         };
-        let font_size = config.font_size_pt;
+        // Canvas-space font size clamped to keep the on-screen glyph
+        // size inside [min_font_size_pt, max_font_size_pt]. At extreme
+        // zoom-out this inflates the canvas-space size so sample
+        // spacing grows and the per-edge glyph count falls — the LOD
+        // mechanism that keeps zoomed-out connections from becoming a
+        // dust cloud.
+        let font_size = config.effective_font_size_pt(camera_zoom);
         let approx_glyph_width = font_size * 0.6;
         let effective_spacing = approx_glyph_width + config.spacing;
 
@@ -555,7 +578,7 @@ mod tests {
         vars.insert("--bg".into(), "#123456".into());
         map.canvas.theme_variables = vars;
 
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         assert_eq!(scene.background_color, "#123456");
     }
 
@@ -570,7 +593,7 @@ mod tests {
         vars.insert("--frame".into(), "#abcdef".into());
         map.canvas.theme_variables = vars;
 
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         assert_eq!(scene.border_elements.len(), 1);
         // `BorderStyle::default_with_color` stores the color string as-is
         // on the style; check the resolved hex ends up there.
@@ -592,7 +615,7 @@ mod tests {
         vars.insert("--edge".into(), "#fedcba".into());
         map.canvas.theme_variables = vars;
 
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         assert_eq!(scene.connection_elements.len(), 1);
         assert_eq!(scene.connection_elements[0].color, "#fedcba");
     }
@@ -604,7 +627,7 @@ mod tests {
             vec![],
         );
         map.canvas.background_color = "var(--missing)".into();
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         // Unknown var is passed through verbatim — downstream consumers
         // decide how to handle it (hex_to_rgba_safe falls back to the
         // fallback color).
@@ -626,7 +649,7 @@ mod tests {
             vec![synthetic_edge("a", "b", 2, 4)], // right edge of A → left edge of B
         );
 
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         assert_eq!(scene.connection_elements.len(), 1);
         let conn = &scene.connection_elements[0];
 
@@ -659,7 +682,7 @@ mod tests {
             vec![synthetic_edge("a", "b", 2, 4)],
         );
 
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         assert_eq!(scene.connection_elements.len(), 1);
         let conn = &scene.connection_elements[0];
 
@@ -698,6 +721,7 @@ mod tests {
             font_size_pt: 12.0,
             color: None,
             spacing: 0.0,
+            ..GlyphConnectionConfig::default()
         });
         let map = synthetic_map(
             vec![
@@ -706,7 +730,7 @@ mod tests {
             ],
             vec![edge],
         );
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         let conn = &scene.connection_elements[0];
         assert!(conn.cap_start.is_some(),
             "cap_start should survive for unframed source");
@@ -730,6 +754,7 @@ mod tests {
             font_size_pt: 12.0,
             color: None,
             spacing: 0.0,
+            ..GlyphConnectionConfig::default()
         });
         let map = synthetic_map(
             vec![
@@ -738,7 +763,7 @@ mod tests {
             ],
             vec![edge],
         );
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         let conn = &scene.connection_elements[0];
         // Source is unframed — cap_start still shows at A's right edge.
         assert!(conn.cap_start.is_some(),
@@ -764,7 +789,7 @@ mod tests {
     fn test_cache_populated_on_first_build() {
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
 
         assert_eq!(scene.connection_elements.len(), 1);
         assert_eq!(cache.len(), 1);
@@ -783,7 +808,7 @@ mod tests {
         // it would have overwritten our mutation with fresh geometry.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
 
         // Mutate the cached entry so we can see whether build #2 read it.
         let key = EdgeKey::new("a", "b", "cross_link");
@@ -803,7 +828,7 @@ mod tests {
             },
         );
 
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
         assert_eq!(second.connection_elements.len(), 1);
         let conn = &second.connection_elements[0];
         assert_eq!(conn.body_glyph, "SENTINEL",
@@ -821,7 +846,7 @@ mod tests {
         // sentinel we stashed in the cache.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
 
         let key = EdgeKey::new("a", "b", "cross_link");
         cache.insert(
@@ -839,7 +864,7 @@ mod tests {
 
         let mut offsets = HashMap::new();
         offsets.insert("a".to_string(), (10.0, 0.0));
-        let second = build_scene_with_cache(&map, &offsets, None, &mut cache);
+        let second = build_scene_with_cache(&map, &offsets, None, &mut cache, 1.0);
         let conn = &second.connection_elements[0];
         assert_ne!(conn.body_glyph, "SENTINEL",
             "endpoint-moved edge should have been re-sampled");
@@ -867,7 +892,7 @@ mod tests {
             ],
         );
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
 
         let cd_key = EdgeKey::new("c", "d", "cross_link");
         cache.insert(
@@ -885,7 +910,7 @@ mod tests {
 
         let mut offsets = HashMap::new();
         offsets.insert("a".to_string(), (5.0, 0.0));
-        let second = build_scene_with_cache(&map, &offsets, None, &mut cache);
+        let second = build_scene_with_cache(&map, &offsets, None, &mut cache, 1.0);
 
         // Find the c↔d connection element and verify it came from the
         // cache unchanged.
@@ -926,7 +951,7 @@ mod tests {
         );
 
         let mut cache = SceneConnectionCache::new();
-        let first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
         let first_count = first.connection_elements[0].glyph_positions.len();
 
         // Now move `c` into the middle of the connection — use a drag
@@ -935,7 +960,7 @@ mod tests {
         // notice `c`'s new position.
         let mut offsets = HashMap::new();
         offsets.insert("c".to_string(), (0.0, 500.0));
-        let second = build_scene_with_cache(&map, &offsets, None, &mut cache);
+        let second = build_scene_with_cache(&map, &offsets, None, &mut cache, 1.0);
         let second_count = second.connection_elements[0].glyph_positions.len();
         assert!(second_count < first_count,
             "moving c through the edge should reduce post-clip glyph count: {} → {}",
@@ -943,7 +968,7 @@ mod tests {
 
         // Now move `c` back out of the way via a model edit + full rebuild.
         map.nodes.get_mut("c").unwrap().position.y = -500.0;
-        let third = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let third = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
         assert_eq!(third.connection_elements[0].glyph_positions.len(), first_count);
     }
 
@@ -951,13 +976,13 @@ mod tests {
     fn test_cache_evicts_deleted_edges() {
         let mut map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
         let key = EdgeKey::new("a", "b", "cross_link");
         assert!(cache.get(&key).is_some());
 
         // Remove the edge from the model and rebuild.
         map.edges.clear();
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
         assert!(second.connection_elements.is_empty());
         assert!(cache.get(&key).is_none(),
             "deleted edge should be evicted from cache");
@@ -981,7 +1006,7 @@ mod tests {
             ],
         );
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
         assert_eq!(scene.connection_elements.len(), 2);
         let ab = EdgeKey::new("a", "b", "cross_link");
         let bc = EdgeKey::new("b", "c", "cross_link");
@@ -1000,8 +1025,8 @@ mod tests {
         // a fresh build would.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
 
         assert_eq!(
             first.connection_elements.len(),
@@ -1035,7 +1060,7 @@ mod tests {
         let map = synthetic_map(vec![a, b_child], vec![edge]);
 
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
         assert!(scene.connection_elements.is_empty(),
             "folded edge should be skipped");
         assert!(cache.is_empty(),
@@ -1050,7 +1075,7 @@ mod tests {
         // selection override.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
         let key = EdgeKey::new("a", "b", "cross_link");
         let stored_color = cache.get(&key).unwrap().color.clone();
 
@@ -1074,6 +1099,7 @@ mod tests {
             &HashMap::new(),
             Some(("a", "b", "cross_link")),
             &mut cache,
+            1.0,
         );
         let conn = &second.connection_elements[0];
         assert_eq!(conn.body_glyph, "SENTINEL",
@@ -1091,7 +1117,7 @@ mod tests {
         // should not crash, and connections should still render (the
         // clipping filter should not wipe out every glyph).
         let map = loader::load_from_file(&test_map_path()).unwrap();
-        let scene = build_scene(&map);
+        let scene = build_scene(&map, 1.0);
         assert!(!scene.text_elements.is_empty());
         assert!(!scene.connection_elements.is_empty());
         // At least one connection should have a non-empty glyph list.
