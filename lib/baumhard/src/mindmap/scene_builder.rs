@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use crate::mindmap::border::BorderStyle;
 use crate::mindmap::connection;
 use crate::mindmap::model::{GlyphConnectionConfig, MindMap, TextRun};
+use crate::util::color::resolve_var;
 use glam::Vec2;
 
 /// Intermediate representation between MindMap data and GPU rendering.
@@ -87,6 +88,11 @@ pub fn build_scene_with_offsets_and_selection(
     // render over the interior of a node.
     let mut node_aabbs: Vec<(Vec2, Vec2)> = Vec::new();
 
+    // Theme variable map — every color string we hand off to render
+    // elements is run through `resolve_var` first so authors can use
+    // `var(--name)` anywhere a literal hex was accepted.
+    let vars = &map.canvas.theme_variables;
+
     for node in map.nodes.values() {
         if map.is_hidden_by_fold(node) {
             continue;
@@ -98,6 +104,10 @@ pub fn build_scene_with_offsets_and_selection(
         let size_x = node.size.width as f32;
         let size_y = node.size.height as f32;
 
+        // Resolve the frame color through theme variables once — used for
+        // both the clip AABB sizing and the border element below.
+        let frame_color = resolve_var(&node.style.frame_color, vars);
+
         // Clip AABB: when a node has a visible frame, the rendered border
         // extends beyond the raw node rect by roughly one border
         // `font_size` vertically and one `approx_char_width` horizontally.
@@ -105,7 +115,7 @@ pub fn build_scene_with_offsets_and_selection(
         // inside the visible frame area (see renderer::rebuild_border_buffers
         // for the matching layout math).
         let (clip_pos, clip_size) = if node.style.show_frame {
-            let border_style = BorderStyle::default_with_color(&node.style.frame_color);
+            let border_style = BorderStyle::default_with_color(frame_color);
             let bf = border_style.font_size_pt;
             let bcw = bf * 0.6;
             (
@@ -117,12 +127,19 @@ pub fn build_scene_with_offsets_and_selection(
         };
         node_aabbs.push((clip_pos, clip_size));
 
-        // Text element (skip empty text nodes)
+        // Text element (skip empty text nodes). Resolve each text run's
+        // color through theme variables so the renderer downstream never
+        // sees a `var(--name)` literal.
         if !node.text.is_empty() {
+            let resolved_runs: Vec<TextRun> = node.text_runs.iter().map(|run| {
+                let mut r = run.clone();
+                r.color = resolve_var(&run.color, vars).to_string();
+                r
+            }).collect();
             text_elements.push(TextElement {
                 node_id: node.id.clone(),
                 text: node.text.clone(),
-                text_runs: node.text_runs.clone(),
+                text_runs: resolved_runs,
                 position: (pos_x, pos_y),
                 size: (size_x, size_y),
             });
@@ -130,7 +147,7 @@ pub fn build_scene_with_offsets_and_selection(
 
         // Border element
         if node.style.show_frame {
-            let border_style = BorderStyle::default_with_color(&node.style.frame_color);
+            let border_style = BorderStyle::default_with_color(frame_color);
             border_elements.push(BorderElement {
                 node_id: node.id.clone(),
                 border_style,
@@ -170,7 +187,12 @@ pub fn build_scene_with_offsets_and_selection(
         let color = if is_selected {
             SELECTED_EDGE_COLOR.to_string()
         } else {
-            config.color.clone().unwrap_or_else(|| edge.color.clone())
+            // Resolve through theme variables: connection override >
+            // edge color > (hardcoded default would be here). Resolution
+            // happens after inheritance so `var(--edge)` on either layer
+            // is honored.
+            let raw = config.color.as_deref().unwrap_or(edge.color.as_str());
+            resolve_var(raw, vars).to_string()
         };
         let font_size = config.font_size_pt;
         let approx_glyph_width = font_size * 0.6;
@@ -250,7 +272,7 @@ pub fn build_scene_with_offsets_and_selection(
         border_elements,
         connection_elements,
         portal_elements: Vec::new(),
-        background_color: map.canvas.background_color.clone(),
+        background_color: resolve_var(&map.canvas.background_color, vars).to_string(),
     }
 }
 
@@ -390,11 +412,89 @@ mod tests {
                 background_color: "#000".into(),
                 default_border: None,
                 default_connection: None,
+                theme_variables: HashMap::new(),
+                theme_variants: HashMap::new(),
             },
             nodes,
             edges,
             custom_mutations: vec![],
         }
+    }
+
+    fn themed_node(id: &str, bg: &str, frame: &str, text: &str) -> MindNode {
+        let mut n = synthetic_node(id, 0.0, 0.0, 40.0, 40.0, true);
+        n.style.background_color = bg.to_string();
+        n.style.frame_color = frame.to_string();
+        n.style.text_color = text.to_string();
+        n
+    }
+
+    #[test]
+    fn test_scene_background_resolves_theme_variable() {
+        use std::collections::HashMap;
+        let mut map = synthetic_map(
+            vec![synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false)],
+            vec![],
+        );
+        map.canvas.background_color = "var(--bg)".into();
+        let mut vars = HashMap::new();
+        vars.insert("--bg".into(), "#123456".into());
+        map.canvas.theme_variables = vars;
+
+        let scene = build_scene(&map);
+        assert_eq!(scene.background_color, "#123456");
+    }
+
+    #[test]
+    fn test_scene_frame_color_resolves_theme_variable() {
+        use std::collections::HashMap;
+        let mut map = synthetic_map(
+            vec![themed_node("a", "#000", "var(--frame)", "#fff")],
+            vec![],
+        );
+        let mut vars = HashMap::new();
+        vars.insert("--frame".into(), "#abcdef".into());
+        map.canvas.theme_variables = vars;
+
+        let scene = build_scene(&map);
+        assert_eq!(scene.border_elements.len(), 1);
+        // `BorderStyle::default_with_color` stores the color string as-is
+        // on the style; check the resolved hex ends up there.
+        let border = &scene.border_elements[0];
+        assert_eq!(border.border_style.color, "#abcdef");
+    }
+
+    #[test]
+    fn test_scene_connection_color_resolves_theme_variable() {
+        use std::collections::HashMap;
+        let mut a = synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false);
+        let mut b = synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false);
+        a.text = "".into(); // skip text element
+        b.text = "".into();
+        let mut edge = synthetic_edge("a", "b", 2, 4);
+        edge.color = "var(--edge)".into();
+        let mut map = synthetic_map(vec![a, b], vec![edge]);
+        let mut vars = HashMap::new();
+        vars.insert("--edge".into(), "#fedcba".into());
+        map.canvas.theme_variables = vars;
+
+        let scene = build_scene(&map);
+        assert_eq!(scene.connection_elements.len(), 1);
+        assert_eq!(scene.connection_elements[0].color, "#fedcba");
+    }
+
+    #[test]
+    fn test_scene_missing_variable_passes_through_raw() {
+        let mut map = synthetic_map(
+            vec![synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false)],
+            vec![],
+        );
+        map.canvas.background_color = "var(--missing)".into();
+        let scene = build_scene(&map);
+        // Unknown var is passed through verbatim — downstream consumers
+        // decide how to handle it (hex_to_rgba_safe falls back to the
+        // fallback color).
+        assert_eq!(scene.background_color, "var(--missing)");
     }
 
     #[test]

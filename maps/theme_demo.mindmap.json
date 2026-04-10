@@ -1,0 +1,269 @@
+{
+  "version": "1.0",
+  "name": "theme_demo",
+  "canvas": {
+    "background_color": "var(--bg)",
+    "theme_variables": {
+      "--bg": "#141414",
+      "--fg": "#eeeeee",
+      "--accent": "#30b082",
+      "--edge": "#888888"
+    },
+    "theme_variants": {
+      "dark": {
+        "--bg": "#141414",
+        "--fg": "#eeeeee",
+        "--accent": "#30b082",
+        "--edge": "#888888"
+      },
+      "light": {
+        "--bg": "#f5f1e8",
+        "--fg": "#1b1b1b",
+        "--accent": "#b84a62",
+        "--edge": "#5c5c5c"
+      },
+      "forest": {
+        "--bg": "#0e2018",
+        "--fg": "#c6e8c0",
+        "--accent": "#6bbf59",
+        "--edge": "#3a5a3a"
+      }
+    }
+  },
+  "nodes": {
+    "title": {
+      "id": "title",
+      "parent_id": null,
+      "index": 0,
+      "position": { "x": -200.0, "y": -220.0 },
+      "size": { "width": 400.0, "height": 80.0 },
+      "text": "theme variable demo",
+      "text_runs": [{
+        "start": 0, "end": 19,
+        "bold": true, "italic": false, "underline": false,
+        "font": "LiberationSans", "size_pt": 36,
+        "color": "var(--fg)", "hyperlink": null
+      }],
+      "style": {
+        "background_color": "var(--bg)",
+        "frame_color": "var(--accent)",
+        "text_color": "var(--fg)",
+        "shape_type": 0,
+        "corner_radius_percent": 10.0,
+        "frame_thickness": 2.0,
+        "show_frame": true,
+        "show_shadow": false
+      },
+      "layout": { "type": 0, "direction": 0, "spacing": 50.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": null
+    },
+    "child_a": {
+      "id": "child_a",
+      "parent_id": "title",
+      "index": 0,
+      "position": { "x": -280.0, "y": -80.0 },
+      "size": { "width": 240.0, "height": 56.0 },
+      "text": "colors follow the theme",
+      "text_runs": [{
+        "start": 0, "end": 23,
+        "bold": false, "italic": false, "underline": false,
+        "font": "LiberationSans", "size_pt": 22,
+        "color": "var(--fg)", "hyperlink": null
+      }],
+      "style": {
+        "background_color": "var(--bg)",
+        "frame_color": "var(--accent)",
+        "text_color": "var(--fg)",
+        "shape_type": 0,
+        "corner_radius_percent": 10.0,
+        "frame_thickness": 1.0,
+        "show_frame": true,
+        "show_shadow": false
+      },
+      "layout": { "type": 0, "direction": 0, "spacing": 50.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": null
+    },
+    "child_b": {
+      "id": "child_b",
+      "parent_id": "title",
+      "index": 1,
+      "position": { "x": 40.0, "y": -80.0 },
+      "size": { "width": 240.0, "height": 56.0 },
+      "text": "edges follow the theme",
+      "text_runs": [{
+        "start": 0, "end": 22,
+        "bold": false, "italic": false, "underline": false,
+        "font": "LiberationSans", "size_pt": 22,
+        "color": "var(--fg)", "hyperlink": null
+      }],
+      "style": {
+        "background_color": "var(--bg)",
+        "frame_color": "var(--accent)",
+        "text_color": "var(--fg)",
+        "shape_type": 0,
+        "corner_radius_percent": 10.0,
+        "frame_thickness": 1.0,
+        "show_frame": true,
+        "show_shadow": false
+      },
+      "layout": { "type": 0, "direction": 0, "spacing": 50.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": null
+    },
+    "btn_dark": {
+      "id": "btn_dark",
+      "parent_id": null,
+      "index": 100,
+      "position": { "x": -280.0, "y": 80.0 },
+      "size": { "width": 160.0, "height": 48.0 },
+      "text": "[ dark ]",
+      "text_runs": [{
+        "start": 0, "end": 8,
+        "bold": true, "italic": false, "underline": false,
+        "font": "LiberationSans", "size_pt": 22,
+        "color": "var(--fg)", "hyperlink": null
+      }],
+      "style": {
+        "background_color": "var(--bg)",
+        "frame_color": "var(--accent)",
+        "text_color": "var(--fg)",
+        "shape_type": 0,
+        "corner_radius_percent": 20.0,
+        "frame_thickness": 2.0,
+        "show_frame": true,
+        "show_shadow": false
+      },
+      "layout": { "type": 0, "direction": 0, "spacing": 50.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": null,
+      "trigger_bindings": [{
+        "trigger": "OnClick",
+        "mutation_id": "switch-dark"
+      }]
+    },
+    "btn_light": {
+      "id": "btn_light",
+      "parent_id": null,
+      "index": 101,
+      "position": { "x": -80.0, "y": 80.0 },
+      "size": { "width": 160.0, "height": 48.0 },
+      "text": "[ light ]",
+      "text_runs": [{
+        "start": 0, "end": 9,
+        "bold": true, "italic": false, "underline": false,
+        "font": "LiberationSans", "size_pt": 22,
+        "color": "var(--fg)", "hyperlink": null
+      }],
+      "style": {
+        "background_color": "var(--bg)",
+        "frame_color": "var(--accent)",
+        "text_color": "var(--fg)",
+        "shape_type": 0,
+        "corner_radius_percent": 20.0,
+        "frame_thickness": 2.0,
+        "show_frame": true,
+        "show_shadow": false
+      },
+      "layout": { "type": 0, "direction": 0, "spacing": 50.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": null,
+      "trigger_bindings": [{
+        "trigger": "OnClick",
+        "mutation_id": "switch-light"
+      }]
+    },
+    "btn_forest": {
+      "id": "btn_forest",
+      "parent_id": null,
+      "index": 102,
+      "position": { "x": 120.0, "y": 80.0 },
+      "size": { "width": 160.0, "height": 48.0 },
+      "text": "[ forest ]",
+      "text_runs": [{
+        "start": 0, "end": 10,
+        "bold": true, "italic": false, "underline": false,
+        "font": "LiberationSans", "size_pt": 22,
+        "color": "var(--fg)", "hyperlink": null
+      }],
+      "style": {
+        "background_color": "var(--bg)",
+        "frame_color": "var(--accent)",
+        "text_color": "var(--fg)",
+        "shape_type": 0,
+        "corner_radius_percent": 20.0,
+        "frame_thickness": 2.0,
+        "show_frame": true,
+        "show_shadow": false
+      },
+      "layout": { "type": 0, "direction": 0, "spacing": 50.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": null,
+      "trigger_bindings": [{
+        "trigger": "OnClick",
+        "mutation_id": "switch-forest"
+      }]
+    }
+  },
+  "edges": [
+    {
+      "from_id": "title",
+      "to_id": "child_a",
+      "type": "parent_child",
+      "color": "var(--edge)",
+      "width": 1,
+      "line_style": 0,
+      "visible": true,
+      "label": null,
+      "anchor_from": 6,
+      "anchor_to": 2,
+      "control_points": []
+    },
+    {
+      "from_id": "title",
+      "to_id": "child_b",
+      "type": "parent_child",
+      "color": "var(--edge)",
+      "width": 1,
+      "line_style": 0,
+      "visible": true,
+      "label": null,
+      "anchor_from": 6,
+      "anchor_to": 4,
+      "control_points": []
+    }
+  ],
+  "custom_mutations": [
+    {
+      "id": "switch-dark",
+      "name": "Switch to dark theme",
+      "target_scope": "SelfOnly",
+      "document_actions": [
+        { "SetThemeVariant": "dark" }
+      ]
+    },
+    {
+      "id": "switch-light",
+      "name": "Switch to light theme",
+      "target_scope": "SelfOnly",
+      "document_actions": [
+        { "SetThemeVariant": "light" }
+      ]
+    },
+    {
+      "id": "switch-forest",
+      "name": "Switch to forest theme",
+      "target_scope": "SelfOnly",
+      "document_actions": [
+        { "SetThemeVariant": "forest" }
+      ]
+    }
+  ]
+}
