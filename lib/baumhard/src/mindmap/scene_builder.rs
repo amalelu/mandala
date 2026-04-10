@@ -19,6 +19,12 @@ pub struct RenderScene {
     /// points, and (for straight edges only) a midpoint handle that
     /// triggers the "curve a straight line" gesture when dragged.
     pub edge_handles: Vec<EdgeHandleElement>,
+    /// Session 6D: labels attached to edges whose `label` field is
+    /// non-empty. One element per labeled edge, positioned along the
+    /// connection path at `edge.label_position_t` (defaulting to 0.5).
+    /// Not cached in `SceneConnectionCache` — labels are ≤ 1 per edge
+    /// and rebuilt each frame at trivial cost.
+    pub connection_label_elements: Vec<ConnectionLabelElement>,
     pub background_color: String,
 }
 
@@ -63,6 +69,37 @@ pub struct ConnectionElement {
 
 /// Placeholder for future portal rendering (M3).
 pub struct PortalElement {}
+
+/// Session 6D: a text label attached to a connection edge. Rendered
+/// as a cosmic-text buffer positioned along the edge's path at a
+/// parameter-space `t` derived from `MindEdge.label_position_t`.
+///
+/// The AABB (`position`, `bounds`) is used by the Renderer both to
+/// build the text buffer and to populate the label-hit-test index so
+/// the app can detect clicks on the label for inline editing.
+pub struct ConnectionLabelElement {
+    /// Stable identity of the edge carrying this label.
+    pub edge_key: EdgeKey,
+    /// The label text (guaranteed non-empty — labels with empty or
+    /// missing text are not emitted).
+    pub text: String,
+    /// Top-left corner of the label's AABB, in canvas coordinates.
+    /// Centered horizontally and vertically on the path point.
+    pub position: (f32, f32),
+    /// Width and height of the label's AABB. Sized loosely from the
+    /// character count × an approximate glyph width.
+    pub bounds: (f32, f32),
+    /// Resolved color (hex) — `var(--name)` references already
+    /// expanded through the theme variable map.
+    pub color: String,
+    /// Optional font family override. `None` falls back to the
+    /// renderer's default font.
+    pub font: Option<String>,
+    /// Font size in points, already multiplied by the label's size
+    /// factor (1.1× the body glyph size by default) and clamped by
+    /// `GlyphConnectionConfig::effective_font_size_pt`.
+    pub font_size_pt: f32,
+}
 
 /// Which part of a selected edge a grab-handle targets. Session 6C's
 /// connection reshape surface: anchor endpoints can be dragged to
@@ -570,12 +607,100 @@ pub fn build_scene_with_cache(
     // the map this frame — handles edges that were deleted between builds.
     cache.retain_keys(&seen_keys);
 
+    // Session 6D: emit connection labels as a separate pass. Labels
+    // are ≤ 1 per edge and rebuilt each frame at trivial cost, so we
+    // don't integrate them into the hot cache path above. Rebuild the
+    // path for each labeled edge, look up the point at
+    // `edge.label_position_t` (defaulting to 0.5), and emit a
+    // `ConnectionLabelElement` centered on that point.
+    let mut connection_label_elements: Vec<ConnectionLabelElement> = Vec::new();
+    for edge in &map.edges {
+        if !edge.visible {
+            continue;
+        }
+        let label_text = match edge.label.as_deref() {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
+        };
+        let from_node = match map.nodes.get(&edge.from_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        let to_node = match map.nodes.get(&edge.to_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        if map.is_hidden_by_fold(from_node) || map.is_hidden_by_fold(to_node) {
+            continue;
+        }
+
+        let (fox, foy) = offsets.get(&from_node.id).copied().unwrap_or((0.0, 0.0));
+        let (tox, toy) = offsets.get(&to_node.id).copied().unwrap_or((0.0, 0.0));
+        let from_pos = Vec2::new(
+            from_node.position.x as f32 + fox,
+            from_node.position.y as f32 + foy,
+        );
+        let from_size = Vec2::new(
+            from_node.size.width as f32,
+            from_node.size.height as f32,
+        );
+        let to_pos = Vec2::new(
+            to_node.position.x as f32 + tox,
+            to_node.position.y as f32 + toy,
+        );
+        let to_size = Vec2::new(
+            to_node.size.width as f32,
+            to_node.size.height as f32,
+        );
+
+        let path = connection::build_connection_path(
+            from_pos,
+            from_size,
+            edge.anchor_from,
+            to_pos,
+            to_size,
+            edge.anchor_to,
+            &edge.control_points,
+        );
+        let t = edge.label_position_t.unwrap_or(0.5);
+        let anchor = connection::point_at_t(&path, t);
+
+        let config = GlyphConnectionConfig::resolved_for(edge, &map.canvas);
+        let base_font_size = config.effective_font_size_pt(camera_zoom);
+        // Labels render slightly larger than the body glyphs so they
+        // read as a distinct element on top of the connection path.
+        let font_size_pt = base_font_size * 1.1;
+        let raw_color = config.color.as_deref().unwrap_or(edge.color.as_str());
+        let color = resolve_var(raw_color, vars).to_string();
+
+        // Loose AABB sized from the glyph-count approximation
+        // (`font_size * 0.6` per glyph — same constant the connection
+        // body sampler uses). Height is one font-size plus a small
+        // vertical margin.
+        let char_count = label_text.chars().count() as f32;
+        let bounds_w = (char_count * font_size_pt * 0.6).max(font_size_pt);
+        let bounds_h = font_size_pt * 1.3;
+        // Center the AABB on the path anchor.
+        let top_left = (anchor.x - bounds_w * 0.5, anchor.y - bounds_h * 0.5);
+
+        connection_label_elements.push(ConnectionLabelElement {
+            edge_key: EdgeKey::from_edge(edge),
+            text: label_text.to_string(),
+            position: top_left,
+            bounds: (bounds_w, bounds_h),
+            color,
+            font: config.font.clone(),
+            font_size_pt,
+        });
+    }
+
     RenderScene {
         text_elements,
         border_elements,
         connection_elements,
         portal_elements: Vec::new(),
         edge_handles,
+        connection_label_elements,
         background_color: resolve_var(&map.canvas.background_color, vars).to_string(),
     }
 }
@@ -696,6 +821,7 @@ mod tests {
             line_style: 0,
             visible: true,
             label: None,
+            label_position_t: None,
             anchor_from,
             anchor_to,
             control_points: vec![],
@@ -1416,5 +1542,108 @@ mod tests {
             .unwrap();
         assert!((cp_handle.position.0 - (from_center_x + cp_x as f32)).abs() < 0.01);
         assert!((cp_handle.position.1 - (from_center_y + cp_y as f32)).abs() < 0.01);
+    }
+
+    // ====================================================================
+    // Session 6D — ConnectionLabelElement emission
+    // ====================================================================
+
+    #[test]
+    fn test_label_element_emitted_for_edge_with_label() {
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+            synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+        ];
+        let mut edge = synthetic_edge("a", "b", 0, 0);
+        edge.label = Some("hello".to_string());
+        let map = synthetic_map(nodes, vec![edge]);
+        let scene = build_scene(&map, 1.0);
+        assert_eq!(scene.connection_label_elements.len(), 1);
+        assert_eq!(scene.connection_label_elements[0].text, "hello");
+    }
+
+    #[test]
+    fn test_no_label_element_for_missing_or_empty_label() {
+        // label = None → no element.
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+            synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+        ];
+        let edge = synthetic_edge("a", "b", 0, 0);
+        let map = synthetic_map(nodes.clone(), vec![edge]);
+        let scene = build_scene(&map, 1.0);
+        assert_eq!(scene.connection_label_elements.len(), 0);
+
+        // label = Some("") → no element (empty-string special case).
+        let mut edge = synthetic_edge("a", "b", 0, 0);
+        edge.label = Some(String::new());
+        let map = synthetic_map(nodes, vec![edge]);
+        let scene = build_scene(&map, 1.0);
+        assert_eq!(scene.connection_label_elements.len(), 0);
+    }
+
+    #[test]
+    fn test_label_position_follows_label_position_t() {
+        // Horizontal edge from (0,0)+40x40 to (1000,0)+40x40 — center line.
+        // At t=0, label should sit near the from-anchor; at t=1, near the
+        // to-anchor; midpoints differ substantially.
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+            synthetic_node("b", 1000.0, 0.0, 40.0, 40.0, false),
+        ];
+        let make = |t: f32| {
+            let mut e = synthetic_edge("a", "b", 0, 0);
+            e.label = Some("x".to_string());
+            e.label_position_t = Some(t);
+            e
+        };
+        let scene_start = build_scene(&synthetic_map(nodes.clone(), vec![make(0.0)]), 1.0);
+        let scene_end = build_scene(&synthetic_map(nodes.clone(), vec![make(1.0)]), 1.0);
+        let scene_mid = build_scene(&synthetic_map(nodes, vec![make(0.5)]), 1.0);
+
+        let pos_x = |s: &RenderScene| {
+            let e = &s.connection_label_elements[0];
+            // Return the center x (position + half width).
+            e.position.0 + e.bounds.0 * 0.5
+        };
+        let x_start = pos_x(&scene_start);
+        let x_end = pos_x(&scene_end);
+        let x_mid = pos_x(&scene_mid);
+        assert!(x_start < x_mid, "t=0 should be left of t=0.5: {x_start} vs {x_mid}");
+        assert!(x_mid < x_end, "t=0.5 should be left of t=1.0: {x_mid} vs {x_end}");
+    }
+
+    #[test]
+    fn test_label_color_inherits_edge_color_when_config_color_none() {
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+            synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+        ];
+        let mut edge = synthetic_edge("a", "b", 0, 0);
+        edge.label = Some("lbl".to_string());
+        edge.color = "#abcdef".to_string();
+        // glyph_connection is None → falls back to edge.color.
+        let map = synthetic_map(nodes, vec![edge]);
+        let scene = build_scene(&map, 1.0);
+        assert_eq!(scene.connection_label_elements[0].color, "#abcdef");
+    }
+
+    #[test]
+    fn test_label_color_follows_glyph_connection_color_override() {
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+            synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+        ];
+        let mut edge = synthetic_edge("a", "b", 0, 0);
+        edge.label = Some("lbl".to_string());
+        edge.color = "#abcdef".to_string();
+        edge.glyph_connection = Some(GlyphConnectionConfig {
+            color: Some("#112233".to_string()),
+            ..GlyphConnectionConfig::default()
+        });
+        let map = synthetic_map(nodes, vec![edge]);
+        let scene = build_scene(&map, 1.0);
+        // The glyph_connection.color override wins over edge.color.
+        assert_eq!(scene.connection_label_elements[0].color, "#112233");
     }
 }

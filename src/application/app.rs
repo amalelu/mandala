@@ -70,6 +70,34 @@ impl PaletteState {
     }
 }
 
+/// Session 6D: inline-edit state for a connection's label. When
+/// `Open`, all keyboard input is routed to the label-edit handler
+/// (just like `PaletteState::Open` captures keys for the palette
+/// query). Mutually exclusive with `PaletteState::Open` — the
+/// palette check runs first, so opening the palette while editing a
+/// label is a no-op.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+enum LabelEditState {
+    Closed,
+    Open {
+        edge_ref: crate::application::document::EdgeRef,
+        /// The in-progress buffer. Committed to
+        /// `MindEdge.label` on Enter; discarded on Escape.
+        buffer: String,
+        /// The edge's label value at the moment edit mode opened.
+        /// Used to restore state on Escape so the cancel is clean.
+        original: Option<String>,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl LabelEditState {
+    fn is_open(&self) -> bool {
+        matches!(self, LabelEditState::Open { .. })
+    }
+}
+
 /// Tracks the high-level interaction mode. Normal handles the usual
 /// select/drag/pan flow; Reparent mode is entered via Ctrl+P and captures
 /// the next left-click as a "choose reparent target" gesture. Connect mode
@@ -245,6 +273,7 @@ impl Application {
                 let scene = doc.build_scene(renderer.camera_zoom());
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 renderer.rebuild_border_buffers(&scene.border_elements);
+                renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
 
                 mindmap_tree = Some(tree);
                 document = Some(doc);
@@ -262,6 +291,7 @@ impl Application {
         let mut drag_state = DragState::None;
         let mut app_mode = AppMode::Normal;
         let mut palette_state = PaletteState::Closed;
+        let mut label_edit_state = LabelEditState::Closed;
         let mut hovered_node: Option<String> = None;
         let mut shift_pressed = false;
         let mut alt_pressed = false;
@@ -399,15 +429,47 @@ impl Application {
                                 // Released
                                 match std::mem::replace(&mut drag_state, DragState::None) {
                                     DragState::Pending { hit_node, .. } => {
-                                        // No drag occurred — treat as click
-                                        handle_click(
-                                            hit_node,
-                                            cursor_pos,
-                                            shift_pressed,
-                                            &mut document,
-                                            &mut mindmap_tree,
-                                            &mut renderer,
-                                        );
+                                        // Session 6D: if an edge is selected and
+                                        // the cursor hits its label, open the
+                                        // inline label editor instead of
+                                        // processing a regular click. Takes
+                                        // precedence over node / edge selection.
+                                        let mut entered_label_edit = false;
+                                        if hit_node.is_none() {
+                                            if let Some(doc) = document.as_ref() {
+                                                if let SelectionState::Edge(er) = &doc.selection {
+                                                    let canvas_pos = renderer.screen_to_canvas(
+                                                        cursor_pos.0 as f32,
+                                                        cursor_pos.1 as f32,
+                                                    );
+                                                    let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+                                                        &er.from_id,
+                                                        &er.to_id,
+                                                        &er.edge_type,
+                                                    );
+                                                    if renderer.hit_test_edge_label(canvas_pos, &edge_key) {
+                                                        let er_clone = er.clone();
+                                                        open_label_edit(
+                                                            &er_clone,
+                                                            doc,
+                                                            &mut label_edit_state,
+                                                            &mut renderer,
+                                                        );
+                                                        entered_label_edit = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if !entered_label_edit {
+                                            handle_click(
+                                                hit_node,
+                                                cursor_pos,
+                                                shift_pressed,
+                                                &mut document,
+                                                &mut mindmap_tree,
+                                                &mut renderer,
+                                            );
+                                        }
                                     }
                                     DragState::MovingNode { node_ids, total_delta, pending_delta, individual } => {
                                         // Flush any remaining pending delta to the tree before drop.
@@ -757,11 +819,30 @@ impl Application {
                             &key_name,
                             &logical_key,
                             &mut palette_state,
+                            &mut label_edit_state,
                             &mut document,
                             &mut mindmap_tree,
                             &mut renderer,
                             &mut scene_cache,
                         );
+                        return;
+                    }
+
+                    // Session 6D: inline label edit modal. Steals keys
+                    // the same way the palette does. Escape discards,
+                    // Enter commits, Backspace pops, character keys
+                    // append.
+                    if label_edit_state.is_open() {
+                        if let Some(doc) = document.as_mut() {
+                            handle_label_edit_key(
+                                &key_name,
+                                &logical_key,
+                                &mut label_edit_state,
+                                doc,
+                                &mut mindmap_tree,
+                                &mut renderer,
+                            );
+                        }
                         return;
                     }
 
@@ -995,6 +1076,12 @@ impl Application {
                                         Some(&dirty_node_ids),
                                     );
                                 }
+                                // Labels are emitted per frame (not
+                                // cached) so their positions track the
+                                // live drag.
+                                renderer.rebuild_connection_label_buffers(
+                                    &scene.connection_label_elements,
+                                );
                             }
 
                             *pending_delta = Vec2::ZERO;
@@ -1050,6 +1137,12 @@ impl Application {
                                     Some(&dirty_edge_keys),
                                 );
                                 renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
+                                // Labels are rebuilt per frame so a
+                                // control-point drag keeps the label
+                                // correctly anchored to the live path.
+                                renderer.rebuild_connection_label_buffers(
+                                    &scene.connection_label_elements,
+                                );
                             }
                             *pending_delta = Vec2::ZERO;
                             mutation_throttle.record_work_duration(work_start.elapsed());
@@ -1118,6 +1211,9 @@ impl Application {
                             renderer.rebuild_connection_buffers_keyed(
                                 &scene.connection_elements,
                                 None, // treat all as dirty; buffer cache was cleared
+                            );
+                            renderer.rebuild_connection_label_buffers(
+                                &scene.connection_label_elements,
                             );
                         }
                     }
@@ -1205,6 +1301,7 @@ impl Application {
                 let scene = document.build_scene(renderer.camera_zoom());
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 renderer.rebuild_border_buffers(&scene.border_elements);
+                renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
             }
 
             renderer.process_decree(RenderDecree::StartRender);
@@ -1296,6 +1393,7 @@ fn handle_palette_key(
     key_name: &Option<String>,
     logical_key: &Key,
     palette_state: &mut PaletteState,
+    label_edit_state: &mut LabelEditState,
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
@@ -1326,10 +1424,25 @@ fn handle_palette_key(
                 if let Some(doc) = document.as_mut() {
                     if let Some(id) = id_to_run {
                         if let Some((_, action)) = crate::application::palette::action_by_id(id) {
-                            let mut effects = PaletteEffects { document: doc };
+                            let mut effects = PaletteEffects {
+                                document: doc,
+                                open_label_edit: None,
+                            };
                             (action.execute)(&mut effects);
+                            let label_edit_req = effects.open_label_edit.take();
                             scene_cache.clear();
                             rebuild_all(doc, mindmap_tree, renderer);
+                            // Session 6D: if the action asked to open the
+                            // inline label editor (e.g. "Edit connection
+                            // label"), transition to the label-edit modal.
+                            if let Some(er) = label_edit_req {
+                                open_label_edit(
+                                    &er,
+                                    doc,
+                                    label_edit_state,
+                                    renderer,
+                                );
+                            }
                         }
                     }
                 }
@@ -1549,8 +1662,140 @@ fn rebuild_all(
     renderer.rebuild_connection_buffers(&scene.connection_elements);
     renderer.rebuild_border_buffers(&scene.border_elements);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
+    renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
 
     *mindmap_tree = Some(new_tree);
+}
+
+/// Session 6D: transition into inline label edit mode for the given
+/// edge. Seeds the buffer from the edge's current label (or the
+/// empty string) and installs a preview override on the renderer so
+/// the caret shows up immediately. Callers must ensure the edge
+/// still exists in `doc.mindmap.edges` — the function silently
+/// returns otherwise.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_label_edit(
+    edge_ref: &crate::application::document::EdgeRef,
+    doc: &MindMapDocument,
+    label_edit_state: &mut LabelEditState,
+    renderer: &mut Renderer,
+) {
+    let edge = match doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)) {
+        Some(e) => e,
+        None => return,
+    };
+    let original = edge.label.clone();
+    let buffer = original.clone().unwrap_or_default();
+    *label_edit_state = LabelEditState::Open {
+        edge_ref: edge_ref.clone(),
+        buffer: buffer.clone(),
+        original,
+    };
+    let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+        &edge_ref.from_id,
+        &edge_ref.to_id,
+        &edge_ref.edge_type,
+    );
+    renderer.label_edit_override = Some((edge_key, buffer));
+    // Rebuild labels so the caret is visible immediately. The caller
+    // already ran `rebuild_all` before this, so the scene is fresh.
+    let scene = doc.build_scene_with_selection(renderer.camera_zoom());
+    renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+}
+
+/// Session 6D: route a keystroke to the inline label editor. Escape
+/// discards, Enter commits, Backspace pops the last grapheme,
+/// character keys append. Mirrors the `handle_palette_key` pattern.
+/// Updates the renderer's preview override on every keystroke so the
+/// caret and the edited text render live.
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_label_edit_key(
+    key_name: &Option<String>,
+    logical_key: &Key,
+    label_edit_state: &mut LabelEditState,
+    doc: &mut MindMapDocument,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let name = key_name.as_deref();
+    match name {
+        Some("escape") => {
+            close_label_edit(false, doc, label_edit_state, mindmap_tree, renderer);
+            return;
+        }
+        Some("enter") => {
+            close_label_edit(true, doc, label_edit_state, mindmap_tree, renderer);
+            return;
+        }
+        Some("backspace") => {
+            if let LabelEditState::Open { buffer, .. } = label_edit_state {
+                buffer.pop();
+            }
+        }
+        _ => {
+            // Append a single-character printable keystroke. Ignore
+            // modifier keys, arrow keys, etc. — cursor navigation is
+            // deferred to a future session.
+            if let Key::Character(c) = logical_key {
+                // winit's `Key::Character` may report multi-char
+                // sequences on dead keys / IME; accept anything that
+                // isn't a control character.
+                for ch in c.as_str().chars() {
+                    if !ch.is_control() {
+                        if let LabelEditState::Open { buffer, .. } = label_edit_state {
+                            buffer.push(ch);
+                        }
+                    }
+                }
+            } else {
+                return;
+            }
+        }
+    }
+
+    // Refresh the preview override so the caret + edited text render
+    // on the next frame. Cheap: one scene rebuild.
+    if let LabelEditState::Open { edge_ref, buffer, .. } = label_edit_state {
+        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+            &edge_ref.from_id,
+            &edge_ref.to_id,
+            &edge_ref.edge_type,
+        );
+        renderer.label_edit_override = Some((edge_key, buffer.clone()));
+        let scene = doc.build_scene_with_selection(renderer.camera_zoom());
+        renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+    }
+}
+
+/// Session 6D: close the inline label editor. If `commit` is true,
+/// writes the current buffer into the edge's label (via
+/// `document.set_edge_label`) and pushes an undo entry. If false,
+/// restores the pre-edit label (equivalent to discarding the buffer)
+/// — no undo push because we never mutated the model during typing.
+#[cfg(not(target_arch = "wasm32"))]
+fn close_label_edit(
+    commit: bool,
+    doc: &mut MindMapDocument,
+    label_edit_state: &mut LabelEditState,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let (edge_ref, buffer, original) = match std::mem::replace(label_edit_state, LabelEditState::Closed) {
+        LabelEditState::Open { edge_ref, buffer, original } => (edge_ref, buffer, original),
+        LabelEditState::Closed => return,
+    };
+    renderer.label_edit_override = None;
+    if commit {
+        let new_val = if buffer.is_empty() { None } else { Some(buffer) };
+        // Only push undo if the committed value actually differs from the
+        // pre-edit original — avoids a dead undo entry on unchanged text.
+        if new_val != original {
+            doc.set_edge_label(&edge_ref, new_val);
+        }
+    }
+    // Rebuild so the label reflects the model state (or vanishes if
+    // the buffer was empty + original was None).
+    rebuild_all(doc, mindmap_tree, renderer);
 }
 
 /// Handle a click event: update selection, rebuild tree with highlight.
@@ -1695,6 +1940,7 @@ fn rebuild_all_with_mode(
     renderer.rebuild_connection_buffers(&scene.connection_elements);
     renderer.rebuild_border_buffers(&scene.border_elements);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
+    renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
 
     *mindmap_tree = Some(new_tree);
 }

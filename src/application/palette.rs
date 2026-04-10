@@ -16,7 +16,7 @@
 //! straight, and two sets of five anchor-side actions (Auto / Top /
 //! Right / Bottom / Left for both `from` and `to` anchors).
 
-use crate::application::document::{MindMapDocument, SelectionState};
+use crate::application::document::{EdgeRef, MindMapDocument, SelectionState};
 
 /// A single command palette entry. Kept small and `'static` so the
 /// whole registry can live in a const slice.
@@ -57,6 +57,12 @@ pub struct PaletteContext<'a> {
 /// dispatcher wrapper in `app.rs`, not inside actions.
 pub struct PaletteEffects<'a> {
     pub document: &'a mut MindMapDocument,
+    /// Session 6D: if an action wants to hand control to the inline
+    /// label editor after running, it sets this to `Some(edge_ref)`.
+    /// The dispatcher in `app.rs` drains the field after `execute`
+    /// returns and opens the `LabelEditState` modal. Keeps actions
+    /// pure-function: no renderer access, no modal state.
+    pub open_label_edit: Option<EdgeRef>,
 }
 
 /// Case-insensitive subsequence fuzzy match. Returns `None` when any
@@ -174,6 +180,95 @@ fn edge_selected_with_control_points(ctx: &PaletteContext) -> bool {
         .unwrap_or(false)
 }
 
+/// Helper used by several Session 6D applicability predicates: run
+/// `f` against the currently selected edge, returning `false` if the
+/// selection is not an edge or the edge can't be found.
+fn with_selected_edge<F>(ctx: &PaletteContext, f: F) -> bool
+where
+    F: FnOnce(&baumhard::mindmap::model::MindEdge) -> bool,
+{
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return false,
+    };
+    ctx.document
+        .mindmap
+        .edges
+        .iter()
+        .find(|e| er.matches(e))
+        .map(f)
+        .unwrap_or(false)
+}
+
+/// Return the effective body glyph of the selected edge, walking the
+/// edge override → canvas default → hardcoded default chain. Used by
+/// the body-glyph setter actions to self-hide when the current body
+/// already matches.
+fn effective_body_glyph(ctx: &PaletteContext) -> Option<String> {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return None,
+    };
+    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
+    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
+        edge,
+        &ctx.document.mindmap.canvas,
+    );
+    Some(resolved.body.clone())
+}
+
+fn effective_cap_start(ctx: &PaletteContext) -> Option<Option<String>> {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return None,
+    };
+    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
+    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
+        edge,
+        &ctx.document.mindmap.canvas,
+    );
+    Some(resolved.cap_start.clone())
+}
+
+fn effective_cap_end(ctx: &PaletteContext) -> Option<Option<String>> {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return None,
+    };
+    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
+    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
+        edge,
+        &ctx.document.mindmap.canvas,
+    );
+    Some(resolved.cap_end.clone())
+}
+
+fn effective_font_size_pt(ctx: &PaletteContext) -> Option<f32> {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return None,
+    };
+    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
+    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
+        edge,
+        &ctx.document.mindmap.canvas,
+    );
+    Some(resolved.font_size_pt)
+}
+
+fn effective_spacing(ctx: &PaletteContext) -> Option<f32> {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return None,
+    };
+    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
+    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
+        edge,
+        &ctx.document.mindmap.canvas,
+    );
+    Some(resolved.spacing)
+}
+
 // ============================================================
 // Execute callbacks
 // ============================================================
@@ -226,6 +321,318 @@ def_set_anchor_exec!(exec_set_anchor_to_top, false, 1);
 def_set_anchor_exec!(exec_set_anchor_to_right, false, 2);
 def_set_anchor_exec!(exec_set_anchor_to_bottom, false, 3);
 def_set_anchor_exec!(exec_set_anchor_to_left, false, 4);
+
+// ============================================================
+// Session 6D execute callbacks
+// ============================================================
+
+macro_rules! def_set_body_exec {
+    ($name:ident, $glyph:expr) => {
+        fn $name(eff: &mut PaletteEffects) {
+            if let SelectionState::Edge(er) = eff.document.selection.clone() {
+                eff.document.set_edge_body_glyph(&er, $glyph);
+            }
+        }
+    };
+}
+
+def_set_body_exec!(exec_set_body_dot, "\u{00B7}"); // ·
+def_set_body_exec!(exec_set_body_dash, "\u{2500}"); // ─
+def_set_body_exec!(exec_set_body_double, "\u{2550}"); // ═
+def_set_body_exec!(exec_set_body_wave, "\u{223C}"); // ∼
+def_set_body_exec!(exec_set_body_chain, "\u{22EF}"); // ⋯
+
+macro_rules! def_set_cap_start_exec {
+    ($name:ident, $glyph:expr) => {
+        fn $name(eff: &mut PaletteEffects) {
+            if let SelectionState::Edge(er) = eff.document.selection.clone() {
+                eff.document.set_edge_cap_start(&er, $glyph);
+            }
+        }
+    };
+}
+
+def_set_cap_start_exec!(exec_set_cap_start_arrow, Some("\u{25C0}")); // ◀
+def_set_cap_start_exec!(exec_set_cap_start_circle, Some("\u{25CF}")); // ●
+def_set_cap_start_exec!(exec_set_cap_start_diamond, Some("\u{25C6}")); // ◆
+def_set_cap_start_exec!(exec_set_cap_start_none, None);
+
+macro_rules! def_set_cap_end_exec {
+    ($name:ident, $glyph:expr) => {
+        fn $name(eff: &mut PaletteEffects) {
+            if let SelectionState::Edge(er) = eff.document.selection.clone() {
+                eff.document.set_edge_cap_end(&er, $glyph);
+            }
+        }
+    };
+}
+
+def_set_cap_end_exec!(exec_set_cap_end_arrow, Some("\u{25B6}")); // ▶
+def_set_cap_end_exec!(exec_set_cap_end_circle, Some("\u{25CF}")); // ●
+def_set_cap_end_exec!(exec_set_cap_end_diamond, Some("\u{25C6}")); // ◆
+def_set_cap_end_exec!(exec_set_cap_end_none, None);
+
+macro_rules! def_set_color_exec {
+    ($name:ident, $color:expr) => {
+        fn $name(eff: &mut PaletteEffects) {
+            if let SelectionState::Edge(er) = eff.document.selection.clone() {
+                eff.document.set_edge_color(&er, $color);
+            }
+        }
+    };
+}
+
+// Theme-var-aware color presets. The resolver in `util/color.rs`
+// expands `var(--name)` at scene-build time, so these automatically
+// restyle when the user switches themes.
+def_set_color_exec!(exec_color_accent, Some("var(--accent)"));
+def_set_color_exec!(exec_color_edge, Some("var(--edge)"));
+def_set_color_exec!(exec_color_fg, Some("var(--fg)"));
+def_set_color_exec!(exec_color_reset, None);
+
+fn exec_font_size_smaller(eff: &mut PaletteEffects) {
+    if let SelectionState::Edge(er) = eff.document.selection.clone() {
+        eff.document.set_edge_font_size_step(&er, -2.0);
+    }
+}
+
+fn exec_font_size_larger(eff: &mut PaletteEffects) {
+    if let SelectionState::Edge(er) = eff.document.selection.clone() {
+        eff.document.set_edge_font_size_step(&er, 2.0);
+    }
+}
+
+fn exec_font_size_reset(eff: &mut PaletteEffects) {
+    if let SelectionState::Edge(er) = eff.document.selection.clone() {
+        eff.document.reset_edge_font_size(&er);
+    }
+}
+
+macro_rules! def_set_spacing_exec {
+    ($name:ident, $value:expr) => {
+        fn $name(eff: &mut PaletteEffects) {
+            if let SelectionState::Edge(er) = eff.document.selection.clone() {
+                eff.document.set_edge_spacing(&er, $value);
+            }
+        }
+    };
+}
+
+def_set_spacing_exec!(exec_spacing_tight, 0.0);
+def_set_spacing_exec!(exec_spacing_normal, 2.0);
+def_set_spacing_exec!(exec_spacing_wide, 6.0);
+
+macro_rules! def_set_edge_type_exec {
+    ($name:ident, $type_str:expr) => {
+        fn $name(eff: &mut PaletteEffects) {
+            if let SelectionState::Edge(er) = eff.document.selection.clone() {
+                eff.document.set_edge_type(&er, $type_str);
+            }
+        }
+    };
+}
+
+def_set_edge_type_exec!(exec_convert_to_cross_link, "cross_link");
+def_set_edge_type_exec!(exec_convert_to_parent_child, "parent_child");
+
+fn exec_edit_label(eff: &mut PaletteEffects) {
+    if let SelectionState::Edge(er) = eff.document.selection.clone() {
+        eff.open_label_edit = Some(er);
+    }
+}
+
+fn exec_clear_label(eff: &mut PaletteEffects) {
+    if let SelectionState::Edge(er) = eff.document.selection.clone() {
+        eff.document.set_edge_label(&er, None);
+    }
+}
+
+macro_rules! def_label_position_exec {
+    ($name:ident, $t:expr) => {
+        fn $name(eff: &mut PaletteEffects) {
+            if let SelectionState::Edge(er) = eff.document.selection.clone() {
+                eff.document.set_edge_label_position(&er, $t);
+            }
+        }
+    };
+}
+
+def_label_position_exec!(exec_label_position_start, 0.0);
+def_label_position_exec!(exec_label_position_middle, 0.5);
+def_label_position_exec!(exec_label_position_end, 1.0);
+
+fn exec_reset_edge_style(eff: &mut PaletteEffects) {
+    if let SelectionState::Edge(er) = eff.document.selection.clone() {
+        eff.document.reset_edge_style_to_default(&er);
+    }
+}
+
+// ============================================================
+// Session 6D applicability predicates
+// ============================================================
+
+fn edge_selected_and_not_body(glyph: &'static str) -> impl Fn(&PaletteContext) -> bool {
+    move |ctx: &PaletteContext| {
+        effective_body_glyph(ctx)
+            .map(|b| b != glyph)
+            .unwrap_or(false)
+    }
+}
+
+fn edge_selected_and_not_body_dot(ctx: &PaletteContext) -> bool {
+    effective_body_glyph(ctx).map(|b| b != "\u{00B7}").unwrap_or(false)
+}
+fn edge_selected_and_not_body_dash(ctx: &PaletteContext) -> bool {
+    effective_body_glyph(ctx).map(|b| b != "\u{2500}").unwrap_or(false)
+}
+fn edge_selected_and_not_body_double(ctx: &PaletteContext) -> bool {
+    effective_body_glyph(ctx).map(|b| b != "\u{2550}").unwrap_or(false)
+}
+fn edge_selected_and_not_body_wave(ctx: &PaletteContext) -> bool {
+    effective_body_glyph(ctx).map(|b| b != "\u{223C}").unwrap_or(false)
+}
+fn edge_selected_and_not_body_chain(ctx: &PaletteContext) -> bool {
+    effective_body_glyph(ctx).map(|b| b != "\u{22EF}").unwrap_or(false)
+}
+
+fn cap_start_not_arrow(ctx: &PaletteContext) -> bool {
+    effective_cap_start(ctx).map(|c| c.as_deref() != Some("\u{25C0}")).unwrap_or(false)
+}
+fn cap_start_not_circle(ctx: &PaletteContext) -> bool {
+    effective_cap_start(ctx).map(|c| c.as_deref() != Some("\u{25CF}")).unwrap_or(false)
+}
+fn cap_start_not_diamond(ctx: &PaletteContext) -> bool {
+    effective_cap_start(ctx).map(|c| c.as_deref() != Some("\u{25C6}")).unwrap_or(false)
+}
+fn cap_start_not_none(ctx: &PaletteContext) -> bool {
+    effective_cap_start(ctx).map(|c| c.is_some()).unwrap_or(false)
+}
+
+fn cap_end_not_arrow(ctx: &PaletteContext) -> bool {
+    effective_cap_end(ctx).map(|c| c.as_deref() != Some("\u{25B6}")).unwrap_or(false)
+}
+fn cap_end_not_circle(ctx: &PaletteContext) -> bool {
+    effective_cap_end(ctx).map(|c| c.as_deref() != Some("\u{25CF}")).unwrap_or(false)
+}
+fn cap_end_not_diamond(ctx: &PaletteContext) -> bool {
+    effective_cap_end(ctx).map(|c| c.as_deref() != Some("\u{25C6}")).unwrap_or(false)
+}
+fn cap_end_not_none(ctx: &PaletteContext) -> bool {
+    effective_cap_end(ctx).map(|c| c.is_some()).unwrap_or(false)
+}
+
+fn color_override_present(ctx: &PaletteContext) -> bool {
+    with_selected_edge(ctx, |edge| {
+        edge.glyph_connection.as_ref().and_then(|c| c.color.as_ref()).is_some()
+    })
+}
+
+fn font_size_not_at_min(ctx: &PaletteContext) -> bool {
+    match (effective_font_size_pt(ctx), ctx_selected_edge_min_font(ctx)) {
+        (Some(cur), Some(min)) => cur > min + 0.5,
+        _ => false,
+    }
+}
+
+fn font_size_not_at_max(ctx: &PaletteContext) -> bool {
+    match (effective_font_size_pt(ctx), ctx_selected_edge_max_font(ctx)) {
+        (Some(cur), Some(max)) => cur < max - 0.5,
+        _ => false,
+    }
+}
+
+fn font_size_not_default(ctx: &PaletteContext) -> bool {
+    let default = baumhard::mindmap::model::GlyphConnectionConfig::default().font_size_pt;
+    effective_font_size_pt(ctx).map(|s| (s - default).abs() > 0.5).unwrap_or(false)
+}
+
+fn ctx_selected_edge_min_font(ctx: &PaletteContext) -> Option<f32> {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return None,
+    };
+    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
+    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
+        edge, &ctx.document.mindmap.canvas,
+    );
+    Some(resolved.min_font_size_pt)
+}
+
+fn ctx_selected_edge_max_font(ctx: &PaletteContext) -> Option<f32> {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return None,
+    };
+    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
+    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
+        edge, &ctx.document.mindmap.canvas,
+    );
+    Some(resolved.max_font_size_pt)
+}
+
+fn spacing_not(ctx: &PaletteContext, target: f32) -> bool {
+    effective_spacing(ctx).map(|s| (s - target).abs() > f32::EPSILON).unwrap_or(false)
+}
+fn spacing_not_tight(ctx: &PaletteContext) -> bool { spacing_not(ctx, 0.0) }
+fn spacing_not_normal(ctx: &PaletteContext) -> bool { spacing_not(ctx, 2.0) }
+fn spacing_not_wide(ctx: &PaletteContext) -> bool { spacing_not(ctx, 6.0) }
+
+fn edge_type_not_cross_link(ctx: &PaletteContext) -> bool {
+    with_selected_edge(ctx, |e| e.edge_type != "cross_link")
+        && !edge_conversion_would_duplicate(ctx, "cross_link")
+}
+
+fn edge_type_not_parent_child(ctx: &PaletteContext) -> bool {
+    with_selected_edge(ctx, |e| e.edge_type != "parent_child")
+        && !edge_conversion_would_duplicate(ctx, "parent_child")
+}
+
+fn edge_conversion_would_duplicate(ctx: &PaletteContext, new_type: &str) -> bool {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return false,
+    };
+    let current_idx = match ctx.document.mindmap.edges.iter().position(|e| er.matches(e)) {
+        Some(i) => i,
+        None => return false,
+    };
+    let from_id = &ctx.document.mindmap.edges[current_idx].from_id;
+    let to_id = &ctx.document.mindmap.edges[current_idx].to_id;
+    ctx.document.mindmap.edges.iter().enumerate().any(|(i, e)| {
+        i != current_idx
+            && &e.from_id == from_id
+            && &e.to_id == to_id
+            && e.edge_type == new_type
+    })
+}
+
+fn edge_has_label(ctx: &PaletteContext) -> bool {
+    with_selected_edge(ctx, |e| e.label.as_deref().map_or(false, |s| !s.is_empty()))
+}
+
+fn label_position_not(ctx: &PaletteContext, target: f32) -> bool {
+    with_selected_edge(ctx, |e| {
+        let cur = e.label_position_t.unwrap_or(0.5);
+        (cur - target).abs() > f32::EPSILON && e.label.as_deref().map_or(false, |s| !s.is_empty())
+    })
+}
+fn label_position_not_start(ctx: &PaletteContext) -> bool { label_position_not(ctx, 0.0) }
+fn label_position_not_middle(ctx: &PaletteContext) -> bool { label_position_not(ctx, 0.5) }
+fn label_position_not_end(ctx: &PaletteContext) -> bool { label_position_not(ctx, 1.0) }
+
+fn edge_has_style_override(ctx: &PaletteContext) -> bool {
+    with_selected_edge(ctx, |e| e.glyph_connection.is_some())
+}
+
+/// Silence `#[allow(dead_code)]` chatter on the higher-order
+/// `edge_selected_and_not_body` helper — it's exposed in case a
+/// future session wants to add more body-glyph presets without
+/// hand-rolling a predicate each time. Tied down with a trivial
+/// no-op reference so rustc sees the symbol.
+#[allow(dead_code)]
+fn _touch_body_helper() {
+    let _ = edge_selected_and_not_body("·");
+}
 
 // ============================================================
 // The global action registry
@@ -321,6 +728,267 @@ pub const PALETTE_ACTIONS: &[PaletteAction] = &[
         tags: &["edge", "connection", "anchor", "side", "left"],
         applicable: edge_selected,
         execute: exec_set_anchor_to_left,
+    },
+    // ====================================================================
+    // Session 6D — connection style and label actions
+    // ====================================================================
+    // Body glyph presets
+    PaletteAction {
+        id: "edge_set_body_dot",
+        label: "Set body glyph: dot (·)",
+        description: "Repeat a middle dot along the connection path",
+        tags: &["edge", "connection", "body", "glyph", "dot", "style"],
+        applicable: edge_selected_and_not_body_dot,
+        execute: exec_set_body_dot,
+    },
+    PaletteAction {
+        id: "edge_set_body_dash",
+        label: "Set body glyph: dash (─)",
+        description: "Repeat a horizontal light dash along the connection path",
+        tags: &["edge", "connection", "body", "glyph", "dash", "line", "style"],
+        applicable: edge_selected_and_not_body_dash,
+        execute: exec_set_body_dash,
+    },
+    PaletteAction {
+        id: "edge_set_body_double",
+        label: "Set body glyph: double (═)",
+        description: "Repeat a horizontal double line along the connection path",
+        tags: &["edge", "connection", "body", "glyph", "double", "line", "style"],
+        applicable: edge_selected_and_not_body_double,
+        execute: exec_set_body_double,
+    },
+    PaletteAction {
+        id: "edge_set_body_wave",
+        label: "Set body glyph: wave (∼)",
+        description: "Repeat a tilde wave along the connection path",
+        tags: &["edge", "connection", "body", "glyph", "wave", "tilde", "style"],
+        applicable: edge_selected_and_not_body_wave,
+        execute: exec_set_body_wave,
+    },
+    PaletteAction {
+        id: "edge_set_body_chain",
+        label: "Set body glyph: chain (⋯)",
+        description: "Repeat a mid-line ellipsis along the connection path",
+        tags: &["edge", "connection", "body", "glyph", "chain", "dots", "style"],
+        applicable: edge_selected_and_not_body_chain,
+        execute: exec_set_body_chain,
+    },
+    // Cap start presets
+    PaletteAction {
+        id: "edge_set_cap_start_arrow",
+        label: "Set from-cap: arrow (◀)",
+        description: "Place a left-pointing triangle at the source anchor",
+        tags: &["edge", "connection", "cap", "start", "from", "arrow"],
+        applicable: cap_start_not_arrow,
+        execute: exec_set_cap_start_arrow,
+    },
+    PaletteAction {
+        id: "edge_set_cap_start_circle",
+        label: "Set from-cap: circle (●)",
+        description: "Place a filled circle at the source anchor",
+        tags: &["edge", "connection", "cap", "start", "from", "circle"],
+        applicable: cap_start_not_circle,
+        execute: exec_set_cap_start_circle,
+    },
+    PaletteAction {
+        id: "edge_set_cap_start_diamond",
+        label: "Set from-cap: diamond (◆)",
+        description: "Place a filled diamond at the source anchor",
+        tags: &["edge", "connection", "cap", "start", "from", "diamond"],
+        applicable: cap_start_not_diamond,
+        execute: exec_set_cap_start_diamond,
+    },
+    PaletteAction {
+        id: "edge_set_cap_start_none",
+        label: "Clear from-cap",
+        description: "Remove the source-anchor cap glyph",
+        tags: &["edge", "connection", "cap", "start", "from", "clear", "none"],
+        applicable: cap_start_not_none,
+        execute: exec_set_cap_start_none,
+    },
+    // Cap end presets
+    PaletteAction {
+        id: "edge_set_cap_end_arrow",
+        label: "Set to-cap: arrow (▶)",
+        description: "Place a right-pointing triangle at the target anchor",
+        tags: &["edge", "connection", "cap", "end", "to", "arrow"],
+        applicable: cap_end_not_arrow,
+        execute: exec_set_cap_end_arrow,
+    },
+    PaletteAction {
+        id: "edge_set_cap_end_circle",
+        label: "Set to-cap: circle (●)",
+        description: "Place a filled circle at the target anchor",
+        tags: &["edge", "connection", "cap", "end", "to", "circle"],
+        applicable: cap_end_not_circle,
+        execute: exec_set_cap_end_circle,
+    },
+    PaletteAction {
+        id: "edge_set_cap_end_diamond",
+        label: "Set to-cap: diamond (◆)",
+        description: "Place a filled diamond at the target anchor",
+        tags: &["edge", "connection", "cap", "end", "to", "diamond"],
+        applicable: cap_end_not_diamond,
+        execute: exec_set_cap_end_diamond,
+    },
+    PaletteAction {
+        id: "edge_set_cap_end_none",
+        label: "Clear to-cap",
+        description: "Remove the target-anchor cap glyph",
+        tags: &["edge", "connection", "cap", "end", "to", "clear", "none"],
+        applicable: cap_end_not_none,
+        execute: exec_set_cap_end_none,
+    },
+    // Color presets (theme-var-aware)
+    PaletteAction {
+        id: "edge_color_accent",
+        label: "Use color: accent",
+        description: "Theme the connection with var(--accent)",
+        tags: &["edge", "connection", "color", "accent", "theme"],
+        applicable: edge_selected,
+        execute: exec_color_accent,
+    },
+    PaletteAction {
+        id: "edge_color_edge",
+        label: "Use color: edge",
+        description: "Theme the connection with var(--edge)",
+        tags: &["edge", "connection", "color", "edge", "theme"],
+        applicable: edge_selected,
+        execute: exec_color_edge,
+    },
+    PaletteAction {
+        id: "edge_color_fg",
+        label: "Use color: foreground",
+        description: "Theme the connection with var(--fg)",
+        tags: &["edge", "connection", "color", "foreground", "fg", "theme"],
+        applicable: edge_selected,
+        execute: exec_color_fg,
+    },
+    PaletteAction {
+        id: "edge_color_reset",
+        label: "Reset color (inherit edge color)",
+        description: "Clear the glyph-connection color override",
+        tags: &["edge", "connection", "color", "reset", "inherit"],
+        applicable: color_override_present,
+        execute: exec_color_reset,
+    },
+    // Font size
+    PaletteAction {
+        id: "edge_font_size_smaller",
+        label: "Smaller connection glyphs",
+        description: "Shrink the connection glyph font size by 2pt",
+        tags: &["edge", "connection", "font", "size", "smaller", "shrink"],
+        applicable: font_size_not_at_min,
+        execute: exec_font_size_smaller,
+    },
+    PaletteAction {
+        id: "edge_font_size_larger",
+        label: "Larger connection glyphs",
+        description: "Grow the connection glyph font size by 2pt",
+        tags: &["edge", "connection", "font", "size", "larger", "grow"],
+        applicable: font_size_not_at_max,
+        execute: exec_font_size_larger,
+    },
+    PaletteAction {
+        id: "edge_font_size_reset",
+        label: "Reset connection font size",
+        description: "Restore the connection glyph font size to the default (12pt)",
+        tags: &["edge", "connection", "font", "size", "reset", "default"],
+        applicable: font_size_not_default,
+        execute: exec_font_size_reset,
+    },
+    // Spacing
+    PaletteAction {
+        id: "edge_spacing_tight",
+        label: "Spacing: tight",
+        description: "Pack connection glyphs flush together",
+        tags: &["edge", "connection", "spacing", "tight", "dense"],
+        applicable: spacing_not_tight,
+        execute: exec_spacing_tight,
+    },
+    PaletteAction {
+        id: "edge_spacing_normal",
+        label: "Spacing: normal",
+        description: "Moderate gap between connection glyphs",
+        tags: &["edge", "connection", "spacing", "normal"],
+        applicable: spacing_not_normal,
+        execute: exec_spacing_normal,
+    },
+    PaletteAction {
+        id: "edge_spacing_wide",
+        label: "Spacing: wide",
+        description: "Airy gap between connection glyphs",
+        tags: &["edge", "connection", "spacing", "wide", "airy"],
+        applicable: spacing_not_wide,
+        execute: exec_spacing_wide,
+    },
+    // Edge type
+    PaletteAction {
+        id: "edge_convert_to_cross_link",
+        label: "Convert to cross-link",
+        description: "Change the edge type to cross_link",
+        tags: &["edge", "connection", "type", "cross_link", "convert"],
+        applicable: edge_type_not_cross_link,
+        execute: exec_convert_to_cross_link,
+    },
+    PaletteAction {
+        id: "edge_convert_to_parent_child",
+        label: "Convert to parent-child",
+        description: "Change the edge type to parent_child",
+        tags: &["edge", "connection", "type", "parent_child", "convert", "hierarchy"],
+        applicable: edge_type_not_parent_child,
+        execute: exec_convert_to_parent_child,
+    },
+    // Label editing
+    PaletteAction {
+        id: "edge_edit_label",
+        label: "Edit connection label",
+        description: "Open the inline label editor on the selected edge",
+        tags: &["edge", "connection", "label", "edit", "text"],
+        applicable: edge_selected,
+        execute: exec_edit_label,
+    },
+    PaletteAction {
+        id: "edge_clear_label",
+        label: "Clear connection label",
+        description: "Remove the label from the selected edge",
+        tags: &["edge", "connection", "label", "clear", "delete"],
+        applicable: edge_has_label,
+        execute: exec_clear_label,
+    },
+    // Label position
+    PaletteAction {
+        id: "edge_label_position_start",
+        label: "Position label at start",
+        description: "Move the label to the from-anchor end of the path",
+        tags: &["edge", "connection", "label", "position", "start", "from"],
+        applicable: label_position_not_start,
+        execute: exec_label_position_start,
+    },
+    PaletteAction {
+        id: "edge_label_position_middle",
+        label: "Position label at middle",
+        description: "Move the label to the middle of the path",
+        tags: &["edge", "connection", "label", "position", "middle"],
+        applicable: label_position_not_middle,
+        execute: exec_label_position_middle,
+    },
+    PaletteAction {
+        id: "edge_label_position_end",
+        label: "Position label at end",
+        description: "Move the label to the to-anchor end of the path",
+        tags: &["edge", "connection", "label", "position", "end", "to"],
+        applicable: label_position_not_end,
+        execute: exec_label_position_end,
+    },
+    // Reset style
+    PaletteAction {
+        id: "edge_reset_style",
+        label: "Reset connection style to default",
+        description: "Clear the per-edge glyph override, falling back to the canvas default",
+        tags: &["edge", "connection", "reset", "default", "style"],
+        applicable: edge_has_style_override,
+        execute: exec_reset_edge_style,
     },
 ];
 
@@ -420,7 +1088,64 @@ mod tests {
     }
 
     #[test]
-    fn palette_actions_have_all_eleven_session_6c_entries() {
-        assert_eq!(PALETTE_ACTIONS.len(), 11);
+    fn palette_actions_session_6c_entries_present() {
+        // Session 6C shipped 11 entries; Session 6D added 31 more.
+        assert!(
+            PALETTE_ACTIONS.len() >= 11,
+            "expected at least 11 (session 6C minimum), got {}",
+            PALETTE_ACTIONS.len()
+        );
+    }
+
+    #[test]
+    fn palette_actions_session_6d_count_matches_plan() {
+        // Session 6D target: 11 (carried over from 6C) + 31 new = 42.
+        // Tight assertion so adding/removing actions shows up in CI.
+        assert_eq!(
+            PALETTE_ACTIONS.len(),
+            42,
+            "expected 42 palette actions (11 from 6C + 31 new in 6D)"
+        );
+    }
+
+    #[test]
+    fn palette_actions_session_6d_ids_all_resolve() {
+        let ids: &[&str] = &[
+            "edge_set_body_dot",
+            "edge_set_body_dash",
+            "edge_set_body_double",
+            "edge_set_body_wave",
+            "edge_set_body_chain",
+            "edge_set_cap_start_arrow",
+            "edge_set_cap_start_circle",
+            "edge_set_cap_start_diamond",
+            "edge_set_cap_start_none",
+            "edge_set_cap_end_arrow",
+            "edge_set_cap_end_circle",
+            "edge_set_cap_end_diamond",
+            "edge_set_cap_end_none",
+            "edge_color_accent",
+            "edge_color_edge",
+            "edge_color_fg",
+            "edge_color_reset",
+            "edge_font_size_smaller",
+            "edge_font_size_larger",
+            "edge_font_size_reset",
+            "edge_spacing_tight",
+            "edge_spacing_normal",
+            "edge_spacing_wide",
+            "edge_convert_to_cross_link",
+            "edge_convert_to_parent_child",
+            "edge_edit_label",
+            "edge_clear_label",
+            "edge_label_position_start",
+            "edge_label_position_middle",
+            "edge_label_position_end",
+            "edge_reset_style",
+        ];
+        assert_eq!(ids.len(), 31, "expected 31 new 6D action ids");
+        for id in ids {
+            assert!(action_by_id(id).is_some(), "action id '{id}' not registered");
+        }
     }
 }

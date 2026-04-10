@@ -9,7 +9,8 @@ use baumhard::mindmap::custom_mutation::{
 };
 use baumhard::mindmap::connection;
 use baumhard::mindmap::model::{
-    Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
+    Canvas, GlyphConnectionConfig, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle,
+    Position, Size,
 };
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
@@ -113,6 +114,7 @@ fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
         line_style: 0,
         visible: true,
         label: None,
+        label_position_t: None,
         anchor_from: 0,
         anchor_to: 0,
         control_points: Vec::new(),
@@ -189,6 +191,7 @@ fn default_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
         line_style: 0,
         visible: true,
         label: None,
+        label_position_t: None,
         anchor_from: 0,
         anchor_to: 0,
         control_points: Vec::new(),
@@ -438,6 +441,335 @@ impl MindMapDocument {
     /// drag flow in `app.rs`).
     pub fn edge_index(&self, edge_ref: &EdgeRef) -> Option<usize> {
         self.mindmap.edges.iter().position(|e| edge_ref.matches(e))
+    }
+
+    // ========================================================================
+    // Session 6D — connection style and label mutation helpers
+    //
+    // Every helper in this block mirrors the `reset_edge_to_straight` /
+    // `set_edge_anchor` template exactly:
+    //
+    //   1. Locate the edge index via `edge_ref.matches`.
+    //   2. Early-return `false` for no-op cases (value already matches, edge
+    //      not found) so repeated palette invocations don't pollute the undo
+    //      stack.
+    //   3. Clone the full pre-edit edge into `before` — this must happen
+    //      BEFORE any fork via `ensure_glyph_connection`, so undo restores
+    //      the pre-fork `None` cleanly.
+    //   4. Mutate the edge in place.
+    //   5. Push `UndoAction::EditEdge { index, before }` and set `dirty`.
+    //
+    // The fork semantic: on the first style edit of an edge whose
+    // `glyph_connection` is None, we materialize a concrete per-edge copy
+    // from the effective resolved config (canvas default, else hardcoded
+    // default). Subsequent canvas-default changes don't retroactively apply
+    // to forked edges — mirroring how CSS "computed style" copies work.
+    // ========================================================================
+
+    /// Ensure `edge.glyph_connection` is `Some(_)`, forking from the
+    /// canvas default (or the hardcoded default) on first edit. Returns
+    /// a mutable reference to the freshly-installed or previously-set
+    /// config so the caller can mutate a specific field.
+    ///
+    /// Must be called AFTER the `before` snapshot has been cloned so
+    /// the undo entry still carries the pre-fork `None`.
+    fn ensure_glyph_connection<'a>(
+        edge: &'a mut MindEdge,
+        canvas: &Canvas,
+    ) -> &'a mut GlyphConnectionConfig {
+        if edge.glyph_connection.is_none() {
+            let seed = canvas
+                .default_connection
+                .clone()
+                .unwrap_or_default();
+            edge.glyph_connection = Some(seed);
+        }
+        edge.glyph_connection.as_mut().expect("just installed")
+    }
+
+    /// Set the body glyph string for a connection. Empty strings are
+    /// rejected (an empty body would produce no glyphs). Returns
+    /// `true` if the edge existed and the body actually changed.
+    pub fn set_edge_body_glyph(&mut self, edge_ref: &EdgeRef, body: &str) -> bool {
+        if body.is_empty() {
+            return false;
+        }
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        // Peek at the effective body before forking to detect no-ops.
+        let current_body = self.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .map(|c| c.body.as_str())
+            .or_else(|| self.mindmap.canvas.default_connection.as_ref().map(|c| c.body.as_str()))
+            .unwrap_or(&GlyphConnectionConfig::default().body.clone())
+            .to_string();
+        if current_body == body {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        cfg.body = body.to_string();
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the `cap_start` glyph (or clear it with `None`). Returns
+    /// `true` if the edge existed and the value changed.
+    pub fn set_edge_cap_start(&mut self, edge_ref: &EdgeRef, cap: Option<&str>) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        let new_val = cap.map(|s| s.to_string());
+        if cfg.cap_start == new_val {
+            // Roll back the fork if nothing actually changed (ensure_glyph_connection
+            // may have installed a default when the edge previously had
+            // glyph_connection = None).
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        cfg.cap_start = new_val;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the `cap_end` glyph (or clear it with `None`). Returns
+    /// `true` if the edge existed and the value changed.
+    pub fn set_edge_cap_end(&mut self, edge_ref: &EdgeRef, cap: Option<&str>) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        let new_val = cap.map(|s| s.to_string());
+        if cfg.cap_end == new_val {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        cfg.cap_end = new_val;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the color override on a connection's glyph_connection config.
+    /// Passing `None` clears the override so the edge inherits from
+    /// `edge.color` (or the canvas default). Returns `true` if the edge
+    /// existed and the value changed.
+    pub fn set_edge_color(&mut self, edge_ref: &EdgeRef, color: Option<&str>) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        let new_val = color.map(|s| s.to_string());
+        if cfg.color == new_val {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        cfg.color = new_val;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Step the connection's base `font_size_pt` by `delta_pt`,
+    /// clamped into `[min_font_size_pt, max_font_size_pt]`. Returns
+    /// `true` if the clamp yielded a different value from the current
+    /// (i.e. we're not already pinned at the relevant bound).
+    pub fn set_edge_font_size_step(&mut self, edge_ref: &EdgeRef, delta_pt: f32) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        let new_val = (cfg.font_size_pt + delta_pt)
+            .clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
+        if (cfg.font_size_pt - new_val).abs() < f32::EPSILON {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        cfg.font_size_pt = new_val;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Reset the connection's `font_size_pt` to the hardcoded default
+    /// (12.0). Returns `true` if the value actually changed.
+    pub fn reset_edge_font_size(&mut self, edge_ref: &EdgeRef) -> bool {
+        let default_size = GlyphConnectionConfig::default().font_size_pt;
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        if (cfg.font_size_pt - default_size).abs() < f32::EPSILON {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        cfg.font_size_pt = default_size;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the connection's glyph `spacing` (canvas units between
+    /// adjacent body glyphs). Returns `true` if the value actually
+    /// changed.
+    pub fn set_edge_spacing(&mut self, edge_ref: &EdgeRef, spacing: f32) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        if (cfg.spacing - spacing).abs() < f32::EPSILON {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        cfg.spacing = spacing;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the label text on an edge. Passing `None` (or `Some("")`)
+    /// clears the label. Returns `true` if the value actually changed.
+    pub fn set_edge_label(&mut self, edge_ref: &EdgeRef, text: Option<String>) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        // Normalize empty string to None so hit testing and rendering
+        // only need to check one absence case.
+        let new_val = match text {
+            Some(s) if s.is_empty() => None,
+            other => other,
+        };
+        if self.mindmap.edges[idx].label == new_val {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        self.mindmap.edges[idx].label = new_val;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the label's position along the connection path. `t` is
+    /// clamped into `[0.0, 1.0]` — values outside that range are
+    /// silently pulled back. Returns `true` if the clamped value
+    /// actually differs from the current.
+    pub fn set_edge_label_position(&mut self, edge_ref: &EdgeRef, t: f32) -> bool {
+        let clamped = t.clamp(0.0, 1.0);
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let current = self.mindmap.edges[idx].label_position_t.unwrap_or(0.5);
+        if (current - clamped).abs() < f32::EPSILON {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        self.mindmap.edges[idx].label_position_t = Some(clamped);
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Change the `edge_type` of an edge. Refuses the change (returns
+    /// `false`) if it would create a duplicate `(from_id, to_id,
+    /// new_type)` against another edge. On success updates
+    /// `self.selection` to a fresh `EdgeRef` with the new type so the
+    /// edge stays selected.
+    pub fn set_edge_type(&mut self, edge_ref: &EdgeRef, new_type: &str) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        if self.mindmap.edges[idx].edge_type == new_type {
+            return false;
+        }
+        // Duplicate guard: refuse if some OTHER edge already has the same
+        // (from_id, to_id, new_type) triple.
+        let from_id = self.mindmap.edges[idx].from_id.clone();
+        let to_id = self.mindmap.edges[idx].to_id.clone();
+        let duplicate = self.mindmap.edges.iter().enumerate().any(|(i, e)| {
+            i != idx
+                && e.from_id == from_id
+                && e.to_id == to_id
+                && e.edge_type == new_type
+        });
+        if duplicate {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        self.mindmap.edges[idx].edge_type = new_type.to_string();
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        // Refresh the selection EdgeRef so the app keeps the edge selected
+        // under its new identity.
+        if let SelectionState::Edge(ref cur) = self.selection {
+            if cur == edge_ref {
+                self.selection = SelectionState::Edge(EdgeRef::new(
+                    from_id,
+                    to_id,
+                    new_type,
+                ));
+            }
+        }
+        true
+    }
+
+    /// Clear `glyph_connection` on the edge, reverting it to the
+    /// canvas-level default style. Returns `true` if the edge existed
+    /// and had a per-edge override to clear.
+    pub fn reset_edge_style_to_default(&mut self, edge_ref: &EdgeRef) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        if self.mindmap.edges[idx].glyph_connection.is_none() {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        self.mindmap.edges[idx].glyph_connection = None;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
     }
 
     /// Create a new unattached (orphan) node at the given canvas position
@@ -2114,6 +2446,7 @@ mod tests {
             line_style: 0,
             visible: true,
             label: None,
+            label_position_t: None,
             anchor_from: 0,
             anchor_to: 0,
             control_points: vec![],
@@ -2670,5 +3003,318 @@ mod tests {
         let doc = load_test_doc();
         let bogus = EdgeRef::new("nope", "nope2", "cross_link");
         assert!(doc.edge_index(&bogus).is_none());
+    }
+
+    // ========================================================================
+    // Session 6D — connection style and label mutation tests
+    // ========================================================================
+
+    /// Find a cross-link or parent-child edge in the testament map and
+    /// return its EdgeRef. Used by the mutation tests below as their
+    /// entry point.
+    fn first_testament_edge_ref(doc: &MindMapDocument) -> EdgeRef {
+        let e = doc.mindmap.edges.first().expect("testament map has edges");
+        EdgeRef::new(&e.from_id, &e.to_id, &e.edge_type)
+    }
+
+    #[test]
+    fn test_ensure_glyph_connection_forks_from_hardcoded_default() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Make sure the test subject starts with no per-edge override
+        // AND the canvas has no default — forces the hardcoded default
+        // path.
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].glyph_connection = None;
+        doc.mindmap.canvas.default_connection = None;
+        doc.undo_stack.clear();
+        doc.dirty = false;
+
+        // First style edit: changing the body glyph. The fork should
+        // materialize a concrete GlyphConnectionConfig with the
+        // hardcoded default body (·) — then the mutation overwrites
+        // `body` with the requested value.
+        let changed = doc.set_edge_body_glyph(&er, "\u{2500}");
+        assert!(changed, "body change should succeed on fresh edge");
+        let cfg = doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .expect("fork should install a config");
+        assert_eq!(cfg.body, "\u{2500}");
+        // The other fields should match the hardcoded default.
+        let hard = GlyphConnectionConfig::default();
+        assert_eq!(cfg.font_size_pt, hard.font_size_pt);
+        assert_eq!(cfg.min_font_size_pt, hard.min_font_size_pt);
+    }
+
+    #[test]
+    fn test_ensure_glyph_connection_forks_from_canvas_default() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].glyph_connection = None;
+        // Set a canvas-level default with a distinctive body glyph.
+        doc.mindmap.canvas.default_connection = Some(GlyphConnectionConfig {
+            body: "\u{22EF}".to_string(), // ⋯
+            ..GlyphConnectionConfig::default()
+        });
+        doc.undo_stack.clear();
+        doc.dirty = false;
+
+        // Change a different field (spacing) so the fork copies the
+        // canvas body (⋯) into the edge before the field overwrite.
+        let changed = doc.set_edge_spacing(&er, 6.0);
+        assert!(changed);
+        let cfg = doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .expect("fork should install a config");
+        // Body was copied from the canvas default, not from the
+        // hardcoded default.
+        assert_eq!(cfg.body, "\u{22EF}");
+        assert_eq!(cfg.spacing, 6.0);
+    }
+
+    #[test]
+    fn test_set_edge_body_glyph_pushes_edit_edge_undo() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let stack_depth = doc.undo_stack.len();
+        let changed = doc.set_edge_body_glyph(&er, "\u{2550}");
+        assert!(changed);
+        assert_eq!(doc.undo_stack.len(), stack_depth + 1);
+        assert!(matches!(doc.undo_stack.last(), Some(UndoAction::EditEdge { .. })));
+        assert!(doc.dirty);
+    }
+
+    #[test]
+    fn test_undo_after_first_style_edit_restores_pre_fork_none() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        // Force the pre-edit state to None so we can verify the fork
+        // is rolled back on undo.
+        doc.mindmap.edges[idx].glyph_connection = None;
+        doc.undo_stack.clear();
+
+        assert!(doc.set_edge_body_glyph(&er, "\u{2500}"));
+        assert!(doc.mindmap.edges[idx].glyph_connection.is_some());
+        doc.undo();
+        assert!(
+            doc.mindmap.edges[idx].glyph_connection.is_none(),
+            "undo should restore the pre-fork None"
+        );
+    }
+
+    #[test]
+    fn test_set_edge_color_none_clears_override() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // First install a color override.
+        assert!(doc.set_edge_color(&er, Some("#112233")));
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .glyph_connection
+                .as_ref()
+                .and_then(|c| c.color.as_deref()),
+            Some("#112233")
+        );
+        // Then clear it.
+        assert!(doc.set_edge_color(&er, None));
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .glyph_connection
+                .as_ref()
+                .and_then(|c| c.color.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_set_edge_font_size_step_clamps_at_min_and_max() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Force a known starting config.
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].glyph_connection = Some(GlyphConnectionConfig {
+            font_size_pt: 12.0,
+            min_font_size_pt: 8.0,
+            max_font_size_pt: 24.0,
+            ..GlyphConnectionConfig::default()
+        });
+        doc.undo_stack.clear();
+
+        // Step down past the min: should clamp, returning a smaller
+        // but not less-than-min value. Repeatedly stepping down should
+        // eventually pin at the min and return false on subsequent
+        // attempts (no-op).
+        for _ in 0..20 {
+            doc.set_edge_font_size_step(&er, -2.0);
+        }
+        let pinned_low = doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .unwrap()
+            .font_size_pt;
+        assert_eq!(pinned_low, 8.0);
+        // Further steps down return false.
+        assert!(!doc.set_edge_font_size_step(&er, -2.0));
+
+        // Step up past the max: clamps to 24.
+        for _ in 0..20 {
+            doc.set_edge_font_size_step(&er, 2.0);
+        }
+        let pinned_high = doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .unwrap()
+            .font_size_pt;
+        assert_eq!(pinned_high, 24.0);
+        assert!(!doc.set_edge_font_size_step(&er, 2.0));
+    }
+
+    #[test]
+    fn test_set_edge_spacing_idempotent_noop() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // First set succeeds.
+        assert!(doc.set_edge_spacing(&er, 2.0));
+        let stack_depth = doc.undo_stack.len();
+        // Second set with the same value is a no-op; undo stack
+        // doesn't grow.
+        assert!(!doc.set_edge_spacing(&er, 2.0));
+        assert_eq!(doc.undo_stack.len(), stack_depth);
+    }
+
+    #[test]
+    fn test_set_edge_label_round_trip() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Set a label.
+        assert!(doc.set_edge_label(&er, Some("hello".to_string())));
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(doc.mindmap.edges[idx].label.as_deref(), Some("hello"));
+        // Clear via Some("").
+        assert!(doc.set_edge_label(&er, Some(String::new())));
+        assert_eq!(doc.mindmap.edges[idx].label, None);
+        // Setting the same None is a no-op.
+        let depth = doc.undo_stack.len();
+        assert!(!doc.set_edge_label(&er, None));
+        assert_eq!(doc.undo_stack.len(), depth);
+    }
+
+    #[test]
+    fn test_set_edge_label_position_clamps_into_0_1() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        assert!(doc.set_edge_label_position(&er, -5.0));
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(0.0));
+
+        assert!(doc.set_edge_label_position(&er, 42.0));
+        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(1.0));
+
+        assert!(doc.set_edge_label_position(&er, 0.75));
+        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(0.75));
+    }
+
+    #[test]
+    fn test_set_edge_type_updates_selection_edge_ref() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        doc.selection = SelectionState::Edge(er.clone());
+        let new_type = if er.edge_type == "parent_child" { "cross_link" } else { "parent_child" };
+        assert!(doc.set_edge_type(&er, new_type));
+        // Selection should now carry the new type.
+        match &doc.selection {
+            SelectionState::Edge(new_ref) => {
+                assert_eq!(new_ref.edge_type, new_type);
+                assert_eq!(new_ref.from_id, er.from_id);
+                assert_eq!(new_ref.to_id, er.to_id);
+            }
+            _ => panic!("selection should still be an edge after type flip"),
+        }
+    }
+
+    #[test]
+    fn test_set_edge_type_refuses_duplicate() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let from_id = er.from_id.clone();
+        let to_id = er.to_id.clone();
+        // Seed a duplicate edge with the OPPOSITE type so conversion
+        // would collide with it.
+        let target_type = if er.edge_type == "parent_child" { "cross_link" } else { "parent_child" };
+        let mut dup = doc.mindmap.edges[doc.edge_index(&er).unwrap()].clone();
+        dup.edge_type = target_type.to_string();
+        doc.mindmap.edges.push(dup);
+        // Conversion should be refused.
+        assert!(!doc.set_edge_type(&er, target_type));
+        // Original edge is unchanged.
+        assert_eq!(
+            doc.mindmap.edges[doc.edge_index(&er).unwrap()].edge_type,
+            er.edge_type
+        );
+    }
+
+    #[test]
+    fn test_reset_edge_style_to_default_clears_glyph_connection() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Install an override.
+        assert!(doc.set_edge_color(&er, Some("#00ff00")));
+        let idx = doc.edge_index(&er).unwrap();
+        assert!(doc.mindmap.edges[idx].glyph_connection.is_some());
+        // Reset clears it.
+        assert!(doc.reset_edge_style_to_default(&er));
+        assert!(doc.mindmap.edges[idx].glyph_connection.is_none());
+        // Repeat call is a no-op.
+        assert!(!doc.reset_edge_style_to_default(&er));
+    }
+
+    #[test]
+    fn test_set_edge_cap_start_none_is_noop_when_already_none() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Force cap_start to None via a fresh config.
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].glyph_connection = Some(GlyphConnectionConfig::default());
+        doc.undo_stack.clear();
+        // Setting cap_start to None when already None is a no-op.
+        assert!(!doc.set_edge_cap_start(&er, None));
+        // Undo stack didn't grow.
+        assert_eq!(doc.undo_stack.len(), 0);
+    }
+
+    #[test]
+    fn test_undo_chain_round_trips_multiple_edits() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Snapshot the starting state of the edge.
+        let idx = doc.edge_index(&er).unwrap();
+        let original = doc.mindmap.edges[idx].clone();
+        doc.undo_stack.clear();
+
+        // Apply three edits.
+        assert!(doc.set_edge_body_glyph(&er, "\u{2500}"));
+        assert!(doc.set_edge_color(&er, Some("#abcdef")));
+        assert!(doc.set_edge_label(&er, Some("x".to_string())));
+        assert_eq!(doc.undo_stack.len(), 3);
+
+        // Undo all three in LIFO order.
+        doc.undo();
+        doc.undo();
+        doc.undo();
+        let restored = &doc.mindmap.edges[idx];
+        assert_eq!(restored.label, original.label);
+        assert_eq!(
+            restored.glyph_connection.as_ref().map(|c| c.body.clone()),
+            original.glyph_connection.as_ref().map(|c| c.body.clone())
+        );
+        assert_eq!(
+            restored.glyph_connection.as_ref().and_then(|c| c.color.clone()),
+            original.glyph_connection.as_ref().and_then(|c| c.color.clone())
+        );
     }
 }
