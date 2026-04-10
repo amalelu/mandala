@@ -62,8 +62,9 @@ The application has two layers:
 - **Stress-test map generator** — `cargo run -p baumhard --bin generate_stress_map -- ...` writes synthetic `.mindmap.json` files of arbitrary size and topology (balanced / skewed / star), with `--long-edges K` to insert deliberately far-apart cross-links for connection-render perf testing and `--seed` for deterministic output. The smoke-test rig for Phase 4 of the theme-variables tangent.
 - **Mutation-frequency throttle** — under load, the `AboutToWait` drag path drains its accumulated `pending_delta` every Nth frame instead of every frame, where N is a moving-average-driven self-tuning multiplier that holds per-frame work time under the screen refresh budget. Input accumulation stays snappy (every mouse event still folds into `pending_delta`); the dragged node advances in chunks under stress, catching up to the cursor every N frames. Healthy load = N = 1 (no throttling). Implements the governing-invariant half of the connection/border render-cost work.
 - **Viewport culling on connection glyphs** — `rebuild_connection_buffers` now computes the visible canvas rect once per call (with a `font_size` margin on each side) and skips cosmic-text buffer creation for any glyph position outside it. The dominant per-frame cost in the connection rebuild path is cosmic-text shaping; for a long cross-link most of its sample positions are off-screen during drag, so skipping those drops per-frame work by ~48× in the user's long-connection stutter scenario without changing visible output.
+- **Keyed incremental rebuild for connections and borders** — storage flipped from `Vec<Buffer>` to `FxHashMap<StableKey, Vec<Buffer>>` for both, keyed on `(from_id, to_id, edge_type)` for connections and `node_id` for borders. The drag path in `AboutToWait` computes the set of affected nodes and edges from the `offsets` map and calls new `update_connection_buffers` / `update_border_buffers` methods which only re-shape entries whose key is affected, leaving every other edge and border's buffers untouched across frames. Drag cost now scales with "what actually moved" rather than "what exists in the whole map."
 - **Multi-target** — native + WASM builds
-- **280 tests passing**
+- **283 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -802,13 +803,35 @@ Five-part fix under that invariant:
       viewport and confirms the cull drops ~1,334 glyph samples to
       ~28 (a 48× shaping-work reduction for the user's exact
       long-connection stutter case).
-- [ ] **(B) Keyed incremental rebuild**. `HashMap<StableKey, Buffer>`
+- [x] **(B) Keyed incremental rebuild**. `HashMap<StableKey, Buffer>`
       instead of flat `Vec<Buffer>` for both connections and
       borders, keyed on `(from_id, to_id, edge_type)` and `node_id`
       respectively. Drag frames only touch entries whose key appears
       in the `offsets` map; every unmoved edge and border keeps its
       existing buffers intact. Scales drag cost with "what moved"
-      instead of "what exists."
+      instead of "what exists." Implemented by: (1) adding
+      `from_id`/`to_id`/`edge_type` + a `key()` helper to
+      `ConnectionElement` in `scene_builder.rs`; (2) changing
+      `Renderer.connection_buffers` from `Vec<MindMapTextBuffer>` to
+      `FxHashMap<(String, String, String), Vec<MindMapTextBuffer>>`
+      and `Renderer.border_buffers` from `Vec` to
+      `FxHashMap<String, Vec<MindMapTextBuffer>>`; (3) extracting the
+      per-element layout math into free `build_border_buffers_for_element`
+      and `build_connection_buffers_for_element` helpers so the
+      full-rebuild path and the new incremental path share one source
+      of truth for layout and the Phase 4(A) culling decision; (4)
+      adding `Renderer::update_border_buffers(scene, affected: &HashSet<String>)`
+      and `Renderer::update_connection_buffers(scene, affected: &HashSet<(String, String, String)>)`
+      which `retain` non-affected entries and re-shape only the
+      affected ones; (5) wiring the drag branch in `app.rs` to
+      compute `affected_nodes` from `offsets.keys()` and
+      `affected_edges` from `doc.mindmap.edges.filter(...)` and call
+      the `update_*` methods instead of the full rebuild. The render
+      loop now iterates `self.border_buffers.values().flat_map(..)`
+      for both maps. 3 new tests: `ConnectionElement` key round-trip,
+      parallel-edge disambiguation, and explicit `BorderElement.node_id`
+      lock-in. Full-rebuild call sites (load / selection change /
+      undo / reparent) are unchanged.
 - [ ] **(C) Shape-once-reuse**. On top of (B): cosmic-text shaping
       is the expensive step, positioning is cheap. Keep shaped
       buffers alive across frames and only update their positions

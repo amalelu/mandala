@@ -641,7 +641,10 @@ impl Application {
                                 renderer.rebuild_buffers_from_tree(&tree.tree);
                             }
 
-                            // Rebuild connections and borders with position offsets
+                            // Rebuild connections and borders with position offsets,
+                            // but only for the edges/nodes actually touched by the
+                            // drag (Phase 4(B)). Everything else keeps the buffers
+                            // built at the start of the drag, untouched.
                             if let Some(doc) = document.as_ref() {
                                 let mut offsets: HashMap<String, (f32, f32)> = HashMap::new();
                                 let delta = (total_delta.x, total_delta.y);
@@ -653,9 +656,24 @@ impl Application {
                                         }
                                     }
                                 }
+                                // Borders are keyed by node_id: affected is exactly
+                                // the set of nodes whose position changed this frame.
+                                let affected_nodes: std::collections::HashSet<String> =
+                                    offsets.keys().cloned().collect();
+                                // Connections are keyed by (from, to, edge_type). An
+                                // edge is affected iff either endpoint is in the
+                                // offsets map.
+                                let affected_edges: std::collections::HashSet<(String, String, String)> =
+                                    doc.mindmap.edges.iter()
+                                        .filter(|e| {
+                                            affected_nodes.contains(&e.from_id)
+                                                || affected_nodes.contains(&e.to_id)
+                                        })
+                                        .map(|e| (e.from_id.clone(), e.to_id.clone(), e.edge_type.clone()))
+                                        .collect();
                                 let scene = doc.build_scene_with_offsets(&offsets);
-                                renderer.rebuild_connection_buffers(&scene.connection_elements);
-                                renderer.rebuild_border_buffers(&scene.border_elements);
+                                renderer.update_connection_buffers(&scene.connection_elements, &affected_edges);
+                                renderer.update_border_buffers(&scene.border_elements, &affected_nodes);
                             }
 
                             *pending_delta = Vec2::ZERO;

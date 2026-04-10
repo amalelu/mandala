@@ -34,6 +34,15 @@ pub struct BorderElement {
 
 /// A connection (edge) between two nodes, with pre-computed glyph positions.
 pub struct ConnectionElement {
+    /// Stable identity of the underlying edge: `(from_id, to_id, edge_type)`.
+    /// Edges have no intrinsic ID in the file format, so this tuple plays
+    /// the role. Used by the renderer to key the incremental rebuild
+    /// path (Phase 4(B)) — a drag frame only re-builds entries whose
+    /// endpoint is in the `offsets` map, and the key is how each
+    /// `ConnectionElement` matches back to its stored buffers.
+    pub from_id: String,
+    pub to_id: String,
+    pub edge_type: String,
     /// Sampled glyph positions along the path (canvas coordinates).
     pub glyph_positions: Vec<(f32, f32)>,
     /// The body glyph string repeated at each position.
@@ -48,6 +57,15 @@ pub struct ConnectionElement {
     pub font_size_pt: f32,
     /// Color as #RRGGBB hex string.
     pub color: String,
+}
+
+impl ConnectionElement {
+    /// Stable composite key used by the renderer to identify which stored
+    /// buffers correspond to this element. Matches the `(from, to, type)`
+    /// triple used throughout the codebase to reference edges.
+    pub fn key(&self) -> (String, String, String) {
+        (self.from_id.clone(), self.to_id.clone(), self.edge_type.clone())
+    }
 }
 
 /// Placeholder for future portal rendering (M3).
@@ -257,6 +275,9 @@ pub fn build_scene_with_offsets_and_selection(
         }
 
         connection_elements.push(ConnectionElement {
+            from_id: edge.from_id.clone(),
+            to_id: edge.to_id.clone(),
+            edge_type: edge.edge_type.clone(),
             glyph_positions,
             body_glyph: config.body.clone(),
             cap_start,
@@ -648,5 +669,66 @@ mod tests {
             .any(|c| !c.glyph_positions.is_empty());
         assert!(any_with_glyphs,
             "at least one connection should have un-clipped glyphs");
+    }
+
+    #[test]
+    fn test_connection_element_exposes_edge_identifiers() {
+        // Phase 4(B): ConnectionElement must carry the stable
+        // `(from_id, to_id, edge_type)` triple so the renderer can key
+        // its incremental rebuild path off it. Verify the scene builder
+        // populates these fields and `.key()` returns the expected
+        // tuple.
+        let map = synthetic_map(
+            vec![
+                synthetic_node("source", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("target", 400.0, 0.0, 40.0, 40.0, false),
+            ],
+            vec![synthetic_edge("source", "target", 2, 4)],
+        );
+        let scene = build_scene(&map);
+        assert_eq!(scene.connection_elements.len(), 1);
+        let conn = &scene.connection_elements[0];
+        assert_eq!(conn.from_id, "source");
+        assert_eq!(conn.to_id, "target");
+        assert_eq!(conn.edge_type, "cross_link");
+        assert_eq!(
+            conn.key(),
+            ("source".to_string(), "target".to_string(), "cross_link".to_string())
+        );
+    }
+
+    #[test]
+    fn test_connection_element_key_disambiguates_parallel_edges() {
+        // Two edges between the same pair but with different types
+        // should get distinct keys so the renderer tracks their buffers
+        // separately.
+        let a = synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false);
+        let b = synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false);
+        let mut parent_child = synthetic_edge("a", "b", 2, 4);
+        parent_child.edge_type = "parent_child".into();
+        let cross_link = synthetic_edge("a", "b", 2, 4);
+        let map = synthetic_map(vec![a, b], vec![parent_child, cross_link]);
+        let scene = build_scene(&map);
+        assert_eq!(scene.connection_elements.len(), 2);
+        let keys: std::collections::HashSet<_> = scene
+            .connection_elements
+            .iter()
+            .map(|c| c.key())
+            .collect();
+        assert_eq!(keys.len(), 2, "parallel edges should have distinct keys");
+    }
+
+    #[test]
+    fn test_border_element_exposes_node_id() {
+        // BorderElement has always had node_id but Phase 4(B) now uses
+        // it as the renderer's HashMap key, so lock the field in with
+        // an explicit assertion.
+        let map = synthetic_map(
+            vec![synthetic_node("the_node", 0.0, 0.0, 40.0, 40.0, true)],
+            vec![],
+        );
+        let scene = build_scene(&map);
+        assert_eq!(scene.border_elements.len(), 1);
+        assert_eq!(scene.border_elements[0].node_id, "the_node");
     }
 }
