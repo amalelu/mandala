@@ -7,7 +7,7 @@ use baumhard::mindmap::custom_mutation::{
     CustomMutation, MutationBehavior, TargetScope, Trigger,
     PlatformContext, apply_mutations_to_element,
 };
-use baumhard::mindmap::model::{MindMap, MindNode, Position};
+use baumhard::mindmap::model::{MindEdge, MindMap, MindNode, Position};
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
 use baumhard::mindmap::tree_builder::{self, MindMapTree};
@@ -48,6 +48,35 @@ impl SelectionState {
     }
 }
 
+/// Return value of `MindMapDocument::apply_reparent`. Contains both the
+/// per-node parent/index entries and a full snapshot of the edges Vec so that
+/// edge rewrites can be reversed wholesale on undo.
+#[derive(Clone, Debug)]
+pub struct ReparentUndoData {
+    pub entries: Vec<(String, Option<String>, i32)>,
+    pub old_edges: Vec<MindEdge>,
+}
+
+/// Build a default-styled parent_child edge from `from_id` to `to_id`.
+/// Used when reparenting a node that has no prior parent_child edge (e.g.
+/// a formerly-root node being attached to a parent).
+fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
+    MindEdge {
+        from_id: from_id.to_string(),
+        to_id: to_id.to_string(),
+        edge_type: "parent_child".to_string(),
+        color: "#888888".to_string(),
+        width: 4,
+        line_style: 0,
+        visible: true,
+        label: None,
+        anchor_from: 0,
+        anchor_to: 0,
+        control_points: Vec::new(),
+        glyph_connection: None,
+    }
+}
+
 /// An undoable action that can be reversed.
 #[derive(Clone, Debug)]
 pub enum UndoAction {
@@ -55,8 +84,13 @@ pub enum UndoAction {
     MoveNodes { original_positions: Vec<(String, Position)> },
     /// Stores full node snapshots before a custom mutation was applied.
     CustomMutation { node_snapshots: Vec<(String, MindNode)> },
-    /// Stores original parent_id and index for each reparented node.
-    ReparentNodes { entries: Vec<(String, Option<String>, i32)> },
+    /// Stores original parent_id and index for each reparented node, plus a
+    /// full snapshot of `mindmap.edges` from before the reparent so that
+    /// parent_child edge rewrites can be reversed on undo.
+    ReparentNodes {
+        entries: Vec<(String, Option<String>, i32)>,
+        old_edges: Vec<MindEdge>,
+    },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -195,15 +229,24 @@ impl MindMapDocument {
     /// nodes whose ID doesn't exist in the map.
     ///
     /// Positions are absolute world-space coordinates, so no position recalculation
-    /// is needed — only `parent_id` and `index` change.
+    /// is needed — only `parent_id`, `index`, and `parent_child` edges change.
     ///
-    /// Returns undo data: `(node_id, old_parent_id, old_index)` for each successfully
-    /// reparented node.
+    /// Returns `ReparentUndoData` containing:
+    /// - `entries`: `(node_id, old_parent_id, old_index)` for each successfully
+    ///   reparented node.
+    /// - `old_edges`: A full snapshot of `mindmap.edges` from before the operation,
+    ///   so edge mutations can be reversed on undo.
+    ///
+    /// If no nodes were reparented (all rejected), `entries` is empty and the
+    /// caller should not push any undo action.
     pub fn apply_reparent(
         &mut self,
         node_ids: &[String],
         new_parent_id: Option<&str>,
-    ) -> Vec<(String, Option<String>, i32)> {
+    ) -> ReparentUndoData {
+        // Snapshot edges before any mutation so undo can restore them wholesale.
+        let old_edges = self.mindmap.edges.clone();
+
         // Compute the starting index: one greater than the current max sibling index
         // under the new parent (or 0 if no siblings).
         let mut next_index: i32 = match new_parent_id {
@@ -225,7 +268,7 @@ impl MindMapDocument {
             }
         };
 
-        let mut undo_data: Vec<(String, Option<String>, i32)> = Vec::new();
+        let mut entries: Vec<(String, Option<String>, i32)> = Vec::new();
         for source_id in node_ids {
             // Skip nonexistent nodes
             if !self.mindmap.nodes.contains_key(source_id) {
@@ -245,12 +288,45 @@ impl MindMapDocument {
                 Some(n) => n,
                 None => continue,
             };
-            undo_data.push((source_id.clone(), node.parent_id.clone(), node.index));
+            entries.push((source_id.clone(), node.parent_id.clone(), node.index));
             node.parent_id = new_parent_id.map(|s| s.to_string());
             node.index = next_index;
             next_index += 1;
+
+            // Update parent_child edges for this source: find any existing
+            // parent_child edge where to_id == source_id (the edge coming from
+            // the old parent) and either update its from_id or remove it.
+            // If no such edge exists and we're reparenting to a new parent,
+            // create a new default-styled parent_child edge.
+            let old_edge_pos = self.mindmap.edges.iter().position(|e| {
+                e.edge_type == "parent_child" && e.to_id == *source_id
+            });
+            match (old_edge_pos, new_parent_id) {
+                (Some(idx), Some(new_parent)) => {
+                    // Repoint the existing edge to the new parent, preserving
+                    // its styling (color, anchors, control points, etc.)
+                    self.mindmap.edges[idx].from_id = new_parent.to_string();
+                    // Clear control points — the old curve was computed for
+                    // the old parent's position and would look wrong.
+                    self.mindmap.edges[idx].control_points.clear();
+                }
+                (Some(idx), None) => {
+                    // Promoted to root — remove the old parent_child edge
+                    self.mindmap.edges.remove(idx);
+                }
+                (None, Some(new_parent)) => {
+                    // No prior edge (e.g. a prior root now being parented).
+                    // Create a default parent_child edge.
+                    self.mindmap.edges.push(default_parent_child_edge(
+                        new_parent, source_id,
+                    ));
+                }
+                (None, None) => {
+                    // Root to root — no edge changes needed.
+                }
+            }
         }
-        undo_data
+        ReparentUndoData { entries, old_edges }
     }
 
     /// Undo the last action. Returns true if something was undone.
@@ -269,13 +345,17 @@ impl MindMapDocument {
                         self.mindmap.nodes.insert(id, snapshot);
                     }
                 }
-                UndoAction::ReparentNodes { entries } => {
+                UndoAction::ReparentNodes { entries, old_edges } => {
                     for (id, old_parent, old_index) in entries {
                         if let Some(node) = self.mindmap.nodes.get_mut(&id) {
                             node.parent_id = old_parent;
                             node.index = old_index;
                         }
                     }
+                    // Restore the full edges snapshot — this reverses any
+                    // parent_child edge additions, removals, and from_id
+                    // repointing that apply_reparent performed.
+                    self.mindmap.edges = old_edges;
                 }
             }
             true
@@ -1290,12 +1370,63 @@ mod tests {
             .iter().map(|n| n.index).max().map(|m| m + 1).unwrap_or(0);
 
         let undo = doc.apply_reparent(&[source.clone()], Some(&new_parent));
-        assert_eq!(undo.len(), 1, "should have one undo entry");
+        assert_eq!(undo.entries.len(), 1, "should have one undo entry");
 
         let node = doc.mindmap.nodes.get(&source).unwrap();
         assert_eq!(node.parent_id.as_deref(), Some(new_parent.as_str()),
             "parent_id should now point to new parent");
         assert_eq!(node.index, expected_index, "index should be max+1 of new siblings");
+    }
+
+    #[test]
+    fn test_apply_reparent_updates_parent_child_edges() {
+        let mut doc = load_test_doc();
+        let (new_parent, source) = find_reparent_pair(&doc);
+
+        // Precondition: there should be a parent_child edge leading to source
+        // (the testament map wires every hierarchy link as an explicit edge).
+        let had_old_edge = doc.mindmap.edges.iter().any(|e|
+            e.edge_type == "parent_child" && e.to_id == source
+        );
+
+        doc.apply_reparent(&[source.clone()], Some(&new_parent));
+
+        // After reparent: any parent_child edge pointing at source must have
+        // from_id == new_parent. There should be at least one such edge if
+        // there was one before (or if we're attaching a formerly-root node).
+        let parent_edges: Vec<&MindEdge> = doc.mindmap.edges.iter()
+            .filter(|e| e.edge_type == "parent_child" && e.to_id == source)
+            .collect();
+        if had_old_edge {
+            assert_eq!(parent_edges.len(), 1,
+                "should still have exactly one parent_child edge to source");
+            assert_eq!(parent_edges[0].from_id, new_parent,
+                "parent_child edge from_id should be updated to new parent");
+        }
+    }
+
+    #[test]
+    fn test_apply_reparent_to_root_removes_edge() {
+        let mut doc = load_test_doc();
+        let source = doc.mindmap.nodes.values()
+            .find(|n| n.parent_id.is_some())
+            .map(|n| n.id.clone())
+            .expect("testament should have at least one non-root node");
+
+        // Precondition: there should be an existing parent_child edge to source.
+        let had_old_edge = doc.mindmap.edges.iter().any(|e|
+            e.edge_type == "parent_child" && e.to_id == source
+        );
+        assert!(had_old_edge, "testament non-root node should have an incoming parent_child edge");
+
+        doc.apply_reparent(&[source.clone()], None);
+
+        // The parent_child edge should have been removed (promoted to root).
+        let still_has_edge = doc.mindmap.edges.iter().any(|e|
+            e.edge_type == "parent_child" && e.to_id == source
+        );
+        assert!(!still_has_edge,
+            "parent_child edge to source should be removed when promoted to root");
     }
 
     #[test]
@@ -1317,7 +1448,7 @@ mod tests {
 
         let sources = vec![first_source.clone(), second_source.clone()];
         let undo = doc.apply_reparent(&sources, Some(&new_parent));
-        assert_eq!(undo.len(), 2, "both sources should be reparented");
+        assert_eq!(undo.entries.len(), 2, "both sources should be reparented");
 
         let n1 = doc.mindmap.nodes.get(&first_source).unwrap();
         let n2 = doc.mindmap.nodes.get(&second_source).unwrap();
@@ -1341,7 +1472,7 @@ mod tests {
             .iter().map(|n| n.index).max().map(|m| m + 1).unwrap_or(0);
 
         let undo = doc.apply_reparent(&[source.clone()], None);
-        assert_eq!(undo.len(), 1);
+        assert_eq!(undo.entries.len(), 1);
 
         let node = doc.mindmap.nodes.get(&source).unwrap();
         assert_eq!(node.parent_id, None, "should be promoted to root");
@@ -1372,7 +1503,7 @@ mod tests {
 
         // Try to reparent grandparent under grandchild — should be silently rejected
         let undo = doc.apply_reparent(&[grandparent.clone()], Some(&grandchild));
-        assert!(undo.is_empty(), "cycle should be rejected, no entries in undo data");
+        assert!(undo.entries.is_empty(), "cycle should be rejected, no entries in undo data");
 
         // State should be unchanged
         let gp = doc.mindmap.nodes.get(&grandparent).unwrap();
@@ -1388,19 +1519,23 @@ mod tests {
 
         // Try to reparent a node under itself — should be silently rejected
         let undo = doc.apply_reparent(&[source.clone()], Some(&source));
-        assert!(undo.is_empty(), "self-reparent should be rejected");
+        assert!(undo.entries.is_empty(), "self-reparent should be rejected");
         assert_eq!(doc.mindmap.nodes.get(&source).unwrap().parent_id, orig_parent);
     }
 
     #[test]
-    fn test_reparent_undo_restores_parent_and_index() {
+    fn test_reparent_undo_restores_parent_index_and_edges() {
         let mut doc = load_test_doc();
         let (new_parent, source) = find_reparent_pair(&doc);
         let orig_parent = doc.mindmap.nodes.get(&source).unwrap().parent_id.clone();
         let orig_index = doc.mindmap.nodes.get(&source).unwrap().index;
+        let orig_edges_snapshot = doc.mindmap.edges.clone();
 
         let undo_data = doc.apply_reparent(&[source.clone()], Some(&new_parent));
-        doc.undo_stack.push(UndoAction::ReparentNodes { entries: undo_data });
+        doc.undo_stack.push(UndoAction::ReparentNodes {
+            entries: undo_data.entries,
+            old_edges: undo_data.old_edges,
+        });
 
         // Precondition: actually moved
         assert_eq!(
@@ -1413,5 +1548,14 @@ mod tests {
         let restored = doc.mindmap.nodes.get(&source).unwrap();
         assert_eq!(restored.parent_id, orig_parent);
         assert_eq!(restored.index, orig_index);
+
+        // Edges should also be restored bit-for-bit
+        assert_eq!(doc.mindmap.edges.len(), orig_edges_snapshot.len(),
+            "edges Vec length should be restored");
+        for (orig, restored) in orig_edges_snapshot.iter().zip(doc.mindmap.edges.iter()) {
+            assert_eq!(orig.from_id, restored.from_id);
+            assert_eq!(orig.to_id, restored.to_id);
+            assert_eq!(orig.edge_type, restored.edge_type);
+        }
     }
 }

@@ -803,9 +803,12 @@ fn handle_reparent_target_click(
     if let Some(doc) = document.as_mut() {
         // target = Some(id) → reparent under that node as last child
         // target = None     → promote sources to root (click on empty canvas)
-        let undo_entries = doc.apply_reparent(&sources, target.as_deref());
-        if !undo_entries.is_empty() {
-            doc.undo_stack.push(UndoAction::ReparentNodes { entries: undo_entries });
+        let undo_data = doc.apply_reparent(&sources, target.as_deref());
+        if !undo_data.entries.is_empty() {
+            doc.undo_stack.push(UndoAction::ReparentNodes {
+                entries: undo_data.entries,
+                old_edges: undo_data.old_edges,
+            });
             doc.dirty = true;
         }
         // Full rebuild: tree structure changed even if a no-op, the mode exit
