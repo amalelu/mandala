@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::mindmap::border::BorderStyle;
 use crate::mindmap::connection;
 use crate::mindmap::model::{GlyphConnectionConfig, MindMap, TextRun};
@@ -54,6 +55,14 @@ pub struct PortalElement {}
 /// Builds a RenderScene from a MindMap, determining which nodes and borders
 /// are visible (accounting for fold state) and extracting their layout data.
 pub fn build_scene(map: &MindMap) -> RenderScene {
+    build_scene_with_offsets(map, &HashMap::new())
+}
+
+/// Builds a RenderScene with position offsets applied to specific nodes.
+/// Used during drag to update connections and borders in real-time without
+/// modifying the MindMap model. Each entry in `offsets` maps a node ID to
+/// a (dx, dy) delta that is added to the node's model position.
+pub fn build_scene_with_offsets(map: &MindMap, offsets: &HashMap<String, (f32, f32)>) -> RenderScene {
     let mut text_elements = Vec::new();
     let mut border_elements = Vec::new();
 
@@ -62,13 +71,17 @@ pub fn build_scene(map: &MindMap) -> RenderScene {
             continue;
         }
 
+        let (ox, oy) = offsets.get(&node.id).copied().unwrap_or((0.0, 0.0));
+        let pos_x = node.position.x as f32 + ox;
+        let pos_y = node.position.y as f32 + oy;
+
         // Text element (skip empty text nodes)
         if !node.text.is_empty() {
             text_elements.push(TextElement {
                 node_id: node.id.clone(),
                 text: node.text.clone(),
                 text_runs: node.text_runs.clone(),
-                position: (node.position.x as f32, node.position.y as f32),
+                position: (pos_x, pos_y),
                 size: (node.size.width as f32, node.size.height as f32),
             });
         }
@@ -79,7 +92,7 @@ pub fn build_scene(map: &MindMap) -> RenderScene {
             border_elements.push(BorderElement {
                 node_id: node.id.clone(),
                 border_style,
-                node_position: (node.position.x as f32, node.position.y as f32),
+                node_position: (pos_x, pos_y),
                 node_size: (node.size.width as f32, node.size.height as f32),
             });
         }
@@ -114,9 +127,12 @@ pub fn build_scene(map: &MindMap) -> RenderScene {
         let approx_glyph_width = font_size * 0.6;
         let effective_spacing = approx_glyph_width + config.spacing;
 
-        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let (fox, foy) = offsets.get(&from_node.id).copied().unwrap_or((0.0, 0.0));
+        let (tox, toy) = offsets.get(&to_node.id).copied().unwrap_or((0.0, 0.0));
+
+        let from_pos = Vec2::new(from_node.position.x as f32 + fox, from_node.position.y as f32 + foy);
         let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
-        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32 + tox, to_node.position.y as f32 + toy);
         let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
 
         let path = connection::build_connection_path(

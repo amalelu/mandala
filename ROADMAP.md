@@ -89,11 +89,18 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
                        |                          |
                        |                          +--> M5 (Move/Reparent)
                        |                          |      via position mutations cascading through tree
+                       |                          |      includes M5.1 (Live Connections During Drag)
                        |                          |
                        |                          +--> M7 (Text Edit)
-                       |                                 via GlyphArea text mutations
+                       |                          |      via GlyphArea text mutations
+                       |                          |
+                       |                          +--> M9 (Custom Mutations)
+                       |                                 user-defined mutations with triggers
+                       |                                 toggle + persistent behaviors
+                       |                                 platform-context-aware dispatch
                        |
                        +--> M8 (Save/File) [can start any time]
+                              M8 enables M9 persistence (Ctrl+S saves custom mutation effects)
 ```
 
 ---
@@ -299,6 +306,22 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
 
 **Verify**: Nodes can be reparented by dragging, undo restores previous state
 
+### Session 5.1: Live Connections & Borders During Drag
+
+**What**: Connections and borders update in real-time during node drag instead of only on mouse release.
+
+- [ ] Add `build_scene_with_offsets(map, offsets: &HashMap<&str, (f32, f32)>)` to scene_builder — applies position deltas when reading node positions for connections and borders
+- [ ] Refactor `build_scene()` to call `build_scene_with_offsets` with an empty map
+- [ ] Add `build_scene_with_offsets()` to MindMapDocument
+- [ ] In `app.rs` `AboutToWait` / `MovingNode` branch: compute offset map from `node_ids` + `total_delta`, rebuild connection + border buffers each frame during drag
+
+**Key files**:
+- `lib/baumhard/src/mindmap/scene_builder.rs` — `build_scene_with_offsets()`
+- `src/application/document.rs` — forwarding method
+- `src/application/app.rs` — wire into drag frame loop
+
+**Verify**: Drag a node — connections and borders follow smoothly in real-time
+
 ---
 
 ## Milestone 6: Connection Editing
@@ -410,6 +433,71 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
 - [ ] File picker for opening existing maps (native: `rfd` crate, WASM: file input)
 
 **Verify**: Changes persist across app restarts, new maps can be created
+
+---
+
+## Milestone 9: Custom Mutations
+
+**Goal**: Users can define named, reusable mutations and attach them to nodes with configurable triggers. Mutations cascade through the tree using the existing Baumhard mutation engine (tree walker, channels, predicates, macros). Both persistent (model-syncing, saveable) and toggle (visual-only, reversible) behaviors are supported. Triggers are platform-context-aware (Desktop/Web/Touch).
+
+### Session 9A: Data model and serialization
+
+**What**: Define all custom mutation types, add fields to MindMap/MindNode, ensure backward-compatible JSON loading.
+
+- [ ] Create `lib/baumhard/src/mindmap/custom_mutation.rs` with `CustomMutation`, `TargetScope`, `MutationBehavior`, `Trigger`, `TriggerBinding`, `PlatformContext`
+- [ ] Add `pub mod custom_mutation` to `lib/baumhard/src/mindmap/mod.rs`
+- [ ] Add `custom_mutations: Vec<CustomMutation>` to `MindMap` (serde default, skip_serializing_if empty)
+- [ ] Add `trigger_bindings: Vec<TriggerBinding>` and `inline_mutations: Vec<CustomMutation>` to `MindNode` (serde default)
+- [ ] Add `always_match: bool` field to `Predicate` with serde default false, update `test()` to short-circuit
+- [ ] Round-trip serialization tests, backward compatibility tests
+
+**Key types**:
+- `CustomMutation` — id, name, `Vec<Mutation>`, `TargetScope`, `MutationBehavior`, optional `Predicate`
+- `MutationBehavior` — `Persistent` (default, syncs to model) | `Toggle` (visual-only, reversible)
+- `TargetScope` — `SelfOnly` | `Children` | `Descendants` | `SelfAndDescendants` | `Parent` | `Siblings`
+- `Trigger` — `OnClick` | `OnHover` | `OnKey(String)` | `OnLink(String)`
+- `TriggerBinding` — trigger + mutation_id + optional `Vec<PlatformContext>` filter
+- `PlatformContext` — `Desktop` | `Web` | `Touch`
+
+**Verify**: `cargo test` passes, existing testament map loads unchanged
+
+### Session 9B: Mutator tree builder and application
+
+**What**: Build MutatorTrees from CustomMutation definitions, apply via tree walker, sync to model.
+
+- [ ] Implement `build_mutator_tree(custom) -> MutatorTree<GfxMutator>` for each TargetScope
+- [ ] Add `mutation_registry: HashMap<String, CustomMutation>` to MindMapDocument
+- [ ] Implement `build_mutation_registry()` — merges global + map + inline mutations
+- [ ] Implement `find_triggered_mutations(node_id, trigger) -> Vec<&CustomMutation>`
+- [ ] Implement `apply_custom_mutation()` — applies to tree, syncs to model for Persistent, tracks active toggles for Toggle
+- [ ] Add `UndoAction::CustomMutation` variant with node snapshots
+- [ ] Tests for each TargetScope, registry build, trigger matching, undo
+
+**Verify**: `cargo test` passes, custom mutations apply correctly to tree and model
+
+### Session 9C: Event loop trigger dispatch
+
+**What**: Wire trigger dispatch into the app event loop for click, hover, and keyboard.
+
+- [ ] Add `hovered_node: Option<String>` and `platform_context: PlatformContext` to event loop state
+- [ ] In `handle_click()`: after selection update, fire OnClick triggers for clicked node
+- [ ] In `CursorMoved` (DragState::None): hit test for hover, fire OnHover on node enter, reverse toggle on leave
+- [ ] In `KeyboardInput`: check selected nodes for OnKey triggers matching pressed key
+- [ ] Platform context filtering: skip triggers whose `contexts` list doesn't include current platform
+- [ ] OnLink trigger: data model ready, dispatch deferred to M7 (text editing)
+
+**Verify**: `cargo test` passes, triggers fire visually with demo map
+
+### Session 9D: Global config and demo map
+
+**What**: Load global custom mutations from config file, create demo mindmap.
+
+- [ ] Load global mutations from `~/.mandala/custom_mutations.json` at startup
+- [ ] Merge into registry with lowest precedence (global < map < inline)
+- [ ] Create `maps/custom_mutations_demo.mindmap.json` with example triggers and mutations
+- [ ] WASM platform detection via `matchMedia("(hover: hover)")` for Touch vs Web context
+
+**Verify**: `cargo test` passes, demo map demonstrates click/hover/key triggers
 
 ---
 

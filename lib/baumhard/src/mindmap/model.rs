@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use crate::mindmap::custom_mutation::{CustomMutation, TriggerBinding};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MindMap {
@@ -8,6 +9,9 @@ pub struct MindMap {
     pub canvas: Canvas,
     pub nodes: HashMap<String, MindNode>,
     pub edges: Vec<MindEdge>,
+    /// Map-level custom mutation definitions, available to all nodes in this map.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_mutations: Vec<CustomMutation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +39,12 @@ pub struct MindNode {
     pub folded: bool,
     pub notes: String,
     pub color_schema: Option<ColorSchema>,
+    /// Trigger bindings attached to this specific node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_bindings: Vec<TriggerBinding>,
+    /// Inline custom mutations defined on this node (not shared with other nodes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_mutations: Vec<CustomMutation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

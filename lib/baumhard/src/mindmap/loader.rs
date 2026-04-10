@@ -189,6 +189,20 @@ mod tests {
     }
 
     #[test]
+    fn test_backward_compat_no_custom_mutations() {
+        // Existing maps without custom_mutations/trigger_bindings/inline_mutations
+        // should load with empty defaults
+        let path = test_map_path();
+        let map = load_from_file(&path).unwrap();
+
+        assert!(map.custom_mutations.is_empty(), "Existing map should have no custom_mutations");
+
+        let node = map.nodes.get("348068464").unwrap();
+        assert!(node.trigger_bindings.is_empty(), "Existing node should have no trigger_bindings");
+        assert!(node.inline_mutations.is_empty(), "Existing node should have no inline_mutations");
+    }
+
+    #[test]
     fn test_is_hidden_by_fold() {
         let path = test_map_path();
         let map = load_from_file(&path).unwrap();

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -380,7 +381,7 @@ impl Application {
                 }
                 Event::AboutToWait => {
                     // Flush any accumulated drag delta (once per frame, not per mouse event)
-                    if let DragState::MovingNode { ref node_ids, ref mut pending_delta, individual, .. } = drag_state {
+                    if let DragState::MovingNode { ref node_ids, ref mut pending_delta, ref total_delta, individual, .. } = drag_state {
                         if *pending_delta != Vec2::ZERO {
                             if let Some(tree) = mindmap_tree.as_mut() {
                                 for nid in node_ids {
@@ -388,6 +389,24 @@ impl Application {
                                 }
                                 renderer.rebuild_buffers_from_tree(&tree.tree);
                             }
+
+                            // Rebuild connections and borders with position offsets
+                            if let Some(doc) = document.as_ref() {
+                                let mut offsets: HashMap<String, (f32, f32)> = HashMap::new();
+                                let delta = (total_delta.x, total_delta.y);
+                                for nid in node_ids {
+                                    offsets.insert(nid.clone(), delta);
+                                    if !individual {
+                                        for desc_id in doc.mindmap.all_descendants(nid) {
+                                            offsets.insert(desc_id, delta);
+                                        }
+                                    }
+                                }
+                                let scene = doc.build_scene_with_offsets(&offsets);
+                                renderer.rebuild_connection_buffers(&scene.connection_elements);
+                                renderer.rebuild_border_buffers(&scene.border_elements);
+                            }
+
                             *pending_delta = Vec2::ZERO;
                         }
                     }

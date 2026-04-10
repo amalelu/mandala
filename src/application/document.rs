@@ -1,8 +1,13 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use glam::Vec2;
 use log::{error, info};
 use baumhard::core::primitives::Range;
-use baumhard::mindmap::model::{MindMap, Position};
+use baumhard::mindmap::custom_mutation::{
+    CustomMutation, MutationBehavior, TargetScope, Trigger,
+    PlatformContext, apply_mutations_to_element,
+};
+use baumhard::mindmap::model::{MindMap, MindNode, Position};
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
 use baumhard::mindmap::tree_builder::{self, MindMapTree};
@@ -41,6 +46,8 @@ impl SelectionState {
 pub enum UndoAction {
     /// Stores original positions of moved nodes for restoration.
     MoveNodes { original_positions: Vec<(String, Position)> },
+    /// Stores full node snapshots before a custom mutation was applied.
+    CustomMutation { node_snapshots: Vec<(String, MindNode)> },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -50,6 +57,10 @@ pub struct MindMapDocument {
     pub dirty: bool,
     pub selection: SelectionState,
     pub undo_stack: Vec<UndoAction>,
+    /// Registry of all available custom mutations (global + map + inline, keyed by id).
+    pub mutation_registry: HashMap<String, CustomMutation>,
+    /// Tracks active toggle mutations per node: (node_id, mutation_id).
+    pub active_toggles: HashSet<(String, String)>,
 }
 
 impl MindMapDocument {
@@ -58,13 +69,17 @@ impl MindMapDocument {
         match loader::load_from_file(Path::new(path)) {
             Ok(map) => {
                 info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
-                Ok(MindMapDocument {
+                let mut doc = MindMapDocument {
                     mindmap: map,
                     file_path: Some(path.to_string()),
                     dirty: false,
                     selection: SelectionState::None,
                     undo_stack: Vec::new(),
-                })
+                    mutation_registry: HashMap::new(),
+                    active_toggles: HashSet::new(),
+                };
+                doc.build_mutation_registry();
+                Ok(doc)
             }
             Err(e) => {
                 let msg = format!("Failed to load mindmap '{}': {}", path, e);
@@ -84,6 +99,12 @@ impl MindMapDocument {
     /// Used for connections and borders (flat pipeline).
     pub fn build_scene(&self) -> RenderScene {
         scene_builder::build_scene(&self.mindmap)
+    }
+
+    /// Build a RenderScene with position offsets applied to specific nodes.
+    /// Used during drag to update connections and borders in real-time.
+    pub fn build_scene_with_offsets(&self, offsets: &HashMap<String, (f32, f32)>) -> RenderScene {
+        scene_builder::build_scene_with_offsets(&self.mindmap, offsets)
     }
 
     /// Apply a position delta to a node and all its descendants in the MindMap model.
@@ -168,10 +189,242 @@ impl MindMapDocument {
                         }
                     }
                 }
+                UndoAction::CustomMutation { node_snapshots } => {
+                    for (id, snapshot) in node_snapshots {
+                        self.mindmap.nodes.insert(id, snapshot);
+                    }
+                }
             }
             true
         } else {
             false
+        }
+    }
+
+    /// Build the mutation registry from map-level and inline node mutations.
+    /// Inline mutations override map-level mutations with the same id.
+    pub fn build_mutation_registry(&mut self) {
+        self.mutation_registry.clear();
+        // Map-level mutations (lower precedence)
+        for cm in &self.mindmap.custom_mutations {
+            self.mutation_registry.insert(cm.id.clone(), cm.clone());
+        }
+        // Inline node mutations (higher precedence — override map-level)
+        for node in self.mindmap.nodes.values() {
+            for cm in &node.inline_mutations {
+                self.mutation_registry.insert(cm.id.clone(), cm.clone());
+            }
+        }
+    }
+
+    /// Find custom mutations triggered by a given trigger on a specific node.
+    /// Checks the node's trigger_bindings and filters by platform context.
+    pub fn find_triggered_mutations(
+        &self,
+        node_id: &str,
+        trigger: &Trigger,
+        platform: &PlatformContext,
+    ) -> Vec<CustomMutation> {
+        let node = match self.mindmap.nodes.get(node_id) {
+            Some(n) => n,
+            None => return vec![],
+        };
+        let mut results = Vec::new();
+        for binding in &node.trigger_bindings {
+            if &binding.trigger != trigger {
+                continue;
+            }
+            // Check platform context filter
+            if !binding.contexts.is_empty() && !binding.contexts.contains(platform) {
+                continue;
+            }
+            if let Some(cm) = self.mutation_registry.get(&binding.mutation_id) {
+                results.push(cm.clone());
+            }
+        }
+        results
+    }
+
+    /// Apply a custom mutation to the tree and optionally sync to the model.
+    /// For Persistent mutations, snapshots affected nodes for undo and sets dirty flag.
+    /// For Toggle mutations, tracks active state without model sync.
+    pub fn apply_custom_mutation(
+        &mut self,
+        custom: &CustomMutation,
+        node_id: &str,
+        tree: &mut MindMapTree,
+    ) {
+        // For toggle behavior, check if already active and reverse if so
+        if custom.behavior == MutationBehavior::Toggle {
+            let key = (node_id.to_string(), custom.id.clone());
+            if self.active_toggles.contains(&key) {
+                // Reverse: remove toggle, rebuild affected nodes from model
+                self.active_toggles.remove(&key);
+                return;
+            }
+            self.active_toggles.insert(key);
+            // Toggle mutations apply to tree only (visual), no model sync
+            self.apply_to_tree(custom, node_id, tree);
+            return;
+        }
+
+        // Persistent: snapshot, apply to tree, sync to model
+        let affected_ids = self.collect_affected_node_ids(node_id, &custom.target_scope);
+        let snapshots: Vec<(String, MindNode)> = affected_ids.iter()
+            .filter_map(|id| {
+                self.mindmap.nodes.get(id).map(|n| (id.clone(), n.clone()))
+            })
+            .collect();
+
+        self.apply_to_tree(custom, node_id, tree);
+
+        // Sync tree state back to model for affected nodes
+        for id in &affected_ids {
+            self.sync_node_from_tree(id, tree);
+        }
+
+        if !snapshots.is_empty() {
+            self.undo_stack.push(UndoAction::CustomMutation { node_snapshots: snapshots });
+            self.dirty = true;
+        }
+    }
+
+    /// Apply mutations to the Baumhard tree based on target scope.
+    fn apply_to_tree(
+        &self,
+        custom: &CustomMutation,
+        node_id: &str,
+        tree: &mut MindMapTree,
+    ) {
+        match custom.target_scope {
+            TargetScope::SelfOnly => {
+                if let Some(&nid) = tree.node_map.get(node_id) {
+                    if let Some(node) = tree.tree.arena.get_mut(nid) {
+                        apply_mutations_to_element(&custom.mutations, node.get_mut());
+                    }
+                }
+            }
+            TargetScope::Children => {
+                let child_ids: Vec<String> = self.mindmap.children_of(node_id)
+                    .iter().map(|n| n.id.clone()).collect();
+                for cid in &child_ids {
+                    if let Some(&nid) = tree.node_map.get(cid.as_str()) {
+                        if let Some(node) = tree.tree.arena.get_mut(nid) {
+                            apply_mutations_to_element(&custom.mutations, node.get_mut());
+                        }
+                    }
+                }
+            }
+            TargetScope::Descendants => {
+                let desc_ids = self.mindmap.all_descendants(node_id);
+                for did in &desc_ids {
+                    if let Some(&nid) = tree.node_map.get(did.as_str()) {
+                        if let Some(node) = tree.tree.arena.get_mut(nid) {
+                            apply_mutations_to_element(&custom.mutations, node.get_mut());
+                        }
+                    }
+                }
+            }
+            TargetScope::SelfAndDescendants => {
+                // Self
+                if let Some(&nid) = tree.node_map.get(node_id) {
+                    if let Some(node) = tree.tree.arena.get_mut(nid) {
+                        apply_mutations_to_element(&custom.mutations, node.get_mut());
+                    }
+                }
+                // Descendants
+                let desc_ids = self.mindmap.all_descendants(node_id);
+                for did in &desc_ids {
+                    if let Some(&nid) = tree.node_map.get(did.as_str()) {
+                        if let Some(node) = tree.tree.arena.get_mut(nid) {
+                            apply_mutations_to_element(&custom.mutations, node.get_mut());
+                        }
+                    }
+                }
+            }
+            TargetScope::Parent => {
+                if let Some(parent_id) = self.mindmap.nodes.get(node_id)
+                    .and_then(|n| n.parent_id.as_deref())
+                {
+                    let pid = parent_id.to_string();
+                    if let Some(&nid) = tree.node_map.get(pid.as_str()) {
+                        if let Some(node) = tree.tree.arena.get_mut(nid) {
+                            apply_mutations_to_element(&custom.mutations, node.get_mut());
+                        }
+                    }
+                }
+            }
+            TargetScope::Siblings => {
+                if let Some(parent_id) = self.mindmap.nodes.get(node_id)
+                    .and_then(|n| n.parent_id.as_deref())
+                {
+                    let sibling_ids: Vec<String> = self.mindmap.children_of(parent_id)
+                        .iter()
+                        .filter(|n| n.id != node_id)
+                        .map(|n| n.id.clone())
+                        .collect();
+                    for sid in &sibling_ids {
+                        if let Some(&nid) = tree.node_map.get(sid.as_str()) {
+                            if let Some(node) = tree.tree.arena.get_mut(nid) {
+                                apply_mutations_to_element(&custom.mutations, node.get_mut());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Collect the IDs of all nodes affected by a mutation with the given scope.
+    fn collect_affected_node_ids(&self, node_id: &str, scope: &TargetScope) -> Vec<String> {
+        match scope {
+            TargetScope::SelfOnly => vec![node_id.to_string()],
+            TargetScope::Children => {
+                self.mindmap.children_of(node_id).iter().map(|n| n.id.clone()).collect()
+            }
+            TargetScope::Descendants => self.mindmap.all_descendants(node_id),
+            TargetScope::SelfAndDescendants => {
+                let mut ids = vec![node_id.to_string()];
+                ids.extend(self.mindmap.all_descendants(node_id));
+                ids
+            }
+            TargetScope::Parent => {
+                self.mindmap.nodes.get(node_id)
+                    .and_then(|n| n.parent_id.clone())
+                    .into_iter().collect()
+            }
+            TargetScope::Siblings => {
+                self.mindmap.nodes.get(node_id)
+                    .and_then(|n| n.parent_id.as_deref())
+                    .map(|pid| {
+                        self.mindmap.children_of(pid).iter()
+                            .filter(|n| n.id != node_id)
+                            .map(|n| n.id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+        }
+    }
+
+    /// Sync a node's position from the Baumhard tree back to the MindMap model.
+    /// Used after persistent mutations to ensure the model reflects tree state.
+    fn sync_node_from_tree(&mut self, node_id: &str, tree: &MindMapTree) {
+        let tree_nid = match tree.node_map.get(node_id) {
+            Some(&nid) => nid,
+            None => return,
+        };
+        let element = match tree.tree.arena.get(tree_nid) {
+            Some(n) => n.get(),
+            None => return,
+        };
+        let area = match element.glyph_area() {
+            Some(a) => a,
+            None => return,
+        };
+        if let Some(model_node) = self.mindmap.nodes.get_mut(node_id) {
+            model_node.position.x = area.position.x.0 as f64;
+            model_node.position.y = area.position.y.0 as f64;
         }
     }
 }
@@ -304,13 +557,17 @@ mod tests {
 
     fn load_test_doc() -> MindMapDocument {
         let map = loader::load_from_file(&test_map_path()).unwrap();
-        MindMapDocument {
+        let mut doc = MindMapDocument {
             mindmap: map,
             file_path: None,
             dirty: false,
             selection: SelectionState::None,
             undo_stack: Vec::new(),
-        }
+            mutation_registry: HashMap::new(),
+            active_toggles: HashSet::new(),
+        };
+        doc.build_mutation_registry();
+        doc
     }
 
     fn load_test_tree() -> MindMapTree {
@@ -656,5 +913,220 @@ mod tests {
             &tree,
         );
         assert!(hits.is_empty(), "Should find no nodes in distant rect");
+    }
+
+    // --- Session 9B: Custom mutation registry & application tests ---
+
+    use baumhard::mindmap::custom_mutation::{
+        CustomMutation as CM, MutationBehavior as MB, TargetScope as TS,
+        Trigger as Tr, TriggerBinding as TB, PlatformContext as PC,
+    };
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+
+    fn make_test_mutation(id: &str, scope: TS) -> CM {
+        CM {
+            id: id.to_string(),
+            name: id.to_string(),
+            mutations: vec![
+                Mutation::area_command(GlyphAreaCommand::NudgeRight(10.0)),
+            ],
+            target_scope: scope,
+            behavior: MB::Persistent,
+            predicate: None,
+        }
+    }
+
+    #[test]
+    fn test_mutation_registry_empty_for_existing_map() {
+        let doc = load_test_doc();
+        assert!(doc.mutation_registry.is_empty(),
+            "Existing map without custom_mutations should have empty registry");
+    }
+
+    #[test]
+    fn test_mutation_registry_from_map_level() {
+        let mut doc = load_test_doc();
+        doc.mindmap.custom_mutations.push(make_test_mutation("nudge-right", TS::SelfOnly));
+        doc.build_mutation_registry();
+        assert_eq!(doc.mutation_registry.len(), 1);
+        assert!(doc.mutation_registry.contains_key("nudge-right"));
+    }
+
+    #[test]
+    fn test_mutation_registry_inline_overrides_map() {
+        let mut doc = load_test_doc();
+        // Map-level mutation
+        let mut map_cm = make_test_mutation("shared-id", TS::SelfOnly);
+        map_cm.name = "Map Version".to_string();
+        doc.mindmap.custom_mutations.push(map_cm);
+
+        // Inline mutation on a node with the same id
+        let mut inline_cm = make_test_mutation("shared-id", TS::Children);
+        inline_cm.name = "Inline Version".to_string();
+        let node_id = "348068464";
+        doc.mindmap.nodes.get_mut(node_id).unwrap().inline_mutations.push(inline_cm);
+
+        doc.build_mutation_registry();
+        assert_eq!(doc.mutation_registry.len(), 1);
+        let cm = doc.mutation_registry.get("shared-id").unwrap();
+        assert_eq!(cm.name, "Inline Version", "Inline should override map-level");
+        assert_eq!(cm.target_scope, TS::Children);
+    }
+
+    #[test]
+    fn test_find_triggered_mutations_match() {
+        let mut doc = load_test_doc();
+        doc.mindmap.custom_mutations.push(make_test_mutation("nudge", TS::SelfOnly));
+        doc.build_mutation_registry();
+
+        let node_id = "348068464";
+        doc.mindmap.nodes.get_mut(node_id).unwrap().trigger_bindings.push(TB {
+            trigger: Tr::OnClick,
+            mutation_id: "nudge".to_string(),
+            contexts: vec![],
+        });
+
+        let results = doc.find_triggered_mutations(node_id, &Tr::OnClick, &PC::Desktop);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "nudge");
+    }
+
+    #[test]
+    fn test_find_triggered_mutations_no_match() {
+        let mut doc = load_test_doc();
+        doc.mindmap.custom_mutations.push(make_test_mutation("nudge", TS::SelfOnly));
+        doc.build_mutation_registry();
+
+        let node_id = "348068464";
+        doc.mindmap.nodes.get_mut(node_id).unwrap().trigger_bindings.push(TB {
+            trigger: Tr::OnClick,
+            mutation_id: "nudge".to_string(),
+            contexts: vec![],
+        });
+
+        // OnHover should not match
+        let results = doc.find_triggered_mutations(node_id, &Tr::OnHover, &PC::Desktop);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_triggered_mutations_platform_filter() {
+        let mut doc = load_test_doc();
+        doc.mindmap.custom_mutations.push(make_test_mutation("desktop-only", TS::SelfOnly));
+        doc.build_mutation_registry();
+
+        let node_id = "348068464";
+        doc.mindmap.nodes.get_mut(node_id).unwrap().trigger_bindings.push(TB {
+            trigger: Tr::OnClick,
+            mutation_id: "desktop-only".to_string(),
+            contexts: vec![PC::Desktop],
+        });
+
+        // Desktop should match
+        let results = doc.find_triggered_mutations(node_id, &Tr::OnClick, &PC::Desktop);
+        assert_eq!(results.len(), 1);
+
+        // Touch should be filtered out
+        let results = doc.find_triggered_mutations(node_id, &Tr::OnClick, &PC::Touch);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_collect_affected_node_ids_self_only() {
+        let doc = load_test_doc();
+        let ids = doc.collect_affected_node_ids("348068464", &TS::SelfOnly);
+        assert_eq!(ids, vec!["348068464"]);
+    }
+
+    #[test]
+    fn test_collect_affected_node_ids_children() {
+        let doc = load_test_doc();
+        let children = doc.mindmap.children_of("348068464");
+        let ids = doc.collect_affected_node_ids("348068464", &TS::Children);
+        assert_eq!(ids.len(), children.len());
+        for child in &children {
+            assert!(ids.contains(&child.id));
+        }
+    }
+
+    #[test]
+    fn test_collect_affected_node_ids_descendants() {
+        let doc = load_test_doc();
+        let all_desc = doc.mindmap.all_descendants("348068464");
+        let ids = doc.collect_affected_node_ids("348068464", &TS::Descendants);
+        assert_eq!(ids.len(), all_desc.len());
+    }
+
+    #[test]
+    fn test_collect_affected_node_ids_self_and_descendants() {
+        let doc = load_test_doc();
+        let all_desc = doc.mindmap.all_descendants("348068464");
+        let ids = doc.collect_affected_node_ids("348068464", &TS::SelfAndDescendants);
+        assert_eq!(ids.len(), all_desc.len() + 1);
+        assert!(ids.contains(&"348068464".to_string()));
+    }
+
+    #[test]
+    fn test_apply_custom_mutation_persistent_sets_dirty() {
+        let mut doc = load_test_doc();
+        let cm = make_test_mutation("nudge", TS::SelfOnly);
+        doc.mindmap.custom_mutations.push(cm.clone());
+        doc.build_mutation_registry();
+        let mut tree = doc.build_tree();
+
+        assert!(!doc.dirty);
+        doc.apply_custom_mutation(&cm, "348068464", &mut tree);
+        assert!(doc.dirty, "Persistent mutation should set dirty flag");
+        assert_eq!(doc.undo_stack.len(), 1, "Should push undo action");
+    }
+
+    #[test]
+    fn test_apply_custom_mutation_toggle_does_not_set_dirty() {
+        let mut doc = load_test_doc();
+        let mut cm = make_test_mutation("toggle-test", TS::SelfOnly);
+        cm.behavior = MB::Toggle;
+        doc.mindmap.custom_mutations.push(cm.clone());
+        doc.build_mutation_registry();
+        let mut tree = doc.build_tree();
+
+        doc.apply_custom_mutation(&cm, "348068464", &mut tree);
+        assert!(!doc.dirty, "Toggle mutation should not set dirty flag");
+        assert!(doc.undo_stack.is_empty(), "Toggle mutation should not push undo");
+        assert!(doc.active_toggles.contains(&("348068464".to_string(), "toggle-test".to_string())));
+    }
+
+    #[test]
+    fn test_apply_custom_mutation_toggle_reverses() {
+        let mut doc = load_test_doc();
+        let mut cm = make_test_mutation("toggle-test", TS::SelfOnly);
+        cm.behavior = MB::Toggle;
+        doc.mindmap.custom_mutations.push(cm.clone());
+        doc.build_mutation_registry();
+        let mut tree = doc.build_tree();
+
+        // First apply: activates toggle
+        doc.apply_custom_mutation(&cm, "348068464", &mut tree);
+        assert!(doc.active_toggles.contains(&("348068464".to_string(), "toggle-test".to_string())));
+
+        // Second apply: deactivates toggle
+        doc.apply_custom_mutation(&cm, "348068464", &mut tree);
+        assert!(!doc.active_toggles.contains(&("348068464".to_string(), "toggle-test".to_string())));
+    }
+
+    #[test]
+    fn test_undo_custom_mutation_restores_node() {
+        let mut doc = load_test_doc();
+        let cm = make_test_mutation("nudge", TS::SelfOnly);
+        let node_id = "348068464";
+
+        let orig_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;
+        let mut tree = doc.build_tree();
+
+        doc.apply_custom_mutation(&cm, node_id, &mut tree);
+        // Position may have been synced from tree; verify undo restores original
+        assert!(doc.undo());
+        let restored_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;
+        assert!((restored_x - orig_x).abs() < 0.001, "Undo should restore original position");
     }
 }
