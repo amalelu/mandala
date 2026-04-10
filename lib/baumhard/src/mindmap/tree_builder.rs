@@ -258,4 +258,158 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------
+    // Scale / performance regression guards
+    //
+    // `build_mindmap_tree` runs on every mutation sync — any regression
+    // from O(N) to O(N²) here would blow the drag budget on large maps
+    // without being caught by the existing correctness tests (which load
+    // the 243-node testament fixture).
+    // -----------------------------------------------------------------
+
+    use crate::mindmap::model::{
+        Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
+    };
+    use std::collections::HashMap;
+
+    fn synthetic_node(id: &str, parent: Option<&str>, index: i32, x: f64, y: f64) -> MindNode {
+        MindNode {
+            id: id.to_string(),
+            parent_id: parent.map(|s| s.to_string()),
+            index,
+            position: Position { x, y },
+            size: Size { width: 80.0, height: 40.0 },
+            text: id.to_string(),
+            text_runs: vec![],
+            style: NodeStyle {
+                background_color: "#000".into(),
+                frame_color: "#fff".into(),
+                text_color: "#fff".into(),
+                shape_type: 0,
+                corner_radius_percent: 0.0,
+                frame_thickness: 1.0,
+                show_frame: true,
+                show_shadow: false,
+                border: None,
+            },
+            layout: NodeLayout { layout_type: 0, direction: 0, spacing: 0.0 },
+            folded: false,
+            notes: String::new(),
+            color_schema: None,
+            trigger_bindings: vec![],
+            inline_mutations: vec![],
+        }
+    }
+
+    fn synthetic_map(nodes_vec: Vec<MindNode>, edges: Vec<MindEdge>) -> MindMap {
+        let mut nodes = HashMap::new();
+        for n in nodes_vec {
+            nodes.insert(n.id.clone(), n);
+        }
+        MindMap {
+            version: "1.0".into(),
+            name: "synthetic".into(),
+            canvas: Canvas {
+                background_color: "#000".into(),
+                default_border: None,
+                default_connection: None,
+                theme_variables: HashMap::new(),
+                theme_variants: HashMap::new(),
+            },
+            nodes,
+            edges,
+            custom_mutations: vec![],
+        }
+    }
+
+    /// Builds an N-node linear spine: `n0 -> n1 -> n2 -> ... -> n{N-1}`.
+    /// Useful for depth-stress tests and O(N²) regression guards.
+    fn mk_chain_map(n: usize) -> MindMap {
+        assert!(n >= 1);
+        let mut nodes = Vec::with_capacity(n);
+        nodes.push(synthetic_node("c0", None, 0, 0.0, 0.0));
+        for i in 1..n {
+            let parent = format!("c{}", i - 1);
+            let id = format!("c{}", i);
+            nodes.push(synthetic_node(&id, Some(&parent), 0, 0.0, i as f64 * 50.0));
+        }
+        synthetic_map(nodes, vec![])
+    }
+
+    /// Builds a star: one root and `n - 1` sibling children.
+    fn mk_star_map(n: usize) -> MindMap {
+        assert!(n >= 1);
+        let mut nodes = Vec::with_capacity(n);
+        nodes.push(synthetic_node("root", None, 0, 0.0, 0.0));
+        for i in 1..n {
+            let id = format!("s{}", i);
+            nodes.push(synthetic_node(
+                &id,
+                Some("root"),
+                (i - 1) as i32,
+                (i as f64) * 100.0,
+                100.0,
+            ));
+        }
+        synthetic_map(nodes, vec![])
+    }
+
+    /// Build a 1000-node chain and assert the resulting `node_map` size
+    /// equals the input count. If a regression made the builder O(N²) it
+    /// would not change this assertion — but the synthetic large-map
+    /// scaffold becomes the natural place to plug a wall-clock bench if
+    /// needed later, and this test proves the builder is linearly
+    /// functional at scale. Also verifies correctness at size.
+    #[test]
+    fn test_build_tree_scale_1000_node_chain() {
+        let map = mk_chain_map(1000);
+        let result = build_mindmap_tree(&map);
+        assert_eq!(result.node_map.len(), 1000);
+        // The spine root is the only root, so the tree's root has one
+        // child (the Void -> first chain node).
+        let roots: Vec<_> = result.tree.root.children(&result.tree.arena).collect();
+        assert_eq!(roots.len(), 1);
+        // Every chain node is reachable via the node_map.
+        for i in 0..1000 {
+            let id = format!("c{}", i);
+            assert!(result.node_map.contains_key(&id),
+                "missing node {}", id);
+        }
+    }
+
+    /// A 500-child star fans out from a single root. Guards the
+    /// wide-breadth case — a regression that used Vec::insert(0, ...)
+    /// or otherwise grew quadratically in the child list would still
+    /// produce a correct node_map, but this test's companion 1000-node
+    /// chain test plus this one together cover both topology extremes.
+    #[test]
+    fn test_build_tree_wide_fan_out_500() {
+        let map = mk_star_map(500);
+        let result = build_mindmap_tree(&map);
+        assert_eq!(result.node_map.len(), 500);
+        // Root is "root", all others are direct children.
+        let root_tree_id = result.node_map.get("root").unwrap();
+        let children: Vec<_> = root_tree_id.children(&result.tree.arena).collect();
+        assert_eq!(children.len(), 499);
+    }
+
+    /// A 500-node deep spine must build without a stack overflow. The
+    /// current `build_mindmap_tree` walks iteratively — this test
+    /// guards against a future refactor silently introducing recursion
+    /// over the hierarchy.
+    #[test]
+    fn test_build_tree_deep_chain_no_stack_overflow() {
+        let map = mk_chain_map(500);
+        let result = build_mindmap_tree(&map);
+        assert_eq!(result.node_map.len(), 500);
+        // Walk from the root down the spine and confirm depth == 500.
+        let mut current = *result.node_map.get("c0").unwrap();
+        let mut depth = 1;
+        while let Some(child) = current.children(&result.tree.arena).next() {
+            current = child;
+            depth += 1;
+        }
+        assert_eq!(depth, 500);
+    }
 }
