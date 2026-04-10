@@ -67,14 +67,25 @@ impl Comparator {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Predicate {
     pub fields: Vec<(GfxElementField, Comparator)>,
+    /// When true, this predicate matches any element regardless of fields.
+    /// Used by TargetScope::Descendants to apply mutations to all descendants.
+    #[serde(default)]
+    pub always_match: bool,
 }
 // TODO: I want to reduce the complexity of this, there is a better design here, I just need to analyze it
 impl Predicate {
     pub fn new() -> Self {
-        Predicate { fields: vec![] }
+        Predicate { fields: vec![], always_match: false }
+    }
+
+    pub fn always_true() -> Self {
+        Predicate { fields: vec![], always_match: true }
     }
 
     pub fn test(&self, element: &GfxElement) -> bool {
+        if self.always_match {
+            return true;
+        }
         for (element_field, comparator) in &self.fields {
             match element_field {
                 GlyphArea(section) => match section {
