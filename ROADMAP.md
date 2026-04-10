@@ -59,8 +59,9 @@ The application has two layers:
 - **Theme variants** — `Canvas.theme_variants: HashMap<String, HashMap<String, String>>` stores named presets (`"light"`, `"dark"`, `"forest"`). Activating a variant copies its map into the live `theme_variables`; presets themselves are pure authoring state and never referenced at render time. A single source of truth means Ctrl+S saves whatever the user last switched to.
 - **Document actions** — `CustomMutation.document_actions: Vec<DocumentAction>` carries canvas/document-level effects alongside the per-node mutations. `DocumentAction::SetThemeVariant(name)` swaps in a named preset; `SetThemeVariables(map)` patches the live variables ad-hoc. Applied by `MindMapDocument::apply_document_actions()`, which snapshots the full canvas into `UndoAction::CanvasSnapshot` before any change, so Ctrl+Z restores a theme swap in one hop.
 - **Button-node cursor polish** — hovering a node with any non-empty `trigger_bindings` switches the cursor to `CursorIcon::Pointer`. Transitions are tracked so `set_cursor` only fires when the hover state actually changes. Native only — WASM input path remains a known gap.
+- **Stress-test map generator** — `cargo run -p baumhard --bin generate_stress_map -- ...` writes synthetic `.mindmap.json` files of arbitrary size and topology (balanced / skewed / star), with `--long-edges K` to insert deliberately far-apart cross-links for connection-render perf testing and `--seed` for deterministic output. The smoke-test rig for Phase 4 of the theme-variables tangent.
 - **Multi-target** — native + WASM builds
-- **248 tests passing**
+- **260 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -731,39 +732,120 @@ adds.
 - [ ] Native first — the WASM input path is a known gap and mustn't
       regress
 
-### Pan stutter mitigation (planned, not yet built)
+### Connection & border render cost (in progress)
 
-**What**: During very fast drags the connection/border rebuild step
-(the heaviest per-frame work) can fall behind input and the user
-sees stutter. Detect it by measuring the moving average of per-frame
-work duration and, when it exceeds a budget, skip the
-connection/border rebuild for that frame. Prioritize snappiness over
-smoothness — a one-frame-stale connection is invisible under motion,
-a dropped frame is not.
+**Context**: The stutter users see during fast drags is not a generic
+"mutation lag" problem. It is an efficiency gap in how connections
+and borders are rebuilt on the renderer side — every drag frame
+`Vec::clear()`s and rebuilds every connection and every border, with
+a fresh cosmic-text buffer per glyph sample. The cost scales with
+connection *length* (via glyph sample count) and with total map
+size, not with what the user is actually touching. Neither
+connections nor borders currently have any throttling, culling, or
+incremental rebuild.
 
-- [ ] Small moving-average tracker on per-frame work duration in
-      `AboutToWait`
-- [ ] Budget threshold (~14ms against a 16.6ms target) above which
-      the connection/border rebuild is skipped
-- [ ] Resume full rebuilds as soon as the average drops back under
-      budget — self-tuning, no configuration
-- [ ] Manual smoke using the stress-generator output below
+**Governing invariant** (set down at the top of §5 of the session
+plan and reiterated by the user): responsiveness is never traded
+for visual fidelity. The moment per-frame work threatens the screen
+refresh budget, we sacrifice **frequency of mutation** — we apply
+tree mutations (and the rebuilds they drive) less often — so that
+input stays snappy. Input accumulation is sacred; mutation
+application is the valve we turn. Everything below is either "ways
+to never hit the wall" or "how to degrade gracefully when we do."
 
-### Stress-test map generator (planned, not yet built)
+Five-part fix under that invariant:
 
-**What**: A standalone binary that emits `.mindmap.json` files of
-arbitrary size and topology. Used to validate the feel improvements
-above and to catch regressions. Not a benchmark harness — just a
-file writer.
+- [ ] **(E) Mutation-frequency throttle**. Moving average on measured
+      per-frame work duration in `AboutToWait`; when it crosses the
+      refresh budget, the drain rate of `pending_delta` drops to one
+      in every N ticks, N ramping with how far over budget we are,
+      decaying back to 1 when healthy. Between drains, mouse motion
+      still accumulates — nothing is lost. Always-on, self-tuning,
+      configuration-free. This is the invariant in code form.
+- [ ] **(A) Viewport culling on connection glyph samples**. Compute
+      the canvas-space viewport in `rebuild_connection_buffers` and
+      skip glyph positions that land off-screen. A few lines; kills
+      the long-connection pathological case because the bulk of the
+      glyphs on an "unreasonably long" edge live outside the visible
+      rect while you're dragging an endpoint.
+- [ ] **(B) Keyed incremental rebuild**. `HashMap<StableKey, Buffer>`
+      instead of flat `Vec<Buffer>` for both connections and
+      borders, keyed on `(from_id, to_id, edge_type)` and `node_id`
+      respectively. Drag frames only touch entries whose key appears
+      in the `offsets` map; every unmoved edge and border keeps its
+      existing buffers intact. Scales drag cost with "what moved"
+      instead of "what exists."
+- [ ] **(C) Shape-once-reuse**. On top of (B): cosmic-text shaping
+      is the expensive step, positioning is cheap. Keep shaped
+      buffers alive across frames and only update their positions
+      when the content is unchanged — the common case during drag.
+- [ ] **(D) Sample decimation during motion**. Double the effective
+      spacing passed to `sample_path` while a drag is active; halves
+      connection glyph counts invisibly under motion. Held in
+      reserve; may prove unnecessary once (A)+(B)+(C) land.
 
-- [ ] New `[[bin]]` target in `Cargo.toml`, e.g. `generate_stress_map`
-- [ ] CLI flags: node count, tree depth, branching factor, cross-link
-      percentage, output path, seed
-- [ ] Three topologies in v1: balanced tree, skewed tree, single-root
-      star — exercises deep hierarchies, wide fanout, and massive
-      sibling lists
-- [ ] Uses `MindMap` serde types to emit — no hand-rolled JSON
-- [ ] Deterministic output per seed for comparable runs
+**Ordering**: E → A → B → C → (D if needed). (E) lands first as the
+safety net; subsequent fixes reduce how often it has to engage.
+Borders ride on (B) without needing their own culling pass —
+they're always colocated with their node.
+
+### Stress-test map generator
+
+**What**: A `[[bin]]` target in the `baumhard` crate that emits
+`.mindmap.json` files of configurable size and topology, seedable
+for reproducibility. Doubles as the smoke-test rig for Phase 4 —
+each of the five sub-fixes above wants a measurable before/after,
+and the stress generator is how we get one. Not a benchmark
+harness, just a file writer.
+
+- [x] New `[[bin]]` target `generate_stress_map` in
+      `lib/baumhard/src/bin/generate_stress_map.rs`. Auto-discovered
+      by cargo; no `[[bin]]` entry needed in `Cargo.toml` because
+      baumhard is a library crate with a `src/bin` directory.
+- [x] CLI flags: `--topology`, `--nodes`, `--depth`, `--branching`,
+      `--cross-links`, `--long-edges`, `--seed`, `--output`, `--help`.
+      Manual argument parsing (no clap) to match the
+      file-writer-only ethos.
+- [x] Three topologies: `balanced` (complete tree of given depth and
+      branching, centred grid layout), `skewed` (comb — a long
+      diagonal spine with one leaf per interior node), `star` (one
+      root with N-1 children laid out on a circle around it).
+      Exercises deep hierarchies, deep paths, and massive sibling
+      lists respectively.
+- [x] `--long-edges K` knob: adds K cross-link edges between the
+      most-distant node pairs in the layout. The key long-connection
+      perf-test lever — these are exactly the edges whose glyph
+      sampling count blows the frame budget. A balanced tree at
+      depth 4, branching 3, with `--long-edges 2` yields a 25,600
+      canvas-unit cross-link on the default layout, which at typical
+      font sizes produces ~1,700 glyph samples per frame during drag.
+- [x] `--cross-links K` knob: adds K random cross-link edges,
+      avoiding self-links and duplicates. Simulates messy real-world
+      maps.
+- [x] Uses `baumhard::mindmap::model` serde types directly — no
+      hand-rolled JSON. Serialises via `serde_json::to_string_pretty`.
+- [x] Deterministic output per `--seed` (default `0xBAADF00D`).
+      Accepts hex (`0xDEADBEEF`) or decimal seeds.
+- [x] 12 new tests cover: topology parsing, balanced tree node-count
+      formula, balanced single-root invariant, skewed node count,
+      skewed edge shape, star root/children invariants, single-node
+      star, cross-link no-self-link guarantee, longest-pair selection,
+      full serde round-trip through the generated `MindMap`,
+      seed determinism.
+
+**Key files**:
+- `lib/baumhard/src/bin/generate_stress_map.rs` — the binary
+
+**Verify**:
+```shell
+cargo run -p baumhard --bin generate_stress_map -- \
+    --topology balanced --depth 4 --branching 3 --long-edges 2 \
+    --output maps/stress.mindmap.json
+cargo run -- maps/stress.mindmap.json
+```
+Loads into the app, renders correctly, and the long cross-link is
+visually present and stretches far off-screen. `./test.sh` green
+(260 tests, 12 new).
 
 ---
 
