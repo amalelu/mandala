@@ -374,4 +374,104 @@ mod tests {
         assert_eq!(got[2], 0.0);
         assert!((got[3] - 128.0 / 255.0).abs() < 1e-6);
     }
+
+    // -----------------------------------------------------------------
+    // Performance & robustness regression guards
+    //
+    // `resolve_var` and `hex_to_rgba_safe` are called for every text run,
+    // border, connection, and background colour on every scene build.
+    // Any panic here crashes the WASM renderer; any regression from O(1)
+    // HashMap lookup to linear scan here would be invisible to a smoke
+    // test but visible in the frame budget.
+    // -----------------------------------------------------------------
+
+    /// A single pathological theme-variable typo must never crash the
+    /// renderer. Iterate over a batch of malformed inputs and assert
+    /// every call returns the fallback without panicking.
+    #[test]
+    fn hex_to_rgba_safe_no_panic_on_malformed_batch() {
+        let fb = [0.25, 0.5, 0.75, 1.0];
+        let long = "f".repeat(1024);
+        let pathological: Vec<&str> = vec![
+            "",
+            "#",
+            "##",
+            "#g",
+            "#12",
+            "#1234",
+            "#1234567",
+            "#123456789",
+            "var(--x)",
+            "var(--missing)",
+            "not-a-color",
+            "rgb(255, 0, 0)",
+            "#\u{1f308}\u{1f308}\u{1f308}",
+            "\0\0\0",
+            "   ",
+            "\t\n\r",
+            long.as_str(),
+        ];
+        for bad in &pathological {
+            let got = hex_to_rgba_safe(bad, fb);
+            assert_eq!(got, fb,
+                "malformed input {:?} should return fallback", bad);
+        }
+    }
+
+    /// Valid 6-char and 8-char hex — with and without the `#` prefix,
+    /// upper and lower case — must all parse. Happy-path guard.
+    #[test]
+    fn hex_to_rgba_safe_accepts_valid_6_and_8_char_both_cases() {
+        let fb = [0.0, 0.0, 0.0, 0.0];
+        let with_hash = hex_to_rgba_safe("#ff0000", fb);
+        let without_hash = hex_to_rgba_safe("ff0000", fb);
+        let upper = hex_to_rgba_safe("FF0000", fb);
+        assert_eq!(with_hash, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(without_hash, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(upper, [1.0, 0.0, 0.0, 1.0]);
+        // 8-char form carries alpha through.
+        let with_alpha = hex_to_rgba_safe("#00ff00ff", fb);
+        assert_eq!(with_alpha, [0.0, 1.0, 0.0, 1.0]);
+        let half_alpha = hex_to_rgba_safe("00ff0080", fb);
+        assert!((half_alpha[3] - 128.0 / 255.0).abs() < 1e-6);
+    }
+
+    /// `resolve_var` over a large theme map must stay correct and must
+    /// return a pointer-equal slice on passthrough (zero-copy
+    /// invariant). This catches a regression from `&str` to `String`
+    /// return type, which would silently invalidate the zero-alloc
+    /// property every scene build relies on.
+    #[test]
+    fn resolve_var_large_theme_map_zero_copy_passthrough() {
+        let mut map = HashMap::with_capacity(1000);
+        for i in 0..1000 {
+            map.insert(format!("--k{}", i), format!("#0000{:02x}", i & 0xff));
+        }
+        // Hit case — known variable.
+        let got = resolve_var("var(--k500)", &map);
+        assert!(got.starts_with('#'),
+            "expected hex value, got {:?}", got);
+        // Miss case — pointer-equal slice returned (zero-copy).
+        let raw = "not-a-var-reference";
+        let out = resolve_var(raw, &map);
+        assert_eq!(out.as_ptr(), raw.as_ptr(),
+            "passthrough should be zero-copy (same pointer)");
+        // Unknown var reference passes through as the original slice.
+        let unknown = "var(--no-such-key)";
+        let out_unknown = resolve_var(unknown, &map);
+        assert_eq!(out_unknown.as_ptr(), unknown.as_ptr(),
+            "unknown var() should pass through zero-copy");
+    }
+
+    /// An unknown `var(--x)` reference must return the raw string, NOT
+    /// silently substitute anything. Explicit guard against a future
+    /// "helpful" fallback-to-black or similar behaviour that would mask
+    /// theme typos.
+    #[test]
+    fn resolve_var_passthrough_on_unknown_is_verbatim() {
+        let map: HashMap<String, String> = HashMap::new();
+        assert_eq!(resolve_var("var(--nope)", &map), "var(--nope)");
+        let map_with_other = vars(&[("--other", "#ffffff")]);
+        assert_eq!(resolve_var("var(--nope)", &map_with_other), "var(--nope)");
+    }
 }

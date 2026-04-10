@@ -144,3 +144,114 @@ impl Default for BorderStyle {
         Self::default_with_color("#ffffff")
     }
 }
+
+// -----------------------------------------------------------------
+// Tests
+//
+// Border string generation is on every scene-rebuild hot path: one
+// call to `top_border` / `bottom_border` per framed node, per frame.
+// The loops look trivial today but are easy to break in ways that
+// either quietly misalign corners or accidentally go quadratic. These
+// tests double as perf regression guards.
+// -----------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The light preset's top border at width 5 is corners + 3 fill
+    /// characters. Structural invariant: first char is `top_left`, last
+    /// is `top_right`, all middle chars equal `top`.
+    #[test]
+    fn test_top_border_light_basic_shape() {
+        let glyphs = BorderGlyphSet::box_drawing_light();
+        let border = glyphs.top_border(5);
+        assert_eq!(border, "\u{250C}\u{2500}\u{2500}\u{2500}\u{2510}");
+        let chars: Vec<char> = border.chars().collect();
+        assert_eq!(chars.len(), 5);
+        assert_eq!(chars[0], glyphs.top_left);
+        assert_eq!(chars[4], glyphs.top_right);
+        for c in &chars[1..4] {
+            assert_eq!(*c, glyphs.top);
+        }
+    }
+
+    /// Widths below 2 have no room for both corners, so the function
+    /// returns an empty string. Guards the early-return branch.
+    #[test]
+    fn test_top_border_width_under_two_is_empty() {
+        let glyphs = BorderGlyphSet::box_drawing_light();
+        assert_eq!(glyphs.top_border(0), "");
+        assert_eq!(glyphs.top_border(1), "");
+        assert_eq!(glyphs.bottom_border(0), "");
+        assert_eq!(glyphs.bottom_border(1), "");
+    }
+
+    /// The bottom border must use the `bottom_*` corners, not the
+    /// `top_*` corners. Copy-paste slip guard.
+    #[test]
+    fn test_bottom_border_uses_bottom_corners() {
+        let glyphs = BorderGlyphSet::box_drawing_light();
+        let border = glyphs.bottom_border(4);
+        let chars: Vec<char> = border.chars().collect();
+        assert_eq!(chars.len(), 4);
+        assert_eq!(chars[0], glyphs.bottom_left);
+        assert_eq!(chars[3], glyphs.bottom_right);
+        assert_ne!(chars[0], glyphs.top_left);
+        assert_ne!(chars[3], glyphs.top_right);
+    }
+
+    /// Every preset must produce a length-N string for width N ≥ 2 on
+    /// both top and bottom. Catches a preset accidentally missing a
+    /// glyph field (serde would default it to `'\0'`, which would still
+    /// produce a length-N string — so also spot-check the first char is
+    /// non-null).
+    #[test]
+    fn test_all_four_presets_produce_non_empty_borders() {
+        let presets = [
+            BorderGlyphSet::box_drawing_light(),
+            BorderGlyphSet::box_drawing_heavy(),
+            BorderGlyphSet::box_drawing_double(),
+            BorderGlyphSet::box_drawing_rounded(),
+        ];
+        for glyphs in &presets {
+            let top = glyphs.top_border(6);
+            let bottom = glyphs.bottom_border(6);
+            assert_eq!(top.chars().count(), 6);
+            assert_eq!(bottom.chars().count(), 6);
+            assert_ne!(top.chars().next().unwrap(), '\0');
+            assert_ne!(bottom.chars().next().unwrap(), '\0');
+            assert_ne!(glyphs.left_char(), '\0');
+            assert_ne!(glyphs.right_char(), '\0');
+        }
+    }
+
+    /// `top_border(10_000)` must succeed without panic and produce
+    /// exactly 10,000 characters. Guards against accidental integer
+    /// overflow on `char_width.saturating_sub(2)` or a quadratic
+    /// string-growth refactor.
+    #[test]
+    fn test_top_border_large_width_no_panic() {
+        let glyphs = BorderGlyphSet::box_drawing_light();
+        let border = glyphs.top_border(10_000);
+        assert_eq!(border.chars().count(), 10_000);
+        // First and last are still corners, not middle fill.
+        let chars: Vec<char> = border.chars().collect();
+        assert_eq!(chars[0], glyphs.top_left);
+        assert_eq!(chars[9_999], glyphs.top_right);
+    }
+
+    /// `BorderStyle::default_with_color` is what the scene builder
+    /// constructs for every framed node. Spot-check its fields.
+    #[test]
+    fn test_border_style_default_with_color() {
+        let style = BorderStyle::default_with_color("#ff0000");
+        assert_eq!(style.color, "#ff0000");
+        assert!(style.visible);
+        // Default preset is rounded.
+        assert_eq!(
+            style.glyph_set.top_left,
+            BorderGlyphSet::box_drawing_rounded().top_left
+        );
+        assert_eq!(style.font_name, None);
+    }
+}

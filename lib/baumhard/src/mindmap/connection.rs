@@ -578,4 +578,182 @@ mod tests {
             _ => panic!("Expected CubicBezier from quadratic promotion"),
         }
     }
+
+    // -----------------------------------------------------------------
+    // Performance regression guards
+    //
+    // These tests do not assert wall-clock timings (flaky under CI load).
+    // They assert behavioural invariants that the Phase 4B drag-frame
+    // optimisations in ROADMAP.md depend on — if any of these break, the
+    // long-connection stutter the optimisation fixed will return.
+    // -----------------------------------------------------------------
+
+    /// A 20,000-unit straight path sampled at spacing 15 must produce a
+    /// sample count proportional to length/spacing, not capped at
+    /// `ARC_LENGTH_SUBDIVISIONS` (256). Guards against a regression that
+    /// clamped sample count to the arc-length table size.
+    #[test]
+    fn test_sample_long_straight_scales_linearly_with_length() {
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(20_000.0, 0.0),
+        };
+        let points = sample_path(&path, 15.0);
+        // Expected: floor(20000/15) + 1 = 1334.
+        assert_eq!(points.len(), 1334);
+        // Way above the 256-subdivision table size — proves no clamp.
+        assert!(points.len() > 1000,
+            "sample count {} should scale with length, not subdivisions",
+            points.len());
+    }
+
+    /// A long cubic bezier's sample count is linear in path length, not in
+    /// the subdivision table size. If the arc-length lookup regressed to
+    /// walking the table per sample (O(N·subdivisions)) instead of binary
+    /// search, the test would still pass — but the ROADMAP-critical
+    /// invariant is that sample count itself tracks length, and that's what
+    /// this guards.
+    #[test]
+    fn test_sample_long_bezier_count_bounded_by_length() {
+        let path = ConnectionPath::CubicBezier {
+            start: Vec2::new(0.0, 0.0),
+            control1: Vec2::new(5_000.0, 800.0),
+            control2: Vec2::new(15_000.0, -800.0),
+            end: Vec2::new(20_000.0, 0.0),
+        };
+        let length = path_length(&path);
+        let spacing = 15.0;
+        let points = sample_path(&path, spacing);
+        let expected_floor = (length / spacing) as usize;
+        // Sampler emits `floor(length/spacing) + 1` points. Allow a window
+        // of ±2 to tolerate FP drift at the endpoint.
+        assert!(points.len() >= expected_floor,
+            "expected at least {}, got {}", expected_floor, points.len());
+        assert!(points.len() <= expected_floor + 2,
+            "expected at most {}, got {}", expected_floor + 2, points.len());
+        // Sanity: we're in the "long edge" regime the ROADMAP calls out.
+        assert!(points.len() > 1000);
+    }
+
+    /// On a straight path, successive samples must be ordered along the
+    /// path direction. Catches an off-by-one or reversed loop in the arc
+    /// length → t conversion.
+    #[test]
+    fn test_sample_path_monotonic_along_straight() {
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(1000.0, 0.0),
+        };
+        let points = sample_path(&path, 10.0);
+        assert!(points.len() > 2);
+        for pair in points.windows(2) {
+            assert!(pair[1].position.x >= pair[0].position.x - 1e-4,
+                "samples not monotonic: {:?} -> {:?}",
+                pair[0].position, pair[1].position);
+        }
+    }
+
+    /// Consecutive sample distances on a straight path should match the
+    /// requested spacing within floating-point tolerance. Catches any
+    /// accumulated FP drift regression from a naive refactor (e.g.
+    /// `current += spacing` instead of `i * spacing`).
+    #[test]
+    fn test_sample_path_even_spacing_within_tolerance() {
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(500.0, 0.0),
+        };
+        let spacing = 10.0;
+        let points = sample_path(&path, spacing);
+        // All pairs except possibly the last must be within tolerance of
+        // the requested spacing. The last pair can be shorter because the
+        // tail is clamped to t=1.
+        let n = points.len();
+        assert!(n >= 3);
+        for i in 0..(n - 2) {
+            let d = points[i + 1].position.distance(points[i].position);
+            assert!((d - spacing).abs() < 0.01,
+                "sample spacing {} at i={} deviates from {}", d, i, spacing);
+        }
+    }
+
+    /// Negative spacing must not produce an infinite loop or a panic.
+    /// Current behaviour: empty Vec (matches the existing zero-spacing
+    /// behaviour). WASM crash guard.
+    #[test]
+    fn test_sample_path_rejects_negative_spacing() {
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        let points = sample_path(&path, -1.0);
+        assert!(points.is_empty(),
+            "negative spacing must return empty, got {} points", points.len());
+    }
+
+    /// NaN spacing must not panic (NaN comparisons are always false, so
+    /// `spacing <= 0.0` is false — we rely on downstream guards to still
+    /// produce a sane result). WASM crash guard.
+    #[test]
+    fn test_sample_path_rejects_nan_spacing() {
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        // Must not panic — we do not care about the exact return value,
+        // only that we get back to this line without an abort. A non-panic
+        // outcome is the WASM-reliability invariant.
+        let _ = sample_path(&path, f32::NAN);
+    }
+
+    /// Spacing larger than the path length should return exactly one
+    /// sample (the start point). This guards the `count = 0` edge case.
+    #[test]
+    fn test_sample_path_huge_spacing_returns_start_only() {
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        let points = sample_path(&path, 10_000.0);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].position, Vec2::new(0.0, 0.0));
+    }
+
+    /// Two calls to `sample_path` with the same inputs must produce
+    /// bit-identical output. Guards against a future accidental
+    /// randomisation (jitter, thread-local state, HashMap iteration
+    /// order leaking into the output).
+    #[test]
+    fn test_sample_path_deterministic_across_calls() {
+        let path = ConnectionPath::CubicBezier {
+            start: Vec2::new(0.0, 0.0),
+            control1: Vec2::new(100.0, 200.0),
+            control2: Vec2::new(300.0, -200.0),
+            end: Vec2::new(400.0, 0.0),
+        };
+        let a = sample_path(&path, 5.0);
+        let b = sample_path(&path, 5.0);
+        assert_eq!(a.len(), b.len());
+        for (pa, pb) in a.iter().zip(b.iter()) {
+            assert_eq!(pa.position, pb.position);
+        }
+    }
+
+    /// `distance_to_path` on a long cubic bezier must return a finite,
+    /// non-NaN value. Guards against a hypothetical exponential
+    /// subdivision regression or NaN propagation from the sampler.
+    #[test]
+    fn test_distance_to_path_on_long_bezier_is_finite() {
+        let path = ConnectionPath::CubicBezier {
+            start: Vec2::new(0.0, 0.0),
+            control1: Vec2::new(25_000.0, 10_000.0),
+            control2: Vec2::new(75_000.0, -10_000.0),
+            end: Vec2::new(100_000.0, 0.0),
+        };
+        let d = distance_to_path(Vec2::new(50_000.0, 50_000.0), &path);
+        assert!(d.is_finite(), "distance should be finite, got {}", d);
+        assert!(d >= 0.0, "distance should be non-negative, got {}", d);
+        // And the point is visibly off the curve, so non-zero.
+        assert!(d > 1.0);
+    }
 }
