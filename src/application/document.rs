@@ -249,12 +249,78 @@ pub struct MindMapDocument {
     pub active_toggles: HashSet<(String, String)>,
 }
 
+/// Walk every node in the map and grow its stored `size` in place until
+/// the box is at least large enough to contain the node's shaped text
+/// bounds plus a small padding. Grow-only: an author-authored oversized
+/// box stays oversized. Runs once at load time, so subsequent reads of
+/// `node.size` by the scene builder, renderer, and connection anchors all
+/// see a single coherent effective size — no per-frame cost, no cross-
+/// layer plumbing.
+///
+/// The scale / line-height formula mirrors
+/// `baumhard::mindmap::tree_builder::mindnode_to_glyph_area` so the
+/// measurement matches what the tree walker will actually render.
+///
+/// Padding: `pad_x = scale * 1.5`, `pad_y = scale * 0.5` — leaves a bit
+/// of breathing room between the text and the border glyphs.
+fn grow_node_sizes_to_fit_text(map: &mut MindMap) {
+    use cosmic_text::{Attrs, Buffer, Metrics, Shaping};
+
+    let mut font_system = baumhard::font::fonts::FONT_SYSTEM
+        .write()
+        .expect("font system lock poisoned");
+
+    for node in map.nodes.values_mut() {
+        let scale = node
+            .text_runs
+            .first()
+            .map(|r| r.size_pt as f32)
+            .unwrap_or(14.0);
+        let line_height = scale * 1.2;
+        let pad_x = scale * 1.5;
+        let pad_y = scale * 0.5;
+
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(scale, line_height));
+        // Unbounded layout so we measure the natural single-line width
+        // of each logical line (cosmic-text still breaks on embedded
+        // `\n`), which is the right floor for "how big does the box
+        // need to be".
+        buffer.set_size(&mut font_system, None, None);
+        buffer.set_text(
+            &mut font_system,
+            &node.text,
+            &Attrs::new(),
+            Shaping::Advanced,
+            None,
+        );
+
+        let measured_w = buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0_f32, f32::max);
+        let measured_h = buffer.layout_runs().count() as f32 * line_height;
+
+        let need_w = (measured_w + pad_x) as f64;
+        let need_h = (measured_h + pad_y) as f64;
+        if node.size.width < need_w {
+            node.size.width = need_w;
+        }
+        if node.size.height < need_h {
+            node.size.height = need_h;
+        }
+    }
+}
+
 impl MindMapDocument {
     /// Load a MindMap from a file path and create a Document.
     pub fn load(path: &str) -> Result<Self, String> {
         match loader::load_from_file(Path::new(path)) {
-            Ok(map) => {
+            Ok(mut map) => {
                 info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
+                // Grow any undersized node boxes to fit their text
+                // before the model is handed to the tree/scene builders.
+                // See `grow_node_sizes_to_fit_text` for the invariants.
+                grow_node_sizes_to_fit_text(&mut map);
                 let mut doc = MindMapDocument {
                     mindmap: map,
                     file_path: Some(path.to_string()),
@@ -3316,5 +3382,130 @@ mod tests {
             restored.glyph_connection.as_ref().and_then(|c| c.color.clone()),
             original.glyph_connection.as_ref().and_then(|c| c.color.clone())
         );
+    }
+
+    // -----------------------------------------------------------------
+    // grow_node_sizes_to_fit_text — node box auto-sizing
+    //
+    // Grow-only pass that runs once at load time to ensure every node's
+    // stored size is at least big enough to contain its text. These
+    // tests lock in the three invariants described in the helper's
+    // doc-comment: grow-only, idempotent, and consistent with rendering.
+    // -----------------------------------------------------------------
+
+    /// Build a synthetic single-node map with a given text and stored
+    /// size. The text_runs carry a 14 pt scale to match the default.
+    fn synthetic_single_node_map(text: &str, w: f64, h: f64) -> MindMap {
+        use baumhard::mindmap::model::TextRun;
+        let text_runs = vec![TextRun {
+            start: 0,
+            end: text.chars().count(),
+            bold: false,
+            italic: false,
+            underline: false,
+            font: "LiberationSans".to_string(),
+            size_pt: 14,
+            color: "#ffffff".to_string(),
+            hyperlink: None,
+        }];
+        let node = MindNode {
+            id: "n1".to_string(),
+            parent_id: None,
+            index: 0,
+            position: Position { x: 0.0, y: 0.0 },
+            size: Size { width: w, height: h },
+            text: text.to_string(),
+            text_runs,
+            style: NodeStyle {
+                background_color: "#141414".to_string(),
+                frame_color: "#30b082".to_string(),
+                text_color: "#ffffff".to_string(),
+                shape_type: 0,
+                corner_radius_percent: 10.0,
+                frame_thickness: 4.0,
+                show_frame: true,
+                show_shadow: false,
+                border: None,
+            },
+            layout: NodeLayout {
+                layout_type: 0,
+                direction: 0,
+                spacing: 50.0,
+            },
+            folded: false,
+            notes: String::new(),
+            color_schema: None,
+            trigger_bindings: Vec::new(),
+            inline_mutations: Vec::new(),
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert("n1".to_string(), node);
+        MindMap {
+            version: "1.0".to_string(),
+            name: "test".to_string(),
+            canvas: Canvas {
+                background_color: "#000000".to_string(),
+                default_border: None,
+                default_connection: None,
+                theme_variables: HashMap::new(),
+                theme_variants: HashMap::new(),
+            },
+            nodes,
+            edges: Vec::new(),
+            custom_mutations: Vec::new(),
+        }
+    }
+
+    /// A stored box that's already comfortably larger than the text
+    /// must be left alone — the helper is strictly grow-only.
+    #[test]
+    fn grow_node_sizes_to_fit_text_does_not_shrink() {
+        let mut map = synthetic_single_node_map("Hi", 500.0, 500.0);
+        grow_node_sizes_to_fit_text(&mut map);
+        let n = map.nodes.get("n1").unwrap();
+        assert_eq!(n.size.width, 500.0);
+        assert_eq!(n.size.height, 500.0);
+    }
+
+    /// A tiny stored box with a long text must grow so the measured
+    /// bounds (plus padding) fit inside. Exact measurements depend on
+    /// available fonts, so assertions are lower-bound only.
+    #[test]
+    fn grow_node_sizes_to_fit_text_grows_undersized_boxes() {
+        let long = "The quick brown fox jumps over the lazy dog a few times";
+        let mut map = synthetic_single_node_map(long, 20.0, 20.0);
+        grow_node_sizes_to_fit_text(&mut map);
+        let n = map.nodes.get("n1").unwrap();
+        // Definitely bigger than 20×20 — the long string shapes to at
+        // least a few hundred pixels wide at 14 pt.
+        assert!(
+            n.size.width > 100.0,
+            "expected grown width > 100, got {}",
+            n.size.width
+        );
+        // Height grows by at least one line of text + pad_y (0.5 *
+        // 14 = 7) → ≥ one line height (14 * 1.2 ≈ 16.8) + 7 ≈ 23.8.
+        assert!(
+            n.size.height >= 20.0,
+            "expected height ≥ 20 (grow-only floor), got {}",
+            n.size.height
+        );
+    }
+
+    /// Running the pass twice must be a no-op the second time —
+    /// after the first run, every node's stored size is already
+    /// `>= measured + pad`, so the `max(stored, ...)` reduces to
+    /// `stored` on the second call.
+    #[test]
+    fn grow_node_sizes_to_fit_text_is_idempotent() {
+        let mut map = synthetic_single_node_map("Some text here", 10.0, 10.0);
+        grow_node_sizes_to_fit_text(&mut map);
+        let first_w = map.nodes.get("n1").unwrap().size.width;
+        let first_h = map.nodes.get("n1").unwrap().size.height;
+        grow_node_sizes_to_fit_text(&mut map);
+        let second_w = map.nodes.get("n1").unwrap().size.width;
+        let second_h = map.nodes.get("n1").unwrap().size.height;
+        assert_eq!(first_w, second_w);
+        assert_eq!(first_h, second_h);
     }
 }

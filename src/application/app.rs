@@ -1082,6 +1082,13 @@ impl Application {
                                 renderer.rebuild_connection_label_buffers(
                                     &scene.connection_label_elements,
                                 );
+                                // Edge handles (anchor / midpoint /
+                                // control-point ◆ glyphs on a selected
+                                // edge) must also track the live drag.
+                                // Without this the handles stay pinned
+                                // to the pre-drag positions until mouse
+                                // release triggers a full rebuild.
+                                renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
                             }
 
                             *pending_delta = Vec2::ZERO;
@@ -1215,6 +1222,12 @@ impl Application {
                             renderer.rebuild_connection_label_buffers(
                                 &scene.connection_label_elements,
                             );
+                            // Edge handles (if an edge is selected) must
+                            // also follow camera changes — scroll-wheel
+                            // zoom with a selected edge used to leave
+                            // the handles pinned to stale screen
+                            // positions until the next full rebuild.
+                            renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
                         }
                     }
 
