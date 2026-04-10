@@ -2,7 +2,7 @@
   "version": "1.0",
   "name": "testament",
   "canvas": {
-    "background_color": "#141414"
+    "background_color": "#000000"
   },
   "nodes": {
     "348068464": {

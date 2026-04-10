@@ -33,7 +33,7 @@ mod tests {
 
         assert_eq!(map.version, "1.0");
         assert_eq!(map.name, "testament");
-        assert_eq!(map.canvas.background_color, "#141414");
+        assert_eq!(map.canvas.background_color, "#000000");
         assert_eq!(map.nodes.len(), 243);
         assert_eq!(map.edges.len(), 250);
     }
