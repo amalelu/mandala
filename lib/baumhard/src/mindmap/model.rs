@@ -300,6 +300,20 @@ impl MindMap {
         false
     }
 
+    /// Collect all descendant IDs of a node (recursive), not including the node itself.
+    pub fn all_descendants(&self, node_id: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        self.collect_descendants(node_id, &mut result);
+        result
+    }
+
+    fn collect_descendants(&self, node_id: &str, result: &mut Vec<String>) {
+        for child in self.children_of(node_id) {
+            result.push(child.id.clone());
+            self.collect_descendants(&child.id, result);
+        }
+    }
+
     /// Resolves the effective colors for a themed node.
     /// Returns (background, frame, text, title) hex color strings.
     pub fn resolve_theme_colors<'a>(&'a self, node: &'a MindNode) -> Option<&'a ColorGroup> {
@@ -313,5 +327,52 @@ impl MindMap {
             // Wrap around if level exceeds groups
             root_schema.groups.last()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mindmap::loader;
+    use std::path::PathBuf;
+
+    fn test_map_path() -> PathBuf {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.pop(); // lib/baumhard -> lib
+        path.pop(); // lib -> root
+        path.push("maps/testament.mindmap.json");
+        path
+    }
+
+    #[test]
+    fn test_all_descendants() {
+        let path = test_map_path();
+        let map = loader::load_from_file(&path).unwrap();
+
+        // "Lord God" (348068464) has children — descendants should include them all
+        let children = map.children_of("348068464");
+        assert!(!children.is_empty(), "Lord God should have children");
+
+        let descendants = map.all_descendants("348068464");
+        // Every direct child should appear in descendants
+        for child in &children {
+            assert!(descendants.contains(&child.id), "Child {} missing from descendants", child.id);
+        }
+        // Descendants should be >= children (includes grandchildren etc.)
+        assert!(descendants.len() >= children.len());
+    }
+
+    #[test]
+    fn test_all_descendants_leaf_node() {
+        let path = test_map_path();
+        let map = loader::load_from_file(&path).unwrap();
+
+        // Find a leaf node (no children)
+        let leaf = map.nodes.values()
+            .find(|n| map.children_of(&n.id).is_empty())
+            .expect("Should have at least one leaf node");
+
+        let descendants = map.all_descendants(&leaf.id);
+        assert!(descendants.is_empty(), "Leaf node should have no descendants");
     }
 }
