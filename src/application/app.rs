@@ -2,17 +2,38 @@ use std::sync::{Arc, RwLock};
 
 #[cfg(not(target_arch = "wasm32"))]
 use pollster::block_on;
+use glam::Vec2;
 use indextree::Arena;
 use wgpu::{Instance, SurfaceTargetUnsafe};
-use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ControlFlow;
+use winit::keyboard::{Key, NamedKey};
 use winit::{event_loop::EventLoop, window::Window};
 
 use crate::application::common::{InputMode, RenderDecree, WindowMode};
-use crate::application::document::{MindMapDocument, SelectionState, hit_test, apply_selection_highlight};
+use crate::application::document::{MindMapDocument, SelectionState, UndoAction, hit_test, apply_selection_highlight, apply_drag_delta};
 use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;
+
+/// Tracks the current drag interaction state.
+#[cfg(not(target_arch = "wasm32"))]
+enum DragState {
+    /// No drag in progress.
+    None,
+    /// Mouse is down but hasn't moved past the drag threshold yet.
+    Pending { start_pos: (f64, f64), hit_node: Option<String> },
+    /// Dragging to pan the camera (started on empty space).
+    Panning,
+    /// Dragging a node to reposition it.
+    MovingNode {
+        node_id: String,
+        /// Accumulated total delta in canvas coords (for model sync on drop).
+        total_delta: Vec2,
+        /// Whether dragging only the individual node (alt+drag) vs subtree.
+        individual: bool,
+    },
+}
 
 /**
 Represents the root container of the application
@@ -95,10 +116,10 @@ impl Application {
 
         // Input state
         let mut cursor_pos: (f64, f64) = (0.0, 0.0);
-        let mut is_panning = false;
-        let mut left_mouse_down = false;
-        let mut left_mouse_down_pos: (f64, f64) = (0.0, 0.0);
+        let mut drag_state = DragState::None;
         let mut shift_pressed = false;
+        let mut alt_pressed = false;
+        let mut ctrl_pressed = false;
 
         self.event_loop.run(move |event, _window_target| {
             _ = (&self.window, &mut self.options);
@@ -131,25 +152,61 @@ impl Application {
                 } => {
                     match button {
                         MouseButton::Middle => {
-                            is_panning = state == ElementState::Pressed;
+                            if state == ElementState::Pressed {
+                                drag_state = DragState::Panning;
+                            } else {
+                                drag_state = DragState::None;
+                            }
                         }
                         MouseButton::Left => {
                             if state == ElementState::Pressed {
-                                left_mouse_down = true;
-                                left_mouse_down_pos = cursor_pos;
-                            } else {
-                                // Released — if no drag occurred, treat as click
-                                if left_mouse_down && !is_panning {
-                                    handle_click(
-                                        cursor_pos,
-                                        shift_pressed,
-                                        &mut document,
-                                        &mut mindmap_tree,
-                                        &mut renderer,
+                                // Hit test to determine if clicking on a node
+                                let hit_node = mindmap_tree.as_ref().and_then(|tree| {
+                                    let canvas_pos = renderer.screen_to_canvas(
+                                        cursor_pos.0 as f32,
+                                        cursor_pos.1 as f32,
                                     );
+                                    hit_test(canvas_pos, tree)
+                                });
+                                drag_state = DragState::Pending {
+                                    start_pos: cursor_pos,
+                                    hit_node,
+                                };
+                            } else {
+                                // Released
+                                match std::mem::replace(&mut drag_state, DragState::None) {
+                                    DragState::Pending { hit_node, .. } => {
+                                        // No drag occurred — treat as click
+                                        handle_click(
+                                            hit_node,
+                                            shift_pressed,
+                                            &mut document,
+                                            &mut mindmap_tree,
+                                            &mut renderer,
+                                        );
+                                    }
+                                    DragState::MovingNode { node_id, total_delta, individual } => {
+                                        // Drop: sync to model, full rebuild, push undo
+                                        if let Some(doc) = document.as_mut() {
+                                            let dx = total_delta.x as f64;
+                                            let dy = total_delta.y as f64;
+                                            let undo_data = if individual {
+                                                doc.apply_move_single(&node_id, dx, dy)
+                                                    .into_iter().collect()
+                                            } else {
+                                                doc.apply_move_subtree(&node_id, dx, dy)
+                                            };
+                                            doc.undo_stack.push(UndoAction::MoveNodes {
+                                                original_positions: undo_data,
+                                            });
+                                            doc.dirty = true;
+
+                                            // Full rebuild from model
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
+                                    }
+                                    DragState::Panning | DragState::None => {}
                                 }
-                                left_mouse_down = false;
-                                is_panning = false;
                             }
                         }
                         _ => {}
@@ -174,19 +231,63 @@ impl Application {
                     event: WindowEvent::CursorMoved { position, .. },
                     ..
                 } => {
-                    let dx = position.x - cursor_pos.0;
-                    let dy = position.y - cursor_pos.1;
+                    let prev_pos = cursor_pos;
                     cursor_pos = (position.x, position.y);
-                    if is_panning {
-                        renderer.process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
-                    } else if left_mouse_down {
-                        // Detect drag: if moved > 5px from press position, start panning
-                        let dist_x = cursor_pos.0 - left_mouse_down_pos.0;
-                        let dist_y = cursor_pos.1 - left_mouse_down_pos.1;
-                        if dist_x * dist_x + dist_y * dist_y > 25.0 {
-                            is_panning = true;
+
+                    match &mut drag_state {
+                        DragState::Panning => {
+                            let dx = cursor_pos.0 - prev_pos.0;
+                            let dy = cursor_pos.1 - prev_pos.1;
                             renderer.process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
                         }
+                        DragState::MovingNode { node_id, total_delta, individual } => {
+                            // Convert screen delta to canvas delta
+                            let old_canvas = renderer.screen_to_canvas(prev_pos.0 as f32, prev_pos.1 as f32);
+                            let new_canvas = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
+                            let canvas_dx = new_canvas.x - old_canvas.x;
+                            let canvas_dy = new_canvas.y - old_canvas.y;
+
+                            *total_delta += Vec2::new(canvas_dx, canvas_dy);
+
+                            // Apply in-place mutation to tree for visual preview
+                            if let Some(tree) = mindmap_tree.as_mut() {
+                                apply_drag_delta(tree, node_id, canvas_dx, canvas_dy, !*individual);
+                                renderer.rebuild_buffers_from_tree(&tree.tree);
+                            }
+                        }
+                        DragState::Pending { start_pos, hit_node } => {
+                            let dist_x = cursor_pos.0 - start_pos.0;
+                            let dist_y = cursor_pos.1 - start_pos.1;
+                            if dist_x * dist_x + dist_y * dist_y > 25.0 {
+                                // Past threshold — decide: move node or pan camera
+                                if let Some(node_id) = hit_node.take() {
+                                    // Ensure the node is selected
+                                    if let Some(doc) = document.as_mut() {
+                                        if !doc.selection.is_selected(&node_id) {
+                                            doc.selection = SelectionState::Single(node_id.clone());
+                                            // Rebuild with highlight for the newly selected node
+                                            if let Some(tree) = mindmap_tree.as_mut() {
+                                                let mut new_tree = doc.build_tree();
+                                                apply_selection_highlight(&mut new_tree, &doc.selection);
+                                                renderer.rebuild_buffers_from_tree(&new_tree.tree);
+                                                *tree = new_tree;
+                                            }
+                                        }
+                                    }
+                                    drag_state = DragState::MovingNode {
+                                        node_id,
+                                        total_delta: Vec2::ZERO,
+                                        individual: alt_pressed,
+                                    };
+                                } else {
+                                    drag_state = DragState::Panning;
+                                    let dx = cursor_pos.0 - prev_pos.0;
+                                    let dy = cursor_pos.1 - prev_pos.1;
+                                    renderer.process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
+                                }
+                            }
+                        }
+                        DragState::None => {}
                     }
                 }
                 ////////////////////
@@ -197,6 +298,32 @@ impl Application {
                     ..
                 } => {
                     shift_pressed = modifiers.state().shift_key();
+                    alt_pressed = modifiers.state().alt_key();
+                    ctrl_pressed = modifiers.state().control_key();
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput {
+                        event: KeyEvent {
+                            logical_key,
+                            state: ElementState::Pressed,
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                } => {
+                    let is_undo = match &logical_key {
+                        Key::Named(NamedKey::Undo) => true,
+                        Key::Character(c) if ctrl_pressed && c.as_ref() == "z" => true,
+                        _ => false,
+                    };
+                    if is_undo {
+                        if let Some(doc) = document.as_mut() {
+                            if doc.undo() {
+                                rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                            }
+                        }
+                    }
                 }
                 Event::AboutToWait => {
                     // Drive the render loop each frame
@@ -343,10 +470,28 @@ fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
         .unwrap();
 }
 
-/// Handle a click event: hit test, update selection, rebuild tree with highlight.
+/// Rebuild tree from model with selection highlight, plus connections and borders.
+#[cfg(not(target_arch = "wasm32"))]
+fn rebuild_all(
+    doc: &MindMapDocument,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let mut new_tree = doc.build_tree();
+    apply_selection_highlight(&mut new_tree, &doc.selection);
+    renderer.rebuild_buffers_from_tree(&new_tree.tree);
+
+    let scene = doc.build_scene();
+    renderer.rebuild_connection_buffers(&scene.connection_elements);
+    renderer.rebuild_border_buffers(&scene.border_elements);
+
+    *mindmap_tree = Some(new_tree);
+}
+
+/// Handle a click event: update selection, rebuild tree with highlight.
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_click(
-    cursor_pos: (f64, f64),
+    hit: Option<String>,
     shift_pressed: bool,
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
@@ -356,12 +501,6 @@ fn handle_click(
         Some(d) => d,
         None => return,
     };
-
-    // Hit test against current tree
-    let hit = mindmap_tree.as_ref().and_then(|tree| {
-        let canvas_pos = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
-        hit_test(canvas_pos, tree)
-    });
 
     // Update selection state
     match (&hit, shift_pressed) {
@@ -406,10 +545,7 @@ fn handle_click(
     }
 
     // Rebuild tree with selection highlight applied
-    let mut new_tree = doc.build_tree();
-    apply_selection_highlight(&mut new_tree, &doc.selection);
-    renderer.rebuild_buffers_from_tree(&new_tree.tree);
-    *mindmap_tree = Some(new_tree);
+    rebuild_all(doc, mindmap_tree, renderer);
 }
 
 /**

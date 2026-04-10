@@ -30,7 +30,7 @@ The application has two layers:
 
 ---
 
-## Current State (after Session 4)
+## Current State (after Session 5)
 
 ### What works
 - **MindMap data model** — serde-based structs, JSON loading, hierarchy queries
@@ -42,24 +42,27 @@ The application has two layers:
 - **Node selection** — click to select, shift+click for multi-select, click empty to deselect
 - **Selection highlight** — selected nodes highlighted via GlyphArea color region mutation (cyan)
 - **Click vs drag** — left-click selects, left-drag pans (5px threshold), middle-drag pans
+- **Node movement** — drag selected nodes to reposition (subtree moves together), alt+drag for individual node only. Mutations applied to Baumhard tree for real-time preview, model synced on drop. Connections/borders snap on drop.
+- **Undo** — Ctrl+Z undoes node movement (undo stack with position restoration)
+- **DragState machine** — structured input state (Pending/Panning/MovingNode) replaces loose booleans
 - **Multi-target** — native + WASM builds
-- **126 tests passing**
+- **135 tests passing**
 
 ### What needs work
-- **No node movement** — selection exists but nodes can't be dragged to new positions
+- **No reparent via drag** — nodes can be moved but not reparented by dragging onto other nodes
 - **No text editing** — no inline text editing or node creation
 - **Borders not in tree** — borders render via flat pipeline, not as GlyphModel children in the Baumhard tree
 - **No save/persistence** — document dirty flag exists but no serialization
-- **WASM input** — selection not yet wired up on WASM (TODOs in event loop)
+- **WASM input** — selection and movement not yet wired up on WASM (TODOs in event loop)
 
 ### Key Files Reference
 | File | Role |
 |------|------|
-| `src/application/app.rs` | Event loop, window, tree+scene pipeline wiring |
+| `src/application/app.rs` | Event loop, window, DragState machine, input handling, tree+scene pipeline wiring |
 | `src/application/renderer.rs` | GPU pipeline: tree-based node rendering + flat border/connection rendering |
-| `src/application/document.rs` | Owns MindMap + SelectionState, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()` |
+| `src/application/document.rs` | Owns MindMap + SelectionState + UndoStack, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()`, `apply_drag_delta()`, `apply_move_subtree/single()`, `undo()` |
 | `src/application/common.rs` | RenderDecree, WindowMode, InputMode, timing |
-| `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge structs |
+| `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge structs, `all_descendants()` |
 | `lib/baumhard/src/mindmap/tree_builder.rs` | MindMap → Tree<GfxElement, GfxMutator> bridge |
 | `lib/baumhard/src/mindmap/scene_builder.rs` | MindMap → flat RenderScene (connections, borders) |
 | `lib/baumhard/src/mindmap/loader.rs` | JSON loading |
@@ -256,7 +259,7 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
 - `src/application/app.rs` — persistent document/tree in event loop, click handling, modifier tracking
 - `src/application/renderer.rs` — screen_to_canvas()
 
-**Verify**: `cargo test -p baumhard -p mandala` passes (126 tests), clicking nodes selects them with visual feedback
+**Verify**: `cargo test -p baumhard -p mandala` passes (126 tests at end of session 4), clicking nodes selects them with visual feedback
 
 ---
 
@@ -268,14 +271,20 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
 
 **What**: Drag to move nodes, with subtree and individual modes.
 
-- [ ] Implement drag gesture detection (mouse down → move → mouse up)
-- [ ] Default drag: move node + all descendants — apply NudgeDown/NudgeRight MutatorTree to subtree, then sync positions back to MindMap model
-- [ ] Alt+drag: move individual node only (apply mutation to single node, not descendants)
-- [ ] Update positions in MindMap model, mark document dirty
-- [ ] Rebuild tree from updated model (or apply mutations directly to existing tree)
-- [ ] Add undo support: push `MoveAction` to undo stack
+- [x] Implement drag gesture detection (mouse down → move → mouse up) via DragState enum (None/Pending/Panning/MovingNode)
+- [x] Default drag: move node + all descendants — in-place GlyphArea mutations for real-time preview, model sync on drop
+- [x] Alt+drag: move individual node only (apply mutation to single node, not descendants)
+- [x] Update positions in MindMap model on drop, mark document dirty
+- [x] Full rebuild from model on drop (tree + connections + borders)
+- [x] Add undo support: UndoAction::MoveNodes with original positions, Ctrl+Z to undo
+- [x] 9 new tests: all_descendants, move_subtree, move_single, move_preserves_relative, undo_restores, drag_delta, drag_delta_with_descendants, move_returns_originals
 
-**Verify**: Nodes can be dragged around, subtrees move together
+**Key files**:
+- `src/application/app.rs` — DragState enum, refactored input handling, alt/ctrl tracking, Ctrl+Z undo
+- `src/application/document.rs` — UndoAction, undo_stack, apply_move_subtree/single, undo(), apply_drag_delta()
+- `lib/baumhard/src/mindmap/model.rs` — all_descendants() helper
+
+**Verify**: `cargo test -p baumhard -p mandala` passes (135 tests), nodes can be dragged around, subtrees move together
 
 ### Session 5B: Reparent via drag
 
