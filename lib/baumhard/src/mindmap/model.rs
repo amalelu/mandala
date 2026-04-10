@@ -12,6 +12,13 @@ pub struct MindMap {
     /// Map-level custom mutation definitions, available to all nodes in this map.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_mutations: Vec<CustomMutation>,
+    /// Session 6E: portal pairs — matching glyph markers on two distant
+    /// nodes used as a lightweight alternative to cross-link edges when a
+    /// rendered line would clutter the map. Each pair contributes two
+    /// rendered markers (one per endpoint). Backward-compatible via
+    /// serde default: maps authored before 6E parse with an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub portals: Vec<PortalPair>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +333,79 @@ pub struct ControlPoint {
     pub y: f64,
 }
 
+/// Session 6E: a portal pair — two matching glyph markers placed on
+/// two distant nodes so users can visually link them without rendering
+/// a connection line across the canvas. Portals are a lightweight
+/// alternative to cross-link edges for very far-apart nodes.
+///
+/// Each pair produces *two* rendered markers (one per endpoint node),
+/// both showing the same `glyph` and `color`. The `label` is an
+/// auto-assigned identifier ("A", "B", ..., "AA"...) used for stable
+/// identity in selection/undo; it is not currently drawn next to the
+/// glyph — the glyph alone is the visual cue. Labels are immutable in
+/// Session 6E; a rename action is deferred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortalPair {
+    /// Node id of the first endpoint.
+    pub endpoint_a: String,
+    /// Node id of the second endpoint.
+    pub endpoint_b: String,
+    /// Auto-assigned stable identifier: "A", "B", ..., "Z", "AA", "AB"...
+    /// Picked by `MindMap::next_portal_label` to be the lowest unused
+    /// letter in column-letter order at creation time.
+    pub label: String,
+    /// The visible marker glyph, e.g. "◈", "◆", "⬡". Rotated from
+    /// `PORTAL_GLYPH_PRESETS` at creation time, editable via the
+    /// Session 6E palette actions.
+    pub glyph: String,
+    /// Marker color — `#RRGGBB` hex or `var(--name)`. Resolved through
+    /// the theme variable map at scene-build time, so `var(--accent)`
+    /// auto-restyles on theme swap (see `connection labels` for the
+    /// parallel pattern at `scene_builder.rs` Session 6D).
+    pub color: String,
+    /// Point size of the rendered glyph. Defaults to 16.0 so markers
+    /// are a hair larger than body text for legibility without
+    /// dominating the node they sit next to.
+    #[serde(default = "default_portal_font_size")]
+    pub font_size_pt: f32,
+    /// Optional font family override. `None` falls back to the
+    /// renderer's default font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+}
+
+fn default_portal_font_size() -> f32 { 16.0 }
+
+/// Convert a 1-indexed ordinal into an Excel-style column letter label:
+/// `1 → "A"`, `26 → "Z"`, `27 → "AA"`, `28 → "AB"`, `702 → "ZZ"`,
+/// `703 → "AAA"`, and so on. Used by `MindMap::next_portal_label` to
+/// walk a lazy sequence of candidate portal labels. Panics on `0`.
+pub fn column_letter_label(mut n: u64) -> String {
+    assert!(n > 0, "column_letter_label is 1-indexed");
+    let mut s = String::new();
+    while n > 0 {
+        n -= 1;
+        s.insert(0, (b'A' + (n % 26) as u8) as char);
+        n /= 26;
+    }
+    s
+}
+
+/// Rotation palette used by `MindMapDocument::apply_create_portal`
+/// to pick a distinct default glyph for each new portal without
+/// requiring the user to choose up front. Indexed by
+/// `portals.len() % PORTAL_GLYPH_PRESETS.len()` at creation time.
+pub const PORTAL_GLYPH_PRESETS: &[&str] = &[
+    "\u{25C8}", // ◈ white diamond containing black small diamond
+    "\u{25C6}", // ◆ black diamond
+    "\u{2B21}", // ⬡ white hexagon
+    "\u{2B22}", // ⬢ black hexagon
+    "\u{25C9}", // ◉ fisheye
+    "\u{2756}", // ❖ black diamond minus white X
+    "\u{2726}", // ✦ black four pointed star
+    "\u{2727}", // ✧ white four pointed star
+];
+
 impl MindMap {
     /// Returns root nodes (nodes with no parent), sorted by index.
     pub fn root_nodes(&self) -> Vec<&MindNode> {
@@ -422,6 +502,28 @@ impl MindMap {
             current = self.nodes.get(pid).and_then(|n| n.parent_id.as_deref());
         }
         false
+    }
+
+    /// Session 6E: return the lowest unused portal label in column-letter
+    /// order: "A", "B", ..., "Z", "AA", "AB", ..., "AZ", "BA", ...
+    ///
+    /// Walks the existing `portals` vec, collects the used labels into a
+    /// set, then emits labels lazily until one is not in the set. Used
+    /// by `MindMapDocument::apply_create_portal` so deleting portal "B"
+    /// and creating a new one reuses "B" rather than jumping to "D".
+    pub fn next_portal_label(&self) -> String {
+        use std::collections::HashSet;
+        let used: HashSet<&str> = self.portals.iter().map(|p| p.label.as_str()).collect();
+        // Lazy column-letter generator: 1 → "A", 26 → "Z", 27 → "AA", ...
+        // (matching the Excel column naming scheme).
+        let mut n: u64 = 1;
+        loop {
+            let label = column_letter_label(n);
+            if !used.contains(label.as_str()) {
+                return label;
+            }
+            n += 1;
+        }
     }
 
     /// Resolves the effective colors for a themed node.
@@ -743,5 +845,149 @@ mod tests {
         assert_eq!(resolved.body, GlyphConnectionConfig::default().body);
         // Owned — the caller got a freshly-built default.
         assert!(matches!(resolved, std::borrow::Cow::Owned(_)));
+    }
+
+    // ============================================================
+    // Session 6E — portal data model tests
+    // ============================================================
+
+    fn synthetic_empty_map() -> MindMap {
+        MindMap {
+            version: "1".to_string(),
+            name: "test".to_string(),
+            canvas: Canvas {
+                background_color: "#000".to_string(),
+                default_border: None,
+                default_connection: None,
+                theme_variables: HashMap::new(),
+                theme_variants: HashMap::new(),
+            },
+            nodes: HashMap::new(),
+            edges: Vec::new(),
+            custom_mutations: Vec::new(),
+            portals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn column_letter_label_sequence() {
+        assert_eq!(column_letter_label(1), "A");
+        assert_eq!(column_letter_label(2), "B");
+        assert_eq!(column_letter_label(26), "Z");
+        assert_eq!(column_letter_label(27), "AA");
+        assert_eq!(column_letter_label(28), "AB");
+        assert_eq!(column_letter_label(52), "AZ");
+        assert_eq!(column_letter_label(53), "BA");
+        assert_eq!(column_letter_label(702), "ZZ");
+        assert_eq!(column_letter_label(703), "AAA");
+    }
+
+    #[test]
+    fn portal_pair_round_trips_through_json() {
+        let portal = PortalPair {
+            endpoint_a: "node-1".to_string(),
+            endpoint_b: "node-2".to_string(),
+            label: "A".to_string(),
+            glyph: "\u{25C8}".to_string(),
+            color: "var(--accent)".to_string(),
+            font_size_pt: 18.0,
+            font: Some("LiberationSans".to_string()),
+        };
+        let json = serde_json::to_string(&portal).unwrap();
+        assert!(json.contains("node-1"));
+        assert!(json.contains("\"label\":\"A\""));
+        let back: PortalPair = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.endpoint_a, "node-1");
+        assert_eq!(back.endpoint_b, "node-2");
+        assert_eq!(back.label, "A");
+        assert_eq!(back.color, "var(--accent)");
+        assert_eq!(back.font_size_pt, 18.0);
+        assert_eq!(back.font.as_deref(), Some("LiberationSans"));
+    }
+
+    #[test]
+    fn portal_pair_font_size_defaults_when_missing() {
+        // A portal authored without `font_size_pt` must deserialize with the
+        // default 16.0 so older saved maps keep working when this field is
+        // added post-hoc.
+        let json = r##"{
+            "endpoint_a":"a","endpoint_b":"b",
+            "label":"A","glyph":"\u25C8","color":"#aa88cc"
+        }"##;
+        let portal: PortalPair = serde_json::from_str(json).unwrap();
+        assert_eq!(portal.font_size_pt, 16.0);
+        assert_eq!(portal.font, None);
+    }
+
+    #[test]
+    fn portals_missing_deserializes_empty() {
+        // Maps authored before Session 6E omit the `portals` field
+        // entirely. `#[serde(default)]` must give them an empty vec so
+        // they keep loading cleanly.
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        assert!(map.portals.is_empty(), "pre-6E maps should have no portals");
+    }
+
+    #[test]
+    fn portals_empty_vec_skipped_in_serialize() {
+        // A fresh map with no portals must not write the field so the
+        // on-disk JSON shape for existing maps is byte-stable.
+        let map = synthetic_empty_map();
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(
+            !json.contains("\"portals\""),
+            "empty portals should not appear in JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn next_portal_label_picks_lowest_unused() {
+        let mut map = synthetic_empty_map();
+        assert_eq!(map.next_portal_label(), "A");
+
+        map.portals.push(PortalPair {
+            endpoint_a: "x".to_string(), endpoint_b: "y".to_string(),
+            label: "A".to_string(), glyph: "\u{25C8}".to_string(),
+            color: "#aa88cc".to_string(), font_size_pt: 16.0, font: None,
+        });
+        assert_eq!(map.next_portal_label(), "B");
+
+        // Fill in "B" — next should be "C".
+        map.portals.push(PortalPair {
+            endpoint_a: "x".to_string(), endpoint_b: "y".to_string(),
+            label: "B".to_string(), glyph: "\u{25C6}".to_string(),
+            color: "#aa88cc".to_string(), font_size_pt: 16.0, font: None,
+        });
+        assert_eq!(map.next_portal_label(), "C");
+
+        // Skip "C", use "D" — the gap at "C" should be reused first.
+        map.portals.last_mut().unwrap().label = "D".to_string();
+        assert_eq!(map.next_portal_label(), "B");
+    }
+
+    #[test]
+    fn next_portal_label_wraps_to_double_letter() {
+        let mut map = synthetic_empty_map();
+        // Fill A..Z.
+        for n in 1u64..=26 {
+            map.portals.push(PortalPair {
+                endpoint_a: "x".to_string(), endpoint_b: "y".to_string(),
+                label: column_letter_label(n),
+                glyph: "\u{25C8}".to_string(),
+                color: "#aa88cc".to_string(),
+                font_size_pt: 16.0,
+                font: None,
+            });
+        }
+        assert_eq!(map.next_portal_label(), "AA");
+    }
+
+    #[test]
+    fn portal_glyph_presets_are_nonempty_and_unique() {
+        assert!(!PORTAL_GLYPH_PRESETS.is_empty());
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for g in PORTAL_GLYPH_PRESETS {
+            assert!(seen.insert(*g), "glyph preset {g} duplicated");
+        }
     }
 }

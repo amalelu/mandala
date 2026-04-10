@@ -16,7 +16,7 @@
 //! straight, and two sets of five anchor-side actions (Auto / Top /
 //! Right / Bottom / Left for both `from` and `to` anchors).
 
-use crate::application::document::{EdgeRef, MindMapDocument, SelectionState};
+use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, SelectionState};
 
 /// A single command palette entry. Kept small and `'static` so the
 /// whole registry can live in a const slice.
@@ -624,6 +624,133 @@ fn edge_has_style_override(ctx: &PaletteContext) -> bool {
     with_selected_edge(ctx, |e| e.glyph_connection.is_some())
 }
 
+// ============================================================
+// Session 6E — portal predicates
+// ============================================================
+
+/// True when `Multi` selection holds exactly two node ids — the
+/// precondition for creating a portal between them.
+fn two_nodes_selected(ctx: &PaletteContext) -> bool {
+    matches!(&ctx.document.selection, SelectionState::Multi(ids) if ids.len() == 2)
+}
+
+/// True when a portal is currently selected (via glyph hit-test in
+/// `handle_click`). Gates all the per-portal edit actions.
+fn portal_selected(ctx: &PaletteContext) -> bool {
+    matches!(ctx.document.selection, SelectionState::Portal(_))
+}
+
+/// Helper matching `with_selected_edge`: runs `f` against the
+/// currently-selected portal pair's `PortalPair`, returning `false`
+/// if the selection is not a portal or no matching portal is found.
+fn with_selected_portal<F>(ctx: &PaletteContext, f: F) -> bool
+where
+    F: FnOnce(&baumhard::mindmap::model::PortalPair) -> bool,
+{
+    let pref = match &ctx.document.selection {
+        SelectionState::Portal(p) => p,
+        _ => return false,
+    };
+    ctx.document
+        .mindmap
+        .portals
+        .iter()
+        .find(|p| pref.matches(p))
+        .map(f)
+        .unwrap_or(false)
+}
+
+/// Self-hide a glyph-setter action when the current glyph already
+/// matches — matches the Session 6D `edge_selected_and_not_body_*`
+/// pattern.
+fn portal_glyph_not(ctx: &PaletteContext, glyph: &str) -> bool {
+    with_selected_portal(ctx, |p| p.glyph != glyph)
+}
+
+fn portal_glyph_not_hexagon(ctx: &PaletteContext) -> bool {
+    portal_glyph_not(ctx, "\u{2B21}")
+}
+fn portal_glyph_not_diamond(ctx: &PaletteContext) -> bool {
+    portal_glyph_not(ctx, "\u{25C6}")
+}
+fn portal_glyph_not_star(ctx: &PaletteContext) -> bool {
+    portal_glyph_not(ctx, "\u{2726}")
+}
+fn portal_glyph_not_circle(ctx: &PaletteContext) -> bool {
+    portal_glyph_not(ctx, "\u{25C9}")
+}
+
+fn portal_color_not(ctx: &PaletteContext, color: &str) -> bool {
+    with_selected_portal(ctx, |p| p.color != color)
+}
+fn portal_color_not_accent(ctx: &PaletteContext) -> bool {
+    portal_color_not(ctx, "var(--accent)")
+}
+fn portal_color_not_edge(ctx: &PaletteContext) -> bool {
+    portal_color_not(ctx, "var(--edge)")
+}
+fn portal_color_not_fg(ctx: &PaletteContext) -> bool {
+    portal_color_not(ctx, "var(--fg)")
+}
+fn portal_color_not_default(ctx: &PaletteContext) -> bool {
+    portal_color_not(ctx, "#aa88cc")
+}
+
+// ============================================================
+// Session 6E — portal execute callbacks
+// ============================================================
+
+/// Create a portal between the two nodes in the current `Multi`
+/// selection, then pivot the selection to the new portal so the
+/// follow-up glyph/color actions target it immediately.
+fn exec_create_portal(eff: &mut PaletteEffects) {
+    let (a, b) = match &eff.document.selection {
+        SelectionState::Multi(ids) if ids.len() == 2 => (ids[0].clone(), ids[1].clone()),
+        _ => return,
+    };
+    if let Ok(pref) = eff.document.apply_create_portal(&a, &b) {
+        eff.document.selection = SelectionState::Portal(pref);
+    }
+}
+
+fn exec_delete_portal(eff: &mut PaletteEffects) {
+    let pref = match &eff.document.selection {
+        SelectionState::Portal(p) => p.clone(),
+        _ => return,
+    };
+    if eff.document.apply_delete_portal(&pref).is_some() {
+        eff.document.selection = SelectionState::None;
+    }
+}
+
+fn set_selected_portal_glyph(eff: &mut PaletteEffects, glyph: &str) {
+    if let SelectionState::Portal(ref pref) = eff.document.selection {
+        let pref = pref.clone();
+        eff.document.set_portal_glyph(&pref, glyph);
+    }
+}
+fn exec_portal_glyph_hexagon(eff: &mut PaletteEffects) { set_selected_portal_glyph(eff, "\u{2B21}") }
+fn exec_portal_glyph_diamond(eff: &mut PaletteEffects) { set_selected_portal_glyph(eff, "\u{25C6}") }
+fn exec_portal_glyph_star(eff: &mut PaletteEffects)    { set_selected_portal_glyph(eff, "\u{2726}") }
+fn exec_portal_glyph_circle(eff: &mut PaletteEffects)  { set_selected_portal_glyph(eff, "\u{25C9}") }
+
+fn set_selected_portal_color(eff: &mut PaletteEffects, color: &str) {
+    if let SelectionState::Portal(ref pref) = eff.document.selection {
+        let pref = pref.clone();
+        eff.document.set_portal_color(&pref, color);
+    }
+}
+fn exec_portal_color_accent(eff: &mut PaletteEffects) { set_selected_portal_color(eff, "var(--accent)") }
+fn exec_portal_color_edge(eff: &mut PaletteEffects)   { set_selected_portal_color(eff, "var(--edge)") }
+fn exec_portal_color_fg(eff: &mut PaletteEffects)     { set_selected_portal_color(eff, "var(--fg)") }
+fn exec_portal_color_reset(eff: &mut PaletteEffects)  { set_selected_portal_color(eff, "#aa88cc") }
+
+// Silence dead-code chatter on `PortalRef` usage — the document
+// layer uses it directly, but this module only imports it for type
+// completeness.
+#[allow(dead_code)]
+fn _touch_portal_ref(_: PortalRef) {}
+
 /// Silence `#[allow(dead_code)]` chatter on the higher-order
 /// `edge_selected_and_not_body` helper — it's exposed in case a
 /// future session wants to add more body-glyph presets without
@@ -990,6 +1117,89 @@ pub const PALETTE_ACTIONS: &[PaletteAction] = &[
         applicable: edge_has_style_override,
         execute: exec_reset_edge_style,
     },
+    // ====================================================================
+    // Session 6E — portal creation and editing
+    // ====================================================================
+    PaletteAction {
+        id: "portal_create",
+        label: "Create portal between selected nodes",
+        description: "Place matching glyph markers on two distant nodes",
+        tags: &["portal", "create", "link", "marker", "pair"],
+        applicable: two_nodes_selected,
+        execute: exec_create_portal,
+    },
+    PaletteAction {
+        id: "portal_delete",
+        label: "Delete portal",
+        description: "Remove the selected portal pair and its markers",
+        tags: &["portal", "delete", "remove"],
+        applicable: portal_selected,
+        execute: exec_delete_portal,
+    },
+    PaletteAction {
+        id: "portal_glyph_hexagon",
+        label: "Portal glyph: hexagon (⬡)",
+        description: "Set the selected portal's marker glyph to a hexagon",
+        tags: &["portal", "glyph", "hexagon", "style"],
+        applicable: portal_glyph_not_hexagon,
+        execute: exec_portal_glyph_hexagon,
+    },
+    PaletteAction {
+        id: "portal_glyph_diamond",
+        label: "Portal glyph: diamond (◆)",
+        description: "Set the selected portal's marker glyph to a diamond",
+        tags: &["portal", "glyph", "diamond", "style"],
+        applicable: portal_glyph_not_diamond,
+        execute: exec_portal_glyph_diamond,
+    },
+    PaletteAction {
+        id: "portal_glyph_star",
+        label: "Portal glyph: star (✦)",
+        description: "Set the selected portal's marker glyph to a star",
+        tags: &["portal", "glyph", "star", "style"],
+        applicable: portal_glyph_not_star,
+        execute: exec_portal_glyph_star,
+    },
+    PaletteAction {
+        id: "portal_glyph_circle",
+        label: "Portal glyph: circle (◉)",
+        description: "Set the selected portal's marker glyph to a fisheye circle",
+        tags: &["portal", "glyph", "circle", "fisheye", "style"],
+        applicable: portal_glyph_not_circle,
+        execute: exec_portal_glyph_circle,
+    },
+    PaletteAction {
+        id: "portal_color_accent",
+        label: "Portal color: accent",
+        description: "Theme the selected portal with var(--accent)",
+        tags: &["portal", "color", "accent", "theme"],
+        applicable: portal_color_not_accent,
+        execute: exec_portal_color_accent,
+    },
+    PaletteAction {
+        id: "portal_color_edge",
+        label: "Portal color: edge",
+        description: "Theme the selected portal with var(--edge)",
+        tags: &["portal", "color", "edge", "theme"],
+        applicable: portal_color_not_edge,
+        execute: exec_portal_color_edge,
+    },
+    PaletteAction {
+        id: "portal_color_fg",
+        label: "Portal color: foreground",
+        description: "Theme the selected portal with var(--fg)",
+        tags: &["portal", "color", "foreground", "fg", "theme"],
+        applicable: portal_color_not_fg,
+        execute: exec_portal_color_fg,
+    },
+    PaletteAction {
+        id: "portal_color_reset",
+        label: "Portal color: reset",
+        description: "Restore the default portal color",
+        tags: &["portal", "color", "reset", "default"],
+        applicable: portal_color_not_default,
+        execute: exec_portal_color_reset,
+    },
 ];
 
 /// Look up an action by its stable id. Returns `None` if no action
@@ -1098,13 +1308,13 @@ mod tests {
     }
 
     #[test]
-    fn palette_actions_session_6d_count_matches_plan() {
-        // Session 6D target: 11 (carried over from 6C) + 31 new = 42.
+    fn palette_actions_session_6e_count_matches_plan() {
+        // Session 6E target: 11 (6C) + 31 (6D) + 10 (6E) = 52.
         // Tight assertion so adding/removing actions shows up in CI.
         assert_eq!(
             PALETTE_ACTIONS.len(),
-            42,
-            "expected 42 palette actions (11 from 6C + 31 new in 6D)"
+            52,
+            "expected 52 palette actions (11 from 6C + 31 from 6D + 10 from 6E)"
         );
     }
 
@@ -1147,5 +1357,176 @@ mod tests {
         for id in ids {
             assert!(action_by_id(id).is_some(), "action id '{id}' not registered");
         }
+    }
+
+    // ====================================================================
+    // Session 6E — portal palette actions
+    // ====================================================================
+
+    fn load_test_doc_for_portal_tests() -> MindMapDocument {
+        use std::collections::{HashMap, HashSet};
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("maps/testament.mindmap.json");
+        let map = baumhard::mindmap::loader::load_from_file(&path)
+            .expect("testament map should load");
+        let mut doc = MindMapDocument {
+            mindmap: map,
+            file_path: None,
+            dirty: false,
+            selection: SelectionState::None,
+            undo_stack: Vec::new(),
+            mutation_registry: HashMap::new(),
+            active_toggles: HashSet::new(),
+        };
+        doc.build_mutation_registry();
+        doc
+    }
+
+    #[test]
+    fn palette_actions_session_6e_ids_all_resolve() {
+        let ids: &[&str] = &[
+            "portal_create",
+            "portal_delete",
+            "portal_glyph_hexagon",
+            "portal_glyph_diamond",
+            "portal_glyph_star",
+            "portal_glyph_circle",
+            "portal_color_accent",
+            "portal_color_edge",
+            "portal_color_fg",
+            "portal_color_reset",
+        ];
+        assert_eq!(ids.len(), 10, "expected 10 new 6E action ids");
+        for id in ids {
+            assert!(action_by_id(id).is_some(), "action id '{id}' not registered");
+        }
+    }
+
+    #[test]
+    fn portal_create_applicable_only_with_two_node_selection() {
+        let mut doc = load_test_doc_for_portal_tests();
+        let (_, create_action) = action_by_id("portal_create").unwrap();
+
+        // No selection: not applicable.
+        doc.selection = SelectionState::None;
+        let ctx = PaletteContext { document: &doc };
+        assert!(!(create_action.applicable)(&ctx));
+
+        // Single-node selection: still not applicable.
+        let mut ids = doc.mindmap.nodes.keys().cloned();
+        let a = ids.next().unwrap();
+        let b = ids.next().unwrap();
+        doc.selection = SelectionState::Single(a.clone());
+        let ctx = PaletteContext { document: &doc };
+        assert!(!(create_action.applicable)(&ctx));
+
+        // Two-node Multi selection: applicable.
+        doc.selection = SelectionState::Multi(vec![a.clone(), b.clone()]);
+        let ctx = PaletteContext { document: &doc };
+        assert!((create_action.applicable)(&ctx));
+
+        // Three-node Multi selection: not applicable.
+        let c = doc.mindmap.nodes.keys().nth(2).unwrap().clone();
+        doc.selection = SelectionState::Multi(vec![a, b, c]);
+        let ctx = PaletteContext { document: &doc };
+        assert!(!(create_action.applicable)(&ctx));
+    }
+
+    #[test]
+    fn portal_edit_actions_only_applicable_when_portal_selected() {
+        let mut doc = load_test_doc_for_portal_tests();
+        let (_, glyph_hex) = action_by_id("portal_glyph_hexagon").unwrap();
+        let (_, color_accent) = action_by_id("portal_color_accent").unwrap();
+        let (_, delete_action) = action_by_id("portal_delete").unwrap();
+
+        // None selection → neither applies.
+        doc.selection = SelectionState::None;
+        let ctx = PaletteContext { document: &doc };
+        assert!(!(glyph_hex.applicable)(&ctx));
+        assert!(!(color_accent.applicable)(&ctx));
+        assert!(!(delete_action.applicable)(&ctx));
+
+        // With an actual portal created + selected, all three apply.
+        let mut ids = doc.mindmap.nodes.keys().cloned();
+        let a = ids.next().unwrap();
+        let b = ids.next().unwrap();
+        let pref = doc.apply_create_portal(&a, &b).unwrap();
+        doc.selection = SelectionState::Portal(pref);
+        let ctx = PaletteContext { document: &doc };
+        assert!((glyph_hex.applicable)(&ctx));
+        assert!((color_accent.applicable)(&ctx));
+        assert!((delete_action.applicable)(&ctx));
+    }
+
+    #[test]
+    fn exec_create_portal_selects_new_portal() {
+        let mut doc = load_test_doc_for_portal_tests();
+        let mut ids = doc.mindmap.nodes.keys().cloned();
+        let a = ids.next().unwrap();
+        let b = ids.next().unwrap();
+        doc.selection = SelectionState::Multi(vec![a.clone(), b.clone()]);
+        let mut eff = PaletteEffects {
+            document: &mut doc,
+            open_label_edit: None,
+        };
+        let (_, act) = action_by_id("portal_create").unwrap();
+        (act.execute)(&mut eff);
+        // The selection should pivot to Portal(_) so follow-up glyph/color
+        // actions target the new pair without the user having to click it.
+        assert!(matches!(doc.selection, SelectionState::Portal(_)));
+        assert_eq!(doc.mindmap.portals.len(), 1);
+        assert_eq!(doc.mindmap.portals[0].label, "A");
+    }
+
+    #[test]
+    fn exec_portal_glyph_hexagon_updates_selected_portal() {
+        let mut doc = load_test_doc_for_portal_tests();
+        let mut ids = doc.mindmap.nodes.keys().cloned();
+        let a = ids.next().unwrap();
+        let b = ids.next().unwrap();
+        let pref = doc.apply_create_portal(&a, &b).unwrap();
+        doc.selection = SelectionState::Portal(pref);
+        let mut eff = PaletteEffects {
+            document: &mut doc,
+            open_label_edit: None,
+        };
+        let (_, act) = action_by_id("portal_glyph_hexagon").unwrap();
+        (act.execute)(&mut eff);
+        assert_eq!(doc.mindmap.portals[0].glyph, "\u{2B21}");
+    }
+
+    #[test]
+    fn exec_delete_portal_removes_and_clears_selection() {
+        let mut doc = load_test_doc_for_portal_tests();
+        let mut ids = doc.mindmap.nodes.keys().cloned();
+        let a = ids.next().unwrap();
+        let b = ids.next().unwrap();
+        let pref = doc.apply_create_portal(&a, &b).unwrap();
+        doc.selection = SelectionState::Portal(pref);
+        let mut eff = PaletteEffects {
+            document: &mut doc,
+            open_label_edit: None,
+        };
+        let (_, act) = action_by_id("portal_delete").unwrap();
+        (act.execute)(&mut eff);
+        assert!(doc.mindmap.portals.is_empty());
+        assert!(matches!(doc.selection, SelectionState::None));
+    }
+
+    #[test]
+    fn portal_glyph_action_self_hides_when_glyph_already_matches() {
+        let mut doc = load_test_doc_for_portal_tests();
+        let mut ids = doc.mindmap.nodes.keys().cloned();
+        let a = ids.next().unwrap();
+        let b = ids.next().unwrap();
+        let pref = doc.apply_create_portal(&a, &b).unwrap();
+        // The first auto-assigned glyph is PORTAL_GLYPH_PRESETS[0] = "◈",
+        // not the hexagon; "hexagon" should be applicable. Now set the
+        // glyph to hexagon and expect the action to hide.
+        doc.set_portal_glyph(&pref, "\u{2B21}");
+        doc.selection = SelectionState::Portal(pref);
+        let (_, glyph_hex) = action_by_id("portal_glyph_hexagon").unwrap();
+        let ctx = PaletteContext { document: &doc };
+        assert!(!(glyph_hex.applicable)(&ctx));
     }
 }

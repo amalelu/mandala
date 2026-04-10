@@ -349,6 +349,7 @@ mod tests {
             nodes,
             edges,
             custom_mutations: vec![],
+            portals: vec![],
         }
     }
 

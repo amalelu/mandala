@@ -33,7 +33,7 @@ use baumhard::gfx_structs::camera::Camera2D;
 use baumhard::mindmap::model::MindMap;
 use baumhard::mindmap::loader;
 use baumhard::mindmap::border::BorderStyle;
-use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement};
+use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement, PortalElement, PortalRefKey};
 use baumhard::mindmap::scene_cache::EdgeKey;
 use glam::Vec2;
 use std::path::Path;
@@ -454,6 +454,19 @@ pub struct Renderer {
     /// `rebuild_connection_label_buffers`. Used by inline label edit
     /// mode to preview uncommitted text without mutating the model.
     pub label_edit_override: Option<(EdgeKey, String)>,
+    /// Session 6E: per-endpoint portal marker buffers, keyed by
+    /// `(portal_ref, endpoint_node_id)` so each of the two marker
+    /// glyphs of a pair is stored separately. Rebuilt every scene
+    /// build from the `portal_elements` field of `RenderScene`.
+    /// Portal counts stay in the dozens so a keyed cache is enough;
+    /// no incremental rebuild path is warranted.
+    portal_buffers: FxHashMap<(PortalRefKey, String), MindMapTextBuffer>,
+    /// Session 6E: AABB hitbox for each rendered portal marker,
+    /// keyed by `(portal_ref, endpoint_node_id)`. Populated alongside
+    /// `portal_buffers`; consulted by `hit_test_portal` when the
+    /// `handle_click` dispatcher needs to resolve a click on a
+    /// portal glyph to a `PortalRefKey`.
+    portal_hitboxes: FxHashMap<(PortalRefKey, String), (Vec2, Vec2)>,
     /// Session 6C: command palette overlay buffers. Rendered above
     /// everything else in screen coordinates. Populated only when
     /// the palette is open; cleared otherwise.
@@ -679,6 +692,8 @@ impl Renderer {
             connection_label_buffers: FxHashMap::default(),
             connection_label_hitboxes: FxHashMap::default(),
             label_edit_override: None,
+            portal_buffers: FxHashMap::default(),
+            portal_hitboxes: FxHashMap::default(),
             palette_overlay_buffers: Vec::new(),
             overlay_buffers: Vec::new(),
             connection_viewport_dirty: false,
@@ -1129,6 +1144,7 @@ impl Renderer {
             .chain(self.border_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_label_buffers.values())
+            .chain(self.portal_buffers.values())
             .chain(self.edge_handle_buffers.iter())
             .chain(self.overlay_buffers.iter())
             .filter_map(|tb| {
@@ -2127,6 +2143,81 @@ impl Renderer {
         } else {
             false
         }
+    }
+
+    /// Session 6E: (re)build the per-portal-marker cosmic-text
+    /// buffers from `scene.portal_elements`. Mirrors
+    /// `rebuild_connection_label_buffers` byte-for-byte: clear both
+    /// keyed maps, iterate the scene elements, build a buffer per
+    /// marker at the element's position and color, and record an
+    /// AABB hitbox keyed by `(portal_ref, endpoint_node_id)` so
+    /// `hit_test_portal` can resolve clicks back to a
+    /// `PortalRefKey`.
+    ///
+    /// Portals are cheap: ≤ 2 markers per pair and portal counts
+    /// stay in the dozens, so there is no incremental-reuse cache
+    /// and the full map is rebuilt on every scene build.
+    pub fn rebuild_portal_buffers(
+        &mut self,
+        portal_elements: &[PortalElement],
+    ) {
+        self.portal_buffers.clear();
+        self.portal_hitboxes.clear();
+        if portal_elements.is_empty() {
+            return;
+        }
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        for elem in portal_elements {
+            let cosmic_color = parse_hex_color(&elem.color)
+                .unwrap_or(cosmic_text::Color::rgba(235, 235, 235, 255));
+            let attrs = Attrs::new()
+                .color(cosmic_color)
+                .metrics(cosmic_text::Metrics::new(elem.font_size_pt, elem.font_size_pt));
+
+            let buffer = create_border_buffer(
+                &mut font_system,
+                &elem.glyph,
+                &attrs,
+                elem.font_size_pt,
+                elem.position,
+                elem.bounds,
+            );
+            let key = (elem.portal_ref.clone(), elem.endpoint_node_id.clone());
+            self.portal_buffers.insert(key.clone(), buffer);
+
+            let min = Vec2::new(elem.position.0, elem.position.1);
+            let max = Vec2::new(
+                elem.position.0 + elem.bounds.0,
+                elem.position.1 + elem.bounds.1,
+            );
+            self.portal_hitboxes.insert(key, (min, max));
+        }
+    }
+
+    /// Session 6E: hit-test portal markers at `canvas_pos`. Returns
+    /// the `PortalRefKey` of the first marker whose AABB contains
+    /// the point, or `None` if no marker is hit.
+    ///
+    /// Linear scan — portal counts stay in the dozens so a spatial
+    /// index is not worth the maintenance cost. Consulted from
+    /// `handle_click` as an alternate selection path, routed in
+    /// before the edge hit test so clicks on a marker floating above
+    /// a node's top-right corner don't accidentally fall through to
+    /// an edge beneath.
+    pub fn hit_test_portal(&self, canvas_pos: Vec2) -> Option<PortalRefKey> {
+        for ((key, _endpoint), (min, max)) in &self.portal_hitboxes {
+            if canvas_pos.x >= min.x
+                && canvas_pos.x <= max.x
+                && canvas_pos.y >= min.y
+                && canvas_pos.y <= max.y
+            {
+                return Some(key.clone());
+            }
+        }
+        None
     }
 
     /// Fit the camera to show a Baumhard tree's content.
