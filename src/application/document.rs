@@ -115,6 +115,48 @@ impl MindMapDocument {
         }
     }
 
+    /// Move multiple root nodes at once, with subtree deduplication.
+    /// If a selected node is already a descendant of another selected node,
+    /// it is skipped to avoid double-movement when moving subtrees.
+    /// Returns combined undo data for all moved nodes.
+    pub fn apply_move_multiple(&mut self, node_ids: &[String], dx: f64, dy: f64, individual: bool) -> Vec<(String, Position)> {
+        if individual {
+            // No dedup needed — each node moves independently
+            let mut undo_data = Vec::new();
+            for nid in node_ids {
+                undo_data.extend(self.apply_move_single(nid, dx, dy));
+            }
+            return undo_data;
+        }
+
+        // Deduplicate: skip nodes that are descendants of other selected nodes
+        let roots = self.dedup_subtree_roots(node_ids);
+        let mut undo_data = Vec::new();
+        for nid in &roots {
+            undo_data.extend(self.apply_move_subtree(nid, dx, dy));
+        }
+        undo_data
+    }
+
+    /// Filter a list of node IDs to only the "roots" — nodes that are not
+    /// descendants of any other node in the list.
+    fn dedup_subtree_roots(&self, node_ids: &[String]) -> Vec<String> {
+        let id_set: std::collections::HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
+        node_ids.iter().filter(|id| {
+            // Walk up the parent chain; if any ancestor is in the set, skip this node
+            let mut current = self.mindmap.nodes.get(id.as_str())
+                .and_then(|n| n.parent_id.as_deref());
+            while let Some(pid) = current {
+                if id_set.contains(pid) {
+                    return false;
+                }
+                current = self.mindmap.nodes.get(pid)
+                    .and_then(|n| n.parent_id.as_deref());
+            }
+            true
+        }).cloned().collect()
+    }
+
     /// Undo the last action. Returns true if something was undone.
     pub fn undo(&mut self) -> bool {
         if let Some(action) = self.undo_stack.pop() {
@@ -522,5 +564,38 @@ mod tests {
             .glyph_area().unwrap().position.x.0;
         assert!((child_new_x - (child_orig_x + 30.0)).abs() < 0.001,
             "Descendant should be shifted when include_descendants=true");
+    }
+
+    #[test]
+    fn test_dedup_subtree_roots() {
+        let doc = load_test_doc();
+        let parent_id = "348068464"; // Lord God
+        let descendants = doc.mindmap.all_descendants(parent_id);
+        assert!(!descendants.is_empty());
+        let child_id = &descendants[0];
+
+        // If both parent and child are selected, only parent should be a root
+        let ids = vec![parent_id.to_string(), child_id.clone()];
+        let roots = doc.dedup_subtree_roots(&ids);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0], parent_id);
+    }
+
+    #[test]
+    fn test_apply_move_multiple_no_double_movement() {
+        let mut doc = load_test_doc();
+        let parent_id = "348068464";
+        let descendants = doc.mindmap.all_descendants(parent_id);
+        let child_id = &descendants[0];
+
+        let child_orig_x = doc.mindmap.nodes.get(child_id).unwrap().position.x;
+
+        // Move both parent and child as subtrees — child should only move once (via parent)
+        let ids = vec![parent_id.to_string(), child_id.clone()];
+        doc.apply_move_multiple(&ids, 50.0, 0.0, false);
+
+        let child_new_x = doc.mindmap.nodes.get(child_id).unwrap().position.x;
+        assert!((child_new_x - (child_orig_x + 50.0)).abs() < 0.001,
+            "Child should be moved exactly once, not twice");
     }
 }

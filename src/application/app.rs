@@ -25,14 +25,15 @@ enum DragState {
     Pending { start_pos: (f64, f64), hit_node: Option<String> },
     /// Dragging to pan the camera (started on empty space).
     Panning,
-    /// Dragging a node to reposition it.
+    /// Dragging node(s) to reposition them.
     MovingNode {
-        node_id: String,
+        /// The node IDs being moved. Single node, or all selected nodes (shift+drag).
+        node_ids: Vec<String>,
         /// Accumulated total delta in canvas coords (for model sync on drop).
         total_delta: Vec2,
         /// Delta accumulated since last frame, applied in AboutToWait.
         pending_delta: Vec2,
-        /// Whether dragging only the individual node (alt+drag) vs subtree.
+        /// Whether dragging only the individual node(s) (alt+drag) vs subtrees.
         individual: bool,
     },
 }
@@ -187,23 +188,20 @@ impl Application {
                                             &mut renderer,
                                         );
                                     }
-                                    DragState::MovingNode { node_id, total_delta, pending_delta, individual } => {
+                                    DragState::MovingNode { node_ids, total_delta, pending_delta, individual } => {
                                         // Flush any remaining pending delta to the tree before drop
                                         if pending_delta != Vec2::ZERO {
                                             if let Some(tree) = mindmap_tree.as_mut() {
-                                                apply_drag_delta(tree, &node_id, pending_delta.x, pending_delta.y, !individual);
+                                                for nid in &node_ids {
+                                                    apply_drag_delta(tree, nid, pending_delta.x, pending_delta.y, !individual);
+                                                }
                                             }
                                         }
                                         // Drop: sync to model, full rebuild, push undo
                                         if let Some(doc) = document.as_mut() {
                                             let dx = total_delta.x as f64;
                                             let dy = total_delta.y as f64;
-                                            let undo_data = if individual {
-                                                doc.apply_move_single(&node_id, dx, dy)
-                                                    .into_iter().collect()
-                                            } else {
-                                                doc.apply_move_subtree(&node_id, dx, dy)
-                                            };
+                                            let undo_data = doc.apply_move_multiple(&node_ids, dx, dy, individual);
                                             doc.undo_stack.push(UndoAction::MoveNodes {
                                                 original_positions: undo_data,
                                             });
@@ -264,11 +262,10 @@ impl Application {
                             if dist_x * dist_x + dist_y * dist_y > 25.0 {
                                 // Past threshold — decide: move node or pan camera
                                 if let Some(node_id) = hit_node.take() {
-                                    // Ensure the node is selected
+                                    // Ensure the dragged node is selected
                                     if let Some(doc) = document.as_mut() {
                                         if !doc.selection.is_selected(&node_id) {
                                             doc.selection = SelectionState::Single(node_id.clone());
-                                            // Rebuild with highlight for the newly selected node
                                             if let Some(tree) = mindmap_tree.as_mut() {
                                                 let mut new_tree = doc.build_tree();
                                                 apply_selection_highlight(&mut new_tree, &doc.selection);
@@ -277,8 +274,23 @@ impl Application {
                                             }
                                         }
                                     }
+                                    // Shift+drag: move all selected nodes together
+                                    let node_ids = if shift_pressed {
+                                        if let Some(doc) = document.as_ref() {
+                                            let mut ids: Vec<String> = doc.selection.selected_ids()
+                                                .iter().map(|s| s.to_string()).collect();
+                                            if !ids.contains(&node_id) {
+                                                ids.push(node_id);
+                                            }
+                                            ids
+                                        } else {
+                                            vec![node_id]
+                                        }
+                                    } else {
+                                        vec![node_id]
+                                    };
                                     drag_state = DragState::MovingNode {
-                                        node_id,
+                                        node_ids,
                                         total_delta: Vec2::ZERO,
                                         pending_delta: Vec2::ZERO,
                                         individual: alt_pressed,
@@ -331,10 +343,12 @@ impl Application {
                 }
                 Event::AboutToWait => {
                     // Flush any accumulated drag delta (once per frame, not per mouse event)
-                    if let DragState::MovingNode { ref node_id, ref mut pending_delta, individual, .. } = drag_state {
+                    if let DragState::MovingNode { ref node_ids, ref mut pending_delta, individual, .. } = drag_state {
                         if *pending_delta != Vec2::ZERO {
                             if let Some(tree) = mindmap_tree.as_mut() {
-                                apply_drag_delta(tree, node_id, pending_delta.x, pending_delta.y, !individual);
+                                for nid in node_ids {
+                                    apply_drag_delta(tree, nid, pending_delta.x, pending_delta.y, !individual);
+                                }
                                 renderer.rebuild_buffers_from_tree(&tree.tree);
                             }
                             *pending_delta = Vec2::ZERO;
