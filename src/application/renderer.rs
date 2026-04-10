@@ -987,11 +987,36 @@ impl Renderer {
         let font_size: f32 = 16.0;
         let char_width = font_size * 0.6;
         let row_height = font_size * 1.5;
-        let frame_width: f32 = 560.0;
-        let inner_padding: f32 = 12.0;
+        let inner_padding: f32 = 8.0;
         let max_rows_shown: usize = 10;
         let shown_rows = geometry.rows.len().min(max_rows_shown);
         let frame_height = row_height * (2.0 + shown_rows as f32) + inner_padding * 2.0;
+
+        // Adaptive frame width: wrap tightly around the longest
+        // content row (query line, label, or description), with a
+        // minimum so very short content doesn't produce a postage
+        // stamp and a maximum so a stray long description doesn't
+        // blow the palette across the whole window.
+        let query_chars = geometry.query_text.chars().count() + 3; // "/…▌"
+        let longest_label = geometry
+            .rows
+            .iter()
+            .take(shown_rows)
+            .map(|r| r.label.chars().count() + 2) // "▸ "
+            .max()
+            .unwrap_or(0);
+        let longest_desc = geometry
+            .rows
+            .iter()
+            .take(shown_rows)
+            .map(|r| r.description.chars().count() + 4) // "    "
+            .max()
+            .unwrap_or(0);
+        let content_chars = query_chars.max(longest_label).max(longest_desc);
+        let frame_width = ((content_chars as f32 + 2.0) * char_width
+            + inner_padding * 2.0
+            + char_width * 2.0)
+            .clamp(320.0, 720.0);
 
         // Center horizontally, fixed offset from the top.
         let screen_w = self.config.width as f32;
@@ -1002,6 +1027,36 @@ impl Renderer {
         let text_color = cosmic_text::Color::rgba(235, 235, 235, 255);
         let dim_color = cosmic_text::Color::rgba(150, 150, 160, 255);
         let selected_color = cosmic_text::Color::rgba(0, 229, 255, 255);
+        // Dark, fully-opaque background fill so text behind the
+        // palette doesn't bleed through. Rendered first so every
+        // subsequent buffer draws on top of it.
+        let bg_color = cosmic_text::Color::rgba(15, 18, 26, 255);
+
+        // Opaque background: a tight grid of U+2588 FULL BLOCK
+        // characters filling the frame interior (and a hair past the
+        // border glyphs so no sliver of canvas shows through at the
+        // edges). Tight-stacked with `Metrics(font_size, font_size)`
+        // so adjacent lines abut without a gap, and slightly
+        // over-filled horizontally since the effective advance of
+        // `█` can be a touch under the approximate `char_width`.
+        let bg_cols = ((frame_width / char_width).ceil() as usize + 2).max(1);
+        let bg_rows = ((frame_height / font_size).ceil() as usize + 1).max(1);
+        let bg_line: String = "\u{2588}".repeat(bg_cols);
+        let bg_text: String = std::iter::repeat(bg_line.as_str())
+            .take(bg_rows)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let bg_attrs = Attrs::new()
+            .color(bg_color)
+            .metrics(cosmic_text::Metrics::new(font_size, font_size));
+        self.palette_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &bg_text,
+            &bg_attrs,
+            font_size,
+            (left - char_width, top - 2.0),
+            (frame_width + char_width * 2.0, frame_height + font_size),
+        ));
 
         // Box-drawing border around the frame.
         let inner_cols = ((frame_width - char_width * 2.0) / char_width).max(1.0) as usize;
