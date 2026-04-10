@@ -283,6 +283,21 @@ impl MindMapDocument {
         scene_builder::build_scene_with_offsets(&self.mindmap, offsets)
     }
 
+    /// Cache-aware scene build. The drag drain in `app.rs` calls this
+    /// every frame with a persistent `SceneConnectionCache` so unchanged
+    /// edges skip the `sample_path` geometry work entirely — Phase B of
+    /// the connection-render cost fix. See
+    /// `baumhard::mindmap::scene_cache` for invariants.
+    pub fn build_scene_with_cache(
+        &self,
+        offsets: &HashMap<String, (f32, f32)>,
+        cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
+    ) -> RenderScene {
+        let sel = self.selection.selected_edge()
+            .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
+        scene_builder::build_scene_with_cache(&self.mindmap, offsets, sel, cache)
+    }
+
     /// Build a RenderScene that also reflects the current edge selection.
     /// The selected edge (if any) gets a cyan color override baked into its
     /// ConnectionElement so the renderer paints it in the highlight color.
