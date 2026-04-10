@@ -35,12 +35,13 @@ pub fn build_mindmap_tree(map: &MindMap) -> MindMapTree {
     let mut node_map: HashMap<String, NodeId> = HashMap::new();
     let mut id_counter: usize = 1; // 0 is reserved for the Void root
 
+    let vars = &map.canvas.theme_variables;
     let roots = map.root_nodes();
     for root in &roots {
         if map.is_hidden_by_fold(root) {
             continue;
         }
-        let area = mindnode_to_glyph_area(root);
+        let area = mindnode_to_glyph_area(root, vars);
         let element = GfxElement::new_area_non_indexed_with_id(area, 0, id_counter);
         id_counter += 1;
 
@@ -62,12 +63,13 @@ fn build_children_recursive(
     node_map: &mut HashMap<String, NodeId>,
     id_counter: &mut usize,
 ) {
+    let vars = &map.canvas.theme_variables;
     let children = map.children_of(parent_mind_id);
     for child in &children {
         if map.is_hidden_by_fold(child) {
             continue;
         }
-        let area = mindnode_to_glyph_area(child);
+        let area = mindnode_to_glyph_area(child, vars);
         let element = GfxElement::new_area_non_indexed_with_id(area, 0, *id_counter);
         *id_counter += 1;
 
@@ -79,8 +81,11 @@ fn build_children_recursive(
     }
 }
 
-/// Converts a MindNode's data into a Baumhard GlyphArea.
-fn mindnode_to_glyph_area(node: &MindNode) -> GlyphArea {
+/// Converts a MindNode's data into a Baumhard GlyphArea. Text-run colors
+/// are resolved through the map's theme variables before being converted
+/// to RGBA; unknown references and malformed hex fall back to transparent
+/// black rather than panicking so a theme typo can't crash the render.
+fn mindnode_to_glyph_area(node: &MindNode, vars: &HashMap<String, String>) -> GlyphArea {
     let scale = node
         .text_runs
         .first()
@@ -95,7 +100,8 @@ fn mindnode_to_glyph_area(node: &MindNode) -> GlyphArea {
     // Convert text runs to ColorFontRegions
     let mut regions = ColorFontRegions::new_empty();
     for run in &node.text_runs {
-        let rgba = color::hex_to_rgba(&run.color);
+        let resolved = color::resolve_var(&run.color, vars);
+        let rgba = color::hex_to_rgba_safe(resolved, [0.0, 0.0, 0.0, 1.0]);
         regions.submit_region(ColorFontRegion::new(
             Range::new(run.start, run.end),
             None, // Font: use default (cosmic-text resolves family names at render time)

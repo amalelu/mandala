@@ -4,12 +4,12 @@ use glam::Vec2;
 use log::{error, info};
 use baumhard::core::primitives::Range;
 use baumhard::mindmap::custom_mutation::{
-    CustomMutation, MutationBehavior, TargetScope, Trigger,
+    CustomMutation, DocumentAction, MutationBehavior, TargetScope, Trigger,
     PlatformContext, apply_mutations_to_element,
 };
 use baumhard::mindmap::connection;
 use baumhard::mindmap::model::{
-    MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
+    Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
 };
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
@@ -219,6 +219,11 @@ pub enum UndoAction {
     /// A new node was created (via `apply_create_orphan_node`). Undo
     /// removes the node from `mindmap.nodes` by id.
     CreateNode { node_id: String },
+    /// Snapshot of the entire `Canvas` taken before a document action
+    /// (theme switch, etc.) mutated it. The canvas is small and cloning
+    /// the whole thing is cheaper than tracking field-level diffs, and
+    /// trivially correct.
+    CanvasSnapshot { canvas: Canvas },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -616,6 +621,9 @@ impl MindMapDocument {
                         self.selection = SelectionState::None;
                     }
                 }
+                UndoAction::CanvasSnapshot { canvas } => {
+                    self.mindmap.canvas = canvas;
+                }
             }
             true
         } else {
@@ -709,6 +717,49 @@ impl MindMapDocument {
             self.undo_stack.push(UndoAction::CustomMutation { node_snapshots: snapshots });
             self.dirty = true;
         }
+    }
+
+    /// Apply any document-level actions carried by a custom mutation. These
+    /// operate on `self.mindmap.canvas` rather than any tree node, so they
+    /// run independently of `apply_custom_mutation`'s tree walk. When any
+    /// action would actually change state, a `CanvasSnapshot` undo entry is
+    /// pushed capturing the pre-action canvas, and the document is marked
+    /// dirty. Returns true if the canvas was modified.
+    pub fn apply_document_actions(&mut self, custom: &CustomMutation) -> bool {
+        if custom.document_actions.is_empty() {
+            return false;
+        }
+        let snapshot = self.mindmap.canvas.clone();
+        let mut changed = false;
+        for action in &custom.document_actions {
+            match action {
+                DocumentAction::SetThemeVariant(name) => {
+                    if let Some(preset) = self.mindmap.canvas.theme_variants.get(name) {
+                        let new_vars = preset.clone();
+                        if new_vars != self.mindmap.canvas.theme_variables {
+                            self.mindmap.canvas.theme_variables = new_vars;
+                            changed = true;
+                        }
+                    }
+                    // Unknown variant: silently ignored (graceful).
+                }
+                DocumentAction::SetThemeVariables(map) => {
+                    for (k, v) in map {
+                        let existing = self.mindmap.canvas.theme_variables.get(k);
+                        if existing.map(|s| s != v).unwrap_or(true) {
+                            self.mindmap.canvas.theme_variables
+                                .insert(k.clone(), v.clone());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.undo_stack.push(UndoAction::CanvasSnapshot { canvas: snapshot });
+            self.dirty = true;
+        }
+        changed
     }
 
     /// Apply mutations to the Baumhard tree based on target scope.
@@ -1453,6 +1504,7 @@ mod tests {
             target_scope: scope,
             behavior: MB::Persistent,
             predicate: None,
+            document_actions: vec![],
         }
     }
 

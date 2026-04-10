@@ -30,7 +30,7 @@ The application has two layers:
 
 ---
 
-## Current State (after Session 6A+6B)
+## Current State
 
 ### What works
 - **MindMap data model** — serde-based structs, JSON loading, hierarchy queries
@@ -44,37 +44,51 @@ The application has two layers:
 - **Click vs drag** — left-click selects, left-drag pans (5px threshold), middle-drag pans
 - **Node movement** — drag selected nodes to reposition (subtree moves together), alt+drag for individual node only. Mutations applied to Baumhard tree for real-time preview, model synced on drop. Connections/borders snap on drop.
 - **Reparent via hotkey mode** — Ctrl+P on selected nodes enters reparent mode (orange highlight), click target node to attach as last children (or click empty canvas to promote to root), Esc to cancel. Cycle prevention built in. Green hover preview on drop target.
-- **Undo** — Ctrl+Z undoes node movement and reparent operations (undo stack with position/parent restoration)
+- **Undo** — Ctrl+Z undoes node movement, reparent, edge creation/deletion, orphan creation, custom mutations, and canvas (theme) snapshots
 - **DragState machine** — structured input state (Pending/Panning/MovingNode) replaces loose booleans
-- **AppMode** — high-level mode enum (Normal / Reparent) cleanly separates reparent from the regular drag flow
+- **AppMode** — high-level mode enum (Normal / Reparent / Connect) cleanly separates mode-based flows from the regular drag flow
 - **Connection selection** — click on a connection path (point-to-path hit test, zoom-aware 8px tolerance) to select it; mutually exclusive with node selection. Selected edges render in cyan via scene-builder color override.
 - **Connection deletion** — Delete key removes the selected edge. `UndoAction::DeleteEdge { index, edge }` restores it at the original index on Ctrl+Z.
 - **Connection creation** — Ctrl+D with one selected node enters connect mode (source orange, hovered target green, reusing the reparent color scheme), click target to create a `cross_link` edge. Auto-selects the newly-created edge. Ctrl+Z undoes. Esc cancels. Self-links / duplicates / unknown nodes are silent no-ops.
 - **Orphan node creation** — Ctrl+N creates a new unattached node at the cursor position with placeholder text. `parent_id = None` so it starts as a root; reparent mode (Ctrl+P) can then attach it once the user is ready. Ctrl+Z undoes the creation.
 - **Orphan selection (detach)** — Ctrl+O severs the selected node(s) from their parent, promoting them to root. Each detached node's entire subtree stays attached to it. Ctrl+Z undoes, restoring the original parent link and index.
 - **Configurable keybindings** — every keyboard action is reconfigurable via a JSON config file. Desktop loads from `--keybinds <path>` CLI flag or a conventional path (`$XDG_CONFIG_HOME/mandala/keybinds.json`, else `$HOME/.config/mandala/keybinds.json`). WASM loads from a `?keybinds=<url-encoded-json>` query param or `localStorage['mandala_keybinds']`. Missing fields fall back to hardcoded defaults so partial configs work. Invalid bindings are logged and skipped; the app never crashes for a bad keybinds file. Modifier aliases (cmd/command/meta/super → Ctrl, option → Alt) make the same config work across platforms. Sample config in `config/default_keybinds.json`.
+- **Custom mutation scaffolding** — types and registry machinery exist in code from earlier tangent work: `CustomMutation` carries a bundle of `Mutation` operations plus a `TargetScope`, a `MutationBehavior`, and an optional `Predicate`. `MindMapDocument` maintains a `mutation_registry` merged from map-level and inline-on-node definitions, with `find_triggered_mutations()` and `apply_custom_mutation()` wiring the tree walk and model sync. `UndoAction::CustomMutation { node_snapshots }` captures pre-mutation state for Ctrl+Z. M9 is not officially complete — hover/key dispatch, global config loading, and the proper demo map remain open.
+- **Click-triggered mutations (partial)** — `handle_click` dispatches `OnClick` trigger bindings via `find_triggered_mutations` + `apply_custom_mutation`, filtered by `PlatformContext::Desktop`. Rootless nodes with trigger bindings become user-defined "buttons" that fire custom mutations and/or document actions on click. Hover and key triggers are still stubbed.
+- **Theme variables (CSS custom properties)** — `Canvas.theme_variables: HashMap<String, String>` holds the live variable map (e.g. `"--bg" → "#141414"`). Any color field in the map can reference a variable via `var(--name)` and it is resolved at scene-build time through `resolve_var()` in `util/color.rs`. Unknown variables and malformed references pass through unchanged (graceful fallback); `hex_to_rgba_safe()` provides a non-panicking hex parser so a theme typo can't crash the render. Resolution sites cover background, frame color, connection/edge color, and per-run text colors in both the flat scene pipeline and the Baumhard tree pipeline.
+- **Theme variants** — `Canvas.theme_variants: HashMap<String, HashMap<String, String>>` stores named presets (`"light"`, `"dark"`, `"forest"`). Activating a variant copies its map into the live `theme_variables`; presets themselves are pure authoring state and never referenced at render time. A single source of truth means Ctrl+S saves whatever the user last switched to.
+- **Document actions** — `CustomMutation.document_actions: Vec<DocumentAction>` carries canvas/document-level effects alongside the per-node mutations. `DocumentAction::SetThemeVariant(name)` swaps in a named preset; `SetThemeVariables(map)` patches the live variables ad-hoc. Applied by `MindMapDocument::apply_document_actions()`, which snapshots the full canvas into `UndoAction::CanvasSnapshot` before any change, so Ctrl+Z restores a theme swap in one hop.
+- **Button-node cursor polish** — hovering a node with any non-empty `trigger_bindings` switches the cursor to `CursorIcon::Pointer`. Transitions are tracked so `set_cursor` only fires when the hover state actually changes. Native only — WASM input path remains a known gap.
 - **Multi-target** — native + WASM builds
-- **227 tests passing**
+- **248 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
 - **Borders not in tree** — borders render via flat pipeline, not as GlyphModel children in the Baumhard tree
 - **No save/persistence** — document dirty flag exists but no serialization
-- **WASM input** — selection, movement, reparent not yet wired up on WASM (TODOs in event loop)
+- **Hover and key trigger dispatch** — `OnHover` and `OnKey` triggers are in the data model but the event loop only dispatches `OnClick` so far
+- **Global custom mutations** — `~/.mandala/custom_mutations.json` loading is not yet wired
+- **WASM input** — selection, movement, reparent, trigger dispatch not yet wired up on WASM (TODOs in event loop)
+- **Animated mutations** — mutations currently apply instantly; the timing/interpolation layer planned in Session 10B is not yet built
+- **Keyboard map navigation** — no keyboard pan/zoom; mouse-driven only
+- **Fast-pan stutter** — model mutation work can fall behind input during very fast drags
 
 ### Key Files Reference
 | File | Role |
 |------|------|
 | `src/application/app.rs` | Event loop, window, DragState machine, input handling, tree+scene pipeline wiring |
 | `src/application/renderer.rs` | GPU pipeline: tree-based node rendering + flat border/connection rendering |
-| `src/application/document.rs` | Owns MindMap + SelectionState + UndoStack, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()`, `apply_drag_delta()`, `apply_move_subtree/single()`, `undo()` |
+| `src/application/document.rs` | Owns MindMap + SelectionState + UndoStack, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()`, `apply_drag_delta()`, `apply_move_subtree/single()`, `undo()`, `apply_custom_mutation()`, `apply_document_actions()` |
 | `src/application/common.rs` | RenderDecree, WindowMode, InputMode, timing |
-| `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge structs, `all_descendants()` |
-| `lib/baumhard/src/mindmap/tree_builder.rs` | MindMap → Tree<GfxElement, GfxMutator> bridge |
-| `lib/baumhard/src/mindmap/scene_builder.rs` | MindMap → flat RenderScene (connections, borders) |
+| `src/application/keybinds.rs` | Configurable key-to-Action mapping with layered loading |
+| `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge, Canvas (incl. `theme_variables`, `theme_variants`), `all_descendants()` |
+| `lib/baumhard/src/mindmap/tree_builder.rs` | MindMap → Tree<GfxElement, GfxMutator> bridge, resolves text-run colors through theme variables |
+| `lib/baumhard/src/mindmap/scene_builder.rs` | MindMap → flat RenderScene (connections, borders, background), resolves colors through theme variables |
 | `lib/baumhard/src/mindmap/loader.rs` | JSON loading |
 | `lib/baumhard/src/mindmap/border.rs` | BorderGlyphSet, BorderStyle |
 | `lib/baumhard/src/mindmap/connection.rs` | Path computation, Bezier curves, glyph sampling |
+| `lib/baumhard/src/mindmap/custom_mutation.rs` | `CustomMutation`, `TargetScope`, `MutationBehavior`, `Trigger`, `TriggerBinding`, `DocumentAction`, `PlatformContext` |
+| `lib/baumhard/src/util/color.rs` | Hex parsing, `Color` arithmetic, `resolve_var()`, `hex_to_rgba_safe()` |
 | `lib/baumhard/src/gfx_structs/tree.rs` | Tree<T,M>, MutatorTree<T> |
 | `lib/baumhard/src/gfx_structs/tree_walker.rs` | Mutation tree walking (channel-aligned, with RepeatWhile) |
 | `lib/baumhard/src/gfx_structs/element.rs` | GfxElement enum (GlyphArea, GlyphModel, Void) |
@@ -556,6 +570,200 @@ Esc cancels. `./test.sh` passes (196 tests total at end of Session 6A+B).
 - [ ] WASM platform detection via `matchMedia("(hover: hover)")` for Touch vs Web context
 
 **Verify**: `cargo test` passes, demo map demonstrates click/hover/key triggers
+
+---
+
+## Tangent: Theme Variables & Map Customization
+
+**Context**: Not a scheduled milestone — grew out of a request to make
+maps feel like a place users own, not a file they edit. Users wanted to
+author light/dark themes, build clickable buttons inside the map that
+switch themes, eventually script smooth animated transitions, navigate
+the canvas fluidly from the keyboard, and stress the app with very
+large generated maps to keep the feel honest at scale. The work below
+is non-linear — pieces can ship in any order. Only what is actually
+done is checked off; the rest is a sketch of adjacent ground.
+
+Full planning notes lived in the session plan file; this section is
+the durable record of what landed and what's still open.
+
+### Theme variables, variants, and click-triggered theme switching
+
+**What**: CSS-custom-property-style variables on the canvas, referenced
+via `var(--name)` anywhere a color string is accepted. Named presets
+in a sibling dictionary, switched by copy-into-live. A new
+`DocumentAction` enum on `CustomMutation` carries canvas-level effects
+alongside the existing per-node mutations. `handle_click` fires
+`OnClick` trigger bindings so rootless nodes become user-defined
+buttons.
+
+- [x] `Canvas.theme_variables: HashMap<String, String>` — the live
+      variable map, serde-default so existing maps load unchanged
+- [x] `Canvas.theme_variants: HashMap<String, HashMap<String, String>>`
+      — named presets, pure authoring state, activated by copy into
+      the live map
+- [x] `resolve_var(raw, vars) -> &str` in `lib/baumhard/src/util/color.rs`
+      — single-level indirection, unknown references pass through
+      unchanged (graceful fallback)
+- [x] `hex_to_rgba_safe(color, fallback) -> [f32; 4]` — non-panicking
+      hex parse so a theme typo can't crash the render
+- [x] `var(--name)` resolution wired into `scene_builder.rs` for
+      background, frame color, connection/edge color, per-text-run
+      color, and `tree_builder.rs` for text runs into the Baumhard
+      tree (both rendering pipelines covered)
+- [x] `DocumentAction::SetThemeVariant(name)` — copies a named preset
+      into the live variable map
+- [x] `DocumentAction::SetThemeVariables(map)` — ad-hoc patch of the
+      live variable map
+- [x] `CustomMutation.document_actions: Vec<DocumentAction>` — new
+      field, non-breaking via `#[serde(default)]`, round-trips cleanly
+- [x] `UndoAction::CanvasSnapshot { canvas }` — snapshots the full
+      canvas before any document action mutates it; Ctrl+Z restores a
+      theme swap in one hop
+- [x] `MindMapDocument::apply_document_actions(custom) -> bool` —
+      applies the actions, pushes the undo snapshot only when
+      something actually changed
+- [x] Click dispatch in `handle_click` — looks up OnClick triggers via
+      `find_triggered_mutations`, runs `apply_custom_mutation` for node
+      mutations and `apply_document_actions` for canvas effects,
+      filtered by `PlatformContext::Desktop`. Native only.
+- [x] Hand cursor (`CursorIcon::Pointer`) over nodes with non-empty
+      `trigger_bindings`, tracked on a transition so `set_cursor` only
+      fires when hover state actually changes
+- [x] Demo map `maps/theme_demo.mindmap.json` — titled root, two
+      styled children using `var(--...)` everywhere, three rootless
+      button nodes (`[ dark ]`, `[ light ]`, `[ forest ]`) wired to
+      `SetThemeVariant` document actions
+- [x] 13 new tests: `var` resolution hit/miss/malformed/whitespace/
+      no-recursion, lenient hex parse, background/frame/connection
+      color resolution, missing-variable pass-through, document
+      action round-trip, backwards compat without `document_actions`,
+      theme-demo loader + scene build + full round-trip
+- [x] All 248 tests green (`./test.sh`)
+
+**Key files**:
+- `lib/baumhard/src/mindmap/model.rs` — `Canvas` fields
+- `lib/baumhard/src/util/color.rs` — `resolve_var`, `hex_to_rgba_safe`
+- `lib/baumhard/src/mindmap/custom_mutation.rs` — `DocumentAction`,
+  `document_actions` field, round-trip tests
+- `lib/baumhard/src/mindmap/scene_builder.rs` — color resolution at
+  all render-build sites
+- `lib/baumhard/src/mindmap/tree_builder.rs` — text-run color
+  resolution through the Baumhard tree path
+- `lib/baumhard/src/mindmap/loader.rs` — theme-demo round-trip tests
+- `src/application/document.rs` — `Canvas` import, `DocumentAction`
+  import, `UndoAction::CanvasSnapshot`, `apply_document_actions`
+- `src/application/app.rs` — `handle_click` trigger dispatch,
+  `cursor_is_hand` tracking, `CursorIcon::Pointer` transitions
+- `maps/theme_demo.mindmap.json` — the sample map
+
+**Verify**: `cargo run --release -- maps/theme_demo.mindmap.json`,
+click each of the three button nodes, watch the background / frames /
+edges / text colors swap instantly. Ctrl+Z restores the previous
+theme. `./test.sh` is green.
+
+### Animated mutations (planned, not yet built)
+
+**What**: Wrap the existing mutation flow with timing — not a new
+mutation kind, just an optional timing envelope on `CustomMutation`
+(`duration_ms`, `delay_ms`, `easing`, `then: Reverse { hold_ms } |
+Chain { id } | Loop`). At animation start, snapshot the from and to
+states of affected nodes; each frame write a blended snapshot back
+into `self.mindmap.nodes` so the existing `rebuild_all` path just
+reads the in-progress state and repaints. Position, size, and all
+color fields (including per-text-run colors) lerp; structural changes
+snap at the boundary. While any animation is active the event loop
+flips from `ControlFlow::Poll` to `WaitUntil(now + 16ms)` and ticks
+the controller in `AboutToWait`. Phase-1's instant theme swap becomes
+a smooth transition, and the same machinery drives pulses, reveals,
+and any other declarative effect.
+
+- [ ] `AnimationTiming { duration_ms, delay_ms, easing, then: Option<Followup> }`
+      on `CustomMutation`, serde-default so old maps still load
+- [ ] `Easing` enum (Linear / EaseIn / EaseOut / EaseInOut)
+- [ ] `Followup::{Reverse, Chain, Loop}`
+- [ ] Small purpose-built `lib/baumhard/src/mindmap/animation.rs`
+      with the lerp + tick logic. The dormant
+      `lib/baumhard/src/core/animation.rs` skeleton is left alone —
+      it's generic over `T: Mutable` and would cost more to adapt
+      than to replace.
+- [ ] `active_animations: Vec<AnimationInstance>` on `MindMapDocument`,
+      carrying from/to snapshots, phase, and timing
+- [ ] `start_animation`, `tick_animations`, `has_active_animations`
+      methods on the document
+- [ ] Conditional `ControlFlow::WaitUntil` in `AboutToWait` while
+      animations are active; back to `Poll` when idle
+- [ ] `handle_click` branches on `cm.timing.is_some()` to start an
+      animation instead of applying instantly
+- [ ] Ctrl+Z during an animation fast-forwards to the end state then
+      pops the undo entry — single predictable semantics
+- [ ] Re-triggering the same (mutation_id, node_id) mid-flight is a
+      silent no-op in v1
+- [ ] `then: Reverse` forces Toggle semantics regardless of declared
+      behavior (a reversed animation has no net persistent effect);
+      log a warning at registry-build time if it was declared
+      Persistent
+- [ ] Non-interpolable mutations (`ModelCommand`, etc.) fire at the
+      animation boundary, not per-frame
+- [ ] Tests for timing round-trip, linear midpoint blend, completion,
+      reverse followup, and post-completion undo
+
+### Keyboard map navigation with feel (planned, not yet built)
+
+**What**: Pan and zoom from the keyboard should feel like steering a
+responsive spaceship. New action variants in the keybind layer so
+WASD, arrow keys, and Colemak's WARS are interchangeable, held-key
+tracking, and a per-axis velocity integrated each frame with a short
+ease-in on press and ease-out on release. Zoom follows the same
+curve against a log-scale factor so each tick multiplies rather than
+adds.
+
+- [ ] `Action::{PanUp, PanDown, PanLeft, PanRight, ZoomIn, ZoomOut}`
+- [ ] Multiple default bindings per action (`["w", "ArrowUp"]` etc.)
+- [ ] Held-key tracking: handle `ElementState::Released` alongside
+      Pressed, maintain a `NavigationState` of directions currently
+      down
+- [ ] Per-axis velocity integrated in `AboutToWait`, fed into
+      `RenderDecree::CameraPan` / `CameraZoom` (both already exist)
+- [ ] Acceleration curve: baseline speed on press, ramp to cap over
+      ~300ms, ease-out on release
+- [ ] Log-scale zoom so each step multiplies the factor
+- [ ] Native first — the WASM input path is a known gap and mustn't
+      regress
+
+### Pan stutter mitigation (planned, not yet built)
+
+**What**: During very fast drags the connection/border rebuild step
+(the heaviest per-frame work) can fall behind input and the user
+sees stutter. Detect it by measuring the moving average of per-frame
+work duration and, when it exceeds a budget, skip the
+connection/border rebuild for that frame. Prioritize snappiness over
+smoothness — a one-frame-stale connection is invisible under motion,
+a dropped frame is not.
+
+- [ ] Small moving-average tracker on per-frame work duration in
+      `AboutToWait`
+- [ ] Budget threshold (~14ms against a 16.6ms target) above which
+      the connection/border rebuild is skipped
+- [ ] Resume full rebuilds as soon as the average drops back under
+      budget — self-tuning, no configuration
+- [ ] Manual smoke using the stress-generator output below
+
+### Stress-test map generator (planned, not yet built)
+
+**What**: A standalone binary that emits `.mindmap.json` files of
+arbitrary size and topology. Used to validate the feel improvements
+above and to catch regressions. Not a benchmark harness — just a
+file writer.
+
+- [ ] New `[[bin]]` target in `Cargo.toml`, e.g. `generate_stress_map`
+- [ ] CLI flags: node count, tree depth, branching factor, cross-link
+      percentage, output path, seed
+- [ ] Three topologies in v1: balanced tree, skewed tree, single-root
+      star — exercises deep hierarchies, wide fanout, and massive
+      sibling lists
+- [ ] Uses `MindMap` serde types to emit — no hand-rolled JSON
+- [ ] Deterministic output per seed for comparable runs
 
 ---
 

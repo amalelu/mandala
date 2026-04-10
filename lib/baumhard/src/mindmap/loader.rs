@@ -203,6 +203,59 @@ mod tests {
     }
 
     #[test]
+    fn test_backward_compat_no_theme_variables() {
+        // Existing maps without theme_variables/theme_variants should load
+        // with empty defaults (the new fields must be opt-in via serde default).
+        let path = test_map_path();
+        let map = load_from_file(&path).unwrap();
+        assert!(map.canvas.theme_variables.is_empty());
+        assert!(map.canvas.theme_variants.is_empty());
+    }
+
+    fn theme_demo_path() -> PathBuf {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.pop();
+        path.pop();
+        path.push("maps/theme_demo.mindmap.json");
+        path
+    }
+
+    #[test]
+    fn test_load_theme_demo_map() {
+        let path = theme_demo_path();
+        let map = load_from_file(&path).expect("Failed to load theme demo map");
+        assert_eq!(map.version, "1.0");
+        assert_eq!(map.name, "theme_demo");
+        assert_eq!(map.canvas.background_color, "var(--bg)");
+        assert!(map.canvas.theme_variables.contains_key("--bg"));
+        assert_eq!(map.canvas.theme_variants.len(), 3);
+        assert!(map.canvas.theme_variants.contains_key("dark"));
+        assert!(map.canvas.theme_variants.contains_key("light"));
+        assert!(map.canvas.theme_variants.contains_key("forest"));
+        assert_eq!(map.custom_mutations.len(), 3);
+    }
+
+    #[test]
+    fn test_theme_demo_scene_resolves_background() {
+        use crate::mindmap::scene_builder;
+        let path = theme_demo_path();
+        let map = load_from_file(&path).unwrap();
+        let scene = scene_builder::build_scene(&map);
+        // Background should resolve through the dark theme var set.
+        assert_eq!(scene.background_color, "#141414");
+    }
+
+    #[test]
+    fn test_theme_demo_roundtrip() {
+        let path = theme_demo_path();
+        let map = load_from_file(&path).unwrap();
+        let json = serde_json::to_string(&map).unwrap();
+        let back: MindMap = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.canvas.theme_variants.len(), 3);
+        assert_eq!(back.custom_mutations.len(), 3);
+    }
+
+    #[test]
     fn test_is_hidden_by_fold() {
         let path = test_map_path();
         let map = load_from_file(&path).unwrap();

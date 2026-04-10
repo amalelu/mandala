@@ -9,6 +9,7 @@ use wgpu::{Instance, SurfaceTargetUnsafe};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ControlFlow;
 use winit::keyboard::Key;
+use winit::window::CursorIcon;
 use winit::{event_loop::EventLoop, window::Window};
 
 use crate::application::common::{InputMode, RenderDecree, WindowMode};
@@ -22,6 +23,8 @@ use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name}
 use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;
+#[cfg(not(target_arch = "wasm32"))]
+use baumhard::mindmap::custom_mutation::{PlatformContext, Trigger};
 
 /// Screen-space click tolerance (in pixels) for edge hit testing. Converted
 /// to canvas units via `Renderer::canvas_per_pixel()` so the click target
@@ -163,6 +166,10 @@ impl Application {
         let mut shift_pressed = false;
         let mut alt_pressed = false;
         let mut ctrl_pressed = false;
+        // True while the cursor is hovering a node with any trigger
+        // bindings (a "button"). Tracked so we only call set_cursor on
+        // transitions instead of every CursorMoved event.
+        let mut cursor_is_hand = false;
 
         // Resolve keybindings once at startup. Users can rebind any key
         // by shipping a `keybinds.json` (see `keybinds.rs` for the format).
@@ -344,6 +351,32 @@ impl Application {
                             }
                         }
                         return;
+                    }
+
+                    // Hand cursor over button-like nodes (nodes with any
+                    // trigger bindings). Only recomputed when idle — during
+                    // a drag the cursor should stay as-is.
+                    if matches!(drag_state, DragState::None) {
+                        let over_button = match (document.as_ref(), mindmap_tree.as_ref()) {
+                            (Some(doc), Some(tree)) => {
+                                let canvas_pos = renderer.screen_to_canvas(
+                                    cursor_pos.0 as f32, cursor_pos.1 as f32,
+                                );
+                                hit_test(canvas_pos, tree)
+                                    .and_then(|id| doc.mindmap.nodes.get(&id))
+                                    .map(|n| !n.trigger_bindings.is_empty())
+                                    .unwrap_or(false)
+                            }
+                            _ => false,
+                        };
+                        if over_button != cursor_is_hand {
+                            self.window.set_cursor(if over_button {
+                                CursorIcon::Pointer
+                            } else {
+                                CursorIcon::Default
+                            });
+                            cursor_is_hand = over_button;
+                        }
                     }
 
                     match &mut drag_state {
@@ -798,7 +831,10 @@ fn rebuild_all(
 
 /// Handle a click event: update selection, rebuild tree with highlight.
 /// When the node hit test misses, falls through to edge hit testing so
-/// the user can click on a connection path to select it.
+/// the user can click on a connection path to select it. If the clicked
+/// node has an `OnClick` trigger binding, the bound custom mutation fires
+/// (both node mutations and any document actions) after the selection
+/// update.
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_click(
     hit: Option<String>,
@@ -812,6 +848,27 @@ fn handle_click(
         Some(d) => d,
         None => return,
     };
+
+    // Fire any OnClick triggers before the selection update so that
+    // document actions (theme switches etc.) take effect before the
+    // scene rebuild below picks up the new state. Node mutations go
+    // into the tree via `apply_custom_mutation`, which owns the
+    // model-sync + undo-push for Persistent behavior.
+    if let Some(id) = hit.as_ref() {
+        let triggered = doc.find_triggered_mutations(
+            id, &Trigger::OnClick, &PlatformContext::Desktop,
+        );
+        if !triggered.is_empty() {
+            // `find_triggered_mutations` returned cloned CustomMutations so
+            // we can iterate without holding an immutable borrow on doc.
+            for cm in triggered {
+                if let Some(tree) = mindmap_tree.as_mut() {
+                    doc.apply_custom_mutation(&cm, id, tree);
+                }
+                doc.apply_document_actions(&cm);
+            }
+        }
+    }
 
     // Update selection state
     match (&hit, shift_pressed) {

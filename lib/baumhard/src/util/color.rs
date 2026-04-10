@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::{Add, Div, Index, IndexMut, Mul, Sub};
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +89,62 @@ pub fn hex_to_rgba(color: &str) -> [f32; 4] {
     } else {
         panic!("Invalid color length, expected 6 or 8 characters");
     }
+}
+
+/// Resolve a (possibly `var(--name)`) color reference against a set of
+/// theme variables. If `raw` looks like `var(--something)` and the
+/// corresponding entry exists in `vars`, return the variable's value;
+/// otherwise return `raw` unchanged. This is deliberately forgiving:
+/// unknown variables, malformed references, and plain hex strings all
+/// pass through so downstream hex parsing can decide what to do.
+///
+/// Only one level of indirection is resolved — if a variable's value is
+/// itself a `var(--other)` reference, it is returned verbatim and not
+/// dereferenced further. That's a deliberate v1 simplification.
+pub fn resolve_var<'a>(raw: &'a str, vars: &'a HashMap<String, String>) -> &'a str {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with("var(") || !trimmed.ends_with(')') {
+        return raw;
+    }
+    let inner = trimmed["var(".len()..trimmed.len() - 1].trim();
+    match vars.get(inner) {
+        Some(value) => value.as_str(),
+        None => raw,
+    }
+}
+
+/// Non-panicking hex-to-rgba. Parses the same set of inputs as
+/// `hex_to_rgba` (6 or 8 hex chars, optional leading `#`) but returns
+/// `fallback` on any parse failure instead of panicking. Intended for
+/// render-time color resolution paths that should never crash the app
+/// over a typo in a theme variable.
+pub fn hex_to_rgba_safe(color: &str, fallback: [f32; 4]) -> [f32; 4] {
+    let color = color.trim_start_matches('#');
+    let length = color.len();
+    if length != 6 && length != 8 {
+        return fallback;
+    }
+    let mut rgba = fallback;
+    let bytes = color.as_bytes();
+    for i in 0..(length / 2) {
+        let hi = match bytes[i * 2] {
+            b'0'..=b'9' => bytes[i * 2] - b'0',
+            b'a'..=b'f' => bytes[i * 2] - b'a' + 10,
+            b'A'..=b'F' => bytes[i * 2] - b'A' + 10,
+            _ => return fallback,
+        };
+        let lo = match bytes[i * 2 + 1] {
+            b'0'..=b'9' => bytes[i * 2 + 1] - b'0',
+            b'a'..=b'f' => bytes[i * 2 + 1] - b'a' + 10,
+            b'A'..=b'F' => bytes[i * 2 + 1] - b'A' + 10,
+            _ => return fallback,
+        };
+        rgba[i] = ((hi << 4) | lo) as f32 / 255.0;
+    }
+    if length == 6 {
+        rgba[3] = 1.0;
+    }
+    rgba
 }
 
 pub fn from_hex(colors: &[&str]) -> Vec<[f32; 4]> {
@@ -238,5 +295,83 @@ impl Color {
             (self.rgba[BLUE_IDX] / VAL_MAX).into(),
             (self.rgba[ALPHA_IDX] / VAL_MAX).into(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vars(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn resolve_var_hit() {
+        let v = vars(&[("--bg", "#111111")]);
+        assert_eq!(resolve_var("var(--bg)", &v), "#111111");
+    }
+
+    #[test]
+    fn resolve_var_miss_returns_raw() {
+        let v = vars(&[("--bg", "#111111")]);
+        assert_eq!(resolve_var("var(--missing)", &v), "var(--missing)");
+    }
+
+    #[test]
+    fn resolve_var_plain_hex_passes_through() {
+        let v = vars(&[("--bg", "#111111")]);
+        assert_eq!(resolve_var("#ff00aa", &v), "#ff00aa");
+    }
+
+    #[test]
+    fn resolve_var_malformed_passes_through() {
+        let v = vars(&[("--bg", "#111111")]);
+        // Missing closing paren — treat as raw
+        assert_eq!(resolve_var("var(--bg", &v), "var(--bg");
+    }
+
+    #[test]
+    fn resolve_var_tolerates_whitespace_inside() {
+        let v = vars(&[("--bg", "#abc123")]);
+        assert_eq!(resolve_var("var( --bg )", &v), "#abc123");
+    }
+
+    #[test]
+    fn resolve_var_single_level_no_recursion() {
+        // A variable whose value is itself a var(...) reference is NOT
+        // dereferenced further in v1 — returned verbatim.
+        let v = vars(&[
+            ("--primary", "var(--secondary)"),
+            ("--secondary", "#abcdef"),
+        ]);
+        assert_eq!(resolve_var("var(--primary)", &v), "var(--secondary)");
+    }
+
+    #[test]
+    fn hex_to_rgba_safe_good_input() {
+        let got = hex_to_rgba_safe("#ff0000", [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(got[0], 1.0);
+        assert_eq!(got[1], 0.0);
+        assert_eq!(got[2], 0.0);
+        assert_eq!(got[3], 1.0);
+    }
+
+    #[test]
+    fn hex_to_rgba_safe_garbage_returns_fallback() {
+        let fb = [0.5, 0.5, 0.5, 1.0];
+        assert_eq!(hex_to_rgba_safe("not-a-color", fb), fb);
+        assert_eq!(hex_to_rgba_safe("var(--bgg)", fb), fb);
+        assert_eq!(hex_to_rgba_safe("#xyz", fb), fb);
+        assert_eq!(hex_to_rgba_safe("", fb), fb);
+    }
+
+    #[test]
+    fn hex_to_rgba_safe_with_alpha() {
+        let got = hex_to_rgba_safe("#00ff0080", [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(got[0], 0.0);
+        assert_eq!(got[1], 1.0);
+        assert_eq!(got[2], 0.0);
+        assert!((got[3] - 128.0 / 255.0).abs() < 1e-6);
     }
 }

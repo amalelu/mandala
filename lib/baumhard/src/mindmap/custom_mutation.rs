@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{GfxMutator, Instruction, Mutation};
@@ -14,6 +15,7 @@ pub struct CustomMutation {
     /// Human-readable name.
     pub name: String,
     /// The mutation operations to apply (reuses existing Mutation enum).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mutations: Vec<Mutation>,
     /// Which nodes to target relative to the triggering node.
     pub target_scope: TargetScope,
@@ -23,6 +25,29 @@ pub struct CustomMutation {
     /// Optional predicate filter — only apply to nodes matching this condition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<Predicate>,
+    /// Optional canvas/document-level actions that fire alongside the
+    /// node mutations. These target the `MindMap` itself (theme, etc.)
+    /// rather than any tree node, so they're dispatched separately from
+    /// the node mutation path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub document_actions: Vec<DocumentAction>,
+}
+
+/// An action that operates on the map/document state rather than any
+/// specific tree node. Delivered alongside node mutations via the same
+/// `CustomMutation` carrier so a single trigger can do both at once.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum DocumentAction {
+    /// Copy a named preset from `canvas.theme_variants` into the live
+    /// `canvas.theme_variables`. Silently ignored if the variant does
+    /// not exist (graceful — matches how `resolve_var` handles misses).
+    SetThemeVariant(String),
+    /// Overwrite the live `canvas.theme_variables` with an ad-hoc map.
+    /// Existing keys not mentioned in the new map are preserved; any
+    /// key in the new map overwrites the previous value. Pass an empty
+    /// map to reset nothing — use `SetThemeVariant` with a preset for
+    /// that.
+    SetThemeVariables(HashMap<String, String>),
 }
 
 /// Controls whether a mutation is a one-shot persistent change or a toggle.
@@ -168,6 +193,7 @@ mod tests {
             target_scope: TargetScope::Children,
             behavior: MutationBehavior::Persistent,
             predicate: None,
+            document_actions: vec![],
         };
 
         let json = serde_json::to_string(&custom).unwrap();
@@ -179,6 +205,7 @@ mod tests {
         assert_eq!(deserialized.behavior, MutationBehavior::Persistent);
         assert!(deserialized.predicate.is_none());
         assert_eq!(deserialized.mutations.len(), 1);
+        assert!(deserialized.document_actions.is_empty());
     }
 
     #[test]
@@ -231,11 +258,66 @@ mod tests {
             target_scope: TargetScope::SelfOnly,
             behavior: MutationBehavior::Toggle,
             predicate: None,
+            document_actions: vec![],
         };
 
         let json = serde_json::to_string(&custom).unwrap();
         let deserialized: CustomMutation = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.behavior, MutationBehavior::Toggle);
+    }
+
+    #[test]
+    fn test_document_action_set_theme_variant_roundtrip() {
+        let action = DocumentAction::SetThemeVariant("dark".to_string());
+        let json = serde_json::to_string(&action).unwrap();
+        let back: DocumentAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, action);
+    }
+
+    #[test]
+    fn test_document_action_set_theme_variables_roundtrip() {
+        let mut vars = HashMap::new();
+        vars.insert("--bg".to_string(), "#111".to_string());
+        vars.insert("--fg".to_string(), "#eee".to_string());
+        let action = DocumentAction::SetThemeVariables(vars);
+        let json = serde_json::to_string(&action).unwrap();
+        let back: DocumentAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, action);
+    }
+
+    #[test]
+    fn test_custom_mutation_with_document_actions_roundtrip() {
+        let custom = CustomMutation {
+            id: "switch-dark".to_string(),
+            name: "Switch to dark".to_string(),
+            mutations: vec![],
+            target_scope: TargetScope::SelfOnly,
+            behavior: MutationBehavior::Persistent,
+            predicate: None,
+            document_actions: vec![
+                DocumentAction::SetThemeVariant("dark".to_string()),
+            ],
+        };
+        let json = serde_json::to_string(&custom).unwrap();
+        let back: CustomMutation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.document_actions.len(), 1);
+        assert_eq!(
+            back.document_actions[0],
+            DocumentAction::SetThemeVariant("dark".to_string())
+        );
+    }
+
+    #[test]
+    fn test_custom_mutation_backwards_compat_without_document_actions() {
+        // Old-style JSON without the document_actions field must still parse.
+        let json = r#"{
+            "id": "test",
+            "name": "Test",
+            "mutations": [],
+            "target_scope": "SelfOnly"
+        }"#;
+        let custom: CustomMutation = serde_json::from_str(json).unwrap();
+        assert!(custom.document_actions.is_empty());
     }
 
     #[test]
