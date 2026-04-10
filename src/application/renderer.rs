@@ -737,11 +737,33 @@ impl Renderer {
     }
 
     /// Rebuild connection buffers from flat connection elements (from RenderScene).
+    ///
+    /// Per-glyph viewport culling is applied here. For each connection element,
+    /// the visible canvas rect (expanded by `font_size` on each side as a
+    /// margin) is tested against every glyph position; glyphs outside are
+    /// skipped without creating a buffer. This is Phase 4(A) of the
+    /// connection-render cost work: the dominant per-frame cost in this
+    /// function is cosmic-text shaping, and a long cross-link during drag
+    /// has thousands of sample positions the vast majority of which are
+    /// off-screen. Skipping their buffer creation avoids the shaping cost
+    /// entirely. The existing downstream cull in `render()` (line ~396)
+    /// was only saving the rasterization of already-shaped buffers; the
+    /// shaping had already happened.
     pub fn rebuild_connection_buffers(&mut self, connection_elements: &[ConnectionElement]) {
         self.connection_buffers.clear();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
+
+        // Compute the visible canvas-space rectangle once. `screen_to_canvas`
+        // can return corners in either order depending on the camera's
+        // orientation, so normalise with `min`/`max` before use.
+        let vp_w = self.config.width as f32;
+        let vp_h = self.config.height as f32;
+        let corner_tl = self.camera.screen_to_canvas(Vec2::new(0.0, 0.0));
+        let corner_br = self.camera.screen_to_canvas(Vec2::new(vp_w, vp_h));
+        let vp_min = corner_tl.min(corner_br);
+        let vp_max = corner_tl.max(corner_br);
 
         for elem in connection_elements {
             let conn_color = parse_hex_color(&elem.color)
@@ -754,15 +776,27 @@ impl Renderer {
                 .color(conn_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
 
+            // Per-element cull margin. A generous `font_size` each side means
+            // glyphs whose anchor lands just off-screen still get included,
+            // so there's no visible popping at the viewport edge during pan.
+            let in_view = |x: f32, y: f32| -> bool {
+                glyph_position_in_viewport(x, y, vp_min, vp_max, font_size)
+            };
+
             if let Some((ref cap_text, cap_pos)) = elem.cap_start {
-                self.connection_buffers.push(create_border_buffer(
-                    &mut font_system, cap_text, &conn_attrs, font_size,
-                    (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
-                    glyph_bounds,
-                ));
+                if in_view(cap_pos.0, cap_pos.1) {
+                    self.connection_buffers.push(create_border_buffer(
+                        &mut font_system, cap_text, &conn_attrs, font_size,
+                        (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
+                        glyph_bounds,
+                    ));
+                }
             }
 
             for &pos in &elem.glyph_positions {
+                if !in_view(pos.0, pos.1) {
+                    continue;
+                }
                 self.connection_buffers.push(create_border_buffer(
                     &mut font_system, &elem.body_glyph, &conn_attrs, font_size,
                     (pos.0 - half_glyph, pos.1 - half_height),
@@ -771,11 +805,13 @@ impl Renderer {
             }
 
             if let Some((ref cap_text, cap_pos)) = elem.cap_end {
-                self.connection_buffers.push(create_border_buffer(
-                    &mut font_system, cap_text, &conn_attrs, font_size,
-                    (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
-                    glyph_bounds,
-                ));
+                if in_view(cap_pos.0, cap_pos.1) {
+                    self.connection_buffers.push(create_border_buffer(
+                        &mut font_system, cap_text, &conn_attrs, font_size,
+                        (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
+                        glyph_bounds,
+                    ));
+                }
             }
         }
     }
@@ -934,6 +970,28 @@ impl Renderer {
     }
 }
 
+/// Viewport containment test used by `rebuild_connection_buffers` to cull
+/// off-screen connection glyphs before building cosmic-text buffers. The
+/// visible canvas rect is padded by `margin` on every side so glyphs whose
+/// anchor lands just outside the visible region still get drawn (avoiding
+/// visible popping at the viewport edge during pan).
+///
+/// Extracted as a free function so Phase 4(A)'s core decision is unit-
+/// testable without needing a real `Renderer` / wgpu context.
+#[inline]
+fn glyph_position_in_viewport(
+    x: f32,
+    y: f32,
+    vp_min: Vec2,
+    vp_max: Vec2,
+    margin: f32,
+) -> bool {
+    x >= vp_min.x - margin
+        && x <= vp_max.x + margin
+        && y >= vp_min.y - margin
+        && y <= vp_max.y + margin
+}
+
 pub struct TextBuffer {
     pub block_hash: u64,
     pub editor: Editor<'static>,
@@ -1031,4 +1089,102 @@ fn parse_hex_color(hex: &str) -> Option<cosmic_text::Color> {
         rgb as u8,
         255,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cull_accepts_center_of_viewport() {
+        let vp_min = Vec2::new(0.0, 0.0);
+        let vp_max = Vec2::new(100.0, 100.0);
+        assert!(glyph_position_in_viewport(50.0, 50.0, vp_min, vp_max, 12.0));
+    }
+
+    #[test]
+    fn cull_accepts_glyph_just_inside_edge() {
+        let vp_min = Vec2::new(0.0, 0.0);
+        let vp_max = Vec2::new(100.0, 100.0);
+        // Right on the boundary — inclusive on both sides.
+        assert!(glyph_position_in_viewport(0.0, 0.0, vp_min, vp_max, 0.0));
+        assert!(glyph_position_in_viewport(100.0, 100.0, vp_min, vp_max, 0.0));
+    }
+
+    #[test]
+    fn cull_rejects_far_off_screen() {
+        let vp_min = Vec2::new(0.0, 0.0);
+        let vp_max = Vec2::new(100.0, 100.0);
+        // Way off to the right, far beyond any reasonable margin.
+        assert!(!glyph_position_in_viewport(10_000.0, 50.0, vp_min, vp_max, 12.0));
+        assert!(!glyph_position_in_viewport(50.0, 10_000.0, vp_min, vp_max, 12.0));
+        assert!(!glyph_position_in_viewport(-10_000.0, 50.0, vp_min, vp_max, 12.0));
+        assert!(!glyph_position_in_viewport(50.0, -10_000.0, vp_min, vp_max, 12.0));
+    }
+
+    #[test]
+    fn cull_margin_extends_visible_rect() {
+        let vp_min = Vec2::new(0.0, 0.0);
+        let vp_max = Vec2::new(100.0, 100.0);
+        // Just outside the rect but within the margin — should be included
+        // so there's no visible popping at viewport edges during pan.
+        assert!(glyph_position_in_viewport(-10.0, 50.0, vp_min, vp_max, 12.0));
+        assert!(glyph_position_in_viewport(110.0, 50.0, vp_min, vp_max, 12.0));
+        assert!(glyph_position_in_viewport(50.0, -10.0, vp_min, vp_max, 12.0));
+        assert!(glyph_position_in_viewport(50.0, 110.0, vp_min, vp_max, 12.0));
+    }
+
+    #[test]
+    fn cull_rejects_just_beyond_margin() {
+        let vp_min = Vec2::new(0.0, 0.0);
+        let vp_max = Vec2::new(100.0, 100.0);
+        let margin = 12.0;
+        // One epsilon past the padded boundary → excluded.
+        assert!(!glyph_position_in_viewport(
+            vp_max.x + margin + 0.001,
+            50.0,
+            vp_min,
+            vp_max,
+            margin
+        ));
+        assert!(!glyph_position_in_viewport(
+            vp_min.x - margin - 0.001,
+            50.0,
+            vp_min,
+            vp_max,
+            margin
+        ));
+    }
+
+    #[test]
+    fn cull_handles_non_origin_viewport() {
+        // Viewport not at origin (pan offset).
+        let vp_min = Vec2::new(500.0, 1000.0);
+        let vp_max = Vec2::new(700.0, 1200.0);
+        assert!(glyph_position_in_viewport(600.0, 1100.0, vp_min, vp_max, 12.0));
+        assert!(!glyph_position_in_viewport(100.0, 100.0, vp_min, vp_max, 12.0));
+    }
+
+    #[test]
+    fn cull_kills_most_glyphs_on_a_very_long_edge() {
+        // Simulate a Phase 4(A) scenario: a 20,000 canvas-unit connection,
+        // sampled every 15 units (default spacing), one endpoint at origin,
+        // the other at (20000, 0). Viewport is the first 400x400 canvas
+        // units. With font_size=12 margin, we should keep glyphs whose x
+        // is in [-12, 412] — roughly 28 of ~1334 samples.
+        let vp_min = Vec2::new(0.0, 0.0);
+        let vp_max = Vec2::new(400.0, 400.0);
+        let margin = 12.0;
+        let total = 1334;
+        let kept = (0..total)
+            .filter(|&i| {
+                let x = i as f32 * 15.0;
+                glyph_position_in_viewport(x, 0.0, vp_min, vp_max, margin)
+            })
+            .count();
+        // Expect well under 5% retained.
+        assert!(kept < total / 20, "kept {} of {}, expected < {}", kept, total, total / 20);
+        // And at least a few — it's not zero.
+        assert!(kept > 10, "kept {} of {}, expected at least 10", kept, total);
+    }
 }
