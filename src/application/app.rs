@@ -30,6 +30,8 @@ enum DragState {
         node_id: String,
         /// Accumulated total delta in canvas coords (for model sync on drop).
         total_delta: Vec2,
+        /// Delta accumulated since last frame, applied in AboutToWait.
+        pending_delta: Vec2,
         /// Whether dragging only the individual node (alt+drag) vs subtree.
         individual: bool,
     },
@@ -185,7 +187,13 @@ impl Application {
                                             &mut renderer,
                                         );
                                     }
-                                    DragState::MovingNode { node_id, total_delta, individual } => {
+                                    DragState::MovingNode { node_id, total_delta, pending_delta, individual } => {
+                                        // Flush any remaining pending delta to the tree before drop
+                                        if pending_delta != Vec2::ZERO {
+                                            if let Some(tree) = mindmap_tree.as_mut() {
+                                                apply_drag_delta(tree, &node_id, pending_delta.x, pending_delta.y, !individual);
+                                            }
+                                        }
                                         // Drop: sync to model, full rebuild, push undo
                                         if let Some(doc) = document.as_mut() {
                                             let dx = total_delta.x as f64;
@@ -240,20 +248,15 @@ impl Application {
                             let dy = cursor_pos.1 - prev_pos.1;
                             renderer.process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
                         }
-                        DragState::MovingNode { node_id, total_delta, individual } => {
-                            // Convert screen delta to canvas delta
+                        DragState::MovingNode { total_delta, pending_delta, .. } => {
+                            // Convert screen delta to canvas delta and accumulate.
+                            // Actual mutation + rebuild happens in AboutToWait (once per frame).
                             let old_canvas = renderer.screen_to_canvas(prev_pos.0 as f32, prev_pos.1 as f32);
                             let new_canvas = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
-                            let canvas_dx = new_canvas.x - old_canvas.x;
-                            let canvas_dy = new_canvas.y - old_canvas.y;
+                            let delta = new_canvas - old_canvas;
 
-                            *total_delta += Vec2::new(canvas_dx, canvas_dy);
-
-                            // Apply in-place mutation to tree for visual preview
-                            if let Some(tree) = mindmap_tree.as_mut() {
-                                apply_drag_delta(tree, node_id, canvas_dx, canvas_dy, !*individual);
-                                renderer.rebuild_buffers_from_tree(&tree.tree);
-                            }
+                            *total_delta += delta;
+                            *pending_delta += delta;
                         }
                         DragState::Pending { start_pos, hit_node } => {
                             let dist_x = cursor_pos.0 - start_pos.0;
@@ -277,6 +280,7 @@ impl Application {
                                     drag_state = DragState::MovingNode {
                                         node_id,
                                         total_delta: Vec2::ZERO,
+                                        pending_delta: Vec2::ZERO,
                                         individual: alt_pressed,
                                     };
                                 } else {
@@ -326,6 +330,16 @@ impl Application {
                     }
                 }
                 Event::AboutToWait => {
+                    // Flush any accumulated drag delta (once per frame, not per mouse event)
+                    if let DragState::MovingNode { ref node_id, ref mut pending_delta, individual, .. } = drag_state {
+                        if *pending_delta != Vec2::ZERO {
+                            if let Some(tree) = mindmap_tree.as_mut() {
+                                apply_drag_delta(tree, node_id, pending_delta.x, pending_delta.y, !individual);
+                                renderer.rebuild_buffers_from_tree(&tree.tree);
+                            }
+                            *pending_delta = Vec2::ZERO;
+                        }
+                    }
                     // Drive the render loop each frame
                     renderer.process();
                 }
