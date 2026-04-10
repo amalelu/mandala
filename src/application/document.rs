@@ -216,6 +216,13 @@ pub enum UndoAction {
     /// Edge created via connect mode (Ctrl+D). Reversed by removing the
     /// edge at `index` (assumes LIFO undo order so the index is still valid).
     CreateEdge { index: usize },
+    /// Full in-place edit of an existing edge — control-point drag,
+    /// anchor change, reset-to-straight via palette, etc. The `before`
+    /// snapshot is the pre-edit edge; undo replaces
+    /// `mindmap.edges[index]` with it. Assumes the edge was not
+    /// removed or reordered since the action was recorded (LIFO undo
+    /// order makes this safe in practice).
+    EditEdge { index: usize, before: MindEdge },
     /// A new node was created (via `apply_create_orphan_node`). Undo
     /// removes the node from `mindmap.nodes` by id.
     CreateNode { node_id: String },
@@ -329,6 +336,108 @@ impl MindMapDocument {
         let idx = self.mindmap.edges.iter().position(|e| edge_ref.matches(e))?;
         let edge = self.mindmap.edges.remove(idx);
         Some((idx, edge))
+    }
+
+    /// Hit-test the grab-handles of a specific edge at `canvas_pos`.
+    /// Returns the closest handle whose canvas-space position is
+    /// within `tolerance` of the cursor, or `None` if nothing is in
+    /// range. Used by the Session 6C edge-reshape drag flow — called
+    /// at mouse-down time when an edge is currently selected.
+    ///
+    /// Computed from the live edge (so any in-progress drag is
+    /// reflected), without consulting the scene cache. Bounded cost:
+    /// one `build_connection_path` + up to five distance comparisons.
+    pub fn hit_test_edge_handle(
+        &self,
+        canvas_pos: Vec2,
+        edge_ref: &EdgeRef,
+        tolerance: f32,
+    ) -> Option<(scene_builder::EdgeHandleKind, Vec2)> {
+        let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
+        let from_node = self.mindmap.nodes.get(&edge.from_id)?;
+        let to_node = self.mindmap.nodes.get(&edge.to_id)?;
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+
+        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+        let handles = scene_builder::build_edge_handles(
+            edge, &edge_key, from_pos, from_size, to_pos, to_size,
+        );
+
+        let mut best: Option<(scene_builder::EdgeHandleKind, Vec2, f32)> = None;
+        for h in handles {
+            let pos = Vec2::new(h.position.0, h.position.1);
+            let dist = canvas_pos.distance(pos);
+            if dist > tolerance {
+                continue;
+            }
+            if best.as_ref().map_or(true, |(_, _, d)| dist < *d) {
+                best = Some((h.kind, pos, dist));
+            }
+        }
+        best.map(|(k, p, _)| (k, p))
+    }
+
+    /// Clear an edge's `control_points` so it renders as a straight
+    /// line. Returns `true` if the edge existed and had control
+    /// points to clear; `false` if the edge was already straight or
+    /// wasn't found. On success, a full snapshot of the pre-edit
+    /// edge is pushed onto `undo_stack` as `UndoAction::EditEdge` and
+    /// `dirty` is set. No-op for already-straight edges so repeated
+    /// palette invocations don't pollute the undo stack.
+    pub fn reset_edge_to_straight(&mut self, edge_ref: &EdgeRef) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        if self.mindmap.edges[idx].control_points.is_empty() {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        self.mindmap.edges[idx].control_points.clear();
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set an edge's `anchor_from` (when `is_from == true`) or
+    /// `anchor_to` (when `is_from == false`) to `value`. Valid values
+    /// are 0 (auto) or 1..=4 (top/right/bottom/left). Returns `true`
+    /// if the value changed, pushing an `EditEdge` undo snapshot and
+    /// setting `dirty`. Returns `false` if the edge was not found or
+    /// the anchor was already at the requested value.
+    pub fn set_edge_anchor(&mut self, edge_ref: &EdgeRef, is_from: bool, value: i32) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let current = if is_from {
+            self.mindmap.edges[idx].anchor_from
+        } else {
+            self.mindmap.edges[idx].anchor_to
+        };
+        if current == value {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        if is_from {
+            self.mindmap.edges[idx].anchor_from = value;
+        } else {
+            self.mindmap.edges[idx].anchor_to = value;
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Look up the index of an edge in `mindmap.edges` matching the
+    /// given `EdgeRef`. Returned for callers that need to snapshot
+    /// the edge before mutating it in place (e.g. the edge-handle
+    /// drag flow in `app.rs`).
+    pub fn edge_index(&self, edge_ref: &EdgeRef) -> Option<usize> {
+        self.mindmap.edges.iter().position(|e| edge_ref.matches(e))
     }
 
     /// Create a new unattached (orphan) node at the given canvas position
@@ -635,6 +744,15 @@ impl MindMapDocument {
                 UndoAction::CreateEdge { index } => {
                     if index < self.mindmap.edges.len() {
                         self.mindmap.edges.remove(index);
+                    }
+                }
+                UndoAction::EditEdge { index, before } => {
+                    // Restore the pre-edit edge. If the index is stale
+                    // (structural change since the action was recorded),
+                    // clamp to the current length — a best-effort
+                    // fallback that matches the DeleteEdge pattern.
+                    if index < self.mindmap.edges.len() {
+                        self.mindmap.edges[index] = before;
                     }
                 }
                 UndoAction::CreateNode { node_id } => {
@@ -2316,5 +2434,241 @@ mod tests {
         assert_eq!(doc.mindmap.edges.len(), orig_edges_len);
         // undo.entries may be non-empty but the restoration is a no-op.
         let _ = undo;
+    }
+
+    // ---------------------------------------------------------------------
+    // Session 6C: edge handles + reset/anchor helpers + EditEdge undo
+    // ---------------------------------------------------------------------
+
+    use baumhard::mindmap::model::ControlPoint;
+    use baumhard::mindmap::scene_builder::EdgeHandleKind;
+
+    #[test]
+    fn test_hit_test_edge_handle_finds_anchor_from() {
+        let doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+        let edge = doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)).unwrap();
+        let from_node = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+        let to_node = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+        let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
+        let anchor_from_pos = baumhard::mindmap::connection::resolve_anchor_point(
+            from_pos, from_size, edge.anchor_from, to_center,
+        );
+
+        let hit = doc.hit_test_edge_handle(anchor_from_pos, &edge_ref, 2.0);
+        assert!(matches!(hit, Some((EdgeHandleKind::AnchorFrom, _))),
+            "expected AnchorFrom hit, got {:?}", hit.as_ref().map(|(k, _)| k));
+    }
+
+    #[test]
+    fn test_hit_test_edge_handle_finds_midpoint_on_straight_edge() {
+        let mut doc = load_test_doc();
+        // Make sure we have a straight edge with empty control_points
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .expect("testament map should have at least one straight edge");
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let _ = &mut doc;
+
+        let edge = &doc.mindmap.edges[edge_idx];
+        let from_node = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+        let to_node = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+        let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
+        let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
+        let start = baumhard::mindmap::connection::resolve_anchor_point(
+            from_pos, from_size, edge.anchor_from, to_center,
+        );
+        let end = baumhard::mindmap::connection::resolve_anchor_point(
+            to_pos, to_size, edge.anchor_to, from_center,
+        );
+        let midpoint = start.lerp(end, 0.5);
+
+        let hit = doc.hit_test_edge_handle(midpoint, &edge_ref, 2.0);
+        assert!(matches!(hit, Some((EdgeHandleKind::Midpoint, _))),
+            "expected Midpoint hit for straight edge");
+    }
+
+    #[test]
+    fn test_hit_test_edge_handle_no_midpoint_on_curved_edge() {
+        let mut doc = load_test_doc();
+        // Give an edge a control point so it's curved
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        doc.mindmap.edges[edge_idx].control_points.push(ControlPoint { x: 50.0, y: 50.0 });
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+
+        // Compute what the midpoint WOULD be on a straight line; the
+        // hit test should NOT return Midpoint for this curved edge
+        // regardless of whether some other handle happens to be near.
+        let edge = &doc.mindmap.edges[edge_idx];
+        let from_node = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+        let to_node = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+        let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
+
+        // The control point is at from_center + (50, 50). Hit there:
+        // should get ControlPoint(0), not Midpoint.
+        let cp_pos = from_center + Vec2::new(50.0, 50.0);
+        let hit = doc.hit_test_edge_handle(cp_pos, &edge_ref, 5.0);
+        assert!(matches!(hit, Some((EdgeHandleKind::ControlPoint(0), _))),
+            "expected ControlPoint(0) hit on curved edge, got {:?}",
+            hit.as_ref().map(|(k, _)| k));
+    }
+
+    #[test]
+    fn test_hit_test_edge_handle_miss_outside_tolerance() {
+        let doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+        let hit = doc.hit_test_edge_handle(
+            Vec2::new(-99999.0, -99999.0),
+            &edge_ref,
+            10.0,
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn test_reset_edge_to_straight_clears_control_points() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        doc.mindmap.edges[edge_idx].control_points.push(ControlPoint { x: 10.0, y: 20.0 });
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let ok = doc.reset_edge_to_straight(&edge_ref);
+        assert!(ok, "reset should report success");
+        assert!(doc.mindmap.edges[edge_idx].control_points.is_empty());
+        assert!(doc.dirty);
+        assert_eq!(doc.undo_stack.len(), 1);
+    }
+
+    #[test]
+    fn test_reset_edge_to_straight_noop_on_already_straight() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let ok = doc.reset_edge_to_straight(&edge_ref);
+        assert!(!ok, "reset on already-straight edge should be a no-op");
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_edge_anchor_pushes_undo() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        // Force a change by picking a value different from the current
+        let original = doc.mindmap.edges[edge_idx].anchor_from;
+        let new_value = if original == 1 { 3 } else { 1 };
+        let ok = doc.set_edge_anchor(&edge_ref, true, new_value);
+        assert!(ok);
+        assert_eq!(doc.mindmap.edges[edge_idx].anchor_from, new_value);
+        assert_eq!(doc.undo_stack.len(), 1);
+    }
+
+    #[test]
+    fn test_set_edge_anchor_noop_when_already_set() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let current = doc.mindmap.edges[edge_idx].anchor_from;
+        let ok = doc.set_edge_anchor(&edge_ref, true, current);
+        assert!(!ok);
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_edit_edge_undo_restores_control_points() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        doc.mindmap.edges[edge_idx].control_points.push(ControlPoint { x: 33.0, y: 44.0 });
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        doc.reset_edge_to_straight(&edge_ref);
+        assert!(doc.mindmap.edges[edge_idx].control_points.is_empty());
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.edges[edge_idx].control_points.len(), 1);
+        assert_eq!(doc.mindmap.edges[edge_idx].control_points[0].x, 33.0);
+    }
+
+    #[test]
+    fn test_edit_edge_undo_restores_anchor() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        let original = doc.mindmap.edges[edge_idx].anchor_from;
+        let new_value = if original == 2 { 4 } else { 2 };
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        doc.set_edge_anchor(&edge_ref, true, new_value);
+        assert_eq!(doc.mindmap.edges[edge_idx].anchor_from, new_value);
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.edges[edge_idx].anchor_from, original);
+    }
+
+    #[test]
+    fn test_edge_index_finds_existing_edge() {
+        let doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+        let idx = doc.edge_index(&edge_ref);
+        assert!(idx.is_some());
+    }
+
+    #[test]
+    fn test_edge_index_unknown_returns_none() {
+        let doc = load_test_doc();
+        let bogus = EdgeRef::new("nope", "nope2", "cross_link");
+        assert!(doc.edge_index(&bogus).is_none());
     }
 }

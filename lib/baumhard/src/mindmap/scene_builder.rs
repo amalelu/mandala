@@ -13,6 +13,12 @@ pub struct RenderScene {
     pub border_elements: Vec<BorderElement>,
     pub connection_elements: Vec<ConnectionElement>,
     pub portal_elements: Vec<PortalElement>,
+    /// Session 6C: grab-handles rendered on top of the *selected* edge.
+    /// Always empty unless `selected_edge` was `Some` on the scene-build
+    /// call. Contains the two anchor endpoints, any existing control
+    /// points, and (for straight edges only) a midpoint handle that
+    /// triggers the "curve a straight line" gesture when dragged.
+    pub edge_handles: Vec<EdgeHandleElement>,
     pub background_color: String,
 }
 
@@ -58,10 +64,138 @@ pub struct ConnectionElement {
 /// Placeholder for future portal rendering (M3).
 pub struct PortalElement {}
 
+/// Which part of a selected edge a grab-handle targets. Session 6C's
+/// connection reshape surface: anchor endpoints can be dragged to
+/// change which side of a node an edge attaches to, control points
+/// can be dragged to reshape a curve, and the `Midpoint` handle on a
+/// straight edge inserts a control point on first drag to convert
+/// the straight line into a quadratic Bezier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeHandleKind {
+    /// Endpoint anchor on the `from_id` side.
+    AnchorFrom,
+    /// Endpoint anchor on the `to_id` side.
+    AnchorTo,
+    /// Existing control point at `edge.control_points[index]`.
+    ControlPoint(usize),
+    /// Only emitted for straight edges (empty `control_points`).
+    /// Dragging this handle inserts a new control point to curve
+    /// the edge. After insertion, subsequent frames treat the drag
+    /// as a `ControlPoint(0)` drag.
+    Midpoint,
+}
+
+/// One grab-handle glyph emitted on top of a selected edge. Rendered
+/// as a small cosmic-text buffer in canvas space — the Renderer
+/// treats `edge_handles` as its own buffer family since the handle
+/// set is small, bounded, and only exists for the currently-selected
+/// edge.
+pub struct EdgeHandleElement {
+    pub edge_key: EdgeKey,
+    pub kind: EdgeHandleKind,
+    /// Canvas-space position of the handle, already resolved from
+    /// the edge's current `control_points` and anchors.
+    pub position: (f32, f32),
+    /// Glyph string (usually a single char like ◆).
+    pub glyph: String,
+    /// Color as `#RRGGBB` hex.
+    pub color: String,
+    /// Font size in points.
+    pub font_size_pt: f32,
+}
+
 /// Color override applied to the `ConnectionElement` of a selected edge.
 /// Kept in sync visually with the cyan node selection highlight in
 /// `src/application/document.rs::HIGHLIGHT_COLOR`.
 const SELECTED_EDGE_COLOR: &str = "#00E5FF";
+
+/// Glyph used for edge grab-handles in Session 6C's connection
+/// reshape surface. A solid black diamond reads as a clickable
+/// control point across most fonts.
+const EDGE_HANDLE_GLYPH: &str = "\u{25C6}"; // ◆
+
+/// Font size (in points) for the edge handle glyphs. Slightly larger
+/// than the default connection glyph size so handles stand out on top
+/// of the selected edge.
+const EDGE_HANDLE_FONT_SIZE_PT: f32 = 14.0;
+
+/// Build the grab-handle set for a single selected edge, given the
+/// current (offset-applied) positions and sizes of its endpoint
+/// nodes. Called once per scene build (for the selected edge only),
+/// so the cost is trivial and needs no cache.
+///
+/// Always emits AnchorFrom + AnchorTo. On top of that:
+/// - an edge with 0 control points gets a `Midpoint` handle
+///   (dragging it curves the straight line);
+/// - an edge with ≥ 1 control points gets `ControlPoint(i)` handles
+///   at each stored offset-from-center.
+pub fn build_edge_handles(
+    edge: &crate::mindmap::model::MindEdge,
+    edge_key: &EdgeKey,
+    from_pos: Vec2,
+    from_size: Vec2,
+    to_pos: Vec2,
+    to_size: Vec2,
+) -> Vec<EdgeHandleElement> {
+    let path = connection::build_connection_path(
+        from_pos, from_size, edge.anchor_from,
+        to_pos, to_size, edge.anchor_to,
+        &edge.control_points,
+    );
+    let (start, end) = match &path {
+        connection::ConnectionPath::Straight { start, end } => (*start, *end),
+        connection::ConnectionPath::CubicBezier { start, end, .. } => (*start, *end),
+    };
+
+    let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
+    let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
+
+    let make = |kind: EdgeHandleKind, position: Vec2| EdgeHandleElement {
+        edge_key: edge_key.clone(),
+        kind,
+        position: (position.x, position.y),
+        glyph: EDGE_HANDLE_GLYPH.to_string(),
+        color: SELECTED_EDGE_COLOR.to_string(),
+        font_size_pt: EDGE_HANDLE_FONT_SIZE_PT,
+    };
+
+    let mut handles = Vec::with_capacity(5);
+    handles.push(make(EdgeHandleKind::AnchorFrom, start));
+    handles.push(make(EdgeHandleKind::AnchorTo, end));
+
+    match edge.control_points.len() {
+        0 => {
+            // Straight edge: offer a midpoint handle that starts a
+            // "curve this line" gesture on drag.
+            let mid = start.lerp(end, 0.5);
+            handles.push(make(EdgeHandleKind::Midpoint, mid));
+        }
+        1 => {
+            // Quadratic Bezier (stored as 1 CP offset from from_center).
+            let cp0 = from_center + Vec2::new(
+                edge.control_points[0].x as f32,
+                edge.control_points[0].y as f32,
+            );
+            handles.push(make(EdgeHandleKind::ControlPoint(0), cp0));
+        }
+        _ => {
+            // Cubic Bezier (stored as 2 CPs: cp[0] from from_center,
+            // cp[1] from to_center).
+            let cp0 = from_center + Vec2::new(
+                edge.control_points[0].x as f32,
+                edge.control_points[0].y as f32,
+            );
+            let cp1 = to_center + Vec2::new(
+                edge.control_points[1].x as f32,
+                edge.control_points[1].y as f32,
+            );
+            handles.push(make(EdgeHandleKind::ControlPoint(0), cp0));
+            handles.push(make(EdgeHandleKind::ControlPoint(1), cp1));
+        }
+    }
+
+    handles
+}
 
 /// Builds a RenderScene from a MindMap, determining which nodes and borders
 /// are visible (accounting for fold state) and extracting their layout data.
@@ -204,6 +338,9 @@ pub fn build_scene_with_cache(
     // Build connection elements from edges
     let default_config = GlyphConnectionConfig::default();
     let mut connection_elements = Vec::new();
+    // Grab-handles for the currently selected edge. Populated at most
+    // once per scene build (selection is single-edge); empty otherwise.
+    let mut edge_handles: Vec<EdgeHandleElement> = Vec::new();
     // Keys seen this frame — used after the loop to evict stale cache
     // entries for edges that were removed from the model between builds.
     let mut seen_keys: HashSet<EdgeKey> = HashSet::with_capacity(map.edges.len());
@@ -234,6 +371,35 @@ pub fn build_scene_with_cache(
         let is_selected = selected_edge.map_or(false, |(f, t, ty)| {
             f == edge.from_id && t == edge.to_id && ty == edge.edge_type
         });
+
+        // Emit grab-handles for the selected edge. Done once, from
+        // the LIVE edge + current (offset-applied) endpoint positions —
+        // the caller may be in the middle of a drag and the handle
+        // positions have to track that live state. Cost is bounded
+        // (one edge per build) so no cache.
+        if is_selected {
+            let (fox, foy) = offsets.get(&from_node.id).copied().unwrap_or((0.0, 0.0));
+            let (tox, toy) = offsets.get(&to_node.id).copied().unwrap_or((0.0, 0.0));
+            let from_pos = Vec2::new(
+                from_node.position.x as f32 + fox,
+                from_node.position.y as f32 + foy,
+            );
+            let from_size = Vec2::new(
+                from_node.size.width as f32,
+                from_node.size.height as f32,
+            );
+            let to_pos = Vec2::new(
+                to_node.position.x as f32 + tox,
+                to_node.position.y as f32 + toy,
+            );
+            let to_size = Vec2::new(
+                to_node.size.width as f32,
+                to_node.size.height as f32,
+            );
+            edge_handles.extend(build_edge_handles(
+                edge, &edge_key, from_pos, from_size, to_pos, to_size,
+            ));
+        }
 
         // Did either endpoint of THIS edge move this frame?
         let endpoint_moved = offsets.contains_key(&from_node.id)
@@ -409,6 +575,7 @@ pub fn build_scene_with_cache(
         border_elements,
         connection_elements,
         portal_elements: Vec::new(),
+        edge_handles,
         background_color: resolve_var(&map.canvas.background_color, vars).to_string(),
     }
 }
@@ -1125,5 +1292,129 @@ mod tests {
             .any(|c| !c.glyph_positions.is_empty());
         assert!(any_with_glyphs,
             "at least one connection should have un-clipped glyphs");
+    }
+
+    // ---------------------------------------------------------------------
+    // Session 6C: edge handle emission
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_no_edge_handles_when_nothing_selected() {
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        let scene = build_scene(&map, 1.0);
+        assert!(scene.edge_handles.is_empty(),
+            "no selection → no handles emitted");
+    }
+
+    #[test]
+    fn test_edge_handles_straight_edge_emits_midpoint() {
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        // Find a straight edge
+        let edge = map.edges.iter()
+            .find(|e| e.visible && e.control_points.is_empty())
+            .expect("testament map should have a straight edge");
+        let mut cache = SceneConnectionCache::new();
+        let scene = build_scene_with_cache(
+            &map,
+            &HashMap::new(),
+            Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            &mut cache,
+            1.0,
+        );
+        assert_eq!(
+            scene.edge_handles.len(),
+            3,
+            "straight edge: AnchorFrom + AnchorTo + Midpoint = 3 handles"
+        );
+        let kinds: Vec<&EdgeHandleKind> = scene.edge_handles
+            .iter()
+            .map(|h| &h.kind)
+            .collect();
+        assert!(kinds.iter().any(|k| matches!(k, EdgeHandleKind::AnchorFrom)));
+        assert!(kinds.iter().any(|k| matches!(k, EdgeHandleKind::AnchorTo)));
+        assert!(kinds.iter().any(|k| matches!(k, EdgeHandleKind::Midpoint)));
+    }
+
+    #[test]
+    fn test_edge_handles_curved_edge_emits_control_points_not_midpoint() {
+        let mut map = loader::load_from_file(&test_map_path()).unwrap();
+        // Find a visible edge and curve it (quadratic)
+        let edge_idx = map.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        map.edges[edge_idx].control_points.push(
+            crate::mindmap::model::ControlPoint { x: 20.0, y: 30.0 },
+        );
+        let edge = map.edges[edge_idx].clone();
+        let mut cache = SceneConnectionCache::new();
+        let scene = build_scene_with_cache(
+            &map,
+            &HashMap::new(),
+            Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            &mut cache,
+            1.0,
+        );
+        // 2 anchors + 1 control point = 3 handles, no midpoint
+        assert_eq!(scene.edge_handles.len(), 3);
+        assert!(scene.edge_handles.iter().any(|h| matches!(h.kind, EdgeHandleKind::ControlPoint(0))));
+        assert!(scene.edge_handles.iter().all(|h| !matches!(h.kind, EdgeHandleKind::Midpoint)));
+    }
+
+    #[test]
+    fn test_edge_handles_cubic_edge_emits_both_control_points() {
+        let mut map = loader::load_from_file(&test_map_path()).unwrap();
+        let edge_idx = map.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        map.edges[edge_idx].control_points.push(
+            crate::mindmap::model::ControlPoint { x: 10.0, y: 10.0 },
+        );
+        map.edges[edge_idx].control_points.push(
+            crate::mindmap::model::ControlPoint { x: 40.0, y: 40.0 },
+        );
+        let edge = map.edges[edge_idx].clone();
+        let mut cache = SceneConnectionCache::new();
+        let scene = build_scene_with_cache(
+            &map,
+            &HashMap::new(),
+            Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            &mut cache,
+            1.0,
+        );
+        // 2 anchors + 2 control points = 4 handles
+        assert_eq!(scene.edge_handles.len(), 4);
+        assert!(scene.edge_handles.iter().any(|h| matches!(h.kind, EdgeHandleKind::ControlPoint(0))));
+        assert!(scene.edge_handles.iter().any(|h| matches!(h.kind, EdgeHandleKind::ControlPoint(1))));
+    }
+
+    #[test]
+    fn test_edge_handle_control_point_position_is_absolute_canvas() {
+        let mut map = loader::load_from_file(&test_map_path()).unwrap();
+        let edge_idx = map.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        let cp_x = 55.0;
+        let cp_y = 77.0;
+        map.edges[edge_idx].control_points.push(
+            crate::mindmap::model::ControlPoint { x: cp_x, y: cp_y },
+        );
+        let edge = map.edges[edge_idx].clone();
+        let from_node = map.nodes.get(&edge.from_id).unwrap();
+        let from_center_x = from_node.position.x as f32 + from_node.size.width as f32 * 0.5;
+        let from_center_y = from_node.position.y as f32 + from_node.size.height as f32 * 0.5;
+
+        let mut cache = SceneConnectionCache::new();
+        let scene = build_scene_with_cache(
+            &map,
+            &HashMap::new(),
+            Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            &mut cache,
+            1.0,
+        );
+        let cp_handle = scene.edge_handles.iter()
+            .find(|h| matches!(h.kind, EdgeHandleKind::ControlPoint(0)))
+            .unwrap();
+        assert!((cp_handle.position.0 - (from_center_x + cp_x as f32)).abs() < 0.01);
+        assert!((cp_handle.position.1 - (from_center_y + cp_y as f32)).abs() < 0.01);
     }
 }
