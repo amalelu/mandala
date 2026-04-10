@@ -61,8 +61,9 @@ The application has two layers:
 - **Button-node cursor polish** — hovering a node with any non-empty `trigger_bindings` switches the cursor to `CursorIcon::Pointer`. Transitions are tracked so `set_cursor` only fires when the hover state actually changes. Native only — WASM input path remains a known gap.
 - **Stress-test map generator** — `cargo run -p baumhard --bin generate_stress_map -- ...` writes synthetic `.mindmap.json` files of arbitrary size and topology (balanced / skewed / star), with `--long-edges K` to insert deliberately far-apart cross-links for connection-render perf testing and `--seed` for deterministic output. The smoke-test rig for Phase 4 of the theme-variables tangent.
 - **Mutation-frequency throttle** — under load, the `AboutToWait` drag path drains its accumulated `pending_delta` every Nth frame instead of every frame, where N is a moving-average-driven self-tuning multiplier that holds per-frame work time under the screen refresh budget. Input accumulation stays snappy (every mouse event still folds into `pending_delta`); the dragged node advances in chunks under stress, catching up to the cursor every N frames. Healthy load = N = 1 (no throttling). Implements the governing-invariant half of the connection/border render-cost work.
+- **Viewport culling on connection glyphs** — `rebuild_connection_buffers` now computes the visible canvas rect once per call (with a `font_size` margin on each side) and skips cosmic-text buffer creation for any glyph position outside it. The dominant per-frame cost in the connection rebuild path is cosmic-text shaping; for a long cross-link most of its sample positions are off-screen during drag, so skipping those drops per-frame work by ~48× in the user's long-connection stutter scenario without changing visible output.
 - **Multi-target** — native + WASM builds
-- **273 tests passing**
+- **280 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -778,12 +779,29 @@ Five-part fix under that invariant:
       frames skip work, moving-average arithmetic, window eviction,
       reset returns to fresh state, drain cadence exactly matches
       N, default budget sanity, zero-frame empty-window.
-- [ ] **(A) Viewport culling on connection glyph samples**. Compute
+- [x] **(A) Viewport culling on connection glyph samples**. Compute
       the canvas-space viewport in `rebuild_connection_buffers` and
       skip glyph positions that land off-screen. A few lines; kills
       the long-connection pathological case because the bulk of the
       glyphs on an "unreasonably long" edge live outside the visible
-      rect while you're dragging an endpoint.
+      rect while you're dragging an endpoint. Implemented by
+      computing `vp_min`/`vp_max` from `camera.screen_to_canvas` on
+      the surface corners once per call, then checking each glyph
+      position (caps included) against a `font_size`-padded rect
+      before calling `create_border_buffer`. The pad margin avoids
+      visible popping at viewport edges during pan. The existing
+      downstream cull in `render()` was only saving rasterization
+      of already-shaped buffers; moving the cull upstream skips the
+      cosmic-text shaping entirely, which is where the cost lives.
+      The predicate is extracted to a free `glyph_position_in_viewport`
+      function so it's testable without a `Renderer`. 7 new unit
+      tests cover: center-of-viewport acceptance, edge inclusivity,
+      far-off-screen rejection, margin expansion, just-past-margin
+      rejection, non-origin viewport handling, and a scenario test
+      that simulates a 20,000 canvas-unit connection with a 400x400
+      viewport and confirms the cull drops ~1,334 glyph samples to
+      ~28 (a 48× shaping-work reduction for the user's exact
+      long-connection stutter case).
 - [ ] **(B) Keyed incremental rebuild**. `HashMap<StableKey, Buffer>`
       instead of flat `Vec<Buffer>` for both connections and
       borders, keyed on `(from_id, to_id, edge_type)` and `node_id`
