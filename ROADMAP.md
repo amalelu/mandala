@@ -324,10 +324,10 @@ cancellable mode with clear visual feedback.
 
 **What**: Connections and borders update in real-time during node drag instead of only on mouse release.
 
-- [ ] Add `build_scene_with_offsets(map, offsets: &HashMap<&str, (f32, f32)>)` to scene_builder — applies position deltas when reading node positions for connections and borders
-- [ ] Refactor `build_scene()` to call `build_scene_with_offsets` with an empty map
-- [ ] Add `build_scene_with_offsets()` to MindMapDocument
-- [ ] In `app.rs` `AboutToWait` / `MovingNode` branch: compute offset map from `node_ids` + `total_delta`, rebuild connection + border buffers each frame during drag
+- [x] Add `build_scene_with_offsets(map, offsets: &HashMap<&str, (f32, f32)>)` to scene_builder — applies position deltas when reading node positions for connections and borders
+- [x] Refactor `build_scene()` to call `build_scene_with_offsets` with an empty map
+- [x] Add `build_scene_with_offsets()` to MindMapDocument
+- [x] In `app.rs` `AboutToWait` / `MovingNode` branch: compute offset map from `node_ids` + `total_delta`, rebuild connection + border buffers each frame during drag
 
 **Key files**:
 - `lib/baumhard/src/mindmap/scene_builder.rs` — `build_scene_with_offsets()`
