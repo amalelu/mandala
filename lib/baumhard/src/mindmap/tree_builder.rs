@@ -97,6 +97,35 @@ fn mindnode_to_glyph_area(node: &MindNode, vars: &HashMap<String, String>) -> Gl
 
     let mut area = GlyphArea::new_with_str(&node.text, scale, line_height, position, bounds);
 
+    // Resolve the node's background color through theme variables and
+    // pack it as u8 RGBA onto the tree element. The renderer's rect
+    // pipeline reads it back out during `rebuild_buffers_from_tree`
+    // and emits a solid quad behind the text glyphs.
+    //
+    // `None` means "no fill" — the canvas background shows through.
+    // Both an empty string and a fully-transparent alpha ("#00000000"
+    // / "#0000") map to `None`. Bad hex degrades to `None` as well,
+    // so a theme typo leaves the node transparent rather than
+    // painting it opaque black.
+    area.background_color = {
+        let raw = &node.style.background_color;
+        if raw.is_empty() {
+            None
+        } else {
+            let resolved = color::resolve_var(raw, vars);
+            // Sentinel alpha = 0 means "parse failed" here because
+            // the fallback is fully transparent. Authors can also
+            // opt out with an explicit `#00000000` / `#0000`, which
+            // lands on the same sentinel for free.
+            let rgba = color::hex_to_rgba_safe(resolved, [0.0, 0.0, 0.0, 0.0]);
+            if rgba[3] <= 0.0 {
+                None
+            } else {
+                Some(color::convert_f32_to_u8(&rgba))
+            }
+        }
+    };
+
     // Convert text runs to ColorFontRegions
     let mut regions = ColorFontRegions::new_empty();
     for run in &node.text_runs {
@@ -411,5 +440,112 @@ mod tests {
             depth += 1;
         }
         assert_eq!(depth, 500);
+    }
+
+    // -----------------------------------------------------------------
+    // Background color → GlyphArea.background_color plumbing
+    //
+    // Session 6C follow-up: node backgrounds now live on the Baumhard
+    // tree (as `GlyphArea.background_color`) so they can be mutated
+    // through the tree walker and efficiently rendered as filled
+    // rectangles by the renderer. These tests lock in that
+    // `NodeStyle.background_color` survives the tree build intact,
+    // honors the theme-variable indirection, and degrades safely on
+    // malformed input or the explicit `transparent` sentinel.
+    // -----------------------------------------------------------------
+
+    fn glyph_area_of<'a>(
+        tree: &'a crate::gfx_structs::tree::Tree<
+            crate::gfx_structs::element::GfxElement,
+            crate::gfx_structs::mutator::GfxMutator,
+        >,
+        node_id: indextree::NodeId,
+    ) -> &'a crate::gfx_structs::area::GlyphArea {
+        tree.arena.get(node_id).unwrap().get().glyph_area().unwrap()
+    }
+
+    #[test]
+    fn test_background_color_opaque_hex_populates_field() {
+        let mut map = synthetic_map(
+            vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+            vec![],
+        );
+        map.nodes.get_mut("n").unwrap().style.background_color = "#ff8800".into();
+        let result = build_mindmap_tree(&map);
+        let area = glyph_area_of(&result.tree, *result.node_map.get("n").unwrap());
+        assert_eq!(area.background_color, Some([255, 136, 0, 255]));
+    }
+
+    #[test]
+    fn test_background_color_empty_string_becomes_none() {
+        let mut map = synthetic_map(
+            vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+            vec![],
+        );
+        map.nodes.get_mut("n").unwrap().style.background_color = "".into();
+        let result = build_mindmap_tree(&map);
+        let area = glyph_area_of(&result.tree, *result.node_map.get("n").unwrap());
+        assert!(area.background_color.is_none());
+    }
+
+    #[test]
+    fn test_background_color_fully_transparent_becomes_none() {
+        let mut map = synthetic_map(
+            vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+            vec![],
+        );
+        // `#00000000` is the conventional "no fill" opt-out.
+        map.nodes.get_mut("n").unwrap().style.background_color = "#00000000".into();
+        let result = build_mindmap_tree(&map);
+        let area = glyph_area_of(&result.tree, *result.node_map.get("n").unwrap());
+        assert!(area.background_color.is_none());
+    }
+
+    #[test]
+    fn test_background_color_resolves_theme_variable() {
+        let mut map = synthetic_map(
+            vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+            vec![],
+        );
+        map.canvas
+            .theme_variables
+            .insert("--panel".into(), "#112233".into());
+        map.nodes.get_mut("n").unwrap().style.background_color = "var(--panel)".into();
+        let result = build_mindmap_tree(&map);
+        let area = glyph_area_of(&result.tree, *result.node_map.get("n").unwrap());
+        assert_eq!(area.background_color, Some([17, 34, 51, 255]));
+    }
+
+    #[test]
+    fn test_background_color_malformed_hex_degrades_to_none() {
+        let mut map = synthetic_map(
+            vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+            vec![],
+        );
+        // `hex_to_rgba_safe` degrades unknown/bad strings to the
+        // fallback we passed in — `[0,0,0,0]` for background — which
+        // then trips the transparent-alpha sentinel below and becomes
+        // `None`. Keeps a typo from crashing the render.
+        map.nodes.get_mut("n").unwrap().style.background_color = "not-a-color".into();
+        let result = build_mindmap_tree(&map);
+        let area = glyph_area_of(&result.tree, *result.node_map.get("n").unwrap());
+        assert!(area.background_color.is_none());
+    }
+
+    #[test]
+    fn test_background_color_three_digit_hex_works() {
+        let mut map = synthetic_map(
+            vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+            vec![],
+        );
+        // `#000` is the default in all the synthetic nodes above, and
+        // it's opaque black — verify the builder treats it as a real
+        // fill (not transparent) so the renderer draws the rect. A
+        // future refactor that mis-parses short hex values would
+        // regress this.
+        map.nodes.get_mut("n").unwrap().style.background_color = "#000".into();
+        let result = build_mindmap_tree(&map);
+        let area = glyph_area_of(&result.tree, *result.node_map.get("n").unwrap());
+        assert_eq!(area.background_color, Some([0, 0, 0, 255]));
     }
 }

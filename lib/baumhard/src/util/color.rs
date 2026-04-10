@@ -121,28 +121,52 @@ pub fn resolve_var<'a>(raw: &'a str, vars: &'a HashMap<String, String>) -> &'a s
 pub fn hex_to_rgba_safe(color: &str, fallback: [f32; 4]) -> [f32; 4] {
     let color = color.trim_start_matches('#');
     let length = color.len();
-    if length != 6 && length != 8 {
+    // CSS color hex accepts both short (`#rgb`, `#rgba`) and long
+    // (`#rrggbb`, `#rrggbbaa`) forms. For short forms, each nibble is
+    // doubled ("a" → "aa") to produce the full 8-bit component. Any
+    // other length is a typo and returns the caller's fallback.
+    if length != 3 && length != 4 && length != 6 && length != 8 {
         return fallback;
     }
-    let mut rgba = fallback;
-    let bytes = color.as_bytes();
-    for i in 0..(length / 2) {
-        let hi = match bytes[i * 2] {
-            b'0'..=b'9' => bytes[i * 2] - b'0',
-            b'a'..=b'f' => bytes[i * 2] - b'a' + 10,
-            b'A'..=b'F' => bytes[i * 2] - b'A' + 10,
-            _ => return fallback,
-        };
-        let lo = match bytes[i * 2 + 1] {
-            b'0'..=b'9' => bytes[i * 2 + 1] - b'0',
-            b'a'..=b'f' => bytes[i * 2 + 1] - b'a' + 10,
-            b'A'..=b'F' => bytes[i * 2 + 1] - b'A' + 10,
-            _ => return fallback,
-        };
-        rgba[i] = ((hi << 4) | lo) as f32 / 255.0;
+
+    fn nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
     }
-    if length == 6 {
-        rgba[3] = 1.0;
+
+    let bytes = color.as_bytes();
+    let mut rgba = fallback;
+    if length == 3 || length == 4 {
+        for i in 0..length {
+            let n = match nibble(bytes[i]) {
+                Some(v) => v,
+                None => return fallback,
+            };
+            // Double the nibble: "a" → "aa" = (n << 4) | n.
+            rgba[i] = ((n << 4) | n) as f32 / 255.0;
+        }
+        if length == 3 {
+            rgba[3] = 1.0;
+        }
+    } else {
+        for i in 0..(length / 2) {
+            let hi = match nibble(bytes[i * 2]) {
+                Some(v) => v,
+                None => return fallback,
+            };
+            let lo = match nibble(bytes[i * 2 + 1]) {
+                Some(v) => v,
+                None => return fallback,
+            };
+            rgba[i] = ((hi << 4) | lo) as f32 / 255.0;
+        }
+        if length == 6 {
+            rgba[3] = 1.0;
+        }
     }
     rgba
 }
@@ -388,6 +412,10 @@ mod tests {
     /// A single pathological theme-variable typo must never crash the
     /// renderer. Iterate over a batch of malformed inputs and assert
     /// every call returns the fallback without panicking.
+    ///
+    /// Note: `#123` and `#1234` are valid CSS shorthand (`#rgb` and
+    /// `#rgba`) and are handled by the parser, so they're not
+    /// listed here. Only genuinely broken inputs are exercised.
     #[test]
     fn hex_to_rgba_safe_no_panic_on_malformed_batch() {
         let fb = [0.25, 0.5, 0.75, 1.0];
@@ -398,7 +426,7 @@ mod tests {
             "##",
             "#g",
             "#12",
-            "#1234",
+            "#12345",
             "#1234567",
             "#123456789",
             "var(--x)",
@@ -416,6 +444,32 @@ mod tests {
             assert_eq!(got, fb,
                 "malformed input {:?} should return fallback", bad);
         }
+    }
+
+    /// CSS-style short hex (`#rgb` and `#rgba`) must parse by
+    /// doubling each nibble, so `#abc` → `#aabbcc`.
+    #[test]
+    fn hex_to_rgba_safe_short_hex_expands_each_nibble() {
+        let fb = [0.0, 0.0, 0.0, 0.0];
+        // `#000` = opaque black — the common default in node styles.
+        assert_eq!(hex_to_rgba_safe("#000", fb), [0.0, 0.0, 0.0, 1.0]);
+        // `#fff` = opaque white.
+        assert_eq!(hex_to_rgba_safe("#fff", fb), [1.0, 1.0, 1.0, 1.0]);
+        // `#abc` → `#aabbcc` with alpha = 1.
+        let got = hex_to_rgba_safe("#abc", fb);
+        let expected_r = 0xaa as f32 / 255.0;
+        let expected_g = 0xbb as f32 / 255.0;
+        let expected_b = 0xcc as f32 / 255.0;
+        assert!((got[0] - expected_r).abs() < 1e-6);
+        assert!((got[1] - expected_g).abs() < 1e-6);
+        assert!((got[2] - expected_b).abs() < 1e-6);
+        assert_eq!(got[3], 1.0);
+        // `#abcd` → `#aabbccdd` with alpha derived from the 4th nibble.
+        let got = hex_to_rgba_safe("#abcd", fb);
+        let expected_a = 0xdd as f32 / 255.0;
+        assert!((got[3] - expected_a).abs() < 1e-6);
+        // `#0000` → fully transparent black (the "no fill" sentinel).
+        assert_eq!(hex_to_rgba_safe("#0000", fb), [0.0, 0.0, 0.0, 0.0]);
     }
 
     /// Valid 6-char and 8-char hex — with and without the `#` prefix,
