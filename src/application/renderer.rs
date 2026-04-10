@@ -69,6 +69,8 @@ pub struct Renderer {
     mindmap_buffers: FxHashMap<String, MindMapTextBuffer>,
     border_buffers: Vec<MindMapTextBuffer>,
     connection_buffers: Vec<MindMapTextBuffer>,
+    /// Temporary overlay buffers (e.g., selection rectangle). Camera-transformed.
+    overlay_buffers: Vec<MindMapTextBuffer>,
 }
 
 impl Renderer {
@@ -141,6 +143,7 @@ impl Renderer {
             mindmap_buffers: Default::default(),
             border_buffers: Vec::new(),
             connection_buffers: Vec::new(),
+            overlay_buffers: Vec::new(),
         }
     }
 
@@ -386,6 +389,7 @@ impl Renderer {
         let mut text_areas: Vec<TextArea> = self.mindmap_buffers.values()
             .chain(self.border_buffers.iter())
             .chain(self.connection_buffers.iter())
+            .chain(self.overlay_buffers.iter())
             .filter_map(|tb| {
                 let canvas_pos = Vec2::new(tb.pos.0, tb.pos.1);
                 let canvas_size = Vec2::new(tb.bounds.0, tb.bounds.1);
@@ -920,6 +924,66 @@ impl Renderer {
                 0.05,
             );
         }
+    }
+
+    /// Build overlay buffers for a selection rectangle using dashed box-drawing glyphs.
+    /// Coordinates are in canvas space.
+    pub fn rebuild_selection_rect_overlay(&mut self, min: Vec2, max: Vec2) {
+        self.overlay_buffers.clear();
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        let font_size: f32 = 14.0;
+        let approx_char_width = font_size * 0.6;
+        let rect_color = cosmic_text::Color::rgba(0, 230, 255, 200); // Cyan, slightly transparent
+        let attrs = Attrs::new()
+            .color(rect_color)
+            .metrics(cosmic_text::Metrics::new(font_size, font_size));
+
+        let w = max.x - min.x;
+        let h = max.y - min.y;
+        let h_width = w + approx_char_width * 2.0;
+        let v_width = approx_char_width * 2.0;
+
+        // Top border
+        let char_count = (w / approx_char_width).max(1.0) as usize;
+        let top_text = format!("\u{256D}{}\u{256E}", "\u{2504}".repeat(char_count)); // ╭┄╮
+        self.overlay_buffers.push(create_border_buffer(
+            &mut font_system, &top_text, &attrs, font_size,
+            (min.x - approx_char_width, min.y - font_size),
+            (h_width, font_size * 1.5),
+        ));
+
+        // Bottom border
+        let bottom_text = format!("\u{2570}{}\u{256F}", "\u{2504}".repeat(char_count)); // ╰┄╯
+        self.overlay_buffers.push(create_border_buffer(
+            &mut font_system, &bottom_text, &attrs, font_size,
+            (min.x - approx_char_width, max.y),
+            (h_width, font_size * 1.5),
+        ));
+
+        // Left border
+        let row_count = (h / font_size).max(1.0) as usize;
+        let left_text: String = std::iter::repeat_n("\u{2506}\n", row_count).collect(); // ┆
+        self.overlay_buffers.push(create_border_buffer(
+            &mut font_system, &left_text, &attrs, font_size,
+            (min.x - approx_char_width, min.y),
+            (v_width, h),
+        ));
+
+        // Right border
+        let right_text: String = std::iter::repeat_n("\u{2506}\n", row_count).collect(); // ┆
+        self.overlay_buffers.push(create_border_buffer(
+            &mut font_system, &right_text, &attrs, font_size,
+            (max.x, min.y),
+            (v_width, h),
+        ));
+    }
+
+    /// Clear all overlay buffers (e.g., after selection rect is finished).
+    pub fn clear_overlay_buffers(&mut self) {
+        self.overlay_buffers.clear();
     }
 
     /// Convert screen coordinates to canvas (world) coordinates using the camera transform.
