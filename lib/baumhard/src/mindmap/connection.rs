@@ -209,6 +209,52 @@ fn sample_cubic_bezier(
     points
 }
 
+/// Returns the squared distance from `point` to the line segment `a`—`b`.
+fn point_to_segment_distance_squared(point: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    if len_sq < f32::EPSILON {
+        return point.distance_squared(a);
+    }
+    let t = ((point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    let closest = a + ab * t;
+    point.distance_squared(closest)
+}
+
+/// Returns the minimum distance from `point` to the given connection path.
+///
+/// - `Straight`: exact point-to-segment distance.
+/// - `CubicBezier`: samples the curve and returns the minimum distance over
+///   all resulting polyline segments. This is an approximation; at default
+///   sampling density (4.0 canvas units) the error is below one canvas unit
+///   for typical connection paths — well within a click tolerance.
+pub fn distance_to_path(point: Vec2, path: &ConnectionPath) -> f32 {
+    match path {
+        ConnectionPath::Straight { start, end } => {
+            point_to_segment_distance_squared(point, *start, *end).sqrt()
+        }
+        ConnectionPath::CubicBezier { .. } => {
+            let samples = sample_path(path, 4.0);
+            if samples.is_empty() {
+                return f32::INFINITY;
+            }
+            if samples.len() == 1 {
+                return point.distance(samples[0].position);
+            }
+            let mut min_sq = f32::INFINITY;
+            for pair in samples.windows(2) {
+                let d = point_to_segment_distance_squared(
+                    point, pair[0].position, pair[1].position,
+                );
+                if d < min_sq {
+                    min_sq = d;
+                }
+            }
+            min_sq.sqrt()
+        }
+    }
+}
+
 /// Binary search the arc-length table to find the t value for a given arc length.
 fn arc_length_to_t(arc_lengths: &[f32], target_len: f32, n: usize) -> f32 {
     let mut lo = 0usize;
@@ -430,6 +476,93 @@ mod tests {
         };
         let points = sample_path(&path, 10.0);
         assert_eq!(points.len(), 1);
+    }
+
+    #[test]
+    fn test_distance_to_straight_on_path() {
+        // Point lying exactly on a horizontal segment -> distance 0
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        let d = distance_to_path(Vec2::new(50.0, 0.0), &path);
+        assert!(d.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_distance_to_straight_perpendicular() {
+        // Perpendicular offset of 5 above the path midpoint
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        let d = distance_to_path(Vec2::new(50.0, 5.0), &path);
+        assert!((d - 5.0).abs() < 0.01, "expected ~5, got {}", d);
+    }
+
+    #[test]
+    fn test_distance_to_straight_past_endpoint() {
+        // Point beyond `end`: distance should be to the end, not the
+        // infinite line.
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        let d = distance_to_path(Vec2::new(110.0, 0.0), &path);
+        assert!((d - 10.0).abs() < 0.01, "expected ~10, got {}", d);
+    }
+
+    #[test]
+    fn test_distance_to_straight_diagonal() {
+        // Diagonal segment (0,0)->(30,40), length 50.
+        // Point at (0,50): expected distance from segment ~ ?
+        // Perpendicular foot on segment is at t = (0*30 + 50*40)/2500 = 0.8
+        // -> closest = (24, 32), distance = sqrt(24^2 + 18^2) = sqrt(576+324) = 30
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(30.0, 40.0),
+        };
+        let d = distance_to_path(Vec2::new(0.0, 50.0), &path);
+        assert!((d - 30.0).abs() < 0.01, "expected 30, got {}", d);
+    }
+
+    #[test]
+    fn test_distance_to_zero_length_path() {
+        // Degenerate (zero-length) segment: distance is point-to-point
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(50.0, 50.0),
+            end: Vec2::new(50.0, 50.0),
+        };
+        let d = distance_to_path(Vec2::new(50.0, 60.0), &path);
+        assert!((d - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_distance_to_cubic_bezier_on_curve() {
+        // A straight-ish cubic: control points collinear with endpoints
+        // means the "curve" is effectively a line from (0,0) to (100,0).
+        let path = ConnectionPath::CubicBezier {
+            start: Vec2::new(0.0, 0.0),
+            control1: Vec2::new(33.33, 0.0),
+            control2: Vec2::new(66.67, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        let d = distance_to_path(Vec2::new(50.0, 0.0), &path);
+        assert!(d < 0.5, "expected ~0, got {}", d);
+    }
+
+    #[test]
+    fn test_distance_to_cubic_bezier_perpendicular() {
+        // Point 5 units above the midpoint of a collinear bezier (straight
+        // line in practice): distance should be ~5
+        let path = ConnectionPath::CubicBezier {
+            start: Vec2::new(0.0, 0.0),
+            control1: Vec2::new(33.33, 0.0),
+            control2: Vec2::new(66.67, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        let d = distance_to_path(Vec2::new(50.0, 5.0), &path);
+        assert!((d - 5.0).abs() < 0.5, "expected ~5, got {}", d);
     }
 
     #[test]
