@@ -524,171 +524,6 @@ impl Renderer {
         }
     }
 
-    /// Rebuild rendering buffers from a RenderScene (produced by MindMapDocument).
-    /// This is the primary rendering path: scene data -> cosmic-text buffers.
-    pub fn rebuild_buffers_from_scene(&mut self, scene: &RenderScene) {
-        self.mindmap_buffers.clear();
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
-
-        for elem in &scene.text_elements {
-            let scale = elem.text_runs.first()
-                .map(|r| r.size_pt as f32)
-                .unwrap_or(14.0);
-            let line_height = scale * 1.2;
-            let (bound_x, bound_y) = elem.size;
-
-            let mut buffer = cosmic_text::Buffer::new(
-                &mut font_system,
-                cosmic_text::Metrics::new(scale, line_height),
-            );
-            buffer.set_size(&mut font_system, Some(bound_x), Some(bound_y));
-            buffer.set_wrap(&mut font_system, cosmic_text::Wrap::Word);
-
-            let text = &elem.text;
-            let spans: Vec<(&str, Attrs)> = if elem.text_runs.is_empty() {
-                vec![(text.as_str(), Attrs::new())]
-            } else {
-                elem.text_runs.iter().filter_map(|run| {
-                    let start = grapheme_chad::find_byte_index_of_char(text, run.start)
-                        .unwrap_or(text.len());
-                    let end = grapheme_chad::find_byte_index_of_char(text, run.end)
-                        .unwrap_or(text.len());
-                    if start >= end {
-                        return None;
-                    }
-                    let slice = &text[start..end];
-                    let mut attrs = Attrs::new();
-                    if let Some(color) = parse_hex_color(&run.color) {
-                        attrs = attrs.color(color);
-                    }
-                    if run.bold {
-                        attrs = attrs.weight(cosmic_text::Weight::BOLD);
-                    }
-                    if run.italic {
-                        attrs = attrs.style(Style::Italic);
-                    }
-                    attrs = attrs.metrics(cosmic_text::Metrics::new(
-                        run.size_pt as f32,
-                        run.size_pt as f32 * 1.2,
-                    ));
-                    Some((slice, attrs))
-                }).collect()
-            };
-
-            buffer.set_rich_text(
-                &mut font_system,
-                spans,
-                &Attrs::new(),
-                cosmic_text::Shaping::Advanced,
-                None,
-            );
-            buffer.shape_until_scroll(&mut font_system, false);
-
-            let text_buffer = MindMapTextBuffer {
-                buffer,
-                pos: elem.position,
-                bounds: (bound_x, bound_y),
-            };
-            self.mindmap_buffers.insert(elem.node_id.clone(), text_buffer);
-        }
-
-        // Build border buffers
-        self.border_buffers.clear();
-        for elem in &scene.border_elements {
-            let border_color = parse_hex_color(&elem.border_style.color)
-                .unwrap_or(cosmic_text::Color::rgba(255, 255, 255, 255));
-            let font_size = elem.border_style.font_size_pt;
-            let glyph_set = &elem.border_style.glyph_set;
-
-            let approx_char_width = font_size * 0.6;
-            let char_count = (elem.node_size.0 / approx_char_width).max(3.0) as usize;
-            let border_attrs = Attrs::new()
-                .color(border_color)
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
-
-            let (nx, ny) = elem.node_position;
-            let (nw, nh) = elem.node_size;
-            let h_width = nw + approx_char_width * 2.0;
-            let v_width = approx_char_width * 2.0;
-
-            // Top border
-            let top_text = glyph_set.top_border(char_count);
-            self.border_buffers.push(create_border_buffer(
-                &mut font_system, &top_text, &border_attrs, font_size,
-                (nx - approx_char_width, ny - font_size),
-                (h_width, font_size * 1.5),
-            ));
-
-            // Bottom border
-            let bottom_text = glyph_set.bottom_border(char_count);
-            self.border_buffers.push(create_border_buffer(
-                &mut font_system, &bottom_text, &border_attrs, font_size,
-                (nx - approx_char_width, ny + nh),
-                (h_width, font_size * 1.5),
-            ));
-
-            // Left side
-            let row_count = (nh / font_size).max(1.0) as usize;
-            let left_text: String = std::iter::repeat_n(format!("{}\n", glyph_set.left_char()), row_count).collect();
-            self.border_buffers.push(create_border_buffer(
-                &mut font_system, &left_text, &border_attrs, font_size,
-                (nx - approx_char_width, ny),
-                (v_width, nh),
-            ));
-
-            // Right side
-            let right_text: String = std::iter::repeat_n(format!("{}\n", glyph_set.right_char()), row_count).collect();
-            self.border_buffers.push(create_border_buffer(
-                &mut font_system, &right_text, &border_attrs, font_size,
-                (nx + nw, ny),
-                (v_width, nh),
-            ));
-        }
-
-        // Build connection buffers
-        self.connection_buffers.clear();
-        for elem in &scene.connection_elements {
-            let conn_color = parse_hex_color(&elem.color)
-                .unwrap_or(cosmic_text::Color::rgba(200, 200, 200, 255));
-            let font_size = elem.font_size_pt;
-            let half_glyph = font_size * 0.3;
-            let half_height = font_size * 0.5;
-            let glyph_bounds = (font_size, font_size);
-            let conn_attrs = Attrs::new()
-                .color(conn_color)
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
-
-            // Start cap
-            if let Some((ref cap_text, cap_pos)) = elem.cap_start {
-                self.connection_buffers.push(create_border_buffer(
-                    &mut font_system, cap_text, &conn_attrs, font_size,
-                    (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
-                    glyph_bounds,
-                ));
-            }
-
-            // Body glyphs
-            for &pos in &elem.glyph_positions {
-                self.connection_buffers.push(create_border_buffer(
-                    &mut font_system, &elem.body_glyph, &conn_attrs, font_size,
-                    (pos.0 - half_glyph, pos.1 - half_height),
-                    glyph_bounds,
-                ));
-            }
-
-            // End cap
-            if let Some((ref cap_text, cap_pos)) = elem.cap_end {
-                self.connection_buffers.push(create_border_buffer(
-                    &mut font_system, cap_text, &conn_attrs, font_size,
-                    (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
-                    glyph_bounds,
-                ));
-            }
-        }
-    }
-
     /// Fit the camera to show a RenderScene's content.
     pub fn fit_camera_to_scene(&mut self, scene: &RenderScene) {
         if scene.text_elements.is_empty() {
@@ -713,9 +548,9 @@ impl Renderer {
         );
     }
 
-    /// Rebuild text buffers from a Baumhard tree (nodes rendered from GlyphArea elements).
-    /// This replaces the text portion of rebuild_buffers_from_scene — nodes are now
-    /// sourced from the mutation tree instead of the flat RenderScene.
+    /// Rebuild text buffers from a Baumhard tree (nodes rendered from GlyphArea
+    /// elements). This is the primary text-rendering path; borders and
+    /// connections use their own `rebuild_*_buffers` methods alongside it.
     pub fn rebuild_buffers_from_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>) {
         self.mindmap_buffers.clear();
         let mut font_system = fonts::FONT_SYSTEM
@@ -792,6 +627,14 @@ impl Renderer {
     }
 
     /// Rebuild border buffers from flat border elements (from RenderScene).
+    ///
+    /// Borders are a rectangle of box-drawing glyphs: the top and bottom
+    /// edges are horizontal text runs, the left and right edges are columns
+    /// of single-character lines. All four share a single `approx_char_width`
+    /// approximation so the corners of the horizontal runs line up with the
+    /// vertical columns — the previous implementation mixed the approximation
+    /// (for the top/bottom width) with the real node width (for the right
+    /// column position), which left a visible gap on wide nodes.
     pub fn rebuild_border_buffers(&mut self, border_elements: &[BorderElement]) {
         self.border_buffers.clear();
         let mut font_system = fonts::FONT_SYSTEM
@@ -803,18 +646,31 @@ impl Renderer {
                 .unwrap_or(cosmic_text::Color::rgba(255, 255, 255, 255));
             let font_size = elem.border_style.font_size_pt;
             let glyph_set = &elem.border_style.glyph_set;
-
-            let approx_char_width = font_size * 0.6;
-            let char_count = (elem.node_size.0 / approx_char_width).max(3.0) as usize;
             let border_attrs = Attrs::new()
                 .color(border_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
 
             let (nx, ny) = elem.node_position;
             let (nw, nh) = elem.node_size;
-            let h_width = nw + approx_char_width * 2.0;
+
+            // --- Horizontal math ---
+            // The top/bottom runs include two corner cells plus enough body
+            // cells to span the node's width. We round up so the border
+            // always fully encloses the node horizontally.
+            let approx_char_width = font_size * 0.6;
+            let char_count = ((nw / approx_char_width) + 2.0)
+                .ceil()
+                .max(3.0) as usize;
+            // Approximate x of the rightmost (corner) character within the
+            // top run. The top run starts at `nx - approx_char_width`, and
+            // the last character occupies positions
+            // `(char_count - 1) * approx_char_width` further along.
+            let right_corner_x =
+                nx - approx_char_width + (char_count - 1) as f32 * approx_char_width;
+            let h_width = (char_count as f32 + 1.0) * approx_char_width;
             let v_width = approx_char_width * 2.0;
 
+            // Top run: `╭─ … ─╮`
             let top_text = glyph_set.top_border(char_count);
             self.border_buffers.push(create_border_buffer(
                 &mut font_system, &top_text, &border_attrs, font_size,
@@ -822,6 +678,7 @@ impl Renderer {
                 (h_width, font_size * 1.5),
             ));
 
+            // Bottom run: `╰─ … ─╯`
             let bottom_text = glyph_set.bottom_border(char_count);
             self.border_buffers.push(create_border_buffer(
                 &mut font_system, &bottom_text, &border_attrs, font_size,
@@ -829,18 +686,28 @@ impl Renderer {
                 (h_width, font_size * 1.5),
             ));
 
-            let row_count = (nh / font_size).max(1.0) as usize;
-            let left_text: String = std::iter::repeat_n(format!("{}\n", glyph_set.left_char()), row_count).collect();
+            // --- Vertical math ---
+            // The left/right columns use `row_count` line-height-tall cells
+            // so the column spans `row_count * font_size` vertically. Round
+            // so we don't overshoot or undershoot by more than half a row.
+            let row_count = (nh / font_size).round().max(1.0) as usize;
+            let left_text: String =
+                std::iter::repeat_n(format!("{}\n", glyph_set.left_char()), row_count).collect();
             self.border_buffers.push(create_border_buffer(
                 &mut font_system, &left_text, &border_attrs, font_size,
                 (nx - approx_char_width, ny),
                 (v_width, nh),
             ));
 
-            let right_text: String = std::iter::repeat_n(format!("{}\n", glyph_set.right_char()), row_count).collect();
+            // Right column is anchored to the *approximate* position of the
+            // top run's right corner glyph, not to `nx + nw`. This keeps the
+            // top/bottom corners and the right column visually aligned even
+            // when `nw` isn't a whole multiple of `approx_char_width`.
+            let right_text: String =
+                std::iter::repeat_n(format!("{}\n", glyph_set.right_char()), row_count).collect();
             self.border_buffers.push(create_border_buffer(
                 &mut font_system, &right_text, &border_attrs, font_size,
-                (nx + nw, ny),
+                (right_corner_x, ny),
                 (v_width, nh),
             ));
         }

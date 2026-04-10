@@ -54,7 +54,7 @@ The application has two layers:
 - **Orphan selection (detach)** — Ctrl+O severs the selected node(s) from their parent, promoting them to root. Each detached node's entire subtree stays attached to it. Ctrl+Z undoes, restoring the original parent link and index.
 - **Configurable keybindings** — every keyboard action is reconfigurable via a JSON config file. Desktop loads from `--keybinds <path>` CLI flag or a conventional path (`$XDG_CONFIG_HOME/mandala/keybinds.json`, else `$HOME/.config/mandala/keybinds.json`). WASM loads from a `?keybinds=<url-encoded-json>` query param or `localStorage['mandala_keybinds']`. Missing fields fall back to hardcoded defaults so partial configs work. Invalid bindings are logged and skipped; the app never crashes for a bad keybinds file. Modifier aliases (cmd/command/meta/super → Ctrl, option → Alt) make the same config work across platforms. Sample config in `config/default_keybinds.json`.
 - **Multi-target** — native + WASM builds
-- **218 tests passing**
+- **224 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
