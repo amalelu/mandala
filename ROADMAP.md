@@ -30,7 +30,7 @@ The application has two layers:
 
 ---
 
-## Current State (after Session 5B)
+## Current State (after Session 6A+6B)
 
 ### What works
 - **MindMap data model** — serde-based structs, JSON loading, hierarchy queries
@@ -47,8 +47,11 @@ The application has two layers:
 - **Undo** — Ctrl+Z undoes node movement and reparent operations (undo stack with position/parent restoration)
 - **DragState machine** — structured input state (Pending/Panning/MovingNode) replaces loose booleans
 - **AppMode** — high-level mode enum (Normal / Reparent) cleanly separates reparent from the regular drag flow
+- **Connection selection** — click on a connection path (point-to-path hit test, zoom-aware 8px tolerance) to select it; mutually exclusive with node selection. Selected edges render in cyan via scene-builder color override.
+- **Connection deletion** — Delete key removes the selected edge. `UndoAction::DeleteEdge { index, edge }` restores it at the original index on Ctrl+Z.
+- **Connection creation** — Ctrl+D with one selected node enters connect mode (source orange, hovered target green, reusing the reparent color scheme), click target to create a `cross_link` edge. Auto-selects the newly-created edge. Ctrl+Z undoes. Esc cancels. Self-links / duplicates / unknown nodes are silent no-ops.
 - **Multi-target** — native + WASM builds
-- **172 tests passing**
+- **196 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -346,27 +349,65 @@ cancellable mode with clear visual feedback.
 
 **What**: Select connections and delete them, with visual feedback.
 
-- [ ] Click on a connection glyph path to select the edge
-- [ ] Hit testing for connections: click position -> find nearest edge by glyph proximity
-- [ ] Visual feedback: highlight selected connection (color change, thicker glyphs, or glow)
-- [ ] Display edge info on selection (type, color, label, anchor points)
-- [ ] Delete selected connection (Delete key or context action)
-- [ ] Undo support for connection deletion (push `DeleteEdgeAction` to undo stack)
+- [x] Click on a connection glyph path to select the edge (falls through from
+      node hit test when the cursor misses every node)
+- [x] Hit testing for connections: point-to-path distance via new
+      `connection::distance_to_path()`, scaled by zoom so 8 screen pixels of
+      click tolerance stay visually stable across zoom levels
+- [x] Visual feedback: selected connection color-overridden to cyan
+      (`#00E5FF`) via `scene_builder::build_scene_with_offsets_and_selection`
+- [x] `SelectionState::Edge(EdgeRef)` variant; node and edge selection are
+      mutually exclusive
+- [x] Delete key removes the selected edge
+- [x] Undo support: `UndoAction::DeleteEdge { index, edge }` restores the
+      edge at its original index
+- [x] 22 new tests added (7 `distance_to_path` + 15 document-level)
 
-**Verify**: Connections can be clicked to select and deleted with undo
+**Key files**:
+- `lib/baumhard/src/mindmap/connection.rs` — `distance_to_path()` + tests
+- `lib/baumhard/src/mindmap/scene_builder.rs` — selection-aware scene build
+- `src/application/document.rs` — `EdgeRef`, `SelectionState::Edge`,
+  `hit_test_edge()`, `remove_edge()`, `build_scene_with_selection()`,
+  `UndoAction::DeleteEdge`/`CreateEdge`
+- `src/application/renderer.rs` — `canvas_per_pixel()` helper for tolerance
+  conversion
+- `src/application/app.rs` — edge hit test wired into `handle_click`, Delete
+  key handler, `rebuild_all` uses selection-aware scene build
+
+**Verify**: Click a connection to select it, press Delete to remove it,
+Ctrl+Z to undo. `./test.sh` passes (196 tests).
 
 ### Session 6B: Create connections
 
 **What**: Draw new connections between nodes.
 
-- [ ] "Connect mode": select source node, click target to create edge
-- [ ] Visual feedback: temporary connection following cursor from source anchor
-- [ ] Create new `MindEdge` with default glyph style from canvas config
-- [ ] Support edge types: `parent_child`, `cross_link`
-- [ ] Cross-links are arbitrary connections — they don't affect the tree hierarchy
-- [ ] Undo support for connection creation
+- [x] Connect mode via Ctrl+D ("D for draw"): requires exactly one node
+      selected, enters `AppMode::Connect { source }`, next left-click on a
+      target node creates the edge
+- [x] Visual feedback: source node orange, hovered target node green —
+      reuses the existing reparent-mode color scheme
+- [x] New `MindEdge` created with `default_cross_link_edge()` (color
+      `#aa88cc`, width 3, auto anchors, no control points)
+- [x] Cross-links are arbitrary connections — they don't affect the tree
+      hierarchy. Hierarchy edges continue to be created via Ctrl+P reparent.
+- [x] Duplicate/self-link/unknown-node guards return silent no-ops
+- [x] Undo support: `UndoAction::CreateEdge { index }` pops the created edge
+- [x] Newly-created edge is auto-selected so the user gets immediate visual
+      confirmation and can Delete or style it next
+- [x] Esc cancels connect mode without side effect
+- [x] 6 new tests covering creation success, self-link rejection, duplicate
+      rejection, unknown-node rejection, default-field correctness, undo
 
-**Verify**: New connections can be created between any two nodes
+**Key files**:
+- `src/application/document.rs` — `create_cross_link_edge()`,
+  `default_cross_link_edge()`, `UndoAction::CreateEdge`
+- `src/application/app.rs` — `AppMode::Connect`, Ctrl+D hotkey,
+  `handle_connect_target_click()`, extended `rebuild_all_with_mode` and
+  cursor-move hover tracking
+
+**Verify**: Select a single node, Ctrl+D (source turns orange), hover other
+nodes (green preview), click to create a cross-link edge. Ctrl+Z undoes.
+Esc cancels. `./test.sh` passes (196 tests total at end of Session 6A+B).
 
 ### Session 6C: Connection path manipulation
 

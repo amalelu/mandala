@@ -7,6 +7,7 @@ use baumhard::mindmap::custom_mutation::{
     CustomMutation, MutationBehavior, TargetScope, Trigger,
     PlatformContext, apply_mutations_to_element,
 };
+use baumhard::mindmap::connection;
 use baumhard::mindmap::model::{MindEdge, MindMap, MindNode, Position};
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
@@ -22,12 +23,42 @@ const REPARENT_SOURCE_COLOR: [f32; 4] = [1.0, 0.55, 0.0, 1.0];
 /// a potential reparent target.
 const REPARENT_TARGET_COLOR: [f32; 4] = [0.2, 1.0, 0.4, 1.0];
 
-/// Tracks which nodes are currently selected.
+/// Identifies an edge in the MindMap by its endpoints and type. Edges have
+/// no stable ID, so this triple is the canonical reference (matching how
+/// `apply_reparent` looks up parent_child edges at document.rs:301).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EdgeRef {
+    pub from_id: String,
+    pub to_id: String,
+    pub edge_type: String,
+}
+
+impl EdgeRef {
+    pub fn new(from_id: impl Into<String>, to_id: impl Into<String>, edge_type: impl Into<String>) -> Self {
+        Self {
+            from_id: from_id.into(),
+            to_id: to_id.into(),
+            edge_type: edge_type.into(),
+        }
+    }
+
+    /// Returns true if this ref identifies the given `MindEdge`.
+    pub fn matches(&self, edge: &MindEdge) -> bool {
+        self.from_id == edge.from_id
+            && self.to_id == edge.to_id
+            && self.edge_type == edge.edge_type
+    }
+}
+
+/// Tracks what is currently selected in the document. Node and edge
+/// selection are mutually exclusive — clicking a node clears any edge
+/// selection and vice versa.
 #[derive(Clone, Debug)]
 pub enum SelectionState {
     None,
     Single(String),
     Multi(Vec<String>),
+    Edge(EdgeRef),
 }
 
 impl SelectionState {
@@ -36,6 +67,7 @@ impl SelectionState {
             SelectionState::None => false,
             SelectionState::Single(id) => id == node_id,
             SelectionState::Multi(ids) => ids.contains(&node_id.to_string()),
+            SelectionState::Edge(_) => false,
         }
     }
 
@@ -44,6 +76,15 @@ impl SelectionState {
             SelectionState::None => vec![],
             SelectionState::Single(id) => vec![id.as_str()],
             SelectionState::Multi(ids) => ids.iter().map(|s| s.as_str()).collect(),
+            SelectionState::Edge(_) => vec![],
+        }
+    }
+
+    /// Returns the selected edge, if any.
+    pub fn selected_edge(&self) -> Option<&EdgeRef> {
+        match self {
+            SelectionState::Edge(e) => Some(e),
+            _ => None,
         }
     }
 }
@@ -77,6 +118,26 @@ fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
     }
 }
 
+/// Build a default-styled cross_link edge from `from_id` to `to_id`.
+/// Used by connect mode (Ctrl+D) to create non-hierarchical connections.
+/// Cross-links don't affect the tree structure.
+fn default_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
+    MindEdge {
+        from_id: from_id.to_string(),
+        to_id: to_id.to_string(),
+        edge_type: "cross_link".to_string(),
+        color: "#aa88cc".to_string(),
+        width: 3,
+        line_style: 0,
+        visible: true,
+        label: None,
+        anchor_from: 0,
+        anchor_to: 0,
+        control_points: Vec::new(),
+        glyph_connection: None,
+    }
+}
+
 /// An undoable action that can be reversed.
 #[derive(Clone, Debug)]
 pub enum UndoAction {
@@ -91,6 +152,12 @@ pub enum UndoAction {
         entries: Vec<(String, Option<String>, i32)>,
         old_edges: Vec<MindEdge>,
     },
+    /// Edge removed via the Delete key on a selected connection. Restored
+    /// by re-inserting `edge` at `index` in `mindmap.edges`.
+    DeleteEdge { index: usize, edge: MindEdge },
+    /// Edge created via connect mode (Ctrl+D). Reversed by removing the
+    /// edge at `index` (assumes LIFO undo order so the index is still valid).
+    CreateEdge { index: usize },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -148,6 +215,64 @@ impl MindMapDocument {
     /// Used during drag to update connections and borders in real-time.
     pub fn build_scene_with_offsets(&self, offsets: &HashMap<String, (f32, f32)>) -> RenderScene {
         scene_builder::build_scene_with_offsets(&self.mindmap, offsets)
+    }
+
+    /// Build a RenderScene that also reflects the current edge selection.
+    /// The selected edge (if any) gets a cyan color override baked into its
+    /// ConnectionElement so the renderer paints it in the highlight color.
+    pub fn build_scene_with_selection(&self) -> RenderScene {
+        let sel = self.selection.selected_edge()
+            .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
+        scene_builder::build_scene_with_offsets_and_selection(
+            &self.mindmap,
+            &HashMap::new(),
+            sel,
+        )
+    }
+
+    /// Remove an edge matching `edge_ref` from the MindMap. Returns its
+    /// original index in `mindmap.edges` and the removed edge so the caller
+    /// can push a `DeleteEdge` undo action.
+    pub fn remove_edge(&mut self, edge_ref: &EdgeRef) -> Option<(usize, MindEdge)> {
+        let idx = self.mindmap.edges.iter().position(|e| edge_ref.matches(e))?;
+        let edge = self.mindmap.edges.remove(idx);
+        Some((idx, edge))
+    }
+
+    /// Create a default-styled `cross_link` edge between two nodes and push
+    /// it onto `mindmap.edges`. Returns the index where it was inserted so
+    /// the caller can push a `CreateEdge` undo action.
+    ///
+    /// Returns `None` if:
+    /// - `source_id == target_id` (self-links are rejected)
+    /// - either node doesn't exist in the map
+    /// - a `cross_link` edge from source to target already exists
+    pub fn create_cross_link_edge(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+    ) -> Option<usize> {
+        if source_id == target_id {
+            return None;
+        }
+        if !self.mindmap.nodes.contains_key(source_id)
+            || !self.mindmap.nodes.contains_key(target_id)
+        {
+            return None;
+        }
+        // Duplicate check: reject if a cross_link already exists between
+        // these two nodes (in this direction).
+        let exists = self.mindmap.edges.iter().any(|e| {
+            e.edge_type == "cross_link"
+                && e.from_id == source_id
+                && e.to_id == target_id
+        });
+        if exists {
+            return None;
+        }
+        let edge = default_cross_link_edge(source_id, target_id);
+        self.mindmap.edges.push(edge);
+        Some(self.mindmap.edges.len() - 1)
     }
 
     /// Apply a position delta to a node and all its descendants in the MindMap model.
@@ -356,6 +481,17 @@ impl MindMapDocument {
                     // parent_child edge additions, removals, and from_id
                     // repointing that apply_reparent performed.
                     self.mindmap.edges = old_edges;
+                }
+                UndoAction::DeleteEdge { index, edge } => {
+                    // Reinsert at the original index, clamped to current length
+                    // in case other undo actions have shifted the Vec.
+                    let idx = index.min(self.mindmap.edges.len());
+                    self.mindmap.edges.insert(idx, edge);
+                }
+                UndoAction::CreateEdge { index } => {
+                    if index < self.mindmap.edges.len() {
+                        self.mindmap.edges.remove(index);
+                    }
                 }
             }
             true
@@ -624,6 +760,55 @@ pub fn hit_test(canvas_pos: Vec2, tree: &MindMapTree) -> Option<String> {
     }
 
     best.map(|(id, _)| id)
+}
+
+/// Hit test edges: find the nearest visible edge within `tolerance` canvas
+/// units of `canvas_pos`. Returns an `EdgeRef` for the closest edge, or
+/// `None` if nothing is within range.
+///
+/// Visibility filter mirrors `scene_builder::build_scene_with_offsets` — an
+/// edge is eligible only if `edge.visible` is true, both endpoint nodes
+/// exist, and neither endpoint is hidden by fold state.
+pub fn hit_test_edge(canvas_pos: Vec2, map: &MindMap, tolerance: f32) -> Option<EdgeRef> {
+    let mut best: Option<(EdgeRef, f32)> = None;
+    for edge in &map.edges {
+        if !edge.visible {
+            continue;
+        }
+        let from_node = match map.nodes.get(&edge.from_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        let to_node = match map.nodes.get(&edge.to_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        if map.is_hidden_by_fold(from_node) || map.is_hidden_by_fold(to_node) {
+            continue;
+        }
+
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+
+        let path = connection::build_connection_path(
+            from_pos, from_size, edge.anchor_from,
+            to_pos, to_size, edge.anchor_to,
+            &edge.control_points,
+        );
+        let dist = connection::distance_to_path(canvas_pos, &path);
+        if dist > tolerance {
+            continue;
+        }
+        if best.as_ref().map_or(true, |(_, best_dist)| dist < *best_dist) {
+            best = Some((
+                EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type),
+                dist,
+            ));
+        }
+    }
+    best.map(|(e, _)| e)
 }
 
 /// Find all node IDs whose bounds intersect the given canvas-space rectangle.
@@ -1557,5 +1742,249 @@ mod tests {
             assert_eq!(orig.to_id, restored.to_id);
             assert_eq!(orig.edge_type, restored.edge_type);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Session 6A: edge selection, deletion, undo
+    // ---------------------------------------------------------------------
+
+    /// Pick an edge from the testament map for hit-testing and deletion tests.
+    /// Returns the edge's EdgeRef plus a canvas-space point that should lie
+    /// on (or very near) the edge path.
+    fn pick_test_edge(doc: &MindMapDocument) -> (EdgeRef, Vec2) {
+        let edge = doc.mindmap.edges.iter()
+            .find(|e| e.visible)
+            .expect("testament map has visible edges");
+        let from = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+        let to = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+        let from_pos = Vec2::new(from.position.x as f32, from.position.y as f32);
+        let from_size = Vec2::new(from.size.width as f32, from.size.height as f32);
+        let to_pos = Vec2::new(to.position.x as f32, to.position.y as f32);
+        let to_size = Vec2::new(to.size.width as f32, to.size.height as f32);
+        let path = baumhard::mindmap::connection::build_connection_path(
+            from_pos, from_size, edge.anchor_from,
+            to_pos, to_size, edge.anchor_to,
+            &edge.control_points,
+        );
+        // Sample the middle of the path for a guaranteed on-path point.
+        let samples = baumhard::mindmap::connection::sample_path(&path, 4.0);
+        let midpoint = samples[samples.len() / 2].position;
+        let edge_ref = EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type);
+        (edge_ref, midpoint)
+    }
+
+    #[test]
+    fn test_selection_state_edge_variant() {
+        let edge_ref = EdgeRef::new("a", "b", "cross_link");
+        let sel = SelectionState::Edge(edge_ref.clone());
+        assert_eq!(sel.selected_edge(), Some(&edge_ref));
+        // Node-selection queries on an edge selection return empty
+        assert!(!sel.is_selected("a"));
+        assert_eq!(sel.selected_ids().len(), 0);
+    }
+
+    #[test]
+    fn test_edge_ref_matches() {
+        let edge_ref = EdgeRef::new("a", "b", "cross_link");
+        let edge = MindEdge {
+            from_id: "a".into(),
+            to_id: "b".into(),
+            edge_type: "cross_link".into(),
+            color: "#fff".into(),
+            width: 1,
+            line_style: 0,
+            visible: true,
+            label: None,
+            anchor_from: 0,
+            anchor_to: 0,
+            control_points: vec![],
+            glyph_connection: None,
+        };
+        assert!(edge_ref.matches(&edge));
+
+        let wrong_type = EdgeRef::new("a", "b", "parent_child");
+        assert!(!wrong_type.matches(&edge));
+    }
+
+    #[test]
+    fn test_hit_test_edge_hits_on_path() {
+        let doc = load_test_doc();
+        let (expected, point) = pick_test_edge(&doc);
+        let hit = hit_test_edge(point, &doc.mindmap, 2.0);
+        assert_eq!(hit, Some(expected));
+    }
+
+    #[test]
+    fn test_hit_test_edge_miss_far_away() {
+        let doc = load_test_doc();
+        // A point very far from any node/edge
+        let hit = hit_test_edge(Vec2::new(-1_000_000.0, -1_000_000.0), &doc.mindmap, 8.0);
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn test_hit_test_edge_respects_tolerance() {
+        let doc = load_test_doc();
+        let (_, point) = pick_test_edge(&doc);
+        // Shift 50 units away from the path (orthogonal). Tolerance of 5
+        // should NOT produce a hit; tolerance of 100 should.
+        let offset = Vec2::new(0.0, 50.0);
+        let shifted = point + offset;
+        assert_eq!(hit_test_edge(shifted, &doc.mindmap, 5.0), None);
+        assert!(hit_test_edge(shifted, &doc.mindmap, 100.0).is_some());
+    }
+
+    #[test]
+    fn test_remove_edge_returns_index_and_edge() {
+        let mut doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+        let orig_count = doc.mindmap.edges.len();
+
+        let (idx, removed) = doc.remove_edge(&edge_ref).expect("edge should exist");
+        assert!(edge_ref.matches(&removed));
+        assert_eq!(doc.mindmap.edges.len(), orig_count - 1);
+        // The index should be within the original range
+        assert!(idx < orig_count);
+    }
+
+    #[test]
+    fn test_remove_edge_missing_returns_none() {
+        let mut doc = load_test_doc();
+        let missing = EdgeRef::new("nope_from", "nope_to", "cross_link");
+        assert!(doc.remove_edge(&missing).is_none());
+    }
+
+    #[test]
+    fn test_undo_delete_edge_restores_at_original_index() {
+        let mut doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+        let orig_edges = doc.mindmap.edges.clone();
+        let orig_idx = orig_edges.iter().position(|e| edge_ref.matches(e)).unwrap();
+
+        let (idx, edge) = doc.remove_edge(&edge_ref).unwrap();
+        doc.undo_stack.push(UndoAction::DeleteEdge { index: idx, edge });
+        doc.dirty = true;
+
+        assert_eq!(doc.mindmap.edges.len(), orig_edges.len() - 1);
+
+        // Undo
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.edges.len(), orig_edges.len());
+        // The edge should be back at its original position
+        let restored = &doc.mindmap.edges[orig_idx];
+        assert!(edge_ref.matches(restored));
+    }
+
+    #[test]
+    fn test_scene_builder_highlights_selected_edge() {
+        let mut doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+
+        // Without selection: the edge renders with its model color
+        let scene_normal = doc.build_scene_with_selection();
+        let normal_colors: Vec<String> = scene_normal.connection_elements.iter()
+            .map(|c| c.color.clone())
+            .collect();
+
+        // With edge selected: its element color should be the cyan highlight
+        doc.selection = SelectionState::Edge(edge_ref);
+        let scene_selected = doc.build_scene_with_selection();
+        let highlighted_count = scene_selected.connection_elements.iter()
+            .filter(|c| c.color.eq_ignore_ascii_case("#00E5FF"))
+            .count();
+        assert_eq!(highlighted_count, 1,
+            "exactly one connection element should carry the selection color");
+        // And exactly one color should have changed vs. the unselected scene
+        let changed: usize = scene_selected.connection_elements.iter()
+            .zip(normal_colors.iter())
+            .filter(|(c, orig)| &c.color != *orig)
+            .count();
+        assert_eq!(changed, 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // Session 6B: connection creation
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_default_cross_link_edge_fields() {
+        let e = default_cross_link_edge("a", "b");
+        assert_eq!(e.from_id, "a");
+        assert_eq!(e.to_id, "b");
+        assert_eq!(e.edge_type, "cross_link");
+        assert!(e.visible);
+        assert_eq!(e.anchor_from, 0);
+        assert_eq!(e.anchor_to, 0);
+        assert!(e.control_points.is_empty());
+        assert!(e.label.is_none());
+    }
+
+    #[test]
+    fn test_create_cross_link_edge_success() {
+        let mut doc = load_test_doc();
+        // Pick two nodes that are definitely distinct
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let orig_count = doc.mindmap.edges.len();
+
+        let idx = doc.create_cross_link_edge(&a, &b).expect("should succeed");
+        assert_eq!(idx, orig_count);
+        assert_eq!(doc.mindmap.edges.len(), orig_count + 1);
+        let created = &doc.mindmap.edges[idx];
+        assert_eq!(created.edge_type, "cross_link");
+        assert_eq!(created.from_id, a);
+        assert_eq!(created.to_id, b);
+    }
+
+    #[test]
+    fn test_create_cross_link_rejects_self_link() {
+        let mut doc = load_test_doc();
+        let id = doc.mindmap.nodes.keys().next().unwrap().clone();
+        let orig_count = doc.mindmap.edges.len();
+        assert!(doc.create_cross_link_edge(&id, &id).is_none());
+        assert_eq!(doc.mindmap.edges.len(), orig_count);
+    }
+
+    #[test]
+    fn test_create_cross_link_rejects_duplicate() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+
+        assert!(doc.create_cross_link_edge(&a, &b).is_some());
+        // Second attempt should be a no-op
+        let orig_count = doc.mindmap.edges.len();
+        assert!(doc.create_cross_link_edge(&a, &b).is_none());
+        assert_eq!(doc.mindmap.edges.len(), orig_count);
+    }
+
+    #[test]
+    fn test_create_cross_link_rejects_unknown_node() {
+        let mut doc = load_test_doc();
+        let known = doc.mindmap.nodes.keys().next().unwrap().clone();
+        assert!(doc.create_cross_link_edge(&known, "does_not_exist").is_none());
+        assert!(doc.create_cross_link_edge("does_not_exist", &known).is_none());
+    }
+
+    #[test]
+    fn test_undo_create_edge_removes_it() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let orig_count = doc.mindmap.edges.len();
+
+        let idx = doc.create_cross_link_edge(&a, &b).unwrap();
+        doc.undo_stack.push(UndoAction::CreateEdge { index: idx });
+
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.edges.len(), orig_count);
+        // No cross_link between a and b should remain
+        let still_there = doc.mindmap.edges.iter().any(|e| {
+            e.edge_type == "cross_link" && e.from_id == a && e.to_id == b
+        });
+        assert!(!still_there);
     }
 }

@@ -991,6 +991,18 @@ impl Renderer {
         self.camera.screen_to_canvas(Vec2::new(screen_x, screen_y))
     }
 
+    /// Returns the size of one screen pixel in canvas (world) units.
+    /// Used to convert screen-space tolerances (e.g. click tolerance for
+    /// edge hit testing) into canvas-space distances that stay visually
+    /// consistent across zoom levels.
+    pub fn canvas_per_pixel(&self) -> f32 {
+        if self.camera.zoom > f32::EPSILON {
+            1.0 / self.camera.zoom
+        } else {
+            1.0
+        }
+    }
+
     /// Process a single decree directly
     pub fn process_decree(&mut self, decree: RenderDecree) {
         self.handle_render_decree(decree);

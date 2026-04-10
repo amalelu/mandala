@@ -13,8 +13,8 @@ use winit::{event_loop::EventLoop, window::Window};
 
 use crate::application::common::{InputMode, RenderDecree, WindowMode};
 use crate::application::document::{
-    MindMapDocument, SelectionState, UndoAction,
-    hit_test, rect_select,
+    EdgeRef, MindMapDocument, SelectionState, UndoAction,
+    hit_test, hit_test_edge, rect_select,
     apply_selection_highlight, apply_drag_delta,
     apply_reparent_source_highlight, apply_reparent_target_highlight,
 };
@@ -22,9 +22,17 @@ use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;
 
+/// Screen-space click tolerance (in pixels) for edge hit testing. Converted
+/// to canvas units via `Renderer::canvas_per_pixel()` so the click target
+/// stays visually stable across zoom levels.
+#[cfg(not(target_arch = "wasm32"))]
+const EDGE_HIT_TOLERANCE_PX: f32 = 8.0;
+
 /// Tracks the high-level interaction mode. Normal handles the usual
 /// select/drag/pan flow; Reparent mode is entered via Ctrl+P and captures
-/// the next left-click as a "choose reparent target" gesture.
+/// the next left-click as a "choose reparent target" gesture. Connect mode
+/// is entered via Ctrl+D and captures the next left-click as a "choose
+/// connection target" gesture to create a cross_link edge.
 #[cfg(not(target_arch = "wasm32"))]
 enum AppMode {
     Normal,
@@ -32,6 +40,10 @@ enum AppMode {
     /// The next left-click on a node attaches all sources as its last children;
     /// a left-click on empty canvas promotes them to root. Esc cancels.
     Reparent { sources: Vec<String> },
+    /// Connect mode: the user is drawing a new cross_link edge from `source`.
+    /// The next left-click on a target node creates the edge; a left-click
+    /// on empty canvas cancels. Esc also cancels.
+    Connect { source: String },
 }
 
 /// Tracks the current drag interaction state.
@@ -189,8 +201,8 @@ impl Application {
                             }
                         }
                         MouseButton::Left => {
-                            // In reparent mode, left-click (release) is consumed as
-                            // "choose reparent target" and never transitions to Pending/drag.
+                            // In reparent or connect mode, left-click (release) is consumed as
+                            // a "choose target" gesture and never transitions to Pending/drag.
                             if matches!(app_mode, AppMode::Reparent { .. }) {
                                 if state == ElementState::Released {
                                     handle_reparent_target_click(
@@ -203,6 +215,18 @@ impl Application {
                                     );
                                 }
                                 // Pressed: swallow — do not transition drag state
+                            } else if matches!(app_mode, AppMode::Connect { .. }) {
+                                if state == ElementState::Released {
+                                    handle_connect_target_click(
+                                        cursor_pos,
+                                        &mut app_mode,
+                                        &mut hovered_node,
+                                        &mut document,
+                                        &mut mindmap_tree,
+                                        &mut renderer,
+                                    );
+                                }
+                                // Pressed: swallow
                             } else if state == ElementState::Pressed {
                                 // Hit test to determine if clicking on a node
                                 let hit_node = mindmap_tree.as_ref().and_then(|tree| {
@@ -223,6 +247,7 @@ impl Application {
                                         // No drag occurred — treat as click
                                         handle_click(
                                             hit_node,
+                                            cursor_pos,
                                             shift_pressed,
                                             &mut document,
                                             &mut mindmap_tree,
@@ -294,10 +319,10 @@ impl Application {
                     let prev_pos = cursor_pos;
                     cursor_pos = (position.x, position.y);
 
-                    // Reparent mode: hit-test under cursor to update the hover target
-                    // highlight. Skip the regular drag-state handling for this event
-                    // (no drag in reparent mode).
-                    if matches!(app_mode, AppMode::Reparent { .. }) {
+                    // Reparent or Connect mode: hit-test under cursor to update the hover
+                    // target highlight. Skip the regular drag-state handling (no drag in
+                    // these modes).
+                    if matches!(app_mode, AppMode::Reparent { .. } | AppMode::Connect { .. }) {
                         let new_hover = mindmap_tree.as_ref().and_then(|tree| {
                             let canvas_pos = renderer.screen_to_canvas(
                                 cursor_pos.0 as f32, cursor_pos.1 as f32,
@@ -434,9 +459,9 @@ impl Application {
                         }
                     }
 
-                    // Esc: cancel reparent mode (if active)
+                    // Esc: cancel reparent or connect mode (if active)
                     if matches!(logical_key, Key::Named(NamedKey::Escape))
-                        && matches!(app_mode, AppMode::Reparent { .. })
+                        && matches!(app_mode, AppMode::Reparent { .. } | AppMode::Connect { .. })
                     {
                         app_mode = AppMode::Normal;
                         hovered_node = None;
@@ -464,6 +489,46 @@ impl Application {
                                     doc, &app_mode, hovered_node.as_deref(),
                                     &mut mindmap_tree, &mut renderer,
                                 );
+                            }
+                        }
+                    }
+
+                    // Ctrl+D: enter connect mode if exactly one node is selected
+                    let is_connect_hotkey = match &logical_key {
+                        Key::Character(c) if ctrl_pressed && c.as_ref() == "d" => true,
+                        _ => false,
+                    };
+                    if is_connect_hotkey {
+                        if let Some(doc) = document.as_ref() {
+                            if let SelectionState::Single(source) = &doc.selection {
+                                app_mode = AppMode::Connect { source: source.clone() };
+                                hovered_node = None;
+                                rebuild_all_with_mode(
+                                    doc, &app_mode, hovered_node.as_deref(),
+                                    &mut mindmap_tree, &mut renderer,
+                                );
+                            }
+                        }
+                    }
+
+                    // Delete: remove the currently selected edge (node deletion is
+                    // out of scope for M6 — that lives under a separate session).
+                    if matches!(logical_key, Key::Named(NamedKey::Delete)) {
+                        if let Some(doc) = document.as_mut() {
+                            let maybe_edge_ref = match &doc.selection {
+                                SelectionState::Edge(e) => Some(e.clone()),
+                                _ => None,
+                            };
+                            if let Some(edge_ref) = maybe_edge_ref {
+                                if let Some((idx, edge)) = doc.remove_edge(&edge_ref) {
+                                    doc.undo_stack.push(UndoAction::DeleteEdge {
+                                        index: idx,
+                                        edge,
+                                    });
+                                    doc.selection = SelectionState::None;
+                                    doc.dirty = true;
+                                    rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                }
                             }
                         }
                     }
@@ -666,6 +731,8 @@ fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
 }
 
 /// Rebuild tree from model with selection highlight, plus connections and borders.
+/// When the current selection is an edge, its `ConnectionElement` gets a
+/// cyan color override baked in via `build_scene_with_selection()`.
 #[cfg(not(target_arch = "wasm32"))]
 fn rebuild_all(
     doc: &MindMapDocument,
@@ -676,7 +743,7 @@ fn rebuild_all(
     apply_selection_highlight(&mut new_tree, &doc.selection);
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
-    let scene = doc.build_scene();
+    let scene = doc.build_scene_with_selection();
     renderer.rebuild_connection_buffers(&scene.connection_elements);
     renderer.rebuild_border_buffers(&scene.border_elements);
 
@@ -684,9 +751,12 @@ fn rebuild_all(
 }
 
 /// Handle a click event: update selection, rebuild tree with highlight.
+/// When the node hit test misses, falls through to edge hit testing so
+/// the user can click on a connection path to select it.
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_click(
     hit: Option<String>,
+    cursor_pos: (f64, f64),
     shift_pressed: bool,
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
@@ -703,9 +773,11 @@ fn handle_click(
             doc.selection = SelectionState::Single(id.clone());
         }
         (Some(id), true) => {
-            // Shift+click: toggle node in/out of multi-selection
+            // Shift+click: toggle node in/out of multi-selection.
+            // Shift+click on an edge selection promotes the clicked node
+            // to a fresh single selection (no edge multi-select).
             match &doc.selection {
-                SelectionState::None => {
+                SelectionState::None | SelectionState::Edge(_) => {
                     doc.selection = SelectionState::Single(id.clone());
                 }
                 SelectionState::Single(existing) => {
@@ -732,10 +804,20 @@ fn handle_click(
             }
         }
         (None, false) => {
-            doc.selection = SelectionState::None;
+            // Node miss — try edge hit testing before deselecting.
+            let canvas_pos = renderer.screen_to_canvas(
+                cursor_pos.0 as f32, cursor_pos.1 as f32,
+            );
+            let tolerance = EDGE_HIT_TOLERANCE_PX * renderer.canvas_per_pixel();
+            let edge_hit = hit_test_edge(canvas_pos, &doc.mindmap, tolerance);
+            doc.selection = match edge_hit {
+                Some(edge_ref) => SelectionState::Edge(edge_ref),
+                None => SelectionState::None,
+            };
         }
         (None, true) => {
-            // Shift+click on empty space: keep current selection
+            // Shift+click on empty space: keep current selection (no edge
+            // hit test — shift is reserved for multi-node).
         }
     }
 
@@ -757,23 +839,82 @@ fn rebuild_all_with_mode(
 ) {
     let mut new_tree = doc.build_tree();
     apply_selection_highlight(&mut new_tree, &doc.selection);
-    if let AppMode::Reparent { sources } = app_mode {
-        // Orange on all source nodes (overrides any cyan selection color).
-        apply_reparent_source_highlight(&mut new_tree, sources);
-        // Green on the hovered target (if any and not also a source).
-        if let Some(h) = hovered_node {
-            if !sources.iter().any(|s| s == h) {
-                apply_reparent_target_highlight(&mut new_tree, h);
+    match app_mode {
+        AppMode::Reparent { sources } => {
+            // Orange on all source nodes (overrides any cyan selection color).
+            apply_reparent_source_highlight(&mut new_tree, sources);
+            // Green on the hovered target (if any and not also a source).
+            if let Some(h) = hovered_node {
+                if !sources.iter().any(|s| s == h) {
+                    apply_reparent_target_highlight(&mut new_tree, h);
+                }
             }
         }
+        AppMode::Connect { source } => {
+            // Orange on the source node, green on the hovered target (if
+            // it's not the source itself). Reuses the reparent color scheme.
+            apply_reparent_source_highlight(&mut new_tree, std::slice::from_ref(source));
+            if let Some(h) = hovered_node {
+                if h != source {
+                    apply_reparent_target_highlight(&mut new_tree, h);
+                }
+            }
+        }
+        AppMode::Normal => {}
     }
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
-    let scene = doc.build_scene();
+    let scene = doc.build_scene_with_selection();
     renderer.rebuild_connection_buffers(&scene.connection_elements);
     renderer.rebuild_border_buffers(&scene.border_elements);
 
     *mindmap_tree = Some(new_tree);
+}
+
+/// Handle a left-click while in connect mode: hit-test for a target node
+/// and create a new `cross_link` edge from the source node to the target.
+/// Clicking on empty canvas, the source itself, or a node that already has
+/// a cross_link from the source is a silent no-op. Exits connect mode and
+/// rebuilds the scene unconditionally.
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_connect_target_click(
+    cursor_pos: (f64, f64),
+    app_mode: &mut AppMode,
+    hovered_node: &mut Option<String>,
+    document: &mut Option<MindMapDocument>,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let source = match std::mem::replace(app_mode, AppMode::Normal) {
+        AppMode::Connect { source } => source,
+        _ => return,
+    };
+    *hovered_node = None;
+
+    // Hit-test the cursor position against the current tree.
+    let target: Option<String> = mindmap_tree.as_ref().and_then(|tree| {
+        let canvas_pos = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
+        hit_test(canvas_pos, tree)
+    });
+
+    if let Some(doc) = document.as_mut() {
+        if let Some(target_id) = target {
+            if let Some(idx) = doc.create_cross_link_edge(&source, &target_id) {
+                doc.undo_stack.push(UndoAction::CreateEdge { index: idx });
+                // Select the newly-created edge so the user gets immediate
+                // visual confirmation and can Delete it or style it next.
+                doc.selection = SelectionState::Edge(EdgeRef::new(
+                    source.clone(),
+                    target_id,
+                    "cross_link",
+                ));
+                doc.dirty = true;
+            }
+        }
+        // Full rebuild regardless — exiting the mode requires clearing
+        // orange/green highlights.
+        rebuild_all(doc, mindmap_tree, renderer);
+    }
 }
 
 /// Handle a left-click while in reparent mode: hit-test for a target node and
@@ -790,7 +931,7 @@ fn handle_reparent_target_click(
 ) {
     let sources = match std::mem::replace(app_mode, AppMode::Normal) {
         AppMode::Reparent { sources } => sources,
-        AppMode::Normal => return,
+        AppMode::Normal | AppMode::Connect { .. } => return,
     };
     *hovered_node = None;
 

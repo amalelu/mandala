@@ -52,10 +52,15 @@ pub struct ConnectionElement {
 /// Placeholder for future portal rendering (M3).
 pub struct PortalElement {}
 
+/// Color override applied to the `ConnectionElement` of a selected edge.
+/// Kept in sync visually with the cyan node selection highlight in
+/// `src/application/document.rs::HIGHLIGHT_COLOR`.
+const SELECTED_EDGE_COLOR: &str = "#00E5FF";
+
 /// Builds a RenderScene from a MindMap, determining which nodes and borders
 /// are visible (accounting for fold state) and extracting their layout data.
 pub fn build_scene(map: &MindMap) -> RenderScene {
-    build_scene_with_offsets(map, &HashMap::new())
+    build_scene_with_offsets_and_selection(map, &HashMap::new(), None)
 }
 
 /// Builds a RenderScene with position offsets applied to specific nodes.
@@ -63,6 +68,18 @@ pub fn build_scene(map: &MindMap) -> RenderScene {
 /// modifying the MindMap model. Each entry in `offsets` maps a node ID to
 /// a (dx, dy) delta that is added to the node's model position.
 pub fn build_scene_with_offsets(map: &MindMap, offsets: &HashMap<String, (f32, f32)>) -> RenderScene {
+    build_scene_with_offsets_and_selection(map, offsets, None)
+}
+
+/// Builds a RenderScene with position offsets and an optional selected-edge
+/// highlight. If `selected_edge` matches an edge (by `from_id`, `to_id`,
+/// `edge_type`), that edge's `ConnectionElement.color` is overwritten with
+/// `SELECTED_EDGE_COLOR` so the renderer paints it in the selection color.
+pub fn build_scene_with_offsets_and_selection(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+    selected_edge: Option<(&str, &str, &str)>,
+) -> RenderScene {
     let mut text_elements = Vec::new();
     let mut border_elements = Vec::new();
 
@@ -122,7 +139,14 @@ pub fn build_scene_with_offsets(map: &MindMap, offsets: &HashMap<String, (f32, f
             .or(map.canvas.default_connection.as_ref())
             .unwrap_or(&default_config);
 
-        let color = config.color.clone().unwrap_or_else(|| edge.color.clone());
+        let is_selected = selected_edge.map_or(false, |(f, t, ty)| {
+            f == edge.from_id && t == edge.to_id && ty == edge.edge_type
+        });
+        let color = if is_selected {
+            SELECTED_EDGE_COLOR.to_string()
+        } else {
+            config.color.clone().unwrap_or_else(|| edge.color.clone())
+        };
         let font_size = config.font_size_pt;
         let approx_glyph_width = font_size * 0.6;
         let effective_spacing = approx_glyph_width + config.spacing;
