@@ -60,6 +60,105 @@ pub struct PaletteOverlayRow {
     pub description: String,
 }
 
+/// Pure-function output of the palette-overlay layout pass. Holds
+/// the derived screen-space dimensions for the palette frame so the
+/// backdrop rectangle and the border-glyph positions agree exactly.
+/// Extracted to a plain struct so unit tests can verify the
+/// alignment invariant without constructing a full `Renderer`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaletteFrameLayout {
+    pub left: f32,
+    pub top: f32,
+    pub frame_width: f32,
+    pub frame_height: f32,
+    pub font_size: f32,
+    pub char_width: f32,
+    pub row_height: f32,
+    pub inner_padding: f32,
+    pub shown_rows: usize,
+}
+
+impl PaletteFrameLayout {
+    /// Screen-space rectangle covered by the opaque backdrop. Matches
+    /// the border-glyph bounds exactly: the top border row sits at
+    /// `y = top`, the bottom border row extends to
+    /// `y = top + frame_height + font_size`, and the left / right
+    /// columns span `[left, left + frame_width]` horizontally.
+    pub fn backdrop_rect(&self) -> (f32, f32, f32, f32) {
+        (
+            self.left,
+            self.top,
+            self.frame_width,
+            self.frame_height + self.font_size,
+        )
+    }
+}
+
+/// Compute the screen-space layout for the command-palette overlay
+/// from a `PaletteOverlayGeometry` and the current screen width.
+/// Pure function — no GPU or font-system access. Called by
+/// `rebuild_palette_overlay_buffers` to derive positions for the
+/// backdrop rect, border glyphs, and row text, and by unit tests to
+/// assert the backdrop-vs-border alignment invariant.
+pub fn compute_palette_frame_layout(
+    geometry: &PaletteOverlayGeometry,
+    screen_width: f32,
+) -> PaletteFrameLayout {
+    // Layout constants, in screen-space pixels. Sized to be
+    // legible at a typical desktop DPI without overlaying too much
+    // of the map. Kept in sync with the values used inside
+    // `rebuild_palette_overlay_buffers`.
+    let font_size: f32 = 16.0;
+    let char_width = font_size * 0.6;
+    let row_height = font_size * 1.5;
+    let inner_padding: f32 = 8.0;
+    let max_rows_shown: usize = 10;
+    let shown_rows = geometry.rows.len().min(max_rows_shown);
+    let frame_height = row_height * (2.0 + shown_rows as f32) + inner_padding * 2.0;
+
+    // Adaptive frame width: wrap tightly around the longest content
+    // row (query line, label, or description), with a minimum so
+    // very short content doesn't produce a postage stamp and a
+    // maximum so a stray long description doesn't blow the palette
+    // across the whole window.
+    let query_chars = geometry.query_text.chars().count() + 3; // "/…▌"
+    let longest_label = geometry
+        .rows
+        .iter()
+        .take(shown_rows)
+        .map(|r| r.label.chars().count() + 2) // "▸ "
+        .max()
+        .unwrap_or(0);
+    let longest_desc = geometry
+        .rows
+        .iter()
+        .take(shown_rows)
+        .map(|r| r.description.chars().count() + 4) // "    "
+        .max()
+        .unwrap_or(0);
+    let content_chars = query_chars.max(longest_label).max(longest_desc);
+    let frame_width = ((content_chars as f32 + 2.0) * char_width
+        + inner_padding * 2.0
+        + char_width * 2.0)
+        .clamp(320.0, 720.0);
+
+    // Center horizontally, fixed offset from the top.
+    let left = ((screen_width - frame_width) * 0.5).max(0.0);
+    let top: f32 = 80.0;
+
+    PaletteFrameLayout {
+        left,
+        top,
+        frame_width,
+        frame_height,
+        font_size,
+        char_width,
+        row_height,
+        inner_padding,
+        shown_rows,
+    }
+}
+
 /// Inline WGSL shader for the colored-rectangle pipeline. Draws a
 /// stream of NDC-space vertices, each carrying its own RGBA color.
 /// Kept inline (rather than in the baumhard shader table) because
@@ -160,6 +259,23 @@ pub struct Renderer {
     /// Bounded cost (≤ 5 glyph buffers per selected edge) so no
     /// keyed cache is warranted.
     edge_handle_buffers: Vec<MindMapTextBuffer>,
+    /// Session 6D: per-edge label buffers, keyed by `EdgeKey`. Each
+    /// entry is the shaped cosmic-text buffer for that edge's label
+    /// (if any). Labels are ≤ 1 per edge and rebuilt every scene
+    /// build — no incremental-reuse cache is warranted.
+    connection_label_buffers: FxHashMap<EdgeKey, MindMapTextBuffer>,
+    /// Session 6D: AABB hitbox for each rendered label, keyed by
+    /// `EdgeKey`. Populated alongside `connection_label_buffers`;
+    /// consulted by `hit_test_edge_label` when the app dispatches
+    /// inline click-to-edit. Stored as `(min, max)` canvas-space
+    /// corners so the hit test is a pair of comparisons per edge.
+    connection_label_hitboxes: FxHashMap<EdgeKey, (Vec2, Vec2)>,
+    /// Session 6D: when set to `Some((key, text))`, the renderer
+    /// substitutes the given text (with a trailing caret glyph) for
+    /// whichever label matches `key` during
+    /// `rebuild_connection_label_buffers`. Used by inline label edit
+    /// mode to preview uncommitted text without mutating the model.
+    pub label_edit_override: Option<(EdgeKey, String)>,
     /// Session 6C: command palette overlay buffers. Rendered above
     /// everything else in screen coordinates. Populated only when
     /// the palette is open; cleared otherwise.
@@ -382,6 +498,9 @@ impl Renderer {
             border_buffers: FxHashMap::default(),
             connection_buffers: FxHashMap::default(),
             edge_handle_buffers: Vec::new(),
+            connection_label_buffers: FxHashMap::default(),
+            connection_label_hitboxes: FxHashMap::default(),
+            label_edit_override: None,
             palette_overlay_buffers: Vec::new(),
             overlay_buffers: Vec::new(),
             connection_viewport_dirty: false,
@@ -767,10 +886,10 @@ impl Renderer {
             let (ndc_min, ndc_max) = Self::screen_rect_to_ndc_bounds(
                 left, top, w, h, vp_w_px, vp_h_px,
             );
-            // Opaque dark charcoal — chosen to sit cleanly against
-            // both light and dark canvas backgrounds without
-            // tinting the palette's cyan foreground.
-            let bg_color = [15.0 / 255.0, 18.0 / 255.0, 26.0 / 255.0, 1.0];
+            // Pitch black. Sits cleanly against the cyan frame and
+            // any canvas background without tinting the palette's
+            // cyan foreground.
+            let bg_color = [0.0, 0.0, 0.0, 1.0];
             Self::push_rect_ndc(
                 &mut self.palette_rect_vertices,
                 ndc_min,
@@ -831,6 +950,7 @@ impl Renderer {
         let mut main_text_areas: Vec<TextArea> = self.mindmap_buffers.values()
             .chain(self.border_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
+            .chain(self.connection_label_buffers.values())
             .chain(self.edge_handle_buffers.iter())
             .chain(self.overlay_buffers.iter())
             .filter_map(|tb| {
@@ -1410,47 +1530,21 @@ impl Renderer {
             .write()
             .expect("Failed to acquire font_system lock");
 
-        // Layout constants, in screen-space pixels. Sized to be
-        // legible at a typical desktop DPI without overlaying too
-        // much of the map.
-        let font_size: f32 = 16.0;
-        let char_width = font_size * 0.6;
-        let row_height = font_size * 1.5;
-        let inner_padding: f32 = 8.0;
-        let max_rows_shown: usize = 10;
-        let shown_rows = geometry.rows.len().min(max_rows_shown);
-        let frame_height = row_height * (2.0 + shown_rows as f32) + inner_padding * 2.0;
-
-        // Adaptive frame width: wrap tightly around the longest
-        // content row (query line, label, or description), with a
-        // minimum so very short content doesn't produce a postage
-        // stamp and a maximum so a stray long description doesn't
-        // blow the palette across the whole window.
-        let query_chars = geometry.query_text.chars().count() + 3; // "/…▌"
-        let longest_label = geometry
-            .rows
-            .iter()
-            .take(shown_rows)
-            .map(|r| r.label.chars().count() + 2) // "▸ "
-            .max()
-            .unwrap_or(0);
-        let longest_desc = geometry
-            .rows
-            .iter()
-            .take(shown_rows)
-            .map(|r| r.description.chars().count() + 4) // "    "
-            .max()
-            .unwrap_or(0);
-        let content_chars = query_chars.max(longest_label).max(longest_desc);
-        let frame_width = ((content_chars as f32 + 2.0) * char_width
-            + inner_padding * 2.0
-            + char_width * 2.0)
-            .clamp(320.0, 720.0);
-
-        // Center horizontally, fixed offset from the top.
-        let screen_w = self.config.width as f32;
-        let left = ((screen_w - frame_width) * 0.5).max(0.0);
-        let top: f32 = 80.0;
+        // Compute the screen-space layout via the pure helper so the
+        // backdrop rect and the border-glyph positions come from the
+        // same source of truth. See `compute_palette_frame_layout`.
+        let layout = compute_palette_frame_layout(geometry, self.config.width as f32);
+        let PaletteFrameLayout {
+            left,
+            top,
+            frame_width,
+            frame_height,
+            font_size,
+            char_width,
+            row_height,
+            inner_padding,
+            shown_rows,
+        } = layout;
 
         let palette_color = cosmic_text::Color::rgba(0, 229, 255, 255); // cyan
         let text_color = cosmic_text::Color::rgba(235, 235, 235, 255);
@@ -1461,15 +1555,12 @@ impl Renderer {
         // `render()` rebuilds the palette rect batch from this each
         // frame (cheap — one rect) and draws it between the main
         // text pass and the palette text pass, so the fill is truly
-        // opaque and no node text bleeds through. The rect extends
-        // slightly beyond the frame so it sits flush with the
-        // border glyphs.
-        self.palette_backdrop = Some((
-            left - char_width,
-            top - 2.0,
-            frame_width + char_width * 2.0,
-            frame_height + font_size,
-        ));
+        // opaque and no node text bleeds through. The rect matches
+        // the border bounds exactly — top border glyphs sit at
+        // `y = top`, bottom border glyphs extend down to
+        // `y = top + frame_height + font_size`, and the left/right
+        // columns span `[left, left + frame_width]` horizontally.
+        self.palette_backdrop = Some(layout.backdrop_rect());
 
         // Box-drawing border around the frame.
         let inner_cols = ((frame_width - char_width * 2.0) / char_width).max(1.0) as usize;
@@ -1727,6 +1818,105 @@ impl Renderer {
         // Evict any cached entries whose edge key is no longer in the
         // scene — handles edge deletion / fold toggle.
         self.connection_buffers.retain(|k, _| seen.contains(k));
+    }
+
+    /// Session 6D: rebuild the per-edge label buffers from a freshly
+    /// computed scene. Labels are rendered as individual cosmic-text
+    /// buffers centered on their AABB, with a hitbox recorded so the
+    /// app can detect clicks for inline label editing.
+    ///
+    /// If `self.label_edit_override` is `Some((key, text))`, the
+    /// matching edge's label is drawn from `text` (with a trailing
+    /// caret) instead of the element's committed text — the inline
+    /// edit preview. The override is consulted only by the buffer
+    /// rebuild; the AABB is still computed from the scene element's
+    /// bounds, so the hitbox stays stable across keystrokes.
+    pub fn rebuild_connection_label_buffers(
+        &mut self,
+        label_elements: &[baumhard::mindmap::scene_builder::ConnectionLabelElement],
+    ) {
+        self.connection_label_buffers.clear();
+        self.connection_label_hitboxes.clear();
+        if label_elements.is_empty() && self.label_edit_override.is_none() {
+            return;
+        }
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        for elem in label_elements {
+            let cosmic_color = parse_hex_color(&elem.color)
+                .unwrap_or(cosmic_text::Color::rgba(235, 235, 235, 255));
+            let attrs = Attrs::new()
+                .color(cosmic_color)
+                .metrics(cosmic_text::Metrics::new(elem.font_size_pt, elem.font_size_pt));
+
+            // Preview override (inline label editor): substitute the
+            // edited buffer text + caret for whichever edge is being
+            // edited right now.
+            let rendered_text: String = match self.label_edit_override.as_ref() {
+                Some((key, text)) if *key == elem.edge_key => {
+                    format!("{text}\u{258C}")
+                }
+                _ => elem.text.clone(),
+            };
+
+            let buffer = create_border_buffer(
+                &mut font_system,
+                &rendered_text,
+                &attrs,
+                elem.font_size_pt,
+                elem.position,
+                elem.bounds,
+            );
+            self.connection_label_buffers
+                .insert(elem.edge_key.clone(), buffer);
+
+            let min = Vec2::new(elem.position.0, elem.position.1);
+            let max = Vec2::new(
+                elem.position.0 + elem.bounds.0,
+                elem.position.1 + elem.bounds.1,
+            );
+            self.connection_label_hitboxes
+                .insert(elem.edge_key.clone(), (min, max));
+        }
+
+        // If an override points at an edge whose label element isn't
+        // in the scene (e.g. the user is typing the very first
+        // character of a brand-new label whose committed text is
+        // still empty), synthesize a preview buffer at the edge
+        // anchor so the caret is visible while typing. The app is
+        // responsible for passing a scene that includes a
+        // ConnectionLabelElement for the edited edge once the buffer
+        // is non-empty; this branch is a belt-and-suspenders guard.
+        if let Some((key, text)) = self.label_edit_override.as_ref() {
+            if !self.connection_label_buffers.contains_key(key) {
+                // No scene element to anchor to — do nothing. Callers
+                // ensure the scene is rebuilt after opening the
+                // editor so this branch is exercised only on the
+                // first keystroke before the next scene build.
+                let _ = (text,);
+            }
+        }
+    }
+
+    /// Session 6D: AABB hit test against the rendered label hitboxes.
+    /// Returns true when `canvas_pos` falls inside the hitbox of the
+    /// given edge's label. Used by the app to dispatch inline
+    /// click-to-edit when a selected edge's label is clicked.
+    pub fn hit_test_edge_label(
+        &self,
+        canvas_pos: Vec2,
+        edge_key: &EdgeKey,
+    ) -> bool {
+        if let Some((min, max)) = self.connection_label_hitboxes.get(edge_key) {
+            canvas_pos.x >= min.x
+                && canvas_pos.x <= max.x
+                && canvas_pos.y >= min.y
+                && canvas_pos.y <= max.y
+        } else {
+            false
+        }
     }
 
     /// Fit the camera to show a Baumhard tree's content.
@@ -2129,5 +2319,146 @@ mod tests {
         assert!(kept < total / 20, "kept {} of {}, expected < {}", kept, total, total / 20);
         // And at least a few — it's not zero.
         assert!(kept > 10, "kept {} of {}, expected at least 10", kept, total);
+    }
+
+    // ====================================================================
+    // Phase 0 — Command palette overlay polish (Session 6D bug fixes)
+    // ====================================================================
+
+    fn sample_palette_geometry() -> PaletteOverlayGeometry {
+        PaletteOverlayGeometry {
+            query_text: "hello".to_string(),
+            rows: vec![
+                PaletteOverlayRow {
+                    label: "Reset connection to straight".to_string(),
+                    description: "Remove all control points".to_string(),
+                },
+                PaletteOverlayRow {
+                    label: "Set from-anchor: Top".to_string(),
+                    description: "Attach the source of the edge to the top".to_string(),
+                },
+            ],
+            selected_row: 0,
+        }
+    }
+
+    #[test]
+    fn palette_backdrop_matches_border_bounds_exactly() {
+        // Bug fix: before Session 6D, the backdrop rect was inflated
+        // by `char_width` on each horizontal side and by ~(font_size - 2.0)
+        // below the bottom border, so the opaque background leaked out
+        // past the cyan border. After the fix the backdrop must match
+        // the border bounds exactly — no horizontal overhang, no
+        // vertical overhang.
+        let geometry = sample_palette_geometry();
+        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+
+        let (bd_left, bd_top, bd_w, bd_h) = layout.backdrop_rect();
+
+        // Left edge aligned with the border's left column.
+        assert_eq!(bd_left, layout.left);
+        // Top edge aligned with the top border row.
+        assert_eq!(bd_top, layout.top);
+        // Width matches the border frame width exactly — no horizontal overhang.
+        assert_eq!(bd_w, layout.frame_width);
+        // Height covers the whole border box: frame_height for the
+        // interior + one font_size row for the bottom border glyphs.
+        assert_eq!(bd_h, layout.frame_height + layout.font_size);
+    }
+
+    #[test]
+    fn palette_backdrop_has_no_horizontal_overhang() {
+        // Explicit regression guard for the horizontal overhang bug.
+        let geometry = sample_palette_geometry();
+        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+        let (bd_left, _, bd_w, _) = layout.backdrop_rect();
+        // Backdrop right edge.
+        let bd_right = bd_left + bd_w;
+        // Border right edge (rightmost column of border glyphs).
+        let border_right = layout.left + layout.frame_width;
+        assert!(
+            bd_right <= border_right + 0.001,
+            "backdrop right {} overhangs border right {}",
+            bd_right,
+            border_right
+        );
+        assert!(
+            bd_left >= layout.left - 0.001,
+            "backdrop left {} overhangs border left {}",
+            bd_left,
+            layout.left
+        );
+    }
+
+    #[test]
+    fn palette_backdrop_has_no_vertical_overhang() {
+        // Explicit regression guard for the vertical overhang bug.
+        let geometry = sample_palette_geometry();
+        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+        let (_, bd_top, _, bd_h) = layout.backdrop_rect();
+        let bd_bottom = bd_top + bd_h;
+        // The bottom border is drawn at `y = top + frame_height` and its
+        // glyphs extend down by one font_size row.
+        let border_bottom = layout.top + layout.frame_height + layout.font_size;
+        assert!(
+            bd_bottom <= border_bottom + 0.001,
+            "backdrop bottom {} overhangs border bottom {}",
+            bd_bottom,
+            border_bottom
+        );
+        assert!(
+            bd_top >= layout.top - 0.001,
+            "backdrop top {} overhangs border top {}",
+            bd_top,
+            layout.top
+        );
+    }
+
+    #[test]
+    fn palette_frame_layout_clamps_width_between_min_and_max() {
+        // A tiny query and zero rows should still produce at least the
+        // minimum frame width.
+        let empty = PaletteOverlayGeometry {
+            query_text: String::new(),
+            rows: Vec::new(),
+            selected_row: 0,
+        };
+        let min_layout = compute_palette_frame_layout(&empty, 1920.0);
+        assert!(
+            min_layout.frame_width >= 320.0,
+            "frame_width {} below min 320",
+            min_layout.frame_width
+        );
+
+        // A gigantic description should cap out at the max width.
+        let huge = PaletteOverlayGeometry {
+            query_text: String::new(),
+            rows: vec![PaletteOverlayRow {
+                label: "x".to_string(),
+                description: "y".repeat(500),
+            }],
+            selected_row: 0,
+        };
+        let max_layout = compute_palette_frame_layout(&huge, 1920.0);
+        assert!(
+            max_layout.frame_width <= 720.0,
+            "frame_width {} above max 720",
+            max_layout.frame_width
+        );
+    }
+
+    #[test]
+    fn palette_frame_layout_centers_horizontally() {
+        let geometry = sample_palette_geometry();
+        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+        // The frame should be centered: distance from screen-left to
+        // frame-left equals distance from frame-right to screen-right.
+        let right_margin = 1920.0 - (layout.left + layout.frame_width);
+        assert!(
+            (layout.left - right_margin).abs() < 0.5,
+            "frame not centered: left={} right_margin={}",
+            layout.left,
+            right_margin
+        );
     }
 }

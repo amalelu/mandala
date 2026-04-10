@@ -110,13 +110,33 @@ pub fn build_connection_path(
 }
 
 /// Evaluates a cubic Bezier curve at parameter t in [0, 1].
-fn cubic_bezier_point(t: f32, p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2) -> Vec2 {
+pub(crate) fn cubic_bezier_point(t: f32, p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2) -> Vec2 {
     let u = 1.0 - t;
     let uu = u * u;
     let uuu = uu * u;
     let tt = t * t;
     let ttt = tt * t;
     uuu * p0 + 3.0 * uu * t * p1 + 3.0 * u * tt * p2 + ttt * p3
+}
+
+/// Return a point on `path` at the parameter value `t`, clamped to
+/// `[0.0, 1.0]`. Straight paths lerp linearly between endpoints; cubic
+/// Bezier paths evaluate the curve at `t` directly. Used by Session 6D
+/// for label positioning along a connection — `t = 0.0` sits at the
+/// from-anchor, `t = 0.5` at the midpoint, `t = 1.0` at the to-anchor.
+///
+/// Parameter-space positioning is fine for the Start/Middle/End label
+/// presets the palette exposes; arc-length uniformity is not needed
+/// because the three preset values all correspond to the same t values
+/// regardless of curvature.
+pub fn point_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
+    let t = t.clamp(0.0, 1.0);
+    match path {
+        ConnectionPath::Straight { start, end } => start.lerp(*end, t),
+        ConnectionPath::CubicBezier { start, control1, control2, end } => {
+            cubic_bezier_point(t, *start, *control1, *control2, *end)
+        }
+    }
 }
 
 /// Computes the total arc length of a connection path.
@@ -755,5 +775,50 @@ mod tests {
         assert!(d >= 0.0, "distance should be non-negative, got {}", d);
         // And the point is visibly off the curve, so non-zero.
         assert!(d > 1.0);
+    }
+
+    // Session 6D Phase 1: point_at_t for label positioning along edges.
+
+    #[test]
+    fn point_at_t_straight_endpoints_and_midpoint() {
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 50.0),
+        };
+        assert_eq!(point_at_t(&path, 0.0), Vec2::new(0.0, 0.0));
+        assert_eq!(point_at_t(&path, 1.0), Vec2::new(100.0, 50.0));
+        let mid = point_at_t(&path, 0.5);
+        assert!((mid.x - 50.0).abs() < 1e-5);
+        assert!((mid.y - 25.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn point_at_t_cubic_bezier_endpoints() {
+        let path = ConnectionPath::CubicBezier {
+            start: Vec2::new(0.0, 0.0),
+            control1: Vec2::new(25.0, 100.0),
+            control2: Vec2::new(75.0, 100.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        // A cubic curve at t = 0 hits the start, at t = 1 hits the end.
+        let p0 = point_at_t(&path, 0.0);
+        let p1 = point_at_t(&path, 1.0);
+        assert!((p0.x - 0.0).abs() < 1e-5 && (p0.y - 0.0).abs() < 1e-5);
+        assert!((p1.x - 100.0).abs() < 1e-5 && (p1.y - 0.0).abs() < 1e-5);
+        // And t = 0.5 sits between the control points vertically, well
+        // above the straight-line midpoint.
+        let mid = point_at_t(&path, 0.5);
+        assert!(mid.y > 50.0, "midpoint y={} should be curved above", mid.y);
+    }
+
+    #[test]
+    fn point_at_t_clamps_out_of_range() {
+        let path = ConnectionPath::Straight {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 0.0),
+        };
+        // Values outside [0, 1] are clamped.
+        assert_eq!(point_at_t(&path, -10.0), Vec2::new(0.0, 0.0));
+        assert_eq!(point_at_t(&path, 99.0), Vec2::new(100.0, 0.0));
     }
 }

@@ -64,9 +64,12 @@ The application has two layers:
 - **Viewport culling on connection glyphs** — `rebuild_connection_buffers` now computes the visible canvas rect once per call (with a `font_size` margin on each side) and skips cosmic-text buffer creation for any glyph position outside it. The dominant per-frame cost in the connection rebuild path is cosmic-text shaping; for a long cross-link most of its sample positions are off-screen during drag, so skipping those drops per-frame work by ~48× in the user's long-connection stutter scenario without changing visible output.
 - **Keyed incremental rebuild for connections and borders** — Phase 4(B) of the connection-render cost work. Two targeted caches keyed on stable identity (edges: `(from_id, to_id, edge_type)` via `SceneConnectionCache` in `lib/baumhard/src/mindmap/scene_cache.rs`; nodes: `id`). During drag, `build_scene_with_cache` skips `sample_path` + control-point/Bezier work for edges whose endpoints did not move — the expensive per-frame cost that Phase A could not touch — and the `Renderer` keeps keyed `HashMap`s for `border_buffers` and `connection_buffers` so unmoved entries reuse their shaped cosmic-text buffers across frames, patched in place via `pos` only. The clip filter (`point_inside_any_node`) still re-runs against the current frame's node AABBs for cached edges, so a stable long cross-link still clips correctly around a moved-but-unrelated third node (governing invariant preserved). Selection changes apply the highlight color override at read time, so flipping selection doesn't invalidate the cache. Camera pan/zoom clears only the renderer-side connection map (viewport cull output changes) while leaving the document-side geometry cache intact. Each drag starts with a fresh cache to handle inter-drag structural edits; the first drag frame is a full rebuild and subsequent frames are incremental. Eliminates the ~1,700 bezier evaluations / frame / long edge that Phase A left on the table — the upstream geometry cost, not just the downstream shaping cost.
 - **Edge reshape via grab-handles** — Session 6C. When a connection is selected, the scene builder emits small cyan `◆` handles at both anchor endpoints and either (a) the midpoint of straight edges or (b) each stored control point of curved edges. Clicking a handle and dragging past the 5 px threshold enters `DragState::DraggingEdgeHandle`, which per-frame drains the accumulated cursor delta into the model edge in place: control-point handles write an `(x, y)` offset from the relevant node center, anchor handles snap to whichever side (top/right/bottom/left) of the node is closest to the cursor, and the straight-edge midpoint handle inserts a fresh control point on first drain and promotes itself to `ControlPoint(0)` for subsequent frames — the "curve a straight line" gesture. `scene_cache.invalidate_edge` is called per frame for the single dirty edge, keeping the Phase B incremental rebuild path hot for everything else. On release, the pre-drag snapshot is pushed as `UndoAction::EditEdge { index, before }`, so Ctrl+Z restores any reshape in one hop.
-- **Command palette** — Session 6C. Press `/` to open a glyph-rendered modal listing context-aware actions for the current selection. Type to fuzzy-filter (case-insensitive subsequence with a word-boundary bonus), Up/Down navigates, Enter executes, Esc / click-outside closes. While open, the palette steals all keyboard input so existing hotkeys don't fire. The global action registry is a static slice of `PaletteAction { id, label, description, tags, applicable, execute }` in `src/application/palette.rs`; Session 6C ships eleven entries — "Reset connection to straight" (hidden by its applicability predicate for edges that are already straight) and two groups of five anchor setters ("Set from-anchor: Auto/Top/Right/Bottom/Left", same for to-anchor). Each action's execute mutates the document through the new `reset_edge_to_straight` / `set_edge_anchor` helpers, which snapshot the edge and push `UndoAction::EditEdge` so undo works identically to the drag-handle path. The palette overlay renders as cosmic-text buffers in screen coordinates above everything else.
+- **Command palette** — Session 6C. Press `/` to open a glyph-rendered modal listing context-aware actions for the current selection. Type to fuzzy-filter (case-insensitive subsequence with a word-boundary bonus), Up/Down navigates, Enter executes, Esc / click-outside closes. While open, the palette steals all keyboard input so existing hotkeys don't fire. The global action registry is a static slice of `PaletteAction { id, label, description, tags, applicable, execute }` in `src/application/palette.rs`. **Session 6D** extended the registry from 11 to 42 entries (body-glyph presets, cap presets, theme-var-aware color presets, font-size step/reset, spacing presets, edge type conversion, label editing, label position, reset-to-default), polished the overlay backdrop to pitch black, and snapped the opaque rect flush to the cyan border (no more background peeking past the frame).
+- **Connection style editing via palette** — Session 6D. 31 new palette actions cover body glyph (dot/dash/double/wave/chain), cap_start/cap_end (arrow/circle/diamond/clear), color (theme vars `--accent` / `--edge` / `--fg` / inherit-reset), font size (smaller/larger/reset, ±2pt with clamp-aware applicability), spacing (tight/normal/wide), edge type (convert to cross_link / parent_child, with duplicate-guard applicability), and a "Reset connection style to default" action. Every mutation goes through an `ensure_glyph_connection` fork helper that materializes a concrete per-edge copy from the effective resolved config on first edit — forked copies retain their values when the canvas default later changes, and undo restores the pre-fork None cleanly because the `before` snapshot is taken before the fork. Uses the existing `UndoAction::EditEdge` variant — no new undo machinery.
+- **Connection labels** — Session 6D. `MindEdge.label` (which had existed in the data model since the pre-roadmap era but was never drawn) now renders as a `ConnectionLabelElement` along the edge's path at a parameter-space position `edge.label_position_t` (new field, defaulting to 0.5 at the midpoint). Labels render through the flat scene pipeline as individual cosmic-text buffers, slightly larger than the connection body glyphs for readability (1.1× font size). Color resolves through the same theme-variable path as the connection body, so a `var(--accent)` color auto-restyles on theme swap. Labels are rebuilt every scene build (no cache — ≤ 1 per edge, trivially cheap) so they track live drags of either endpoint.
+- **Inline label edit modal** — Session 6D. Click the rendered label on a selected edge to enter `LabelEditState::Open { edge_ref, buffer, original }`. Like the command palette, the modal steals all keyboard input: Escape discards (restoring the pre-edit value), Enter commits via `document.set_edge_label` (which pushes an `EditEdge` undo entry), Backspace pops, character keys append. A static `▌` caret appears after the edited text via `Renderer::label_edit_override: Option<(EdgeKey, String)>`, which `rebuild_connection_label_buffers` consults on every keystroke. Cursor navigation is deferred — the buffer is append-only for Session 6D. The palette "Edit connection label" action is the fallback entry point for edges without committed labels (whose text glyphs aren't hit-testable yet).
 - **Multi-target** — native + WASM builds
-- **366 tests passing**
+- **408 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -84,7 +87,7 @@ The application has two layers:
 |------|------|
 | `src/application/app.rs` | Event loop, window, DragState machine, input handling, tree+scene pipeline wiring |
 | `src/application/renderer.rs` | GPU pipeline: tree-based node rendering + flat border/connection rendering |
-| `src/application/document.rs` | Owns MindMap + SelectionState + UndoStack, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()`, `apply_drag_delta()`, `apply_move_subtree/single()`, `undo()`, `apply_custom_mutation()`, `apply_document_actions()` |
+| `src/application/document.rs` | Owns MindMap + SelectionState + UndoStack, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()`, `apply_drag_delta()`, `apply_move_subtree/single()`, `undo()`, `apply_custom_mutation()`, `apply_document_actions()`, and the Session 6D edge-mutation suite (`ensure_glyph_connection`, `set_edge_body_glyph`, `set_edge_cap_start/end`, `set_edge_color`, `set_edge_font_size_step`, `reset_edge_font_size`, `set_edge_spacing`, `set_edge_label`, `set_edge_label_position`, `set_edge_type`, `reset_edge_style_to_default`) |
 | `src/application/common.rs` | RenderDecree, WindowMode, InputMode, timing |
 | `src/application/frame_throttle.rs` | `MutationFrequencyThrottle` — the governing-invariant safety net for the drag path |
 | `src/application/keybinds.rs` | Configurable key-to-Action mapping with layered loading |
@@ -468,18 +471,97 @@ stay, and new actions land in the palette instead.
 
 ### Session 6D: Connection style and label editing
 
-**What**: Customize connection appearance and add/edit labels.
+**What**: Customize connection appearance and add/edit labels. Extends
+the Session 6C palette with 31 new actions for glyph presets, colors,
+font size, spacing, edge type, label editing, and reset-to-default.
+Lands the first rendering path for `MindEdge.label` (which had existed
+in the data model since the pre-roadmap era but was never drawn), plus
+an inline click-to-edit modal that steals keyboard input the same way
+the command palette does.
 
-- [ ] Change connection glyph: body, cap_start, cap_end via selection panel or keyboard shortcut
-- [ ] Change connection color (color picker or preset palette)
-- [ ] Change connection font and font size
-- [ ] Change glyph spacing (tight, normal, wide)
-- [ ] Edit connection label: click to add/edit text label on connection
-- [ ] Position label along connection path (start, middle, end, or custom offset)
-- [ ] Change edge type (parent_child, cross_link, arbitrary) on existing connections
-- [ ] Apply canvas default style to selected connections (reset to default)
+- [x] Change connection glyph: body (5 presets: dot/dash/double/wave/chain), cap_start (arrow/circle/diamond/clear), cap_end (arrow/circle/diamond/clear) via palette actions
+- [x] Change connection color via theme-var-aware palette actions (accent/edge/fg/reset) — stores `var(--name)` references so edges restyle on theme swap
+- [x] Change connection font size via palette (smaller/larger/reset, ±2pt steps, clamp-aware applicability). Font family deferred to a future session — Mandala has no font picker pattern yet.
+- [x] Change glyph spacing via palette (tight/normal/wide presets)
+- [x] Edit connection label: click the rendered label on the selected edge to open the inline editor, type, Enter commits, Esc discards. Palette action "Edit connection label" is the fallback entry point. Live caret preview via the Renderer's `label_edit_override`; keystrokes steal input the same way the palette does.
+- [x] Position label along connection path via palette (start/middle/end = t 0.0/0.5/1.0). New `MindEdge.label_position_t: Option<f32>` field, clamped into `[0, 1]` by the setter. Default None = 0.5 (middle) at render time.
+- [x] Change edge type via palette (Convert to cross-link / Convert to parent-child). `set_edge_type` refreshes the selection `EdgeRef` after the change so the edge stays selected under its new identity; refuses conversions that would produce a duplicate `(from_id, to_id, new_type)` triple.
+- [x] Apply canvas default style via palette action "Reset connection style to default" — clears `edge.glyph_connection` back to None so the edge falls through to the canvas-level default.
+- [x] **Bonus: command palette overlay polish** — Phase 0 of the session fixed two visible bugs in the Session 6C palette: (1) the backdrop color was a dark blue-grey (`#0F121A`), changed to pitch black; (2) the backdrop rectangle extended `char_width` past the cyan border on each side horizontally and `font_size - 2` past the bottom border vertically, now snapped flush to the border bounds via a new `PaletteFrameLayout` pure helper. 5 new regression tests guard both invariants.
+- [x] 42 new tests (5 palette-layout + 8 model/connection + 5 scene-builder label + 3 palette id/count + 14 document mutation + 3 palette id resolution + 4 pre-existing test count), `./test.sh` green at 408 tests (+42 over the 366 baseline).
 
-**Verify**: Connection appearance can be fully customized, labels can be added and edited
+**Fork semantic for per-edge style overrides**: on the first style
+edit of an edge whose `glyph_connection` is `None`, the document
+helpers materialize a concrete per-edge copy from the effective
+resolved config (canvas default, else hardcoded default), then mutate
+the one field the user asked to change. The `before` snapshot for the
+undo entry is taken *before* the fork, so Ctrl+Z on the first edit
+cleanly restores the pre-fork None — subsequent canvas-default
+changes won't retroactively affect forked edges, mirroring how CSS
+"computed style" copies work. Implemented via
+`MindMapDocument::ensure_glyph_connection` + 10 `set_edge_*` helpers
+that all follow the `reset_edge_to_straight` template from Session
+6C. Undo uses the existing `UndoAction::EditEdge { index, before }`
+variant — no new undo machinery.
+
+**Label rendering**: `ConnectionLabelElement` (new in
+`scene_builder.rs`) is emitted as a separate post-pass over
+`map.edges` — labels are ≤ 1 per edge and rebuilt every scene build,
+so no incremental cache is warranted. Position is computed via
+`connection::point_at_t(&path, edge.label_position_t.unwrap_or(0.5))`,
+font size is `config.effective_font_size_pt(camera_zoom) * 1.1`
+(slightly larger than the body glyphs for readability), color
+resolves through `resolve_var` like every other color field. The
+renderer's `rebuild_connection_label_buffers` builds one
+`MindMapTextBuffer` per label and stores an AABB hitbox in
+`connection_label_hitboxes` for inline click detection. During a
+drag (node move, edge handle drag, camera pan) labels are rebuilt
+every frame alongside the connection buffers so they track the live
+path.
+
+**Inline label edit modal**: new `LabelEditState` enum in `app.rs`
+mirrors the `PaletteState` shape. Entered via:
+(a) `Open { edge_ref, buffer, original }` from the left-click handler
+when the cursor hits a selected edge's label via
+`Renderer::hit_test_edge_label`, or
+(b) from the palette via `PaletteEffects::open_label_edit`, which the
+dispatcher drains after `action.execute` returns and hands to
+`open_label_edit()`. Keyboard input is stolen the same way the
+palette does: Escape discards, Enter commits (via
+`document.set_edge_label`), Backspace pops, `Key::Character` appends.
+Live preview on every keystroke via `Renderer::label_edit_override:
+Option<(EdgeKey, String)>`, which `rebuild_connection_label_buffers`
+consults to substitute the edited text + a static `▌` caret for the
+scene element's text. Cursor navigation is deferred — the buffer is
+append-only for Session 6D.
+
+**Key files**:
+- `lib/baumhard/src/mindmap/model.rs` — `MindEdge.label_position_t`, `GlyphConnectionConfig::resolved_for`
+- `lib/baumhard/src/mindmap/connection.rs` — `point_at_t` public wrapper over `cubic_bezier_point` (now `pub(crate)`)
+- `lib/baumhard/src/mindmap/scene_builder.rs` — `ConnectionLabelElement` struct, `RenderScene::connection_label_elements` field, label emission post-pass inside `build_scene_with_cache`
+- `src/application/document.rs` — `ensure_glyph_connection` fork helper + 10 `set_edge_*` mutation methods (body/cap_start/cap_end/color/font_size_step/font_size_reset/spacing/label/label_position/type/reset_style). All push `UndoAction::EditEdge`.
+- `src/application/palette.rs` — `PaletteEffects::open_label_edit` channel, 31 new `PaletteAction` entries, 9 new applicability predicates + helper accessors for self-hiding actions, 3 new registry tests
+- `src/application/app.rs` — `LabelEditState` enum + state, `handle_label_edit_key` keyboard handler, `open_label_edit` / `close_label_edit` helpers, palette dispatcher drains `open_label_edit`, label-hit intercept in the click-release branch, `rebuild_connection_label_buffers` wiring across `rebuild_all` + `rebuild_all_with_mode` + drag frame paths
+- `src/application/renderer.rs` — `PaletteFrameLayout` pure helper + `compute_palette_frame_layout` (Phase 0), pitch-black palette backdrop color (Phase 0), backdrop rect flush to border bounds (Phase 0), `connection_label_buffers` + `connection_label_hitboxes` + `label_edit_override` fields, `rebuild_connection_label_buffers`, `hit_test_edge_label`, label buffers chained into the main text-area render pass
+
+**Verify**: `./test.sh` green (408 tests, +42 new). `cargo run --release -- maps/theme_demo.mindmap.json`:
+
+1. Press `/`, confirm the palette background is pitch black and the cyan border sits flush on all four sides (Phase 0).
+2. Select a connection (cyan highlight).
+3. `/` → `"dash"` Enter — body becomes `─`.
+4. `/` → `"cap end arrow"` Enter — `▶` appears at target.
+5. `/` → `"larger"` Enter twice — connection glyphs grow; "Smaller" reappears in the palette once the clamp isn't at max.
+6. `/` → `"wide"` Enter — more space between glyphs.
+7. `/` → `"accent"` Enter — color switches to `var(--accent)`.
+8. `/` → `"convert to cross"` Enter — edge type flips, selection stays on the same edge under its new EdgeRef.
+9. `/` → `"edit label"` Enter — static caret `▌` appears at the midpoint of the edge.
+10. Type `beloved`, Enter — label persists on the edge.
+11. Click directly on the rendered `beloved` label — inline editor reopens with text prefilled. Backspace to `bel`, type `ss`, Enter — label is now `bless`.
+12. `/` → `"position label at start"` Enter — label jumps to the from-anchor end of the path.
+13. `/` → `"clear label"` Enter — label disappears; the action self-hides on the next palette open.
+14. `/` → `"reset connection style"` Enter — edge returns to the canvas default style; the per-edge override is cleared.
+15. Ctrl+Z repeatedly — every step reverses cleanly, ending at the pre-session edge state.
+16. Switch themes by clicking a theme-variant button in `theme_demo.mindmap.json` — any edge whose color was set to `var(--accent)` automatically restyles.
 
 ### Session 6E: Portal creation and management
 

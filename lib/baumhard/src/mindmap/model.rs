@@ -197,6 +197,13 @@ pub struct MindEdge {
     pub line_style: i32,
     pub visible: bool,
     pub label: Option<String>,
+    /// Parameter-space position of the label along the connection
+    /// path. `0.0` sits at the from-anchor, `1.0` at the to-anchor,
+    /// `0.5` (or `None`) at the midpoint. Introduced in Session 6D
+    /// for labeled edges; absent on older maps, which render their
+    /// labels at the midpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_position_t: Option<f32>,
     pub anchor_from: i32,
     pub anchor_to: i32,
     pub control_points: Vec<ControlPoint>,
@@ -291,6 +298,25 @@ impl GlyphConnectionConfig {
         let target_screen = (self.font_size_pt * z)
             .clamp(self.min_font_size_pt, self.max_font_size_pt);
         target_screen / z
+    }
+
+    /// Return the effective `GlyphConnectionConfig` for `edge`, resolved
+    /// through the standard precedence: per-edge override (`edge.glyph_connection`)
+    /// > canvas-level default (`canvas.default_connection`) > hardcoded default.
+    ///
+    /// Session 6D uses this helper from the document mutation layer when
+    /// forking an inherited-default edge into a concrete per-edge copy on
+    /// the first style edit. The returned `Cow::Owned` case carries a
+    /// freshly-cloned value the caller can install into
+    /// `edge.glyph_connection`.
+    pub fn resolved_for<'a>(edge: &'a MindEdge, canvas: &'a Canvas) -> std::borrow::Cow<'a, GlyphConnectionConfig> {
+        if let Some(cfg) = edge.glyph_connection.as_ref() {
+            std::borrow::Cow::Borrowed(cfg)
+        } else if let Some(cfg) = canvas.default_connection.as_ref() {
+            std::borrow::Cow::Borrowed(cfg)
+        } else {
+            std::borrow::Cow::Owned(GlyphConnectionConfig::default())
+        }
     }
 }
 
@@ -612,5 +638,110 @@ mod tests {
         assert!((cfg.effective_font_size_pt(0.5) - 20.0).abs() < EFFECTIVE_FONT_EPSILON);
         // zoom = 2.0: 24 → down to 14 → canvas 7.
         assert!((cfg.effective_font_size_pt(2.0) - 7.0).abs() < EFFECTIVE_FONT_EPSILON);
+    }
+
+    // Session 6D Phase 1: label_position_t + resolved_for helper.
+
+    fn synthetic_edge_with_label(label: Option<&str>, pos: Option<f32>) -> MindEdge {
+        MindEdge {
+            from_id: "a".to_string(),
+            to_id: "b".to_string(),
+            edge_type: "cross_link".to_string(),
+            color: "#fff".to_string(),
+            width: 1,
+            line_style: 0,
+            visible: true,
+            label: label.map(|s| s.to_string()),
+            label_position_t: pos,
+            anchor_from: 0,
+            anchor_to: 0,
+            control_points: Vec::new(),
+            glyph_connection: None,
+        }
+    }
+
+    #[test]
+    fn label_position_t_round_trips_through_json() {
+        // Explicit value is preserved.
+        let edge = synthetic_edge_with_label(Some("hello"), Some(0.25));
+        let json = serde_json::to_string(&edge).unwrap();
+        assert!(json.contains("label_position_t"), "json should include the field: {json}");
+        let back: MindEdge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.label.as_deref(), Some("hello"));
+        assert_eq!(back.label_position_t, Some(0.25));
+    }
+
+    #[test]
+    fn label_position_t_missing_defaults_to_none() {
+        // Older maps without the field must still deserialize.
+        let json = r##"{
+            "from_id":"a","to_id":"b","type":"cross_link",
+            "color":"#fff","width":1,"line_style":0,"visible":true,
+            "label":null,"anchor_from":0,"anchor_to":0,"control_points":[]
+        }"##;
+        let edge: MindEdge = serde_json::from_str(json).unwrap();
+        assert_eq!(edge.label_position_t, None);
+        // And round-trips back without the field (skip_serializing_if).
+        let back_json = serde_json::to_string(&edge).unwrap();
+        assert!(
+            !back_json.contains("label_position_t"),
+            "None should not serialize: {back_json}"
+        );
+    }
+
+    #[test]
+    fn resolved_for_returns_borrowed_from_edge_when_present() {
+        let mut edge = synthetic_edge_with_label(None, None);
+        let custom = GlyphConnectionConfig {
+            body: "◆".to_string(),
+            ..GlyphConnectionConfig::default()
+        };
+        edge.glyph_connection = Some(custom);
+        let canvas = Canvas {
+            background_color: "#000".to_string(),
+            default_border: None,
+            default_connection: None,
+            theme_variables: HashMap::new(),
+            theme_variants: HashMap::new(),
+        };
+        let resolved = GlyphConnectionConfig::resolved_for(&edge, &canvas);
+        assert_eq!(resolved.body, "◆");
+        // It's borrowed, not owned — clone-count unchanged.
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn resolved_for_falls_back_to_canvas_default() {
+        let edge = synthetic_edge_with_label(None, None);
+        let canvas_cfg = GlyphConnectionConfig {
+            body: "═".to_string(),
+            ..GlyphConnectionConfig::default()
+        };
+        let canvas = Canvas {
+            background_color: "#000".to_string(),
+            default_border: None,
+            default_connection: Some(canvas_cfg),
+            theme_variables: HashMap::new(),
+            theme_variants: HashMap::new(),
+        };
+        let resolved = GlyphConnectionConfig::resolved_for(&edge, &canvas);
+        assert_eq!(resolved.body, "═");
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn resolved_for_falls_back_to_hardcoded_default() {
+        let edge = synthetic_edge_with_label(None, None);
+        let canvas = Canvas {
+            background_color: "#000".to_string(),
+            default_border: None,
+            default_connection: None,
+            theme_variables: HashMap::new(),
+            theme_variants: HashMap::new(),
+        };
+        let resolved = GlyphConnectionConfig::resolved_for(&edge, &canvas);
+        assert_eq!(resolved.body, GlyphConnectionConfig::default().body);
+        // Owned — the caller got a freshly-built default.
+        assert!(matches!(resolved, std::borrow::Cow::Owned(_)));
     }
 }
