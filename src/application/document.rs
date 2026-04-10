@@ -15,6 +15,13 @@ use baumhard::mindmap::tree_builder::{self, MindMapTree};
 /// Selection highlight color: bright cyan [R, G, B, A]
 const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
 
+/// Reparent-mode source color: orange, used for nodes currently being reparented.
+const REPARENT_SOURCE_COLOR: [f32; 4] = [1.0, 0.55, 0.0, 1.0];
+
+/// Reparent-mode target color: green, used for the node currently hovered as
+/// a potential reparent target.
+const REPARENT_TARGET_COLOR: [f32; 4] = [0.2, 1.0, 0.4, 1.0];
+
 /// Tracks which nodes are currently selected.
 #[derive(Clone, Debug)]
 pub enum SelectionState {
@@ -48,6 +55,8 @@ pub enum UndoAction {
     MoveNodes { original_positions: Vec<(String, Position)> },
     /// Stores full node snapshots before a custom mutation was applied.
     CustomMutation { node_snapshots: Vec<(String, MindNode)> },
+    /// Stores original parent_id and index for each reparented node.
+    ReparentNodes { entries: Vec<(String, Option<String>, i32)> },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -178,6 +187,72 @@ impl MindMapDocument {
         }).cloned().collect()
     }
 
+    /// Reparent a set of nodes under `new_parent_id` (None = promote to root),
+    /// making them the last children of the new parent in their given order.
+    ///
+    /// Silently skips any source node that would create a cycle (i.e. the target
+    /// parent is the source itself or one of its descendants). Also skips source
+    /// nodes whose ID doesn't exist in the map.
+    ///
+    /// Positions are absolute world-space coordinates, so no position recalculation
+    /// is needed — only `parent_id` and `index` change.
+    ///
+    /// Returns undo data: `(node_id, old_parent_id, old_index)` for each successfully
+    /// reparented node.
+    pub fn apply_reparent(
+        &mut self,
+        node_ids: &[String],
+        new_parent_id: Option<&str>,
+    ) -> Vec<(String, Option<String>, i32)> {
+        // Compute the starting index: one greater than the current max sibling index
+        // under the new parent (or 0 if no siblings).
+        let mut next_index: i32 = match new_parent_id {
+            Some(pid) => {
+                self.mindmap.children_of(pid)
+                    .iter()
+                    .map(|n| n.index)
+                    .max()
+                    .map(|m| m + 1)
+                    .unwrap_or(0)
+            }
+            None => {
+                self.mindmap.root_nodes()
+                    .iter()
+                    .map(|n| n.index)
+                    .max()
+                    .map(|m| m + 1)
+                    .unwrap_or(0)
+            }
+        };
+
+        let mut undo_data: Vec<(String, Option<String>, i32)> = Vec::new();
+        for source_id in node_ids {
+            // Skip nonexistent nodes
+            if !self.mindmap.nodes.contains_key(source_id) {
+                continue;
+            }
+            // Cycle check: if the target is the source itself or a descendant
+            // of the source, reparenting would create a cycle. Skip.
+            if let Some(target) = new_parent_id {
+                if self.mindmap.is_ancestor_or_self(source_id, target) {
+                    continue;
+                }
+            }
+            // A node whose parent is already the target is a no-op that would
+            // still reassign its index and push it to last-child position. That
+            // is a valid (user-intended) "move to end", so we allow it.
+            let node = match self.mindmap.nodes.get_mut(source_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            undo_data.push((source_id.clone(), node.parent_id.clone(), node.index));
+            node.parent_id = new_parent_id.map(|s| s.to_string());
+            node.index = next_index;
+            next_index += 1;
+        }
+        undo_data
+    }
+
     /// Undo the last action. Returns true if something was undone.
     pub fn undo(&mut self) -> bool {
         if let Some(action) = self.undo_stack.pop() {
@@ -192,6 +267,14 @@ impl MindMapDocument {
                 UndoAction::CustomMutation { node_snapshots } => {
                     for (id, snapshot) in node_snapshots {
                         self.mindmap.nodes.insert(id, snapshot);
+                    }
+                }
+                UndoAction::ReparentNodes { entries } => {
+                    for (id, old_parent, old_index) in entries {
+                        if let Some(node) = self.mindmap.nodes.get_mut(&id) {
+                            node.parent_id = old_parent;
+                            node.index = old_index;
+                        }
                     }
                 }
             }
@@ -515,6 +598,54 @@ pub fn apply_selection_highlight(tree: &mut MindMapTree, selection: &SelectionSt
             for range in &ranges {
                 glyph_area.set_region_color(range, &HIGHLIGHT_COLOR);
             }
+        }
+    }
+}
+
+/// Apply an orange "reparent-source" highlight to the given nodes in the tree.
+/// Used in reparent mode to indicate which nodes the user is about to move.
+/// Call after `apply_selection_highlight` if you want it to override the cyan
+/// selection color for source nodes.
+pub fn apply_reparent_source_highlight(tree: &mut MindMapTree, sources: &[String]) {
+    for source_id in sources {
+        let node_id = match tree.node_map.get(source_id) {
+            Some(&id) => id,
+            None => continue,
+        };
+        let node = match tree.tree.arena.get_mut(node_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        if let Some(glyph_area) = node.get_mut().glyph_area_mut() {
+            let ranges: Vec<Range> = glyph_area.regions.all_regions()
+                .iter()
+                .map(|r| r.range)
+                .collect();
+            for range in &ranges {
+                glyph_area.set_region_color(range, &REPARENT_SOURCE_COLOR);
+            }
+        }
+    }
+}
+
+/// Apply a green "reparent-target" highlight to a single node in the tree.
+/// Used in reparent mode to indicate the currently-hovered drop target.
+pub fn apply_reparent_target_highlight(tree: &mut MindMapTree, target_id: &str) {
+    let node_id = match tree.node_map.get(target_id) {
+        Some(&id) => id,
+        None => return,
+    };
+    let node = match tree.tree.arena.get_mut(node_id) {
+        Some(n) => n,
+        None => return,
+    };
+    if let Some(glyph_area) = node.get_mut().glyph_area_mut() {
+        let ranges: Vec<Range> = glyph_area.regions.all_regions()
+            .iter()
+            .map(|r| r.range)
+            .collect();
+        for range in &ranges {
+            glyph_area.set_region_color(range, &REPARENT_TARGET_COLOR);
         }
     }
 }
@@ -1128,5 +1259,159 @@ mod tests {
         assert!(doc.undo());
         let restored_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;
         assert!((restored_x - orig_x).abs() < 0.001, "Undo should restore original position");
+    }
+
+    // --- Session 5B: reparent tests ---
+
+    /// Pick (new_parent_id, source_id) where source is an unrelated node that
+    /// can be validly reparented under new_parent. Both are pulled from the
+    /// testament map and guaranteed to exist.
+    fn find_reparent_pair(doc: &MindMapDocument) -> (String, String) {
+        // Find two distinct nodes where the source is not an ancestor of the target.
+        // Simplest approach: pick two unrelated leaf-ish nodes.
+        let ids: Vec<String> = doc.mindmap.nodes.keys().cloned().collect();
+        for a in &ids {
+            for b in &ids {
+                if a == b { continue; }
+                // source = a, target parent = b. Valid iff a is not an ancestor of b.
+                if !doc.mindmap.is_ancestor_or_self(a, b) {
+                    return (b.clone(), a.clone());
+                }
+            }
+        }
+        panic!("testament map should contain a valid reparent pair");
+    }
+
+    #[test]
+    fn test_apply_reparent_single_node_updates_parent_and_index() {
+        let mut doc = load_test_doc();
+        let (new_parent, source) = find_reparent_pair(&doc);
+        let expected_index = doc.mindmap.children_of(&new_parent)
+            .iter().map(|n| n.index).max().map(|m| m + 1).unwrap_or(0);
+
+        let undo = doc.apply_reparent(&[source.clone()], Some(&new_parent));
+        assert_eq!(undo.len(), 1, "should have one undo entry");
+
+        let node = doc.mindmap.nodes.get(&source).unwrap();
+        assert_eq!(node.parent_id.as_deref(), Some(new_parent.as_str()),
+            "parent_id should now point to new parent");
+        assert_eq!(node.index, expected_index, "index should be max+1 of new siblings");
+    }
+
+    #[test]
+    fn test_apply_reparent_multiple_nodes_become_siblings() {
+        let mut doc = load_test_doc();
+        // Find a node with two unrelated siblings we can reparent.
+        // Use two unrelated nodes from find_reparent_pair repeatedly.
+        let (new_parent, first_source) = find_reparent_pair(&doc);
+        // Find a second source that is also not an ancestor of new_parent and is
+        // not the same as first_source.
+        let second_source = doc.mindmap.nodes.keys()
+            .find(|k| **k != new_parent && **k != first_source
+                && !doc.mindmap.is_ancestor_or_self(k, &new_parent))
+            .expect("testament should have another candidate source")
+            .clone();
+
+        let start_index = doc.mindmap.children_of(&new_parent)
+            .iter().map(|n| n.index).max().map(|m| m + 1).unwrap_or(0);
+
+        let sources = vec![first_source.clone(), second_source.clone()];
+        let undo = doc.apply_reparent(&sources, Some(&new_parent));
+        assert_eq!(undo.len(), 2, "both sources should be reparented");
+
+        let n1 = doc.mindmap.nodes.get(&first_source).unwrap();
+        let n2 = doc.mindmap.nodes.get(&second_source).unwrap();
+        assert_eq!(n1.parent_id.as_deref(), Some(new_parent.as_str()));
+        assert_eq!(n2.parent_id.as_deref(), Some(new_parent.as_str()));
+        // Indices should be start_index and start_index+1, preserving argument order
+        assert_eq!(n1.index, start_index);
+        assert_eq!(n2.index, start_index + 1);
+    }
+
+    #[test]
+    fn test_apply_reparent_to_root() {
+        let mut doc = load_test_doc();
+        // Pick any non-root node
+        let source = doc.mindmap.nodes.values()
+            .find(|n| n.parent_id.is_some())
+            .map(|n| n.id.clone())
+            .expect("testament should have at least one non-root node");
+
+        let expected_index = doc.mindmap.root_nodes()
+            .iter().map(|n| n.index).max().map(|m| m + 1).unwrap_or(0);
+
+        let undo = doc.apply_reparent(&[source.clone()], None);
+        assert_eq!(undo.len(), 1);
+
+        let node = doc.mindmap.nodes.get(&source).unwrap();
+        assert_eq!(node.parent_id, None, "should be promoted to root");
+        assert_eq!(node.index, expected_index);
+    }
+
+    #[test]
+    fn test_apply_reparent_rejects_cycle() {
+        let mut doc = load_test_doc();
+        // Find a parent with a grandchild so we can try to reparent the grandparent
+        // under its own grandchild.
+        let (grandparent, _child, grandchild) = {
+            let mut found = None;
+            'outer: for root in doc.mindmap.root_nodes() {
+                for child in doc.mindmap.children_of(&root.id) {
+                    let grands = doc.mindmap.children_of(&child.id);
+                    if let Some(g) = grands.first() {
+                        found = Some((root.id.clone(), child.id.clone(), g.id.clone()));
+                        break 'outer;
+                    }
+                }
+            }
+            found.expect("testament should have a three-level chain")
+        };
+
+        let orig_parent = doc.mindmap.nodes.get(&grandparent).unwrap().parent_id.clone();
+        let orig_index = doc.mindmap.nodes.get(&grandparent).unwrap().index;
+
+        // Try to reparent grandparent under grandchild — should be silently rejected
+        let undo = doc.apply_reparent(&[grandparent.clone()], Some(&grandchild));
+        assert!(undo.is_empty(), "cycle should be rejected, no entries in undo data");
+
+        // State should be unchanged
+        let gp = doc.mindmap.nodes.get(&grandparent).unwrap();
+        assert_eq!(gp.parent_id, orig_parent);
+        assert_eq!(gp.index, orig_index);
+    }
+
+    #[test]
+    fn test_apply_reparent_rejects_self() {
+        let mut doc = load_test_doc();
+        let source = doc.mindmap.nodes.keys().next().unwrap().clone();
+        let orig_parent = doc.mindmap.nodes.get(&source).unwrap().parent_id.clone();
+
+        // Try to reparent a node under itself — should be silently rejected
+        let undo = doc.apply_reparent(&[source.clone()], Some(&source));
+        assert!(undo.is_empty(), "self-reparent should be rejected");
+        assert_eq!(doc.mindmap.nodes.get(&source).unwrap().parent_id, orig_parent);
+    }
+
+    #[test]
+    fn test_reparent_undo_restores_parent_and_index() {
+        let mut doc = load_test_doc();
+        let (new_parent, source) = find_reparent_pair(&doc);
+        let orig_parent = doc.mindmap.nodes.get(&source).unwrap().parent_id.clone();
+        let orig_index = doc.mindmap.nodes.get(&source).unwrap().index;
+
+        let undo_data = doc.apply_reparent(&[source.clone()], Some(&new_parent));
+        doc.undo_stack.push(UndoAction::ReparentNodes { entries: undo_data });
+
+        // Precondition: actually moved
+        assert_eq!(
+            doc.mindmap.nodes.get(&source).unwrap().parent_id.as_deref(),
+            Some(new_parent.as_str())
+        );
+
+        // Undo and verify restoration
+        assert!(doc.undo());
+        let restored = doc.mindmap.nodes.get(&source).unwrap();
+        assert_eq!(restored.parent_id, orig_parent);
+        assert_eq!(restored.index, orig_index);
     }
 }

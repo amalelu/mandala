@@ -12,10 +12,27 @@ use winit::keyboard::{Key, NamedKey};
 use winit::{event_loop::EventLoop, window::Window};
 
 use crate::application::common::{InputMode, RenderDecree, WindowMode};
-use crate::application::document::{MindMapDocument, SelectionState, UndoAction, hit_test, rect_select, apply_selection_highlight, apply_drag_delta};
+use crate::application::document::{
+    MindMapDocument, SelectionState, UndoAction,
+    hit_test, rect_select,
+    apply_selection_highlight, apply_drag_delta,
+    apply_reparent_source_highlight, apply_reparent_target_highlight,
+};
 use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;
+
+/// Tracks the high-level interaction mode. Normal handles the usual
+/// select/drag/pan flow; Reparent mode is entered via Ctrl+P and captures
+/// the next left-click as a "choose reparent target" gesture.
+#[cfg(not(target_arch = "wasm32"))]
+enum AppMode {
+    Normal,
+    /// Reparent mode: the user is choosing a new parent for `sources`.
+    /// The next left-click on a node attaches all sources as its last children;
+    /// a left-click on empty canvas promotes them to root. Esc cancels.
+    Reparent { sources: Vec<String> },
+}
 
 /// Tracks the current drag interaction state.
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,6 +145,8 @@ impl Application {
         // Input state
         let mut cursor_pos: (f64, f64) = (0.0, 0.0);
         let mut drag_state = DragState::None;
+        let mut app_mode = AppMode::Normal;
+        let mut hovered_node: Option<String> = None;
         let mut shift_pressed = false;
         let mut alt_pressed = false;
         let mut ctrl_pressed = false;
@@ -170,7 +189,21 @@ impl Application {
                             }
                         }
                         MouseButton::Left => {
-                            if state == ElementState::Pressed {
+                            // In reparent mode, left-click (release) is consumed as
+                            // "choose reparent target" and never transitions to Pending/drag.
+                            if matches!(app_mode, AppMode::Reparent { .. }) {
+                                if state == ElementState::Released {
+                                    handle_reparent_target_click(
+                                        cursor_pos,
+                                        &mut app_mode,
+                                        &mut hovered_node,
+                                        &mut document,
+                                        &mut mindmap_tree,
+                                        &mut renderer,
+                                    );
+                                }
+                                // Pressed: swallow — do not transition drag state
+                            } else if state == ElementState::Pressed {
                                 // Hit test to determine if clicking on a node
                                 let hit_node = mindmap_tree.as_ref().and_then(|tree| {
                                     let canvas_pos = renderer.screen_to_canvas(
@@ -260,6 +293,28 @@ impl Application {
                 } => {
                     let prev_pos = cursor_pos;
                     cursor_pos = (position.x, position.y);
+
+                    // Reparent mode: hit-test under cursor to update the hover target
+                    // highlight. Skip the regular drag-state handling for this event
+                    // (no drag in reparent mode).
+                    if matches!(app_mode, AppMode::Reparent { .. }) {
+                        let new_hover = mindmap_tree.as_ref().and_then(|tree| {
+                            let canvas_pos = renderer.screen_to_canvas(
+                                cursor_pos.0 as f32, cursor_pos.1 as f32,
+                            );
+                            hit_test(canvas_pos, tree)
+                        });
+                        if new_hover != hovered_node {
+                            hovered_node = new_hover;
+                            if let Some(doc) = document.as_ref() {
+                                rebuild_all_with_mode(
+                                    doc, &app_mode, hovered_node.as_deref(),
+                                    &mut mindmap_tree, &mut renderer,
+                                );
+                            }
+                        }
+                        return;
+                    }
 
                     match &mut drag_state {
                         DragState::Panning => {
@@ -375,6 +430,40 @@ impl Application {
                         if let Some(doc) = document.as_mut() {
                             if doc.undo() {
                                 rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                            }
+                        }
+                    }
+
+                    // Esc: cancel reparent mode (if active)
+                    if matches!(logical_key, Key::Named(NamedKey::Escape))
+                        && matches!(app_mode, AppMode::Reparent { .. })
+                    {
+                        app_mode = AppMode::Normal;
+                        hovered_node = None;
+                        if let Some(doc) = document.as_ref() {
+                            rebuild_all_with_mode(
+                                doc, &app_mode, hovered_node.as_deref(),
+                                &mut mindmap_tree, &mut renderer,
+                            );
+                        }
+                    }
+
+                    // Ctrl+P: enter reparent mode if at least one node is selected
+                    let is_reparent_hotkey = match &logical_key {
+                        Key::Character(c) if ctrl_pressed && c.as_ref() == "p" => true,
+                        _ => false,
+                    };
+                    if is_reparent_hotkey {
+                        if let Some(doc) = document.as_ref() {
+                            let sel: Vec<String> = doc.selection.selected_ids()
+                                .iter().map(|s| s.to_string()).collect();
+                            if !sel.is_empty() {
+                                app_mode = AppMode::Reparent { sources: sel };
+                                hovered_node = None;
+                                rebuild_all_with_mode(
+                                    doc, &app_mode, hovered_node.as_deref(),
+                                    &mut mindmap_tree, &mut renderer,
+                                );
                             }
                         }
                     }
@@ -652,6 +741,77 @@ fn handle_click(
 
     // Rebuild tree with selection highlight applied
     rebuild_all(doc, mindmap_tree, renderer);
+}
+
+/// Rebuild tree, connections, and borders like `rebuild_all`, but additionally
+/// overlays reparent-mode highlights on top of the normal selection highlight.
+/// `hovered_node` is the node currently under the cursor (highlighted green as
+/// the drop target) when in reparent mode; it is ignored in Normal mode.
+#[cfg(not(target_arch = "wasm32"))]
+fn rebuild_all_with_mode(
+    doc: &MindMapDocument,
+    app_mode: &AppMode,
+    hovered_node: Option<&str>,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let mut new_tree = doc.build_tree();
+    apply_selection_highlight(&mut new_tree, &doc.selection);
+    if let AppMode::Reparent { sources } = app_mode {
+        // Orange on all source nodes (overrides any cyan selection color).
+        apply_reparent_source_highlight(&mut new_tree, sources);
+        // Green on the hovered target (if any and not also a source).
+        if let Some(h) = hovered_node {
+            if !sources.iter().any(|s| s == h) {
+                apply_reparent_target_highlight(&mut new_tree, h);
+            }
+        }
+    }
+    renderer.rebuild_buffers_from_tree(&new_tree.tree);
+
+    let scene = doc.build_scene();
+    renderer.rebuild_connection_buffers(&scene.connection_elements);
+    renderer.rebuild_border_buffers(&scene.border_elements);
+
+    *mindmap_tree = Some(new_tree);
+}
+
+/// Handle a left-click while in reparent mode: hit-test for a target node and
+/// perform the reparent (or promote to root if clicked on empty canvas). Exits
+/// reparent mode and rebuilds the scene unconditionally.
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_reparent_target_click(
+    cursor_pos: (f64, f64),
+    app_mode: &mut AppMode,
+    hovered_node: &mut Option<String>,
+    document: &mut Option<MindMapDocument>,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let sources = match std::mem::replace(app_mode, AppMode::Normal) {
+        AppMode::Reparent { sources } => sources,
+        AppMode::Normal => return,
+    };
+    *hovered_node = None;
+
+    // Hit-test the cursor position against the current tree.
+    let target: Option<String> = mindmap_tree.as_ref().and_then(|tree| {
+        let canvas_pos = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
+        hit_test(canvas_pos, tree)
+    });
+
+    if let Some(doc) = document.as_mut() {
+        // target = Some(id) → reparent under that node as last child
+        // target = None     → promote sources to root (click on empty canvas)
+        let undo_entries = doc.apply_reparent(&sources, target.as_deref());
+        if !undo_entries.is_empty() {
+            doc.undo_stack.push(UndoAction::ReparentNodes { entries: undo_entries });
+            doc.dirty = true;
+        }
+        // Full rebuild: tree structure changed even if a no-op, the mode exit
+        // requires clearing the orange/green highlights.
+        rebuild_all(doc, mindmap_tree, renderer);
+    }
 }
 
 /**
