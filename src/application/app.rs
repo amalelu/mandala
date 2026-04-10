@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 use pollster::block_on;
@@ -19,6 +21,7 @@ use crate::application::document::{
     apply_selection_highlight, apply_drag_delta,
     apply_reparent_source_highlight, apply_reparent_target_highlight,
 };
+use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name};
 use crate::application::renderer::Renderer;
 
@@ -171,6 +174,18 @@ impl Application {
         // transitions instead of every CursorMoved event.
         let mut cursor_is_hand = false;
 
+        // Phase 4(E): the governing-invariant throttle. Per-frame
+        // work in the drag path feeds its measured duration into this
+        // tracker; when the moving average crosses the refresh
+        // budget, `should_drain()` starts returning false on some
+        // frames, coalescing multiple ticks' worth of pending delta
+        // into a single drain. Responsiveness is preserved because
+        // input accumulation keeps running every tick (the mouse
+        // cursor never lags; only the dragged node briefly does).
+        // The throttle is reset at drag end so a fresh drag starts
+        // with n = 1.
+        let mut mutation_throttle = MutationFrequencyThrottle::with_default_budget();
+
         // Resolve keybindings once at startup. Users can rebind any key
         // by shipping a `keybinds.json` (see `keybinds.rs` for the format).
         let keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
@@ -267,7 +282,10 @@ impl Application {
                                         );
                                     }
                                     DragState::MovingNode { node_ids, total_delta, pending_delta, individual } => {
-                                        // Flush any remaining pending delta to the tree before drop
+                                        // Flush any remaining pending delta to the tree before drop.
+                                        // This always runs regardless of the throttle — on release
+                                        // we want the final position committed in full, even if
+                                        // the throttle was mid-stretch skipping intermediate drains.
                                         if pending_delta != Vec2::ZERO {
                                             if let Some(tree) = mindmap_tree.as_mut() {
                                                 for nid in &node_ids {
@@ -288,6 +306,10 @@ impl Application {
                                             // Full rebuild from model
                                             rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                         }
+                                        // Drag ended — reset the throttle so the next drag
+                                        // starts at n = 1 without inheriting any residual
+                                        // throttling from this one.
+                                        mutation_throttle.reset();
                                     }
                                     DragState::SelectingRect { start_canvas, current_canvas } => {
                                         // Finalize: select all nodes in the rectangle
@@ -599,9 +621,19 @@ impl Application {
                     }
                 }
                 Event::AboutToWait => {
-                    // Flush any accumulated drag delta (once per frame, not per mouse event)
+                    // Flush any accumulated drag delta (once per frame, not per mouse event),
+                    // gated by the mutation-frequency throttle. When the moving
+                    // average of this block's work duration exceeds the refresh
+                    // budget, `should_drain()` starts returning false on some
+                    // frames — `pending_delta` stays intact and the next
+                    // successful drain folds in whatever motion arrived in the
+                    // meantime. This holds the governing invariant:
+                    // responsiveness is preserved at the cost of briefer
+                    // chunking in the visual update cadence.
                     if let DragState::MovingNode { ref node_ids, ref mut pending_delta, ref total_delta, individual, .. } = drag_state {
-                        if *pending_delta != Vec2::ZERO {
+                        if *pending_delta != Vec2::ZERO && mutation_throttle.should_drain() {
+                            let work_start = Instant::now();
+
                             if let Some(tree) = mindmap_tree.as_mut() {
                                 for nid in node_ids {
                                     apply_drag_delta(tree, nid, pending_delta.x, pending_delta.y, !individual);
@@ -627,6 +659,7 @@ impl Application {
                             }
 
                             *pending_delta = Vec2::ZERO;
+                            mutation_throttle.record_work_duration(work_start.elapsed());
                         }
                     }
                     // Update selection rectangle overlay + preview highlight (once per frame)

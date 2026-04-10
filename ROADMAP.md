@@ -60,8 +60,9 @@ The application has two layers:
 - **Document actions** — `CustomMutation.document_actions: Vec<DocumentAction>` carries canvas/document-level effects alongside the per-node mutations. `DocumentAction::SetThemeVariant(name)` swaps in a named preset; `SetThemeVariables(map)` patches the live variables ad-hoc. Applied by `MindMapDocument::apply_document_actions()`, which snapshots the full canvas into `UndoAction::CanvasSnapshot` before any change, so Ctrl+Z restores a theme swap in one hop.
 - **Button-node cursor polish** — hovering a node with any non-empty `trigger_bindings` switches the cursor to `CursorIcon::Pointer`. Transitions are tracked so `set_cursor` only fires when the hover state actually changes. Native only — WASM input path remains a known gap.
 - **Stress-test map generator** — `cargo run -p baumhard --bin generate_stress_map -- ...` writes synthetic `.mindmap.json` files of arbitrary size and topology (balanced / skewed / star), with `--long-edges K` to insert deliberately far-apart cross-links for connection-render perf testing and `--seed` for deterministic output. The smoke-test rig for Phase 4 of the theme-variables tangent.
+- **Mutation-frequency throttle** — under load, the `AboutToWait` drag path drains its accumulated `pending_delta` every Nth frame instead of every frame, where N is a moving-average-driven self-tuning multiplier that holds per-frame work time under the screen refresh budget. Input accumulation stays snappy (every mouse event still folds into `pending_delta`); the dragged node advances in chunks under stress, catching up to the cursor every N frames. Healthy load = N = 1 (no throttling). Implements the governing-invariant half of the connection/border render-cost work.
 - **Multi-target** — native + WASM builds
-- **260 tests passing**
+- **273 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -81,6 +82,7 @@ The application has two layers:
 | `src/application/renderer.rs` | GPU pipeline: tree-based node rendering + flat border/connection rendering |
 | `src/application/document.rs` | Owns MindMap + SelectionState + UndoStack, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()`, `apply_drag_delta()`, `apply_move_subtree/single()`, `undo()`, `apply_custom_mutation()`, `apply_document_actions()` |
 | `src/application/common.rs` | RenderDecree, WindowMode, InputMode, timing |
+| `src/application/frame_throttle.rs` | `MutationFrequencyThrottle` — the governing-invariant safety net for the drag path |
 | `src/application/keybinds.rs` | Configurable key-to-Action mapping with layered loading |
 | `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge, Canvas (incl. `theme_variables`, `theme_variants`), `all_descendants()` |
 | `lib/baumhard/src/mindmap/tree_builder.rs` | MindMap → Tree<GfxElement, GfxMutator> bridge, resolves text-run colors through theme variables |
@@ -755,13 +757,27 @@ to never hit the wall" or "how to degrade gracefully when we do."
 
 Five-part fix under that invariant:
 
-- [ ] **(E) Mutation-frequency throttle**. Moving average on measured
+- [x] **(E) Mutation-frequency throttle**. Moving average on measured
       per-frame work duration in `AboutToWait`; when it crosses the
       refresh budget, the drain rate of `pending_delta` drops to one
       in every N ticks, N ramping with how far over budget we are,
       decaying back to 1 when healthy. Between drains, mouse motion
       still accumulates — nothing is lost. Always-on, self-tuning,
       configuration-free. This is the invariant in code form.
+      Implemented in `src/application/frame_throttle.rs` as
+      `MutationFrequencyThrottle` with an 8-frame moving window, a
+      default 14ms budget (60 Hz minus 2.7ms safety margin — correct
+      value on higher-refresh monitors is an open tuning question),
+      a 30% hysteresis band between raise and lower thresholds to
+      prevent oscillation, and a cap of N = 8 (worst-case 133ms lag
+      at 60 Hz before the other Phase 4 fixes kick in). Wired into
+      `app.rs` `AboutToWait` drag branch, reset on drag release so
+      fresh drags start at N = 1. 13 unit tests: healthy-load
+      no-op, sustained-over-budget raise, cap-at-MAX_N,
+      load-drop-decay, hysteresis-prevents-oscillation, throttled
+      frames skip work, moving-average arithmetic, window eviction,
+      reset returns to fresh state, drain cadence exactly matches
+      N, default budget sanity, zero-frame empty-window.
 - [ ] **(A) Viewport culling on connection glyph samples**. Compute
       the canvas-space viewport in `rebuild_connection_buffers` and
       skip glyph positions that land off-screen. A few lines; kills
