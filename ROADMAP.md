@@ -30,7 +30,7 @@ The application has two layers:
 
 ---
 
-## Current State (after Session 5)
+## Current State (after Session 5B)
 
 ### What works
 - **MindMap data model** — serde-based structs, JSON loading, hierarchy queries
@@ -43,17 +43,18 @@ The application has two layers:
 - **Selection highlight** — selected nodes highlighted via GlyphArea color region mutation (cyan)
 - **Click vs drag** — left-click selects, left-drag pans (5px threshold), middle-drag pans
 - **Node movement** — drag selected nodes to reposition (subtree moves together), alt+drag for individual node only. Mutations applied to Baumhard tree for real-time preview, model synced on drop. Connections/borders snap on drop.
-- **Undo** — Ctrl+Z undoes node movement (undo stack with position restoration)
+- **Reparent via hotkey mode** — Ctrl+P on selected nodes enters reparent mode (orange highlight), click target node to attach as last children (or click empty canvas to promote to root), Esc to cancel. Cycle prevention built in. Green hover preview on drop target.
+- **Undo** — Ctrl+Z undoes node movement and reparent operations (undo stack with position/parent restoration)
 - **DragState machine** — structured input state (Pending/Panning/MovingNode) replaces loose booleans
+- **AppMode** — high-level mode enum (Normal / Reparent) cleanly separates reparent from the regular drag flow
 - **Multi-target** — native + WASM builds
-- **135 tests passing**
+- **172 tests passing**
 
 ### What needs work
-- **No reparent via drag** — nodes can be moved but not reparented by dragging onto other nodes
 - **No text editing** — no inline text editing or node creation
 - **Borders not in tree** — borders render via flat pipeline, not as GlyphModel children in the Baumhard tree
 - **No save/persistence** — document dirty flag exists but no serialization
-- **WASM input** — selection and movement not yet wired up on WASM (TODOs in event loop)
+- **WASM input** — selection, movement, reparent not yet wired up on WASM (TODOs in event loop)
 
 ### Key Files Reference
 | File | Role |
@@ -293,18 +294,31 @@ M1 (Architecture) ✓ --+--> M2 (Connections) ✓ ------+
 
 **Verify**: `cargo test -p baumhard -p mandala` passes (135 tests), nodes can be dragged around, subtrees move together
 
-### Session 5B: Reparent via drag
+### Session 5B: Reparent via hotkey mode (Ctrl+P)
 
-**What**: Drag a node onto another to reparent it.
+**What**: Explicit reparent mode — press Ctrl+P with one or more nodes selected
+to enter "reparent mode," then click a target node to attach the source(s) as its
+last children. Reparenting is not an implicit drag gesture but an explicit,
+cancellable mode with clear visual feedback.
 
-- [ ] Detect drag-over-node: highlight potential parent target
-- [ ] On release over node: reparent (update `parent_id`, recalculate index)
-- [ ] Support drop as first child, last child, or between siblings
-- [ ] Rebuild Baumhard tree after reparent (tree structure changed)
-- [ ] Visual indicators for drop position
-- [ ] Undo support for reparent operations
+- [x] `AppMode::Reparent { sources }` enum tracks the mode in the event loop
+- [x] Ctrl+P enters the mode when ≥1 node is selected; Esc cancels
+- [x] In reparent mode: left-click on a node reparents sources under it as last
+      children; left-click on empty canvas promotes sources to root
+- [x] Cycle prevention: silently skip invalid targets (target is self or descendant of source) via new `MindMap::is_ancestor_or_self()` helper
+- [x] Source nodes highlighted orange during mode; hovered target highlighted green
+- [x] Tree + scene rebuilt after reparent (tree structure changed)
+- [x] `UndoAction::ReparentNodes { entries }` records `(id, old_parent_id, old_index)` for every reparented node; Ctrl+Z restores
+- [x] Drop position: new nodes become last children (`index = max(siblings.index) + 1`)
+- [x] Multi-select: all selected nodes become siblings under the new parent, preserving argument order
+- [x] 11 new tests (5 `is_ancestor_or_self` + 6 reparent/undo)
 
-**Verify**: Nodes can be reparented by dragging, undo restores previous state
+**Key files**:
+- `lib/baumhard/src/mindmap/model.rs` — `is_ancestor_or_self()` helper
+- `src/application/document.rs` — `UndoAction::ReparentNodes`, `apply_reparent()`, `apply_reparent_source_highlight()`, `apply_reparent_target_highlight()`, extended `undo()`
+- `src/application/app.rs` — `AppMode` enum, `app_mode`/`hovered_node` state, Ctrl+P/Esc handling, left-click reroute in reparent mode, `handle_reparent_target_click()` and `rebuild_all_with_mode()` helpers
+
+**Verify**: `cargo test -p baumhard -p mandala` passes (172 tests). Select a node, Ctrl+P (turns orange), hover another node (turns green), click to reparent. Ctrl+Z undoes. Esc cancels. Click empty canvas in mode promotes to root.
 
 ### Session 5.1: Live Connections & Borders During Drag
 

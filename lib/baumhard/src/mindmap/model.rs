@@ -324,6 +324,23 @@ impl MindMap {
         }
     }
 
+    /// Returns true if `candidate_ancestor` equals `node_id` or is a (transitive)
+    /// ancestor of it. Used to prevent reparenting a node under itself or under
+    /// one of its own descendants (which would create a cycle).
+    pub fn is_ancestor_or_self(&self, candidate_ancestor: &str, node_id: &str) -> bool {
+        if candidate_ancestor == node_id {
+            return true;
+        }
+        let mut current = self.nodes.get(node_id).and_then(|n| n.parent_id.as_deref());
+        while let Some(pid) = current {
+            if pid == candidate_ancestor {
+                return true;
+            }
+            current = self.nodes.get(pid).and_then(|n| n.parent_id.as_deref());
+        }
+        false
+    }
+
     /// Resolves the effective colors for a themed node.
     /// Returns (background, frame, text, title) hex color strings.
     pub fn resolve_theme_colors<'a>(&'a self, node: &'a MindNode) -> Option<&'a ColorGroup> {
@@ -384,5 +401,72 @@ mod tests {
 
         let descendants = map.all_descendants(&leaf.id);
         assert!(descendants.is_empty(), "Leaf node should have no descendants");
+    }
+
+    /// Find a (root_id, child_id, grandchild_id) triple in the testament map.
+    /// Used by the ancestor tests below.
+    fn find_hierarchy_triple(map: &MindMap) -> (String, String, String) {
+        for root in map.root_nodes() {
+            for child in map.children_of(&root.id) {
+                let grands = map.children_of(&child.id);
+                if let Some(grand) = grands.first() {
+                    return (root.id.clone(), child.id.clone(), grand.id.clone());
+                }
+            }
+        }
+        panic!("testament map should contain a root -> child -> grandchild chain");
+    }
+
+    #[test]
+    fn test_is_ancestor_or_self_reflexive() {
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        let (root, child, grand) = find_hierarchy_triple(&map);
+        assert!(map.is_ancestor_or_self(&root, &root));
+        assert!(map.is_ancestor_or_self(&child, &child));
+        assert!(map.is_ancestor_or_self(&grand, &grand));
+    }
+
+    #[test]
+    fn test_is_ancestor_or_self_direct_parent() {
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        let (root, child, grand) = find_hierarchy_triple(&map);
+        // root is a direct ancestor of child; child is a direct ancestor of grand
+        assert!(map.is_ancestor_or_self(&root, &child));
+        assert!(map.is_ancestor_or_self(&child, &grand));
+    }
+
+    #[test]
+    fn test_is_ancestor_or_self_deep_descendant() {
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        let (root, _child, grand) = find_hierarchy_triple(&map);
+        // root is a transitive ancestor of grand (two hops away)
+        assert!(map.is_ancestor_or_self(&root, &grand));
+    }
+
+    #[test]
+    fn test_is_ancestor_or_self_reversed_is_false() {
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        let (root, child, grand) = find_hierarchy_triple(&map);
+        // A descendant is never the ancestor of its own parent chain.
+        assert!(!map.is_ancestor_or_self(&child, &root));
+        assert!(!map.is_ancestor_or_self(&grand, &child));
+        assert!(!map.is_ancestor_or_self(&grand, &root));
+    }
+
+    #[test]
+    fn test_is_ancestor_or_self_sibling_is_unrelated() {
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        // Find two sibling roots (they share parent_id = None but are not
+        // ancestors of each other).
+        let roots = map.root_nodes();
+        if roots.len() >= 2 {
+            let a = roots[0].id.clone();
+            let b = roots[1].id.clone();
+            assert!(!map.is_ancestor_or_self(&a, &b));
+            assert!(!map.is_ancestor_or_self(&b, &a));
+        }
+        // Also check: the first root and some node whose parent chain does not
+        // include it (pick an unrelated subtree if available).
+        // The above two-sibling-roots case is sufficient for testament.
     }
 }
