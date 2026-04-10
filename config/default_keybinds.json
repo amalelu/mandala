@@ -1,0 +1,11 @@
+{
+  "_comment": "Default Mandala keybindings. Copy this file to $XDG_CONFIG_HOME/mandala/keybinds.json (or $HOME/.config/mandala/keybinds.json) to override, or pass it explicitly with --keybinds <path>. On WASM, serialize a JSON object like this into the ?keybinds=<url-encoded-json> query param, or store it under localStorage['mandala_keybinds']. Missing fields fall back to the built-in defaults, so you only need to list the actions you want to change. Bindings are strings like 'Ctrl+Z', 'Shift+Alt+Delete', or 'Escape'. Modifier aliases: cmd/command/meta/super all mean Ctrl; option means Alt. Each action accepts a list, so you can bind multiple keys to the same action.",
+
+  "undo": ["Ctrl+Z", "Undo"],
+  "enter_reparent_mode": ["Ctrl+P"],
+  "enter_connect_mode": ["Ctrl+D"],
+  "delete_selection": ["Delete"],
+  "cancel_mode": ["Escape"],
+  "create_orphan_node": ["Ctrl+N"],
+  "orphan_selection": ["Ctrl+O"]
+}
