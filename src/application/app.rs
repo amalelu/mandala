@@ -11,7 +11,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::{event_loop::EventLoop, window::Window};
 
 use crate::application::common::{InputMode, RenderDecree, WindowMode};
-use crate::application::document::{MindMapDocument, SelectionState, UndoAction, hit_test, apply_selection_highlight, apply_drag_delta};
+use crate::application::document::{MindMapDocument, SelectionState, UndoAction, hit_test, rect_select, apply_selection_highlight, apply_drag_delta};
 use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;
@@ -35,6 +35,13 @@ enum DragState {
         pending_delta: Vec2,
         /// Whether dragging only the individual node(s) (alt+drag) vs subtrees.
         individual: bool,
+    },
+    /// Shift+drag on empty space: rubber-band selection rectangle.
+    SelectingRect {
+        /// Canvas-space corner where the drag started.
+        start_canvas: Vec2,
+        /// Canvas-space corner at current cursor position.
+        current_canvas: Vec2,
     },
 }
 
@@ -211,6 +218,19 @@ impl Application {
                                             rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                         }
                                     }
+                                    DragState::SelectingRect { start_canvas, current_canvas } => {
+                                        // Finalize: select all nodes in the rectangle
+                                        renderer.clear_overlay_buffers();
+                                        if let (Some(doc), Some(tree)) = (document.as_mut(), mindmap_tree.as_ref()) {
+                                            let hits = rect_select(start_canvas, current_canvas, tree);
+                                            doc.selection = match hits.len() {
+                                                0 => SelectionState::None,
+                                                1 => SelectionState::Single(hits.into_iter().next().unwrap()),
+                                                _ => SelectionState::Multi(hits),
+                                            };
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
+                                    }
                                     DragState::Panning | DragState::None => {}
                                 }
                             }
@@ -295,6 +315,18 @@ impl Application {
                                         pending_delta: Vec2::ZERO,
                                         individual: alt_pressed,
                                     };
+                                } else if shift_pressed {
+                                    // Shift+drag on empty space: rubber-band selection
+                                    let start_canvas = renderer.screen_to_canvas(
+                                        start_pos.0 as f32, start_pos.1 as f32,
+                                    );
+                                    let current_canvas = renderer.screen_to_canvas(
+                                        cursor_pos.0 as f32, cursor_pos.1 as f32,
+                                    );
+                                    drag_state = DragState::SelectingRect {
+                                        start_canvas,
+                                        current_canvas,
+                                    };
                                 } else {
                                     drag_state = DragState::Panning;
                                     let dx = cursor_pos.0 - prev_pos.0;
@@ -302,6 +334,11 @@ impl Application {
                                     renderer.process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
                                 }
                             }
+                        }
+                        DragState::SelectingRect { ref mut current_canvas, .. } => {
+                            *current_canvas = renderer.screen_to_canvas(
+                                cursor_pos.0 as f32, cursor_pos.1 as f32,
+                            );
                         }
                         DragState::None => {}
                     }
@@ -352,6 +389,28 @@ impl Application {
                                 renderer.rebuild_buffers_from_tree(&tree.tree);
                             }
                             *pending_delta = Vec2::ZERO;
+                        }
+                    }
+                    // Update selection rectangle overlay + preview highlight (once per frame)
+                    if let DragState::SelectingRect { start_canvas, current_canvas } = &drag_state {
+                        let sc = *start_canvas;
+                        let cc = *current_canvas;
+                        let min = Vec2::new(sc.x.min(cc.x), sc.y.min(cc.y));
+                        let max = Vec2::new(sc.x.max(cc.x), sc.y.max(cc.y));
+                        renderer.rebuild_selection_rect_overlay(min, max);
+
+                        // Preview: rebuild tree with intersecting nodes highlighted
+                        if let Some(doc) = document.as_ref() {
+                            let mut new_tree = doc.build_tree();
+                            let hits = rect_select(sc, cc, &new_tree);
+                            let preview_selection = match hits.len() {
+                                0 => SelectionState::None,
+                                1 => SelectionState::Single(hits.into_iter().next().unwrap()),
+                                _ => SelectionState::Multi(hits),
+                            };
+                            apply_selection_highlight(&mut new_tree, &preview_selection);
+                            renderer.rebuild_buffers_from_tree(&new_tree.tree);
+                            mindmap_tree = Some(new_tree);
                         }
                     }
                     // Drive the render loop each frame

@@ -210,6 +210,33 @@ pub fn hit_test(canvas_pos: Vec2, tree: &MindMapTree) -> Option<String> {
     best.map(|(id, _)| id)
 }
 
+/// Find all node IDs whose bounds intersect the given canvas-space rectangle.
+/// The rectangle is defined by two opposite corners (min and max are computed internally).
+pub fn rect_select(corner_a: Vec2, corner_b: Vec2, tree: &MindMapTree) -> Vec<String> {
+    let min_x = corner_a.x.min(corner_b.x);
+    let min_y = corner_a.y.min(corner_b.y);
+    let max_x = corner_a.x.max(corner_b.x);
+    let max_y = corner_a.y.max(corner_b.y);
+
+    let mut hits = Vec::new();
+    for (mind_id, &node_id) in &tree.node_map {
+        let area = match tree.tree.arena.get(node_id).and_then(|n| n.get().glyph_area()) {
+            Some(a) => a,
+            None => continue,
+        };
+        let x = area.position.x.0;
+        let y = area.position.y.0;
+        let w = area.render_bounds.x.0;
+        let h = area.render_bounds.y.0;
+
+        // AABB overlap test
+        if x + w >= min_x && x <= max_x && y + h >= min_y && y <= max_y {
+            hits.push(mind_id.clone());
+        }
+    }
+    hits
+}
+
 /// Apply selection highlight to the tree by modifying selected nodes' color regions.
 /// Call this after `build_tree()` and before passing the tree to the renderer.
 /// The tree is modified in-place; rebuilding restores original colors from the MindMap model.
@@ -597,5 +624,37 @@ mod tests {
         let child_new_x = doc.mindmap.nodes.get(child_id).unwrap().position.x;
         assert!((child_new_x - (child_orig_x + 50.0)).abs() < 0.001,
             "Child should be moved exactly once, not twice");
+    }
+
+    #[test]
+    fn test_rect_select_finds_nodes_in_region() {
+        let tree = load_test_tree();
+        // Get position/bounds of "Lord God" to build a rect that contains it
+        let node_id = *tree.node_map.get("348068464").unwrap();
+        let area = tree.tree.arena.get(node_id).unwrap().get().glyph_area().unwrap();
+        let x = area.position.x.0;
+        let y = area.position.y.0;
+        let w = area.render_bounds.x.0;
+        let h = area.render_bounds.y.0;
+
+        // A rect that exactly contains this node should select it
+        let hits = rect_select(
+            Vec2::new(x - 1.0, y - 1.0),
+            Vec2::new(x + w + 1.0, y + h + 1.0),
+            &tree,
+        );
+        assert!(hits.contains(&"348068464".to_string()), "Should find Lord God in rect");
+    }
+
+    #[test]
+    fn test_rect_select_misses_distant_nodes() {
+        let tree = load_test_tree();
+        // A rect far from any node should select nothing
+        let hits = rect_select(
+            Vec2::new(-99999.0, -99999.0),
+            Vec2::new(-99998.0, -99998.0),
+            &tree,
+        );
+        assert!(hits.is_empty(), "Should find no nodes in distant rect");
     }
 }
