@@ -63,8 +63,10 @@ The application has two layers:
 - **Mutation-frequency throttle** — under load, the `AboutToWait` drag path drains its accumulated `pending_delta` every Nth frame instead of every frame, where N is a moving-average-driven self-tuning multiplier that holds per-frame work time under the screen refresh budget. Input accumulation stays snappy (every mouse event still folds into `pending_delta`); the dragged node advances in chunks under stress, catching up to the cursor every N frames. Healthy load = N = 1 (no throttling). Implements the governing-invariant half of the connection/border render-cost work.
 - **Viewport culling on connection glyphs** — `rebuild_connection_buffers` now computes the visible canvas rect once per call (with a `font_size` margin on each side) and skips cosmic-text buffer creation for any glyph position outside it. The dominant per-frame cost in the connection rebuild path is cosmic-text shaping; for a long cross-link most of its sample positions are off-screen during drag, so skipping those drops per-frame work by ~48× in the user's long-connection stutter scenario without changing visible output.
 - **Keyed incremental rebuild for connections and borders** — Phase 4(B) of the connection-render cost work. Two targeted caches keyed on stable identity (edges: `(from_id, to_id, edge_type)` via `SceneConnectionCache` in `lib/baumhard/src/mindmap/scene_cache.rs`; nodes: `id`). During drag, `build_scene_with_cache` skips `sample_path` + control-point/Bezier work for edges whose endpoints did not move — the expensive per-frame cost that Phase A could not touch — and the `Renderer` keeps keyed `HashMap`s for `border_buffers` and `connection_buffers` so unmoved entries reuse their shaped cosmic-text buffers across frames, patched in place via `pos` only. The clip filter (`point_inside_any_node`) still re-runs against the current frame's node AABBs for cached edges, so a stable long cross-link still clips correctly around a moved-but-unrelated third node (governing invariant preserved). Selection changes apply the highlight color override at read time, so flipping selection doesn't invalidate the cache. Camera pan/zoom clears only the renderer-side connection map (viewport cull output changes) while leaving the document-side geometry cache intact. Each drag starts with a fresh cache to handle inter-drag structural edits; the first drag frame is a full rebuild and subsequent frames are incremental. Eliminates the ~1,700 bezier evaluations / frame / long edge that Phase A left on the table — the upstream geometry cost, not just the downstream shaping cost.
+- **Edge reshape via grab-handles** — Session 6C. When a connection is selected, the scene builder emits small cyan `◆` handles at both anchor endpoints and either (a) the midpoint of straight edges or (b) each stored control point of curved edges. Clicking a handle and dragging past the 5 px threshold enters `DragState::DraggingEdgeHandle`, which per-frame drains the accumulated cursor delta into the model edge in place: control-point handles write an `(x, y)` offset from the relevant node center, anchor handles snap to whichever side (top/right/bottom/left) of the node is closest to the cursor, and the straight-edge midpoint handle inserts a fresh control point on first drain and promotes itself to `ControlPoint(0)` for subsequent frames — the "curve a straight line" gesture. `scene_cache.invalidate_edge` is called per frame for the single dirty edge, keeping the Phase B incremental rebuild path hot for everything else. On release, the pre-drag snapshot is pushed as `UndoAction::EditEdge { index, before }`, so Ctrl+Z restores any reshape in one hop.
+- **Command palette** — Session 6C. Press `/` to open a glyph-rendered modal listing context-aware actions for the current selection. Type to fuzzy-filter (case-insensitive subsequence with a word-boundary bonus), Up/Down navigates, Enter executes, Esc / click-outside closes. While open, the palette steals all keyboard input so existing hotkeys don't fire. The global action registry is a static slice of `PaletteAction { id, label, description, tags, applicable, execute }` in `src/application/palette.rs`; Session 6C ships eleven entries — "Reset connection to straight" (hidden by its applicability predicate for edges that are already straight) and two groups of five anchor setters ("Set from-anchor: Auto/Top/Right/Bottom/Left", same for to-anchor). Each action's execute mutates the document through the new `reset_edge_to_straight` / `set_edge_anchor` helpers, which snapshot the edge and push `UndoAction::EditEdge` so undo works identically to the drag-handle path. The palette overlay renders as cosmic-text buffers in screen coordinates above everything else.
 - **Multi-target** — native + WASM builds
-- **298 tests passing**
+- **366 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -432,19 +434,37 @@ Ctrl+Z to undo. `./test.sh` passes (196 tests).
 nodes (green preview), click to create a cross-link edge. Ctrl+Z undoes.
 Esc cancels. `./test.sh` passes (196 tests total at end of Session 6A+B).
 
-### Session 6C: Connection path manipulation
+### Session 6C: Connection path manipulation + command palette
 
-**What**: Edit connection paths, control points, and anchor positions.
+**What**: Edit connection paths, control points, and anchor positions
+via direct manipulation (grab-handles on the selected edge), plus a
+new context-aware command palette that hosts long-tail actions
+without burning a hotkey per action. The palette is the UI answer to
+"we can't have a single shortcut for every action" — existing hotkeys
+stay, and new actions land in the palette instead.
 
-- [ ] Drag control points to curve existing straight connections (adds Bezier control points)
-- [ ] Drag existing control points to reshape curved connections
-- [ ] Visual handles: render draggable control point markers on selected connections
-- [ ] Change anchor points: drag connection endpoints to different sides of a node (top/right/bottom/left)
-- [ ] Snap anchor to nearest edge midpoint on release
-- [ ] Reset connection to straight line (remove control points)
-- [ ] Undo support for all path modifications
+- [x] Drag control points to curve existing straight connections (adds Bezier control points via the "Midpoint" handle gesture)
+- [x] Drag existing control points to reshape curved connections
+- [x] Visual handles: render draggable control-point markers on selected connections (cyan `◆` glyphs at anchors, CPs, and a midpoint for straight edges)
+- [x] Change anchor points: drag connection endpoints to different sides of a node (top/right/bottom/left); during drag, the anchor snaps to whichever side midpoint is closest to the cursor
+- [x] Snap anchor to nearest edge midpoint on release (falls out of the drag path above — the stored value is always one of 1..=4)
+- [x] Reset connection to straight line via command palette action ("Reset connection to straight"), applicability predicate hides it for already-straight edges
+- [x] Undo support for all path modifications via new `UndoAction::EditEdge { index, before }` variant; handle drags, palette reset, and palette anchor changes all use it
+- [x] `DragState::DraggingEdgeHandle` variant with `Pending`→handle-hit precedence over node hits; per-frame drain loop mirrors `MovingNode`, writes model in place, invalidates only the dirty edge in the scene cache
+- [x] Command palette infrastructure in `src/application/palette.rs`: `PaletteAction` (id, label, description, tags, applicable, execute), `PaletteContext`/`PaletteEffects`, `fuzzy_score` subsequence matcher with word-boundary bonus, `filter_actions` sorted by score descending
+- [x] Eleven initial actions: "Reset connection to straight" + "Set from-anchor: Auto/Top/Right/Bottom/Left" + "Set to-anchor: Auto/Top/Right/Bottom/Left"
+- [x] Palette UI: `/` opens it, glyph-rendered box frame (reuses box-drawing border chars) with a `/query▌` input line and one row per filtered action, selected row prefixed with `▸` in cyan; Up/Down navigates, Enter executes, Esc or any click outside closes; steals all keyboard input while open so Ctrl+Z etc. don't leak through
+- [x] 68 new tests (13 handle-drag + edge edit helpers + undo, 5 scene-builder handle emission, 11 palette fuzzy/registry/applicability, 39 covering the broader surface)
 
-**Verify**: Connections can be curved, reshaped, and anchor points moved
+**Key files**:
+- `lib/baumhard/src/mindmap/scene_builder.rs` — `EdgeHandleElement`, `EdgeHandleKind`, `build_edge_handles`, `RenderScene::edge_handles` field, emission inside `build_scene_with_cache` when `selected_edge` is `Some`
+- `src/application/document.rs` — `hit_test_edge_handle`, `reset_edge_to_straight`, `set_edge_anchor`, `edge_index`, `UndoAction::EditEdge` + undo handler
+- `src/application/renderer.rs` — `edge_handle_buffers` field + `rebuild_edge_handle_buffers`; `palette_overlay_buffers` + `rebuild_palette_overlay_buffers` with `PaletteOverlayGeometry`/`PaletteOverlayRow`; both wired into the render pass
+- `src/application/app.rs` — `DragState::DraggingEdgeHandle`, extended `Pending` with `hit_edge_handle`, `apply_edge_handle_drag` helper, `nearest_anchor_side` snap helper, `PaletteState` enum, `handle_palette_key` + `rebuild_palette_overlay`, `/` opening, click-outside-to-close
+- `src/application/palette.rs` — **new** module with the `PaletteAction` registry, fuzzy-match, filter, and 11 Session 6C actions
+- `src/application/mod.rs` — expose the new `palette` module
+
+**Verify**: `./test.sh` green (366 tests, +68 new). `cargo run -- maps/testament.mindmap.json`, select a connection, drag its midpoint handle to curve it, drag a control-point handle to reshape, drag an anchor to snap to a different side. Press `/`, type "reset", Enter — the edge returns to straight. Press `/`, type "from top", Enter — source anchor snaps to the top. Ctrl+Z after any of the above restores the previous edge state.
 
 ### Session 6D: Connection style and label editing
 

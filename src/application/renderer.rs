@@ -38,6 +38,28 @@ use baumhard::mindmap::scene_cache::EdgeKey;
 use glam::Vec2;
 use std::path::Path;
 
+/// Session 6C: pre-layout palette data handed from the app event
+/// loop to the renderer every time the palette state changes. The
+/// renderer turns it into cosmic-text buffers in
+/// `rebuild_palette_overlay_buffers`. Kept as a plain struct (no
+/// rendering primitives) so unit tests can construct one trivially.
+pub struct PaletteOverlayGeometry {
+    /// Current query text, shown after the `/` prefix on the input
+    /// line. Empty when the palette just opened.
+    pub query_text: String,
+    /// One entry per currently-filtered action, in display order.
+    pub rows: Vec<PaletteOverlayRow>,
+    /// Which row is highlighted. Index into `rows`.
+    pub selected_row: usize,
+}
+
+/// One row in the palette overlay — label + description, matching
+/// the fields on `PaletteAction`.
+pub struct PaletteOverlayRow {
+    pub label: String,
+    pub description: String,
+}
+
 pub struct Renderer {
     instance: Instance,
     surface: Surface<'static>,
@@ -80,6 +102,16 @@ pub struct Renderer {
     /// drag frames — the big win for the "long cross-link, dragging
     /// something else" scenario.
     connection_buffers: FxHashMap<EdgeKey, Vec<MindMapTextBuffer>>,
+    /// Edge grab-handle buffers for Session 6C's connection reshape
+    /// surface. Populated only when an edge is selected; rebuilt
+    /// fresh every time the scene is rebuilt with a selected edge.
+    /// Bounded cost (≤ 5 glyph buffers per selected edge) so no
+    /// keyed cache is warranted.
+    edge_handle_buffers: Vec<MindMapTextBuffer>,
+    /// Session 6C: command palette overlay buffers. Rendered above
+    /// everything else in screen coordinates. Populated only when
+    /// the palette is open; cleared otherwise.
+    palette_overlay_buffers: Vec<MindMapTextBuffer>,
     /// Temporary overlay buffers (e.g., selection rectangle). Camera-transformed.
     overlay_buffers: Vec<MindMapTextBuffer>,
     /// Set whenever the camera's viewport rect changes (pan, zoom,
@@ -171,6 +203,8 @@ impl Renderer {
             mindmap_buffers: Default::default(),
             border_buffers: FxHashMap::default(),
             connection_buffers: FxHashMap::default(),
+            edge_handle_buffers: Vec::new(),
+            palette_overlay_buffers: Vec::new(),
             overlay_buffers: Vec::new(),
             connection_viewport_dirty: false,
             connection_geometry_dirty: false,
@@ -443,6 +477,7 @@ impl Renderer {
         let mut text_areas: Vec<TextArea> = self.mindmap_buffers.values()
             .chain(self.border_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
+            .chain(self.edge_handle_buffers.iter())
             .chain(self.overlay_buffers.iter())
             .filter_map(|tb| {
                 let canvas_pos = Vec2::new(tb.pos.0, tb.pos.1);
@@ -467,6 +502,21 @@ impl Renderer {
         for text_buffer in self.buffer_cache.values() {
             text_areas.push(TextArea {
                 buffer: text_buffer.buffer(),
+                left: text_buffer.pos.0,
+                top: text_buffer.pos.1,
+                scale: 1.0,
+                bounds: vp_bounds,
+                default_color,
+                custom_glyphs: &[],
+            });
+        }
+
+        // Palette overlay (screen-space, no camera transform) —
+        // drawn last so it sits on top of the mindmap. Skipped
+        // when the palette is closed and the buffer list is empty.
+        for text_buffer in self.palette_overlay_buffers.iter() {
+            text_areas.push(TextArea {
+                buffer: &text_buffer.buffer,
                 left: text_buffer.pos.0,
                 top: text_buffer.pos.1,
                 scale: 1.0,
@@ -864,6 +914,195 @@ impl Renderer {
     pub fn rebuild_connection_buffers(&mut self, connection_elements: &[ConnectionElement]) {
         self.connection_buffers.clear();
         self.rebuild_connection_buffers_keyed(connection_elements, None);
+    }
+
+    /// Rebuild the edge grab-handle overlay buffers. Called after every
+    /// scene build — the handles are bounded (≤ 5 per selected edge)
+    /// and always rebuilt from scratch, so no keyed cache is used.
+    /// When `handles` is empty (nothing selected or selection is a
+    /// node/None) this clears the buffer list and returns.
+    pub fn rebuild_edge_handle_buffers(
+        &mut self,
+        handles: &[baumhard::mindmap::scene_builder::EdgeHandleElement],
+    ) {
+        self.edge_handle_buffers.clear();
+        if handles.is_empty() {
+            return;
+        }
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+        for handle in handles {
+            let cosmic_color = parse_hex_color(&handle.color)
+                .unwrap_or(cosmic_text::Color::rgba(0, 229, 255, 255));
+            let attrs = Attrs::new()
+                .color(cosmic_color)
+                .metrics(cosmic_text::Metrics::new(handle.font_size_pt, handle.font_size_pt));
+
+            // Center the glyph on the handle position. `approx_char_width`
+            // keeps the math consistent with the connection glyph layout.
+            let half_w = handle.font_size_pt * 0.3;
+            let half_h = handle.font_size_pt * 0.5;
+            let pos = (handle.position.0 - half_w, handle.position.1 - half_h);
+            let bounds = (handle.font_size_pt, handle.font_size_pt);
+
+            self.edge_handle_buffers.push(create_border_buffer(
+                &mut font_system,
+                &handle.glyph,
+                &attrs,
+                handle.font_size_pt,
+                pos,
+                bounds,
+            ));
+        }
+    }
+
+    /// Rebuild the command palette overlay buffers. When
+    /// `geometry` is `None`, the palette is closed — clear the
+    /// buffer list and return. When `Some`, lay out a glyph-rendered
+    /// frame at a fixed screen position: a box-drawing border, a
+    /// query line with a trailing cursor, and one row per filtered
+    /// action.
+    ///
+    /// Everything is positioned in screen coordinates (the render
+    /// pass draws `palette_overlay_buffers` with `scale = 1.0`), so
+    /// the palette stays a fixed size regardless of canvas zoom.
+    pub fn rebuild_palette_overlay_buffers(
+        &mut self,
+        geometry: Option<&PaletteOverlayGeometry>,
+    ) {
+        self.palette_overlay_buffers.clear();
+        let geometry = match geometry {
+            Some(g) => g,
+            None => return,
+        };
+
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        // Layout constants, in screen-space pixels. Sized to be
+        // legible at a typical desktop DPI without overlaying too
+        // much of the map.
+        let font_size: f32 = 16.0;
+        let char_width = font_size * 0.6;
+        let row_height = font_size * 1.5;
+        let frame_width: f32 = 560.0;
+        let inner_padding: f32 = 12.0;
+        let max_rows_shown: usize = 10;
+        let shown_rows = geometry.rows.len().min(max_rows_shown);
+        let frame_height = row_height * (2.0 + shown_rows as f32) + inner_padding * 2.0;
+
+        // Center horizontally, fixed offset from the top.
+        let screen_w = self.config.width as f32;
+        let left = ((screen_w - frame_width) * 0.5).max(0.0);
+        let top: f32 = 80.0;
+
+        let palette_color = cosmic_text::Color::rgba(0, 229, 255, 255); // cyan
+        let text_color = cosmic_text::Color::rgba(235, 235, 235, 255);
+        let dim_color = cosmic_text::Color::rgba(150, 150, 160, 255);
+        let selected_color = cosmic_text::Color::rgba(0, 229, 255, 255);
+
+        // Box-drawing border around the frame.
+        let inner_cols = ((frame_width - char_width * 2.0) / char_width).max(1.0) as usize;
+        let top_border = format!(
+            "\u{256D}{}\u{256E}",
+            "\u{2500}".repeat(inner_cols),
+        );
+        let bottom_border = format!(
+            "\u{2570}{}\u{256F}",
+            "\u{2500}".repeat(inner_cols),
+        );
+        let side = "\u{2502}";
+
+        let border_attrs = Attrs::new()
+            .color(palette_color)
+            .metrics(cosmic_text::Metrics::new(font_size, font_size));
+
+        self.palette_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &top_border,
+            &border_attrs,
+            font_size,
+            (left, top),
+            (frame_width, font_size * 1.5),
+        ));
+        self.palette_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &bottom_border,
+            &border_attrs,
+            font_size,
+            (left, top + frame_height),
+            (frame_width, font_size * 1.5),
+        ));
+        let inner_rows = ((frame_height / font_size).max(1.0) as usize).saturating_sub(1);
+        let side_text: String = std::iter::repeat_n(format!("{side}\n"), inner_rows).collect();
+        self.palette_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &side_text,
+            &border_attrs,
+            font_size,
+            (left, top + font_size),
+            (char_width, frame_height),
+        ));
+        self.palette_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &side_text,
+            &border_attrs,
+            font_size,
+            (left + frame_width - char_width, top + font_size),
+            (char_width, frame_height),
+        ));
+
+        // Query line: "/query|" where "|" is a cursor glyph.
+        let query_line = format!("/{}\u{258C}", geometry.query_text);
+        let query_attrs = Attrs::new()
+            .color(text_color)
+            .metrics(cosmic_text::Metrics::new(font_size, font_size));
+        self.palette_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &query_line,
+            &query_attrs,
+            font_size,
+            (left + inner_padding + char_width, top + inner_padding),
+            (frame_width - inner_padding * 2.0 - char_width * 2.0, row_height),
+        ));
+
+        // Filtered rows, each labelled and dim-described. Selected
+        // row gets a cyan prefix glyph and cyan label color.
+        let row_base_y = top + inner_padding + row_height;
+        for (i, row) in geometry.rows.iter().take(shown_rows).enumerate() {
+            let is_selected = i == geometry.selected_row;
+            let prefix = if is_selected { "\u{25B8} " } else { "  " };
+            let row_attrs = Attrs::new()
+                .color(if is_selected { selected_color } else { text_color })
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+            let label_line = format!("{prefix}{}", row.label);
+            let row_y = row_base_y + row_height * (i as f32 + 1.0);
+            self.palette_overlay_buffers.push(create_border_buffer(
+                &mut font_system,
+                &label_line,
+                &row_attrs,
+                font_size,
+                (left + inner_padding + char_width, row_y),
+                (frame_width - inner_padding * 2.0 - char_width * 2.0, row_height),
+            ));
+            let desc_attrs = Attrs::new()
+                .color(dim_color)
+                .metrics(cosmic_text::Metrics::new(font_size * 0.8, font_size * 0.8));
+            let desc_line = format!("    {}", row.description);
+            self.palette_overlay_buffers.push(create_border_buffer(
+                &mut font_system,
+                &desc_line,
+                &desc_attrs,
+                font_size * 0.8,
+                (
+                    left + inner_padding + char_width,
+                    row_y + font_size * 0.9,
+                ),
+                (frame_width - inner_padding * 2.0 - char_width * 2.0, row_height),
+            ));
+        }
     }
 
     /// Keyed connection rebuild. See [`rebuild_border_buffers_keyed`] for

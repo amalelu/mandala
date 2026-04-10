@@ -23,6 +23,10 @@ use crate::application::document::{
 };
 use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::application::palette::{
+    PaletteContext, PaletteEffects, filter_actions, PALETTE_ACTIONS,
+};
 use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;
@@ -34,6 +38,37 @@ use baumhard::mindmap::custom_mutation::{PlatformContext, Trigger};
 /// stays visually stable across zoom levels.
 #[cfg(not(target_arch = "wasm32"))]
 const EDGE_HIT_TOLERANCE_PX: f32 = 8.0;
+
+/// Screen-space click tolerance (in pixels) for edge grab-handle hit
+/// testing in Session 6C. Slightly larger than the edge-path
+/// tolerance above because handles are point-like and need a bit
+/// more grab-area to feel forgiving.
+#[cfg(not(target_arch = "wasm32"))]
+const EDGE_HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
+
+/// Session 6C command palette state. When open, all keyboard input
+/// is routed to the palette (query editing, navigation, execute,
+/// close) and regular hotkeys are suppressed until it closes.
+#[cfg(not(target_arch = "wasm32"))]
+enum PaletteState {
+    Closed,
+    Open {
+        query: String,
+        /// Indices into `PALETTE_ACTIONS`, sorted by fuzzy score
+        /// descending. Rebuilt on every keystroke.
+        filtered: Vec<usize>,
+        /// Which row of `filtered` is highlighted; wraps via
+        /// Up/Down.
+        selected: usize,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PaletteState {
+    fn is_open(&self) -> bool {
+        matches!(self, PaletteState::Open { .. })
+    }
+}
 
 /// Tracks the high-level interaction mode. Normal handles the usual
 /// select/drag/pan flow; Reparent mode is entered via Ctrl+P and captures
@@ -59,7 +94,18 @@ enum DragState {
     /// No drag in progress.
     None,
     /// Mouse is down but hasn't moved past the drag threshold yet.
-    Pending { start_pos: (f64, f64), hit_node: Option<String> },
+    Pending {
+        start_pos: (f64, f64),
+        hit_node: Option<String>,
+        /// If an edge was selected at mouse-down time and the cursor
+        /// landed on one of that edge's grab-handles, this records
+        /// which handle the user is about to drag. Populated in
+        /// `MouseInput::Pressed`, consumed at the threshold-cross
+        /// transition in `CursorMoved`. Takes precedence over
+        /// `hit_node` — clicking a handle always wins over clicking
+        /// the node behind it.
+        hit_edge_handle: Option<(EdgeRef, baumhard::mindmap::scene_builder::EdgeHandleKind)>,
+    },
     /// Dragging to pan the camera (started on empty space).
     Panning,
     /// Dragging node(s) to reposition them.
@@ -72,6 +118,33 @@ enum DragState {
         pending_delta: Vec2,
         /// Whether dragging only the individual node(s) (alt+drag) vs subtrees.
         individual: bool,
+    },
+    /// Dragging a grab-handle on the selected edge to reshape it.
+    /// Session 6C: handles come in four kinds (see
+    /// `scene_builder::EdgeHandleKind`): two anchor endpoints, any
+    /// existing control points, and a midpoint handle on straight
+    /// edges that curves them into a quadratic Bezier on first drag.
+    DraggingEdgeHandle {
+        edge_ref: EdgeRef,
+        /// Which handle is being dragged. `Midpoint` is only the
+        /// initial kind — after the first drain frame inserts a
+        /// fresh control point, this mutates in place to
+        /// `ControlPoint(0)` so subsequent frames take the CP path.
+        handle: baumhard::mindmap::scene_builder::EdgeHandleKind,
+        /// Full snapshot of the edge at drag start, for undo and
+        /// for checking whether the drag actually changed anything
+        /// on release (single-pixel no-op shouldn't leave undo
+        /// droppings).
+        original: baumhard::mindmap::model::MindEdge,
+        /// Canvas-space position of the handle at drag start. Used
+        /// to recompute the new CP position from an absolute cursor
+        /// location instead of an accumulated delta, which avoids
+        /// drift for non-CP handles.
+        start_handle_pos: Vec2,
+        /// Accumulated delta since drag start.
+        total_delta: Vec2,
+        /// Delta accumulated since last frame, applied in AboutToWait.
+        pending_delta: Vec2,
     },
     /// Shift+drag on empty space: rubber-band selection rectangle.
     SelectingRect {
@@ -177,6 +250,7 @@ impl Application {
         let mut cursor_pos: (f64, f64) = (0.0, 0.0);
         let mut drag_state = DragState::None;
         let mut app_mode = AppMode::Normal;
+        let mut palette_state = PaletteState::Closed;
         let mut hovered_node: Option<String> = None;
         let mut shift_pressed = false;
         let mut alt_pressed = false;
@@ -231,6 +305,15 @@ impl Application {
                     event: WindowEvent::MouseInput { state, button, .. },
                     ..
                 } => {
+                    // Session 6C: the palette swallows mouse clicks
+                    // as a close gesture. Clicking anywhere while
+                    // open dismisses the palette without running
+                    // an action, mirroring Escape.
+                    if palette_state.is_open() && state == ElementState::Pressed {
+                        palette_state = PaletteState::Closed;
+                        renderer.rebuild_palette_overlay_buffers(None);
+                        return;
+                    }
                     match button {
                         MouseButton::Middle => {
                             if state == ElementState::Pressed {
@@ -268,16 +351,38 @@ impl Application {
                                 // Pressed: swallow
                             } else if state == ElementState::Pressed {
                                 // Hit test to determine if clicking on a node
+                                let canvas_pos = renderer.screen_to_canvas(
+                                    cursor_pos.0 as f32,
+                                    cursor_pos.1 as f32,
+                                );
                                 let hit_node = mindmap_tree.as_ref().and_then(|tree| {
-                                    let canvas_pos = renderer.screen_to_canvas(
-                                        cursor_pos.0 as f32,
-                                        cursor_pos.1 as f32,
-                                    );
                                     hit_test(canvas_pos, tree)
                                 });
+                                // If an edge is currently selected, check
+                                // whether the cursor is over one of its
+                                // grab-handles. This check has precedence
+                                // over the node hit at threshold-cross
+                                // time — see the `Pending` → drag
+                                // transition below. Returns `None` if no
+                                // edge is selected, nothing is in range,
+                                // or the hit test infrastructure isn't
+                                // ready yet.
+                                let hit_edge_handle = match document.as_ref() {
+                                    Some(doc) => match &doc.selection {
+                                        SelectionState::Edge(er) => {
+                                            let tol = EDGE_HANDLE_HIT_TOLERANCE_PX
+                                                * renderer.canvas_per_pixel();
+                                            doc.hit_test_edge_handle(canvas_pos, er, tol)
+                                                .map(|(kind, _pos)| (er.clone(), kind))
+                                        }
+                                        _ => None,
+                                    },
+                                    None => None,
+                                };
                                 drag_state = DragState::Pending {
                                     start_pos: cursor_pos,
                                     hit_node,
+                                    hit_edge_handle,
                                 };
                             } else {
                                 // Released
@@ -321,6 +426,39 @@ impl Application {
                                         // Drag ended — reset the throttle so the next drag
                                         // starts at n = 1 without inheriting any residual
                                         // throttling from this one.
+                                        mutation_throttle.reset();
+                                    }
+                                    DragState::DraggingEdgeHandle { edge_ref, handle, original, start_handle_pos, total_delta, pending_delta: _ } => {
+                                        // The drain loop has been writing
+                                        // each new edge state directly
+                                        // into the model. Before release,
+                                        // flush one last write using the
+                                        // full `total_delta` (independent
+                                        // of any throttled pending drain)
+                                        // so the final committed state
+                                        // matches the cursor position
+                                        // exactly. Reaching this branch
+                                        // means the drag threshold was
+                                        // crossed, so push an EditEdge
+                                        // undo with the pre-drag snapshot
+                                        // unconditionally.
+                                        if let Some(doc) = document.as_mut() {
+                                            apply_edge_handle_drag(
+                                                doc,
+                                                &edge_ref,
+                                                handle,
+                                                start_handle_pos,
+                                                total_delta,
+                                            );
+                                            if let Some(idx) = doc.edge_index(&edge_ref) {
+                                                doc.undo_stack.push(UndoAction::EditEdge {
+                                                    index: idx,
+                                                    before: original,
+                                                });
+                                                doc.dirty = true;
+                                            }
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
                                         mutation_throttle.reset();
                                     }
                                     DragState::SelectingRect { start_canvas, current_canvas } => {
@@ -429,11 +567,70 @@ impl Application {
                             *total_delta += delta;
                             *pending_delta += delta;
                         }
-                        DragState::Pending { start_pos, hit_node } => {
+                        DragState::DraggingEdgeHandle { total_delta, pending_delta, .. } => {
+                            // Same accumulation pattern as MovingNode —
+                            // actual edge mutation + buffer rebuild
+                            // happens in `AboutToWait`. Keeps the
+                            // CursorMoved path cheap so fast mouse
+                            // motion doesn't bottleneck on scene builds.
+                            let old_canvas = renderer.screen_to_canvas(prev_pos.0 as f32, prev_pos.1 as f32);
+                            let new_canvas = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
+                            let delta = new_canvas - old_canvas;
+
+                            *total_delta += delta;
+                            *pending_delta += delta;
+                        }
+                        DragState::Pending { start_pos, hit_node, hit_edge_handle } => {
                             let dist_x = cursor_pos.0 - start_pos.0;
                             let dist_y = cursor_pos.1 - start_pos.1;
                             if dist_x * dist_x + dist_y * dist_y > 25.0 {
-                                // Past threshold — decide: move node or pan camera
+                                // Past threshold — decide what kind of drag
+                                // this is. Handle grabs take precedence over
+                                // node hits so that clicking a control-point
+                                // handle that happens to overlap a node
+                                // still enters the reshape flow.
+                                if let Some((edge_ref, handle_kind)) = hit_edge_handle.take() {
+                                    // Grab the pre-edit snapshot + start
+                                    // position so the drain loop can do
+                                    // absolute-positioning math.
+                                    if let Some(doc) = document.as_mut() {
+                                        if let Some(original) = doc
+                                            .mindmap
+                                            .edges
+                                            .iter()
+                                            .find(|e| edge_ref.matches(e))
+                                            .cloned()
+                                        {
+                                            let canvas_pos = renderer.screen_to_canvas(
+                                                start_pos.0 as f32,
+                                                start_pos.1 as f32,
+                                            );
+                                            let start_handle_pos = doc
+                                                .hit_test_edge_handle(
+                                                    canvas_pos,
+                                                    &edge_ref,
+                                                    f32::INFINITY,
+                                                )
+                                                .map(|(_, p)| p)
+                                                .unwrap_or(canvas_pos);
+                                            // Phase 4(B) invariant: a new
+                                            // drag starts with a clean
+                                            // scene cache — see the
+                                            // MovingNode branch for the
+                                            // full rationale.
+                                            scene_cache.clear();
+                                            drag_state = DragState::DraggingEdgeHandle {
+                                                edge_ref,
+                                                handle: handle_kind,
+                                                original,
+                                                start_handle_pos,
+                                                total_delta: Vec2::ZERO,
+                                                pending_delta: Vec2::ZERO,
+                                            };
+                                            return;
+                                        }
+                                    }
+                                }
                                 if let Some(node_id) = hit_node.take() {
                                     // Ensure the dragged node is selected
                                     if let Some(doc) = document.as_mut() {
@@ -538,6 +735,50 @@ impl Application {
                         Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),
                         _ => None,
                     };
+
+                    // Session 6C: when the palette is open, it steals
+                    // all keyboard input. Character keys go into the
+                    // query, Up/Down navigate, Enter executes, Escape
+                    // closes. Regular hotkeys are suppressed until
+                    // the palette closes.
+                    if palette_state.is_open() {
+                        handle_palette_key(
+                            &key_name,
+                            &logical_key,
+                            &mut palette_state,
+                            &mut document,
+                            &mut mindmap_tree,
+                            &mut renderer,
+                            &mut scene_cache,
+                        );
+                        return;
+                    }
+
+                    // Opening the palette is a pre-action lookup:
+                    // `/` with no modifiers opens it regardless of
+                    // what the keybinds layer says (we don't want a
+                    // user to accidentally rebind away their only
+                    // discovery path).
+                    if key_name.as_deref() == Some("/")
+                        && !ctrl_pressed && !alt_pressed
+                    {
+                        let ctx = document.as_ref().map(|doc| PaletteContext { document: doc });
+                        if let Some(ctx) = ctx {
+                            let filtered = filter_actions("", &ctx);
+                            palette_state = PaletteState::Open {
+                                query: String::new(),
+                                filtered,
+                                selected: 0,
+                            };
+                            if let Some(doc) = document.as_ref() {
+                                rebuild_palette_overlay(
+                                    &palette_state, doc, &mut renderer,
+                                );
+                            }
+                        }
+                        return;
+                    }
+
                     let action = key_name.as_deref().and_then(|k| {
                         keybinds.action_for(k, ctrl_pressed, shift_pressed, alt_pressed)
                     });
@@ -745,6 +986,60 @@ impl Application {
                                 }
                             }
 
+                            *pending_delta = Vec2::ZERO;
+                            mutation_throttle.record_work_duration(work_start.elapsed());
+                        }
+                    }
+                    // Session 6C edge-handle drag drain. Mirrors the
+                    // MovingNode drain above but writes the edge in
+                    // place instead of moving nodes. The scene cache
+                    // is invalidated for the single dirty edge so the
+                    // next build re-samples just that edge; everything
+                    // else rides the incremental rebuild path.
+                    if let DragState::DraggingEdgeHandle {
+                        ref edge_ref,
+                        ref mut handle,
+                        ref mut pending_delta,
+                        ref total_delta,
+                        ref start_handle_pos,
+                        ..
+                    } = drag_state {
+                        if *pending_delta != Vec2::ZERO && mutation_throttle.should_drain() {
+                            let work_start = Instant::now();
+                            if let Some(doc) = document.as_mut() {
+                                let new_handle = apply_edge_handle_drag(
+                                    doc,
+                                    edge_ref,
+                                    *handle,
+                                    *start_handle_pos,
+                                    *total_delta,
+                                );
+                                *handle = new_handle;
+
+                                let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+                                    &edge_ref.from_id,
+                                    &edge_ref.to_id,
+                                    &edge_ref.edge_type,
+                                );
+                                scene_cache.invalidate_edge(&edge_key);
+
+                                let offsets: HashMap<String, (f32, f32)> = HashMap::new();
+                                let mut dirty_edge_keys: std::collections::HashSet<
+                                    baumhard::mindmap::scene_cache::EdgeKey
+                                > = std::collections::HashSet::new();
+                                dirty_edge_keys.insert(edge_key);
+
+                                let scene = doc.build_scene_with_cache(
+                                    &offsets,
+                                    &mut scene_cache,
+                                    renderer.camera_zoom(),
+                                );
+                                renderer.rebuild_connection_buffers_keyed(
+                                    &scene.connection_elements,
+                                    Some(&dirty_edge_keys),
+                                );
+                                renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
+                            }
                             *pending_delta = Vec2::ZERO;
                             mutation_throttle.record_work_duration(work_start.elapsed());
                         }
@@ -980,6 +1275,256 @@ fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
 /// When the current selection is an edge, its `ConnectionElement` gets a
 /// cyan color override baked in via `build_scene_with_selection()`.
 #[cfg(not(target_arch = "wasm32"))]
+/// Handle a keystroke while the command palette is open. Character
+/// keys append to the query (and re-filter), Backspace pops, Up/Down
+/// navigate the filtered list, Enter runs the selected action, and
+/// Escape closes without running anything. Regular hotkeys are
+/// suppressed — this runs entirely outside the keybinds resolver.
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_palette_key(
+    key_name: &Option<String>,
+    logical_key: &Key,
+    palette_state: &mut PaletteState,
+    document: &mut Option<MindMapDocument>,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
+) {
+    let name = match key_name.as_deref() {
+        Some(n) => n,
+        None => return,
+    };
+    match name {
+        "escape" => {
+            *palette_state = PaletteState::Closed;
+            renderer.rebuild_palette_overlay_buffers(None);
+        }
+        "enter" => {
+            let (id_to_run, ran) = {
+                if let PaletteState::Open { filtered, selected, .. } = palette_state {
+                    if let Some(idx) = filtered.get(*selected).copied() {
+                        (Some(PALETTE_ACTIONS[idx].id), true)
+                    } else {
+                        (None, false)
+                    }
+                } else {
+                    (None, false)
+                }
+            };
+            if ran {
+                if let Some(doc) = document.as_mut() {
+                    if let Some(id) = id_to_run {
+                        if let Some((_, action)) = crate::application::palette::action_by_id(id) {
+                            let mut effects = PaletteEffects { document: doc };
+                            (action.execute)(&mut effects);
+                            scene_cache.clear();
+                            rebuild_all(doc, mindmap_tree, renderer);
+                        }
+                    }
+                }
+            }
+            *palette_state = PaletteState::Closed;
+            renderer.rebuild_palette_overlay_buffers(None);
+        }
+        "arrowup" | "up" => {
+            if let PaletteState::Open { filtered, selected, .. } = palette_state {
+                if !filtered.is_empty() && *selected > 0 {
+                    *selected -= 1;
+                }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_palette_overlay(palette_state, doc, renderer);
+            }
+        }
+        "arrowdown" | "down" => {
+            if let PaletteState::Open { filtered, selected, .. } = palette_state {
+                if !filtered.is_empty() && *selected + 1 < filtered.len() {
+                    *selected += 1;
+                }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_palette_overlay(palette_state, doc, renderer);
+            }
+        }
+        "backspace" => {
+            if let PaletteState::Open { query, filtered, selected, .. } = palette_state {
+                query.pop();
+                if let Some(doc) = document.as_ref() {
+                    let ctx = PaletteContext { document: doc };
+                    *filtered = filter_actions(query, &ctx);
+                    *selected = 0;
+                    rebuild_palette_overlay(palette_state, doc, renderer);
+                }
+            }
+        }
+        _ => {
+            // Character input: append to the query. Only accept
+            // single-char keys to avoid stuffing "ArrowLeft" or
+            // "Control" into the query text.
+            if let Key::Character(c) = logical_key {
+                if let PaletteState::Open { query, filtered, selected, .. } = palette_state {
+                    query.push_str(c.as_ref());
+                    if let Some(doc) = document.as_ref() {
+                        let ctx = PaletteContext { document: doc };
+                        *filtered = filter_actions(query, &ctx);
+                        *selected = 0;
+                        rebuild_palette_overlay(palette_state, doc, renderer);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Build the palette overlay geometry from the current state and
+/// push it to the renderer for glyph-rendering. Called whenever the
+/// palette opens, the query changes, or the selected row changes.
+#[cfg(not(target_arch = "wasm32"))]
+fn rebuild_palette_overlay(
+    palette_state: &PaletteState,
+    _document: &MindMapDocument,
+    renderer: &mut Renderer,
+) {
+    use crate::application::renderer::{PaletteOverlayGeometry, PaletteOverlayRow};
+    let (query, filtered, selected) = match palette_state {
+        PaletteState::Closed => {
+            renderer.rebuild_palette_overlay_buffers(None);
+            return;
+        }
+        PaletteState::Open { query, filtered, selected } => (query, filtered, *selected),
+    };
+    let rows: Vec<PaletteOverlayRow> = filtered
+        .iter()
+        .map(|&idx| {
+            let a = &PALETTE_ACTIONS[idx];
+            PaletteOverlayRow {
+                label: a.label.to_string(),
+                description: a.description.to_string(),
+            }
+        })
+        .collect();
+    let geometry = PaletteOverlayGeometry {
+        query_text: query.clone(),
+        rows,
+        selected_row: selected,
+    };
+    renderer.rebuild_palette_overlay_buffers(Some(&geometry));
+}
+
+/// Apply a full edge-handle drag to the document model in place —
+/// writes the new control point / anchor into
+/// `doc.mindmap.edges[idx]` based on the current cursor delta.
+/// Called every frame during the drag and once more at release to
+/// commit the final position. Mutates `handle` in place when a
+/// `Midpoint` handle crosses over into a fresh control point so
+/// subsequent frames take the `ControlPoint(0)` path.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_edge_handle_drag(
+    doc: &mut MindMapDocument,
+    edge_ref: &EdgeRef,
+    handle: baumhard::mindmap::scene_builder::EdgeHandleKind,
+    start_handle_pos: Vec2,
+    total_delta: Vec2,
+) -> baumhard::mindmap::scene_builder::EdgeHandleKind {
+    use baumhard::mindmap::model::ControlPoint;
+    use baumhard::mindmap::scene_builder::EdgeHandleKind;
+
+    let idx = match doc.edge_index(edge_ref) {
+        Some(i) => i,
+        None => return handle,
+    };
+    let (from_center, to_center) = {
+        let edge = &doc.mindmap.edges[idx];
+        let from_node = match doc.mindmap.nodes.get(&edge.from_id) {
+            Some(n) => n,
+            None => return handle,
+        };
+        let to_node = match doc.mindmap.nodes.get(&edge.to_id) {
+            Some(n) => n,
+            None => return handle,
+        };
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+        (
+            Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5),
+            Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5),
+        )
+    };
+    let new_handle_canvas = start_handle_pos + total_delta;
+
+    let edge = &mut doc.mindmap.edges[idx];
+    match handle {
+        EdgeHandleKind::ControlPoint(i) => {
+            let center = if i == 0 { from_center } else { to_center };
+            let offset = new_handle_canvas - center;
+            while edge.control_points.len() <= i {
+                edge.control_points.push(ControlPoint { x: 0.0, y: 0.0 });
+            }
+            edge.control_points[i] = ControlPoint {
+                x: offset.x as f64,
+                y: offset.y as f64,
+            };
+            EdgeHandleKind::ControlPoint(i)
+        }
+        EdgeHandleKind::Midpoint => {
+            // First drained frame of a "curve this line" gesture:
+            // insert a single control point (quadratic Bezier,
+            // offset from source node center) at the new cursor
+            // position. Subsequent frames promote to ControlPoint(0).
+            let offset = new_handle_canvas - from_center;
+            edge.control_points.clear();
+            edge.control_points.push(ControlPoint {
+                x: offset.x as f64,
+                y: offset.y as f64,
+            });
+            EdgeHandleKind::ControlPoint(0)
+        }
+        EdgeHandleKind::AnchorFrom => {
+            // Pick the side of from_node whose midpoint is closest to
+            // the new cursor position. Value in 1..=4 (top/right/
+            // bottom/left) — never 0 (auto) during manual drag.
+            let from_node = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+            let node_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+            let node_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+            edge.anchor_from = nearest_anchor_side(new_handle_canvas, node_pos, node_size);
+            EdgeHandleKind::AnchorFrom
+        }
+        EdgeHandleKind::AnchorTo => {
+            let to_node = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+            let node_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+            let node_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+            edge.anchor_to = nearest_anchor_side(new_handle_canvas, node_pos, node_size);
+            EdgeHandleKind::AnchorTo
+        }
+    }
+}
+
+/// Given a canvas-space position and a node's AABB, return the
+/// anchor code (1=top, 2=right, 3=bottom, 4=left) of the edge
+/// midpoint closest to the position. Used by the anchor-handle
+/// drag to snap the anchor to whichever side the cursor is nearest.
+#[cfg(not(target_arch = "wasm32"))]
+fn nearest_anchor_side(point: Vec2, node_pos: Vec2, node_size: Vec2) -> i32 {
+    let half_w = node_size.x * 0.5;
+    let half_h = node_size.y * 0.5;
+    let top = Vec2::new(node_pos.x + half_w, node_pos.y);
+    let right = Vec2::new(node_pos.x + node_size.x, node_pos.y + half_h);
+    let bottom = Vec2::new(node_pos.x + half_w, node_pos.y + node_size.y);
+    let left = Vec2::new(node_pos.x, node_pos.y + half_h);
+    let candidates = [(1, top), (2, right), (3, bottom), (4, left)];
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            let da = a.1.distance_squared(point);
+            let db = b.1.distance_squared(point);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(code, _)| *code)
+        .unwrap_or(0)
+}
+
 fn rebuild_all(
     doc: &MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
@@ -992,6 +1537,7 @@ fn rebuild_all(
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_buffers(&scene.connection_elements);
     renderer.rebuild_border_buffers(&scene.border_elements);
+    renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
 
     *mindmap_tree = Some(new_tree);
 }
@@ -1137,6 +1683,7 @@ fn rebuild_all_with_mode(
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_buffers(&scene.connection_elements);
     renderer.rebuild_border_buffers(&scene.border_elements);
+    renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
 
     *mindmap_tree = Some(new_tree);
 }
