@@ -8,7 +8,9 @@ use baumhard::mindmap::custom_mutation::{
     PlatformContext, apply_mutations_to_element,
 };
 use baumhard::mindmap::connection;
-use baumhard::mindmap::model::{MindEdge, MindMap, MindNode, Position};
+use baumhard::mindmap::model::{
+    MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
+};
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
 use baumhard::mindmap::tree_builder::{self, MindMapTree};
@@ -118,6 +120,62 @@ fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
     }
 }
 
+/// Build a fresh "orphan" MindNode with sensible defaults, positioned at
+/// `position` and marked as a root (`parent_id = None`). The node has
+/// placeholder text so it's visible on the canvas until the user edits it
+/// (text editing is still WIP; see roadmap M7).
+fn default_orphan_node(id: &str, position: Vec2, index: i32) -> MindNode {
+    use baumhard::mindmap::model::TextRun;
+    let text = "New node".to_string();
+    let text_runs = vec![TextRun {
+        start: 0,
+        end: text.chars().count(),
+        bold: false,
+        italic: false,
+        underline: false,
+        font: "LiberationSans".to_string(),
+        size_pt: 24,
+        color: "#ffffff".to_string(),
+        hyperlink: None,
+    }];
+    MindNode {
+        id: id.to_string(),
+        parent_id: None,
+        index,
+        position: Position {
+            x: position.x as f64,
+            y: position.y as f64,
+        },
+        size: Size {
+            width: 240.0,
+            height: 60.0,
+        },
+        text,
+        text_runs,
+        style: NodeStyle {
+            background_color: "#141414".to_string(),
+            frame_color: "#30b082".to_string(),
+            text_color: "#ffffff".to_string(),
+            shape_type: 0,
+            corner_radius_percent: 10.0,
+            frame_thickness: 4.0,
+            show_frame: true,
+            show_shadow: false,
+            border: None,
+        },
+        layout: NodeLayout {
+            layout_type: 0,
+            direction: 0,
+            spacing: 50.0,
+        },
+        folded: false,
+        notes: String::new(),
+        color_schema: None,
+        trigger_bindings: Vec::new(),
+        inline_mutations: Vec::new(),
+    }
+}
+
 /// Build a default-styled cross_link edge from `from_id` to `to_id`.
 /// Used by connect mode (Ctrl+D) to create non-hierarchical connections.
 /// Cross-links don't affect the tree structure.
@@ -158,6 +216,9 @@ pub enum UndoAction {
     /// Edge created via connect mode (Ctrl+D). Reversed by removing the
     /// edge at `index` (assumes LIFO undo order so the index is still valid).
     CreateEdge { index: usize },
+    /// A new node was created (via `apply_create_orphan_node`). Undo
+    /// removes the node from `mindmap.nodes` by id.
+    CreateNode { node_id: String },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -237,6 +298,58 @@ impl MindMapDocument {
         let idx = self.mindmap.edges.iter().position(|e| edge_ref.matches(e))?;
         let edge = self.mindmap.edges.remove(idx);
         Some((idx, edge))
+    }
+
+    /// Create a new unattached (orphan) node at the given canvas position
+    /// and insert it into the map. The node has `parent_id == None` so it
+    /// renders as a root, giving users a way to start a subtree in
+    /// isolation and attach it later (via reparent mode, Ctrl+P).
+    ///
+    /// Returns the new node's id. The caller is expected to push a
+    /// `UndoAction::CreateNode { node_id }` entry so Ctrl+Z removes it.
+    pub fn apply_create_orphan_node(&mut self, position: Vec2) -> String {
+        let id = self.fresh_node_id();
+        // Index among roots: one past the current maximum so the new node
+        // sorts last (it was just created, after all).
+        let next_root_index = self.mindmap.root_nodes()
+            .iter()
+            .map(|n| n.index)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        let node = default_orphan_node(&id, position, next_root_index);
+        self.mindmap.nodes.insert(id.clone(), node);
+        id
+    }
+
+    /// Detach each node in `node_ids` from its parent, promoting it to a
+    /// root node. Each node's entire subtree stays attached to it — only
+    /// the link between the node and its former parent is severed.
+    ///
+    /// This is a thin wrapper around `apply_reparent(ids, None)`, which
+    /// already handles the promote-to-root case (updating `parent_id`,
+    /// `index`, and removing the corresponding `parent_child` edge). The
+    /// wrapper exists so keybind dispatch can call a self-documenting
+    /// method name.
+    ///
+    /// Returns the same `ReparentUndoData` as `apply_reparent`, which the
+    /// caller should wrap in `UndoAction::ReparentNodes` for undo.
+    pub fn apply_orphan_selection(&mut self, node_ids: &[String]) -> ReparentUndoData {
+        self.apply_reparent(node_ids, None)
+    }
+
+    /// Generate a fresh node id that doesn't collide with any existing
+    /// node. The format is `new-<n>` where `n` starts at 1 and increments
+    /// until the id is free. Deterministic for testing.
+    fn fresh_node_id(&self) -> String {
+        let mut n: usize = 1;
+        loop {
+            let candidate = format!("new-{}", n);
+            if !self.mindmap.nodes.contains_key(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
     }
 
     /// Create a default-styled `cross_link` edge between two nodes and push
@@ -491,6 +604,16 @@ impl MindMapDocument {
                 UndoAction::CreateEdge { index } => {
                     if index < self.mindmap.edges.len() {
                         self.mindmap.edges.remove(index);
+                    }
+                }
+                UndoAction::CreateNode { node_id } => {
+                    // Remove the node. It has no parent_child edge (it was
+                    // created as an orphan) and no children (fresh node),
+                    // so there's nothing else to clean up. If the current
+                    // selection referenced it, clear the selection.
+                    self.mindmap.nodes.remove(&node_id);
+                    if self.selection.is_selected(&node_id) {
+                        self.selection = SelectionState::None;
                     }
                 }
             }
@@ -1986,5 +2109,134 @@ mod tests {
             e.edge_type == "cross_link" && e.from_id == a && e.to_id == b
         });
         assert!(!still_there);
+    }
+
+    // ---------------------------------------------------------------------
+    // Orphan node creation + orphan-selection action
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_create_orphan_node_adds_to_map() {
+        let mut doc = load_test_doc();
+        let orig_count = doc.mindmap.nodes.len();
+        let pos = Vec2::new(123.0, 456.0);
+
+        let new_id = doc.apply_create_orphan_node(pos);
+
+        assert_eq!(doc.mindmap.nodes.len(), orig_count + 1);
+        let node = doc.mindmap.nodes.get(&new_id).expect("new node must exist");
+        assert_eq!(node.id, new_id);
+        assert!(node.parent_id.is_none(), "orphan should have no parent");
+        assert_eq!(node.position.x, 123.0);
+        assert_eq!(node.position.y, 456.0);
+        assert!(!node.text.is_empty(), "orphan should have placeholder text");
+    }
+
+    #[test]
+    fn test_create_orphan_node_ids_are_unique() {
+        let mut doc = load_test_doc();
+        let a = doc.apply_create_orphan_node(Vec2::ZERO);
+        let b = doc.apply_create_orphan_node(Vec2::ZERO);
+        let c = doc.apply_create_orphan_node(Vec2::ZERO);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+        // All three should exist in the map
+        assert!(doc.mindmap.nodes.contains_key(&a));
+        assert!(doc.mindmap.nodes.contains_key(&b));
+        assert!(doc.mindmap.nodes.contains_key(&c));
+    }
+
+    #[test]
+    fn test_undo_create_node_removes_it() {
+        let mut doc = load_test_doc();
+        let orig_count = doc.mindmap.nodes.len();
+
+        let new_id = doc.apply_create_orphan_node(Vec2::new(0.0, 0.0));
+        doc.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
+        doc.selection = SelectionState::Single(new_id.clone());
+
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.nodes.len(), orig_count);
+        assert!(!doc.mindmap.nodes.contains_key(&new_id));
+        // Selection should have been cleared since it referenced the deleted node
+        assert!(matches!(doc.selection, SelectionState::None));
+    }
+
+    #[test]
+    fn test_orphan_selection_promotes_to_root_and_keeps_subtree() {
+        // Pick a non-root node that has at least one child, so we can
+        // verify the subtree stays attached after orphaning.
+        let mut doc = load_test_doc();
+        let (parent_having_child, child) = doc.mindmap.nodes.values()
+            .find_map(|n| {
+                let kids = doc.mindmap.children_of(&n.id);
+                if !kids.is_empty() && n.parent_id.is_some() {
+                    Some((n.id.clone(), kids[0].id.clone()))
+                } else {
+                    None
+                }
+            })
+            .expect("testament map should have at least one non-root parent node");
+
+        // Precondition: the selected node has a parent, and has a child
+        assert!(doc.mindmap.nodes.get(&parent_having_child).unwrap().parent_id.is_some());
+        let child_of_node = doc.mindmap.nodes.get(&child).unwrap().parent_id.clone();
+        assert_eq!(child_of_node.as_deref(), Some(parent_having_child.as_str()));
+
+        let undo = doc.apply_orphan_selection(&[parent_having_child.clone()]);
+        assert_eq!(undo.entries.len(), 1);
+
+        // The orphaned node is now a root...
+        assert!(doc.mindmap.nodes.get(&parent_having_child).unwrap().parent_id.is_none());
+        // ...but its child is still attached to it.
+        assert_eq!(
+            doc.mindmap.nodes.get(&child).unwrap().parent_id.as_deref(),
+            Some(parent_having_child.as_str()),
+            "child subtree should stay attached to the orphaned node"
+        );
+    }
+
+    #[test]
+    fn test_orphan_selection_undo_reattaches() {
+        let mut doc = load_test_doc();
+        let non_root = doc.mindmap.nodes.values()
+            .find(|n| n.parent_id.is_some())
+            .map(|n| n.id.clone())
+            .expect("at least one non-root node");
+        let original_parent = doc.mindmap.nodes.get(&non_root).unwrap().parent_id.clone();
+        let original_index = doc.mindmap.nodes.get(&non_root).unwrap().index;
+
+        let undo = doc.apply_orphan_selection(&[non_root.clone()]);
+        doc.undo_stack.push(UndoAction::ReparentNodes {
+            entries: undo.entries,
+            old_edges: undo.old_edges,
+        });
+
+        // Precondition: it's now a root
+        assert!(doc.mindmap.nodes.get(&non_root).unwrap().parent_id.is_none());
+
+        // Undo restores the parent link + index
+        assert!(doc.undo());
+        let restored = doc.mindmap.nodes.get(&non_root).unwrap();
+        assert_eq!(restored.parent_id, original_parent);
+        assert_eq!(restored.index, original_index);
+    }
+
+    #[test]
+    fn test_orphan_selection_on_root_is_noop() {
+        let mut doc = load_test_doc();
+        let root = doc.mindmap.root_nodes().first().map(|n| n.id.clone()).unwrap();
+        let orig_edges_len = doc.mindmap.edges.len();
+
+        let undo = doc.apply_orphan_selection(&[root.clone()]);
+        // The node is already a root, so there are entries (it's a valid
+        // "move-to-last-root-index" op), but nothing meaningful changed:
+        // parent_id is still None.
+        assert!(doc.mindmap.nodes.get(&root).unwrap().parent_id.is_none());
+        // And since it was already a root, no parent_child edge was removed.
+        assert_eq!(doc.mindmap.edges.len(), orig_edges_len);
+        // undo.entries may be non-empty but the restoration is a no-op.
+        let _ = undo;
     }
 }

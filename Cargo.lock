@@ -1509,6 +1509,7 @@ dependencies = [
  "rustix 0.38.44",
  "serde",
  "serde-lexpr",
+ "serde_json",
  "smol_str 0.3.6",
  "syn 2.0.117",
  "tinyvec",

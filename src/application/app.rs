@@ -8,7 +8,7 @@ use indextree::Arena;
 use wgpu::{Instance, SurfaceTargetUnsafe};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ControlFlow;
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::Key;
 use winit::{event_loop::EventLoop, window::Window};
 
 use crate::application::common::{InputMode, RenderDecree, WindowMode};
@@ -18,6 +18,7 @@ use crate::application::document::{
     apply_selection_highlight, apply_drag_delta,
     apply_reparent_source_highlight, apply_reparent_target_highlight,
 };
+use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name};
 use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;
@@ -162,6 +163,10 @@ impl Application {
         let mut shift_pressed = false;
         let mut alt_pressed = false;
         let mut ctrl_pressed = false;
+
+        // Resolve keybindings once at startup. Users can rebind any key
+        // by shipping a `keybinds.json` (see `keybinds.rs` for the format).
+        let keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
 
         self.event_loop.run(move |event, _window_target| {
             _ = (&self.window, &mut self.options);
@@ -446,91 +451,118 @@ impl Application {
                     },
                     ..
                 } => {
-                    let is_undo = match &logical_key {
-                        Key::Named(NamedKey::Undo) => true,
-                        Key::Character(c) if ctrl_pressed && c.as_ref() == "z" => true,
-                        _ => false,
+                    // Resolve the pressed key through the configured keybinds.
+                    // Convert the winit `Key` into the lowercase string form
+                    // that `KeyBind::parse` produces so the comparison is
+                    // symmetric.
+                    let key_name = match &logical_key {
+                        Key::Character(c) => Some(normalize_key_name(c.as_ref())),
+                        Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),
+                        _ => None,
                     };
-                    if is_undo {
-                        if let Some(doc) = document.as_mut() {
-                            if doc.undo() {
-                                rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                            }
-                        }
-                    }
+                    let action = key_name.as_deref().and_then(|k| {
+                        keybinds.action_for(k, ctrl_pressed, shift_pressed, alt_pressed)
+                    });
 
-                    // Esc: cancel reparent or connect mode (if active)
-                    if matches!(logical_key, Key::Named(NamedKey::Escape))
-                        && matches!(app_mode, AppMode::Reparent { .. } | AppMode::Connect { .. })
-                    {
-                        app_mode = AppMode::Normal;
-                        hovered_node = None;
-                        if let Some(doc) = document.as_ref() {
-                            rebuild_all_with_mode(
-                                doc, &app_mode, hovered_node.as_deref(),
-                                &mut mindmap_tree, &mut renderer,
-                            );
-                        }
-                    }
-
-                    // Ctrl+P: enter reparent mode if at least one node is selected
-                    let is_reparent_hotkey = match &logical_key {
-                        Key::Character(c) if ctrl_pressed && c.as_ref() == "p" => true,
-                        _ => false,
-                    };
-                    if is_reparent_hotkey {
-                        if let Some(doc) = document.as_ref() {
-                            let sel: Vec<String> = doc.selection.selected_ids()
-                                .iter().map(|s| s.to_string()).collect();
-                            if !sel.is_empty() {
-                                app_mode = AppMode::Reparent { sources: sel };
-                                hovered_node = None;
-                                rebuild_all_with_mode(
-                                    doc, &app_mode, hovered_node.as_deref(),
-                                    &mut mindmap_tree, &mut renderer,
-                                );
-                            }
-                        }
-                    }
-
-                    // Ctrl+D: enter connect mode if exactly one node is selected
-                    let is_connect_hotkey = match &logical_key {
-                        Key::Character(c) if ctrl_pressed && c.as_ref() == "d" => true,
-                        _ => false,
-                    };
-                    if is_connect_hotkey {
-                        if let Some(doc) = document.as_ref() {
-                            if let SelectionState::Single(source) = &doc.selection {
-                                app_mode = AppMode::Connect { source: source.clone() };
-                                hovered_node = None;
-                                rebuild_all_with_mode(
-                                    doc, &app_mode, hovered_node.as_deref(),
-                                    &mut mindmap_tree, &mut renderer,
-                                );
-                            }
-                        }
-                    }
-
-                    // Delete: remove the currently selected edge (node deletion is
-                    // out of scope for M6 — that lives under a separate session).
-                    if matches!(logical_key, Key::Named(NamedKey::Delete)) {
-                        if let Some(doc) = document.as_mut() {
-                            let maybe_edge_ref = match &doc.selection {
-                                SelectionState::Edge(e) => Some(e.clone()),
-                                _ => None,
-                            };
-                            if let Some(edge_ref) = maybe_edge_ref {
-                                if let Some((idx, edge)) = doc.remove_edge(&edge_ref) {
-                                    doc.undo_stack.push(UndoAction::DeleteEdge {
-                                        index: idx,
-                                        edge,
-                                    });
-                                    doc.selection = SelectionState::None;
-                                    doc.dirty = true;
+                    match action {
+                        Some(Action::Undo) => {
+                            if let Some(doc) = document.as_mut() {
+                                if doc.undo() {
                                     rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                 }
                             }
                         }
+                        Some(Action::CancelMode) => {
+                            if matches!(app_mode, AppMode::Reparent { .. } | AppMode::Connect { .. }) {
+                                app_mode = AppMode::Normal;
+                                hovered_node = None;
+                                if let Some(doc) = document.as_ref() {
+                                    rebuild_all_with_mode(
+                                        doc, &app_mode, hovered_node.as_deref(),
+                                        &mut mindmap_tree, &mut renderer,
+                                    );
+                                }
+                            }
+                        }
+                        Some(Action::EnterReparentMode) => {
+                            if let Some(doc) = document.as_ref() {
+                                let sel: Vec<String> = doc.selection.selected_ids()
+                                    .iter().map(|s| s.to_string()).collect();
+                                if !sel.is_empty() {
+                                    app_mode = AppMode::Reparent { sources: sel };
+                                    hovered_node = None;
+                                    rebuild_all_with_mode(
+                                        doc, &app_mode, hovered_node.as_deref(),
+                                        &mut mindmap_tree, &mut renderer,
+                                    );
+                                }
+                            }
+                        }
+                        Some(Action::EnterConnectMode) => {
+                            if let Some(doc) = document.as_ref() {
+                                if let SelectionState::Single(source) = &doc.selection {
+                                    app_mode = AppMode::Connect { source: source.clone() };
+                                    hovered_node = None;
+                                    rebuild_all_with_mode(
+                                        doc, &app_mode, hovered_node.as_deref(),
+                                        &mut mindmap_tree, &mut renderer,
+                                    );
+                                }
+                            }
+                        }
+                        Some(Action::DeleteSelection) => {
+                            // Currently wired to edge deletion. Node deletion
+                            // is scoped to a future roadmap milestone.
+                            if let Some(doc) = document.as_mut() {
+                                let maybe_edge_ref = match &doc.selection {
+                                    SelectionState::Edge(e) => Some(e.clone()),
+                                    _ => None,
+                                };
+                                if let Some(edge_ref) = maybe_edge_ref {
+                                    if let Some((idx, edge)) = doc.remove_edge(&edge_ref) {
+                                        doc.undo_stack.push(UndoAction::DeleteEdge {
+                                            index: idx,
+                                            edge,
+                                        });
+                                        doc.selection = SelectionState::None;
+                                        doc.dirty = true;
+                                        rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                    }
+                                }
+                            }
+                        }
+                        Some(Action::CreateOrphanNode) => {
+                            if let Some(doc) = document.as_mut() {
+                                let canvas_pos = renderer.screen_to_canvas(
+                                    cursor_pos.0 as f32, cursor_pos.1 as f32,
+                                );
+                                let new_id = doc.apply_create_orphan_node(canvas_pos);
+                                doc.undo_stack.push(UndoAction::CreateNode {
+                                    node_id: new_id.clone(),
+                                });
+                                doc.selection = SelectionState::Single(new_id);
+                                doc.dirty = true;
+                                rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                            }
+                        }
+                        Some(Action::OrphanSelection) => {
+                            if let Some(doc) = document.as_mut() {
+                                let sel: Vec<String> = doc.selection.selected_ids()
+                                    .iter().map(|s| s.to_string()).collect();
+                                if !sel.is_empty() {
+                                    let undo_data = doc.apply_orphan_selection(&sel);
+                                    if !undo_data.entries.is_empty() {
+                                        doc.undo_stack.push(UndoAction::ReparentNodes {
+                                            entries: undo_data.entries,
+                                            old_edges: undo_data.old_edges,
+                                        });
+                                        doc.dirty = true;
+                                    }
+                                    rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                }
+                            }
+                        }
+                        None => {}
                     }
                 }
                 Event::AboutToWait => {
@@ -601,6 +633,16 @@ impl Application {
 
         baumhard::font::fonts::init();
 
+        // Load keybindings from the WASM environment (URL query param or
+        // localStorage) with a defaults fallback. Failure is non-fatal —
+        // see KeybindConfig::load_for_web().
+        self.options.keybind_config =
+            crate::application::keybinds::KeybindConfig::load_for_web();
+        let _keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
+        // TODO (WASM): once keyboard input is forwarded to the document,
+        // dispatch through `_keybinds.action_for(...)` the same way the
+        // native path does.
+
         // Attach canvas to DOM
         let canvas = self.window.canvas().expect("Failed to get canvas");
         let web_window = web_sys::window().expect("No global window");
@@ -617,11 +659,15 @@ impl Application {
         let mindmap_path = {
             let web_window = web_sys::window().expect("No global window");
             let search = web_window.location().search().unwrap_or_default();
-            if let Some(map_param) = search.strip_prefix("?map=") {
-                map_param.to_string()
-            } else {
-                self.options.mindmap_path.clone()
+            // Handle both "?map=foo" and "?keybinds=...&map=foo" forms.
+            let mut map_path: Option<String> = None;
+            let trimmed = search.trim_start_matches('?');
+            for pair in trimmed.split('&') {
+                if let Some(val) = pair.strip_prefix("map=") {
+                    map_path = Some(val.to_string());
+                }
             }
+            map_path.unwrap_or_else(|| self.options.mindmap_path.clone())
         };
 
         // On WASM we run single-threaded -- spawn the renderer init as a future
@@ -972,4 +1018,8 @@ pub struct Options {
     pub avail_cores: usize,
     pub render_must_be_main: bool,
     pub mindmap_path: String,
+    /// The user's keybinding configuration (already loaded from file or
+    /// defaults). The event loop resolves this into a `ResolvedKeybinds`
+    /// at startup and dispatches keyboard events through it.
+    pub keybind_config: crate::application::keybinds::KeybindConfig,
 }
