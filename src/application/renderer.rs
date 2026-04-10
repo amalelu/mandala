@@ -75,8 +75,22 @@ pub struct PaletteFrameLayout {
     pub char_width: f32,
     pub row_height: f32,
     pub inner_padding: f32,
+    /// How many filtered rows are rendered inside the frame. Clamped
+    /// to `MAX_PALETTE_VISIBLE_ROWS`.
     pub shown_rows: usize,
+    /// Index of the first row in `PaletteOverlayGeometry.rows` that
+    /// is visible inside the frame — scroll-window origin. Always
+    /// zero when the total filtered row count fits inside
+    /// `shown_rows`; otherwise chosen so `selected_row` stays
+    /// roughly centered (see `compute_palette_frame_layout`).
+    pub first_visible: usize,
 }
+
+/// Maximum number of filtered rows drawn inside the palette frame.
+/// With the new ~34 px row height this keeps the modal from
+/// dominating the canvas while still showing a useful slice of a
+/// long filtered list.
+pub const MAX_PALETTE_VISIBLE_ROWS: usize = 8;
 
 impl PaletteFrameLayout {
     /// Screen-space rectangle covered by the opaque backdrop. Matches
@@ -92,6 +106,110 @@ impl PaletteFrameLayout {
             self.frame_height + self.font_size,
         )
     }
+}
+
+/// Selects between Unicode and ASCII rendering for the palette
+/// "sacred border" — the decorative border made of repeating words
+/// for God in Sanskrit (top: ॐ, the syllable Om) and ancient Hebrew
+/// (bottom: אל, the word "El"), replacing the old Unicode box-
+/// drawing border. Dual mode because fonts covering Devanagari /
+/// Hebrew are not guaranteed (CI images, stripped-down desktops,
+/// etc.) and the ASCII path produces a useful fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SacredBorderStyle {
+    /// Devanagari + Hebrew. Native default.
+    Unicode,
+    /// ASCII fallback. Used when `MANDALA_PALETTE_ASCII_BORDER=1`
+    /// is set in the environment, and in unit tests that need a
+    /// font-independent baseline.
+    Ascii,
+}
+
+impl SacredBorderStyle {
+    /// Read the style from the environment. Defaults to `Unicode`;
+    /// set `MANDALA_PALETTE_ASCII_BORDER=1` to force `Ascii`.
+    pub fn from_env() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if std::env::var("MANDALA_PALETTE_ASCII_BORDER")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
+                return SacredBorderStyle::Ascii;
+            }
+        }
+        SacredBorderStyle::Unicode
+    }
+
+    fn top_unit(self) -> &'static str {
+        match self {
+            SacredBorderStyle::Unicode => "ॐ ",
+            SacredBorderStyle::Ascii => " GOD ",
+        }
+    }
+
+    fn bottom_unit(self) -> &'static str {
+        match self {
+            SacredBorderStyle::Unicode => "אל ",
+            SacredBorderStyle::Ascii => " AUM ",
+        }
+    }
+
+    fn side_unit(self) -> &'static str {
+        match self {
+            SacredBorderStyle::Unicode => "·\n",
+            SacredBorderStyle::Ascii => ".\n",
+        }
+    }
+}
+
+/// Build the four border strings (top, bottom, left_column,
+/// right_column) for the command palette "sacred border". The
+/// strings are sized to approximately fill the given frame extent
+/// — small over/underfill is cosmetically fine because the opaque
+/// palette backdrop rect masks any overshoot and the Devanagari /
+/// Hebrew glyphs are decorative rather than load-bearing grid.
+///
+/// Returns `(top, bottom, left, right)`. Left and right columns
+/// are identical strings (same per-line repetition count); the
+/// caller places them at different x positions.
+pub fn build_sacred_border_strings(
+    inner_width_px: f32,
+    inner_height_px: f32,
+    font_size: f32,
+    style: SacredBorderStyle,
+) -> (String, String, String, String) {
+    // Conservative average glyph width — wider than a typical
+    // Latin character so the repetition count leans slightly low
+    // (under-fill, masked by the backdrop) rather than high
+    // (over-fill, wraps onto a second line and visually doubles
+    // up).
+    let avg_glyph_width = (font_size * 0.7).max(1.0);
+    let top_unit = style.top_unit();
+    let bottom_unit = style.bottom_unit();
+    let side_unit = style.side_unit();
+
+    let top_unit_chars = top_unit.chars().count().max(1) as f32;
+    let bottom_unit_chars = bottom_unit.chars().count().max(1) as f32;
+
+    let top_repetitions =
+        ((inner_width_px / (avg_glyph_width * top_unit_chars)).ceil() as usize).max(1);
+    let bottom_repetitions =
+        ((inner_width_px / (avg_glyph_width * bottom_unit_chars)).ceil() as usize).max(1);
+
+    // Side columns are laid out in `font_size`-tall line-height
+    // slots, *not* in ROW_HEIGHT slots — the side buffer is a
+    // single cosmic-text buffer with `\n`-separated lines, and
+    // each line takes `font_size` of vertical space. Deriving the
+    // count from the palette's row height would leave the rail
+    // short under the new 34 px ROW_HEIGHT.
+    let line_count =
+        ((inner_height_px / font_size).ceil() as usize).max(1);
+
+    let top = top_unit.repeat(top_repetitions);
+    let bottom = bottom_unit.repeat(bottom_repetitions);
+    let side = side_unit.repeat(line_count);
+    (top, bottom, side.clone(), side)
 }
 
 /// Compute the screen-space layout for the command-palette overlay
@@ -110,21 +228,79 @@ pub fn compute_palette_frame_layout(
     // `rebuild_palette_overlay_buffers`.
     let font_size: f32 = 16.0;
     let char_width = font_size * 0.6;
-    let row_height = font_size * 1.5;
     let inner_padding: f32 = 8.0;
-    let max_rows_shown: usize = 10;
-    let shown_rows = geometry.rows.len().min(max_rows_shown);
-    let frame_height = row_height * (2.0 + shown_rows as f32) + inner_padding * 2.0;
 
-    // Adaptive frame width: wrap tightly around the longest content
-    // row (query line, label, or description), with a minimum so
-    // very short content doesn't produce a postage stamp and a
-    // maximum so a stray long description doesn't blow the palette
-    // across the whole window.
+    // Per-row layout. The label and description are drawn in
+    // separate, non-overlapping sub-regions inside each row slot,
+    // with a gap below the description so successive rows have
+    // clear visual rhythm — the pre-session-6D layout drew the
+    // description inside the same `font_size * 1.5 = 24 px` cell
+    // as the label, which caused a visible collision.
+    //
+    // LABEL_LINE   — vertical budget for the label text. Matches
+    //                `font_size` since cosmic-text's line box is
+    //                ~`font_size` tall at `Metrics::new(fs, fs)`.
+    // DESC_SIZE    — font size for the description line.
+    // DESC_Y_OFFSET — y offset from the row's top (label baseline
+    //                anchor) to the description's top. Hard-coded
+    //                rather than derived from `font_size` so the
+    //                relationship between label and description is
+    //                explicit in the code.
+    // ROW_GAP      — empty space below the description before the
+    //                next row's label starts.
+    // ROW_HEIGHT   — total vertical cost of a single row, the sum
+    //                of the three above.
+    const LABEL_LINE: f32 = 16.0;
+    const DESC_SIZE: f32 = 12.0;
+    const DESC_Y_OFFSET: f32 = LABEL_LINE + 4.0;
+    const ROW_GAP: f32 = 6.0;
+    const ROW_HEIGHT: f32 = LABEL_LINE + DESC_SIZE + ROW_GAP;
+    // Query line vertical budget — slightly taller than a label
+    // line so the cursor glyph sits clear of the top border.
+    let query_line = font_size * 1.4;
+    let row_height = ROW_HEIGHT;
+
+    let shown_rows = geometry.rows.len().min(MAX_PALETTE_VISIBLE_ROWS);
+    // Frame height is strictly linear in `shown_rows` now — no
+    // "+2 row premium" like the old `row_height * (2 + N) + 2*pad`
+    // formula. The query line is accounted for exactly once, and
+    // each visible filtered row contributes exactly ROW_HEIGHT.
+    let frame_height =
+        query_line + inner_padding * 2.0 + ROW_HEIGHT * shown_rows as f32;
+
+    // Scroll window: recompute per rebuild from `selected_row` so
+    // the highlight stays visible on Up/Down navigation through a
+    // filtered list longer than `shown_rows`. Centered-window
+    // policy: selection stays roughly mid-frame, pinning to the
+    // top or bottom when it runs out of room. Stateless — safe
+    // because the palette has no "scroll without moving the
+    // selection" gesture (no PageUp/PageDown yet, and filter
+    // changes always reset `selected` to 0).
+    let total_rows = geometry.rows.len();
+    let first_visible = if total_rows <= shown_rows {
+        0
+    } else {
+        let half = shown_rows / 2;
+        let sel = geometry.selected_row.min(total_rows.saturating_sub(1));
+        if sel < half {
+            0
+        } else if sel + (shown_rows - half) >= total_rows {
+            total_rows - shown_rows
+        } else {
+            sel - half
+        }
+    };
+
+    // Adaptive frame width: wrap tightly around the longest
+    // visible content row (query line, label, or description),
+    // with a minimum so very short content doesn't produce a
+    // postage stamp and a maximum so a stray long description
+    // doesn't blow the palette across the whole window.
     let query_chars = geometry.query_text.chars().count() + 3; // "/…▌"
     let longest_label = geometry
         .rows
         .iter()
+        .skip(first_visible)
         .take(shown_rows)
         .map(|r| r.label.chars().count() + 2) // "▸ "
         .max()
@@ -132,6 +308,7 @@ pub fn compute_palette_frame_layout(
     let longest_desc = geometry
         .rows
         .iter()
+        .skip(first_visible)
         .take(shown_rows)
         .map(|r| r.description.chars().count() + 4) // "    "
         .max()
@@ -156,6 +333,7 @@ pub fn compute_palette_frame_layout(
         row_height,
         inner_padding,
         shown_rows,
+        first_visible,
     }
 }
 
@@ -1544,6 +1722,7 @@ impl Renderer {
             row_height,
             inner_padding,
             shown_rows,
+            first_visible,
         } = layout;
 
         let palette_color = cosmic_text::Color::rgba(0, 229, 255, 255); // cyan
@@ -1562,17 +1741,17 @@ impl Renderer {
         // columns span `[left, left + frame_width]` horizontally.
         self.palette_backdrop = Some(layout.backdrop_rect());
 
-        // Box-drawing border around the frame.
-        let inner_cols = ((frame_width - char_width * 2.0) / char_width).max(1.0) as usize;
-        let top_border = format!(
-            "\u{256D}{}\u{256E}",
-            "\u{2500}".repeat(inner_cols),
+        // Sacred border: top row repeats ॐ (Sanskrit "Om"), bottom
+        // row repeats אל (Hebrew "El"), left/right columns repeat a
+        // neutral dot. Falls back to ASCII if the environment asks
+        // for it — see `SacredBorderStyle::from_env`.
+        let sacred_style = SacredBorderStyle::from_env();
+        let (top_border, bottom_border, left_col, right_col) = build_sacred_border_strings(
+            frame_width - char_width * 2.0,
+            frame_height,
+            font_size,
+            sacred_style,
         );
-        let bottom_border = format!(
-            "\u{2570}{}\u{256F}",
-            "\u{2500}".repeat(inner_cols),
-        );
-        let side = "\u{2502}";
 
         let border_attrs = Attrs::new()
             .color(palette_color)
@@ -1594,11 +1773,9 @@ impl Renderer {
             (left, top + frame_height),
             (frame_width, font_size * 1.5),
         ));
-        let inner_rows = ((frame_height / font_size).max(1.0) as usize).saturating_sub(1);
-        let side_text: String = std::iter::repeat_n(format!("{side}\n"), inner_rows).collect();
         self.palette_overlay_buffers.push(create_border_buffer(
             &mut font_system,
-            &side_text,
+            &left_col,
             &border_attrs,
             font_size,
             (left, top + font_size),
@@ -1606,60 +1783,93 @@ impl Renderer {
         ));
         self.palette_overlay_buffers.push(create_border_buffer(
             &mut font_system,
-            &side_text,
+            &right_col,
             &border_attrs,
             font_size,
             (left + frame_width - char_width, top + font_size),
             (char_width, frame_height),
         ));
 
-        // Query line: "/query|" where "|" is a cursor glyph.
-        let query_line = format!("/{}\u{258C}", geometry.query_text);
+        // Query line: "/query▌" where "▌" is a cursor glyph.
+        let query_line_text = format!("/{}\u{258C}", geometry.query_text);
         let query_attrs = Attrs::new()
             .color(text_color)
             .metrics(cosmic_text::Metrics::new(font_size, font_size));
+        let query_line_budget = font_size * 1.4;
         self.palette_overlay_buffers.push(create_border_buffer(
             &mut font_system,
-            &query_line,
+            &query_line_text,
             &query_attrs,
             font_size,
             (left + inner_padding + char_width, top + inner_padding),
-            (frame_width - inner_padding * 2.0 - char_width * 2.0, row_height),
+            (
+                frame_width - inner_padding * 2.0 - char_width * 2.0,
+                query_line_budget,
+            ),
         ));
 
-        // Filtered rows, each labelled and dim-described. Selected
-        // row gets a cyan prefix glyph and cyan label color.
-        let row_base_y = top + inner_padding + row_height;
-        for (i, row) in geometry.rows.iter().take(shown_rows).enumerate() {
-            let is_selected = i == geometry.selected_row;
+        // Filtered rows. Iterate over the scroll window (not the
+        // full filtered list), so a long list doesn't leave the
+        // highlight off-screen. The selected-row check compares
+        // against the absolute index into `geometry.rows`, not
+        // `i` — the visible index `i` would reset to 0 at
+        // `first_visible`, misrepresenting selection on a scrolled
+        // list.
+        //
+        // Row layout per `compute_palette_frame_layout`:
+        //
+        //     row_y(i) = top + inner_padding + query_line_budget
+        //                + ROW_HEIGHT * i
+        //     label    drawn at (x, row_y)
+        //     description drawn at (x, row_y + DESC_Y_OFFSET)
+        //
+        // where ROW_HEIGHT = 34 px and DESC_Y_OFFSET = 20 px.
+        const DESC_SIZE: f32 = 12.0;
+        const DESC_Y_OFFSET: f32 = 20.0;
+        let rows_top = top + inner_padding + query_line_budget;
+        for (i, row) in geometry
+            .rows
+            .iter()
+            .skip(first_visible)
+            .take(shown_rows)
+            .enumerate()
+        {
+            let absolute_index = first_visible + i;
+            let is_selected = absolute_index == geometry.selected_row;
             let prefix = if is_selected { "\u{25B8} " } else { "  " };
             let row_attrs = Attrs::new()
                 .color(if is_selected { selected_color } else { text_color })
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
             let label_line = format!("{prefix}{}", row.label);
-            let row_y = row_base_y + row_height * (i as f32 + 1.0);
+            let row_y = rows_top + row_height * i as f32;
             self.palette_overlay_buffers.push(create_border_buffer(
                 &mut font_system,
                 &label_line,
                 &row_attrs,
                 font_size,
                 (left + inner_padding + char_width, row_y),
-                (frame_width - inner_padding * 2.0 - char_width * 2.0, row_height),
+                (
+                    frame_width - inner_padding * 2.0 - char_width * 2.0,
+                    row_height,
+                ),
             ));
             let desc_attrs = Attrs::new()
                 .color(dim_color)
-                .metrics(cosmic_text::Metrics::new(font_size * 0.8, font_size * 0.8));
+                .metrics(cosmic_text::Metrics::new(DESC_SIZE, DESC_SIZE));
             let desc_line = format!("    {}", row.description);
             self.palette_overlay_buffers.push(create_border_buffer(
                 &mut font_system,
                 &desc_line,
                 &desc_attrs,
-                font_size * 0.8,
+                DESC_SIZE,
                 (
                     left + inner_padding + char_width,
-                    row_y + font_size * 0.9,
+                    row_y + DESC_Y_OFFSET,
                 ),
-                (frame_width - inner_padding * 2.0 - char_width * 2.0, row_height),
+                (
+                    frame_width - inner_padding * 2.0 - char_width * 2.0,
+                    row_height,
+                ),
             ));
         }
     }
@@ -2459,6 +2669,183 @@ mod tests {
             "frame not centered: left={} right_margin={}",
             layout.left,
             right_margin
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Scroll-window tests
+    //
+    // `compute_palette_frame_layout` is stateless — it derives
+    // `first_visible` from `selected_row` every rebuild. These tests
+    // lock in the centered-window clamp policy so a selection past
+    // `MAX_PALETTE_VISIBLE_ROWS` doesn't leave the highlight off-
+    // screen and so the window pins cleanly at both ends.
+    // -----------------------------------------------------------------
+
+    fn many_row_geometry(total: usize, selected: usize) -> PaletteOverlayGeometry {
+        PaletteOverlayGeometry {
+            query_text: String::new(),
+            rows: (0..total)
+                .map(|i| PaletteOverlayRow {
+                    label: format!("label_{i}"),
+                    description: format!("desc_{i}"),
+                })
+                .collect(),
+            selected_row: selected,
+        }
+    }
+
+    /// With more rows than `MAX_PALETTE_VISIBLE_ROWS` and a selection
+    /// past the visible count, the scroll window must advance so the
+    /// selected row is inside `[first_visible, first_visible +
+    /// shown_rows)`.
+    #[test]
+    fn palette_scroll_window_follows_selection() {
+        let geometry = many_row_geometry(15, 12);
+        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+        assert_eq!(layout.shown_rows, MAX_PALETTE_VISIBLE_ROWS);
+        let top = layout.first_visible;
+        let bottom = top + layout.shown_rows;
+        assert!(
+            top <= 12 && 12 < bottom,
+            "selection 12 not visible: window [{top}, {bottom})"
+        );
+    }
+
+    /// With a selection near the top of a long filtered list, the
+    /// window must pin to the top — `first_visible == 0`. Otherwise
+    /// centering would leave empty rows above the content.
+    #[test]
+    fn palette_scroll_window_pins_to_top_when_selection_low() {
+        let geometry = many_row_geometry(15, 0);
+        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+        assert_eq!(layout.first_visible, 0);
+        assert_eq!(layout.shown_rows, MAX_PALETTE_VISIBLE_ROWS);
+    }
+
+    /// With a selection at the bottom of a long filtered list, the
+    /// window must pin to the bottom — `first_visible + shown_rows
+    /// == total_rows`. Otherwise centering would overshoot and
+    /// leave empty rows below the content.
+    #[test]
+    fn palette_scroll_window_pins_to_bottom_when_selection_high() {
+        let geometry = many_row_geometry(15, 14);
+        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+        assert_eq!(
+            layout.first_visible + layout.shown_rows,
+            15,
+            "window did not pin to bottom: first_visible={}, shown_rows={}",
+            layout.first_visible,
+            layout.shown_rows
+        );
+    }
+
+    /// With fewer rows than `shown_rows`, `first_visible` must be 0
+    /// and `shown_rows == total_rows` (no scroll window needed).
+    #[test]
+    fn palette_scroll_window_no_clamp_when_total_fits() {
+        let geometry = many_row_geometry(3, 2);
+        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+        assert_eq!(layout.first_visible, 0);
+        assert_eq!(layout.shown_rows, 3);
+    }
+
+    /// New frame height formula is strictly linear in
+    /// `shown_rows` — no hidden "+2 row premium" like the old
+    /// `row_height * (2.0 + shown_rows)` math. Guards against
+    /// accidentally reintroducing the wasted bottom space.
+    #[test]
+    fn palette_frame_height_is_linear_in_visible_rows() {
+        let one = many_row_geometry(1, 0);
+        let two = many_row_geometry(2, 0);
+        let three = many_row_geometry(3, 0);
+        let h1 = compute_palette_frame_layout(&one, 1920.0).frame_height;
+        let h2 = compute_palette_frame_layout(&two, 1920.0).frame_height;
+        let h3 = compute_palette_frame_layout(&three, 1920.0).frame_height;
+        // Each extra row adds exactly one ROW_HEIGHT (34 px).
+        let delta_21 = h2 - h1;
+        let delta_32 = h3 - h2;
+        assert!(
+            (delta_21 - delta_32).abs() < 0.01,
+            "non-linear row delta: 2-1={delta_21}, 3-2={delta_32}"
+        );
+        assert!(
+            (delta_21 - 34.0).abs() < 0.01,
+            "expected row delta ~34 px, got {delta_21}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Sacred border source-string tests
+    //
+    // Assertions only check the *source strings* produced by the
+    // helper, never the shaped glyph output. This keeps the tests
+    // green in CI environments that lack Devanagari / Hebrew fonts —
+    // the shaper will render .notdef tofu there, but the source
+    // strings themselves are stable.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn palette_sacred_border_unicode_contains_devanagari_and_hebrew() {
+        let (top, bottom, left, right) = build_sacred_border_strings(
+            400.0, 320.0, 16.0, SacredBorderStyle::Unicode,
+        );
+        // Top border contains the Om syllable (U+0950).
+        assert!(
+            top.contains('\u{0950}'),
+            "top missing Devanagari Om (U+0950): {top:?}"
+        );
+        // Bottom border contains Hebrew aleph (U+05D0) and lamed (U+05DC).
+        assert!(
+            bottom.contains('\u{05D0}') && bottom.contains('\u{05DC}'),
+            "bottom missing Hebrew El (אל): {bottom:?}"
+        );
+        // Side columns contain the neutral middle-dot rail.
+        assert!(left.contains('\u{00B7}'), "left missing dot rail: {left:?}");
+        assert!(right.contains('\u{00B7}'), "right missing dot rail: {right:?}");
+        // Side columns are newline-separated, so their length should
+        // scale with the inner height.
+        let newline_count = left.chars().filter(|c| *c == '\n').count();
+        assert!(
+            newline_count >= 1,
+            "side column has no newlines: {left:?}"
+        );
+    }
+
+    #[test]
+    fn palette_sacred_border_ascii_uses_ascii_only() {
+        let (top, bottom, left, right) = build_sacred_border_strings(
+            400.0, 320.0, 16.0, SacredBorderStyle::Ascii,
+        );
+        assert!(top.contains("GOD"), "ascii top missing GOD: {top:?}");
+        assert!(bottom.contains("AUM"), "ascii bottom missing AUM: {bottom:?}");
+        // All characters must be ASCII (no Devanagari / Hebrew bleed-
+        // through from the wrong style).
+        for c in top.chars().chain(bottom.chars()).chain(left.chars()).chain(right.chars()) {
+            assert!(
+                c.is_ascii() || c == '\n',
+                "ascii border contains non-ASCII {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn palette_sacred_border_scales_with_width_and_height() {
+        let (top_narrow, _, left_short, _) =
+            build_sacred_border_strings(100.0, 100.0, 16.0, SacredBorderStyle::Unicode);
+        let (top_wide, _, left_tall, _) =
+            build_sacred_border_strings(800.0, 400.0, 16.0, SacredBorderStyle::Unicode);
+        assert!(
+            top_wide.chars().count() > top_narrow.chars().count(),
+            "wide border not longer than narrow: {} vs {}",
+            top_wide.chars().count(),
+            top_narrow.chars().count()
+        );
+        let short_lines = left_short.chars().filter(|c| *c == '\n').count();
+        let tall_lines = left_tall.chars().filter(|c| *c == '\n').count();
+        assert!(
+            tall_lines > short_lines,
+            "tall side column not longer than short: {tall_lines} vs {short_lines}"
         );
     }
 }
