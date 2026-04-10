@@ -630,12 +630,29 @@ impl Renderer {
     ///
     /// Borders are a rectangle of box-drawing glyphs: the top and bottom
     /// edges are horizontal text runs, the left and right edges are columns
-    /// of single-character lines. All four share a single `approx_char_width`
-    /// approximation so the corners of the horizontal runs line up with the
-    /// vertical columns — the previous implementation mixed the approximation
-    /// (for the top/bottom width) with the real node width (for the right
-    /// column position), which left a visible gap on wide nodes.
+    /// of single-character lines.
+    ///
+    /// Two subtleties make this tricky:
+    ///
+    /// - The top/bottom runs share the same `approx_char_width`
+    ///   approximation as the right column's x anchor — otherwise the right
+    ///   column drifts away from the top-right corner as the node gets
+    ///   wider (fixed in an earlier pass).
+    /// - cosmic-text renders each glyph inside its line box with the
+    ///   font's own ascent/descent, which is typically ~80% of the line
+    ///   height for box-drawing characters in LiberationSans. So the `╮`
+    ///   at the bottom of the top border's line box does NOT quite reach
+    ///   the top of the right column's first `│` glyph. We close the gap
+    ///   by overlapping the top/bottom runs' line boxes into the vertical
+    ///   column's extent by `CORNER_OVERLAP_FRAC * font_size` on each side.
     pub fn rebuild_border_buffers(&mut self, border_elements: &[BorderElement]) {
+        /// How far the top/bottom border line boxes are pulled inward (toward
+        /// the node content) so their glyph visible extents overlap with the
+        /// vertical columns' glyph visible extents. Empirically chosen for
+        /// LiberationSans at typical border font sizes; larger values visibly
+        /// encroach on the node content, smaller values leave gaps.
+        const CORNER_OVERLAP_FRAC: f32 = 0.35;
+
         self.border_buffers.clear();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
@@ -670,11 +687,17 @@ impl Renderer {
             let h_width = (char_count as f32 + 1.0) * approx_char_width;
             let v_width = approx_char_width * 2.0;
 
+            // Pull the horizontal runs inward so their glyph visible extents
+            // meet the vertical columns at the corners.
+            let corner_overlap = font_size * CORNER_OVERLAP_FRAC;
+            let top_y = ny - font_size + corner_overlap;
+            let bottom_y = ny + nh - corner_overlap;
+
             // Top run: `╭─ … ─╮`
             let top_text = glyph_set.top_border(char_count);
             self.border_buffers.push(create_border_buffer(
                 &mut font_system, &top_text, &border_attrs, font_size,
-                (nx - approx_char_width, ny - font_size),
+                (nx - approx_char_width, top_y),
                 (h_width, font_size * 1.5),
             ));
 
@@ -682,7 +705,7 @@ impl Renderer {
             let bottom_text = glyph_set.bottom_border(char_count);
             self.border_buffers.push(create_border_buffer(
                 &mut font_system, &bottom_text, &border_attrs, font_size,
-                (nx - approx_char_width, ny + nh),
+                (nx - approx_char_width, bottom_y),
                 (h_width, font_size * 1.5),
             ));
 

@@ -98,7 +98,24 @@ pub fn build_scene_with_offsets_and_selection(
         let size_x = node.size.width as f32;
         let size_y = node.size.height as f32;
 
-        node_aabbs.push((Vec2::new(pos_x, pos_y), Vec2::new(size_x, size_y)));
+        // Clip AABB: when a node has a visible frame, the rendered border
+        // extends beyond the raw node rect by roughly one border
+        // `font_size` vertically and one `approx_char_width` horizontally.
+        // Expand the clip box to match so connection glyphs don't land
+        // inside the visible frame area (see renderer::rebuild_border_buffers
+        // for the matching layout math).
+        let (clip_pos, clip_size) = if node.style.show_frame {
+            let border_style = BorderStyle::default_with_color(&node.style.frame_color);
+            let bf = border_style.font_size_pt;
+            let bcw = bf * 0.6;
+            (
+                Vec2::new(pos_x - bcw, pos_y - bf),
+                Vec2::new(size_x + 2.0 * bcw, size_y + 2.0 * bf),
+            )
+        } else {
+            (Vec2::new(pos_x, pos_y), Vec2::new(size_x, size_y))
+        };
+        node_aabbs.push((clip_pos, clip_size));
 
         // Text element (skip empty text nodes)
         if !node.text.is_empty() {
@@ -177,20 +194,33 @@ pub fn build_scene_with_offsets_and_selection(
             continue;
         }
 
-        // Caps are anchored to the ORIGINAL first/last sample — they sit on
-        // the source/target node's border and stay there regardless of any
-        // interior-clipping the body glyphs go through below.
-        let first_pos = (samples[0].position.x, samples[0].position.y);
-        let last_pos = (
-            samples.last().unwrap().position.x,
-            samples.last().unwrap().position.y,
-        );
-        let cap_start = config.cap_start.as_ref().map(|glyph| (glyph.clone(), first_pos));
-        let cap_end = config.cap_end.as_ref().map(|glyph| (glyph.clone(), last_pos));
+        // Caps live at the ORIGINAL first and last sample positions (the
+        // anchor points resolved from the source/target node bounds).
+        // Those points sit on the raw node edge — which is ON the clip
+        // AABB boundary for an unframed node (so they survive clipping)
+        // but INSIDE the expanded clip AABB for a framed node (so they
+        // get dropped along with the body glyphs that would also render
+        // inside the frame area).
+        let first_pos = samples[0].position;
+        let last_pos = samples.last().unwrap().position;
+        let first_visible = !point_inside_any_node(first_pos, &node_aabbs);
+        let last_visible = !point_inside_any_node(last_pos, &node_aabbs);
+        let cap_start = if first_visible {
+            config.cap_start.as_ref()
+                .map(|g| (g.clone(), (first_pos.x, first_pos.y)))
+        } else {
+            None
+        };
+        let cap_end = if last_visible {
+            config.cap_end.as_ref()
+                .map(|g| (g.clone(), (last_pos.x, last_pos.y)))
+        } else {
+            None
+        };
 
         // Drop body-glyph positions that fall strictly inside any visible
-        // node's AABB so a connection doesn't render over the interior of
-        // a node it's passing through.
+        // node's (frame-expanded) AABB so a connection doesn't render
+        // over the interior of a node or over its visible border area.
         let glyph_positions: Vec<(f32, f32)> = samples.iter()
             .map(|s| s.position)
             .filter(|p| !point_inside_any_node(*p, &node_aabbs))
@@ -296,52 +326,64 @@ mod tests {
         assert!(point_inside_any_node(Vec2::new(125.0, 125.0), &aabbs));
     }
 
-    #[test]
-    fn test_scene_clips_connection_glyphs_inside_node() {
-        // Build a minimal map with three nodes: A on the left, B on the
-        // right, and a blocker node C directly on the path between them.
-        // The A→B connection should skip body glyphs that fall inside C.
-        use crate::mindmap::model::{
-            Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
-        };
-        use std::collections::HashMap;
+    // Shared helpers for the synthetic-map scene tests below.
+    use crate::mindmap::model::{
+        Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
+    };
 
-        fn node_at(id: &str, x: f64, y: f64, w: f64, h: f64) -> MindNode {
-            MindNode {
-                id: id.to_string(),
-                parent_id: None,
-                index: 0,
-                position: Position { x, y },
-                size: Size { width: w, height: h },
-                text: id.to_string(),
-                text_runs: vec![],
-                style: NodeStyle {
-                    background_color: "#000".into(),
-                    frame_color: "#fff".into(),
-                    text_color: "#fff".into(),
-                    shape_type: 0,
-                    corner_radius_percent: 0.0,
-                    frame_thickness: 1.0,
-                    show_frame: false,
-                    show_shadow: false,
-                    border: None,
-                },
-                layout: NodeLayout { layout_type: 0, direction: 0, spacing: 0.0 },
-                folded: false,
-                notes: String::new(),
-                color_schema: None,
-                trigger_bindings: vec![],
-                inline_mutations: vec![],
-            }
+    fn synthetic_node(id: &str, x: f64, y: f64, w: f64, h: f64, show_frame: bool) -> MindNode {
+        MindNode {
+            id: id.to_string(),
+            parent_id: None,
+            index: 0,
+            position: Position { x, y },
+            size: Size { width: w, height: h },
+            text: id.to_string(),
+            text_runs: vec![],
+            style: NodeStyle {
+                background_color: "#000".into(),
+                frame_color: "#fff".into(),
+                text_color: "#fff".into(),
+                shape_type: 0,
+                corner_radius_percent: 0.0,
+                frame_thickness: 1.0,
+                show_frame,
+                show_shadow: false,
+                border: None,
+            },
+            layout: NodeLayout { layout_type: 0, direction: 0, spacing: 0.0 },
+            folded: false,
+            notes: String::new(),
+            color_schema: None,
+            trigger_bindings: vec![],
+            inline_mutations: vec![],
         }
+    }
 
+    fn synthetic_edge(from: &str, to: &str, anchor_from: i32, anchor_to: i32) -> MindEdge {
+        MindEdge {
+            from_id: from.to_string(),
+            to_id: to.to_string(),
+            edge_type: "cross_link".to_string(),
+            color: "#fff".to_string(),
+            width: 1,
+            line_style: 0,
+            visible: true,
+            label: None,
+            anchor_from,
+            anchor_to,
+            control_points: vec![],
+            glyph_connection: None,
+        }
+    }
+
+    fn synthetic_map(nodes_vec: Vec<MindNode>, edges: Vec<MindEdge>) -> MindMap {
+        use std::collections::HashMap;
         let mut nodes = HashMap::new();
-        nodes.insert("a".into(), node_at("a", 0.0, 0.0, 40.0, 40.0));
-        nodes.insert("b".into(), node_at("b", 400.0, 0.0, 40.0, 40.0));
-        // Blocker C is directly on the path between A and B
-        nodes.insert("c".into(), node_at("c", 180.0, 0.0, 60.0, 40.0));
-
-        let map = MindMap {
+        for n in nodes_vec {
+            nodes.insert(n.id.clone(), n);
+        }
+        MindMap {
             version: "1.0".into(),
             name: "test".into(),
             canvas: Canvas {
@@ -350,22 +392,25 @@ mod tests {
                 default_connection: None,
             },
             nodes,
-            edges: vec![MindEdge {
-                from_id: "a".into(),
-                to_id: "b".into(),
-                edge_type: "cross_link".into(),
-                color: "#fff".into(),
-                width: 1,
-                line_style: 0,
-                visible: true,
-                label: None,
-                anchor_from: 2, // right edge of A
-                anchor_to: 4,   // left edge of B
-                control_points: vec![],
-                glyph_connection: None,
-            }],
+            edges,
             custom_mutations: vec![],
-        };
+        }
+    }
+
+    #[test]
+    fn test_scene_clips_connection_glyphs_inside_node() {
+        // A on the left, B on the right, blocker C directly on the path
+        // between them. The A→B connection should skip body glyphs that
+        // fall inside C. All three nodes are unframed so only the raw
+        // AABB clipping is exercised here.
+        let map = synthetic_map(
+            vec![
+                synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("c", 180.0, 0.0, 60.0, 40.0, false),
+            ],
+            vec![synthetic_edge("a", "b", 2, 4)], // right edge of A → left edge of B
+        );
 
         let scene = build_scene(&map);
         assert_eq!(scene.connection_elements.len(), 1);
@@ -378,10 +423,115 @@ mod tests {
                 "glyph at ({}, {}) should have been clipped by blocker C",
                 x, y);
         }
-        // And at least some body glyphs should remain outside C, otherwise
-        // the whole connection would be invisible.
         assert!(!conn.glyph_positions.is_empty(),
             "some glyphs should remain outside the blocker");
+    }
+
+    #[test]
+    fn test_scene_clips_connection_glyphs_in_frame_area() {
+        // Same A→B→blocker layout but this time C has a visible frame.
+        // The border at default 14pt font extends ~8.4 px horizontally and
+        // ~14 px vertically past C's AABB, so body glyphs in the expanded
+        // region should also be clipped.
+        let border_font = 14.0_f32;
+        let border_char_w = border_font * 0.6;
+
+        let map = synthetic_map(
+            vec![
+                synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("c", 180.0, 0.0, 60.0, 40.0, true),
+            ],
+            vec![synthetic_edge("a", "b", 2, 4)],
+        );
+
+        let scene = build_scene(&map);
+        assert_eq!(scene.connection_elements.len(), 1);
+        let conn = &scene.connection_elements[0];
+
+        // The clip AABB for framed C is expanded by (border_char_w,
+        // border_font) on every side. No body glyph should fall inside
+        // the expanded region.
+        let min_x = 180.0 - border_char_w + 0.5;
+        let max_x = 240.0 + border_char_w - 0.5;
+        let min_y = 0.0 - border_font + 0.5;
+        let max_y = 40.0 + border_font - 0.5;
+        for &(x, y) in &conn.glyph_positions {
+            let inside_expanded_c =
+                x > min_x && x < max_x && y > min_y && y < max_y;
+            assert!(!inside_expanded_c,
+                "glyph at ({}, {}) should have been clipped by framed C's expanded AABB",
+                x, y);
+        }
+        // Body glyphs should still render in the space between A, C's
+        // expanded clip box, and B.
+        assert!(!conn.glyph_positions.is_empty(),
+            "connection between A and B should still have visible body glyphs outside C's frame");
+    }
+
+    #[test]
+    fn test_scene_caps_survive_for_unframed_endpoints() {
+        // A→B connection with a cap_start glyph configured. Because A and
+        // B are unframed, the anchor point sits exactly on A's edge and
+        // the cap should render there.
+        use crate::mindmap::model::GlyphConnectionConfig;
+        let mut edge = synthetic_edge("a", "b", 2, 4);
+        edge.glyph_connection = Some(GlyphConnectionConfig {
+            body: "·".into(),
+            cap_start: Some("►".into()),
+            cap_end: Some("◄".into()),
+            font: None,
+            font_size_pt: 12.0,
+            color: None,
+            spacing: 0.0,
+        });
+        let map = synthetic_map(
+            vec![
+                synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
+            ],
+            vec![edge],
+        );
+        let scene = build_scene(&map);
+        let conn = &scene.connection_elements[0];
+        assert!(conn.cap_start.is_some(),
+            "cap_start should survive for unframed source");
+        assert!(conn.cap_end.is_some(),
+            "cap_end should survive for unframed target");
+    }
+
+    #[test]
+    fn test_scene_caps_clipped_for_framed_endpoints() {
+        // A→B connection where the target B has a visible frame. The
+        // cap_end sits on B's node edge, which is STRICTLY inside B's
+        // frame-expanded clip AABB, so it should be dropped — otherwise
+        // the cap would render in the visible border area.
+        use crate::mindmap::model::GlyphConnectionConfig;
+        let mut edge = synthetic_edge("a", "b", 2, 4);
+        edge.glyph_connection = Some(GlyphConnectionConfig {
+            body: "·".into(),
+            cap_start: Some("►".into()),
+            cap_end: Some("◄".into()),
+            font: None,
+            font_size_pt: 12.0,
+            color: None,
+            spacing: 0.0,
+        });
+        let map = synthetic_map(
+            vec![
+                synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("b", 400.0, 0.0, 40.0, 40.0, true), // framed!
+            ],
+            vec![edge],
+        );
+        let scene = build_scene(&map);
+        let conn = &scene.connection_elements[0];
+        // Source is unframed — cap_start still shows at A's right edge.
+        assert!(conn.cap_start.is_some(),
+            "cap_start should survive for unframed source");
+        // Target is framed — cap_end falls inside the expanded clip AABB.
+        assert!(conn.cap_end.is_none(),
+            "cap_end should be clipped when target has a visible frame");
     }
 
     #[test]
