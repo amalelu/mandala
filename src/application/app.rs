@@ -221,6 +221,17 @@ impl Application {
 
         match MindMapDocument::load(&self.options.mindmap_path) {
             Ok(doc) => {
+                // Canvas background: resolve through theme
+                // variables so `"var(--bg)"` works, then hand off
+                // to the renderer as the render-pass clear color.
+                // Replaces the previously-hardcoded black clear.
+                let vars = &doc.mindmap.canvas.theme_variables;
+                let resolved_bg = baumhard::util::color::resolve_var(
+                    &doc.mindmap.canvas.background_color,
+                    vars,
+                );
+                renderer.set_clear_color_from_hex(resolved_bg);
+
                 // Nodes: build Baumhard tree from MindMap hierarchy
                 let tree = doc.build_tree();
                 renderer.rebuild_buffers_from_tree(&tree.tree);

@@ -60,6 +60,50 @@ pub struct PaletteOverlayRow {
     pub description: String,
 }
 
+/// Inline WGSL shader for the colored-rectangle pipeline. Draws a
+/// stream of NDC-space vertices, each carrying its own RGBA color.
+/// Kept inline (rather than in the baumhard shader table) because
+/// it's 100% renderer-local — no tree data, no camera uniforms; the
+/// CPU bakes the camera transform into each vertex before upload.
+const RECT_SHADER_WGSL: &str = r#"
+struct VsIn {
+    @location(0) pos: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+    var out: VsOut;
+    out.pos = vec4<f32>(in.pos, 0.0, 1.0);
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
+/// Bytes-per-vertex for the rect pipeline: `vec2<f32> pos +
+/// vec4<f32> color = 6 × f32 = 24 bytes`. Used when sizing /
+/// offsetting the vertex buffer. Declared as a compile-time const so
+/// the layout math is grep-able from a single place.
+const RECT_VERTEX_SIZE: u64 = 24;
+
+/// Starting capacity (in bytes) for the rect vertex buffer. Big
+/// enough for a modest map with several hundred node backgrounds
+/// without an immediate grow; doubling-on-overflow handles anything
+/// larger. 8192 bytes = 341 vertices = ~56 rects. Deliberately small
+/// since most maps will have a handful of colored nodes and the grow
+/// path is exercised rarely.
+const RECT_VBUF_INITIAL_CAPACITY: u64 = 8192;
+
 pub struct Renderer {
     instance: Instance,
     surface: Surface<'static>,
@@ -80,6 +124,14 @@ pub struct Renderer {
     shaders: FxHashMap<&'static str, ShaderModule>,
     render_pipeline: RenderPipeline,
     text_renderer: TextRenderer,
+    /// Second glyphon TextRenderer dedicated to the command
+    /// palette overlay. Shares `self.atlas` with `text_renderer`
+    /// so glyph caching is unified, but keeps its own internal
+    /// vertex/index buffers — which is what lets us issue a rect
+    /// draw BETWEEN the two text renders inside one render pass
+    /// (otherwise re-preparing the single text renderer would
+    /// race with the pass's already-recorded draw commands).
+    palette_text_renderer: TextRenderer,
     texture_format: TextureFormat,
     surface_capabilities: SurfaceCapabilities,
     redraw_mode: RedrawMode,
@@ -131,6 +183,60 @@ pub struct Renderer {
     /// this flag so the event loop can explicitly clear the cache and
     /// order the rebuild readably alongside the viewport-dirty path.
     connection_geometry_dirty: bool,
+    /// Filled-rectangle rendering pipeline. Used to draw node
+    /// backgrounds (from `GlyphArea.background_color`), the command
+    /// palette backdrop, and any other solid-color fill that needs
+    /// to sit in the render pipeline alongside text. See the
+    /// `RECT_SHADER_WGSL` const above for the shader, and
+    /// `push_canvas_rect` / `push_screen_rect` for the CPU-side
+    /// vertex layout.
+    rect_pipeline: RenderPipeline,
+    /// Persistent vertex buffer for the rect pipeline. Grows
+    /// (doubling) on overflow, never shrinks. Re-uploaded each
+    /// frame with the concatenation of `main_rect_vertices` and
+    /// `palette_rect_vertices`; the two batches draw separately
+    /// using offset + count so a single buffer keeps the code
+    /// simple.
+    rect_vertex_buffer: wgpu::Buffer,
+    /// Current allocated capacity of `rect_vertex_buffer`, in
+    /// bytes.
+    rect_vertex_buffer_capacity: u64,
+    /// Canvas-space node background rects (pos, size, rgba u8)
+    /// collected from `GlyphArea.background_color` during
+    /// `rebuild_buffers_from_tree`. Camera-transformed to NDC in
+    /// `render` each frame so a camera pan/zoom is a pure CPU
+    /// rebuild — no tree rewalk required.
+    node_background_rects: Vec<NodeBackgroundRect>,
+    /// Packed vertex floats for the "main" (node background) rect
+    /// batch, rebuilt every frame from `node_background_rects` +
+    /// current camera. 6 floats per vertex, 6 vertices per rect.
+    main_rect_vertices: Vec<f32>,
+    /// Packed vertex floats for the "overlay" (palette backdrop)
+    /// rect batch, rebuilt whenever the palette opens/closes or
+    /// the viewport resizes. Stays empty when the palette is shut.
+    palette_rect_vertices: Vec<f32>,
+    /// Screen-space geometry of the palette's opaque backdrop.
+    /// Captured inside `rebuild_palette_overlay_buffers` so
+    /// `render()` can turn it into NDC vertices against the
+    /// current viewport size without re-running the layout.
+    /// `None` whenever the palette is closed.
+    palette_backdrop: Option<(f32, f32, f32, f32)>, // (left, top, width, height)
+    /// Clear color for the render pass, driven by the map's
+    /// `Canvas.background_color`. Starts as opaque black so the
+    /// app looks sensible before a map loads; the event loop
+    /// calls `set_clear_color` right after load.
+    clear_color: Color,
+}
+
+/// Canvas-space record of a filled rectangle drawn behind a node's
+/// text. Captured from `GlyphArea.background_color` during the tree
+/// walk in `rebuild_buffers_from_tree`; camera-transformed to NDC
+/// in `render` each frame.
+#[derive(Clone, Debug)]
+struct NodeBackgroundRect {
+    position: Vec2,
+    size: Vec2,
+    color: [u8; 4],
 }
 
 impl Renderer {
@@ -170,8 +276,79 @@ impl Renderer {
         let mut atlas = TextAtlas::new(&device, &queue, &glyphon_cache, swapchain_format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        let palette_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let viewport = Viewport::new(&device, &glyphon_cache);
         let camera = Camera2D::new(size.width, size.height);
+
+        // Rect pipeline: colored quads for node backgrounds and the
+        // palette backdrop. Uses the swapchain (not capability[0])
+        // format so the pipeline matches the LoadOp target, and
+        // enables standard alpha blending so semi-transparent fills
+        // compose cleanly with whatever's beneath them.
+        let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rect_shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(RECT_SHADER_WGSL)),
+        });
+        let rect_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rect_pipeline_layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rect_pipeline"),
+            layout: Some(&rect_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &rect_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: RECT_VERTEX_SIZE,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rect_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: swapchain_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let rect_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rect_vertex_buffer"),
+            size: RECT_VBUF_INITIAL_CAPACITY,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Renderer {
             instance,
             surface,
@@ -188,6 +365,7 @@ impl Renderer {
             shaders,
             render_pipeline,
             text_renderer,
+            palette_text_renderer,
             texture_format,
             surface_capabilities,
             should_render: false,
@@ -208,6 +386,14 @@ impl Renderer {
             overlay_buffers: Vec::new(),
             connection_viewport_dirty: false,
             connection_geometry_dirty: false,
+            rect_pipeline,
+            rect_vertex_buffer,
+            rect_vertex_buffer_capacity: RECT_VBUF_INITIAL_CAPACITY,
+            node_background_rects: Vec::new(),
+            main_rect_vertices: Vec::new(),
+            palette_rect_vertices: Vec::new(),
+            palette_backdrop: None,
+            clear_color: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
         }
     }
 
@@ -217,6 +403,78 @@ impl Renderer {
     /// `GlyphConnectionConfig::effective_font_size_pt`).
     pub fn camera_zoom(&self) -> f32 {
         self.camera.zoom
+    }
+
+    /// Set the render-pass clear color from a hex string like
+    /// `#141820`. Called by the event loop after a map loads so the
+    /// canvas matches `Canvas.background_color`. Bad hex degrades
+    /// to opaque black via `hex_to_rgba_safe`, so a typo in a
+    /// theme file can't leave the app with a glitched background.
+    pub fn set_clear_color_from_hex(&mut self, hex: &str) {
+        let rgba = baumhard::util::color::hex_to_rgba_safe(hex, [0.0, 0.0, 0.0, 1.0]);
+        self.clear_color = Color {
+            r: rgba[0] as f64,
+            g: rgba[1] as f64,
+            b: rgba[2] as f64,
+            a: rgba[3] as f64,
+        };
+    }
+
+    /// Push the six vertices (two triangles) of a filled axis-aligned
+    /// rectangle into `out`. Coords are already in NDC — the caller is
+    /// responsible for any camera or screen→NDC transform. `color` is
+    /// the flat RGBA written to every vertex.
+    ///
+    /// Layout: `[x_tl, y_tl, r, g, b, a, x_tr, y_tr, r, g, b, a, …]`
+    /// (6 floats per vertex, 6 vertices per rect = 36 floats per rect).
+    fn push_rect_ndc(
+        out: &mut Vec<f32>,
+        ndc_min: Vec2,
+        ndc_max: Vec2,
+        color: [f32; 4],
+    ) {
+        // Triangle 1: TL, BL, BR
+        // Triangle 2: TL, BR, TR
+        //
+        // NDC y is UP, so "top" is the larger y. The caller computes
+        // ndc_min / ndc_max from the canonical top-left + size by
+        // flipping y during the screen-to-NDC transform, so here
+        // ndc_min is bottom-left and ndc_max is top-right. Unpack:
+        let (lx, ly) = (ndc_min.x, ndc_min.y); // bottom-left
+        let (rx, ry) = (ndc_max.x, ndc_max.y); // top-right
+        let [r, g, b, a] = color;
+        // TL = (lx, ry), TR = (rx, ry), BR = (rx, ly), BL = (lx, ly)
+        let push = |out: &mut Vec<f32>, x: f32, y: f32| {
+            out.extend_from_slice(&[x, y, r, g, b, a]);
+        };
+        // Triangle 1: TL, BL, BR
+        push(out, lx, ry);
+        push(out, lx, ly);
+        push(out, rx, ly);
+        // Triangle 2: TL, BR, TR
+        push(out, lx, ry);
+        push(out, rx, ly);
+        push(out, rx, ry);
+    }
+
+    /// Convert a screen-space rectangle (top-left + size in pixels)
+    /// into a NDC bounding pair. Y is flipped so "top" (small y on
+    /// screen) maps to "top" (large y in NDC).
+    fn screen_rect_to_ndc_bounds(
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> (Vec2, Vec2) {
+        let x0 = left / vp_w * 2.0 - 1.0;
+        let x1 = (left + width) / vp_w * 2.0 - 1.0;
+        // Screen y grows down; NDC y grows up. Invert.
+        let y_top = 1.0 - top / vp_h * 2.0;
+        let y_bottom = 1.0 - (top + height) / vp_h * 2.0;
+        // ndc_min = (x0, y_bottom), ndc_max = (x1, y_top)
+        (Vec2::new(x0, y_bottom), Vec2::new(x1, y_top))
     }
 
     /// Returns and resets the connection viewport-dirty flag. Called by
@@ -468,13 +726,109 @@ impl Renderer {
         if !self.should_render {
             return;
         }
+        let vp_w_px = self.config.width as f32;
+        let vp_h_px = self.config.height as f32;
         let vp_w = self.config.width as i32;
         let vp_h = self.config.height as i32;
         let vp_bounds = TextBounds { left: 0, top: 0, right: vp_w, bottom: vp_h };
         let default_color = cosmic_text::Color::rgba(255, 255, 255, 255);
 
-        // Collect all camera-transformed mindmap + border + connection buffers with viewport culling
-        let mut text_areas: Vec<TextArea> = self.mindmap_buffers.values()
+        // Rebuild the "main" rect batch: canvas-space node
+        // backgrounds transformed to NDC via the current camera.
+        // Cheap: one push per visible node, no text shaping.
+        // Visible-range test mirrors the text-area cull below so
+        // clipped-offscreen nodes don't waste vertices either.
+        self.main_rect_vertices.clear();
+        for rect in &self.node_background_rects {
+            if !self.camera.is_visible(rect.position, rect.size) {
+                continue;
+            }
+            let screen_tl = self.camera.canvas_to_screen(rect.position);
+            let screen_size = rect.size * self.camera.zoom;
+            let (ndc_min, ndc_max) = Self::screen_rect_to_ndc_bounds(
+                screen_tl.x, screen_tl.y,
+                screen_size.x, screen_size.y,
+                vp_w_px, vp_h_px,
+            );
+            let color = [
+                rect.color[0] as f32 / 255.0,
+                rect.color[1] as f32 / 255.0,
+                rect.color[2] as f32 / 255.0,
+                rect.color[3] as f32 / 255.0,
+            ];
+            Self::push_rect_ndc(&mut self.main_rect_vertices, ndc_min, ndc_max, color);
+        }
+
+        // Rebuild the "palette" rect batch: one opaque backdrop
+        // behind the command palette, in screen space. Empty when
+        // the palette is closed (the `Option` is `None`).
+        self.palette_rect_vertices.clear();
+        if let Some((left, top, w, h)) = self.palette_backdrop {
+            let (ndc_min, ndc_max) = Self::screen_rect_to_ndc_bounds(
+                left, top, w, h, vp_w_px, vp_h_px,
+            );
+            // Opaque dark charcoal — chosen to sit cleanly against
+            // both light and dark canvas backgrounds without
+            // tinting the palette's cyan foreground.
+            let bg_color = [15.0 / 255.0, 18.0 / 255.0, 26.0 / 255.0, 1.0];
+            Self::push_rect_ndc(
+                &mut self.palette_rect_vertices,
+                ndc_min,
+                ndc_max,
+                bg_color,
+            );
+        }
+
+        // Upload both batches to the shared rect vertex buffer,
+        // growing if the combined size exceeds the current
+        // capacity. Layout: `[main_bytes | palette_bytes]`.
+        let main_bytes_len = self.main_rect_vertices.len() * std::mem::size_of::<f32>();
+        let palette_bytes_len = self.palette_rect_vertices.len() * std::mem::size_of::<f32>();
+        let total_bytes = (main_bytes_len + palette_bytes_len) as u64;
+        if total_bytes > self.rect_vertex_buffer_capacity {
+            let mut new_cap = self.rect_vertex_buffer_capacity.max(RECT_VBUF_INITIAL_CAPACITY);
+            while new_cap < total_bytes {
+                new_cap *= 2;
+            }
+            self.rect_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("rect_vertex_buffer"),
+                size: new_cap,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.rect_vertex_buffer_capacity = new_cap;
+        }
+        if main_bytes_len > 0 {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    self.main_rect_vertices.as_ptr() as *const u8,
+                    main_bytes_len,
+                )
+            };
+            self.queue.write_buffer(&self.rect_vertex_buffer, 0, bytes);
+        }
+        if palette_bytes_len > 0 {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    self.palette_rect_vertices.as_ptr() as *const u8,
+                    palette_bytes_len,
+                )
+            };
+            self.queue.write_buffer(
+                &self.rect_vertex_buffer,
+                main_bytes_len as u64,
+                bytes,
+            );
+        }
+        let main_vertex_count = (self.main_rect_vertices.len() / 6) as u32;
+        let palette_vertex_count = (self.palette_rect_vertices.len() / 6) as u32;
+
+        // Collect "main" text areas: the mindmap + borders +
+        // connections + edge handles + overlays + arena buffers.
+        // Palette buffers go into a separate list so they render
+        // in a second glyphon pass (with the backdrop rect
+        // between them, hence the split).
+        let mut main_text_areas: Vec<TextArea> = self.mindmap_buffers.values()
             .chain(self.border_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
             .chain(self.edge_handle_buffers.iter())
@@ -500,7 +854,7 @@ impl Renderer {
 
         // GfxElement arena-based buffers (no camera transform)
         for text_buffer in self.buffer_cache.values() {
-            text_areas.push(TextArea {
+            main_text_areas.push(TextArea {
                 buffer: text_buffer.buffer(),
                 left: text_buffer.pos.0,
                 top: text_buffer.pos.1,
@@ -511,20 +865,21 @@ impl Renderer {
             });
         }
 
-        // Palette overlay (screen-space, no camera transform) —
-        // drawn last so it sits on top of the mindmap. Skipped
-        // when the palette is closed and the buffer list is empty.
-        for text_buffer in self.palette_overlay_buffers.iter() {
-            text_areas.push(TextArea {
-                buffer: &text_buffer.buffer,
-                left: text_buffer.pos.0,
-                top: text_buffer.pos.1,
+        // Palette overlay: screen-space text, drawn in its own
+        // glyphon pass so the rect-pipeline backdrop can be
+        // interleaved between the main text and this one.
+        let palette_text_areas: Vec<TextArea> = self.palette_overlay_buffers.iter()
+            .map(|tb| TextArea {
+                buffer: &tb.buffer,
+                left: tb.pos.0,
+                top: tb.pos.1,
                 scale: 1.0,
                 bounds: vp_bounds,
                 default_color,
                 custom_glyphs: &[],
-            });
-        }
+            })
+            .collect();
+
         let mut font_system = fonts::FONT_SYSTEM
             .try_write()
             .expect("Failed to acquire font_system lock");
@@ -536,10 +891,23 @@ impl Renderer {
                 &mut font_system,
                 &mut self.atlas,
                 &self.viewport,
-                text_areas,
+                main_text_areas,
                 &mut self.swash_cache,
             )
             .unwrap();
+        self.palette_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut font_system,
+                &mut self.atlas,
+                &self.viewport,
+                palette_text_areas,
+                &mut self.swash_cache,
+            )
+            .unwrap();
+        drop(font_system);
+
         let frame_result = self.surface.get_current_texture();
         if frame_result.is_err() {
             debug!("Failed to get the surface texture, can't render.");
@@ -560,7 +928,7 @@ impl Renderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(Color::BLACK),
+                        load: wgpu::LoadOp::Clear(self.clear_color),
                         store: StoreOp::Store,
                     },
                 })],
@@ -569,7 +937,42 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+
+            // 1. Node backgrounds (rect pipeline, camera-transformed).
+            if main_vertex_count > 0 {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(
+                    0,
+                    self.rect_vertex_buffer.slice(0..main_bytes_len as u64),
+                );
+                pass.draw(0..main_vertex_count, 0..1);
+            }
+
+            // 2. Main text pass — node text, borders, connections,
+            //    edge handles, camera-transformed and screen-space
+            //    overlays, all drawn on top of the node backgrounds.
             self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).unwrap();
+
+            // 3. Palette backdrop (rect pipeline, screen-space).
+            //    Drawn AFTER the main text pass so node text
+            //    sitting behind the palette is fully occluded.
+            if palette_vertex_count > 0 {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(
+                    0,
+                    self.rect_vertex_buffer.slice(
+                        main_bytes_len as u64..(main_bytes_len + palette_bytes_len) as u64,
+                    ),
+                );
+                pass.draw(0..palette_vertex_count, 0..1);
+            }
+
+            // 4. Palette text pass — cyan border, query line,
+            //    filtered action rows. Drawn on top of the palette
+            //    backdrop so every glyph sits cleanly on solid fill.
+            self.palette_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .unwrap();
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -667,6 +1070,15 @@ impl Renderer {
     /// connections use their own `rebuild_*_buffers` methods alongside it.
     pub fn rebuild_buffers_from_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>) {
         self.mindmap_buffers.clear();
+        // Session 6C follow-up: node backgrounds live on GlyphArea
+        // and are collected fresh alongside the text buffers. The
+        // render pipeline reads them back out each frame to draw
+        // solid fills behind the text, with the camera transform
+        // baked in at the last moment. Clearing here (rather than
+        // on every render call) keeps the collect cost aligned
+        // with the tree rebuild cadence — i.e. only when something
+        // structural changed.
+        self.node_background_rects.clear();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
@@ -681,6 +1093,19 @@ impl Renderer {
                 Some(a) => a,
                 None => continue, // Skip Void and GlyphModel nodes
             };
+
+            // Background rects live on the GlyphArea itself. Even
+            // text-empty elements can have a background (a blank
+            // colored pad), so collect the rect before the text
+            // skip below. Mutations on the tree can mutate this
+            // directly via `glyph_area_mut().background_color`.
+            if let Some(color) = area.background_color {
+                self.node_background_rects.push(NodeBackgroundRect {
+                    position: Vec2::new(area.position.x.0, area.position.y.0),
+                    size: Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
+                    color,
+                });
+            }
 
             if area.text.is_empty() {
                 continue;
@@ -972,6 +1397,10 @@ impl Renderer {
         geometry: Option<&PaletteOverlayGeometry>,
     ) {
         self.palette_overlay_buffers.clear();
+        // Drop any previously-recorded backdrop — the render pass
+        // emits a palette rect only when this is `Some`, so closing
+        // the palette also clears the backdrop.
+        self.palette_backdrop = None;
         let geometry = match geometry {
             Some(g) => g,
             None => return,
@@ -1027,35 +1456,19 @@ impl Renderer {
         let text_color = cosmic_text::Color::rgba(235, 235, 235, 255);
         let dim_color = cosmic_text::Color::rgba(150, 150, 160, 255);
         let selected_color = cosmic_text::Color::rgba(0, 229, 255, 255);
-        // Dark, fully-opaque background fill so text behind the
-        // palette doesn't bleed through. Rendered first so every
-        // subsequent buffer draws on top of it.
-        let bg_color = cosmic_text::Color::rgba(15, 18, 26, 255);
 
-        // Opaque background: a tight grid of U+2588 FULL BLOCK
-        // characters filling the frame interior (and a hair past the
-        // border glyphs so no sliver of canvas shows through at the
-        // edges). Tight-stacked with `Metrics(font_size, font_size)`
-        // so adjacent lines abut without a gap, and slightly
-        // over-filled horizontally since the effective advance of
-        // `█` can be a touch under the approximate `char_width`.
-        let bg_cols = ((frame_width / char_width).ceil() as usize + 2).max(1);
-        let bg_rows = ((frame_height / font_size).ceil() as usize + 1).max(1);
-        let bg_line: String = "\u{2588}".repeat(bg_cols);
-        let bg_text: String = std::iter::repeat(bg_line.as_str())
-            .take(bg_rows)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let bg_attrs = Attrs::new()
-            .color(bg_color)
-            .metrics(cosmic_text::Metrics::new(font_size, font_size));
-        self.palette_overlay_buffers.push(create_border_buffer(
-            &mut font_system,
-            &bg_text,
-            &bg_attrs,
-            font_size,
-            (left - char_width, top - 2.0),
-            (frame_width + char_width * 2.0, frame_height + font_size),
+        // Record the backdrop geometry for the rect pipeline.
+        // `render()` rebuilds the palette rect batch from this each
+        // frame (cheap — one rect) and draws it between the main
+        // text pass and the palette text pass, so the fill is truly
+        // opaque and no node text bleeds through. The rect extends
+        // slightly beyond the frame so it sits flush with the
+        // border glyphs.
+        self.palette_backdrop = Some((
+            left - char_width,
+            top - 2.0,
+            frame_width + char_width * 2.0,
+            frame_height + font_size,
         ));
 
         // Box-drawing border around the frame.

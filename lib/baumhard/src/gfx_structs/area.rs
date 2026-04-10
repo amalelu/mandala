@@ -144,6 +144,14 @@ pub struct GlyphArea {
     pub position: OrderedVec2,
     pub render_bounds: OrderedVec2,
     pub regions: ColorFontRegions,
+    /// Solid background fill drawn behind the text glyphs by the
+    /// renderer. `None` means no fill — the element draws as text
+    /// only, letting the canvas show through. Stored as 4×u8 RGBA
+    /// so it's cheap to hash, copy, and ship to the GPU. Mutations
+    /// can modify this directly through the tree walker; per-frame
+    /// rendering reads it during `rebuild_buffers_from_tree`.
+    #[serde(default)]
+    pub background_color: Option<[u8; 4]>,
     #[derivative(PartialEq = "ignore")]
     pub hitbox: HitBox,
     #[serde(skip)]
@@ -164,6 +172,7 @@ impl Hash for GlyphArea {
         self.render_bounds.x().to_bits().hash(state);
         self.render_bounds.y().to_bits().hash(state);
         self.regions.hash(state);
+        self.background_color.hash(state);
     }
 }
 
@@ -176,6 +185,7 @@ impl GlyphArea {
             position: OrderedVec2::from_vec2(position),
             render_bounds: OrderedVec2::from_vec2(bounds),
             regions: ColorFontRegions::default(),
+            background_color: None,
             hitbox: HitBox::new(),
             screen_region_params: None,
             tree_index: None,
@@ -195,6 +205,7 @@ impl GlyphArea {
             position: OrderedVec2::from_vec2(position),
             render_bounds: OrderedVec2::from_vec2(bounds),
             regions: ColorFontRegions::default(),
+            background_color: None,
             hitbox: HitBox::new(),
             screen_region_params: None,
             tree_index: None,
