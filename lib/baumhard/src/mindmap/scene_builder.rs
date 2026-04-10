@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::mindmap::border::BorderStyle;
 use crate::mindmap::connection;
 use crate::mindmap::model::{GlyphConnectionConfig, MindMap, TextRun};
+use crate::mindmap::scene_cache::{CachedConnection, EdgeKey, SceneConnectionCache};
 use crate::util::color::resolve_var;
 use glam::Vec2;
 
@@ -34,6 +35,10 @@ pub struct BorderElement {
 
 /// A connection (edge) between two nodes, with pre-computed glyph positions.
 pub struct ConnectionElement {
+    /// Stable identity of the edge — `(from_id, to_id, edge_type)`. Used by
+    /// the renderer's keyed connection buffer map so unchanged edges can
+    /// reuse their shaped `cosmic_text::Buffer`s across drag frames.
+    pub edge_key: EdgeKey,
     /// Sampled glyph positions along the path (canvas coordinates).
     pub glyph_positions: Vec<(f32, f32)>,
     /// The body glyph string repeated at each position.
@@ -72,14 +77,36 @@ pub fn build_scene_with_offsets(map: &MindMap, offsets: &HashMap<String, (f32, f
     build_scene_with_offsets_and_selection(map, offsets, None)
 }
 
-/// Builds a RenderScene with position offsets and an optional selected-edge
-/// highlight. If `selected_edge` matches an edge (by `from_id`, `to_id`,
-/// `edge_type`), that edge's `ConnectionElement.color` is overwritten with
-/// `SELECTED_EDGE_COLOR` so the renderer paints it in the selection color.
+/// Thin wrapper over the cache-aware builder that uses a scratch
+/// (throwaway) cache so call sites that don't track a persistent cache
+/// still work. Prefer `build_scene_with_cache` on the hot drag path.
 pub fn build_scene_with_offsets_and_selection(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
+) -> RenderScene {
+    let mut scratch = SceneConnectionCache::new();
+    build_scene_with_cache(map, offsets, selected_edge, &mut scratch)
+}
+
+/// Cache-aware scene builder. For each edge:
+/// - if neither endpoint is in `offsets` AND the edge's geometry is already
+///   in `cache`, reuse the cached pre-clip samples (skip `sample_path`) and
+///   only re-run the cheap clip filter against this frame's `node_aabbs`
+///   so stable edges still clip correctly around moved-but-unrelated nodes;
+/// - otherwise, run the full `build_connection_path` + `sample_path` +
+///   clip path and **write the fresh entry back** into the cache.
+///
+/// Selection changes do NOT invalidate the cache: the `SELECTED_EDGE_COLOR`
+/// override is applied at read time below.
+///
+/// At the end of the build, any cached entry whose key was not seen this
+/// frame (i.e. the edge was deleted from the model) is evicted.
+pub fn build_scene_with_cache(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+    selected_edge: Option<(&str, &str, &str)>,
+    cache: &mut SceneConnectionCache,
 ) -> RenderScene {
     let mut text_elements = Vec::new();
     let mut border_elements = Vec::new();
@@ -160,6 +187,9 @@ pub fn build_scene_with_offsets_and_selection(
     // Build connection elements from edges
     let default_config = GlyphConnectionConfig::default();
     let mut connection_elements = Vec::new();
+    // Keys seen this frame — used after the loop to evict stale cache
+    // entries for edges that were removed from the model between builds.
+    let mut seen_keys: HashSet<EdgeKey> = HashSet::with_capacity(map.edges.len());
     for edge in &map.edges {
         if !edge.visible {
             continue;
@@ -176,6 +206,9 @@ pub fn build_scene_with_offsets_and_selection(
             continue;
         }
 
+        let edge_key = EdgeKey::from_edge(edge);
+        seen_keys.insert(edge_key.clone());
+
         // Resolve glyph config: edge override > canvas default > hardcoded default
         let config = edge.glyph_connection.as_ref()
             .or(map.canvas.default_connection.as_ref())
@@ -184,15 +217,73 @@ pub fn build_scene_with_offsets_and_selection(
         let is_selected = selected_edge.map_or(false, |(f, t, ty)| {
             f == edge.from_id && t == edge.to_id && ty == edge.edge_type
         });
+
+        // Did either endpoint of THIS edge move this frame?
+        let endpoint_moved = offsets.contains_key(&from_node.id)
+            || offsets.contains_key(&to_node.id);
+
+        // --- Fast path: cached geometry is still valid ---
+        //
+        // If the endpoints haven't moved and we have a cached entry for
+        // this edge, reuse the cached pre-clip samples and skip
+        // `build_connection_path` / `sample_path` entirely. The cheap
+        // clip filter still runs against THIS frame's `node_aabbs` so a
+        // stable edge correctly clips around a third node that moved
+        // through its path.
+        if !endpoint_moved {
+            if let Some(cached) = cache.get(&edge_key) {
+                let color = if is_selected {
+                    SELECTED_EDGE_COLOR.to_string()
+                } else {
+                    cached.color.clone()
+                };
+                let cap_start = match &cached.cap_start {
+                    Some((g, p)) if !point_inside_any_node(*p, &node_aabbs) => {
+                        Some((g.clone(), (p.x, p.y)))
+                    }
+                    _ => None,
+                };
+                let cap_end = match &cached.cap_end {
+                    Some((g, p)) if !point_inside_any_node(*p, &node_aabbs) => {
+                        Some((g.clone(), (p.x, p.y)))
+                    }
+                    _ => None,
+                };
+                let glyph_positions: Vec<(f32, f32)> = cached
+                    .pre_clip_positions
+                    .iter()
+                    .filter(|p| !point_inside_any_node(**p, &node_aabbs))
+                    .map(|p| (p.x, p.y))
+                    .collect();
+                if glyph_positions.is_empty() && cap_start.is_none() && cap_end.is_none() {
+                    continue;
+                }
+                connection_elements.push(ConnectionElement {
+                    edge_key,
+                    glyph_positions,
+                    body_glyph: cached.body_glyph.clone(),
+                    cap_start,
+                    cap_end,
+                    font: cached.font.clone(),
+                    font_size_pt: cached.font_size_pt,
+                    color,
+                });
+                continue;
+            }
+        }
+
+        // --- Slow path: sample fresh and update the cache ---
+        let stored_color = {
+            // The color we STORE in the cache is the resolved-but-unselected
+            // color. Selection overrides are applied at read time above so
+            // selection changes don't invalidate the cache.
+            let raw = config.color.as_deref().unwrap_or(edge.color.as_str());
+            resolve_var(raw, vars).to_string()
+        };
         let color = if is_selected {
             SELECTED_EDGE_COLOR.to_string()
         } else {
-            // Resolve through theme variables: connection override >
-            // edge color > (hardcoded default would be here). Resolution
-            // happens after inheritance so `var(--edge)` on either layer
-            // is honored.
-            let raw = config.color.as_deref().unwrap_or(edge.color.as_str());
-            resolve_var(raw, vars).to_string()
+            stored_color.clone()
         };
         let font_size = config.font_size_pt;
         let approx_glyph_width = font_size * 0.6;
@@ -213,6 +304,9 @@ pub fn build_scene_with_offsets_and_selection(
         );
         let samples = connection::sample_path(&path, effective_spacing);
         if samples.is_empty() {
+            // Edge produces no samples; make sure any stale cache entry is
+            // dropped so we re-try next frame.
+            cache.invalidate_edge(&edge_key);
             continue;
         }
 
@@ -225,27 +319,42 @@ pub fn build_scene_with_offsets_and_selection(
         // inside the frame area).
         let first_pos = samples[0].position;
         let last_pos = samples.last().unwrap().position;
-        let first_visible = !point_inside_any_node(first_pos, &node_aabbs);
-        let last_visible = !point_inside_any_node(last_pos, &node_aabbs);
-        let cap_start = if first_visible {
-            config.cap_start.as_ref()
-                .map(|g| (g.clone(), (first_pos.x, first_pos.y)))
-        } else {
-            None
-        };
-        let cap_end = if last_visible {
-            config.cap_end.as_ref()
-                .map(|g| (g.clone(), (last_pos.x, last_pos.y)))
-        } else {
-            None
-        };
+        let cached_cap_start = config.cap_start.as_ref().map(|g| (g.clone(), first_pos));
+        let cached_cap_end = config.cap_end.as_ref().map(|g| (g.clone(), last_pos));
 
-        // Drop body-glyph positions that fall strictly inside any visible
-        // node's (frame-expanded) AABB so a connection doesn't render
-        // over the interior of a node or over its visible border area.
-        let glyph_positions: Vec<(f32, f32)> = samples.iter()
-            .map(|s| s.position)
-            .filter(|p| !point_inside_any_node(*p, &node_aabbs))
+        let pre_clip_positions: Vec<Vec2> = samples.iter().map(|s| s.position).collect();
+
+        // Write fresh geometry back into the cache BEFORE applying the
+        // frame-specific clip filter so next frame can reuse it.
+        cache.insert(
+            edge_key.clone(),
+            CachedConnection {
+                pre_clip_positions: pre_clip_positions.clone(),
+                cap_start: cached_cap_start.clone(),
+                cap_end: cached_cap_end.clone(),
+                body_glyph: config.body.clone(),
+                font: config.font.clone(),
+                font_size_pt: font_size,
+                color: stored_color,
+            },
+        );
+
+        // Now produce the post-clip element for THIS frame.
+        let cap_start = match cached_cap_start {
+            Some((g, p)) if !point_inside_any_node(p, &node_aabbs) => {
+                Some((g, (p.x, p.y)))
+            }
+            _ => None,
+        };
+        let cap_end = match cached_cap_end {
+            Some((g, p)) if !point_inside_any_node(p, &node_aabbs) => {
+                Some((g, (p.x, p.y)))
+            }
+            _ => None,
+        };
+        let glyph_positions: Vec<(f32, f32)> = pre_clip_positions
+            .iter()
+            .filter(|p| !point_inside_any_node(**p, &node_aabbs))
             .map(|p| (p.x, p.y))
             .collect();
 
@@ -257,6 +366,7 @@ pub fn build_scene_with_offsets_and_selection(
         }
 
         connection_elements.push(ConnectionElement {
+            edge_key,
             glyph_positions,
             body_glyph: config.body.clone(),
             cap_start,
@@ -266,6 +376,10 @@ pub fn build_scene_with_offsets_and_selection(
             color,
         });
     }
+
+    // Evict any cache entries for edges that were in the cache but NOT in
+    // the map this frame — handles edges that were deleted between builds.
+    cache.retain_keys(&seen_keys);
 
     RenderScene {
         text_elements,
@@ -632,6 +746,343 @@ mod tests {
         // Target is framed — cap_end falls inside the expanded clip AABB.
         assert!(conn.cap_end.is_none(),
             "cap_end should be clipped when target has a visible frame");
+    }
+
+    // --- Phase B cache tests --------------------------------------------
+
+    fn two_node_edge_map() -> MindMap {
+        synthetic_map(
+            vec![
+                synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
+            ],
+            vec![synthetic_edge("a", "b", 2, 4)],
+        )
+    }
+
+    #[test]
+    fn test_cache_populated_on_first_build() {
+        let map = two_node_edge_map();
+        let mut cache = SceneConnectionCache::new();
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+
+        assert_eq!(scene.connection_elements.len(), 1);
+        assert_eq!(cache.len(), 1);
+        let key = EdgeKey::new("a", "b", "cross_link");
+        assert!(cache.get(&key).is_some());
+        assert_eq!(cache.edges_touching("a"), std::slice::from_ref(&key));
+        assert_eq!(cache.edges_touching("b"), std::slice::from_ref(&key));
+    }
+
+    #[test]
+    fn test_cache_hit_preserves_sample_identity() {
+        // Two builds with empty offsets — the second one should serve
+        // from cache. We verify the cache by mutating the cached entry in
+        // place between builds and observing that the mutation flows into
+        // the second build's output. If the second build had re-sampled,
+        // it would have overwritten our mutation with fresh geometry.
+        let map = two_node_edge_map();
+        let mut cache = SceneConnectionCache::new();
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+
+        // Mutate the cached entry so we can see whether build #2 read it.
+        let key = EdgeKey::new("a", "b", "cross_link");
+        // Replace with a sentinel entry with no positions and a unique
+        // body glyph. If the cache is used, the second build's
+        // ConnectionElement body_glyph will match.
+        cache.insert(
+            key.clone(),
+            CachedConnection {
+                pre_clip_positions: vec![Vec2::new(200.0, 20.0)],
+                cap_start: None,
+                cap_end: None,
+                body_glyph: "SENTINEL".into(),
+                font: None,
+                font_size_pt: 12.0,
+                color: "#ff00ff".into(),
+            },
+        );
+
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        assert_eq!(second.connection_elements.len(), 1);
+        let conn = &second.connection_elements[0];
+        assert_eq!(conn.body_glyph, "SENTINEL",
+            "cache-hit path should have used the stored entry");
+        assert_eq!(conn.color, "#ff00ff");
+        // Single cached pre-clip point should have survived the clip
+        // filter (it's outside both nodes).
+        assert_eq!(conn.glyph_positions.len(), 1);
+    }
+
+    #[test]
+    fn test_cache_invalidated_on_endpoint_offset() {
+        // If endpoint `a` moves, the a↔b edge must be re-sampled — we
+        // should observe fresh `body_glyph` on the element, not the
+        // sentinel we stashed in the cache.
+        let map = two_node_edge_map();
+        let mut cache = SceneConnectionCache::new();
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+
+        let key = EdgeKey::new("a", "b", "cross_link");
+        cache.insert(
+            key.clone(),
+            CachedConnection {
+                pre_clip_positions: vec![],
+                cap_start: None,
+                cap_end: None,
+                body_glyph: "SENTINEL".into(),
+                font: None,
+                font_size_pt: 12.0,
+                color: "#ff00ff".into(),
+            },
+        );
+
+        let mut offsets = HashMap::new();
+        offsets.insert("a".to_string(), (10.0, 0.0));
+        let second = build_scene_with_cache(&map, &offsets, None, &mut cache);
+        let conn = &second.connection_elements[0];
+        assert_ne!(conn.body_glyph, "SENTINEL",
+            "endpoint-moved edge should have been re-sampled");
+        // The cache should contain the freshly-resampled entry now.
+        let refreshed = cache.get(&key).unwrap();
+        assert_ne!(refreshed.body_glyph, "SENTINEL");
+        assert!(!refreshed.pre_clip_positions.is_empty());
+    }
+
+    #[test]
+    fn test_cache_preserves_unrelated_edge_under_drag() {
+        // Two edges: a↔b (long) and c↔d (short). Drag node `a`. The c↔d
+        // edge should NOT be re-sampled; its cache entry should remain as
+        // our sentinel.
+        let map = synthetic_map(
+            vec![
+                synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("c", 0.0, 300.0, 40.0, 40.0, false),
+                synthetic_node("d", 400.0, 300.0, 40.0, 40.0, false),
+            ],
+            vec![
+                synthetic_edge("a", "b", 2, 4),
+                synthetic_edge("c", "d", 2, 4),
+            ],
+        );
+        let mut cache = SceneConnectionCache::new();
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+
+        let cd_key = EdgeKey::new("c", "d", "cross_link");
+        cache.insert(
+            cd_key.clone(),
+            CachedConnection {
+                pre_clip_positions: vec![Vec2::new(200.0, 320.0)],
+                cap_start: None,
+                cap_end: None,
+                body_glyph: "STABLE_SENTINEL".into(),
+                font: None,
+                font_size_pt: 12.0,
+                color: "#00ff00".into(),
+            },
+        );
+
+        let mut offsets = HashMap::new();
+        offsets.insert("a".to_string(), (5.0, 0.0));
+        let second = build_scene_with_cache(&map, &offsets, None, &mut cache);
+
+        // Find the c↔d connection element and verify it came from the
+        // cache unchanged.
+        let cd_elem = second
+            .connection_elements
+            .iter()
+            .find(|e| e.edge_key == cd_key)
+            .expect("c↔d element should exist");
+        assert_eq!(cd_elem.body_glyph, "STABLE_SENTINEL",
+            "unrelated edge should have been served from cache, not re-sampled");
+
+        // The a↔b edge should have been re-sampled.
+        let ab_key = EdgeKey::new("a", "b", "cross_link");
+        let ab_elem = second
+            .connection_elements
+            .iter()
+            .find(|e| e.edge_key == ab_key)
+            .expect("a↔b element should exist");
+        assert_ne!(ab_elem.body_glyph, "SENTINEL");
+    }
+
+    #[test]
+    fn test_cache_clip_reruns_against_fresh_aabbs() {
+        // Governing-invariant correctness: even when an edge is served
+        // from cache, the clip filter must run against the current
+        // frame's `node_aabbs`. Here, a stable a↔b edge has a blocker
+        // node `c` in the middle. Moving `c` through the edge should
+        // change which glyphs survive clipping, even though a↔b itself
+        // is served from cache.
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
+                // Blocker far above the connection — no clip effect yet.
+                synthetic_node("c", 180.0, -500.0, 60.0, 40.0, false),
+            ],
+            vec![synthetic_edge("a", "b", 2, 4)],
+        );
+
+        let mut cache = SceneConnectionCache::new();
+        let first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let first_count = first.connection_elements[0].glyph_positions.len();
+
+        // Now move `c` into the middle of the connection — use a drag
+        // offset. `a↔b` is NOT in the dirty set (endpoints didn't move),
+        // so it hits the cache path, but the clip filter must still
+        // notice `c`'s new position.
+        let mut offsets = HashMap::new();
+        offsets.insert("c".to_string(), (0.0, 500.0));
+        let second = build_scene_with_cache(&map, &offsets, None, &mut cache);
+        let second_count = second.connection_elements[0].glyph_positions.len();
+        assert!(second_count < first_count,
+            "moving c through the edge should reduce post-clip glyph count: {} → {}",
+            first_count, second_count);
+
+        // Now move `c` back out of the way via a model edit + full rebuild.
+        map.nodes.get_mut("c").unwrap().position.y = -500.0;
+        let third = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        assert_eq!(third.connection_elements[0].glyph_positions.len(), first_count);
+    }
+
+    #[test]
+    fn test_cache_evicts_deleted_edges() {
+        let mut map = two_node_edge_map();
+        let mut cache = SceneConnectionCache::new();
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let key = EdgeKey::new("a", "b", "cross_link");
+        assert!(cache.get(&key).is_some());
+
+        // Remove the edge from the model and rebuild.
+        map.edges.clear();
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        assert!(second.connection_elements.is_empty());
+        assert!(cache.get(&key).is_none(),
+            "deleted edge should be evicted from cache");
+    }
+
+    #[test]
+    fn test_connection_element_edge_key_always_populated() {
+        // Sanity: every ConnectionElement emitted by the cache-aware
+        // builder carries a valid EdgeKey matching the source MindEdge.
+        // The renderer's keyed buffer map is keyed off this; a missing
+        // or wrong edge_key would silently break the incremental path.
+        let map = synthetic_map(
+            vec![
+                synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
+                synthetic_node("c", 0.0, 200.0, 40.0, 40.0, false),
+            ],
+            vec![
+                synthetic_edge("a", "b", 2, 4),
+                synthetic_edge("b", "c", 2, 4),
+            ],
+        );
+        let mut cache = SceneConnectionCache::new();
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        assert_eq!(scene.connection_elements.len(), 2);
+        let ab = EdgeKey::new("a", "b", "cross_link");
+        let bc = EdgeKey::new("b", "c", "cross_link");
+        let keys: Vec<&EdgeKey> =
+            scene.connection_elements.iter().map(|e| &e.edge_key).collect();
+        assert!(keys.contains(&&ab));
+        assert!(keys.contains(&&bc));
+    }
+
+    #[test]
+    fn test_second_cache_hit_produces_identical_output() {
+        // Regression guard: build twice with no changes; the two scenes
+        // must have byte-equivalent connection_element glyph_positions
+        // (same count, same coordinates, same body glyph). This
+        // verifies the cache-hit read path returns the same element as
+        // a fresh build would.
+        let map = two_node_edge_map();
+        let mut cache = SceneConnectionCache::new();
+        let first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+
+        assert_eq!(
+            first.connection_elements.len(),
+            second.connection_elements.len(),
+        );
+        let a = &first.connection_elements[0];
+        let b = &second.connection_elements[0];
+        assert_eq!(a.edge_key, b.edge_key);
+        assert_eq!(a.glyph_positions, b.glyph_positions);
+        assert_eq!(a.body_glyph, b.body_glyph);
+        assert_eq!(a.color, b.color);
+        assert_eq!(a.font_size_pt, b.font_size_pt);
+    }
+
+    #[test]
+    fn test_cache_is_empty_after_new() {
+        let cache = SceneConnectionCache::new();
+        assert_eq!(cache.len(), 0);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_fold_hidden_edge_does_not_populate_cache() {
+        // When an endpoint is hidden by fold state, the edge is skipped
+        // entirely — it should not appear in the output OR the cache.
+        let mut a = synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false);
+        let mut b_child = synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false);
+        b_child.parent_id = Some("a".to_string());
+        a.folded = true; // hides b
+        let edge = synthetic_edge("a", "b", 2, 4);
+        let map = synthetic_map(vec![a, b_child], vec![edge]);
+
+        let mut cache = SceneConnectionCache::new();
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        assert!(scene.connection_elements.is_empty(),
+            "folded edge should be skipped");
+        assert!(cache.is_empty(),
+            "folded edge should not appear in cache");
+    }
+
+    #[test]
+    fn test_cache_selection_change_does_not_invalidate() {
+        // Build with no selection → cache populated with the resolved
+        // color. Build again with the edge selected → cache entry should
+        // not be rewritten; the element's color should still reflect the
+        // selection override.
+        let map = two_node_edge_map();
+        let mut cache = SceneConnectionCache::new();
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache);
+        let key = EdgeKey::new("a", "b", "cross_link");
+        let stored_color = cache.get(&key).unwrap().color.clone();
+
+        // Inject a sentinel body_glyph into the cache so we can detect
+        // whether the cache path was taken on the second build.
+        cache.insert(
+            key.clone(),
+            CachedConnection {
+                pre_clip_positions: vec![Vec2::new(200.0, 20.0)],
+                cap_start: None,
+                cap_end: None,
+                body_glyph: "SENTINEL".into(),
+                font: None,
+                font_size_pt: 12.0,
+                color: stored_color.clone(),
+            },
+        );
+
+        let second = build_scene_with_cache(
+            &map,
+            &HashMap::new(),
+            Some(("a", "b", "cross_link")),
+            &mut cache,
+        );
+        let conn = &second.connection_elements[0];
+        assert_eq!(conn.body_glyph, "SENTINEL",
+            "selection change should not have dropped the cache");
+        assert_eq!(conn.color, SELECTED_EDGE_COLOR,
+            "selected element should pick up the highlight color");
+        // And the cache's stored color should be unchanged (still the
+        // pre-selection value).
+        assert_eq!(cache.get(&key).unwrap().color, stored_color);
     }
 
     #[test]

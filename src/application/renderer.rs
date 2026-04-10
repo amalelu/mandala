@@ -34,6 +34,7 @@ use baumhard::mindmap::model::MindMap;
 use baumhard::mindmap::loader;
 use baumhard::mindmap::border::BorderStyle;
 use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement};
+use baumhard::mindmap::scene_cache::EdgeKey;
 use glam::Vec2;
 use std::path::Path;
 
@@ -67,8 +68,18 @@ pub struct Renderer {
 
     camera: Camera2D,
     mindmap_buffers: FxHashMap<String, MindMapTextBuffer>,
-    border_buffers: Vec<MindMapTextBuffer>,
-    connection_buffers: Vec<MindMapTextBuffer>,
+    /// Per-node border glyph buffers, keyed by `node_id`. Each entry is a
+    /// `Vec` of 4 buffers (top/bottom/left/right) matching the layout in
+    /// `rebuild_border_buffers_keyed`. Keyed so unchanged borders survive
+    /// across drag frames without re-shaping — Phase B of the
+    /// connection-render cost work.
+    border_buffers: FxHashMap<String, Vec<MindMapTextBuffer>>,
+    /// Per-edge connection glyph buffers, keyed by `(from_id, to_id,
+    /// edge_type)`. Each entry is the `Vec` of already-shaped glyph
+    /// buffers for that edge. Keyed so unchanged edges survive across
+    /// drag frames — the big win for the "long cross-link, dragging
+    /// something else" scenario.
+    connection_buffers: FxHashMap<EdgeKey, Vec<MindMapTextBuffer>>,
     /// Temporary overlay buffers (e.g., selection rectangle). Camera-transformed.
     overlay_buffers: Vec<MindMapTextBuffer>,
 }
@@ -141,8 +152,8 @@ impl Renderer {
             viewport,
             camera,
             mindmap_buffers: Default::default(),
-            border_buffers: Vec::new(),
-            connection_buffers: Vec::new(),
+            border_buffers: FxHashMap::default(),
+            connection_buffers: FxHashMap::default(),
             overlay_buffers: Vec::new(),
         }
     }
@@ -387,8 +398,8 @@ impl Renderer {
 
         // Collect all camera-transformed mindmap + border + connection buffers with viewport culling
         let mut text_areas: Vec<TextArea> = self.mindmap_buffers.values()
-            .chain(self.border_buffers.iter())
-            .chain(self.connection_buffers.iter())
+            .chain(self.border_buffers.values().flat_map(|v| v.iter()))
+            .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
             .chain(self.overlay_buffers.iter())
             .filter_map(|tb| {
                 let canvas_pos = Vec2::new(tb.pos.0, tb.pos.1);
@@ -499,6 +510,10 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
         self.viewport.update(&self.queue, Resolution { width, height });
         self.camera.set_viewport_size(width, height);
+        // Viewport changed → Phase A's off-screen glyph cull needs to
+        // re-run for every edge. Drop the keyed connection buffer cache
+        // so the next rebuild rebuilds from a clean slate.
+        self.connection_buffers.clear();
     }
 
     fn load_mindmap(&mut self, path: &str) {
@@ -645,7 +660,32 @@ impl Renderer {
     ///   the top of the right column's first `│` glyph. We close the gap
     ///   by overlapping the top/bottom runs' line boxes into the vertical
     ///   column's extent by `CORNER_OVERLAP_FRAC * font_size` on each side.
+    /// Full (non-keyed) border rebuild — wipes the keyed cache and rebuilds
+    /// every element from scratch. Used on map load, undo, reparent,
+    /// selection change, and anywhere else the caller already knows every
+    /// border may have changed.
     pub fn rebuild_border_buffers(&mut self, border_elements: &[BorderElement]) {
+        self.border_buffers.clear();
+        self.rebuild_border_buffers_keyed(border_elements, None);
+    }
+
+    /// Keyed border rebuild. If `dirty_node_ids` is `Some`, only entries
+    /// whose `node_id` is in the set are re-shaped from scratch; clean
+    /// entries have only their position patched in place on the existing
+    /// cached buffers. Keys not present in `border_elements` are evicted
+    /// at the end of the call. If `dirty_node_ids` is `None`, everything
+    /// is treated as dirty (full re-shape).
+    ///
+    /// This is Phase B of the "Connection & border render cost" fix: on
+    /// a drag frame that moves one node, only that node's border cache
+    /// entry is re-shaped. All other visible borders reuse their shaped
+    /// `cosmic_text::Buffer`s — cosmic-text shaping is the dominant cost
+    /// here, so skipping it for unmoved borders is the point.
+    pub fn rebuild_border_buffers_keyed(
+        &mut self,
+        border_elements: &[BorderElement],
+        dirty_node_ids: Option<&std::collections::HashSet<String>>,
+    ) {
         /// How far the top/bottom border line boxes are pulled inward (toward
         /// the node content) so their glyph visible extents overlap with the
         /// vertical columns' glyph visible extents. Empirically chosen for
@@ -653,87 +693,106 @@ impl Renderer {
         /// encroach on the node content, smaller values leave gaps.
         const CORNER_OVERLAP_FRAC: f32 = 0.35;
 
-        self.border_buffers.clear();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
 
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(border_elements.len());
+
         for elem in border_elements {
+            seen.insert(elem.node_id.clone());
+            let is_dirty = dirty_node_ids
+                .map(|set| set.contains(&elem.node_id))
+                .unwrap_or(true);
+
+            let font_size = elem.border_style.font_size_pt;
+            let (nx, ny) = elem.node_position;
+            let (nw, nh) = elem.node_size;
+
+            // --- Horizontal math (identical to the classic path) ---
+            let approx_char_width = font_size * 0.6;
+            let char_count = ((nw / approx_char_width) + 2.0)
+                .ceil()
+                .max(3.0) as usize;
+            let right_corner_x =
+                nx - approx_char_width + (char_count - 1) as f32 * approx_char_width;
+            let corner_overlap = font_size * CORNER_OVERLAP_FRAC;
+            let top_y = ny - font_size + corner_overlap;
+            let bottom_y = ny + nh - corner_overlap;
+
+            // Fast path: cached, clean, matching glyph count. Patch positions
+            // in place and skip re-shaping. We require the char_count to
+            // match the cached entry's top run bounds so any node-resize
+            // edits (rare outside drag) still force a re-shape.
+            if !is_dirty {
+                if let Some(existing) = self.border_buffers.get_mut(&elem.node_id) {
+                    if existing.len() == 4 {
+                        // Sanity: the top run's `bounds.0` is char_count-
+                        // dependent. If it has diverged (e.g. the node was
+                        // resized), re-shape.
+                        let expected_h_width = (char_count as f32 + 1.0) * approx_char_width;
+                        if (existing[0].bounds.0 - expected_h_width).abs() < 0.5 {
+                            existing[0].pos = (nx - approx_char_width, top_y);
+                            existing[1].pos = (nx - approx_char_width, bottom_y);
+                            existing[2].pos = (nx - approx_char_width, ny);
+                            existing[3].pos = (right_corner_x, ny);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Slow path: shape fresh. Compute the strings, allocate 4
+            // buffers, insert into the cache (replacing any previous
+            // entry).
             let border_color = parse_hex_color(&elem.border_style.color)
                 .unwrap_or(cosmic_text::Color::rgba(255, 255, 255, 255));
-            let font_size = elem.border_style.font_size_pt;
             let glyph_set = &elem.border_style.glyph_set;
             let border_attrs = Attrs::new()
                 .color(border_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
 
-            let (nx, ny) = elem.node_position;
-            let (nw, nh) = elem.node_size;
-
-            // --- Horizontal math ---
-            // The top/bottom runs include two corner cells plus enough body
-            // cells to span the node's width. We round up so the border
-            // always fully encloses the node horizontally.
-            let approx_char_width = font_size * 0.6;
-            let char_count = ((nw / approx_char_width) + 2.0)
-                .ceil()
-                .max(3.0) as usize;
-            // Approximate x of the rightmost (corner) character within the
-            // top run. The top run starts at `nx - approx_char_width`, and
-            // the last character occupies positions
-            // `(char_count - 1) * approx_char_width` further along.
-            let right_corner_x =
-                nx - approx_char_width + (char_count - 1) as f32 * approx_char_width;
             let h_width = (char_count as f32 + 1.0) * approx_char_width;
             let v_width = approx_char_width * 2.0;
 
-            // Pull the horizontal runs inward so their glyph visible extents
-            // meet the vertical columns at the corners.
-            let corner_overlap = font_size * CORNER_OVERLAP_FRAC;
-            let top_y = ny - font_size + corner_overlap;
-            let bottom_y = ny + nh - corner_overlap;
-
-            // Top run: `╭─ … ─╮`
-            let top_text = glyph_set.top_border(char_count);
-            self.border_buffers.push(create_border_buffer(
-                &mut font_system, &top_text, &border_attrs, font_size,
-                (nx - approx_char_width, top_y),
-                (h_width, font_size * 1.5),
-            ));
-
-            // Bottom run: `╰─ … ─╯`
-            let bottom_text = glyph_set.bottom_border(char_count);
-            self.border_buffers.push(create_border_buffer(
-                &mut font_system, &bottom_text, &border_attrs, font_size,
-                (nx - approx_char_width, bottom_y),
-                (h_width, font_size * 1.5),
-            ));
-
-            // --- Vertical math ---
-            // The left/right columns use `row_count` line-height-tall cells
-            // so the column spans `row_count * font_size` vertically. Round
-            // so we don't overshoot or undershoot by more than half a row.
             let row_count = (nh / font_size).round().max(1.0) as usize;
+
+            let top_text = glyph_set.top_border(char_count);
+            let bottom_text = glyph_set.bottom_border(char_count);
             let left_text: String =
                 std::iter::repeat_n(format!("{}\n", glyph_set.left_char()), row_count).collect();
-            self.border_buffers.push(create_border_buffer(
-                &mut font_system, &left_text, &border_attrs, font_size,
-                (nx - approx_char_width, ny),
-                (v_width, nh),
-            ));
-
-            // Right column is anchored to the *approximate* position of the
-            // top run's right corner glyph, not to `nx + nw`. This keeps the
-            // top/bottom corners and the right column visually aligned even
-            // when `nw` isn't a whole multiple of `approx_char_width`.
             let right_text: String =
                 std::iter::repeat_n(format!("{}\n", glyph_set.right_char()), row_count).collect();
-            self.border_buffers.push(create_border_buffer(
-                &mut font_system, &right_text, &border_attrs, font_size,
-                (right_corner_x, ny),
-                (v_width, nh),
-            ));
+
+            let entry = vec![
+                create_border_buffer(
+                    &mut font_system, &top_text, &border_attrs, font_size,
+                    (nx - approx_char_width, top_y),
+                    (h_width, font_size * 1.5),
+                ),
+                create_border_buffer(
+                    &mut font_system, &bottom_text, &border_attrs, font_size,
+                    (nx - approx_char_width, bottom_y),
+                    (h_width, font_size * 1.5),
+                ),
+                create_border_buffer(
+                    &mut font_system, &left_text, &border_attrs, font_size,
+                    (nx - approx_char_width, ny),
+                    (v_width, nh),
+                ),
+                create_border_buffer(
+                    &mut font_system, &right_text, &border_attrs, font_size,
+                    (right_corner_x, ny),
+                    (v_width, nh),
+                ),
+            ];
+            self.border_buffers.insert(elem.node_id.clone(), entry);
         }
+
+        // Evict any cached entries whose node_id is no longer in the scene
+        // (fold toggle, delete, show_frame = false, etc.).
+        self.border_buffers.retain(|k, _| seen.contains(k));
     }
 
     /// Rebuild connection buffers from flat connection elements (from RenderScene).
@@ -749,15 +808,43 @@ impl Renderer {
     /// entirely. The existing downstream cull in `render()` (line ~396)
     /// was only saving the rasterization of already-shaped buffers; the
     /// shaping had already happened.
+    /// Full (non-keyed) connection rebuild — wipes the keyed cache and
+    /// rebuilds every element from scratch. Used on map load, undo,
+    /// reparent, edge CRUD, and anywhere else the caller already knows
+    /// every connection may have changed.
     pub fn rebuild_connection_buffers(&mut self, connection_elements: &[ConnectionElement]) {
         self.connection_buffers.clear();
+        self.rebuild_connection_buffers_keyed(connection_elements, None);
+    }
+
+    /// Keyed connection rebuild. See [`rebuild_border_buffers_keyed`] for
+    /// the general pattern.
+    ///
+    /// If `dirty_edge_keys` is `Some`, clean edges (those whose
+    /// `edge_key` is not in the set AND whose cached glyph count matches
+    /// the current element's) only have their glyph *positions* patched
+    /// in place — no cosmic-text shaping. Dirty edges are fully re-shaped.
+    /// When `dirty_edge_keys` is `None`, everything is treated as dirty.
+    ///
+    /// **Interaction with Phase A viewport culling**: the off-screen glyph
+    /// cull is a function of the camera, not the edge geometry, so on a
+    /// camera pan the set of visible glyphs for a stable edge can change.
+    /// The caller is responsible for clearing `self.connection_buffers`
+    /// when the camera moves (see `process_decree` / `update_surface_size`)
+    /// so that the dirty-set mechanism starts from a clean slate post-pan.
+    /// Per-element the cull still runs here; clean fast-path kicks in
+    /// only when the resulting visible-glyph count matches the cached
+    /// entry's length.
+    pub fn rebuild_connection_buffers_keyed(
+        &mut self,
+        connection_elements: &[ConnectionElement],
+        dirty_edge_keys: Option<&std::collections::HashSet<EdgeKey>>,
+    ) {
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
 
-        // Compute the visible canvas-space rectangle once. `screen_to_canvas`
-        // can return corners in either order depending on the camera's
-        // orientation, so normalise with `min`/`max` before use.
+        // Compute the visible canvas-space rectangle once.
         let vp_w = self.config.width as f32;
         let vp_h = self.config.height as f32;
         let corner_tl = self.camera.screen_to_canvas(Vec2::new(0.0, 0.0));
@@ -765,55 +852,125 @@ impl Renderer {
         let vp_min = corner_tl.min(corner_br);
         let vp_max = corner_tl.max(corner_br);
 
+        let mut seen: std::collections::HashSet<EdgeKey> =
+            std::collections::HashSet::with_capacity(connection_elements.len());
+
         for elem in connection_elements {
-            let conn_color = parse_hex_color(&elem.color)
-                .unwrap_or(cosmic_text::Color::rgba(200, 200, 200, 255));
+            seen.insert(elem.edge_key.clone());
+            let is_dirty = dirty_edge_keys
+                .map(|set| set.contains(&elem.edge_key))
+                .unwrap_or(true);
+
             let font_size = elem.font_size_pt;
             let half_glyph = font_size * 0.3;
             let half_height = font_size * 0.5;
             let glyph_bounds = (font_size, font_size);
+
+            // Collect the positions that survive the viewport cull, in
+            // order: cap_start, body glyphs, cap_end. Both the fast and
+            // slow paths walk this same set.
+            let in_view = |x: f32, y: f32| -> bool {
+                glyph_position_in_viewport(x, y, vp_min, vp_max, font_size)
+            };
+            let mut visible_positions: Vec<(f32, f32)> =
+                Vec::with_capacity(elem.glyph_positions.len() + 2);
+            if let Some((_, cap_pos)) = &elem.cap_start {
+                if in_view(cap_pos.0, cap_pos.1) {
+                    visible_positions.push((cap_pos.0 - half_glyph, cap_pos.1 - half_height));
+                }
+            }
+            for &pos in &elem.glyph_positions {
+                if in_view(pos.0, pos.1) {
+                    visible_positions.push((pos.0 - half_glyph, pos.1 - half_height));
+                }
+            }
+            if let Some((_, cap_pos)) = &elem.cap_end {
+                if in_view(cap_pos.0, cap_pos.1) {
+                    visible_positions.push((cap_pos.0 - half_glyph, cap_pos.1 - half_height));
+                }
+            }
+
+            if visible_positions.is_empty() {
+                // Nothing visible — keep any existing cache entry? No, we
+                // need to drop it so the buffer map doesn't hold stale
+                // glyphs that would re-appear if `dirty_edge_keys`
+                // bypassed this edge on the next frame. Just remove it.
+                self.connection_buffers.remove(&elem.edge_key);
+                continue;
+            }
+
+            // Fast path: clean + cached + same glyph count → patch
+            // positions in place without re-shaping.
+            if !is_dirty {
+                if let Some(existing) = self.connection_buffers.get_mut(&elem.edge_key) {
+                    if existing.len() == visible_positions.len() {
+                        for (buf, new_pos) in existing.iter_mut().zip(visible_positions.iter()) {
+                            buf.pos = *new_pos;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // Slow path: re-shape. Build attrs once per element and emit
+            // a fresh `Vec` of shaped buffers matching the same order as
+            // `visible_positions`.
+            let conn_color = parse_hex_color(&elem.color)
+                .unwrap_or(cosmic_text::Color::rgba(200, 200, 200, 255));
             let conn_attrs = Attrs::new()
                 .color(conn_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
 
-            // Per-element cull margin. A generous `font_size` each side means
-            // glyphs whose anchor lands just off-screen still get included,
-            // so there's no visible popping at the viewport edge during pan.
-            let in_view = |x: f32, y: f32| -> bool {
-                glyph_position_in_viewport(x, y, vp_min, vp_max, font_size)
-            };
+            let mut new_entry: Vec<MindMapTextBuffer> =
+                Vec::with_capacity(visible_positions.len());
 
-            if let Some((ref cap_text, cap_pos)) = elem.cap_start {
-                if in_view(cap_pos.0, cap_pos.1) {
-                    self.connection_buffers.push(create_border_buffer(
-                        &mut font_system, cap_text, &conn_attrs, font_size,
-                        (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
-                        glyph_bounds,
-                    ));
-                }
+            let cap_start_visible = elem
+                .cap_start
+                .as_ref()
+                .map(|(_, p)| in_view(p.0, p.1))
+                .unwrap_or(false);
+            let cap_end_visible = elem
+                .cap_end
+                .as_ref()
+                .map(|(_, p)| in_view(p.0, p.1))
+                .unwrap_or(false);
+
+            let mut idx = 0;
+            if cap_start_visible {
+                let cap_text = elem.cap_start.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
+                new_entry.push(create_border_buffer(
+                    &mut font_system, cap_text, &conn_attrs, font_size,
+                    visible_positions[idx],
+                    glyph_bounds,
+                ));
+                idx += 1;
             }
-
             for &pos in &elem.glyph_positions {
                 if !in_view(pos.0, pos.1) {
                     continue;
                 }
-                self.connection_buffers.push(create_border_buffer(
+                new_entry.push(create_border_buffer(
                     &mut font_system, &elem.body_glyph, &conn_attrs, font_size,
-                    (pos.0 - half_glyph, pos.1 - half_height),
+                    visible_positions[idx],
+                    glyph_bounds,
+                ));
+                idx += 1;
+            }
+            if cap_end_visible {
+                let cap_text = elem.cap_end.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
+                new_entry.push(create_border_buffer(
+                    &mut font_system, cap_text, &conn_attrs, font_size,
+                    visible_positions[idx],
                     glyph_bounds,
                 ));
             }
 
-            if let Some((ref cap_text, cap_pos)) = elem.cap_end {
-                if in_view(cap_pos.0, cap_pos.1) {
-                    self.connection_buffers.push(create_border_buffer(
-                        &mut font_system, cap_text, &conn_attrs, font_size,
-                        (cap_pos.0 - half_glyph, cap_pos.1 - half_height),
-                        glyph_bounds,
-                    ));
-                }
-            }
+            self.connection_buffers.insert(elem.edge_key.clone(), new_entry);
         }
+
+        // Evict any cached entries whose edge key is no longer in the
+        // scene — handles edge deletion / fold toggle.
+        self.connection_buffers.retain(|k, _| seen.contains(k));
     }
 
     /// Fit the camera to show a Baumhard tree's content.
@@ -959,9 +1116,18 @@ impl Renderer {
             }
             RenderDecree::CameraPan(dx, dy) => {
                 self.camera.pan(Vec2::new(dx, dy));
+                // Phase A's off-screen glyph cull is a function of the
+                // camera, so moving the camera invalidates the cached
+                // per-edge visible-glyph layout. Clear the renderer-side
+                // connection cache so the next rebuild re-runs the cull
+                // from scratch. The document-side `SceneConnectionCache`
+                // holds pre-clip samples (camera-independent) and is NOT
+                // cleared here — geometry stays cached across pans.
+                self.connection_buffers.clear();
             }
             RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
                 self.camera.zoom_at(Vec2::new(screen_x, screen_y), factor);
+                self.connection_buffers.clear();
             }
             RenderDecree::LoadMindMap(path) => {
                 self.load_mindmap(&path);

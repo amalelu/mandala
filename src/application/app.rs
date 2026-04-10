@@ -137,6 +137,14 @@ impl Application {
         // Load mindmap — document and tree persist for interactive use
         let mut document: Option<MindMapDocument> = None;
         let mut mindmap_tree: Option<MindMapTree> = None;
+        // Phase 4(B) keyed incremental rebuild: the document-side cache
+        // of per-edge pre-clip sample geometry. Populated lazily by
+        // `build_scene_with_cache`; cleared by `rebuild_all` so any
+        // structural change to the map forces a fresh scene build.
+        // Lives in the event loop state next to `mindmap_tree` so its
+        // lifetime matches the interactive session. It is a pure view
+        // optimisation — nothing about the model depends on it.
+        let mut scene_cache = baumhard::mindmap::scene_cache::SceneConnectionCache::new();
 
         match MindMapDocument::load(&self.options.mindmap_path) {
             Ok(doc) => {
@@ -450,6 +458,17 @@ impl Application {
                                     } else {
                                         vec![node_id]
                                     };
+                                    // Phase 4(B): start each drag with a
+                                    // clean scene cache. Between drags the
+                                    // model may have changed structurally
+                                    // (undo, reparent, edge CRUD, node
+                                    // edit) and cached entries would not
+                                    // reflect the current map. Clearing
+                                    // here means the first drag frame
+                                    // re-populates the cache from scratch
+                                    // and subsequent frames get the
+                                    // incremental-rebuild benefit.
+                                    scene_cache.clear();
                                     drag_state = DragState::MovingNode {
                                         node_ids,
                                         total_delta: Vec2::ZERO,
@@ -641,7 +660,14 @@ impl Application {
                                 renderer.rebuild_buffers_from_tree(&tree.tree);
                             }
 
-                            // Rebuild connections and borders with position offsets
+                            // Rebuild connections and borders with position offsets.
+                            //
+                            // Phase 4(B): use the cache-aware scene build so
+                            // only edges whose endpoints appear in `offsets`
+                            // get re-sampled. The renderer's keyed rebuild
+                            // methods then only re-shape the buffers for
+                            // dirty elements; stable elements have just
+                            // their `pos` patched in place.
                             if let Some(doc) = document.as_ref() {
                                 let mut offsets: HashMap<String, (f32, f32)> = HashMap::new();
                                 let delta = (total_delta.x, total_delta.y);
@@ -653,9 +679,62 @@ impl Application {
                                         }
                                     }
                                 }
-                                let scene = doc.build_scene_with_offsets(&offsets);
-                                renderer.rebuild_connection_buffers(&scene.connection_elements);
-                                renderer.rebuild_border_buffers(&scene.border_elements);
+
+                                // First frame of a drag? The scene_cache
+                                // was cleared at drag start so it is
+                                // still empty. Skip the incremental-
+                                // rebuild path and do a FULL renderer
+                                // rebuild: this guarantees the renderer's
+                                // per-edge buffer map matches the new
+                                // offset-applied scene exactly, rather
+                                // than reusing pre-drag shaped buffers
+                                // whose cap visibility / glyph count
+                                // might not align with the moved edge's
+                                // new layout. After this first frame,
+                                // the scene_cache is populated and the
+                                // incremental path below kicks in.
+                                let first_frame_of_drag = scene_cache.is_empty();
+
+                                // The dirty edge set = every edge touching
+                                // any moved node. The scene cache holds the
+                                // reverse index, so this is O(sum of edges-
+                                // per-moved-node), not O(edges in map).
+                                let mut dirty_edge_keys: std::collections::HashSet<
+                                    baumhard::mindmap::scene_cache::EdgeKey
+                                > = std::collections::HashSet::new();
+                                for nid in offsets.keys() {
+                                    for k in scene_cache.edges_touching(nid) {
+                                        dirty_edge_keys.insert(k.clone());
+                                    }
+                                }
+                                let dirty_node_ids: std::collections::HashSet<String> =
+                                    offsets.keys().cloned().collect();
+
+                                let scene = doc.build_scene_with_cache(&offsets, &mut scene_cache);
+
+                                if first_frame_of_drag {
+                                    // `None` = treat every element as
+                                    // dirty → full re-shape of the keyed
+                                    // maps. One-time per drag; subsequent
+                                    // frames are incremental.
+                                    renderer.rebuild_connection_buffers_keyed(
+                                        &scene.connection_elements,
+                                        None,
+                                    );
+                                    renderer.rebuild_border_buffers_keyed(
+                                        &scene.border_elements,
+                                        None,
+                                    );
+                                } else {
+                                    renderer.rebuild_connection_buffers_keyed(
+                                        &scene.connection_elements,
+                                        Some(&dirty_edge_keys),
+                                    );
+                                    renderer.rebuild_border_buffers_keyed(
+                                        &scene.border_elements,
+                                        Some(&dirty_node_ids),
+                                    );
+                                }
                             }
 
                             *pending_delta = Vec2::ZERO;

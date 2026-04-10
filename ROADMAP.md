@@ -62,8 +62,9 @@ The application has two layers:
 - **Stress-test map generator** — `cargo run -p baumhard --bin generate_stress_map -- ...` writes synthetic `.mindmap.json` files of arbitrary size and topology (balanced / skewed / star), with `--long-edges K` to insert deliberately far-apart cross-links for connection-render perf testing and `--seed` for deterministic output. The smoke-test rig for Phase 4 of the theme-variables tangent.
 - **Mutation-frequency throttle** — under load, the `AboutToWait` drag path drains its accumulated `pending_delta` every Nth frame instead of every frame, where N is a moving-average-driven self-tuning multiplier that holds per-frame work time under the screen refresh budget. Input accumulation stays snappy (every mouse event still folds into `pending_delta`); the dragged node advances in chunks under stress, catching up to the cursor every N frames. Healthy load = N = 1 (no throttling). Implements the governing-invariant half of the connection/border render-cost work.
 - **Viewport culling on connection glyphs** — `rebuild_connection_buffers` now computes the visible canvas rect once per call (with a `font_size` margin on each side) and skips cosmic-text buffer creation for any glyph position outside it. The dominant per-frame cost in the connection rebuild path is cosmic-text shaping; for a long cross-link most of its sample positions are off-screen during drag, so skipping those drops per-frame work by ~48× in the user's long-connection stutter scenario without changing visible output.
+- **Keyed incremental rebuild for connections and borders** — Phase 4(B) of the connection-render cost work. Two targeted caches keyed on stable identity (edges: `(from_id, to_id, edge_type)` via `SceneConnectionCache` in `lib/baumhard/src/mindmap/scene_cache.rs`; nodes: `id`). During drag, `build_scene_with_cache` skips `sample_path` + control-point/Bezier work for edges whose endpoints did not move — the expensive per-frame cost that Phase A could not touch — and the `Renderer` keeps keyed `HashMap`s for `border_buffers` and `connection_buffers` so unmoved entries reuse their shaped cosmic-text buffers across frames, patched in place via `pos` only. The clip filter (`point_inside_any_node`) still re-runs against the current frame's node AABBs for cached edges, so a stable long cross-link still clips correctly around a moved-but-unrelated third node (governing invariant preserved). Selection changes apply the highlight color override at read time, so flipping selection doesn't invalidate the cache. Camera pan/zoom clears only the renderer-side connection map (viewport cull output changes) while leaving the document-side geometry cache intact. Each drag starts with a fresh cache to handle inter-drag structural edits; the first drag frame is a full rebuild and subsequent frames are incremental. Eliminates the ~1,700 bezier evaluations / frame / long edge that Phase A left on the table — the upstream geometry cost, not just the downstream shaping cost.
 - **Multi-target** — native + WASM builds
-- **280 tests passing**
+- **298 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -87,7 +88,8 @@ The application has two layers:
 | `src/application/keybinds.rs` | Configurable key-to-Action mapping with layered loading |
 | `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge, Canvas (incl. `theme_variables`, `theme_variants`), `all_descendants()` |
 | `lib/baumhard/src/mindmap/tree_builder.rs` | MindMap → Tree<GfxElement, GfxMutator> bridge, resolves text-run colors through theme variables |
-| `lib/baumhard/src/mindmap/scene_builder.rs` | MindMap → flat RenderScene (connections, borders, background), resolves colors through theme variables |
+| `lib/baumhard/src/mindmap/scene_builder.rs` | MindMap → flat RenderScene (connections, borders, background), resolves colors through theme variables. Phase B: `build_scene_with_cache` reuses cached per-edge sample geometry |
+| `lib/baumhard/src/mindmap/scene_cache.rs` | `SceneConnectionCache`, `EdgeKey`, `CachedConnection` — Phase B per-edge pre-clip sample cache with `by_node` reverse index |
 | `lib/baumhard/src/mindmap/loader.rs` | JSON loading |
 | `lib/baumhard/src/mindmap/border.rs` | BorderGlyphSet, BorderStyle |
 | `lib/baumhard/src/mindmap/connection.rs` | Path computation, Bezier curves, glyph sampling |
@@ -802,21 +804,91 @@ Five-part fix under that invariant:
       viewport and confirms the cull drops ~1,334 glyph samples to
       ~28 (a 48× shaping-work reduction for the user's exact
       long-connection stutter case).
-- [ ] **(B) Keyed incremental rebuild**. `HashMap<StableKey, Buffer>`
-      instead of flat `Vec<Buffer>` for both connections and
-      borders, keyed on `(from_id, to_id, edge_type)` and `node_id`
-      respectively. Drag frames only touch entries whose key appears
-      in the `offsets` map; every unmoved edge and border keeps its
-      existing buffers intact. Scales drag cost with "what moved"
-      instead of "what exists."
+- [x] **(B) Keyed incremental rebuild**. Two caches, both targeted,
+      neither general. The document-side `SceneConnectionCache` in
+      `lib/baumhard/src/mindmap/scene_cache.rs` stores the *pre-clip*
+      sampled positions + glyph config per edge, keyed by
+      `EdgeKey(from_id, to_id, edge_type)`, with a `by_node:
+      HashMap<String, Vec<EdgeKey>>` reverse index so a moved node
+      dirties exactly its touching edges in O(k_N) rather than an
+      O(E) walk. `build_scene_with_cache` consults the cache: if
+      neither endpoint is in the drag `offsets` map and the entry is
+      present, it clones the cached pre-clip samples and re-runs the
+      cheap `point_inside_any_node` clip filter against the current
+      frame's `node_aabbs` — a stable long cross-link therefore still
+      clips correctly around a moved-but-unrelated third node, which
+      is the governing-invariant correctness property. Dirty or
+      missing edges take the slow path (`sample_path` + clip) and
+      write the fresh entry back. Pre-clip samples are stored
+      separately from the post-clip `glyph_positions` so selection
+      changes and frame-specific clipping never invalidate the cache;
+      the selected-edge color override is applied at read time.
+      `ConnectionElement` gained a `pub edge_key: EdgeKey` so the
+      renderer can key its buffer map without re-deriving it.
+      Renderer-side: `border_buffers` and `connection_buffers` became
+      keyed `FxHashMap<K, Vec<MindMapTextBuffer>>`. New
+      `rebuild_border_buffers_keyed` / `rebuild_connection_buffers_keyed`
+      methods accept an optional `dirty` set: clean entries with
+      matching cap visibility + glyph count get only their `pos`
+      patched in place (zero cosmic-text shaping), dirty entries are
+      re-shaped. Sweep pass evicts unseen keys at the end. Camera
+      pan/zoom/resize clears only the renderer-side `connection_buffers`
+      (viewport cull output changes) while the document-side
+      `SceneConnectionCache` holds camera-independent geometry and is
+      NOT cleared — geometry stays cached across pans. Each drag
+      starts with a freshly-cleared `SceneConnectionCache`; the first
+      drag frame forces a full renderer rebuild (passes `None` for
+      dirty sets) to avoid cap-visibility / glyph-count mismatches
+      against pre-drag shaped buffers, then frames 2+ run the
+      incremental path. 18 new unit tests split across
+      `scene_cache::tests` (7: insert/get round-trip, by-node index,
+      multiple-edges-per-node, invalidate, clear, retain-keys
+      eviction, reinsert-idempotency) and `scene_builder::tests::test_cache_*`
+      (11: populate-on-first-build, cache-hit-preserves-identity,
+      invalidate-on-endpoint-offset, preserve-unrelated-edge-under-drag,
+      clip-reruns-against-fresh-aabbs — the correctness of the
+      governing invariant for cached edges, evict-deleted-edges,
+      selection-change-does-not-invalidate, edge-key-always-populated,
+      second-cache-hit-identical-output, empty-after-new,
+      fold-hidden-edge-not-cached). 298 tests passing (up from 280).
+      Eliminates the ~1,700 bezier evaluations/frame/long-edge that
+      Phase A left untouched — the upstream geometry cost. Together
+      with Phase A, drag cost on the user's long-connection scenario
+      now scales with what moved, not with what exists.
 - [ ] **(C) Shape-once-reuse**. On top of (B): cosmic-text shaping
       is the expensive step, positioning is cheap. Keep shaped
       buffers alive across frames and only update their positions
       when the content is unchanged — the common case during drag.
+      Node text buffers (`rebuild_buffers_from_tree` in `renderer.rs`)
+      still re-shape every visible node every drag frame; that's the
+      next fish once Phase B proves itself. Phase B already
+      implements a form of shape-once-reuse for connection and
+      border buffers — Phase C extends it to the tree-based node
+      text path.
 - [ ] **(D) Sample decimation during motion**. Double the effective
       spacing passed to `sample_path` while a drag is active; halves
       connection glyph counts invisibly under motion. Held in
       reserve; may prove unnecessary once (A)+(B)+(C) land.
+
+**Other bottlenecks surfaced during Phase B investigation** (not
+yet addressed; call-outs for follow-up sessions):
+
+- `point_inside_any_node` is O(N) per point. After Phase B the clip
+  filter becomes the dominant per-edge cost during drag because the
+  sampler is now skipped. A 1D sort on x (or a coarse grid index)
+  would drop it to O(log N) / O(1).
+- `doc.mindmap.all_descendants(nid)` is recomputed inside the drag
+  drain block every frame. Cheap for small subtrees, but O(subtree)
+  per frame when dragging a large subtree. Cache once in
+  `DragState::MovingNode` at drag start.
+- `resolve_var(...).to_string()` in both `scene_builder.rs` and
+  `tree_builder.rs` allocates per-element per-frame. Resolve the
+  canvas-level palette once per scene build and pass a
+  `&HashMap<&str, &str>` down.
+- `MutationFrequencyThrottle` uses a hardcoded 14 ms budget. On a
+  144 Hz monitor this is loose; the throttle never engages even when
+  it could help. A monitor-refresh-aware budget is a one-liner once
+  the winit frame pacing API exposes the refresh rate.
 
 **Ordering**: E → A → B → C → (D if needed). (E) lands first as the
 safety net; subsequent fixes reduce how often it has to engage.
