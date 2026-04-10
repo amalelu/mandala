@@ -68,8 +68,9 @@ The application has two layers:
 - **Connection style editing via palette** — Session 6D. 31 new palette actions cover body glyph (dot/dash/double/wave/chain), cap_start/cap_end (arrow/circle/diamond/clear), color (theme vars `--accent` / `--edge` / `--fg` / inherit-reset), font size (smaller/larger/reset, ±2pt with clamp-aware applicability), spacing (tight/normal/wide), edge type (convert to cross_link / parent_child, with duplicate-guard applicability), and a "Reset connection style to default" action. Every mutation goes through an `ensure_glyph_connection` fork helper that materializes a concrete per-edge copy from the effective resolved config on first edit — forked copies retain their values when the canvas default later changes, and undo restores the pre-fork None cleanly because the `before` snapshot is taken before the fork. Uses the existing `UndoAction::EditEdge` variant — no new undo machinery.
 - **Connection labels** — Session 6D. `MindEdge.label` (which had existed in the data model since the pre-roadmap era but was never drawn) now renders as a `ConnectionLabelElement` along the edge's path at a parameter-space position `edge.label_position_t` (new field, defaulting to 0.5 at the midpoint). Labels render through the flat scene pipeline as individual cosmic-text buffers, slightly larger than the connection body glyphs for readability (1.1× font size). Color resolves through the same theme-variable path as the connection body, so a `var(--accent)` color auto-restyles on theme swap. Labels are rebuilt every scene build (no cache — ≤ 1 per edge, trivially cheap) so they track live drags of either endpoint.
 - **Inline label edit modal** — Session 6D. Click the rendered label on a selected edge to enter `LabelEditState::Open { edge_ref, buffer, original }`. Like the command palette, the modal steals all keyboard input: Escape discards (restoring the pre-edit value), Enter commits via `document.set_edge_label` (which pushes an `EditEdge` undo entry), Backspace pops, character keys append. A static `▌` caret appears after the edited text via `Renderer::label_edit_override: Option<(EdgeKey, String)>`, which `rebuild_connection_label_buffers` consults on every keystroke. Cursor navigation is deferred — the buffer is append-only for Session 6D. The palette "Edit connection label" action is the fallback entry point for edges without committed labels (whose text glyphs aren't hit-testable yet).
+- **Portal pairs** — Session 6E. A new `MindMap.portals: Vec<PortalPair>` collection (parallel to `edges`) holds matching glyph markers that visually link two distant nodes without drawing a connection line across the canvas — a lightweight alternative to cross-link edges for far-apart endpoints. Each pair emits *two* `PortalElement`s in the scene (one floating above the top-right corner of each endpoint), both sharing the same glyph, color, and auto-assigned label. Labels progress through column letters A..Z..AA..AB.. with gap-reuse (`MindMap::next_portal_label` picks the lowest unused letter so deleting "B" and creating a new portal reuses "B"). Default glyphs rotate through `PORTAL_GLYPH_PRESETS = ["◈","◆","⬡","⬢","◉","❖","✦","✧"]` by `portals.len() % 8` so successive creations look distinct. Portals render through the flat scene pipeline (no tree involvement); the `Renderer` keys a `portal_buffers: FxHashMap<(PortalRefKey, String), MindMapTextBuffer>` plus parallel `portal_hitboxes` for click detection. `Renderer::hit_test_portal` is consulted in `handle_click` between the node and edge hit tests so clicks on a marker floating above a node corner don't fall through. Selection via `SelectionState::Portal(PortalRef)` (mutually exclusive with node/edge selection); `selected_portal` is threaded through the scene builder parallel to `selected_edge` so both markers of a selected pair render in the cyan highlight color. Delete removes the pair via `apply_delete_portal`; Ctrl+Z restores it via three new undo variants (`CreatePortal` / `DeletePortal` / `EditPortal`). The command palette grew from 42 to 52 actions with 10 new 6E entries: "Create portal" (applicable when Multi selection has exactly 2 nodes), "Delete portal", 4 glyph presets (hexagon/diamond/star/circle), and 4 theme-var-aware colors (accent/edge/fg/reset). Portal colors resolve through `resolve_var` so `var(--accent)` auto-restyles on theme swap. Rename-portal-label and free-form glyph input are deferred (would need the inline label edit modal infrastructure).
 - **Multi-target** — native + WASM builds
-- **408 tests passing**
+- **453 tests passing**
 
 ### What needs work
 - **No text editing** — no inline text editing or node creation
@@ -87,13 +88,13 @@ The application has two layers:
 |------|------|
 | `src/application/app.rs` | Event loop, window, DragState machine, input handling, tree+scene pipeline wiring |
 | `src/application/renderer.rs` | GPU pipeline: tree-based node rendering + flat border/connection rendering |
-| `src/application/document.rs` | Owns MindMap + SelectionState + UndoStack, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()`, `apply_drag_delta()`, `apply_move_subtree/single()`, `undo()`, `apply_custom_mutation()`, `apply_document_actions()`, and the Session 6D edge-mutation suite (`ensure_glyph_connection`, `set_edge_body_glyph`, `set_edge_cap_start/end`, `set_edge_color`, `set_edge_font_size_step`, `reset_edge_font_size`, `set_edge_spacing`, `set_edge_label`, `set_edge_label_position`, `set_edge_type`, `reset_edge_style_to_default`) |
+| `src/application/document.rs` | Owns MindMap + SelectionState + UndoStack, provides `build_tree()`, `build_scene()`, `hit_test()`, `apply_selection_highlight()`, `apply_drag_delta()`, `apply_move_subtree/single()`, `undo()`, `apply_custom_mutation()`, `apply_document_actions()`, the Session 6D edge-mutation suite (`ensure_glyph_connection`, `set_edge_body_glyph`, `set_edge_cap_start/end`, `set_edge_color`, `set_edge_font_size_step`, `reset_edge_font_size`, `set_edge_spacing`, `set_edge_label`, `set_edge_label_position`, `set_edge_type`, `reset_edge_style_to_default`), and the Session 6E portal-mutation suite (`PortalRef`, `apply_create_portal`, `apply_delete_portal`, `apply_edit_portal`, `set_portal_glyph`, `set_portal_color`) |
 | `src/application/common.rs` | RenderDecree, WindowMode, InputMode, timing |
 | `src/application/frame_throttle.rs` | `MutationFrequencyThrottle` — the governing-invariant safety net for the drag path |
 | `src/application/keybinds.rs` | Configurable key-to-Action mapping with layered loading |
-| `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge, Canvas (incl. `theme_variables`, `theme_variants`), `all_descendants()` |
+| `lib/baumhard/src/mindmap/model.rs` | MindMap, MindNode, MindEdge, Canvas (incl. `theme_variables`, `theme_variants`), `all_descendants()`, Session 6E `PortalPair`, `MindMap.portals`, `next_portal_label`, `column_letter_label`, `PORTAL_GLYPH_PRESETS` |
 | `lib/baumhard/src/mindmap/tree_builder.rs` | MindMap → Tree<GfxElement, GfxMutator> bridge, resolves text-run colors through theme variables |
-| `lib/baumhard/src/mindmap/scene_builder.rs` | MindMap → flat RenderScene (connections, borders, background), resolves colors through theme variables. Phase B: `build_scene_with_cache` reuses cached per-edge sample geometry |
+| `lib/baumhard/src/mindmap/scene_builder.rs` | MindMap → flat RenderScene (connections, borders, background), resolves colors through theme variables. Phase B: `build_scene_with_cache` reuses cached per-edge sample geometry. Session 6E: `PortalElement` + `PortalRefKey`, `selected_portal` threaded alongside `selected_edge`, portal emission post-pass |
 | `lib/baumhard/src/mindmap/scene_cache.rs` | `SceneConnectionCache`, `EdgeKey`, `CachedConnection` — Phase B per-edge pre-clip sample cache with `by_node` reverse index |
 | `lib/baumhard/src/mindmap/loader.rs` | JSON loading |
 | `lib/baumhard/src/mindmap/border.rs` | BorderGlyphSet, BorderStyle |
@@ -565,16 +566,142 @@ append-only for Session 6D.
 
 ### Session 6E: Portal creation and management
 
-**What**: Create and manage portal pairs for non-hierarchical node relationships.
+**What**: Portals — matching glyph markers placed on two distant
+nodes so the user can visually link them without drawing a connection
+line across the canvas. Portals are a lightweight alternative to a
+cross-link edge when two endpoints are far enough apart that a
+rendered line would clutter the map. Each pair contributes *two*
+marker glyphs (one per endpoint) that share the same glyph, color,
+and label. Labels auto-assign in column-letter order ("A", "B", ...,
+"Z", "AA", "AB", ...) picking the lowest unused letter so deleting
+"B" and creating a new portal reuses "B". Default glyphs rotate
+through an 8-entry preset palette so successive portals look
+distinct at creation time.
 
-- [ ] "Create Portal" action: select two nodes -> generate PortalPair
-- [ ] Auto-assign labels (A, B, C...) with matching glyph symbols
-- [ ] Portal glyphs rendered as markers on both endpoint nodes
-- [ ] Select and delete portal pairs
-- [ ] Edit portal glyph symbols and colors
-- [ ] Undo support for portal operations
+- [x] "Create Portal" action: with two nodes Multi-selected, the `/`
+      palette action "Create portal between selected nodes" fires
+      `MindMapDocument::apply_create_portal`, pushes a `CreatePortal`
+      undo entry, and pivots the selection to `SelectionState::Portal(pref)`
+      so the follow-up glyph/color actions target the new pair
+      without a click
+- [x] Auto-assign labels (A, B, C, ..., AA, ...) via
+      `MindMap::next_portal_label`, which scans `portals` for the
+      lowest unused label in column-letter order (Excel-style);
+      matching glyphs rotate through `PORTAL_GLYPH_PRESETS` =
+      `["◈", "◆", "⬡", "⬢", "◉", "❖", "✦", "✧"]` indexed by
+      `portals.len() % 8`
+- [x] Portal glyphs rendered as markers on both endpoint nodes via a
+      new `PortalElement` + `portal_elements: Vec<PortalElement>` on
+      `RenderScene` (replacing the pre-existing empty
+      `PortalElement {}` stub). The scene builder emits two elements
+      per pair in a post-pass inside `build_scene_with_cache`,
+      positioned above the top-right corner of each endpoint with a
+      loose square AABB sized from the portal's `font_size_pt`.
+      Portal colors resolve through `resolve_var` so
+      `var(--accent)` auto-restyles on theme swap. Endpoints
+      missing or hidden by fold skip the entire pair.
+- [x] Select and delete portal pairs: click on a marker glyph →
+      `Renderer::hit_test_portal` returns a `PortalRefKey` →
+      `handle_click` routes to `SelectionState::Portal(PortalRef)`
+      (mutually exclusive with node/edge selection, mirroring the
+      `SelectionState::Edge` path). Delete key removes via
+      `apply_delete_portal` which pushes a `DeletePortal` undo entry.
+      Selected portals render in the cyan highlight color via the new
+      `selected_portal` threaded through
+      `build_scene_with_offsets_and_selection` / `build_scene_with_cache`
+      alongside the existing `selected_edge` parameter.
+- [x] Edit portal glyph symbols and colors via 8 palette actions:
+      glyph presets "Portal glyph: hexagon/diamond/star/circle" and
+      theme-var-aware colors "Portal color: accent/edge/fg/reset".
+      Self-hide when the current glyph/color already matches.
+      `set_portal_glyph` and `set_portal_color` wrap
+      `apply_edit_portal` (a closure-based "snapshot, mutate, push
+      `EditPortal` undo" chokepoint that mirrors the Session 6D
+      `apply_edit_*` pattern).
+- [x] Undo support for portal operations via three new variants:
+      `UndoAction::CreatePortal { index }` /
+      `UndoAction::DeletePortal { index, portal }` /
+      `UndoAction::EditPortal { index, before }`. All three arms are
+      direct clones of the corresponding `*Edge` variants'
+      insert/remove/replace-in-place handling. Undoing a
+      `CreatePortal` on the currently-selected portal also clears the
+      selection so the UI doesn't hold a dangling reference.
+- [x] 34 new tests (`./test.sh` green at 453 tests, +34 over the 419
+      baseline): 8 model tests (PortalPair round-trip,
+      column-letter label sequence, next_portal_label reuses gaps,
+      wraps to AA after Z, glyph presets are unique + non-empty,
+      backward-compat empty vec on load/serialize), 7 scene-builder
+      tests (two-elements-per-pair, missing-endpoint and
+      hidden-by-fold skip, theme-var resolution, selection color
+      override, above-top-right placement, drag-offset tracking),
+      12 document tests (create success, rejects
+      self/unknown-node, sequential label assignment A/B/C, rotating
+      glyph presets, undo create/delete/edit, delete reuses gap,
+      selection mutual exclusivity with edge), and 7 palette tests
+      (10 new action ids resolve, `two_nodes_selected` / 
+      `portal_selected` applicability gating, `exec_create_portal`
+      pivots selection, `exec_portal_glyph_hexagon` writes the
+      field, `exec_delete_portal` clears selection, glyph-action
+      self-hides when the current glyph already matches).
 
-**Verify**: Portals render as matching glyph markers, can be created and deleted
+**Fork semantic**: portal mutations skip the Session 6D "fork on
+first edit" pattern entirely because portals have no canvas-level
+default to inherit from — each `PortalPair` always owns its own
+concrete field values. `apply_edit_portal` just snapshots, mutates,
+and records `EditPortal` without an intermediate fork step.
+
+**Key files**:
+- `lib/baumhard/src/mindmap/model.rs` — `PortalPair` struct,
+  `MindMap.portals`, `next_portal_label`, `column_letter_label`,
+  `PORTAL_GLYPH_PRESETS`, `default_portal_font_size`
+- `lib/baumhard/src/mindmap/scene_builder.rs` — expanded
+  `PortalElement`, new `PortalRefKey`, `selected_portal` parameter
+  threaded through `build_scene` / `build_scene_with_offsets` /
+  `build_scene_with_offsets_and_selection` / `build_scene_with_cache`,
+  portal emission post-pass, `SELECTED_PORTAL_COLOR_HEX`
+- `src/application/document.rs` — `PortalRef` struct,
+  `SelectionState::Portal` variant, `UndoAction::{Create,Delete,Edit}Portal`
+  variants + undo arms, `apply_create_portal` / `apply_delete_portal`
+  / `apply_edit_portal` / `set_portal_glyph` / `set_portal_color`,
+  `build_scene_with_selection` / `build_scene_with_cache` threading
+  the new `selected_portal` arg
+- `src/application/renderer.rs` — `portal_buffers` + `portal_hitboxes`
+  `FxHashMap<(PortalRefKey, String), ...>` fields, `rebuild_portal_buffers`,
+  `hit_test_portal`, `portal_buffers.values()` chained into the main
+  text-area render pass next to `connection_label_buffers.values()`
+- `src/application/app.rs` — `handle_click` portal fallthrough
+  before the edge hit test, Delete-key handler extended to route
+  `SelectionState::Portal` through `apply_delete_portal`, shift-click
+  selection-carry path extended to treat `Portal(_)` like `Edge(_)`,
+  `rebuild_portal_buffers` added at every existing
+  `rebuild_connection_label_buffers` call site (8 sites including
+  the hot drag drain and the camera-change rebuild)
+- `src/application/palette.rs` — 10 new predicates + 10 executors +
+  10 `PaletteAction` entries under a new "Session 6E" banner, new
+  test count assertion (42 → 52)
+
+**Verify**: `./test.sh` green at 453 tests.
+`cargo run -- maps/testament.mindmap.json`:
+
+1. Click a node, shift+click another — two nodes in `Multi`
+   selection (cyan highlights on both).
+2. `/` → "Create portal" → Enter — two matching `◈` glyphs appear
+   above the top-right corner of both nodes, labeled "A". Selection
+   pivots to the new portal (both markers render in cyan).
+3. `/` → "Portal glyph: hexagon" → Enter — both markers become
+   `⬡`. The "hexagon" action self-hides from the next palette open.
+4. `/` → "Portal color: accent" → Enter — markers resolve through
+   `var(--accent)` and pick up the theme color.
+5. Click either marker again to confirm hit-testing by glyph.
+6. Delete key — both markers vanish, selection clears.
+7. Ctrl+Z — portal restored with its original glyph and color,
+   selection clears (LIFO undo order).
+8. Ctrl+Z again — the create is undone; portals vec is empty.
+9. Create three portals in sequence against different node pairs —
+   confirm labels progress to "A", "B", "C". Delete "B". Create
+   another — confirm the new label is "B" (gap reuse).
+10. Switch themes on `theme_demo.mindmap.json` — any
+    `var(--accent)`-colored portal auto-restyles.
 
 ---
 

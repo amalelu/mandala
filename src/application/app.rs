@@ -274,6 +274,7 @@ impl Application {
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 renderer.rebuild_border_buffers(&scene.border_elements);
                 renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+                renderer.rebuild_portal_buffers(&scene.portal_elements);
 
                 mindmap_tree = Some(tree);
                 document = Some(doc);
@@ -922,23 +923,41 @@ impl Application {
                             }
                         }
                         Some(Action::DeleteSelection) => {
-                            // Currently wired to edge deletion. Node deletion
-                            // is scoped to a future roadmap milestone.
+                            // Currently wired to edge and portal deletion.
+                            // Node deletion is scoped to a future roadmap
+                            // milestone.
                             if let Some(doc) = document.as_mut() {
-                                let maybe_edge_ref = match &doc.selection {
-                                    SelectionState::Edge(e) => Some(e.clone()),
+                                enum DelKind {
+                                    Edge(crate::application::document::EdgeRef),
+                                    Portal(crate::application::document::PortalRef),
+                                }
+                                let kind = match &doc.selection {
+                                    SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
+                                    SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
                                     _ => None,
                                 };
-                                if let Some(edge_ref) = maybe_edge_ref {
-                                    if let Some((idx, edge)) = doc.remove_edge(&edge_ref) {
-                                        doc.undo_stack.push(UndoAction::DeleteEdge {
-                                            index: idx,
-                                            edge,
-                                        });
-                                        doc.selection = SelectionState::None;
-                                        doc.dirty = true;
-                                        rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                match kind {
+                                    Some(DelKind::Edge(edge_ref)) => {
+                                        if let Some((idx, edge)) = doc.remove_edge(&edge_ref) {
+                                            doc.undo_stack.push(UndoAction::DeleteEdge {
+                                                index: idx,
+                                                edge,
+                                            });
+                                            doc.selection = SelectionState::None;
+                                            doc.dirty = true;
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
                                     }
+                                    Some(DelKind::Portal(pref)) => {
+                                        // `apply_delete_portal` records the
+                                        // DeletePortal undo entry internally;
+                                        // we just clear selection + rebuild.
+                                        if doc.apply_delete_portal(&pref).is_some() {
+                                            doc.selection = SelectionState::None;
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
+                                    }
+                                    None => {}
                                 }
                             }
                         }
@@ -1082,6 +1101,8 @@ impl Application {
                                 renderer.rebuild_connection_label_buffers(
                                     &scene.connection_label_elements,
                                 );
+                                // Portal markers also track the live drag.
+                                renderer.rebuild_portal_buffers(&scene.portal_elements);
                                 // Edge handles (anchor / midpoint /
                                 // control-point ◆ glyphs on a selected
                                 // edge) must also track the live drag.
@@ -1150,6 +1171,7 @@ impl Application {
                                 renderer.rebuild_connection_label_buffers(
                                     &scene.connection_label_elements,
                                 );
+                                renderer.rebuild_portal_buffers(&scene.portal_elements);
                             }
                             *pending_delta = Vec2::ZERO;
                             mutation_throttle.record_work_duration(work_start.elapsed());
@@ -1222,6 +1244,7 @@ impl Application {
                             renderer.rebuild_connection_label_buffers(
                                 &scene.connection_label_elements,
                             );
+                            renderer.rebuild_portal_buffers(&scene.portal_elements);
                             // Edge handles (if an edge is selected) must
                             // also follow camera changes — scroll-wheel
                             // zoom with a selected edge used to leave
@@ -1315,6 +1338,7 @@ impl Application {
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 renderer.rebuild_border_buffers(&scene.border_elements);
                 renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+                renderer.rebuild_portal_buffers(&scene.portal_elements);
             }
 
             renderer.process_decree(RenderDecree::StartRender);
@@ -1676,6 +1700,7 @@ fn rebuild_all(
     renderer.rebuild_border_buffers(&scene.border_elements);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
     renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+    renderer.rebuild_portal_buffers(&scene.portal_elements);
 
     *mindmap_tree = Some(new_tree);
 }
@@ -1714,6 +1739,7 @@ fn open_label_edit(
     // already ran `rebuild_all` before this, so the scene is fresh.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+    renderer.rebuild_portal_buffers(&scene.portal_elements);
 }
 
 /// Session 6D: route a keystroke to the inline label editor. Escape
@@ -1777,6 +1803,7 @@ fn handle_label_edit_key(
         renderer.label_edit_override = Some((edge_key, buffer.clone()));
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
         renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+    renderer.rebuild_portal_buffers(&scene.portal_elements);
     }
 }
 
@@ -1862,7 +1889,9 @@ fn handle_click(
             // Shift+click on an edge selection promotes the clicked node
             // to a fresh single selection (no edge multi-select).
             match &doc.selection {
-                SelectionState::None | SelectionState::Edge(_) => {
+                SelectionState::None
+                | SelectionState::Edge(_)
+                | SelectionState::Portal(_) => {
                     doc.selection = SelectionState::Single(id.clone());
                 }
                 SelectionState::Single(existing) => {
@@ -1889,16 +1918,27 @@ fn handle_click(
             }
         }
         (None, false) => {
-            // Node miss — try edge hit testing before deselecting.
+            // Node miss — fall through: first try portal markers
+            // (small glyphs floating above the top-right corner of
+            // their endpoint nodes), then edge hit testing, then
+            // finally deselect.
             let canvas_pos = renderer.screen_to_canvas(
                 cursor_pos.0 as f32, cursor_pos.1 as f32,
             );
-            let tolerance = EDGE_HIT_TOLERANCE_PX * renderer.canvas_per_pixel();
-            let edge_hit = hit_test_edge(canvas_pos, &doc.mindmap, tolerance);
-            doc.selection = match edge_hit {
-                Some(edge_ref) => SelectionState::Edge(edge_ref),
-                None => SelectionState::None,
-            };
+            if let Some(pkey) = renderer.hit_test_portal(canvas_pos) {
+                doc.selection = SelectionState::Portal(
+                    crate::application::document::PortalRef::new(
+                        pkey.label, pkey.endpoint_a, pkey.endpoint_b,
+                    ),
+                );
+            } else {
+                let tolerance = EDGE_HIT_TOLERANCE_PX * renderer.canvas_per_pixel();
+                let edge_hit = hit_test_edge(canvas_pos, &doc.mindmap, tolerance);
+                doc.selection = match edge_hit {
+                    Some(edge_ref) => SelectionState::Edge(edge_ref),
+                    None => SelectionState::None,
+                };
+            }
         }
         (None, true) => {
             // Shift+click on empty space: keep current selection (no edge
@@ -1954,6 +1994,7 @@ fn rebuild_all_with_mode(
     renderer.rebuild_border_buffers(&scene.border_elements);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
     renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+    renderer.rebuild_portal_buffers(&scene.portal_elements);
 
     *mindmap_tree = Some(new_tree);
 }

@@ -10,7 +10,7 @@ use baumhard::mindmap::custom_mutation::{
 use baumhard::mindmap::connection;
 use baumhard::mindmap::model::{
     Canvas, GlyphConnectionConfig, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle,
-    Position, Size,
+    PortalPair, Position, Size, PORTAL_GLYPH_PRESETS,
 };
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
@@ -53,15 +53,62 @@ impl EdgeRef {
     }
 }
 
-/// Tracks what is currently selected in the document. Node and edge
-/// selection are mutually exclusive — clicking a node clears any edge
-/// selection and vice versa.
+/// Session 6E: stable identity of a portal pair. Mirrors `EdgeRef` —
+/// portals have no numeric id, but the auto-assigned `label` plus the
+/// two endpoint node ids form a unique triple within a single
+/// `MindMap`. `PortalRef` is the document-layer form; the rendering
+/// scene builder uses a parallel `scene_builder::PortalRefKey` type
+/// so it can own the triple without depending on the application
+/// layer.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PortalRef {
+    pub label: String,
+    pub endpoint_a: String,
+    pub endpoint_b: String,
+}
+
+impl PortalRef {
+    pub fn new(
+        label: impl Into<String>,
+        endpoint_a: impl Into<String>,
+        endpoint_b: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            endpoint_a: endpoint_a.into(),
+            endpoint_b: endpoint_b.into(),
+        }
+    }
+
+    /// Returns true if this ref identifies the given `PortalPair`.
+    pub fn matches(&self, portal: &PortalPair) -> bool {
+        self.label == portal.label
+            && self.endpoint_a == portal.endpoint_a
+            && self.endpoint_b == portal.endpoint_b
+    }
+
+    pub fn from_portal(portal: &PortalPair) -> Self {
+        Self {
+            label: portal.label.clone(),
+            endpoint_a: portal.endpoint_a.clone(),
+            endpoint_b: portal.endpoint_b.clone(),
+        }
+    }
+}
+
+/// Tracks what is currently selected in the document. Node, edge,
+/// and portal selection are mutually exclusive — selecting one kind
+/// clears any prior selection of the others.
 #[derive(Clone, Debug)]
 pub enum SelectionState {
     None,
     Single(String),
     Multi(Vec<String>),
     Edge(EdgeRef),
+    /// Session 6E: a portal pair is currently selected. The renderer
+    /// draws both of its marker glyphs in the cyan highlight color, and
+    /// Delete/Ctrl+Z target this portal.
+    Portal(PortalRef),
 }
 
 impl SelectionState {
@@ -71,6 +118,7 @@ impl SelectionState {
             SelectionState::Single(id) => id == node_id,
             SelectionState::Multi(ids) => ids.contains(&node_id.to_string()),
             SelectionState::Edge(_) => false,
+            SelectionState::Portal(_) => false,
         }
     }
 
@@ -80,6 +128,7 @@ impl SelectionState {
             SelectionState::Single(id) => vec![id.as_str()],
             SelectionState::Multi(ids) => ids.iter().map(|s| s.as_str()).collect(),
             SelectionState::Edge(_) => vec![],
+            SelectionState::Portal(_) => vec![],
         }
     }
 
@@ -87,6 +136,14 @@ impl SelectionState {
     pub fn selected_edge(&self) -> Option<&EdgeRef> {
         match self {
             SelectionState::Edge(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Session 6E: returns the selected portal pair, if any.
+    pub fn selected_portal(&self) -> Option<&PortalRef> {
+        match self {
+            SelectionState::Portal(p) => Some(p),
             _ => None,
         }
     }
@@ -234,6 +291,18 @@ pub enum UndoAction {
     /// the whole thing is cheaper than tracking field-level diffs, and
     /// trivially correct.
     CanvasSnapshot { canvas: Canvas },
+    /// Session 6E: a new portal pair was created via
+    /// `apply_create_portal`. Undo removes the portal at `index`
+    /// (assumes LIFO undo order so the index is still valid).
+    CreatePortal { index: usize },
+    /// Session 6E: a portal pair was deleted via
+    /// `apply_delete_portal`. Undo re-inserts `portal` at `index` in
+    /// `mindmap.portals`.
+    DeletePortal { index: usize, portal: PortalPair },
+    /// Session 6E: a portal pair was edited in place (glyph, color,
+    /// or any other field change via `apply_edit_portal`). Undo
+    /// replaces `mindmap.portals[index]` with the `before` snapshot.
+    EditPortal { index: usize, before: PortalPair },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -381,7 +450,11 @@ impl MindMapDocument {
     ) -> RenderScene {
         let sel = self.selection.selected_edge()
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
-        scene_builder::build_scene_with_cache(&self.mindmap, offsets, sel, cache, camera_zoom)
+        let portal_sel = self.selection.selected_portal()
+            .map(|p| (p.label.as_str(), p.endpoint_a.as_str(), p.endpoint_b.as_str()));
+        scene_builder::build_scene_with_cache(
+            &self.mindmap, offsets, sel, portal_sel, cache, camera_zoom,
+        )
     }
 
     /// Build a RenderScene that also reflects the current edge selection.
@@ -390,10 +463,13 @@ impl MindMapDocument {
     pub fn build_scene_with_selection(&self, camera_zoom: f32) -> RenderScene {
         let sel = self.selection.selected_edge()
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
+        let portal_sel = self.selection.selected_portal()
+            .map(|p| (p.label.as_str(), p.endpoint_a.as_str(), p.endpoint_b.as_str()));
         scene_builder::build_scene_with_offsets_and_selection(
             &self.mindmap,
             &HashMap::new(),
             sel,
+            portal_sel,
             camera_zoom,
         )
     }
@@ -838,6 +914,113 @@ impl MindMapDocument {
         true
     }
 
+    // ============================================================
+    // Session 6E — portal mutation helpers
+    // ============================================================
+
+    /// Create a new portal pair linking `node_a` and `node_b`.
+    ///
+    /// Fails (returns `Err`) if the two ids are identical or if either
+    /// node is missing from `mindmap.nodes` — defense in depth, since
+    /// the 2-node `Multi` selection path in the palette already rules
+    /// out these cases in normal use.
+    ///
+    /// The new portal gets the lowest unused label in column-letter
+    /// order (A, B, ..., Z, AA, ...) from `MindMap::next_portal_label`,
+    /// and its glyph is picked by rotating through
+    /// `PORTAL_GLYPH_PRESETS` so each new pair looks distinct at a
+    /// glance. The color defaults to the same `#aa88cc` used by
+    /// `default_cross_link_edge`.
+    ///
+    /// Pushes `UndoAction::CreatePortal { index }`, marks the document
+    /// dirty, and returns a fresh `PortalRef` identifying the new pair.
+    pub fn apply_create_portal(
+        &mut self,
+        node_a: &str,
+        node_b: &str,
+    ) -> Result<PortalRef, String> {
+        if node_a == node_b {
+            return Err("cannot create a portal between a node and itself".to_string());
+        }
+        if !self.mindmap.nodes.contains_key(node_a) {
+            return Err(format!("unknown node id: {node_a}"));
+        }
+        if !self.mindmap.nodes.contains_key(node_b) {
+            return Err(format!("unknown node id: {node_b}"));
+        }
+        let label = self.mindmap.next_portal_label();
+        let glyph_idx = self.mindmap.portals.len() % PORTAL_GLYPH_PRESETS.len();
+        let portal = PortalPair {
+            endpoint_a: node_a.to_string(),
+            endpoint_b: node_b.to_string(),
+            label: label.clone(),
+            glyph: PORTAL_GLYPH_PRESETS[glyph_idx].to_string(),
+            color: "#aa88cc".to_string(),
+            font_size_pt: 16.0,
+            font: None,
+        };
+        let index = self.mindmap.portals.len();
+        let pref = PortalRef::from_portal(&portal);
+        self.mindmap.portals.push(portal);
+        self.undo_stack.push(UndoAction::CreatePortal { index });
+        self.dirty = true;
+        Ok(pref)
+    }
+
+    /// Delete the portal pair identified by `portal_ref`. Records a
+    /// `DeletePortal` undo entry so Ctrl+Z restores it at the same
+    /// index. Returns the removed pair on success, `None` if the ref
+    /// did not match any portal.
+    pub fn apply_delete_portal(
+        &mut self,
+        portal_ref: &PortalRef,
+    ) -> Option<PortalPair> {
+        let idx = self.mindmap.portals.iter().position(|p| portal_ref.matches(p))?;
+        let portal = self.mindmap.portals.remove(idx);
+        self.undo_stack.push(UndoAction::DeletePortal { index: idx, portal: portal.clone() });
+        self.dirty = true;
+        Some(portal)
+    }
+
+    /// Edit a portal in place via a mutation closure. The pre-edit
+    /// snapshot is taken before `f` runs and pushed as
+    /// `UndoAction::EditPortal`, so Ctrl+Z restores the original
+    /// fields wholesale. Returns `true` if the ref matched a portal.
+    ///
+    /// Used by `set_portal_glyph` / `set_portal_color` / future field
+    /// setters in the same way `apply_edit_portal` is the single
+    /// "write + record undo" chokepoint for portal mutations.
+    pub fn apply_edit_portal<F>(&mut self, portal_ref: &PortalRef, f: F) -> bool
+    where
+        F: FnOnce(&mut PortalPair),
+    {
+        let idx = match self.mindmap.portals.iter().position(|p| portal_ref.matches(p)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.portals[idx].clone();
+        f(&mut self.mindmap.portals[idx]);
+        self.undo_stack.push(UndoAction::EditPortal { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the visible glyph of a portal pair. Wraps
+    /// `apply_edit_portal` so undo works via `EditPortal`.
+    pub fn set_portal_glyph(&mut self, portal_ref: &PortalRef, glyph: &str) -> bool {
+        let glyph_owned = glyph.to_string();
+        self.apply_edit_portal(portal_ref, move |p| p.glyph = glyph_owned)
+    }
+
+    /// Set the color of a portal pair. Accepts a raw `#RRGGBB` hex or
+    /// a theme-variable reference like `var(--accent)`. The color is
+    /// resolved at scene-build time so theme swaps auto-restyle
+    /// var-referencing portals.
+    pub fn set_portal_color(&mut self, portal_ref: &PortalRef, color: &str) -> bool {
+        let color_owned = color.to_string();
+        self.apply_edit_portal(portal_ref, move |p| p.color = color_owned)
+    }
+
     /// Create a new unattached (orphan) node at the given canvas position
     /// and insert it into the map. The node has `parent_id == None` so it
     /// renders as a root, giving users a way to start a subtree in
@@ -1165,6 +1348,31 @@ impl MindMapDocument {
                 }
                 UndoAction::CanvasSnapshot { canvas } => {
                     self.mindmap.canvas = canvas;
+                }
+                UndoAction::CreatePortal { index } => {
+                    // Mirror `CreateEdge`: pop the created portal off
+                    // the vec. Clear portal selection if it referenced
+                    // the portal we just removed.
+                    if index < self.mindmap.portals.len() {
+                        let removed = self.mindmap.portals.remove(index);
+                        if let SelectionState::Portal(ref pref) = self.selection {
+                            if pref.matches(&removed) {
+                                self.selection = SelectionState::None;
+                            }
+                        }
+                    }
+                }
+                UndoAction::DeletePortal { index, portal } => {
+                    // Mirror `DeleteEdge`: re-insert at the original
+                    // index, clamped to the current length.
+                    let idx = index.min(self.mindmap.portals.len());
+                    self.mindmap.portals.insert(idx, portal);
+                }
+                UndoAction::EditPortal { index, before } => {
+                    // Mirror `EditEdge`: replace in place, clamped.
+                    if index < self.mindmap.portals.len() {
+                        self.mindmap.portals[index] = before;
+                    }
                 }
             }
             true
@@ -3453,6 +3661,7 @@ mod tests {
             nodes,
             edges: Vec::new(),
             custom_mutations: Vec::new(),
+            portals: Vec::new(),
         }
     }
 
@@ -3507,5 +3716,186 @@ mod tests {
         let second_h = map.nodes.get("n1").unwrap().size.height;
         assert_eq!(first_w, second_w);
         assert_eq!(first_h, second_h);
+    }
+
+    // =====================================================================
+    // Session 6E — portal mutation tests
+    // =====================================================================
+
+    #[test]
+    fn portal_create_success_assigns_first_label() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+
+        let pref = doc.apply_create_portal(&a, &b).expect("should succeed");
+        assert_eq!(pref.label, "A");
+        assert_eq!(pref.endpoint_a, a);
+        assert_eq!(pref.endpoint_b, b);
+        assert_eq!(doc.mindmap.portals.len(), 1);
+        assert_eq!(doc.mindmap.portals[0].label, "A");
+        assert!(doc.dirty);
+    }
+
+    #[test]
+    fn portal_create_assigns_sequential_labels_a_b_c() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let c = iter.next().unwrap().clone();
+
+        let p1 = doc.apply_create_portal(&a, &b).unwrap();
+        let p2 = doc.apply_create_portal(&b, &c).unwrap();
+        let p3 = doc.apply_create_portal(&a, &c).unwrap();
+        assert_eq!(p1.label, "A");
+        assert_eq!(p2.label, "B");
+        assert_eq!(p3.label, "C");
+    }
+
+    #[test]
+    fn portal_create_assigns_rotating_glyphs() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let c = iter.next().unwrap().clone();
+
+        doc.apply_create_portal(&a, &b).unwrap();
+        doc.apply_create_portal(&b, &c).unwrap();
+        assert_eq!(doc.mindmap.portals[0].glyph, PORTAL_GLYPH_PRESETS[0]);
+        assert_eq!(doc.mindmap.portals[1].glyph, PORTAL_GLYPH_PRESETS[1]);
+    }
+
+    #[test]
+    fn portal_create_rejects_self_portal() {
+        let mut doc = load_test_doc();
+        let id = doc.mindmap.nodes.keys().next().unwrap().clone();
+        let result = doc.apply_create_portal(&id, &id);
+        assert!(result.is_err());
+        assert!(doc.mindmap.portals.is_empty());
+    }
+
+    #[test]
+    fn portal_create_rejects_unknown_node() {
+        let mut doc = load_test_doc();
+        let known = doc.mindmap.nodes.keys().next().unwrap().clone();
+        assert!(doc.apply_create_portal(&known, "does_not_exist").is_err());
+        assert!(doc.apply_create_portal("does_not_exist", &known).is_err());
+        assert!(doc.mindmap.portals.is_empty());
+    }
+
+    #[test]
+    fn portal_undo_create_removes_portal() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+
+        let pref = doc.apply_create_portal(&a, &b).unwrap();
+        doc.selection = SelectionState::Portal(pref);
+        assert_eq!(doc.mindmap.portals.len(), 1);
+        assert!(doc.undo());
+        assert!(doc.mindmap.portals.is_empty());
+        // Undoing a CreatePortal that was selected should clear the selection.
+        assert!(matches!(doc.selection, SelectionState::None));
+    }
+
+    #[test]
+    fn portal_delete_and_undo_restore_original_index() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let c = iter.next().unwrap().clone();
+
+        let p1 = doc.apply_create_portal(&a, &b).unwrap();
+        let p2 = doc.apply_create_portal(&b, &c).unwrap();
+        let _p3 = doc.apply_create_portal(&a, &c).unwrap();
+        assert_eq!(doc.mindmap.portals.len(), 3);
+
+        // Delete the middle portal.
+        let removed = doc.apply_delete_portal(&p2).expect("should delete");
+        assert_eq!(removed.label, "B");
+        assert_eq!(doc.mindmap.portals.len(), 2);
+
+        // Undo should slot it back at its original middle index.
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.portals.len(), 3);
+        assert_eq!(doc.mindmap.portals[1].label, "B");
+        // And the other portals should still be intact.
+        assert_eq!(doc.mindmap.portals[0].label, p1.label);
+    }
+
+    #[test]
+    fn portal_edit_glyph_and_undo_restores_before() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+
+        let pref = doc.apply_create_portal(&a, &b).unwrap();
+        let original_glyph = doc.mindmap.portals[0].glyph.clone();
+        assert!(doc.set_portal_glyph(&pref, "\u{2B22}"));
+        assert_eq!(doc.mindmap.portals[0].glyph, "\u{2B22}");
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.portals[0].glyph, original_glyph);
+    }
+
+    #[test]
+    fn portal_edit_color_and_undo_restores_before() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+
+        let pref = doc.apply_create_portal(&a, &b).unwrap();
+        let original_color = doc.mindmap.portals[0].color.clone();
+        assert!(doc.set_portal_color(&pref, "var(--accent)"));
+        assert_eq!(doc.mindmap.portals[0].color, "var(--accent)");
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.portals[0].color, original_color);
+    }
+
+    #[test]
+    fn portal_delete_returns_none_for_unknown_ref() {
+        let mut doc = load_test_doc();
+        let ghost = PortalRef::new("Z", "ghost_a", "ghost_b");
+        assert!(doc.apply_delete_portal(&ghost).is_none());
+    }
+
+    #[test]
+    fn portal_next_label_reuses_gap_after_delete() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let c = iter.next().unwrap().clone();
+
+        let _ = doc.apply_create_portal(&a, &b).unwrap();
+        let p2 = doc.apply_create_portal(&b, &c).unwrap();
+        let _ = doc.apply_create_portal(&a, &c).unwrap();
+        // Delete the middle ("B").
+        doc.apply_delete_portal(&p2).unwrap();
+        // Next creation should reuse "B" since it is now the lowest unused.
+        let d = doc.apply_create_portal(&b, &c).unwrap();
+        assert_eq!(d.label, "B");
+    }
+
+    #[test]
+    fn selection_state_portal_is_not_node_selection() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let pref = doc.apply_create_portal(&a, &b).unwrap();
+        doc.selection = SelectionState::Portal(pref.clone());
+
+        assert!(!doc.selection.is_selected(&a));
+        assert!(!doc.selection.is_selected(&b));
+        assert!(doc.selection.selected_ids().is_empty());
+        assert_eq!(doc.selection.selected_portal(), Some(&pref));
+        assert_eq!(doc.selection.selected_edge(), None);
     }
 }

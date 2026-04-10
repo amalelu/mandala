@@ -67,8 +67,78 @@ pub struct ConnectionElement {
     pub color: String,
 }
 
-/// Placeholder for future portal rendering (M3).
-pub struct PortalElement {}
+/// Session 6E: a portal marker — one half of a `PortalPair` rendered
+/// as a single glyph above the top-right corner of one of its two
+/// endpoint nodes. Each `PortalPair` emits two `PortalElement`s per
+/// scene build (one per endpoint).
+///
+/// Like `ConnectionLabelElement`, portal markers are cheap to rebuild
+/// from scratch every frame (≤ two glyphs per portal, portal counts
+/// stay in the dozens) so there is no per-portal cache.
+pub struct PortalElement {
+    /// Stable identity of the owning pair — used by the renderer's
+    /// keyed buffer map so selection highlighting and hit-testing
+    /// can find the portal from an `app.rs`-side `PortalRef`.
+    pub portal_ref: PortalRefKey,
+    /// Which of the two endpoints this marker is drawn next to.
+    /// The renderer keys its buffer map by `(portal_ref, endpoint_node_id)`
+    /// so the two markers of one pair are stored separately.
+    pub endpoint_node_id: String,
+    /// The visible glyph string, e.g. `"◈"`.
+    pub glyph: String,
+    /// Top-left corner of the marker AABB in canvas coordinates.
+    pub position: (f32, f32),
+    /// Width and height of the marker AABB.
+    pub bounds: (f32, f32),
+    /// Resolved color (hex) — `var(--name)` references already expanded
+    /// through the theme variable map. Overridden to the cyan highlight
+    /// color at emission time when the portal is selected.
+    pub color: String,
+    /// Optional font family override. `None` falls back to the
+    /// renderer's default font.
+    pub font: Option<String>,
+    /// Font size in points.
+    pub font_size_pt: f32,
+}
+
+/// Stable identity of a portal pair — `(label, endpoint_a, endpoint_b)`.
+/// Mirrors the `EdgeKey` role for edges: portals have no numeric id,
+/// but the auto-assigned label plus the two endpoint node ids form a
+/// unique triple within a single `MindMap`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PortalRefKey {
+    pub label: String,
+    pub endpoint_a: String,
+    pub endpoint_b: String,
+}
+
+impl PortalRefKey {
+    pub fn new(
+        label: impl Into<String>,
+        endpoint_a: impl Into<String>,
+        endpoint_b: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            endpoint_a: endpoint_a.into(),
+            endpoint_b: endpoint_b.into(),
+        }
+    }
+
+    pub fn from_portal(p: &crate::mindmap::model::PortalPair) -> Self {
+        Self {
+            label: p.label.clone(),
+            endpoint_a: p.endpoint_a.clone(),
+            endpoint_b: p.endpoint_b.clone(),
+        }
+    }
+
+    pub fn matches(&self, p: &crate::mindmap::model::PortalPair) -> bool {
+        self.label == p.label
+            && self.endpoint_a == p.endpoint_a
+            && self.endpoint_b == p.endpoint_b
+    }
+}
 
 /// Session 6D: a text label attached to a connection edge. Rendered
 /// as a cosmic-text buffer positioned along the edge's path at a
@@ -242,7 +312,7 @@ pub fn build_edge_handles(
 /// [`crate::mindmap::model::GlyphConnectionConfig::effective_font_size_pt`].
 /// Pass `1.0` if no camera context applies (e.g. loader tests).
 pub fn build_scene(map: &MindMap, camera_zoom: f32) -> RenderScene {
-    build_scene_with_offsets_and_selection(map, &HashMap::new(), None, camera_zoom)
+    build_scene_with_offsets_and_selection(map, &HashMap::new(), None, None, camera_zoom)
 }
 
 /// Builds a RenderScene with position offsets applied to specific nodes.
@@ -254,20 +324,26 @@ pub fn build_scene_with_offsets(
     offsets: &HashMap<String, (f32, f32)>,
     camera_zoom: f32,
 ) -> RenderScene {
-    build_scene_with_offsets_and_selection(map, offsets, None, camera_zoom)
+    build_scene_with_offsets_and_selection(map, offsets, None, None, camera_zoom)
 }
 
 /// Thin wrapper over the cache-aware builder that uses a scratch
 /// (throwaway) cache so call sites that don't track a persistent cache
 /// still work. Prefer `build_scene_with_cache` on the hot drag path.
+///
+/// `selected_portal` carries `(label, endpoint_a, endpoint_b)` and
+/// mirrors `selected_edge`: when set, the matching pair's two emitted
+/// `PortalElement`s are colorized with the cyan selection highlight
+/// so the user sees which portal is active.
 pub fn build_scene_with_offsets_and_selection(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
+    selected_portal: Option<(&str, &str, &str)>,
     camera_zoom: f32,
 ) -> RenderScene {
     let mut scratch = SceneConnectionCache::new();
-    build_scene_with_cache(map, offsets, selected_edge, &mut scratch, camera_zoom)
+    build_scene_with_cache(map, offsets, selected_edge, selected_portal, &mut scratch, camera_zoom)
 }
 
 /// Cache-aware scene builder. For each edge:
@@ -287,6 +363,7 @@ pub fn build_scene_with_cache(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
+    selected_portal: Option<(&str, &str, &str)>,
     cache: &mut SceneConnectionCache,
     camera_zoom: f32,
 ) -> RenderScene {
@@ -694,16 +771,81 @@ pub fn build_scene_with_cache(
         });
     }
 
+    // Session 6E: emit portal markers as a post-pass over `map.portals`.
+    // Each pair produces two `PortalElement`s — one floating above the
+    // top-right corner of each endpoint node. Portals whose endpoints
+    // are missing or hidden by fold are skipped silently. Portal colors
+    // resolve through the theme variable map so `var(--accent)` auto-
+    // restyles on theme swap, matching the connection-label pattern.
+    let mut portal_elements: Vec<PortalElement> = Vec::new();
+    for portal in &map.portals {
+        let node_a = match map.nodes.get(&portal.endpoint_a) {
+            Some(n) => n,
+            None => continue,
+        };
+        let node_b = match map.nodes.get(&portal.endpoint_b) {
+            Some(n) => n,
+            None => continue,
+        };
+        if map.is_hidden_by_fold(node_a) || map.is_hidden_by_fold(node_b) {
+            continue;
+        }
+        let is_selected = selected_portal.map_or(false, |(l, a, b)| {
+            l == portal.label && a == portal.endpoint_a && b == portal.endpoint_b
+        });
+        let raw_color = if is_selected {
+            SELECTED_PORTAL_COLOR_HEX
+        } else {
+            portal.color.as_str()
+        };
+        let color = resolve_var(raw_color, vars).to_string();
+        let key = PortalRefKey::from_portal(portal);
+
+        for endpoint in [node_a, node_b] {
+            let (ox, oy) = offsets.get(&endpoint.id).copied().unwrap_or((0.0, 0.0));
+            let node_x = endpoint.position.x as f32 + ox;
+            let node_y = endpoint.position.y as f32 + oy;
+            let node_w = endpoint.size.width as f32;
+
+            // Loose square AABB sized from the glyph font; matches the
+            // connection-label sizing heuristic (≈0.6 × font_size per
+            // char, one char wide for the single marker glyph).
+            let bounds_w = portal.font_size_pt * 1.4;
+            let bounds_h = portal.font_size_pt * 1.4;
+            // Float the marker just above the node's top-right corner.
+            let top_left = (
+                node_x + node_w - bounds_w * 0.9,
+                node_y - bounds_h - 8.0,
+            );
+
+            portal_elements.push(PortalElement {
+                portal_ref: key.clone(),
+                endpoint_node_id: endpoint.id.clone(),
+                glyph: portal.glyph.clone(),
+                position: top_left,
+                bounds: (bounds_w, bounds_h),
+                color: color.clone(),
+                font: portal.font.clone(),
+                font_size_pt: portal.font_size_pt,
+            });
+        }
+    }
+
     RenderScene {
         text_elements,
         border_elements,
         connection_elements,
-        portal_elements: Vec::new(),
+        portal_elements,
         edge_handles,
         connection_label_elements,
         background_color: resolve_var(&map.canvas.background_color, vars).to_string(),
     }
 }
+
+/// Session 6E: cyan highlight hex for selected portals. Matches the
+/// `HIGHLIGHT_COLOR` constant in `document.rs` that drives the
+/// node-selection color mutation.
+const SELECTED_PORTAL_COLOR_HEX: &str = "#00E5FF";
 
 /// Returns true if `point` is strictly inside any of the given AABBs. Uses a
 /// small epsilon so points that sit exactly on a border (e.g. connection
@@ -848,6 +990,7 @@ mod tests {
             nodes,
             edges,
             custom_mutations: vec![],
+            portals: vec![],
         }
     }
 
@@ -1082,7 +1225,7 @@ mod tests {
     fn test_cache_populated_on_first_build() {
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
 
         assert_eq!(scene.connection_elements.len(), 1);
         assert_eq!(cache.len(), 1);
@@ -1101,7 +1244,7 @@ mod tests {
         // it would have overwritten our mutation with fresh geometry.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
 
         // Mutate the cached entry so we can see whether build #2 read it.
         let key = EdgeKey::new("a", "b", "cross_link");
@@ -1121,7 +1264,7 @@ mod tests {
             },
         );
 
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
         assert_eq!(second.connection_elements.len(), 1);
         let conn = &second.connection_elements[0];
         assert_eq!(conn.body_glyph, "SENTINEL",
@@ -1139,7 +1282,7 @@ mod tests {
         // sentinel we stashed in the cache.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
 
         let key = EdgeKey::new("a", "b", "cross_link");
         cache.insert(
@@ -1157,7 +1300,7 @@ mod tests {
 
         let mut offsets = HashMap::new();
         offsets.insert("a".to_string(), (10.0, 0.0));
-        let second = build_scene_with_cache(&map, &offsets, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &offsets, None, None, &mut cache, 1.0);
         let conn = &second.connection_elements[0];
         assert_ne!(conn.body_glyph, "SENTINEL",
             "endpoint-moved edge should have been re-sampled");
@@ -1185,7 +1328,7 @@ mod tests {
             ],
         );
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
 
         let cd_key = EdgeKey::new("c", "d", "cross_link");
         cache.insert(
@@ -1203,7 +1346,7 @@ mod tests {
 
         let mut offsets = HashMap::new();
         offsets.insert("a".to_string(), (5.0, 0.0));
-        let second = build_scene_with_cache(&map, &offsets, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &offsets, None, None, &mut cache, 1.0);
 
         // Find the c↔d connection element and verify it came from the
         // cache unchanged.
@@ -1244,7 +1387,7 @@ mod tests {
         );
 
         let mut cache = SceneConnectionCache::new();
-        let first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
         let first_count = first.connection_elements[0].glyph_positions.len();
 
         // Now move `c` into the middle of the connection — use a drag
@@ -1253,7 +1396,7 @@ mod tests {
         // notice `c`'s new position.
         let mut offsets = HashMap::new();
         offsets.insert("c".to_string(), (0.0, 500.0));
-        let second = build_scene_with_cache(&map, &offsets, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &offsets, None, None, &mut cache, 1.0);
         let second_count = second.connection_elements[0].glyph_positions.len();
         assert!(second_count < first_count,
             "moving c through the edge should reduce post-clip glyph count: {} → {}",
@@ -1261,7 +1404,7 @@ mod tests {
 
         // Now move `c` back out of the way via a model edit + full rebuild.
         map.nodes.get_mut("c").unwrap().position.y = -500.0;
-        let third = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let third = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
         assert_eq!(third.connection_elements[0].glyph_positions.len(), first_count);
     }
 
@@ -1269,13 +1412,13 @@ mod tests {
     fn test_cache_evicts_deleted_edges() {
         let mut map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
         let key = EdgeKey::new("a", "b", "cross_link");
         assert!(cache.get(&key).is_some());
 
         // Remove the edge from the model and rebuild.
         map.edges.clear();
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
         assert!(second.connection_elements.is_empty());
         assert!(cache.get(&key).is_none(),
             "deleted edge should be evicted from cache");
@@ -1299,7 +1442,7 @@ mod tests {
             ],
         );
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
         assert_eq!(scene.connection_elements.len(), 2);
         let ab = EdgeKey::new("a", "b", "cross_link");
         let bc = EdgeKey::new("b", "c", "cross_link");
@@ -1318,8 +1461,8 @@ mod tests {
         // a fresh build would.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
 
         assert_eq!(
             first.connection_elements.len(),
@@ -1353,7 +1496,7 @@ mod tests {
         let map = synthetic_map(vec![a, b_child], vec![edge]);
 
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
         assert!(scene.connection_elements.is_empty(),
             "folded edge should be skipped");
         assert!(cache.is_empty(),
@@ -1368,7 +1511,7 @@ mod tests {
         // selection override.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
         let key = EdgeKey::new("a", "b", "cross_link");
         let stored_color = cache.get(&key).unwrap().color.clone();
 
@@ -1391,6 +1534,7 @@ mod tests {
             &map,
             &HashMap::new(),
             Some(("a", "b", "cross_link")),
+            None,
             &mut cache,
             1.0,
         );
@@ -1444,6 +1588,7 @@ mod tests {
             &map,
             &HashMap::new(),
             Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            None,
             &mut cache,
             1.0,
         );
@@ -1477,6 +1622,7 @@ mod tests {
             &map,
             &HashMap::new(),
             Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            None,
             &mut cache,
             1.0,
         );
@@ -1504,6 +1650,7 @@ mod tests {
             &map,
             &HashMap::new(),
             Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            None,
             &mut cache,
             1.0,
         );
@@ -1534,6 +1681,7 @@ mod tests {
             &map,
             &HashMap::new(),
             Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            None,
             &mut cache,
             1.0,
         );
@@ -1645,5 +1793,161 @@ mod tests {
         let scene = build_scene(&map, 1.0);
         // The glyph_connection.color override wins over edge.color.
         assert_eq!(scene.connection_label_elements[0].color, "#112233");
+    }
+
+    // ====================================================================
+    // Session 6E — Portal marker emission
+    // ====================================================================
+
+    use crate::mindmap::model::PortalPair;
+
+    fn synthetic_portal(label: &str, a: &str, b: &str, color: &str) -> PortalPair {
+        PortalPair {
+            endpoint_a: a.to_string(),
+            endpoint_b: b.to_string(),
+            label: label.to_string(),
+            glyph: "\u{25C8}".to_string(),
+            color: color.to_string(),
+            font_size_pt: 16.0,
+            font: None,
+        }
+    }
+
+    #[test]
+    fn portal_emits_two_elements_per_pair() {
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+            synthetic_node("b", 500.0, 500.0, 60.0, 40.0, false),
+        ];
+        let mut map = synthetic_map(nodes, vec![]);
+        map.portals.push(synthetic_portal("A", "a", "b", "#aa88cc"));
+        let scene = build_scene(&map, 1.0);
+        assert_eq!(scene.portal_elements.len(), 2);
+        let ids: Vec<&str> = scene.portal_elements.iter()
+            .map(|e| e.endpoint_node_id.as_str())
+            .collect();
+        assert!(ids.contains(&"a"));
+        assert!(ids.contains(&"b"));
+        // Both markers share the same portal_ref identity.
+        assert_eq!(scene.portal_elements[0].portal_ref, scene.portal_elements[1].portal_ref);
+    }
+
+    #[test]
+    fn portal_skipped_when_endpoint_missing_from_map() {
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        ];
+        let mut map = synthetic_map(nodes, vec![]);
+        map.portals.push(synthetic_portal("A", "a", "ghost", "#aa88cc"));
+        let scene = build_scene(&map, 1.0);
+        assert!(scene.portal_elements.is_empty(),
+            "missing endpoint should silently drop the pair");
+    }
+
+    #[test]
+    fn portal_skipped_when_either_endpoint_hidden_by_fold() {
+        // A parent holding a folded child — the child is hidden by
+        // fold from its ancestor. A portal pointing into a folded
+        // subtree has no visible anchor, so the pair must be skipped.
+        let mut root = synthetic_node("root", 0.0, 0.0, 60.0, 40.0, false);
+        root.folded = true;
+        let mut child = synthetic_node("child", 200.0, 0.0, 60.0, 40.0, false);
+        child.parent_id = Some("root".to_string());
+        let other = synthetic_node("other", 500.0, 0.0, 60.0, 40.0, false);
+        let mut map = synthetic_map(vec![root, child, other], vec![]);
+        map.portals.push(synthetic_portal("A", "child", "other", "#aa88cc"));
+        let scene = build_scene(&map, 1.0);
+        assert!(scene.portal_elements.is_empty(),
+            "portal should be dropped when one endpoint is hidden by fold");
+    }
+
+    #[test]
+    fn portal_color_resolves_through_theme_variable() {
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+            synthetic_node("b", 200.0, 0.0, 60.0, 40.0, false),
+        ];
+        let mut map = synthetic_map(nodes, vec![]);
+        map.canvas.theme_variables.insert(
+            "--accent".to_string(), "#ff00aa".to_string(),
+        );
+        map.portals.push(synthetic_portal("A", "a", "b", "var(--accent)"));
+        let scene = build_scene(&map, 1.0);
+        assert_eq!(scene.portal_elements[0].color, "#ff00aa",
+            "var(--accent) must resolve through theme_variables");
+        assert_eq!(scene.portal_elements[1].color, "#ff00aa");
+    }
+
+    #[test]
+    fn selected_portal_rendered_with_highlight_color() {
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+            synthetic_node("b", 200.0, 0.0, 60.0, 40.0, false),
+        ];
+        let mut map = synthetic_map(nodes, vec![]);
+        map.portals.push(synthetic_portal("A", "a", "b", "#aa88cc"));
+        let mut cache = SceneConnectionCache::new();
+        let scene = build_scene_with_cache(
+            &map,
+            &HashMap::new(),
+            None,
+            Some(("A", "a", "b")),
+            &mut cache,
+            1.0,
+        );
+        // Both emitted markers flip to the cyan highlight color.
+        assert_eq!(scene.portal_elements[0].color, "#00E5FF");
+        assert_eq!(scene.portal_elements[1].color, "#00E5FF");
+    }
+
+    #[test]
+    fn portal_marker_position_is_above_top_right_of_node() {
+        let nodes = vec![
+            synthetic_node("a", 100.0, 200.0, 80.0, 40.0, false),
+            synthetic_node("b", 500.0, 500.0, 80.0, 40.0, false),
+        ];
+        let mut map = synthetic_map(nodes, vec![]);
+        map.portals.push(synthetic_portal("A", "a", "b", "#aa88cc"));
+        let scene = build_scene(&map, 1.0);
+        // Find the marker keyed to endpoint "a".
+        let marker_a = scene.portal_elements.iter()
+            .find(|e| e.endpoint_node_id == "a")
+            .expect("marker for endpoint a");
+        // Node "a" sits at (100, 200) with size (80, 40). The marker
+        // should float above the node's top edge (y < 200) and be
+        // horizontally clustered on the right half of the node.
+        assert!(marker_a.position.1 < 200.0,
+            "marker y {} should be above node top 200", marker_a.position.1);
+        assert!(marker_a.position.0 > 100.0 + 80.0 * 0.5,
+            "marker x {} should be on the right half of the node", marker_a.position.0);
+    }
+
+    #[test]
+    fn portal_marker_follows_drag_offsets() {
+        let nodes = vec![
+            synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+            synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+        ];
+        let mut map = synthetic_map(nodes, vec![]);
+        map.portals.push(synthetic_portal("A", "a", "b", "#aa88cc"));
+
+        // Build a baseline scene with no offsets, then an offset scene
+        // and assert the marker moved by exactly the offset amount.
+        let baseline = build_scene(&map, 1.0);
+        let baseline_a = baseline.portal_elements.iter()
+            .find(|e| e.endpoint_node_id == "a")
+            .expect("marker for endpoint a in baseline");
+
+        let mut offsets = HashMap::new();
+        offsets.insert("a".to_string(), (100.0f32, 50.0f32));
+        let dragged = build_scene_with_offsets(&map, &offsets, 1.0);
+        let dragged_a = dragged.portal_elements.iter()
+            .find(|e| e.endpoint_node_id == "a")
+            .expect("marker for endpoint a in dragged scene");
+
+        let dx = dragged_a.position.0 - baseline_a.position.0;
+        let dy = dragged_a.position.1 - baseline_a.position.1;
+        assert!((dx - 100.0).abs() < 0.01, "marker x should shift by +100, got {dx}");
+        assert!((dy - 50.0).abs() < 0.01, "marker y should shift by +50, got {dy}");
     }
 }
