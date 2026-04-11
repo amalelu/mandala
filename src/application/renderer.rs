@@ -448,12 +448,6 @@ pub struct Renderer {
     /// inline click-to-edit. Stored as `(min, max)` canvas-space
     /// corners so the hit test is a pair of comparisons per edge.
     connection_label_hitboxes: FxHashMap<EdgeKey, (Vec2, Vec2)>,
-    /// Session 6D: when set to `Some((key, text))`, the renderer
-    /// substitutes the given text (with a trailing caret glyph) for
-    /// whichever label matches `key` during
-    /// `rebuild_connection_label_buffers`. Used by inline label edit
-    /// mode to preview uncommitted text without mutating the model.
-    pub label_edit_override: Option<(EdgeKey, String)>,
     /// Session 6E: per-endpoint portal marker buffers, keyed by
     /// `(portal_ref, endpoint_node_id)` so each of the two marker
     /// glyphs of a pair is stored separately. Rebuilt every scene
@@ -713,7 +707,6 @@ impl Renderer {
             edge_handle_buffers: Vec::new(),
             connection_label_buffers: FxHashMap::default(),
             connection_label_hitboxes: FxHashMap::default(),
-            label_edit_override: None,
             portal_buffers: FxHashMap::default(),
             portal_hitboxes: FxHashMap::default(),
             palette_overlay_buffers: Vec::new(),
@@ -2422,19 +2415,17 @@ impl Renderer {
     /// buffers centered on their AABB, with a hitbox recorded so the
     /// app can detect clicks for inline label editing.
     ///
-    /// If `self.label_edit_override` is `Some((key, text))`, the
-    /// matching edge's label is drawn from `text` (with a trailing
-    /// caret) instead of the element's committed text — the inline
-    /// edit preview. The override is consulted only by the buffer
-    /// rebuild; the AABB is still computed from the scene element's
-    /// bounds, so the hitbox stays stable across keystrokes.
+    /// The inline label-edit preview (buffer text + caret) is applied
+    /// upstream in `scene_builder` via `MindMapDocument::label_edit_preview`,
+    /// so the renderer can treat every label element as the final
+    /// text to draw — no read-time override, no side channel.
     pub fn rebuild_connection_label_buffers(
         &mut self,
         label_elements: &[baumhard::mindmap::scene_builder::ConnectionLabelElement],
     ) {
         self.connection_label_buffers.clear();
         self.connection_label_hitboxes.clear();
-        if label_elements.is_empty() && self.label_edit_override.is_none() {
+        if label_elements.is_empty() {
             return;
         }
         let mut font_system = fonts::FONT_SYSTEM
@@ -2448,19 +2439,9 @@ impl Renderer {
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(elem.font_size_pt, elem.font_size_pt));
 
-            // Preview override (inline label editor): substitute the
-            // edited buffer text + caret for whichever edge is being
-            // edited right now.
-            let rendered_text: String = match self.label_edit_override.as_ref() {
-                Some((key, text)) if *key == elem.edge_key => {
-                    format!("{text}\u{258C}")
-                }
-                _ => elem.text.clone(),
-            };
-
             let buffer = create_border_buffer(
                 &mut font_system,
-                &rendered_text,
+                &elem.text,
                 &attrs,
                 elem.font_size_pt,
                 elem.position,
@@ -2476,24 +2457,6 @@ impl Renderer {
             );
             self.connection_label_hitboxes
                 .insert(elem.edge_key.clone(), (min, max));
-        }
-
-        // If an override points at an edge whose label element isn't
-        // in the scene (e.g. the user is typing the very first
-        // character of a brand-new label whose committed text is
-        // still empty), synthesize a preview buffer at the edge
-        // anchor so the caret is visible while typing. The app is
-        // responsible for passing a scene that includes a
-        // ConnectionLabelElement for the edited edge once the buffer
-        // is non-empty; this branch is a belt-and-suspenders guard.
-        if let Some((key, text)) = self.label_edit_override.as_ref() {
-            if !self.connection_label_buffers.contains_key(key) {
-                // No scene element to anchor to — do nothing. Callers
-                // ensure the scene is rebuilt after opening the
-                // editor so this branch is exercised only on the
-                // first keystroke before the next scene build.
-                let _ = (text,);
-            }
         }
     }
 

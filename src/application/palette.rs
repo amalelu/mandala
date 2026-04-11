@@ -1422,6 +1422,8 @@ mod tests {
             undo_stack: Vec::new(),
             mutation_registry: HashMap::new(),
             active_toggles: HashSet::new(),
+            label_edit_preview: None,
+            color_picker_preview: None,
         };
         doc.build_mutation_registry();
         doc
