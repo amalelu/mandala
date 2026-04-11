@@ -16,6 +16,7 @@
 //! straight, and two sets of five anchor-side actions (Auto / Top /
 //! Right / Bottom / Left for both `from` and `to` anchors).
 
+use crate::application::color_picker::ColorTarget;
 use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, SelectionState};
 
 /// A single command palette entry. Kept small and `'static` so the
@@ -63,6 +64,12 @@ pub struct PaletteEffects<'a> {
     /// returns and opens the `LabelEditState` modal. Keeps actions
     /// pure-function: no renderer access, no modal state.
     pub open_label_edit: Option<EdgeRef>,
+    /// Glyph-wheel color picker handoff. Mirrors `open_label_edit`:
+    /// if a palette action wants to open the picker (e.g. "Pick edge
+    /// color…"), it sets this field; the dispatcher in `app.rs`
+    /// drains it after `execute` returns and transitions to the
+    /// `ColorPickerState` modal.
+    pub open_color_picker: Option<ColorTarget>,
 }
 
 /// Case-insensitive subsequence fuzzy match. Returns `None` when any
@@ -438,6 +445,23 @@ def_set_edge_type_exec!(exec_convert_to_parent_child, "parent_child");
 fn exec_edit_label(eff: &mut PaletteEffects) {
     if let SelectionState::Edge(er) = eff.document.selection.clone() {
         eff.open_label_edit = Some(er);
+    }
+}
+
+/// Open the glyph-wheel color picker on the currently-selected edge.
+/// Hands off via `open_color_picker`; the dispatcher in `app.rs`
+/// transitions to `ColorPickerState::Open` after the palette closes.
+fn exec_open_color_picker_edge(eff: &mut PaletteEffects) {
+    if let SelectionState::Edge(er) = eff.document.selection.clone() {
+        eff.open_color_picker = Some(ColorTarget::Edge(er));
+    }
+}
+
+/// Open the glyph-wheel color picker on the currently-selected portal
+/// pair. Mirror of `exec_open_color_picker_edge`.
+fn exec_open_color_picker_portal(eff: &mut PaletteEffects) {
+    if let SelectionState::Portal(pr) = eff.document.selection.clone() {
+        eff.open_color_picker = Some(ColorTarget::Portal(pr));
     }
 }
 
@@ -966,6 +990,25 @@ pub const PALETTE_ACTIONS: &[PaletteAction] = &[
         applicable: cap_end_not_none,
         execute: exec_set_cap_end_none,
     },
+    // Glyph-wheel color picker — opens the magical mandala for the
+    // selected edge or portal. Sits above the theme-var presets so a
+    // fuzzy search for "color" surfaces it first.
+    PaletteAction {
+        id: "edge_pick_color",
+        label: "Pick edge color\u{2026}",
+        description: "Open the glyph-wheel color picker for this connection",
+        tags: &["edge", "connection", "color", "pick", "wheel", "mandala"],
+        applicable: edge_selected,
+        execute: exec_open_color_picker_edge,
+    },
+    PaletteAction {
+        id: "portal_pick_color",
+        label: "Pick portal color\u{2026}",
+        description: "Open the glyph-wheel color picker for this portal pair",
+        tags: &["portal", "color", "pick", "wheel", "mandala"],
+        applicable: portal_selected,
+        execute: exec_open_color_picker_portal,
+    },
     // Color presets (theme-var-aware)
     PaletteAction {
         id: "edge_color_accent",
@@ -1310,11 +1353,13 @@ mod tests {
     #[test]
     fn palette_actions_session_6e_count_matches_plan() {
         // Session 6E target: 11 (6C) + 31 (6D) + 10 (6E) = 52.
+        // Glyph-wheel color picker added 2 more openers (Pick edge
+        // color, Pick portal color) → 54 total.
         // Tight assertion so adding/removing actions shows up in CI.
         assert_eq!(
             PALETTE_ACTIONS.len(),
-            52,
-            "expected 52 palette actions (11 from 6C + 31 from 6D + 10 from 6E)"
+            54,
+            "expected 54 palette actions (11 from 6C + 31 from 6D + 10 from 6E + 2 from glyph-wheel picker)"
         );
     }
 
@@ -1468,6 +1513,7 @@ mod tests {
         let mut eff = PaletteEffects {
             document: &mut doc,
             open_label_edit: None,
+            open_color_picker: None,
         };
         let (_, act) = action_by_id("portal_create").unwrap();
         (act.execute)(&mut eff);
@@ -1489,6 +1535,7 @@ mod tests {
         let mut eff = PaletteEffects {
             document: &mut doc,
             open_label_edit: None,
+            open_color_picker: None,
         };
         let (_, act) = action_by_id("portal_glyph_hexagon").unwrap();
         (act.execute)(&mut eff);
@@ -1506,6 +1553,7 @@ mod tests {
         let mut eff = PaletteEffects {
             document: &mut doc,
             open_label_edit: None,
+            open_color_picker: None,
         };
         let (_, act) = action_by_id("portal_delete").unwrap();
         (act.execute)(&mut eff);
