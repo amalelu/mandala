@@ -2091,7 +2091,10 @@ impl Renderer {
         }
 
         // ---- Center preview glyph ✦ at 2× font size ----
-        let preview_size = font_size * 2.0;
+        // The position and size both come from the layout — the
+        // pre-render layout pass owns the centering math, so the
+        // glyph anchors correctly even if we tweak preview size.
+        let preview_size = layout.preview_size;
         let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
         let preview_color = to_cosmic(preview_rgb);
         let preview_attrs = Attrs::new()

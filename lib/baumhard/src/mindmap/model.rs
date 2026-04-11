@@ -193,7 +193,7 @@ pub struct ColorGroup {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MindEdge {
     pub from_id: String,
     pub to_id: String,
@@ -223,7 +223,7 @@ pub struct MindEdge {
 /// Configures how a connection between nodes is rendered using font glyphs.
 /// Connections are composed of repeating body glyphs and optional end caps,
 /// laid out along the path from source to target.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GlyphConnectionConfig {
     /// The glyph(s) used for the body/middle of the connection, repeated to fill length.
     #[serde(default = "default_connection_body")]
@@ -327,7 +327,7 @@ impl GlyphConnectionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlPoint {
     pub x: f64,
     pub y: f64,
@@ -344,7 +344,7 @@ pub struct ControlPoint {
 /// identity in selection/undo; it is not currently drawn next to the
 /// glyph — the glyph alone is the visual cue. Labels are immutable in
 /// Session 6E; a rename action is deferred.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortalPair {
     /// Node id of the first endpoint.
     pub endpoint_a: String,

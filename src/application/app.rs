@@ -334,6 +334,26 @@ impl Application {
                     ..
                 } => {
                     renderer.process_decree(RenderDecree::SetSurfaceSize(size.width, size.height));
+                    // Glyph-wheel color picker caches its layout in
+                    // ColorPickerState::Open { layout, .. }; the
+                    // cached values include the screen-space backdrop
+                    // and per-glyph positions, so a resize would
+                    // leave hit-tests aimed at the old geometry and
+                    // the renderer's overlay buffers anchored at the
+                    // pre-resize coordinates. Re-emit both off the
+                    // new surface dimensions so picker stays usable
+                    // after a resize. Mutually exclusive with the
+                    // palette + label edit modals so only one branch
+                    // ever fires.
+                    if color_picker_state.is_open() {
+                        if let Some(doc) = document.as_ref() {
+                            rebuild_color_picker_overlay(
+                                &mut color_picker_state,
+                                doc,
+                                &mut renderer,
+                            );
+                        }
+                    }
                 }
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
@@ -361,10 +381,12 @@ impl Application {
 
                     // Glyph-wheel color picker click handling. The
                     // picker captures left-click for in-frame hits
-                    // (commit at hit position) and out-of-frame
-                    // clicks (cancel). Other buttons fall through to
-                    // the normal handlers so middle-drag pan still
-                    // works while the picker is open.
+                    // (commit at hit position) and out-of-backdrop
+                    // clicks (cancel). The CursorMoved branch above
+                    // unconditionally early-returns while the picker
+                    // is open, so middle-button pan is suppressed
+                    // for the duration of the modal — matching the
+                    // palette and label-edit modals' behavior.
                     if color_picker_state.is_open()
                         && state == ElementState::Pressed
                         && button == MouseButton::Left
@@ -2072,21 +2094,20 @@ fn commit_color_picker(
         ColorPickerState::Open { snapshot, .. } => snapshot,
         ColorPickerState::Closed => return,
     };
-    // Push undo unconditionally with the captured `before` snapshot.
-    // A pure no-op pick (open then commit without moving) creates one
-    // redundant undo step — acceptable in exchange for not having to
-    // hand-roll equality on `MindEdge` / `PortalPair`, neither of which
-    // derives `PartialEq`. Mirrors how `apply_edge_handle_drag` always
-    // pushes one undo per drag-end.
+    // Skip the undo push when the committed value is byte-identical
+    // to the snapshot — a "no-op pick" (user opened the picker and
+    // committed without moving the cursor, or hovered and returned
+    // to the original color). Both `MindEdge` and `PortalPair` derive
+    // PartialEq so the equality check is just a struct compare.
     match snapshot {
         ColorPickerSnapshot::Edge { index, before } => {
-            if index < doc.mindmap.edges.len() {
+            if index < doc.mindmap.edges.len() && doc.mindmap.edges[index] != before {
                 doc.undo_stack.push(UndoAction::EditEdge { index, before });
                 doc.dirty = true;
             }
         }
         ColorPickerSnapshot::Portal { index, before } => {
-            if index < doc.mindmap.portals.len() {
+            if index < doc.mindmap.portals.len() && doc.mindmap.portals[index] != before {
                 doc.undo_stack.push(UndoAction::EditPortal { index, before });
                 doc.dirty = true;
             }
@@ -2335,12 +2356,16 @@ fn handle_color_picker_click(
 
     match hit {
         PickerHit::Outside => {
+            // Click outside the backdrop entirely — close as cancel,
+            // matching the palette modal's "click outside dismisses"
+            // gesture.
             cancel_color_picker(state, doc, mindmap_tree, renderer);
         }
         PickerHit::Inside => {
-            // Click in the backdrop padding — treat as cancel for
-            // discoverability ("click outside the wheel to dismiss").
-            cancel_color_picker(state, doc, mindmap_tree, renderer);
+            // Click inside the backdrop but not on any glyph (e.g.
+            // the empty space inside the mandala ring between the
+            // crosshair arms). Stay open — the user is aiming and
+            // missed; cancelling would feel surprising.
         }
         PickerHit::Hue(slot) => {
             if let ColorPickerState::Open { hue_deg, .. } = state {

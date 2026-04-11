@@ -189,8 +189,13 @@ pub struct ColorPickerLayout {
     pub sat_cell_positions: [(f32, f32); SAT_CELL_COUNT],
     /// 11 val-bar cell centers, top → bottom (top = brightest).
     pub val_cell_positions: [(f32, f32); VAL_CELL_COUNT],
-    /// Center preview glyph anchor (the `✦`).
+    /// Center preview glyph anchor (the `✦`). Top-left corner of the
+    /// glyph box, computed so the glyph visually centers on the wheel
+    /// center given `preview_size`.
     pub preview_pos: (f32, f32),
+    /// Font size for the central `✦` preview glyph. 2× the base
+    /// `font_size` so the preview reads as a focal point.
+    pub preview_size: f32,
     /// One `(x, y, width)` per chip, ordered as `THEME_CHIPS`.
     pub chip_positions: Vec<(f32, f32, f32)>,
     pub chip_height: f32,
@@ -217,6 +222,7 @@ impl ColorPickerLayout {
             sat_cell_positions: [(0.0, 0.0); SAT_CELL_COUNT],
             val_cell_positions: [(0.0, 0.0); VAL_CELL_COUNT],
             preview_pos: (0.0, 0.0),
+            preview_size: 32.0,
             chip_positions: Vec::new(),
             chip_height: 0.0,
             backdrop: (0.0, 0.0, 0.0, 0.0),
@@ -237,12 +243,28 @@ pub fn compute_color_picker_layout(
     let font_size: f32 = 16.0;
     let char_width = font_size * 0.6;
 
-    // Square frame, centered. The clamp keeps it usable on tiny windows
-    // and unobtrusive on huge ones.
+    // Square frame, centered on the window. The picker draws the
+    // wheel inside `side`, then adds a chip row + hint footer below
+    // and a title above — see the backdrop computation at the
+    // bottom of this function. The vertical budget consumed by the
+    // backdrop is `side + 5 * font_size`, and the backdrop is
+    // anchored above the wheel by 1 font_size, so the total vertical
+    // extent of the backdrop is bounded by:
+    //
+    //     center.y - side/2 - font_size  ..  center.y + side/2 + 4*font_size
+    //
+    // For the backdrop to fit inside `[0, screen_h]` we need
+    // `side/2 + 4*font_size <= center.y` AND `side/2 + font_size <=
+    // center.y` — at center.y = screen_h/2 the first dominates,
+    // giving `side <= screen_h - 8*font_size`. Same logic
+    // horizontally. Note: the `.min` cascade after the floor would
+    // overflow on small windows, so we put the floor on each clamp.
+    let max_side_for_w = (screen_w - font_size * 2.0).max(0.0);
+    let max_side_for_h = (screen_h - font_size * 8.0).max(0.0);
     let side = 420f32
-        .min(screen_w * 0.6)
-        .min(screen_h * 0.8)
-        .max(280.0);
+        .min(max_side_for_w)
+        .min(max_side_for_h)
+        .max(0.0);
     let center = (screen_w * 0.5, screen_h * 0.5);
     let outer_radius = side * 0.45;
 
@@ -270,8 +292,18 @@ pub fn compute_color_picker_layout(
         val_cell_positions[i] = (center.0, center.1 - inner_extent + i as f32 * val_step);
     }
 
-    // Center preview at the bar intersection.
-    let preview_pos = (center.0 - char_width, center.1 - font_size * 0.5);
+    // Center preview at the bar intersection. The ✦ glyph renders
+    // at 2× font_size, so the top-left of its box must be offset by
+    // half the preview size in each direction so the visible glyph
+    // sits on the geometric wheel center. cosmic-text's effective
+    // glyph width is ~0.6 of its font size; we use 0.4 horizontally
+    // because the ✦ glyph has whitespace around it that the box
+    // includes but the visible mark does not.
+    let preview_size = font_size * 2.0;
+    let preview_pos = (
+        center.0 - preview_size * 0.4,
+        center.1 - preview_size * 0.5,
+    );
 
     // ---- Theme chips row ----
     let chip_row_y = center.1 + outer_radius + font_size * 1.5;
@@ -313,6 +345,7 @@ pub fn compute_color_picker_layout(
         sat_cell_positions,
         val_cell_positions,
         preview_pos,
+        preview_size,
         chip_positions,
         chip_height,
         backdrop,
@@ -548,5 +581,60 @@ mod tests {
         // Val bar inverted: top cell = brightest.
         assert!((val_cell_to_value(0) - 1.0).abs() < 1e-6);
         assert!((val_cell_to_value(VAL_CELL_COUNT - 1) - 0.0).abs() < 1e-6);
+    }
+
+    /// Layout must fit inside the window even on small windows. The
+    /// backdrop's vertical extent (top + height) must not exceed the
+    /// screen height; same for horizontal. Regression guard for the
+    /// "side defaulted to 280 even on a 200×200 window" overflow.
+    #[test]
+    fn layout_backdrop_fits_inside_small_window() {
+        let g = sample_geometry();
+        for &(w, h) in &[(320.0_f32, 240.0_f32), (400.0, 300.0), (200.0, 200.0)] {
+            let layout = compute_color_picker_layout(&g, w, h);
+            let (left, top, bw, bh) = layout.backdrop;
+            assert!(left >= 0.0, "backdrop left underflows on {}x{}", w, h);
+            assert!(top >= 0.0, "backdrop top underflows on {}x{}", w, h);
+            assert!(left + bw <= w + 0.5,
+                "backdrop right overflows on {}x{}: left={} bw={} w={}",
+                w, h, left, bw, w);
+            assert!(top + bh <= h + 0.5,
+                "backdrop bottom overflows on {}x{}: top={} bh={} h={}",
+                w, h, top, bh, h);
+        }
+    }
+
+    /// Preview glyph must center on the geometric wheel center given
+    /// the layout-emitted preview_size. Regression guard for the
+    /// "preview was anchored low-right of center" bug.
+    #[test]
+    fn layout_preview_centered_on_wheel_center() {
+        let g = sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let (px, py) = layout.preview_pos;
+        let cx = px + layout.preview_size * 0.4;
+        let cy = py + layout.preview_size * 0.5;
+        // The preview's visible center should be within ~1 px of the
+        // wheel center on each axis.
+        assert!((cx - layout.center.0).abs() < 1.0,
+            "preview x center {} differs from wheel center {}", cx, layout.center.0);
+        assert!((cy - layout.center.1).abs() < 1.0,
+            "preview y center {} differs from wheel center {}", cy, layout.center.1);
+    }
+
+    /// Hue wrap: degrees_to_hue_slot must wrap correctly across the
+    /// 0/360 boundary in both directions, and slots near the
+    /// boundary must round to slot 0 (not slot 24).
+    #[test]
+    fn degrees_to_hue_slot_wraps_at_boundary() {
+        assert_eq!(degrees_to_hue_slot(0.0), 0);
+        assert_eq!(degrees_to_hue_slot(360.0), 0);
+        assert_eq!(degrees_to_hue_slot(720.0), 0);
+        assert_eq!(degrees_to_hue_slot(-15.0), 23);
+        assert_eq!(degrees_to_hue_slot(-360.0), 0);
+        // 357° rounds to slot 0 (since 24 % 24 = 0).
+        assert_eq!(degrees_to_hue_slot(357.0), 0);
+        // 352° rounds to slot 23.
+        assert_eq!(degrees_to_hue_slot(352.0), 23);
     }
 }
