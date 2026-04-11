@@ -6,6 +6,32 @@ use crate::mindmap::scene_cache::{CachedConnection, EdgeKey, SceneConnectionCach
 use crate::util::color::resolve_var;
 use glam::Vec2;
 
+/// A transient, scene-build-only substitution of an edge's effective
+/// color. Used by the inline color picker's hover preview so the edge
+/// under the wheel reflects the in-flight HSV value **without** any
+/// mutation to the committed model. One edge at a time (the picker is
+/// modal) so a single Option is enough.
+///
+/// Applied after the normal "glyph_connection.color → edge.color →
+/// canvas default" resolution path but **before** the selection
+/// override, so a selected edge being previewed still renders cyan on
+/// the body glyphs. The preview is visible on the connection label,
+/// matching the pre-refactor behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct EdgeColorPreview<'a> {
+    pub edge_key: &'a EdgeKey,
+    pub color: &'a str,
+}
+
+/// Portal equivalent of `EdgeColorPreview`. Matched against the
+/// portal's `(label, endpoint_a, endpoint_b)` triple via
+/// `PortalRefKey`.
+#[derive(Debug, Clone, Copy)]
+pub struct PortalColorPreview<'a> {
+    pub portal_key: &'a PortalRefKey,
+    pub color: &'a str,
+}
+
 /// Intermediate representation between MindMap data and GPU rendering.
 /// Produced by `build_scene()`, consumed by Renderer to create cosmic-text buffers.
 pub struct RenderScene {
@@ -343,7 +369,52 @@ pub fn build_scene_with_offsets_and_selection(
     camera_zoom: f32,
 ) -> RenderScene {
     let mut scratch = SceneConnectionCache::new();
-    build_scene_with_cache(map, offsets, selected_edge, selected_portal, &mut scratch, camera_zoom)
+    build_scene_with_cache(
+        map,
+        offsets,
+        selected_edge,
+        selected_portal,
+        None,
+        None,
+        None,
+        &mut scratch,
+        camera_zoom,
+    )
+}
+
+/// Like `build_scene_with_offsets_and_selection`, plus transient
+/// interaction overrides:
+///
+/// - `label_edit_override`: inline label-edit buffer + caret
+///   substitution for a single edge.
+/// - `edge_color_preview`: color-picker hover preview for a single
+///   edge, beats selection on the previewed edge.
+/// - `portal_color_preview`: same, for portals.
+///
+/// When any override is `None`, behavior matches
+/// `build_scene_with_offsets_and_selection`.
+pub fn build_scene_with_offsets_selection_and_overrides(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+    selected_edge: Option<(&str, &str, &str)>,
+    selected_portal: Option<(&str, &str, &str)>,
+    label_edit_override: Option<(&EdgeKey, &str)>,
+    edge_color_preview: Option<EdgeColorPreview<'_>>,
+    portal_color_preview: Option<PortalColorPreview<'_>>,
+    camera_zoom: f32,
+) -> RenderScene {
+    let mut scratch = SceneConnectionCache::new();
+    build_scene_with_cache(
+        map,
+        offsets,
+        selected_edge,
+        selected_portal,
+        label_edit_override,
+        edge_color_preview,
+        portal_color_preview,
+        &mut scratch,
+        camera_zoom,
+    )
 }
 
 /// Cache-aware scene builder. For each edge:
@@ -364,6 +435,9 @@ pub fn build_scene_with_cache(
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
     selected_portal: Option<(&str, &str, &str)>,
+    label_edit_override: Option<(&EdgeKey, &str)>,
+    edge_color_preview: Option<EdgeColorPreview<'_>>,
+    portal_color_preview: Option<PortalColorPreview<'_>>,
     cache: &mut SceneConnectionCache,
     camera_zoom: f32,
 ) -> RenderScene {
@@ -527,9 +601,18 @@ pub fn build_scene_with_cache(
         // clip filter still runs against THIS frame's `node_aabbs` so a
         // stable edge correctly clips around a third node that moved
         // through its path.
+        // Color picker preview: resolve once here so both the cached
+        // and slow paths pick it up. Preview beats selection on the
+        // previewed edge so the user's live feedback is visible on the
+        // connection body, not masked by the cyan selection highlight.
+        let preview_for_this_edge: Option<&str> = edge_color_preview
+            .and_then(|p| if *p.edge_key == edge_key { Some(p.color) } else { None });
+
         if !endpoint_moved {
             if let Some(cached) = cache.get(&edge_key) {
-                let color = if is_selected {
+                let color = if let Some(p) = preview_for_this_edge {
+                    resolve_var(p, vars).to_string()
+                } else if is_selected {
                     SELECTED_EDGE_COLOR.to_string()
                 } else {
                     cached.color.clone()
@@ -577,7 +660,9 @@ pub fn build_scene_with_cache(
             let raw = config.color.as_deref().unwrap_or(edge.color.as_str());
             resolve_var(raw, vars).to_string()
         };
-        let color = if is_selected {
+        let color = if let Some(p) = preview_for_this_edge {
+            resolve_var(p, vars).to_string()
+        } else if is_selected {
             SELECTED_EDGE_COLOR.to_string()
         } else {
             stored_color.clone()
@@ -690,15 +775,20 @@ pub fn build_scene_with_cache(
     // path for each labeled edge, look up the point at
     // `edge.label_position_t` (defaulting to 0.5), and emit a
     // `ConnectionLabelElement` centered on that point.
+    //
+    // If `label_edit_override` is `Some((edge_key, buffer))`, the
+    // matching edge's committed label is replaced in the emitted
+    // element with `buffer + caret` so the inline label editor's
+    // live buffer renders on the next frame. The substitution
+    // happens here — in the scene builder — rather than in the
+    // renderer, so the scene stays the single source of truth for
+    // what will be drawn.
     let mut connection_label_elements: Vec<ConnectionLabelElement> = Vec::new();
+    let mut label_override_emitted = false;
     for edge in &map.edges {
         if !edge.visible {
             continue;
         }
-        let label_text = match edge.label.as_deref() {
-            Some(s) if !s.is_empty() => s,
-            _ => continue,
-        };
         let from_node = match map.nodes.get(&edge.from_id) {
             Some(n) => n,
             None => continue,
@@ -710,6 +800,24 @@ pub fn build_scene_with_cache(
         if map.is_hidden_by_fold(from_node) || map.is_hidden_by_fold(to_node) {
             continue;
         }
+
+        let edge_key = EdgeKey::from_edge(edge);
+        let is_edited = label_edit_override
+            .map_or(false, |(k, _)| *k == edge_key);
+
+        // The label text to render: either the inline edit buffer
+        // (plus caret) for the currently-edited edge, or the
+        // committed label. Committed-empty non-edited edges skip
+        // emission entirely.
+        let rendered_label: String = if is_edited {
+            let (_, buf) = label_edit_override.unwrap();
+            format!("{buf}\u{258C}")
+        } else {
+            match edge.label.as_deref() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => continue,
+            }
+        };
 
         let (fox, foy) = offsets.get(&from_node.id).copied().unwrap_or((0.0, 0.0));
         let (tox, toy) = offsets.get(&to_node.id).copied().unwrap_or((0.0, 0.0));
@@ -747,28 +855,122 @@ pub fn build_scene_with_cache(
         // Labels render slightly larger than the body glyphs so they
         // read as a distinct element on top of the connection path.
         let font_size_pt = base_font_size * 1.1;
-        let raw_color = config.color.as_deref().unwrap_or(edge.color.as_str());
+        // Color picker preview: substitute the preview hex for this
+        // edge's label color if the preview targets it. Applied
+        // before `resolve_var` so `var(--accent)`-style preview values
+        // still theme-resolve correctly.
+        let raw_color: &str = edge_color_preview
+            .and_then(|p| if *p.edge_key == edge_key { Some(p.color) } else { None })
+            .unwrap_or_else(|| config.color.as_deref().unwrap_or(edge.color.as_str()));
         let color = resolve_var(raw_color, vars).to_string();
 
         // Loose AABB sized from the glyph-count approximation
         // (`font_size * 0.6` per glyph — same constant the connection
         // body sampler uses). Height is one font-size plus a small
         // vertical margin.
-        let char_count = label_text.chars().count() as f32;
+        let char_count = rendered_label.chars().count() as f32;
         let bounds_w = (char_count * font_size_pt * 0.6).max(font_size_pt);
         let bounds_h = font_size_pt * 1.3;
         // Center the AABB on the path anchor.
         let top_left = (anchor.x - bounds_w * 0.5, anchor.y - bounds_h * 0.5);
 
+        if is_edited {
+            label_override_emitted = true;
+        }
+
         connection_label_elements.push(ConnectionLabelElement {
-            edge_key: EdgeKey::from_edge(edge),
-            text: label_text.to_string(),
+            edge_key,
+            text: rendered_label,
             position: top_left,
             bounds: (bounds_w, bounds_h),
             color,
             font: config.font.clone(),
             font_size_pt,
         });
+    }
+
+    // If the label edit override targets an edge whose committed
+    // label was empty / None (so the normal loop above skipped it),
+    // synthesize a label element anyway so the caret is visible
+    // while typing the very first character. This fixes the gap in
+    // the previous renderer-side override path, whose "belt and
+    // suspenders" branch was a dead no-op for exactly this case.
+    if let Some((target_key, buffer)) = label_edit_override {
+        if !label_override_emitted {
+            if let Some(edge) = map.edges.iter().find(|e| {
+                e.visible && EdgeKey::from_edge(e) == *target_key
+            }) {
+                if let (Some(from_node), Some(to_node)) = (
+                    map.nodes.get(&edge.from_id),
+                    map.nodes.get(&edge.to_id),
+                ) {
+                    if !map.is_hidden_by_fold(from_node)
+                        && !map.is_hidden_by_fold(to_node)
+                    {
+                        let (fox, foy) = offsets.get(&from_node.id).copied().unwrap_or((0.0, 0.0));
+                        let (tox, toy) = offsets.get(&to_node.id).copied().unwrap_or((0.0, 0.0));
+                        let from_pos = Vec2::new(
+                            from_node.position.x as f32 + fox,
+                            from_node.position.y as f32 + foy,
+                        );
+                        let from_size = Vec2::new(
+                            from_node.size.width as f32,
+                            from_node.size.height as f32,
+                        );
+                        let to_pos = Vec2::new(
+                            to_node.position.x as f32 + tox,
+                            to_node.position.y as f32 + toy,
+                        );
+                        let to_size = Vec2::new(
+                            to_node.size.width as f32,
+                            to_node.size.height as f32,
+                        );
+                        let path = connection::build_connection_path(
+                            from_pos,
+                            from_size,
+                            edge.anchor_from,
+                            to_pos,
+                            to_size,
+                            edge.anchor_to,
+                            &edge.control_points,
+                        );
+                        let t = edge.label_position_t.unwrap_or(0.5);
+                        let anchor = connection::point_at_t(&path, t);
+                        let config = GlyphConnectionConfig::resolved_for(edge, &map.canvas);
+                        let base_font_size = config.effective_font_size_pt(camera_zoom);
+                        let font_size_pt = base_font_size * 1.1;
+                        // The synthesized-label path is for an edge
+                        // being edited with an empty committed label —
+                        // if the color picker is also previewing
+                        // this edge, substitute the preview value.
+                        let raw_color: &str = edge_color_preview
+                            .and_then(|p| {
+                                if p.edge_key == target_key {
+                                    Some(p.color)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| config.color.as_deref().unwrap_or(edge.color.as_str()));
+                        let color = resolve_var(raw_color, vars).to_string();
+                        let rendered = format!("{buffer}\u{258C}");
+                        let char_count = rendered.chars().count() as f32;
+                        let bounds_w = (char_count * font_size_pt * 0.6).max(font_size_pt);
+                        let bounds_h = font_size_pt * 1.3;
+                        let top_left = (anchor.x - bounds_w * 0.5, anchor.y - bounds_h * 0.5);
+                        connection_label_elements.push(ConnectionLabelElement {
+                            edge_key: target_key.clone(),
+                            text: rendered,
+                            position: top_left,
+                            bounds: (bounds_w, bounds_h),
+                            color,
+                            font: config.font.clone(),
+                            font_size_pt,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     // Session 6E: emit portal markers as a post-pass over `map.portals`.
@@ -793,13 +995,20 @@ pub fn build_scene_with_cache(
         let is_selected = selected_portal.map_or(false, |(l, a, b)| {
             l == portal.label && a == portal.endpoint_a && b == portal.endpoint_b
         });
-        let raw_color = if is_selected {
+        let key = PortalRefKey::from_portal(portal);
+        // Color picker preview beats selection on the previewed
+        // portal so the user's live feedback is visible on both
+        // markers — the same rule as the edge body path.
+        let preview_for_this_portal: Option<&str> = portal_color_preview
+            .and_then(|p| if *p.portal_key == key { Some(p.color) } else { None });
+        let raw_color: &str = if let Some(p) = preview_for_this_portal {
+            p
+        } else if is_selected {
             SELECTED_PORTAL_COLOR_HEX
         } else {
             portal.color.as_str()
         };
         let color = resolve_var(raw_color, vars).to_string();
-        let key = PortalRefKey::from_portal(portal);
 
         for endpoint in [node_a, node_b] {
             let (ox, oy) = offsets.get(&endpoint.id).copied().unwrap_or((0.0, 0.0));
@@ -1225,7 +1434,7 @@ mod tests {
     fn test_cache_populated_on_first_build() {
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
         assert_eq!(scene.connection_elements.len(), 1);
         assert_eq!(cache.len(), 1);
@@ -1244,7 +1453,7 @@ mod tests {
         // it would have overwritten our mutation with fresh geometry.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
         // Mutate the cached entry so we can see whether build #2 read it.
         let key = EdgeKey::new("a", "b", "cross_link");
@@ -1264,7 +1473,7 @@ mod tests {
             },
         );
 
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
         assert_eq!(second.connection_elements.len(), 1);
         let conn = &second.connection_elements[0];
         assert_eq!(conn.body_glyph, "SENTINEL",
@@ -1282,7 +1491,7 @@ mod tests {
         // sentinel we stashed in the cache.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
         let key = EdgeKey::new("a", "b", "cross_link");
         cache.insert(
@@ -1300,7 +1509,7 @@ mod tests {
 
         let mut offsets = HashMap::new();
         offsets.insert("a".to_string(), (10.0, 0.0));
-        let second = build_scene_with_cache(&map, &offsets, None, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &offsets, None, None, None, None, None, &mut cache, 1.0);
         let conn = &second.connection_elements[0];
         assert_ne!(conn.body_glyph, "SENTINEL",
             "endpoint-moved edge should have been re-sampled");
@@ -1328,7 +1537,7 @@ mod tests {
             ],
         );
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
         let cd_key = EdgeKey::new("c", "d", "cross_link");
         cache.insert(
@@ -1346,7 +1555,7 @@ mod tests {
 
         let mut offsets = HashMap::new();
         offsets.insert("a".to_string(), (5.0, 0.0));
-        let second = build_scene_with_cache(&map, &offsets, None, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &offsets, None, None, None, None, None, &mut cache, 1.0);
 
         // Find the c↔d connection element and verify it came from the
         // cache unchanged.
@@ -1387,7 +1596,7 @@ mod tests {
         );
 
         let mut cache = SceneConnectionCache::new();
-        let first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
         let first_count = first.connection_elements[0].glyph_positions.len();
 
         // Now move `c` into the middle of the connection — use a drag
@@ -1396,7 +1605,7 @@ mod tests {
         // notice `c`'s new position.
         let mut offsets = HashMap::new();
         offsets.insert("c".to_string(), (0.0, 500.0));
-        let second = build_scene_with_cache(&map, &offsets, None, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &offsets, None, None, None, None, None, &mut cache, 1.0);
         let second_count = second.connection_elements[0].glyph_positions.len();
         assert!(second_count < first_count,
             "moving c through the edge should reduce post-clip glyph count: {} → {}",
@@ -1404,7 +1613,7 @@ mod tests {
 
         // Now move `c` back out of the way via a model edit + full rebuild.
         map.nodes.get_mut("c").unwrap().position.y = -500.0;
-        let third = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let third = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
         assert_eq!(third.connection_elements[0].glyph_positions.len(), first_count);
     }
 
@@ -1412,13 +1621,13 @@ mod tests {
     fn test_cache_evicts_deleted_edges() {
         let mut map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
         let key = EdgeKey::new("a", "b", "cross_link");
         assert!(cache.get(&key).is_some());
 
         // Remove the edge from the model and rebuild.
         map.edges.clear();
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
         assert!(second.connection_elements.is_empty());
         assert!(cache.get(&key).is_none(),
             "deleted edge should be evicted from cache");
@@ -1442,7 +1651,7 @@ mod tests {
             ],
         );
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
         assert_eq!(scene.connection_elements.len(), 2);
         let ab = EdgeKey::new("a", "b", "cross_link");
         let bc = EdgeKey::new("b", "c", "cross_link");
@@ -1461,8 +1670,8 @@ mod tests {
         // a fresh build would.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
-        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
+        let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
         assert_eq!(
             first.connection_elements.len(),
@@ -1496,7 +1705,7 @@ mod tests {
         let map = synthetic_map(vec![a, b_child], vec![edge]);
 
         let mut cache = SceneConnectionCache::new();
-        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
         assert!(scene.connection_elements.is_empty(),
             "folded edge should be skipped");
         assert!(cache.is_empty(),
@@ -1511,7 +1720,7 @@ mod tests {
         // selection override.
         let map = two_node_edge_map();
         let mut cache = SceneConnectionCache::new();
-        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, &mut cache, 1.0);
+        let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
         let key = EdgeKey::new("a", "b", "cross_link");
         let stored_color = cache.get(&key).unwrap().color.clone();
 
@@ -1534,6 +1743,9 @@ mod tests {
             &map,
             &HashMap::new(),
             Some(("a", "b", "cross_link")),
+            None,
+            None,
+            None,
             None,
             &mut cache,
             1.0,
@@ -1589,6 +1801,9 @@ mod tests {
             &HashMap::new(),
             Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
             None,
+            None,
+            None,
+            None,
             &mut cache,
             1.0,
         );
@@ -1623,6 +1838,9 @@ mod tests {
             &HashMap::new(),
             Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
             None,
+            None,
+            None,
+            None,
             &mut cache,
             1.0,
         );
@@ -1650,6 +1868,9 @@ mod tests {
             &map,
             &HashMap::new(),
             Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            None,
+            None,
+            None,
             None,
             &mut cache,
             1.0,
@@ -1681,6 +1902,9 @@ mod tests {
             &map,
             &HashMap::new(),
             Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            None,
+            None,
+            None,
             None,
             &mut cache,
             1.0,
@@ -1892,6 +2116,9 @@ mod tests {
             &HashMap::new(),
             None,
             Some(("A", "a", "b")),
+            None,
+            None,
+            None,
             &mut cache,
             1.0,
         );

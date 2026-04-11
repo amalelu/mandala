@@ -33,7 +33,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 use baumhard::util::color::{hex_to_hsv_safe, resolve_var};
 
-use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, UndoAction};
+use crate::application::document::{EdgeRef, MindMapDocument, PortalRef};
 
 /// Number of hue slots on the outer ring. 24 slots = 15° per step. Fine
 /// enough that adjacent slots feel continuous, coarse enough that each
@@ -182,16 +182,22 @@ pub fn current_hsv_at(
 // State machine
 // =============================================================
 
-/// Modal state for the glyph-wheel color picker. The `Open` variant
-/// carries both the pre-picker snapshot (as an `UndoAction` — cleaner
-/// than a parallel `ColorPickerSnapshot` enum that was structurally
-/// isomorphic anyway) and the live HSV values being previewed.
+/// Modal state for the glyph-wheel color picker.
 ///
-/// Hot path design: `kind` and `target_index` are captured at open time
-/// and used directly by the hover handler to mutate `doc.mindmap.edges
-/// [index]` or `doc.mindmap.portals[index]` without re-resolving any
-/// `EdgeRef`/`PortalRef`. This removes ~6 `String` clones per cursor
-/// move.
+/// The previous revision of this struct also stored a
+/// `snapshot: UndoAction` so a pre-picker clone of the edited
+/// edge/portal could be restored on cancel. That snapshot is no
+/// longer needed: preview is now a purely visual substitution via
+/// `MindMapDocument::color_picker_preview`, so cancel just clears
+/// the preview and commit calls `set_edge_color` /
+/// `set_portal_color` once on the final HSV — the committed model
+/// is untouched during hover and the fork-on-first-edit semantics
+/// of `ensure_glyph_connection` only fire on commit.
+///
+/// Hot path design: `kind` and `target_index` are captured at open
+/// time so the hover handler can push `(target_index, hex)` into
+/// the document preview without re-resolving any `EdgeRef` /
+/// `PortalRef`.
 #[derive(Debug, Clone)]
 pub enum ColorPickerState {
     Closed,
@@ -202,11 +208,6 @@ pub enum ColorPickerState {
         /// captured at open time. Stable for the picker's lifetime because
         /// the modal suppresses all other document edits.
         target_index: usize,
-        /// Pre-picker snapshot stored directly as the `UndoAction` that
-        /// `commit_color_picker` will push. Cancel reads the `before`
-        /// field and restores it in place without touching the undo
-        /// stack. One `UndoAction` per picker session.
-        snapshot: UndoAction,
         /// Current preview hue in degrees, `[0, 360)`.
         hue_deg: f32,
         /// Current preview saturation, `[0, 1]`.
@@ -217,6 +218,15 @@ pub enum ColorPickerState {
         /// HSV. Tab cycles through chips; Enter on a focused chip
         /// commits the chip's raw color string instead of the HSV hex.
         chip_focus: Option<usize>,
+        /// Tracks what the commit should do. `Hsv` → commit the
+        /// current HSV hex as a per-edge/portal override. `Var(raw)`
+        /// → commit the `var(--...)` string so theme-var resolution
+        /// runs at render time. `ResetToInherited` → clear the edge
+        /// override (cfg.color = None) for edges, or re-seed to the
+        /// --accent fallback for portals. Set by `apply_picker_chip`;
+        /// HSV nudges and mouse hover on the wheel reset it back to
+        /// `Hsv`.
+        commit_mode: CommitMode,
         /// Cached layout from the last rebuild. `None` between `Open`
         /// construction and the first `rebuild_color_picker_overlay`
         /// call (a narrow window — the rebuild is the very next line
@@ -224,6 +234,19 @@ pub enum ColorPickerState {
         /// explicit rather than relying on a placeholder).
         layout: Option<ColorPickerLayout>,
     },
+}
+
+/// What the picker will commit to the model on Enter / click-commit.
+#[derive(Debug, Clone)]
+pub enum CommitMode {
+    /// Commit the current HSV value as a concrete hex.
+    Hsv,
+    /// Commit a raw `var(--name)` reference. Set by a theme chip.
+    Var(String),
+    /// Commit a "clear override" — `set_edge_color(None)` for edges;
+    /// re-seed to `--accent` for portals (which have a non-optional
+    /// color field).
+    ResetToInherited,
 }
 
 impl ColorPickerState {

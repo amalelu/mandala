@@ -18,8 +18,8 @@ use crate::application::common::{InputMode, RenderDecree, WindowMode};
 use crate::application::document::{
     EdgeRef, MindMapDocument, SelectionState, UndoAction,
     hit_test, hit_test_edge, rect_select,
-    apply_selection_highlight, apply_drag_delta,
-    apply_reparent_source_highlight, apply_reparent_target_highlight,
+    apply_drag_delta, apply_tree_highlights,
+    HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name};
@@ -483,27 +483,46 @@ impl Application {
                                         // precedence over node / edge selection.
                                         let mut entered_label_edit = false;
                                         if hit_node.is_none() {
-                                            if let Some(doc) = document.as_ref() {
-                                                if let SelectionState::Edge(er) = &doc.selection {
-                                                    let canvas_pos = renderer.screen_to_canvas(
-                                                        cursor_pos.0 as f32,
-                                                        cursor_pos.1 as f32,
-                                                    );
-                                                    let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
-                                                        &er.from_id,
-                                                        &er.to_id,
-                                                        &er.edge_type,
-                                                    );
-                                                    if renderer.hit_test_edge_label(canvas_pos, &edge_key) {
-                                                        let er_clone = er.clone();
-                                                        open_label_edit(
-                                                            &er_clone,
-                                                            doc,
-                                                            &mut label_edit_state,
-                                                            &mut renderer,
+                                            // First, a read-only check to see
+                                            // whether we should even call the
+                                            // editor (hits the selected edge's
+                                            // label AABB). Split from the
+                                            // `open_label_edit` call so the
+                                            // mutable borrow of `document`
+                                            // doesn't conflict with the
+                                            // immutable read.
+                                            let label_edit_target: Option<crate::application::document::EdgeRef> =
+                                                if let Some(doc) = document.as_ref() {
+                                                    if let SelectionState::Edge(er) = &doc.selection {
+                                                        let canvas_pos = renderer.screen_to_canvas(
+                                                            cursor_pos.0 as f32,
+                                                            cursor_pos.1 as f32,
                                                         );
-                                                        entered_label_edit = true;
+                                                        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+                                                            &er.from_id,
+                                                            &er.to_id,
+                                                            &er.edge_type,
+                                                        );
+                                                        if renderer.hit_test_edge_label(canvas_pos, &edge_key) {
+                                                            Some(er.clone())
+                                                        } else {
+                                                            None
+                                                        }
+                                                    } else {
+                                                        None
                                                     }
+                                                } else {
+                                                    None
+                                                };
+                                            if let Some(er_clone) = label_edit_target {
+                                                if let Some(doc) = document.as_mut() {
+                                                    open_label_edit(
+                                                        &er_clone,
+                                                        doc,
+                                                        &mut label_edit_state,
+                                                        &mut renderer,
+                                                    );
+                                                    entered_label_edit = true;
                                                 }
                                             }
                                         }
@@ -775,7 +794,13 @@ impl Application {
                                             doc.selection = SelectionState::Single(node_id.clone());
                                             if let Some(tree) = mindmap_tree.as_mut() {
                                                 let mut new_tree = doc.build_tree();
-                                                apply_selection_highlight(&mut new_tree, &doc.selection);
+                                                apply_tree_highlights(
+                                                    &mut new_tree,
+                                                    doc.selection
+                                                        .selected_ids()
+                                                        .into_iter()
+                                                        .map(|id| (id, HIGHLIGHT_COLOR)),
+                                                );
                                                 renderer.rebuild_buffers_from_tree(&new_tree.tree);
                                                 *tree = new_tree;
                                             }
@@ -1277,7 +1302,13 @@ impl Application {
                                 1 => SelectionState::Single(hits.into_iter().next().unwrap()),
                                 _ => SelectionState::Multi(hits),
                             };
-                            apply_selection_highlight(&mut new_tree, &preview_selection);
+                            apply_tree_highlights(
+                                &mut new_tree,
+                                preview_selection
+                                    .selected_ids()
+                                    .into_iter()
+                                    .map(|id| (id, HIGHLIGHT_COLOR)),
+                            );
                             renderer.rebuild_buffers_from_tree(&new_tree.tree);
                             mindmap_tree = Some(new_tree);
                         }
@@ -1791,7 +1822,13 @@ fn rebuild_all(
     renderer: &mut Renderer,
 ) {
     let mut new_tree = doc.build_tree();
-    apply_selection_highlight(&mut new_tree, &doc.selection);
+    apply_tree_highlights(
+        &mut new_tree,
+        doc.selection
+            .selected_ids()
+            .into_iter()
+            .map(|id| (id, HIGHLIGHT_COLOR)),
+    );
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
     rebuild_scene_only(doc, renderer);
@@ -1825,7 +1862,7 @@ fn rebuild_scene_only(doc: &MindMapDocument, renderer: &mut Renderer) {
 #[cfg(not(target_arch = "wasm32"))]
 fn open_label_edit(
     edge_ref: &crate::application::document::EdgeRef,
-    doc: &MindMapDocument,
+    doc: &mut MindMapDocument,
     label_edit_state: &mut LabelEditState,
     renderer: &mut Renderer,
 ) {
@@ -1840,12 +1877,15 @@ fn open_label_edit(
         buffer: buffer.clone(),
         original,
     };
+    // Store the preview on the document so every subsequent
+    // `doc.build_scene_*` call picks it up automatically — no renderer
+    // field, no read-time override, no belt-and-suspenders branch.
     let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
         &edge_ref.from_id,
         &edge_ref.to_id,
         &edge_ref.edge_type,
     );
-    renderer.label_edit_override = Some((edge_key, buffer));
+    doc.label_edit_preview = Some((edge_key, buffer));
     // Rebuild labels so the caret is visible immediately. The caller
     // already ran `rebuild_all` before this, so the scene is fresh.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
@@ -1903,18 +1943,19 @@ fn handle_label_edit_key(
         }
     }
 
-    // Refresh the preview override so the caret + edited text render
-    // on the next frame. Cheap: one scene rebuild.
+    // Refresh the preview on the document so the caret + edited text
+    // render on the next frame. Cheap: one scene rebuild. The scene
+    // builder picks up the new buffer through `doc.label_edit_preview`.
     if let LabelEditState::Open { edge_ref, buffer, .. } = label_edit_state {
         let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
             &edge_ref.from_id,
             &edge_ref.to_id,
             &edge_ref.edge_type,
         );
-        renderer.label_edit_override = Some((edge_key, buffer.clone()));
+        doc.label_edit_preview = Some((edge_key, buffer.clone()));
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
         renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
-    renderer.rebuild_portal_buffers(&scene.portal_elements);
+        renderer.rebuild_portal_buffers(&scene.portal_elements);
     }
 }
 
@@ -1935,7 +1976,7 @@ fn close_label_edit(
         LabelEditState::Open { edge_ref, buffer, original } => (edge_ref, buffer, original),
         LabelEditState::Closed => return,
     };
-    renderer.label_edit_override = None;
+    doc.label_edit_preview = None;
     if commit {
         let new_val = if buffer.is_empty() { None } else { Some(buffer) };
         // Only push undo if the committed value actually differs from the
@@ -1968,9 +2009,8 @@ fn open_color_picker(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        current_hsv_at, ColorPickerState, TargetKind,
+        current_hsv_at, ColorPickerState,
     };
-    use crate::application::document::UndoAction;
 
     // Resolve the ref to a (kind, index) up front. If the edge/portal
     // was deleted between the palette opening and Enter being pressed,
@@ -1985,19 +2025,6 @@ fn open_color_picker(
         }
     };
 
-    // Snapshot as the same UndoAction we'll eventually push on commit.
-    // One variant per kind keeps the type shared with the undo stack.
-    let snapshot = match kind {
-        TargetKind::Edge => UndoAction::EditEdge {
-            index: target_index,
-            before: doc.mindmap.edges[target_index].clone(),
-        },
-        TargetKind::Portal => UndoAction::EditPortal {
-            index: target_index,
-            before: doc.mindmap.portals[target_index].clone(),
-        },
-    };
-
     // Seed HSV from the currently-displayed (possibly theme-resolved)
     // color so the picker opens right where the user already is.
     let (hue_deg, sat, val) = current_hsv_at(doc, kind, target_index);
@@ -2005,15 +2032,55 @@ fn open_color_picker(
     *state = ColorPickerState::Open {
         kind,
         target_index,
-        snapshot,
         hue_deg,
         sat,
         val,
         chip_focus: None,
+        commit_mode: crate::application::color_picker::CommitMode::Hsv,
         layout: None,
     };
 
+    // Seed the document preview so the initial render already shows
+    // the same HSV the picker opened at. Overwritten on the next
+    // hover frame, but this avoids a one-frame flash of the original
+    // color when the modal opens.
+    seed_initial_preview(doc, kind, target_index, hue_deg, sat, val);
+
     rebuild_color_picker_overlay(state, doc, renderer);
+    rebuild_scene_only(doc, renderer);
+}
+
+/// Helper: write the initial HSV into `doc.color_picker_preview` on
+/// picker open so the first rendered frame already shows the
+/// previewed color instead of the model's stored one.
+#[cfg(not(target_arch = "wasm32"))]
+fn seed_initial_preview(
+    doc: &mut MindMapDocument,
+    kind: crate::application::color_picker::TargetKind,
+    target_index: usize,
+    hue_deg: f32,
+    sat: f32,
+    val: f32,
+) {
+    use crate::application::color_picker::TargetKind;
+    use crate::application::document::ColorPickerPreview;
+    use baumhard::util::color::hsv_to_hex;
+
+    let hex = hsv_to_hex(hue_deg, sat, val);
+    match kind {
+        TargetKind::Edge => {
+            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+                let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+                doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: hex });
+            }
+        }
+        TargetKind::Portal => {
+            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+                let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
+                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: hex });
+            }
+        }
+    }
 }
 
 /// Build geometry from the current picker state. Internal helper —
@@ -2093,8 +2160,10 @@ fn rebuild_color_picker_overlay_dynamic(
     }
 }
 
-/// Cancel the picker: restore the captured pre-picker snapshot in
-/// place (without touching the undo stack) and close the modal.
+/// Cancel the picker: clear the transient document preview and
+/// close the modal. The committed model is untouched because the
+/// new preview path never writes to it — the entire hover / cancel
+/// flow is a pure scene-level substitution.
 #[cfg(not(target_arch = "wasm32"))]
 fn cancel_color_picker(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -2103,37 +2172,29 @@ fn cancel_color_picker(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::ColorPickerState;
-    use crate::application::document::UndoAction;
 
-    let snapshot = match std::mem::replace(state, ColorPickerState::Closed) {
-        ColorPickerState::Open { snapshot, .. } => snapshot,
-        ColorPickerState::Closed => return,
-    };
-    // Only the two edit variants the picker ever stores. Restore the
-    // affected element in place; the undo stack is never touched.
-    match snapshot {
-        UndoAction::EditEdge { index, before } => {
-            if index < doc.mindmap.edges.len() {
-                doc.mindmap.edges[index] = before;
-            }
-        }
-        UndoAction::EditPortal { index, before } => {
-            if index < doc.mindmap.portals.len() {
-                doc.mindmap.portals[index] = before;
-            }
-        }
-        _ => {
-            log::warn!("color picker: unexpected snapshot variant; cancel is a no-op");
-        }
+    if matches!(state, ColorPickerState::Closed) {
+        return;
     }
+    *state = ColorPickerState::Closed;
+    doc.color_picker_preview = None;
     renderer.rebuild_color_picker_overlay_buffers(None);
     rebuild_all(doc, mindmap_tree, renderer);
 }
 
-/// Commit the picker's currently-previewed color: push a single undo
-/// entry carrying the captured pre-picker snapshot, then close the
-/// modal. The model already holds the previewed value (live preview
-/// wrote it in place), so we just need the undo bookkeeping.
+/// Commit the picker's currently-previewed color via the regular
+/// `set_edge_color` / `set_portal_color` path — a single undo entry
+/// is pushed and `ensure_glyph_connection` runs its fork-on-first-
+/// edit only at this moment (never during hover). Close the modal.
+///
+/// The exact call depends on `commit_mode`:
+/// - `Hsv`: commit the current HSV hex as a per-edge/portal override.
+/// - `Var(raw)`: commit the literal `var(--name)` string so theme
+///   resolution runs at render time.
+/// - `ResetToInherited`: for edges, call `set_edge_color(None)` to
+///   clear the per-edge override. For portals, re-seed to the
+///   canvas's `--accent` value (or the raw `var(--accent)` string
+///   as a fallback) since `PortalPair.color` is non-optional.
 #[cfg(not(target_arch = "wasm32"))]
 fn commit_color_picker(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -2141,44 +2202,85 @@ fn commit_color_picker(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::ColorPickerState;
-    use crate::application::document::UndoAction;
+    use crate::application::color_picker::{ColorPickerState, CommitMode, TargetKind};
+    use baumhard::util::color::hsv_to_hex;
 
-    let snapshot = match std::mem::replace(state, ColorPickerState::Closed) {
-        ColorPickerState::Open { snapshot, .. } => snapshot,
+    let (kind, target_index, hue_deg, sat, val, commit_mode) = match state {
+        ColorPickerState::Open { kind, target_index, hue_deg, sat, val, commit_mode, .. } => {
+            (*kind, *target_index, *hue_deg, *sat, *val, commit_mode.clone())
+        }
         ColorPickerState::Closed => return,
     };
-    // Skip the undo push when the committed value is byte-identical
-    // to the snapshot — a "no-op pick" (user opened the picker and
-    // committed without moving the cursor, or hovered and returned
-    // to the original color). Both `MindEdge` and `PortalPair` derive
-    // PartialEq so the equality check is just a struct compare.
-    match snapshot {
-        UndoAction::EditEdge { index, ref before } => {
-            if index < doc.mindmap.edges.len() && doc.mindmap.edges[index] != *before {
-                doc.undo_stack.push(snapshot);
-                doc.dirty = true;
+
+    // Close the modal state first so the subsequent rebuilds don't
+    // re-apply the preview.
+    *state = ColorPickerState::Closed;
+    doc.color_picker_preview = None;
+
+    match kind {
+        TargetKind::Edge => {
+            let er = doc.mindmap.edges.get(target_index).map(|e| {
+                EdgeRef::new(&e.from_id, &e.to_id, &e.edge_type)
+            });
+            if let Some(er) = er {
+                match commit_mode {
+                    CommitMode::Hsv => {
+                        let hex = hsv_to_hex(hue_deg, sat, val);
+                        doc.set_edge_color(&er, Some(&hex));
+                    }
+                    CommitMode::Var(raw) => {
+                        doc.set_edge_color(&er, Some(&raw));
+                    }
+                    CommitMode::ResetToInherited => {
+                        doc.set_edge_color(&er, None);
+                    }
+                }
             }
         }
-        UndoAction::EditPortal { index, ref before } => {
-            if index < doc.mindmap.portals.len() && doc.mindmap.portals[index] != *before {
-                doc.undo_stack.push(snapshot);
-                doc.dirty = true;
+        TargetKind::Portal => {
+            let pr = doc.mindmap.portals.get(target_index).map(|p| {
+                crate::application::document::PortalRef::new(
+                    p.label.clone(),
+                    p.endpoint_a.clone(),
+                    p.endpoint_b.clone(),
+                )
+            });
+            if let Some(pr) = pr {
+                match commit_mode {
+                    CommitMode::Hsv => {
+                        let hex = hsv_to_hex(hue_deg, sat, val);
+                        doc.set_portal_color(&pr, &hex);
+                    }
+                    CommitMode::Var(raw) => {
+                        doc.set_portal_color(&pr, &raw);
+                    }
+                    CommitMode::ResetToInherited => {
+                        // `--accent` fallback — same rule as the old
+                        // portal Reset path.
+                        let resolved = doc
+                            .mindmap
+                            .canvas
+                            .theme_variables
+                            .get("--accent")
+                            .cloned()
+                            .unwrap_or_else(|| "var(--accent)".to_string());
+                        doc.set_portal_color(&pr, &resolved);
+                    }
+                }
             }
-        }
-        _ => {
-            log::warn!("color picker: unexpected snapshot variant; commit is a no-op");
         }
     }
+
     renderer.rebuild_color_picker_overlay_buffers(None);
     rebuild_all(doc, mindmap_tree, renderer);
 }
 
-/// Apply the current picker HSV to the active target via the
-/// non-undoing by-index preview helpers, then rebuild only the
-/// scene (not the node tree, which didn't change) + the picker
-/// overlay so the user sees the live update. Hot path: no ref
-/// resolution, no `ColorTarget` clone.
+/// Apply the current picker HSV to the document's transient color
+/// preview, then rebuild only the scene (not the node tree, which
+/// didn't change) + the picker overlay. Hot path: no ref resolution,
+/// no model mutation, no snapshot. The scene builder reads the
+/// preview via `doc.color_picker_preview` and substitutes it in
+/// during emission.
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_picker_preview(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -2186,11 +2288,16 @@ fn apply_picker_preview(
     _mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::{ColorPickerState, TargetKind};
+    use crate::application::color_picker::{ColorPickerState, CommitMode, TargetKind};
+    use crate::application::document::ColorPickerPreview;
     use baumhard::util::color::hsv_to_hex;
 
     let (kind, target_index, hue_deg, sat, val) = match state {
-        ColorPickerState::Open { kind, target_index, hue_deg, sat, val, .. } => {
+        ColorPickerState::Open { kind, target_index, hue_deg, sat, val, commit_mode, .. } => {
+            // Any HSV movement implicitly cancels a prior chip
+            // selection (Var/Reset) — the user moved the wheel, so
+            // the commit mode goes back to Hsv.
+            *commit_mode = CommitMode::Hsv;
             (*kind, *target_index, *hue_deg, *sat, *val)
         }
         ColorPickerState::Closed => return,
@@ -2198,10 +2305,16 @@ fn apply_picker_preview(
     let hex = hsv_to_hex(hue_deg, sat, val);
     match kind {
         TargetKind::Edge => {
-            doc.preview_edge_color_by_index(target_index, Some(&hex));
+            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+                let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+                doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: hex });
+            }
         }
         TargetKind::Portal => {
-            doc.preview_portal_color_by_index(target_index, &hex);
+            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+                let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
+                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: hex });
+            }
         }
     }
     rebuild_scene_only(doc, renderer);
@@ -2225,8 +2338,9 @@ fn apply_picker_chip(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        ChipAction, ColorPickerState, TargetKind, THEME_CHIPS,
+        ChipAction, ColorPickerState, CommitMode, TargetKind, THEME_CHIPS,
     };
+    use crate::application::document::ColorPickerPreview;
 
     let chip = match THEME_CHIPS.get(chip_idx) {
         Some(c) => *c,
@@ -2236,35 +2350,88 @@ fn apply_picker_chip(
         ColorPickerState::Open { kind, target_index, .. } => (*kind, *target_index),
         ColorPickerState::Closed => return,
     };
+
+    // Compute both (a) the display color for the preview (scene
+    // substitution string) and (b) the commit mode for Enter. The
+    // display color always resolves to something concrete so the
+    // user sees the actual color rather than a `var(--name)` literal.
+    let (display_color, commit_mode): (String, CommitMode) = match (kind, chip.action) {
+        (TargetKind::Edge, ChipAction::Var(raw)) => {
+            // Resolve the var string through the theme map to get
+            // the concrete display color.
+            let resolved = baumhard::util::color::resolve_var(
+                raw,
+                &doc.mindmap.canvas.theme_variables,
+            )
+            .to_string();
+            (resolved, CommitMode::Var(raw.to_string()))
+        }
+        (TargetKind::Edge, ChipAction::Reset) => {
+            // Preview what the edge will look like after Reset: the
+            // inherited `edge.color` (since `cfg.color` becomes
+            // None). Resolve that through theme variables for the
+            // concrete display hex.
+            let display = match doc.mindmap.edges.get(target_index) {
+                Some(e) => baumhard::util::color::resolve_var(
+                    &e.color,
+                    &doc.mindmap.canvas.theme_variables,
+                )
+                .to_string(),
+                None => "#ffffff".to_string(),
+            };
+            (display, CommitMode::ResetToInherited)
+        }
+        (TargetKind::Portal, ChipAction::Var(raw)) => {
+            let resolved = baumhard::util::color::resolve_var(
+                raw,
+                &doc.mindmap.canvas.theme_variables,
+            )
+            .to_string();
+            (resolved, CommitMode::Var(raw.to_string()))
+        }
+        (TargetKind::Portal, ChipAction::Reset) => {
+            // Portals have a non-optional color field, so "reset"
+            // re-seeds to the canvas's `--accent` value (or the
+            // raw `var(--accent)` string as a fallback).
+            let resolved = doc
+                .mindmap
+                .canvas
+                .theme_variables
+                .get("--accent")
+                .cloned()
+                .unwrap_or_else(|| "var(--accent)".to_string());
+            let display = baumhard::util::color::resolve_var(
+                &resolved,
+                &doc.mindmap.canvas.theme_variables,
+            )
+            .to_string();
+            (display, CommitMode::ResetToInherited)
+        }
+    };
+
+    // Update the picker's commit mode so Enter commits the chip's
+    // action rather than the HSV hex.
+    if let ColorPickerState::Open { commit_mode: cm, .. } = state {
+        *cm = commit_mode;
+    }
+
+    // Push the display color into the document preview so the
+    // scene substitution picks it up on the next rebuild.
     match kind {
         TargetKind::Edge => {
-            let new_val: Option<&str> = match chip.action {
-                ChipAction::Var(raw) => Some(raw),
-                ChipAction::Reset => None,
-            };
-            doc.preview_edge_color_by_index(target_index, new_val);
+            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+                let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+                doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: display_color });
+            }
         }
         TargetKind::Portal => {
-            // Portals have a non-optional color field, so "reset"
-            // can't mean "None". Fall back to the canvas's
-            // `--accent` theme variable's resolved value if the
-            // canvas has one, otherwise the raw `var(--accent)`
-            // string (the resolver passes unknown refs through
-            // unchanged). Keeps the portal reset chip symmetric
-            // with edge reset without hardcoding a hex color.
-            let new_val: String = match chip.action {
-                ChipAction::Var(raw) => raw.to_string(),
-                ChipAction::Reset => doc
-                    .mindmap
-                    .canvas
-                    .theme_variables
-                    .get("--accent")
-                    .cloned()
-                    .unwrap_or_else(|| "var(--accent)".to_string()),
-            };
-            doc.preview_portal_color_by_index(target_index, &new_val);
+            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+                let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
+                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: display_color });
+            }
         }
     }
+
     rebuild_scene_only(doc, renderer);
     rebuild_color_picker_overlay_dynamic(state, renderer);
 }
@@ -2610,30 +2777,43 @@ fn rebuild_all_with_mode(
     renderer: &mut Renderer,
 ) {
     let mut new_tree = doc.build_tree();
-    apply_selection_highlight(&mut new_tree, &doc.selection);
+
+    // Build a single flat list of (mind_node_id, color) pairs that
+    // `apply_tree_highlights` applies via baumhard's mutator/walker.
+    // Order matters: later entries override earlier ones via the
+    // repeated `SetRegionColor` mutation, so selection (cyan) is
+    // listed first, then mode-specific source (orange), then the
+    // hovered target (green). This matches the previous behavior
+    // where reparent_source_highlight was documented to override
+    // selection_highlight on conflict.
+    let mut highlights: Vec<(&str, [f32; 4])> = doc
+        .selection
+        .selected_ids()
+        .into_iter()
+        .map(|id| (id, HIGHLIGHT_COLOR))
+        .collect();
     match app_mode {
         AppMode::Reparent { sources } => {
-            // Orange on all source nodes (overrides any cyan selection color).
-            apply_reparent_source_highlight(&mut new_tree, sources);
-            // Green on the hovered target (if any and not also a source).
+            for s in sources {
+                highlights.push((s.as_str(), REPARENT_SOURCE_COLOR));
+            }
             if let Some(h) = hovered_node {
                 if !sources.iter().any(|s| s == h) {
-                    apply_reparent_target_highlight(&mut new_tree, h);
+                    highlights.push((h, REPARENT_TARGET_COLOR));
                 }
             }
         }
         AppMode::Connect { source } => {
-            // Orange on the source node, green on the hovered target (if
-            // it's not the source itself). Reuses the reparent color scheme.
-            apply_reparent_source_highlight(&mut new_tree, std::slice::from_ref(source));
+            highlights.push((source.as_str(), REPARENT_SOURCE_COLOR));
             if let Some(h) = hovered_node {
                 if h != source {
-                    apply_reparent_target_highlight(&mut new_tree, h);
+                    highlights.push((h, REPARENT_TARGET_COLOR));
                 }
             }
         }
         AppMode::Normal => {}
     }
+    apply_tree_highlights(&mut new_tree, highlights);
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
