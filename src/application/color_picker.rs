@@ -21,13 +21,19 @@
 //!
 //! Pure-function layout (`compute_color_picker_layout`) and hit-testing
 //! (`hit_test_picker`) are extracted so unit tests don't need a GPU.
+//!
+//! WASM status: this module compiles on wasm32 (it's pure Rust + data
+//! types, no native-only deps), but the `open_*` / `handle_*` entry
+//! points in `app.rs` are gated behind `#[cfg(not(target_arch =
+//! "wasm32"))]` like the palette and label-edit modals. Picker keyboard
+//! / mouse dispatch for WASM is deferred as part of the broader WASM
+//! input gap tracked in the roadmap.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use baumhard::mindmap::model::{MindEdge, PortalPair};
 use baumhard::util::color::{hex_to_hsv_safe, resolve_var};
 
-use crate::application::document::{EdgeRef, MindMapDocument, PortalRef};
+use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, UndoAction};
 
 /// Number of hue slots on the outer ring. 24 slots = 15° per step. Fine
 /// enough that adjacent slots feel continuous, coarse enough that each
@@ -39,104 +45,168 @@ pub const HUE_SLOT_COUNT: usize = 24;
 pub const SAT_CELL_COUNT: usize = 11;
 pub const VAL_CELL_COUNT: usize = 11;
 
-/// Theme-variable quick-pick chips shown below the wheel. Each entry is
-/// `(display_name, raw_color_string)`. The empty string sentinel maps to
-/// `None` (clear override) when committed.
-pub const THEME_CHIPS: &[(&str, &str)] = &[
-    ("--accent", "var(--accent)"),
-    ("--bg", "var(--bg)"),
-    ("--fg", "var(--fg)"),
-    ("--edge", "var(--edge)"),
-    ("reset", ""),
+/// What a theme-variable quick-pick chip commits when clicked or
+/// Enter-activated with focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipAction {
+    /// Store the given `var(--name)` reference on the target so the
+    /// canvas theme map resolves the color at render time.
+    Var(&'static str),
+    /// Clear the target's color override, falling back to whatever
+    /// the canvas-level default is (the `reset` chip).
+    Reset,
+}
+
+/// One theme-variable chip shown below the wheel.
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeChip {
+    pub label: &'static str,
+    pub action: ChipAction,
+}
+
+/// Theme-variable quick-pick chips shown below the wheel. Replaces the
+/// prior `(&str, &str)` tuple where an empty string was a stringly-typed
+/// "reset" sentinel — `ChipAction` makes the intent explicit at the
+/// type level.
+pub const THEME_CHIPS: &[ThemeChip] = &[
+    ThemeChip { label: "--accent", action: ChipAction::Var("var(--accent)") },
+    ThemeChip { label: "--bg", action: ChipAction::Var("var(--bg)") },
+    ThemeChip { label: "--fg", action: ChipAction::Var("var(--fg)") },
+    ThemeChip { label: "--edge", action: ChipAction::Var("var(--edge)") },
+    ThemeChip { label: "reset", action: ChipAction::Reset },
 ];
 
 // =============================================================
 // Target abstraction
 // =============================================================
 
-/// What the picker is currently editing. Edge and Portal are the two v1
-/// targets — the picker reads/writes through their existing document
+/// What the picker is currently editing. `Edge` / `Portal` are the two
+/// v1 targets — the picker reads/writes through their existing document
 /// setters. Adding a node-style target would mean adding a new variant
 /// here, an `EditNode` undo variant, and node setters in `document.rs`.
+///
+/// Used only at the palette-to-picker handoff. Once the picker is
+/// actually open, the hot hover path uses `TargetKind + target_index`
+/// instead (captured once at open time) to avoid re-resolving the ref
+/// on every mouse move — see `ColorPickerState::Open`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColorTarget {
     Edge(EdgeRef),
     Portal(PortalRef),
 }
 
-impl ColorTarget {
-    /// Read the current color string from the target. For edges this
-    /// prefers the per-edge `glyph_connection.color` override, falling
-    /// back to `edge.color` (the canvas-level default). For portals it's
-    /// just `portal.color`. Returns `None` if the target ref no longer
-    /// resolves (edge/portal was deleted between open and now).
-    pub fn current_color(&self, doc: &MindMapDocument) -> Option<String> {
-        match self {
-            ColorTarget::Edge(er) => {
-                let edge = doc.mindmap.edges.iter().find(|e| er.matches(e))?;
-                Some(
-                    edge.glyph_connection
-                        .as_ref()
-                        .and_then(|gc| gc.color.clone())
-                        .unwrap_or_else(|| edge.color.clone()),
-                )
-            }
-            ColorTarget::Portal(pr) => doc
-                .mindmap
-                .portals
-                .iter()
-                .find(|p| pr.matches(p))
-                .map(|p| p.color.clone()),
-        }
-    }
+/// Kind of target currently open. Cheaper to match on during hover
+/// than carrying the full `ColorTarget` with its owned strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKind {
+    Edge,
+    Portal,
+}
 
-    /// Resolve the current color through the canvas theme variables and
-    /// parse it into HSV for seeding the picker state. Falls back to
-    /// `(0.0, 0.0, 0.5)` (mid-gray) on any failure so the picker always
-    /// opens with a sensible default.
-    pub fn current_hsv(&self, doc: &MindMapDocument) -> (f32, f32, f32) {
-        let raw = match self.current_color(doc) {
-            Some(s) => s,
-            None => return (0.0, 0.0, 0.5),
-        };
-        let resolved = resolve_var(&raw, &doc.mindmap.canvas.theme_variables);
-        hex_to_hsv_safe(resolved).unwrap_or((0.0, 0.0, 0.5))
-    }
-
+impl TargetKind {
     /// Short label for the picker title bar — "edge" or "portal".
-    pub fn kind_label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
-            ColorTarget::Edge(_) => "edge",
-            ColorTarget::Portal(_) => "portal",
+            TargetKind::Edge => "edge",
+            TargetKind::Portal => "portal",
         }
     }
 }
 
-// =============================================================
-// Pre-picker snapshot (for cancel + commit undo entries)
-// =============================================================
+impl ColorTarget {
+    /// Resolve the target ref to a concrete index into
+    /// `doc.mindmap.edges` or `doc.mindmap.portals`. Returns `None` if
+    /// the underlying edge/portal was deleted between the palette
+    /// closing and the picker opening (should never happen in practice
+    /// because the palette holds the event loop, but the defensive
+    /// check protects against a later refactor that relaxes that).
+    pub fn resolve(&self, doc: &MindMapDocument) -> Option<(TargetKind, usize)> {
+        match self {
+            ColorTarget::Edge(er) => doc
+                .mindmap
+                .edges
+                .iter()
+                .position(|e| er.matches(e))
+                .map(|i| (TargetKind::Edge, i)),
+            ColorTarget::Portal(pr) => doc
+                .mindmap
+                .portals
+                .iter()
+                .position(|p| pr.matches(p))
+                .map(|i| (TargetKind::Portal, i)),
+        }
+    }
+}
 
-/// Captured at picker open time so cancel can restore in-place without
-/// touching the undo stack, and commit can push a single
-/// `UndoAction::EditEdge` / `EditPortal` with this `before` state.
-/// Mirrors the snapshot pattern from `apply_edge_handle_drag` in
-/// `app.rs:505-537`.
-#[derive(Debug, Clone)]
-pub enum ColorPickerSnapshot {
-    Edge { index: usize, before: MindEdge },
-    Portal { index: usize, before: PortalPair },
+/// Read the current color string for a target addressed by kind +
+/// index. Used to seed picker HSV at open time and to read the
+/// effective color for the preview after a chip action. Returns
+/// `None` if the index is out of bounds.
+pub fn current_color_at(
+    doc: &MindMapDocument,
+    kind: TargetKind,
+    index: usize,
+) -> Option<String> {
+    match kind {
+        TargetKind::Edge => {
+            let e = doc.mindmap.edges.get(index)?;
+            Some(
+                e.glyph_connection
+                    .as_ref()
+                    .and_then(|gc| gc.color.clone())
+                    .unwrap_or_else(|| e.color.clone()),
+            )
+        }
+        TargetKind::Portal => doc.mindmap.portals.get(index).map(|p| p.color.clone()),
+    }
+}
+
+/// Resolve the current color through the canvas theme variables and
+/// parse it into HSV for seeding the picker state. Falls back to
+/// `(0.0, 0.0, 0.5)` (mid-gray) on any failure so the picker always
+/// opens with a sensible default.
+pub fn current_hsv_at(
+    doc: &MindMapDocument,
+    kind: TargetKind,
+    index: usize,
+) -> (f32, f32, f32) {
+    let raw = match current_color_at(doc, kind, index) {
+        Some(s) => s,
+        None => return (0.0, 0.0, 0.5),
+    };
+    let resolved = resolve_var(&raw, &doc.mindmap.canvas.theme_variables);
+    hex_to_hsv_safe(resolved).unwrap_or((0.0, 0.0, 0.5))
 }
 
 // =============================================================
 // State machine
 // =============================================================
 
+/// Modal state for the glyph-wheel color picker. The `Open` variant
+/// carries both the pre-picker snapshot (as an `UndoAction` — cleaner
+/// than a parallel `ColorPickerSnapshot` enum that was structurally
+/// isomorphic anyway) and the live HSV values being previewed.
+///
+/// Hot path design: `kind` and `target_index` are captured at open time
+/// and used directly by the hover handler to mutate `doc.mindmap.edges
+/// [index]` or `doc.mindmap.portals[index]` without re-resolving any
+/// `EdgeRef`/`PortalRef`. This removes ~6 `String` clones per cursor
+/// move.
 #[derive(Debug, Clone)]
 pub enum ColorPickerState {
     Closed,
     Open {
-        target: ColorTarget,
-        snapshot: ColorPickerSnapshot,
+        /// Which kind of target the picker is editing.
+        kind: TargetKind,
+        /// Direct index into `doc.mindmap.edges` or `doc.mindmap.portals`,
+        /// captured at open time. Stable for the picker's lifetime because
+        /// the modal suppresses all other document edits.
+        target_index: usize,
+        /// Pre-picker snapshot stored directly as the `UndoAction` that
+        /// `commit_color_picker` will push. Cancel reads the `before`
+        /// field and restores it in place without touching the undo
+        /// stack. One `UndoAction` per picker session.
+        snapshot: UndoAction,
         /// Current preview hue in degrees, `[0, 360)`.
         hue_deg: f32,
         /// Current preview saturation, `[0, 1]`.
@@ -147,10 +217,12 @@ pub enum ColorPickerState {
         /// HSV. Tab cycles through chips; Enter on a focused chip
         /// commits the chip's raw color string instead of the HSV hex.
         chip_focus: Option<usize>,
-        /// Cached layout from the last rebuild. Mouse hit testing reads
-        /// from this so we don't re-run the layout pure fn on every
-        /// CursorMoved event.
-        layout: ColorPickerLayout,
+        /// Cached layout from the last rebuild. `None` between `Open`
+        /// construction and the first `rebuild_color_picker_overlay`
+        /// call (a narrow window — the rebuild is the very next line
+        /// in `open_color_picker`, but `Option` makes the invariant
+        /// explicit rather than relying on a placeholder).
+        layout: Option<ColorPickerLayout>,
     },
 }
 
@@ -167,7 +239,10 @@ impl ColorPickerState {
 /// Pre-render geometry pushed from the app to the renderer. Plain data,
 /// no rendering primitives — mirrors `PaletteOverlayGeometry`.
 pub struct ColorPickerOverlayGeometry {
-    pub target_label: String,
+    /// Static label ("edge" / "portal") — held as a `&'static str` so
+    /// the picker render path doesn't allocate a fresh `String` per
+    /// rebuild.
+    pub target_label: &'static str,
     pub hue_deg: f32,
     pub sat: f32,
     pub val: f32,
@@ -208,29 +283,6 @@ pub struct ColorPickerLayout {
     pub hint_pos: (f32, f32),
 }
 
-impl ColorPickerLayout {
-    /// A tiny placeholder layout used to construct an `Open` state
-    /// before the first rebuild has run. The real layout overwrites
-    /// this on the first rebuild_color_picker_overlay call.
-    pub fn placeholder() -> Self {
-        Self {
-            center: (0.0, 0.0),
-            outer_radius: 0.0,
-            font_size: 16.0,
-            char_width: 9.6,
-            hue_slot_positions: [(0.0, 0.0); HUE_SLOT_COUNT],
-            sat_cell_positions: [(0.0, 0.0); SAT_CELL_COUNT],
-            val_cell_positions: [(0.0, 0.0); VAL_CELL_COUNT],
-            preview_pos: (0.0, 0.0),
-            preview_size: 32.0,
-            chip_positions: Vec::new(),
-            chip_height: 0.0,
-            backdrop: (0.0, 0.0, 0.0, 0.0),
-            title_pos: (0.0, 0.0),
-            hint_pos: (0.0, 0.0),
-        }
-    }
-}
 
 /// Pure-function layout. No GPU access, no font system — mirrors
 /// `compute_palette_frame_layout` so unit tests can construct one from
@@ -311,28 +363,31 @@ pub fn compute_color_picker_layout(
     let mut chip_positions: Vec<(f32, f32, f32)> = Vec::with_capacity(THEME_CHIPS.len());
     let total_chip_width: f32 = THEME_CHIPS
         .iter()
-        .map(|(name, _)| (name.chars().count() + 4) as f32 * char_width)
+        .map(|c| (c.label.chars().count() + 4) as f32 * char_width)
         .sum::<f32>()
         + (THEME_CHIPS.len().saturating_sub(1)) as f32 * 6.0;
     let mut x = center.0 - total_chip_width * 0.5;
-    for (name, _) in THEME_CHIPS {
-        let w = (name.chars().count() + 4) as f32 * char_width;
+    for chip in THEME_CHIPS {
+        let w = (chip.label.chars().count() + 4) as f32 * char_width;
         chip_positions.push((x, chip_row_y, w));
         x += w + 6.0;
     }
 
     // ---- Backdrop, title, hint ----
+    // Title and hint are anchored RELATIVE to the backdrop's left
+    // edge, not the window center. On small windows the frame
+    // shrinks; a window-centered anchor would push the hint text
+    // off the right edge when the frame is narrow. Anchoring to the
+    // backdrop keeps both strings inside the frame at any size —
+    // cosmic-text still clips anything past the bounds, which is
+    // correct behavior for a text-too-long situation.
+    let backdrop_left = center.0 - side * 0.5;
     let backdrop_top = center.1 - side * 0.5 - font_size;
     let backdrop_height = side + font_size * 5.0;
-    let backdrop = (
-        center.0 - side * 0.5,
-        backdrop_top,
-        side,
-        backdrop_height,
-    );
-    let title_pos = (center.0 - side * 0.4, backdrop_top + font_size * 0.5);
+    let backdrop = (backdrop_left, backdrop_top, side, backdrop_height);
+    let title_pos = (backdrop_left + font_size * 0.5, backdrop_top + font_size * 0.5);
     let hint_pos = (
-        center.0 - side * 0.4,
+        backdrop_left + font_size * 0.5,
         backdrop_top + backdrop_height - font_size * 1.5,
     );
 
@@ -462,7 +517,7 @@ mod tests {
 
     fn sample_geometry() -> ColorPickerOverlayGeometry {
         ColorPickerOverlayGeometry {
-            target_label: "edge".to_string(),
+            target_label: "edge",
             hue_deg: 0.0,
             sat: 1.0,
             val: 1.0,
@@ -636,5 +691,39 @@ mod tests {
         assert_eq!(degrees_to_hue_slot(357.0), 0);
         // 352° rounds to slot 23.
         assert_eq!(degrees_to_hue_slot(352.0), 23);
+    }
+
+    /// Quantization: every input degree in `[0, 360)` must fall into
+    /// the slot whose center is closest. Walk the range in 1° steps
+    /// and check that no input is more than 7.5° (half a slot) from
+    /// its resolved slot's canonical degree. Guards against a future
+    /// refactor that silently shifts the quantization phase or
+    /// introduces floor-vs-round inconsistencies.
+    #[test]
+    fn degrees_to_hue_slot_quantizes_to_nearest() {
+        for d in 0..360 {
+            let deg = d as f32;
+            let slot = degrees_to_hue_slot(deg);
+            let canonical = hue_slot_to_degrees(slot);
+            // Circular distance from `deg` to `canonical`, taking the
+            // shorter arc of the two directions.
+            let diff = ((deg - canonical).rem_euclid(360.0)).min(
+                (canonical - deg).rem_euclid(360.0),
+            );
+            assert!(diff <= 7.5 + 1e-4,
+                "deg {} → slot {} (canonical {}°) distance {} > 7.5",
+                deg, slot, canonical, diff);
+        }
+    }
+
+    /// Boundary rounding: 7.4° rounds to slot 0 (closer), 7.6°
+    /// rounds to slot 1 (closer). Explicit test guarding the
+    /// round-half-to-even-or-away edge case.
+    #[test]
+    fn degrees_to_hue_slot_mid_slot_rounding() {
+        assert_eq!(degrees_to_hue_slot(7.4), 0);
+        assert_eq!(degrees_to_hue_slot(7.6), 1);
+        assert_eq!(degrees_to_hue_slot(22.4), 1);
+        assert_eq!(degrees_to_hue_slot(22.6), 2);
     }
 }

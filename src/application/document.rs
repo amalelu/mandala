@@ -731,6 +731,22 @@ impl MindMapDocument {
             Some(i) => i,
             None => return false,
         };
+        self.preview_edge_color_by_index(idx, color)
+    }
+
+    /// By-index variant of `preview_edge_color`. The glyph-wheel
+    /// color picker captures the target's index at open time and
+    /// calls this every cursor-move, avoiding a linear scan + ref
+    /// clone on the hot hover path. Returns `true` if `idx` is in
+    /// bounds.
+    pub fn preview_edge_color_by_index(
+        &mut self,
+        idx: usize,
+        color: Option<&str>,
+    ) -> bool {
+        if idx >= self.mindmap.edges.len() {
+            return false;
+        }
         let cfg = Self::ensure_glyph_connection(
             &mut self.mindmap.edges[idx],
             &self.mindmap.canvas,
@@ -1064,6 +1080,15 @@ impl MindMapDocument {
             Some(i) => i,
             None => return false,
         };
+        self.preview_portal_color_by_index(idx, color)
+    }
+
+    /// By-index variant of `preview_portal_color`; see
+    /// `preview_edge_color_by_index` for the hot-path rationale.
+    pub fn preview_portal_color_by_index(&mut self, idx: usize, color: &str) -> bool {
+        if idx >= self.mindmap.portals.len() {
+            return false;
+        }
         self.mindmap.portals[idx].color = color.to_string();
         true
     }
