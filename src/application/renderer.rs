@@ -471,6 +471,18 @@ pub struct Renderer {
     /// everything else in screen coordinates. Populated only when
     /// the palette is open; cleared otherwise.
     palette_overlay_buffers: Vec<MindMapTextBuffer>,
+    /// Glyph-wheel color picker overlay buffers. Rendered through the
+    /// same screen-space pass as the palette (the two modals are
+    /// mutually exclusive, so they never compete for the same pixels)
+    /// and given a separate field for clarity. Populated only when
+    /// the picker is open; cleared otherwise.
+    color_picker_overlay_buffers: Vec<MindMapTextBuffer>,
+    /// Screen-space geometry of the color picker's opaque backdrop.
+    /// Captured inside `rebuild_color_picker_overlay_buffers`; the
+    /// `render()` rect-pipeline pass appends a black fill rect for
+    /// this region alongside the palette backdrop. `None` whenever
+    /// the picker is closed.
+    color_picker_backdrop: Option<(f32, f32, f32, f32)>,
     /// Temporary overlay buffers (e.g., selection rectangle). Camera-transformed.
     overlay_buffers: Vec<MindMapTextBuffer>,
     /// Set whenever the camera's viewport rect changes (pan, zoom,
@@ -695,6 +707,8 @@ impl Renderer {
             portal_buffers: FxHashMap::default(),
             portal_hitboxes: FxHashMap::default(),
             palette_overlay_buffers: Vec::new(),
+            color_picker_overlay_buffers: Vec::new(),
+            color_picker_backdrop: None,
             overlay_buffers: Vec::new(),
             connection_viewport_dirty: false,
             connection_geometry_dirty: false,
@@ -715,6 +729,20 @@ impl Renderer {
     /// `GlyphConnectionConfig::effective_font_size_pt`).
     pub fn camera_zoom(&self) -> f32 {
         self.camera.zoom
+    }
+
+    /// Width of the swapchain surface in pixels. Used by overlay
+    /// modal layouts (palette, glyph-wheel color picker) so they can
+    /// position themselves in screen space without poking the wgpu
+    /// config directly.
+    pub fn surface_width(&self) -> u32 {
+        self.config.width
+    }
+
+    /// Height of the swapchain surface in pixels. Counterpart to
+    /// `surface_width`.
+    pub fn surface_height(&self) -> u32 {
+        self.config.height
     }
 
     /// Set the render-pass clear color from a hex string like
@@ -1072,8 +1100,10 @@ impl Renderer {
         }
 
         // Rebuild the "palette" rect batch: one opaque backdrop
-        // behind the command palette, in screen space. Empty when
-        // the palette is closed (the `Option` is `None`).
+        // behind the command palette and/or the glyph-wheel color
+        // picker, in screen space. The two modals are mutually
+        // exclusive but a single batch handles either case (or
+        // both, if a future variant ever overlaps them).
         self.palette_rect_vertices.clear();
         if let Some((left, top, w, h)) = self.palette_backdrop {
             let (ndc_min, ndc_max) = Self::screen_rect_to_ndc_bounds(
@@ -1082,6 +1112,21 @@ impl Renderer {
             // Pitch black. Sits cleanly against the cyan frame and
             // any canvas background without tinting the palette's
             // cyan foreground.
+            let bg_color = [0.0, 0.0, 0.0, 1.0];
+            Self::push_rect_ndc(
+                &mut self.palette_rect_vertices,
+                ndc_min,
+                ndc_max,
+                bg_color,
+            );
+        }
+        if let Some((left, top, w, h)) = self.color_picker_backdrop {
+            let (ndc_min, ndc_max) = Self::screen_rect_to_ndc_bounds(
+                left, top, w, h, vp_w_px, vp_h_px,
+            );
+            // Same pitch black as the palette — the picker's hue
+            // ring glyphs and crosshair cells are saturated colors
+            // that pop against true black with no tinting.
             let bg_color = [0.0, 0.0, 0.0, 1.0];
             Self::push_rect_ndc(
                 &mut self.palette_rect_vertices,
@@ -1181,8 +1226,11 @@ impl Renderer {
 
         // Palette overlay: screen-space text, drawn in its own
         // glyphon pass so the rect-pipeline backdrop can be
-        // interleaved between the main text and this one.
+        // interleaved between the main text and this one. The
+        // glyph-wheel color picker shares this pass — it's a
+        // mutually exclusive screen-space modal.
         let palette_text_areas: Vec<TextArea> = self.palette_overlay_buffers.iter()
+            .chain(self.color_picker_overlay_buffers.iter())
             .map(|tb| TextArea {
                 buffer: &tb.buffer,
                 left: tb.pos.0,
@@ -1888,6 +1936,244 @@ impl Renderer {
                 ),
             ));
         }
+    }
+
+    /// Rebuild the glyph-wheel color picker overlay buffers. When
+    /// `geometry` is `None`, the picker is closed — clear the buffer
+    /// list and return. When `Some`, lay out the mandala: a 24-glyph
+    /// hue ring, a crosshair sat/value selector, a center preview
+    /// glyph, theme-variable chips, a title at the top, and a hint
+    /// footer at the bottom. Each glyph is colored at its own HSV
+    /// coordinate so the picker IS the color it's offering.
+    ///
+    /// Pure layout via `compute_color_picker_layout`; this function
+    /// just consumes that and emits cosmic-text buffers, the same way
+    /// `rebuild_palette_overlay_buffers` does for the palette.
+    pub fn rebuild_color_picker_overlay_buffers(
+        &mut self,
+        geometry: Option<&crate::application::color_picker::ColorPickerOverlayGeometry>,
+    ) {
+        use crate::application::color_picker::{
+            compute_color_picker_layout, hue_slot_to_degrees, sat_cell_to_value,
+            val_cell_to_value, HUE_SLOT_COUNT, SAT_CELL_COUNT, THEME_CHIPS, VAL_CELL_COUNT,
+        };
+        use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
+
+        self.color_picker_overlay_buffers.clear();
+        self.color_picker_backdrop = None;
+        let geometry = match geometry {
+            Some(g) => g,
+            None => return,
+        };
+
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+
+        let layout = compute_color_picker_layout(
+            geometry,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+        self.color_picker_backdrop = Some(layout.backdrop);
+
+        let font_size = layout.font_size;
+        let char_width = layout.char_width;
+        let glyph_box = (font_size * 1.5, font_size * 1.5);
+
+        // Helper: convert (r, g, b) floats in [0,1] to a cosmic-text Color.
+        let to_cosmic = |rgb: [f32; 3]| {
+            cosmic_text::Color::rgba(
+                (rgb[0] * 255.0).round() as u8,
+                (rgb[1] * 255.0).round() as u8,
+                (rgb[2] * 255.0).round() as u8,
+                255,
+            )
+        };
+
+        // ---- Title bar ----
+        let title_text = format!("\u{2726} {} color", geometry.target_label);
+        let title_attrs = Attrs::new()
+            .color(cosmic_text::Color::rgba(0, 229, 255, 255))
+            .metrics(cosmic_text::Metrics::new(font_size, font_size));
+        self.color_picker_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &title_text,
+            &title_attrs,
+            font_size,
+            layout.title_pos,
+            (font_size * 24.0, font_size * 1.5),
+        ));
+
+        // ---- Hue ring (24 slots) ----
+        let current_hue_slot = ((geometry.hue_deg.rem_euclid(360.0) / 360.0)
+            * HUE_SLOT_COUNT as f32)
+            .round() as usize
+            % HUE_SLOT_COUNT;
+        for i in 0..HUE_SLOT_COUNT {
+            let hue = hue_slot_to_degrees(i);
+            let rgb = hsv_to_rgb(hue, 1.0, 1.0);
+            let cosmic_color = to_cosmic(rgb);
+            // Selected hue slot uses ◉ (fisheye) so it reads as a
+            // locked-in target glyph; the rest are filled circles.
+            let glyph = if i == current_hue_slot {
+                "\u{25C9}"
+            } else {
+                "\u{25CF}"
+            };
+            let attrs = Attrs::new()
+                .color(cosmic_color)
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+            // Anchor each glyph centered on its slot position.
+            let pos = layout.hue_slot_positions[i];
+            self.color_picker_overlay_buffers.push(create_border_buffer(
+                &mut font_system,
+                glyph,
+                &attrs,
+                font_size,
+                (pos.0 - char_width * 0.5, pos.1 - font_size * 0.5),
+                glyph_box,
+            ));
+        }
+
+        // ---- Saturation crosshair bar (horizontal) ----
+        // Each cell shows the color at (current_hue, cell_sat, current_val)
+        // so the bar acts as a live "what does this saturation look
+        // like for the chosen hue?" preview.
+        let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0)).round() as usize;
+        let current_val_cell =
+            ((1.0 - geometry.val) * (VAL_CELL_COUNT as f32 - 1.0)).round() as usize;
+        for i in 0..SAT_CELL_COUNT {
+            let cell_sat = sat_cell_to_value(i);
+            let rgb = hsv_to_rgb(geometry.hue_deg, cell_sat, geometry.val);
+            let cosmic_color = to_cosmic(rgb);
+            let glyph = if i == current_sat_cell {
+                "\u{25C6}" // ◆ selected
+            } else {
+                "\u{25A0}" // ■
+            };
+            let attrs = Attrs::new()
+                .color(cosmic_color)
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+            let (cx, cy) = layout.sat_cell_positions[i];
+            self.color_picker_overlay_buffers.push(create_border_buffer(
+                &mut font_system,
+                glyph,
+                &attrs,
+                font_size,
+                (cx - char_width * 0.5, cy - font_size * 0.5),
+                glyph_box,
+            ));
+        }
+
+        // ---- Value crosshair bar (vertical) ----
+        for i in 0..VAL_CELL_COUNT {
+            let cell_val = val_cell_to_value(i);
+            let rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, cell_val);
+            let cosmic_color = to_cosmic(rgb);
+            let glyph = if i == current_val_cell {
+                "\u{25C6}"
+            } else {
+                "\u{25A0}"
+            };
+            let attrs = Attrs::new()
+                .color(cosmic_color)
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+            let (cx, cy) = layout.val_cell_positions[i];
+            self.color_picker_overlay_buffers.push(create_border_buffer(
+                &mut font_system,
+                glyph,
+                &attrs,
+                font_size,
+                (cx - char_width * 0.5, cy - font_size * 0.5),
+                glyph_box,
+            ));
+        }
+
+        // ---- Center preview glyph ✦ at 2× font size ----
+        let preview_size = font_size * 2.0;
+        let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
+        let preview_color = to_cosmic(preview_rgb);
+        let preview_attrs = Attrs::new()
+            .color(preview_color)
+            .metrics(cosmic_text::Metrics::new(preview_size, preview_size));
+        self.color_picker_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            "\u{2726}",
+            &preview_attrs,
+            preview_size,
+            layout.preview_pos,
+            (preview_size * 1.5, preview_size * 1.5),
+        ));
+
+        // ---- Preview hex readout (small, below the center glyph) ----
+        let hex_text = hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val);
+        let hex_attrs = Attrs::new()
+            .color(cosmic_text::Color::rgba(220, 220, 220, 255))
+            .metrics(cosmic_text::Metrics::new(font_size, font_size));
+        let hex_pos = (
+            layout.center.0 - char_width * 4.0,
+            layout.center.1 + preview_size * 0.7,
+        );
+        self.color_picker_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &hex_text,
+            &hex_attrs,
+            font_size,
+            hex_pos,
+            (font_size * 8.0, font_size * 1.5),
+        ));
+
+        // ---- Theme chips row ----
+        // Each chip looks like "▸ --accent" if focused, "  --accent"
+        // otherwise. The leading two-char prefix is colored at the
+        // chip's resolved color so the user can preview the swatch
+        // without committing.
+        for (i, (name, raw)) in THEME_CHIPS.iter().enumerate() {
+            let focused = geometry.chip_focus == Some(i);
+            let prefix = if focused { "\u{25B8} " } else { "  " };
+            let label = format!("{prefix}{name}");
+            // The chip's "color" is just dim white for the text
+            // itself; the swatch effect comes from the prefix arrow.
+            // Resolved theme colors aren't available here without a
+            // theme map — for v1 we use a uniform dim text color and
+            // let the central preview show the actual hue. The
+            // commit handler in app.rs writes the raw color, so the
+            // user sees the result on the canvas behind the picker.
+            let _ = raw;
+            let chip_color = if focused {
+                cosmic_text::Color::rgba(0, 229, 255, 255)
+            } else {
+                cosmic_text::Color::rgba(200, 200, 200, 255)
+            };
+            let attrs = Attrs::new()
+                .color(chip_color)
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+            let (cx, cy, cw) = layout.chip_positions[i];
+            self.color_picker_overlay_buffers.push(create_border_buffer(
+                &mut font_system,
+                &label,
+                &attrs,
+                font_size,
+                (cx, cy),
+                (cw, layout.chip_height),
+            ));
+        }
+
+        // ---- Hint footer ----
+        let hint_text =
+            "Esc cancel  \u{00B7}  Enter commit  \u{00B7}  h/s/v nudge  \u{00B7}  Tab chips";
+        let hint_attrs = Attrs::new()
+            .color(cosmic_text::Color::rgba(140, 140, 150, 255))
+            .metrics(cosmic_text::Metrics::new(font_size * 0.85, font_size * 0.85));
+        self.color_picker_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            hint_text,
+            &hint_attrs,
+            font_size * 0.85,
+            layout.hint_pos,
+            (font_size * 30.0, font_size * 1.5),
+        ));
     }
 
     /// Keyed connection rebuild. See [`rebuild_border_buffers_keyed`] for

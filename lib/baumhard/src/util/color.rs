@@ -171,6 +171,80 @@ pub fn hex_to_rgba_safe(color: &str, fallback: [f32; 4]) -> [f32; 4] {
     rgba
 }
 
+/// Convert HSV → RGB, all components normalized to `[0, 1]`. `h` is in
+/// degrees (`[0, 360)`); values outside that range are wrapped via
+/// `rem_euclid`. Saturation and value are clamped to `[0, 1]`.
+///
+/// Used by the glyph-wheel color picker to paint each hue-ring slot,
+/// sat/val bar cell, and central preview glyph at the current HSV
+/// coordinates. Kept on `color.rs` next to the other hex/rgba helpers
+/// because the picker shouldn't re-implement color math that could
+/// drift from the canonical path.
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let h = h.rem_euclid(360.0);
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let c = v * s;
+    let hh = h / 60.0;
+    let x = c * (1.0 - (hh.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match hh as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    [r1 + m, g1 + m, b1 + m]
+}
+
+/// Convert RGB → HSV. Inputs in `[0, 1]`; output `(h_deg, s, v)` with
+/// `h_deg` in `[0, 360)`. For achromatic inputs (max == min) hue is
+/// reported as `0.0` — arbitrary but deterministic so round-trips are
+/// stable. Saturation is `0` when `max == 0`.
+pub fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let h = if delta == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    let s = if max == 0.0 { 0.0 } else { delta / max };
+    (h, s, max)
+}
+
+/// Convert HSV → `#RRGGBB` hex string (no alpha). Canonical path for
+/// the color picker commit: quantize an HSV triple into the same hex
+/// string shape stored in `MindEdge.color` / `PortalPair.color`.
+pub fn hsv_to_hex(h: f32, s: f32, v: f32) -> String {
+    let [r, g, b] = hsv_to_rgb(h, s, v);
+    let u = convert_f32_to_u8(&[r, g, b, 1.0]);
+    format!("#{:02x}{:02x}{:02x}", u[0], u[1], u[2])
+}
+
+/// Parse a hex color string into HSV, returning `None` on any parse
+/// failure. Delegates to `hex_to_rgba_safe` with a sentinel fallback
+/// whose alpha channel we can't collide with (negative alpha), then
+/// converts. Used to seed the color picker's HSV state from the
+/// target's current color at open time.
+pub fn hex_to_hsv_safe(hex: &str) -> Option<(f32, f32, f32)> {
+    // Sentinel with an out-of-range marker in the RED channel so we
+    // can detect the "parse failed" case without a second round-trip.
+    const SENTINEL: [f32; 4] = [-1.0, -1.0, -1.0, -1.0];
+    let rgba = hex_to_rgba_safe(hex, SENTINEL);
+    if rgba[0] < 0.0 {
+        return None;
+    }
+    Some(rgb_to_hsv(rgba[0], rgba[1], rgba[2]))
+}
+
 pub fn from_hex(colors: &[&str]) -> Vec<[f32; 4]> {
     let mut rgba_colors: Vec<[f32; 4]> = Vec::with_capacity(colors.len());
     for color in colors.iter() {
@@ -527,5 +601,111 @@ mod tests {
         assert_eq!(resolve_var("var(--nope)", &map), "var(--nope)");
         let map_with_other = vars(&[("--other", "#ffffff")]);
         assert_eq!(resolve_var("var(--nope)", &map_with_other), "var(--nope)");
+    }
+
+    // -----------------------------------------------------------------
+    // HSV helpers — used by the glyph-wheel color picker.
+    // -----------------------------------------------------------------
+
+    fn rgb_close(a: [f32; 3], b: [f32; 3]) -> bool {
+        (a[0] - b[0]).abs() < 1.0 / 255.0
+            && (a[1] - b[1]).abs() < 1.0 / 255.0
+            && (a[2] - b[2]).abs() < 1.0 / 255.0
+    }
+
+    #[test]
+    fn hsv_to_rgb_primaries() {
+        assert!(rgb_close(hsv_to_rgb(0.0, 1.0, 1.0), [1.0, 0.0, 0.0]));
+        assert!(rgb_close(hsv_to_rgb(120.0, 1.0, 1.0), [0.0, 1.0, 0.0]));
+        assert!(rgb_close(hsv_to_rgb(240.0, 1.0, 1.0), [0.0, 0.0, 1.0]));
+        assert!(rgb_close(hsv_to_rgb(60.0, 1.0, 1.0), [1.0, 1.0, 0.0]));
+        assert!(rgb_close(hsv_to_rgb(180.0, 1.0, 1.0), [0.0, 1.0, 1.0]));
+        assert!(rgb_close(hsv_to_rgb(300.0, 1.0, 1.0), [1.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn hsv_to_rgb_grayscale_ignores_hue() {
+        // s = 0 ⇒ achromatic; hue is irrelevant.
+        assert!(rgb_close(hsv_to_rgb(0.0, 0.0, 0.5), [0.5, 0.5, 0.5]));
+        assert!(rgb_close(hsv_to_rgb(200.0, 0.0, 0.5), [0.5, 0.5, 0.5]));
+        assert!(rgb_close(hsv_to_rgb(0.0, 0.0, 0.0), [0.0, 0.0, 0.0]));
+        assert!(rgb_close(hsv_to_rgb(0.0, 0.0, 1.0), [1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn hsv_to_rgb_wraps_hue() {
+        // hsv_to_rgb should wrap negative and > 360 hues via rem_euclid.
+        assert!(rgb_close(hsv_to_rgb(360.0, 1.0, 1.0), [1.0, 0.0, 0.0]));
+        assert!(rgb_close(hsv_to_rgb(-360.0, 1.0, 1.0), [1.0, 0.0, 0.0]));
+        assert!(rgb_close(hsv_to_rgb(720.0, 1.0, 1.0), [1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn rgb_to_hsv_primaries() {
+        let (h, s, v) = rgb_to_hsv(1.0, 0.0, 0.0);
+        assert!((h - 0.0).abs() < 1e-3);
+        assert!((s - 1.0).abs() < 1e-6);
+        assert!((v - 1.0).abs() < 1e-6);
+        let (h, s, v) = rgb_to_hsv(0.0, 1.0, 0.0);
+        assert!((h - 120.0).abs() < 1e-3);
+        assert!((s - 1.0).abs() < 1e-6);
+        assert!((v - 1.0).abs() < 1e-6);
+        let (h, s, v) = rgb_to_hsv(0.0, 0.0, 1.0);
+        assert!((h - 240.0).abs() < 1e-3);
+        assert!((s - 1.0).abs() < 1e-6);
+        assert!((v - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hsv_hex_roundtrip_named_colors() {
+        let cases: &[(&str, (f32, f32, f32))] = &[
+            ("#ff0000", (0.0, 1.0, 1.0)),
+            ("#00ff00", (120.0, 1.0, 1.0)),
+            ("#0000ff", (240.0, 1.0, 1.0)),
+            ("#ffff00", (60.0, 1.0, 1.0)),
+            ("#00ffff", (180.0, 1.0, 1.0)),
+            ("#ff00ff", (300.0, 1.0, 1.0)),
+            ("#000000", (0.0, 0.0, 0.0)),
+            ("#ffffff", (0.0, 0.0, 1.0)),
+            ("#808080", (0.0, 0.0, 128.0 / 255.0)),
+        ];
+        for (hex, expected_hsv) in cases {
+            let got_hsv = hex_to_hsv_safe(hex).unwrap();
+            // Hue only meaningful when saturation > 0
+            if expected_hsv.1 > 0.0 {
+                assert!((got_hsv.0 - expected_hsv.0).abs() < 1e-2,
+                    "hue for {} expected {}, got {}", hex, expected_hsv.0, got_hsv.0);
+            }
+            assert!((got_hsv.1 - expected_hsv.1).abs() < 1e-3,
+                "sat for {}", hex);
+            assert!((got_hsv.2 - expected_hsv.2).abs() < 1e-3,
+                "val for {}", hex);
+            // Round-trip through hsv_to_hex.
+            let back = hsv_to_hex(got_hsv.0, got_hsv.1, got_hsv.2);
+            assert_eq!(back, *hex, "round-trip mismatch for {}", hex);
+        }
+    }
+
+    #[test]
+    fn hex_to_hsv_safe_rejects_garbage() {
+        assert_eq!(hex_to_hsv_safe("not-a-color"), None);
+        assert_eq!(hex_to_hsv_safe(""), None);
+        assert_eq!(hex_to_hsv_safe("#xyz"), None);
+        assert_eq!(hex_to_hsv_safe("var(--x)"), None);
+    }
+
+    #[test]
+    fn hsv_to_hex_emits_six_char_format() {
+        let s = hsv_to_hex(0.0, 1.0, 1.0);
+        assert_eq!(s, "#ff0000");
+        assert_eq!(s.len(), 7);
+        let s = hsv_to_hex(200.0, 0.5, 0.75);
+        assert_eq!(s.len(), 7);
+        assert!(s.starts_with('#'));
+        // All lowercase hex.
+        for c in s[1..].chars() {
+            assert!(c.is_ascii_hexdigit());
+            assert!(!c.is_ascii_uppercase());
+        }
     }
 }

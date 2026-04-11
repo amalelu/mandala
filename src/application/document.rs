@@ -711,6 +711,34 @@ impl MindMapDocument {
         true
     }
 
+    /// Non-undoing in-place color preview, used by the glyph-wheel
+    /// color picker during hover. The picker captures a pre-open
+    /// snapshot once and then calls this on every cursor move; on
+    /// commit a single `UndoAction::EditEdge { before }` is pushed
+    /// (with the captured snapshot), so per-frame previews never
+    /// pollute the undo stack. Mirrors how `apply_edge_handle_drag`
+    /// in `app.rs` mutates per-frame and lets the release path push
+    /// undo. Returns `true` if the edge was found.
+    ///
+    /// `dirty` is intentionally NOT flipped here — preview state is
+    /// transient until the picker commits.
+    pub fn preview_edge_color(
+        &mut self,
+        edge_ref: &EdgeRef,
+        color: Option<&str>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        cfg.color = color.map(|s| s.to_string());
+        true
+    }
+
     /// Set the color override on a connection's glyph_connection config.
     /// Passing `None` clears the override so the edge inherits from
     /// `edge.color` (or the canvas default). Returns `true` if the edge
@@ -1019,6 +1047,25 @@ impl MindMapDocument {
     pub fn set_portal_color(&mut self, portal_ref: &PortalRef, color: &str) -> bool {
         let color_owned = color.to_string();
         self.apply_edit_portal(portal_ref, move |p| p.color = color_owned)
+    }
+
+    /// Non-undoing in-place portal color preview, parallel to
+    /// `preview_edge_color`. Used by the glyph-wheel color picker for
+    /// per-frame hover updates without polluting the undo stack.
+    /// `dirty` is intentionally NOT flipped — the picker commits via
+    /// the regular `set_portal_color` path on Enter, which carries the
+    /// captured pre-picker snapshot for undo.
+    pub fn preview_portal_color(
+        &mut self,
+        portal_ref: &PortalRef,
+        color: &str,
+    ) -> bool {
+        let idx = match self.mindmap.portals.iter().position(|p| portal_ref.matches(p)) {
+            Some(i) => i,
+            None => return false,
+        };
+        self.mindmap.portals[idx].color = color.to_string();
+        true
     }
 
     /// Create a new unattached (orphan) node at the given canvas position
@@ -3347,6 +3394,51 @@ mod tests {
         // hardcoded default.
         assert_eq!(cfg.body, "\u{22EF}");
         assert_eq!(cfg.spacing, 6.0);
+    }
+
+    #[test]
+    fn test_preview_edge_color_does_not_push_undo_or_dirty() {
+        // Glyph-wheel color picker invariant: per-frame previews must
+        // never push undo or flip the dirty flag. Only the final
+        // commit (via set_edge_color or a manual EditEdge push) does.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let stack_depth = doc.undo_stack.len();
+        doc.dirty = false;
+
+        let changed = doc.preview_edge_color(&er, Some("#abcdef"));
+        assert!(changed);
+        assert_eq!(doc.undo_stack.len(), stack_depth, "preview must not push undo");
+        assert!(!doc.dirty, "preview must not flip dirty");
+
+        // The model should reflect the previewed color so the next
+        // scene rebuild draws it.
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .glyph_connection
+                .as_ref()
+                .and_then(|gc| gc.color.as_deref()),
+            Some("#abcdef"),
+        );
+    }
+
+    #[test]
+    fn test_preview_edge_color_none_clears_override_in_place() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // First seed an override the picker would later clear.
+        doc.preview_edge_color(&er, Some("#112233"));
+        // Now the picker user "presses Tab to the reset chip then Enter".
+        let stack_depth = doc.undo_stack.len();
+        doc.preview_edge_color(&er, None);
+        assert_eq!(doc.undo_stack.len(), stack_depth);
+        let idx = doc.edge_index(&er).unwrap();
+        assert!(doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .and_then(|gc| gc.color.as_ref())
+            .is_none());
     }
 
     #[test]
