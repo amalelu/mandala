@@ -14,7 +14,7 @@ use baumhard::mindmap::custom_mutation::{
 use baumhard::mindmap::connection;
 use baumhard::mindmap::model::{
     Canvas, GlyphConnectionConfig, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle,
-    PortalPair, Position, Size, PORTAL_GLYPH_PRESETS,
+    PortalPair, Position, Size, TextRun, PORTAL_GLYPH_PRESETS,
 };
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
@@ -188,7 +188,6 @@ fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
 /// placeholder text so it's visible on the canvas until the user edits it
 /// (text editing is still WIP; see roadmap M7).
 fn default_orphan_node(id: &str, position: Vec2, index: i32) -> MindNode {
-    use baumhard::mindmap::model::TextRun;
     let text = "New node".to_string();
     let text_runs = vec![TextRun {
         start: 0,
@@ -290,6 +289,14 @@ pub enum UndoAction {
     /// A new node was created (via `apply_create_orphan_node`). Undo
     /// removes the node from `mindmap.nodes` by id.
     CreateNode { node_id: String },
+    /// Session 7A: the `text` (and possibly `text_runs`) of a node was
+    /// edited in place via `set_node_text`. Undo restores the pre-edit
+    /// `text` and `text_runs` on the node, if it still exists.
+    EditNodeText {
+        node_id: String,
+        before_text: String,
+        before_runs: Vec<TextRun>,
+    },
     /// Snapshot of the entire `Canvas` taken before a document action
     /// (theme switch, etc.) mutated it. The canvas is small and cloning
     /// the whole thing is cheaper than tracking field-level diffs, and
@@ -1115,6 +1122,58 @@ impl MindMapDocument {
         self.apply_edit_portal(portal_ref, move |p| p.color = color_owned)
     }
 
+    /// Session 7A: replace a node's `text` and collapse its `text_runs`
+    /// to a single run inheriting the first original run's formatting
+    /// (font, size_pt, color, bold, italic, underline). If the original
+    /// had no runs, a white 24pt Liberation Sans run is synthesized —
+    /// mirrors `default_orphan_node`.
+    ///
+    /// Returns `true` if the value actually changed. No-op / no undo
+    /// push on unchanged text, matching `set_edge_label`'s contract.
+    ///
+    /// **Collapse caveat**: authored multi-run nodes lose their per-span
+    /// formatting on any edit. Session 7B's `TextRun` splitting will
+    /// preserve it.
+    pub fn set_node_text(&mut self, node_id: &str, new_text: String) -> bool {
+        let node = match self.mindmap.nodes.get_mut(node_id) {
+            Some(n) => n,
+            None => return false,
+        };
+        if node.text == new_text {
+            return false;
+        }
+        let before_text = node.text.clone();
+        let before_runs = node.text_runs.clone();
+        // Collapse to a single run that spans the new text. Inherit
+        // formatting from the first original run, or fall back to the
+        // default-orphan defaults if the node had no runs.
+        let template = before_runs.first().cloned().unwrap_or_else(|| TextRun {
+            start: 0,
+            end: 0,
+            bold: false,
+            italic: false,
+            underline: false,
+            font: "LiberationSans".to_string(),
+            size_pt: 24,
+            color: "#ffffff".to_string(),
+            hyperlink: None,
+        });
+        let new_runs = vec![TextRun {
+            start: 0,
+            end: new_text.chars().count(),
+            ..template
+        }];
+        node.text = new_text;
+        node.text_runs = new_runs;
+        self.undo_stack.push(UndoAction::EditNodeText {
+            node_id: node_id.to_string(),
+            before_text,
+            before_runs,
+        });
+        self.dirty = true;
+        true
+    }
+
     /// Create a new unattached (orphan) node at the given canvas position
     /// and insert it into the map. The node has `parent_id == None` so it
     /// renders as a root, giving users a way to start a subtree in
@@ -1438,6 +1497,16 @@ impl MindMapDocument {
                     self.mindmap.nodes.remove(&node_id);
                     if self.selection.is_selected(&node_id) {
                         self.selection = SelectionState::None;
+                    }
+                }
+                UndoAction::EditNodeText { node_id, before_text, before_runs } => {
+                    // Restore the pre-edit text and text_runs. If the node
+                    // has been removed since the action was recorded (e.g.
+                    // a later delete that hasn't been undone yet), silently
+                    // skip — matches the `EditEdge` clamp-on-missing pattern.
+                    if let Some(node) = self.mindmap.nodes.get_mut(&node_id) {
+                        node.text = before_text;
+                        node.text_runs = before_runs;
                     }
                 }
                 UndoAction::CanvasSnapshot { canvas } => {
@@ -4079,5 +4148,127 @@ mod tests {
         assert!(doc.selection.selected_ids().is_empty());
         assert_eq!(doc.selection.selected_portal(), Some(&pref));
         assert_eq!(doc.selection.selected_edge(), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Session 7A: node text editing
+    // -----------------------------------------------------------------
+
+    /// Pick a stable node id from the testament map that has a real
+    /// text value. The root node id is well-known from other tests.
+    fn first_testament_node_id(_doc: &MindMapDocument) -> String {
+        "348068464".to_string()
+    }
+
+    #[test]
+    fn test_set_node_text_updates_text_and_collapses_runs() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let changed = doc.set_node_text(&nid, "Hello world".to_string());
+        assert!(changed);
+        let node = doc.mindmap.nodes.get(&nid).unwrap();
+        assert_eq!(node.text, "Hello world");
+        assert_eq!(node.text_runs.len(), 1);
+        assert_eq!(node.text_runs[0].start, 0);
+        assert_eq!(node.text_runs[0].end, "Hello world".chars().count());
+        assert!(doc.dirty);
+        assert!(matches!(
+            doc.undo_stack.last(),
+            Some(UndoAction::EditNodeText { .. })
+        ));
+    }
+
+    #[test]
+    fn test_set_node_text_noop_on_unchanged() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let current = doc.mindmap.nodes.get(&nid).unwrap().text.clone();
+        doc.undo_stack.clear();
+        doc.dirty = false;
+        let changed = doc.set_node_text(&nid, current);
+        assert!(!changed);
+        assert!(doc.undo_stack.is_empty());
+        assert!(!doc.dirty);
+    }
+
+    #[test]
+    fn test_set_node_text_undo_round_trip() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let before_text = doc.mindmap.nodes.get(&nid).unwrap().text.clone();
+        let before_runs_len = doc.mindmap.nodes.get(&nid).unwrap().text_runs.len();
+        let before_first_run_color = doc
+            .mindmap
+            .nodes
+            .get(&nid)
+            .unwrap()
+            .text_runs
+            .first()
+            .map(|r| r.color.clone());
+        assert!(doc.set_node_text(&nid, "mutated".to_string()));
+        assert_eq!(doc.mindmap.nodes.get(&nid).unwrap().text, "mutated");
+        assert!(doc.undo());
+        let restored = doc.mindmap.nodes.get(&nid).unwrap();
+        assert_eq!(restored.text, before_text);
+        // TextRun doesn't implement PartialEq, so compare the parts
+        // we care about: count + first run's color.
+        assert_eq!(restored.text_runs.len(), before_runs_len);
+        assert_eq!(
+            restored.text_runs.first().map(|r| r.color.clone()),
+            before_first_run_color
+        );
+    }
+
+    #[test]
+    fn test_set_node_text_multiline_with_newlines() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        assert!(doc.set_node_text(&nid, "line 1\nline 2\nline 3".to_string()));
+        let node = doc.mindmap.nodes.get(&nid).unwrap();
+        assert_eq!(node.text, "line 1\nline 2\nline 3");
+        // Collapsed single run spans the full char count, including newlines.
+        assert_eq!(node.text_runs.len(), 1);
+        assert_eq!(node.text_runs[0].end, "line 1\nline 2\nline 3".chars().count());
+    }
+
+    #[test]
+    fn test_set_node_text_unknown_id_returns_false() {
+        let mut doc = load_test_doc();
+        doc.undo_stack.clear();
+        doc.dirty = false;
+        assert!(!doc.set_node_text("nonexistent-id", "x".to_string()));
+        assert!(doc.undo_stack.is_empty());
+        assert!(!doc.dirty);
+    }
+
+    #[test]
+    fn test_set_node_text_inherits_first_run_formatting() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        // Force a specific first-run formatting we can check for.
+        {
+            let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+            if node.text_runs.is_empty() {
+                node.text_runs.push(TextRun {
+                    start: 0,
+                    end: node.text.chars().count(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font: "LiberationSans".to_string(),
+                    size_pt: 24,
+                    color: "#ffffff".to_string(),
+                    hyperlink: None,
+                });
+            }
+            node.text_runs[0].bold = true;
+            node.text_runs[0].color = "#abcdef".to_string();
+            node.text_runs[0].size_pt = 33;
+        }
+        assert!(doc.set_node_text(&nid, "rewritten".to_string()));
+        let run = &doc.mindmap.nodes.get(&nid).unwrap().text_runs[0];
+        assert!(run.bold);
+        assert_eq!(run.color, "#abcdef");
+        assert_eq!(run.size_pt, 33);
     }
 }
