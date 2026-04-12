@@ -170,10 +170,15 @@ impl ConsoleFrameLayout {
         )
     }
 
-    /// Y offset of the prompt line's baseline (inner-padded, inside
-    /// the frame).
+    /// Y offset of the prompt line's baseline. Sits directly below
+    /// the scrollback and completion regions. Kept consistent with
+    /// the scrollback / completion placement in
+    /// `rebuild_console_overlay_buffers` so rows never overlap.
     pub fn prompt_y(&self) -> f32 {
-        self.top + self.frame_height - self.inner_padding - self.font_size
+        self.top
+            + self.font_size
+            + self.inner_padding
+            + self.row_height * (self.scrollback_rows + self.completion_rows) as f32
     }
 }
 
@@ -198,14 +203,16 @@ pub fn build_console_border_strings(
     font_size: f32,
 ) -> (String, String, String, String) {
     let unit = if unit.is_empty() { "#" } else { unit };
-    // Conservative average glyph width — wider than a typical Latin
-    // character so the repetition count leans slightly low
-    // (under-fill, masked by the backdrop) rather than high
-    // (over-fill, wraps onto a second line and visually doubles up).
-    let avg_glyph_width = (font_size * 0.7).max(1.0);
+    // Narrow per-glyph estimate so skinny ASCII units (`#`, `.`, `-`)
+    // still fill the horizontal span. Over-fill is fine — cosmic-text
+    // clips anything that runs past the buffer width, and the opaque
+    // backdrop masks the clipped glyph. Under-fill is the actual
+    // hazard (leaves a visible gap on the right), so we intentionally
+    // bias toward too many repetitions.
+    let avg_glyph_width = (font_size * 0.45).max(1.0);
     let unit_char_count = unit.chars().count().max(1) as f32;
 
-    let horiz_reps = ((inner_width_px / (avg_glyph_width * unit_char_count)).ceil() as usize).max(1);
+    let horiz_reps = ((inner_width_px / (avg_glyph_width * unit_char_count)).ceil() as usize + 1).max(1);
     let top = unit.repeat(horiz_reps);
     let bottom = top.clone();
 
@@ -265,10 +272,17 @@ pub fn compute_console_frame_layout(
     // Prompt line gets slightly extra vertical budget so the cursor
     // glyph sits clear of the bottom border.
     let prompt_budget = font_size * 1.4;
-    let frame_height = prompt_budget
-        + row_height * completion_rows as f32
+    // Frame vertical budget:
+    //   top border (font_size) + inner_padding (top)
+    //     + scrollback rows + completion rows + prompt row
+    //     + inner_padding (bottom)
+    // The bottom border sits *outside* `frame_height` — see
+    // `backdrop_rect`, which stretches by one extra `font_size`.
+    let frame_height = font_size
+        + inner_padding * 2.0
         + row_height * scrollback_rows as f32
-        + inner_padding * 2.0;
+        + row_height * completion_rows as f32
+        + prompt_budget;
 
     // Width: adapt to the longest visible line, clamped so a short
     // prompt doesn't produce a postage stamp and a stray long
@@ -3345,6 +3359,80 @@ mod tests {
         let short_lines = left_short.chars().filter(|c| *c == '\n').count();
         let tall_lines = left_tall.chars().filter(|c| *c == '\n').count();
         assert!(tall_lines > short_lines);
+    }
+
+    #[test]
+    fn test_console_prompt_y_sits_below_scrollback_and_completions() {
+        // Regression guard for the overlap bug where `prompt_y`
+        // floated at `frame_height - inner_padding - font_size`,
+        // landing ~0.6 · font_size *above* the last completion row
+        // instead of below it.
+        let mut g = empty_console_geometry();
+        g.scrollback = vec![
+            ConsoleOverlayLine {
+                text: "one".into(),
+                kind: ConsoleOverlayLineKind::Output,
+            },
+            ConsoleOverlayLine {
+                text: "two".into(),
+                kind: ConsoleOverlayLineKind::Output,
+            },
+        ];
+        g.completions = vec![ConsoleOverlayCompletion {
+            text: "help".into(),
+            hint: None,
+        }];
+        g.selected_completion = Some(0);
+        let layout = compute_console_frame_layout(&g, 1920.0, 1080.0);
+
+        let content_top = layout.top + layout.font_size + layout.inner_padding;
+        let last_completion_end = content_top
+            + layout.row_height * (layout.scrollback_rows + layout.completion_rows) as f32;
+        assert!(
+            layout.prompt_y() >= last_completion_end - 0.01,
+            "prompt_y {} overlaps last completion row ending at {}",
+            layout.prompt_y(),
+            last_completion_end
+        );
+    }
+
+    #[test]
+    fn test_console_prompt_y_fits_inside_frame() {
+        // The prompt row plus its padded budget must stay inside
+        // `frame_height`; otherwise it renders outside the border.
+        let geometry = sample_console_geometry();
+        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
+        let prompt_bottom = layout.prompt_y() + layout.font_size * 1.4;
+        let frame_bottom = layout.top + layout.frame_height;
+        assert!(
+            prompt_bottom <= frame_bottom + 0.01,
+            "prompt bottom {} overruns frame bottom {}",
+            prompt_bottom,
+            frame_bottom
+        );
+    }
+
+    #[test]
+    fn test_console_border_horizontally_fills_frame_for_hash_unit() {
+        // Narrow-glyph regression guard: the top border must produce
+        // enough repetitions that cosmic-text lays down at least one
+        // glyph per char-width cell across the full inner width.
+        let geometry = sample_console_geometry();
+        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
+        let (top, _, _, _) = build_console_border_strings(
+            "#",
+            layout.frame_width - layout.char_width * 2.0,
+            layout.frame_height,
+            layout.font_size,
+        );
+        let inner_chars_needed =
+            ((layout.frame_width - layout.char_width * 2.0) / layout.char_width) as usize;
+        assert!(
+            top.chars().count() >= inner_chars_needed,
+            "top border ({} glyphs) undercovers inner width ({} char cells)",
+            top.chars().count(),
+            inner_chars_needed
+        );
     }
 
     #[test]

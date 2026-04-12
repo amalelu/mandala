@@ -87,6 +87,20 @@ fn test_console_cursor_is_grapheme_indexed_in_docs() {
 }
 
 #[test]
+fn test_grapheme_space_insertion_via_helper() {
+    // winit delivers the spacebar as `Key::Named(NamedKey::Space)`,
+    // which `handle_console_key` treats as a named key rather than
+    // a char payload. The named-key arm should insert a literal
+    // space the same way the generic char path does — verified here
+    // by driving the helper directly.
+    use baumhard::util::grapheme_chad::insert_str_at_grapheme;
+    let mut input = String::from("ab");
+    let cursor = 1;
+    insert_str_at_grapheme(&mut input, cursor, " ");
+    assert_eq!(input, "a b");
+}
+
+#[test]
 fn test_grapheme_insert_advances_cursor_by_one_per_char() {
     // Simulate three-char insertion via the grapheme_chad helper
     // directly — mirrors what `handle_console_key` does on each

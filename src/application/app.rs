@@ -2339,6 +2339,8 @@ const CONSOLE_KEY_BACKSPACE: &str = "backspace";
 #[cfg(not(target_arch = "wasm32"))]
 const CONSOLE_KEY_DELETE: &str = "delete";
 #[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_SPACE: &str = "space";
+#[cfg(not(target_arch = "wasm32"))]
 const CONSOLE_KEY_CTRL_A: &str = "a";
 #[cfg(not(target_arch = "wasm32"))]
 const CONSOLE_KEY_CTRL_C: &str = "c";
@@ -2685,6 +2687,30 @@ fn handle_console_key(
                     completions.clear();
                     *completion_idx = None;
                 }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+            }
+        }
+        CONSOLE_KEY_SPACE => {
+            // winit delivers the spacebar as `Key::Named(NamedKey::Space)`
+            // rather than a `Key::Character(" ")`, so the `_` arm below
+            // (which only handles `Key::Character`) would drop it. Insert
+            // a literal space here instead.
+            if let ConsoleState::Open {
+                input,
+                cursor,
+                completions,
+                completion_idx,
+                history_idx,
+                ..
+            } = console_state
+            {
+                insert_str_at_grapheme(input, *cursor, " ");
+                *cursor += 1;
+                completions.clear();
+                *completion_idx = None;
+                *history_idx = None;
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
