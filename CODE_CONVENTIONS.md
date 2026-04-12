@@ -150,10 +150,6 @@ simpler shape than it will tolerate.
   screen is fine if it is doing one thing. The same function becomes a
   problem when it mixes concerns — parse *and* validate *and* render.
   Split on the seam, not on the line count.
-- **Scope your changes.** Bug fixes don't need surrounding cleanup.
-  Small features don't need extra configurability. Do not tidy code you
-  did not otherwise touch — drive-by refactors are the enemy of small,
-  focused commits.
 
 ## §4 Error handling
 
