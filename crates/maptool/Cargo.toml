@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 baumhard = { path = "../../lib/baumhard" }
+regex = "1.11.0"

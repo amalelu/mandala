@@ -1,5 +1,6 @@
 use baumhard::mindmap::loader::load_from_file;
 use baumhard::mindmap::model::MindMap;
+use regex::{Regex, RegexBuilder};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -8,9 +9,11 @@ Usage: maptool <command> <map.json> <args...>
 
 Commands:
   show <map.json> <node-id>     Print the text of the node with this ID.
-  grep <map.json> <pattern>     Print every node whose text contains
-                                <pattern> (case-sensitive substring).
-                                Use -i before the map path for case-insensitive.";
+  grep <map.json> <pattern>     Print every node whose text matches the
+                                regex <pattern>. Literal strings also
+                                work (they're valid regexes). Use -i
+                                before the map path for case-insensitive
+                                matching.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,6 +34,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[derive(Debug)]
 enum CliError {
     Usage(String),
     NotFound(String),
@@ -68,8 +72,9 @@ fn run(args: &[String]) -> Result<(), CliError> {
             let pattern = rest
                 .get(1)
                 .ok_or_else(|| CliError::Usage("grep: missing <pattern>".into()))?;
+            let regex = build_regex(pattern, case_insensitive)?;
             let map = load_map(map_path)?;
-            let matches = grep_nodes(&map, pattern, case_insensitive);
+            let matches = grep_nodes(&map, &regex);
             if matches.is_empty() {
                 return Err(CliError::NotFound(format!("no matches for: {pattern}")));
             }
@@ -95,28 +100,22 @@ fn show_node<'a>(map: &'a MindMap, node_id: &str) -> Option<&'a str> {
     map.nodes.get(node_id).map(|n| n.text.as_str())
 }
 
-/// Return every (id, text) pair whose text contains `pattern`.
+/// Compile a user-supplied pattern into a regex, mapping any syntax
+/// error into a `CliError::Usage` so it's reported with exit code 2.
+fn build_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, CliError> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map_err(|e| CliError::Usage(format!("grep: invalid regex {pattern:?}: {e}")))
+}
+
+/// Return every (id, text) pair whose text matches `regex`.
 /// Results are sorted by node ID so output is deterministic.
-fn grep_nodes<'a>(
-    map: &'a MindMap,
-    pattern: &str,
-    case_insensitive: bool,
-) -> Vec<(&'a str, &'a str)> {
-    let needle = if case_insensitive {
-        pattern.to_lowercase()
-    } else {
-        pattern.to_string()
-    };
+fn grep_nodes<'a>(map: &'a MindMap, regex: &Regex) -> Vec<(&'a str, &'a str)> {
     let mut out: Vec<(&str, &str)> = map
         .nodes
         .values()
-        .filter(|n| {
-            if case_insensitive {
-                n.text.to_lowercase().contains(&needle)
-            } else {
-                n.text.contains(&needle)
-            }
-        })
+        .filter(|n| regex.is_match(&n.text))
         .map(|n| (n.id.as_str(), n.text.as_str()))
         .collect();
     out.sort_by_key(|(id, _)| *id);
@@ -161,23 +160,60 @@ mod tests {
         assert!(show_node(&map, "does-not-exist").is_none());
     }
 
+    fn rx(pattern: &str, case_insensitive: bool) -> Regex {
+        build_regex(pattern, case_insensitive).unwrap()
+    }
+
     #[test]
-    fn grep_finds_known_substring() {
+    fn grep_finds_literal_pattern() {
         let map = testament();
-        let hits = grep_nodes(&map, "Lord God", false);
+        let hits = grep_nodes(&map, &rx("Lord God", false));
         assert!(hits.iter().any(|(id, _)| *id == "348068464"));
     }
 
     #[test]
     fn grep_case_insensitive_matches() {
         let map = testament();
-        let insen = grep_nodes(&map, "lord god", true);
+        let insen = grep_nodes(&map, &rx("lord god", true));
         assert!(insen.iter().any(|(id, _)| *id == "348068464"));
     }
 
     #[test]
     fn grep_empty_on_no_match() {
         let map = testament();
-        assert!(grep_nodes(&map, "xyzzy-no-such-token", false).is_empty());
+        assert!(grep_nodes(&map, &rx("xyzzy-no-such-token", false)).is_empty());
+    }
+
+    #[test]
+    fn grep_regex_metacharacters_match() {
+        let map = testament();
+        // "." is a wildcard, "L.rd God" matches "Lord God".
+        let hits = grep_nodes(&map, &rx("L.rd God", false));
+        assert!(hits.iter().any(|(id, _)| *id == "348068464"));
+    }
+
+    #[test]
+    fn grep_regex_character_class_matches() {
+        let map = testament();
+        // Character class: matches either "Lord" or "lord".
+        let hits = grep_nodes(&map, &rx("[Ll]ord God", false));
+        assert!(hits.iter().any(|(id, _)| *id == "348068464"));
+    }
+
+    #[test]
+    fn grep_regex_anchor_matches() {
+        let map = testament();
+        // "Lord God" is at the start of the root node's text.
+        let hits = grep_nodes(&map, &rx("^Lord God", false));
+        assert!(hits.iter().any(|(id, _)| *id == "348068464"));
+    }
+
+    #[test]
+    fn grep_invalid_regex_is_usage_error() {
+        // Unclosed bracket is a syntax error.
+        match build_regex("[unclosed", false) {
+            Err(CliError::Usage(msg)) => assert!(msg.contains("invalid regex")),
+            _ => panic!("expected usage error for invalid regex"),
+        }
     }
 }
