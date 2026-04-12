@@ -5,6 +5,25 @@ use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 use pollster::block_on;
+
+/// Cross-platform monotonic clock returning milliseconds since first call.
+/// Native: uses `Instant` (guaranteed monotonic). WASM: uses
+/// `performance.now()` (monotonic from page load, Spectre-clamped to ≥1ms
+/// but fine for our 400ms double-click window).
+#[cfg(not(target_arch = "wasm32"))]
+fn now_ms() -> f64 {
+    use std::sync::OnceLock;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
+}
 use glam::Vec2;
 use indextree::Arena;
 use wgpu::{Instance, SurfaceTargetUnsafe};
@@ -109,7 +128,6 @@ impl LabelEditState {
 /// char-index offset within `buffer`. The transient edits flow
 /// through Baumhard's `Mutation::AreaDelta` vocabulary applied to the
 /// live tree — the model is untouched until commit.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 enum TextEditState {
     Closed,
@@ -123,7 +141,6 @@ enum TextEditState {
     },
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl TextEditState {
     fn is_open(&self) -> bool {
         matches!(self, TextEditState::Open { .. })
@@ -140,10 +157,13 @@ impl TextEditState {
 /// second click within a short time + distance window is recognized as
 /// a double-click. Double-click fires on the second `Pressed` event,
 /// not the second release.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Session 7B: `time` changed from `Instant` to `f64` milliseconds
+/// via the cross-platform `now_ms()` helper so this struct compiles
+/// on both native and WASM.
 #[derive(Debug, Clone)]
 struct LastClick {
-    time: Instant,
+    time: f64,
     screen_pos: (f64, f64),
     /// Which node, if any, the first click landed on. Two clicks with
     /// the same `hit` (both `Some(id)` for the same id, or both
@@ -152,30 +172,29 @@ struct LastClick {
 }
 
 /// Double-click window in milliseconds. Matches GNOME/winit convention.
-#[cfg(not(target_arch = "wasm32"))]
-const DOUBLE_CLICK_MS: u128 = 400;
+const DOUBLE_CLICK_MS: f64 = 400.0;
 
 /// Double-click maximum distance² in screen-space pixels.
-#[cfg(not(target_arch = "wasm32"))]
 const DOUBLE_CLICK_DIST_SQ: f64 = 16.0 * 16.0;
 
 /// Session 7A: glyph rendered at the cursor position while a node
 /// text editor is open. Reuses the same caret as `LabelEditState`.
-#[cfg(not(target_arch = "wasm32"))]
 const TEXT_EDIT_CARET: char = '\u{258C}';
 
 /// Session 7A: returns `true` when a new click-down qualifies as a
 /// double-click given the previous click. Extracted as a pure helper
 /// so cursor/time math can be unit-tested without a winit event loop.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Session 7B: rewritten to use `f64` millisecond timestamps from
+/// `now_ms()` instead of `Instant`, enabling WASM compatibility.
 fn is_double_click(
     prev: &LastClick,
-    new_time: Instant,
+    new_time_ms: f64,
     new_screen_pos: (f64, f64),
     new_hit: &Option<String>,
 ) -> bool {
-    let elapsed = new_time.duration_since(prev.time).as_millis();
-    if elapsed >= DOUBLE_CLICK_MS {
+    let elapsed = new_time_ms - prev.time;
+    if elapsed < 0.0 || elapsed >= DOUBLE_CLICK_MS {
         return false;
     }
     let dx = new_screen_pos.0 - prev.screen_pos.0;
@@ -190,7 +209,6 @@ fn is_double_click(
 /// the byte offset in `buffer` that corresponds to inserting at char
 /// index `cursor`. `cursor == buffer.chars().count()` maps to
 /// `buffer.len()` (end of string).
-#[cfg(not(target_arch = "wasm32"))]
 fn cursor_char_to_byte(buffer: &str, cursor: usize) -> usize {
     buffer
         .char_indices()
@@ -201,7 +219,6 @@ fn cursor_char_to_byte(buffer: &str, cursor: usize) -> usize {
 
 /// Session 7A: insert `ch` at char position `cursor` in `buffer`,
 /// returning the new cursor position (one past the insert).
-#[cfg(not(target_arch = "wasm32"))]
 fn insert_at_cursor(buffer: &mut String, cursor: usize, ch: char) -> usize {
     let byte = cursor_char_to_byte(buffer, cursor);
     buffer.insert(byte, ch);
@@ -210,7 +227,6 @@ fn insert_at_cursor(buffer: &mut String, cursor: usize, ch: char) -> usize {
 
 /// Session 7A: delete the char immediately before `cursor` (Backspace
 /// semantics). Returns the new cursor position. No-op at `cursor == 0`.
-#[cfg(not(target_arch = "wasm32"))]
 fn delete_before_cursor(buffer: &mut String, cursor: usize) -> usize {
     if cursor == 0 {
         return 0;
@@ -223,7 +239,6 @@ fn delete_before_cursor(buffer: &mut String, cursor: usize) -> usize {
 
 /// Session 7A: delete the char at `cursor` (Delete semantics). Returns
 /// the unchanged cursor position. No-op at end of buffer.
-#[cfg(not(target_arch = "wasm32"))]
 fn delete_at_cursor(buffer: &mut String, cursor: usize) -> usize {
     let total = buffer.chars().count();
     if cursor >= total {
@@ -239,7 +254,6 @@ fn delete_at_cursor(buffer: &mut String, cursor: usize) -> usize {
 /// containing `cursor` — i.e. the position just after the most recent
 /// `\n` strictly before `cursor`, or 0 if no prior `\n`. Walks the
 /// buffer once via `chars()` without allocating.
-#[cfg(not(target_arch = "wasm32"))]
 fn cursor_to_line_start(buffer: &str, cursor: usize) -> usize {
     let mut line_start = 0usize;
     for (i, ch) in buffer.chars().enumerate() {
@@ -257,7 +271,6 @@ fn cursor_to_line_start(buffer: &str, cursor: usize) -> usize {
 /// containing `cursor` — i.e. the position of the next `\n` at or
 /// after `cursor`, or the total char count if no `\n` follows.
 /// Walks the buffer once via `chars()` without allocating.
-#[cfg(not(target_arch = "wasm32"))]
 fn cursor_to_line_end(buffer: &str, cursor: usize) -> usize {
     let mut total = 0usize;
     for (i, ch) in buffer.chars().enumerate() {
@@ -273,7 +286,6 @@ fn cursor_to_line_end(buffer: &str, cursor: usize) -> usize {
 /// column. Column is computed as `cursor - line_start` on the current
 /// line. The new position lands at `prev_line_start + min(col,
 /// prev_line_len)`. No-op if already on the first line.
-#[cfg(not(target_arch = "wasm32"))]
 fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
     let line_start = cursor_to_line_start(buffer, cursor);
     if line_start == 0 {
@@ -289,7 +301,6 @@ fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
 
 /// Session 7A: move the cursor down one line, preserving the visual
 /// column. No-op if already on the last line.
-#[cfg(not(target_arch = "wasm32"))]
 fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
     let total = buffer.chars().count();
     let line_start = cursor_to_line_start(buffer, cursor);
@@ -307,7 +318,6 @@ fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
 /// Session 7A: build the display text for the edited node by
 /// inserting the caret glyph at the cursor position. Used on every
 /// keystroke to produce the `Mutation::AreaDelta` payload.
-#[cfg(not(target_arch = "wasm32"))]
 fn insert_caret(buffer: &str, cursor: usize) -> String {
     let byte = cursor_char_to_byte(buffer, cursor);
     let mut out = String::with_capacity(buffer.len() + TEXT_EDIT_CARET.len_utf8());
@@ -691,7 +701,7 @@ impl Application {
                                 // in-progress buffer. Let the press fall
                                 // through; the corresponding release
                                 // will be swallowed as click-inside.
-                                let now = Instant::now();
+                                let now = now_ms();
                                 let already_editing_same_target = text_edit_state
                                     .node_id()
                                     .map(|id| hit_node.as_deref() == Some(id))
@@ -1791,6 +1801,9 @@ impl Application {
     pub fn run(mut self) {
         use wasm_bindgen::JsCast;
         use winit::platform::web::WindowExtWebSys;
+        use std::rc::Rc;
+        use std::cell::{Cell, RefCell};
+        use baumhard::mindmap::tree_builder::MindMapTree;
 
         baumhard::font::fonts::init();
 
@@ -1799,10 +1812,6 @@ impl Application {
         // see KeybindConfig::load_for_web().
         self.options.keybind_config =
             crate::application::keybinds::KeybindConfig::load_for_web();
-        let _keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
-        // TODO (WASM): once keyboard input is forwarded to the document,
-        // dispatch through `_keybinds.action_for(...)` the same way the
-        // native path does.
 
         // Attach canvas to DOM
         let canvas = self.window.canvas().expect("Failed to get canvas");
@@ -1813,6 +1822,47 @@ impl Application {
         canvas.set_width(web_window.inner_width().unwrap().as_f64().unwrap() as u32);
         canvas.set_height(web_window.inner_height().unwrap().as_f64().unwrap() as u32);
 
+        // Phase 3: canvas must be focusable for keyboard events to reach
+        // winit. Without tabindex, an HTMLCanvasElement never receives
+        // focus in any browser.
+        canvas.set_attribute("tabindex", "0").ok();
+        let _ = canvas.focus();
+
+        // Phase 3: re-focus on mousedown so clicking the canvas after
+        // tabbing to another element restores keyboard input.
+        {
+            let canvas_for_focus = canvas.clone();
+            let focus_cb = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+                move |_: web_sys::Event| {
+                    let _ = canvas_for_focus.focus();
+                },
+            );
+            canvas
+                .add_event_listener_with_callback("mousedown", focus_cb.as_ref().unchecked_ref())
+                .ok();
+            focus_cb.forget(); // leak — lives for the page lifetime
+        }
+
+        // Phase 3: preventDefault on keydown while the text editor is
+        // open so Tab/Enter/Backspace/arrows don't fire browser defaults
+        // (tab-navigation, history-back, page-scroll). The flag is shared
+        // with the input handlers that set it.
+        let suppress_keys: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        {
+            let suppress = suppress_keys.clone();
+            let pd_cb = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+                move |evt: web_sys::Event| {
+                    if suppress.get() {
+                        evt.prevent_default();
+                    }
+                },
+            );
+            canvas
+                .add_event_listener_with_callback("keydown", pd_cb.as_ref().unchecked_ref())
+                .ok();
+            pd_cb.forget();
+        }
+
         let gfx_arena: Arc<RwLock<Arena<GfxElement>>> = Arc::new(RwLock::new(Arena::new()));
         let renderer_window = Arc::clone(&self.window);
 
@@ -1820,7 +1870,6 @@ impl Application {
         let mindmap_path = {
             let web_window = web_sys::window().expect("No global window");
             let search = web_window.location().search().unwrap_or_default();
-            // Handle both "?map=foo" and "?keybinds=...&map=foo" forms.
             let mut map_path: Option<String> = None;
             let trimmed = search.trim_start_matches('?');
             for pair in trimmed.split('&') {
@@ -1830,6 +1879,34 @@ impl Application {
             }
             map_path.unwrap_or_else(|| self.options.mindmap_path.clone())
         };
+
+        // Phase 4: shared state between the rAF render loop and the
+        // winit event loop. Two RefCells to minimize borrow surface —
+        // input handlers only touch InputState most of the time, borrowing
+        // the renderer only briefly for screen_to_canvas or rebuild calls.
+        struct WasmInputState {
+            document: MindMapDocument,
+            mindmap_tree: Option<MindMapTree>,
+            text_edit_state: TextEditState,
+            last_click: Option<LastClick>,
+            cursor_pos: (f64, f64),
+            /// Minimal drag state for click-outside-commit. Full drag
+            /// machine (pan, move, reparent, connect) deferred to a later
+            /// WASM-parity session.
+            pending_click: Option<WasmPendingClick>,
+        }
+        struct WasmPendingClick {
+            start_pos: (f64, f64),
+            hit_node: Option<String>,
+        }
+
+        let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
+        let input_rc: Rc<RefCell<Option<WasmInputState>>> = Rc::new(RefCell::new(None));
+        let suppress_for_init = suppress_keys.clone();
+
+        // Clone Rcs for the spawn_local init future
+        let renderer_for_init = renderer_rc.clone();
+        let input_for_init = input_rc.clone();
 
         // On WASM we run single-threaded -- spawn the renderer init as a future
         wasm_bindgen_futures::spawn_local(async move {
@@ -1850,43 +1927,58 @@ impl Application {
             renderer.process_decree(RenderDecree::SetSurfaceSize(size, height));
 
             // Load mindmap through Document -> Tree + Scene -> Renderer flow
-            if let Ok(document) = MindMapDocument::load(&mindmap_path) {
-                // Nodes: build Baumhard tree from MindMap hierarchy
-                let mindmap_tree = document.build_tree();
+            let mut doc_opt: Option<MindMapDocument> = None;
+            let mut tree_opt: Option<MindMapTree> = None;
+            if let Ok(doc) = MindMapDocument::load(&mindmap_path) {
+                let mindmap_tree = doc.build_tree();
                 renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
                 renderer.fit_camera_to_tree(&mindmap_tree.tree);
 
-                // Connections + borders: flat pipeline from RenderScene.
-                // `fit_camera_to_tree` above settled the zoom, so pass
-                // it through for correct glyph sizing.
-                let scene = document.build_scene(renderer.camera_zoom());
+                let scene = doc.build_scene(renderer.camera_zoom());
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 renderer.rebuild_border_buffers(&scene.border_elements);
                 renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
                 renderer.rebuild_portal_buffers(&scene.portal_elements);
+                tree_opt = Some(mindmap_tree);
+                doc_opt = Some(doc);
             }
 
             renderer.process_decree(RenderDecree::StartRender);
 
-            // Store renderer in a RefCell for the event loop
-            let renderer = std::cell::RefCell::new(renderer);
+            // Populate the shared state now that init is complete.
+            *renderer_for_init.borrow_mut() = Some(renderer);
+
+            if let Some(doc) = doc_opt {
+                *input_for_init.borrow_mut() = Some(WasmInputState {
+                    document: doc,
+                    mindmap_tree: tree_opt,
+                    text_edit_state: TextEditState::Closed,
+                    last_click: None,
+                    cursor_pos: (0.0, 0.0),
+                    pending_click: None,
+                });
+            }
 
             // WASM render loop via requestAnimationFrame
             use wasm_bindgen::closure::Closure;
-            let f: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
-                std::rc::Rc::new(std::cell::RefCell::new(None));
+            let renderer_for_raf = renderer_for_init.clone();
+            let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> =
+                Rc::new(RefCell::new(None));
             let g = f.clone();
 
             *g.borrow_mut() = Some(Closure::new(move || {
-                renderer.borrow_mut().process();
+                if let Some(r) = renderer_for_raf.borrow_mut().as_mut() {
+                    r.process();
+                }
                 request_animation_frame(f.borrow().as_ref().unwrap());
             }));
             request_animation_frame(g.borrow().as_ref().unwrap());
         });
 
-        // The event loop handles input but doesn't block on WASM
-        let mut cursor_pos: (f64, f64) = (0.0, 0.0);
-        let mut is_panning = false;
+        // Clone Rcs for the event loop closure
+        let renderer_for_events = renderer_rc.clone();
+        let input_for_events = input_rc.clone();
+        let suppress_for_events = suppress_keys.clone();
 
         self.event_loop.run(move |event, _window_target| {
             _ = (&self.window, &mut self.options);
@@ -1902,30 +1994,273 @@ impl Application {
                 } => {
                     // WASM doesn't really close
                 }
+
+                // -------------------------------------------------------
+                // Phase 5: Keyboard input — text editor dispatch
+                // -------------------------------------------------------
                 Event::WindowEvent {
-                    event: WindowEvent::MouseInput { state, button, .. }, ..
+                    event: WindowEvent::KeyboardInput {
+                        event: KeyEvent {
+                            state: ElementState::Pressed,
+                            logical_key: ref logical_key,
+                            ..
+                        },
+                        ..
+                    },
+                    ..
                 } => {
-                    if button == MouseButton::Left || button == MouseButton::Middle {
-                        is_panning = state == ElementState::Pressed;
-                    }
-                }
-                Event::WindowEvent {
-                    event: WindowEvent::MouseWheel { delta, .. }, ..
-                } => {
-                    let _scroll_y = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y as f64,
-                        MouseScrollDelta::PixelDelta(pos) => pos.y / 50.0,
+                    // Extract key name the same way native does at ~line 1279
+                    let key_name: Option<String> = match logical_key {
+                        Key::Character(c) => Some(
+                            crate::application::keybinds::normalize_key_name(c.as_ref()),
+                        ),
+                        Key::Named(named) => Some(
+                            crate::application::keybinds::normalize_key_name(
+                                &format!("{:?}", named),
+                            ),
+                        ),
+                        _ => None,
                     };
-                    // TODO: WASM input needs to be forwarded to the renderer
+
+                    // Text editor keyboard-steal: if open, route all keys
+                    // to the editor. This mirrors the native cascade at
+                    // ~line 1348.
+                    let editor_is_open = {
+                        let borrow = input_for_events.borrow();
+                        borrow.as_ref().map(|s| s.text_edit_state.is_open()).unwrap_or(false)
+                    };
+                    if editor_is_open {
+                        let mut input_borrow = input_for_events.borrow_mut();
+                        let mut renderer_borrow = renderer_for_events.borrow_mut();
+                        if let (Some(input), Some(renderer)) =
+                            (input_borrow.as_mut(), renderer_borrow.as_mut())
+                        {
+                            handle_text_edit_key(
+                                &key_name,
+                                logical_key,
+                                &mut input.text_edit_state,
+                                &mut input.document,
+                                &mut input.mindmap_tree,
+                                renderer,
+                            );
+                            suppress_for_events.set(input.text_edit_state.is_open());
+                        }
+                        return;
+                    }
+                    // Full hotkey dispatch via keybinds deferred to a
+                    // later WASM-parity session.
                 }
+
+                // -------------------------------------------------------
+                // Phase 5: Mouse input — click to open/commit editor
+                // -------------------------------------------------------
                 Event::WindowEvent {
                     event: WindowEvent::CursorMoved { position, .. }, ..
                 } => {
-                    let _dx = position.x - cursor_pos.0;
-                    let _dy = position.y - cursor_pos.1;
-                    cursor_pos = (position.x, position.y);
-                    // TODO: WASM input needs to be forwarded to the renderer
+                    if let Some(input) = input_for_events.borrow_mut().as_mut() {
+                        input.cursor_pos = (position.x, position.y);
+                    }
                 }
+
+                Event::WindowEvent {
+                    event: WindowEvent::MouseInput {
+                        state: btn_state,
+                        button: MouseButton::Left,
+                        ..
+                    },
+                    ..
+                } => {
+                    if btn_state == ElementState::Pressed {
+                        // --- Left mouse Pressed ---
+                        let mut input_borrow = input_for_events.borrow_mut();
+                        let Some(input) = input_borrow.as_mut() else { return; };
+
+                        // Compute canvas position via renderer
+                        let canvas_pos = {
+                            let renderer_borrow = renderer_for_events.borrow();
+                            match renderer_borrow.as_ref() {
+                                Some(r) => r.screen_to_canvas(
+                                    input.cursor_pos.0 as f32,
+                                    input.cursor_pos.1 as f32,
+                                ),
+                                None => return,
+                            }
+                        };
+
+                        // Hit test against nodes
+                        let hit_node: Option<String> = input.mindmap_tree
+                            .as_ref()
+                            .and_then(|tree| {
+                                crate::application::document::hit_test(canvas_pos, tree)
+                            });
+
+                        // Double-click detection
+                        let now = now_ms();
+                        let already_editing_same_target = input.text_edit_state
+                            .node_id()
+                            .map(|id| hit_node.as_deref() == Some(id))
+                            .unwrap_or(false);
+                        let is_dblclick = !already_editing_same_target
+                            && input.last_click
+                                .as_ref()
+                                .map(|prev| is_double_click(prev, now, input.cursor_pos, &hit_node))
+                                .unwrap_or(false);
+
+                        if is_dblclick {
+                            input.last_click = None;
+
+                            // Need renderer for open_text_edit — drop input, grab both
+                            let cursor_pos = input.cursor_pos;
+                            let hit_clone = hit_node.clone();
+                            drop(input_borrow);
+
+                            let mut input_borrow = input_for_events.borrow_mut();
+                            let input = input_borrow.as_mut().unwrap();
+                            let mut renderer_borrow = renderer_for_events.borrow_mut();
+                            let Some(renderer) = renderer_borrow.as_mut() else { return; };
+
+                            if let Some(ref node_id) = hit_clone {
+                                // Double-click on node → open editor
+                                let nid = node_id.clone();
+                                input.document.selection = SelectionState::Single(nid.clone());
+                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                open_text_edit(
+                                    &nid, false,
+                                    &mut input.document,
+                                    &mut input.text_edit_state,
+                                    &mut input.mindmap_tree,
+                                    renderer,
+                                );
+                            } else {
+                                // Double-click empty space → create orphan + edit
+                                let allow_create = !matches!(
+                                    input.document.selection,
+                                    SelectionState::Edge(_) | SelectionState::Portal(_)
+                                );
+                                if allow_create {
+                                    let canvas_pos_for_create = renderer.screen_to_canvas(
+                                        cursor_pos.0 as f32,
+                                        cursor_pos.1 as f32,
+                                    );
+                                    let new_id = input.document.apply_create_orphan_node(canvas_pos_for_create);
+                                    input.document.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
+                                    input.document.selection = SelectionState::Single(new_id.clone());
+                                    input.document.dirty = true;
+                                    rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                    open_text_edit(
+                                        &new_id, true,
+                                        &mut input.document,
+                                        &mut input.text_edit_state,
+                                        &mut input.mindmap_tree,
+                                        renderer,
+                                    );
+                                }
+                            }
+                            suppress_for_events.set(input.text_edit_state.is_open());
+                            return;
+                        }
+
+                        // Not a double-click: store as pending click and
+                        // record LastClick for next potential double-click.
+                        input.pending_click = Some(WasmPendingClick {
+                            start_pos: input.cursor_pos,
+                            hit_node: hit_node.clone(),
+                        });
+                        input.last_click = Some(LastClick {
+                            time: now,
+                            screen_pos: input.cursor_pos,
+                            hit: hit_node,
+                        });
+                    } else {
+                        // --- Left mouse Released ---
+                        // Replicate native click-outside-commit from
+                        // DragState::Pending → Released at ~line 802-862.
+                        let mut input_borrow = input_for_events.borrow_mut();
+                        let Some(input) = input_borrow.as_mut() else { return; };
+
+                        let pending = input.pending_click.take();
+                        let Some(pending) = pending else { return; };
+
+                        if input.text_edit_state.is_open() {
+                            // Compute release canvas position
+                            let release_canvas = {
+                                let renderer_borrow = renderer_for_events.borrow();
+                                match renderer_borrow.as_ref() {
+                                    Some(r) => r.screen_to_canvas(
+                                        input.cursor_pos.0 as f32,
+                                        input.cursor_pos.1 as f32,
+                                    ),
+                                    None => return,
+                                }
+                            };
+
+                            // Check if release is inside the edited node's AABB
+                            let edited_node_id = input.text_edit_state.node_id().unwrap().to_string();
+                            let inside_edit_node = input.mindmap_tree
+                                .as_ref()
+                                .and_then(|tree| {
+                                    tree.node_map.get(&edited_node_id)
+                                        .and_then(|nid| tree.tree.arena.get(*nid))
+                                        .and_then(|n| n.get().glyph_area())
+                                        .map(|area| {
+                                            let pos = area.position();
+                                            let bx = area.render_bounds.x.0;
+                                            let by = area.render_bounds.y.0;
+                                            release_canvas.x >= pos.x
+                                                && release_canvas.x <= pos.x + bx
+                                                && release_canvas.y >= pos.y
+                                                && release_canvas.y <= pos.y + by
+                                        })
+                                })
+                                .unwrap_or(false);
+
+                            if inside_edit_node {
+                                // Click inside edited node → swallow, stay editing
+                                return;
+                            }
+
+                            // Click outside → commit the editor.
+                            // Need renderer — release input, take both borrows.
+                            drop(input_borrow);
+                            let mut input_borrow = input_for_events.borrow_mut();
+                            let input = input_borrow.as_mut().unwrap();
+                            let mut renderer_borrow = renderer_for_events.borrow_mut();
+                            if let Some(renderer) = renderer_borrow.as_mut() {
+                                close_text_edit(
+                                    true,
+                                    &mut input.document,
+                                    &mut input.text_edit_state,
+                                    &mut input.mindmap_tree,
+                                    renderer,
+                                );
+                            }
+                            suppress_for_events.set(false);
+                            return;
+                        }
+
+                        // Not editing — plain selection click
+                        if let Some(ref node_id) = pending.hit_node {
+                            input.document.selection = SelectionState::Single(node_id.clone());
+                        } else {
+                            input.document.selection = SelectionState::None;
+                        }
+                        // Rebuild to show selection highlight
+                        drop(input_borrow);
+                        let mut input_borrow = input_for_events.borrow_mut();
+                        let input = input_borrow.as_mut().unwrap();
+                        let mut renderer_borrow = renderer_for_events.borrow_mut();
+                        if let Some(renderer) = renderer_borrow.as_mut() {
+                            rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                        }
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::MouseWheel { .. }, ..
+                } => {
+                    // Zoom deferred to a later WASM-parity session.
+                }
+
                 _ => {}
             }
         }).expect("Event loop error");
@@ -2254,7 +2589,6 @@ fn rebuild_all(
 /// color preview doesn't change node text, borders, or positions,
 /// so the tree rebuild is wasted work. Halves the hot-path cost vs
 /// `rebuild_all` on maps with many nodes.
-#[cfg(not(target_arch = "wasm32"))]
 fn rebuild_scene_only(doc: &MindMapDocument, renderer: &mut Renderer) {
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_buffers(&scene.connection_elements);
@@ -2415,7 +2749,6 @@ fn close_label_edit(
 /// model itself *is* the pre-edit state. `set_node_text` takes its
 /// own "before" snapshot at commit time, and cancel just rebuilds
 /// the tree from the unchanged model.
-#[cfg(not(target_arch = "wasm32"))]
 fn open_text_edit(
     node_id: &str,
     from_creation: bool,
@@ -2453,7 +2786,6 @@ fn open_text_edit(
 /// entry if the value actually differs. Cancel just calls
 /// `rebuild_all`, which rebuilds the tree from the untouched model —
 /// the transient caret-bearing tree state is discarded wholesale.
-#[cfg(not(target_arch = "wasm32"))]
 fn close_text_edit(
     commit: bool,
     doc: &mut MindMapDocument,
@@ -2483,7 +2815,6 @@ fn close_text_edit(
 /// `Mutation::apply_to_area` vocabulary. The renderer's text buffers
 /// are rebuilt from the mutated tree so the next frame reflects the
 /// keystroke.
-#[cfg(not(target_arch = "wasm32"))]
 fn apply_text_edit_to_tree(
     node_id: &str,
     buffer: &str,
@@ -2535,7 +2866,6 @@ fn apply_text_edit_to_tree(
 /// Backspace/Delete delete, and printable chars are inserted at the
 /// cursor. Every successful mutation is pushed through
 /// `apply_text_edit_to_tree` so the tree and renderer stay in sync.
-#[cfg(not(target_arch = "wasm32"))]
 fn handle_text_edit_key(
     key_name: &Option<String>,
     logical_key: &Key,
@@ -3707,10 +4037,9 @@ pub struct Options {
 // Event-loop integration is verified manually via `cargo run`.
 // =====================================================================
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod text_edit_tests {
     use super::*;
-    use std::time::Duration;
 
     // -----------------------------------------------------------------
     // Cursor math
@@ -3863,16 +4192,14 @@ mod text_edit_tests {
 
     #[test]
     fn test_double_click_same_target_within_window_fires() {
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (100.0, 100.0),
             hit: Some("node-a".to_string()),
         };
-        let t1 = t0 + Duration::from_millis(100);
         assert!(is_double_click(
             &prev,
-            t1,
+            1100.0,
             (101.0, 100.0),
             &Some("node-a".to_string()),
         ));
@@ -3880,16 +4207,14 @@ mod text_edit_tests {
 
     #[test]
     fn test_double_click_different_targets_does_not_fire() {
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (100.0, 100.0),
             hit: Some("node-a".to_string()),
         };
-        let t1 = t0 + Duration::from_millis(100);
         assert!(!is_double_click(
             &prev,
-            t1,
+            1100.0,
             (100.0, 100.0),
             &Some("node-b".to_string()),
         ));
@@ -3897,41 +4222,56 @@ mod text_edit_tests {
 
     #[test]
     fn test_double_click_too_far_apart_does_not_fire() {
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (100.0, 100.0),
             hit: None,
         };
-        let t1 = t0 + Duration::from_millis(100);
         // Distance = sqrt(20² + 0²) = 20px → dist² = 400, threshold = 256.
-        assert!(!is_double_click(&prev, t1, (120.0, 100.0), &None));
+        assert!(!is_double_click(&prev, 1100.0, (120.0, 100.0), &None));
     }
 
     #[test]
     fn test_double_click_expired_does_not_fire() {
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (100.0, 100.0),
             hit: None,
         };
-        let t1 = t0 + Duration::from_millis(500);
-        assert!(!is_double_click(&prev, t1, (100.0, 100.0), &None));
+        assert!(!is_double_click(&prev, 1500.0, (100.0, 100.0), &None));
     }
 
     #[test]
     fn test_double_click_empty_space_both_misses_fires() {
         // Both clicks landed on no node — valid double-click for
         // the "create orphan" gesture.
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (50.0, 50.0),
             hit: None,
         };
-        let t1 = t0 + Duration::from_millis(150);
-        assert!(is_double_click(&prev, t1, (52.0, 51.0), &None));
+        assert!(is_double_click(&prev, 1150.0, (52.0, 51.0), &None));
+    }
+
+    #[test]
+    fn test_double_click_exact_boundary_does_not_fire() {
+        // At exactly DOUBLE_CLICK_MS elapsed, should NOT fire (uses >= threshold).
+        let prev = LastClick {
+            time: 1000.0,
+            screen_pos: (100.0, 100.0),
+            hit: None,
+        };
+        assert!(!is_double_click(&prev, 1400.0, (100.0, 100.0), &None));
+    }
+
+    #[test]
+    fn test_double_click_just_under_boundary_fires() {
+        let prev = LastClick {
+            time: 1000.0,
+            screen_pos: (100.0, 100.0),
+            hit: None,
+        };
+        assert!(is_double_click(&prev, 1399.0, (100.0, 100.0), &None));
     }
 
     // -----------------------------------------------------------------

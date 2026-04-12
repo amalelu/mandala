@@ -1499,6 +1499,7 @@ dependencies = [
  "glam",
  "glyphon",
  "indextree",
+ "js-sys",
  "lazy_static",
  "log",
  "num_cpus",
