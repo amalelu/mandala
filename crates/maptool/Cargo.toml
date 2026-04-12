@@ -1,0 +1,7 @@
+[package]
+name = "maptool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+baumhard = { path = "../../lib/baumhard" }
