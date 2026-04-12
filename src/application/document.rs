@@ -1310,6 +1310,104 @@ impl MindMapDocument {
         self.apply_reparent(node_ids, None)
     }
 
+    /// Create an orphan node at `canvas_pos`, push the `CreateNode` undo
+    /// entry, select the new node, and mark the document dirty. Returns
+    /// the new node's id. Shared between the Ctrl+N / double-click-empty
+    /// paths on native and WASM — each caller then typically opens the
+    /// text editor on the returned id.
+    pub fn create_orphan_and_select(&mut self, canvas_pos: Vec2) -> String {
+        let new_id = self.apply_create_orphan_node(canvas_pos);
+        self.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
+        self.selection = SelectionState::Single(new_id.clone());
+        self.dirty = true;
+        new_id
+    }
+
+    /// Detach every currently-selected node from its parent (promote to
+    /// root), push the `ReparentNodes` undo entry, and mark dirty.
+    /// Returns `true` if anything was actually orphaned — callers gate a
+    /// rebuild on this. No-op on empty selection or when no nodes
+    /// actually moved.
+    pub fn apply_orphan_selection_with_undo(&mut self) -> bool {
+        let sel: Vec<String> = self.selection
+            .selected_ids().iter().map(|s| s.to_string()).collect();
+        if sel.is_empty() {
+            return false;
+        }
+        let undo_data = self.apply_orphan_selection(&sel);
+        if undo_data.entries.is_empty() {
+            return false;
+        }
+        self.undo_stack.push(UndoAction::ReparentNodes {
+            entries: undo_data.entries,
+            old_edges: undo_data.old_edges,
+        });
+        self.dirty = true;
+        true
+    }
+
+    /// Delete whatever is currently selected (edge / portal / single node /
+    /// multiple nodes), push the appropriate undo entries, clear the
+    /// selection, and mark dirty. Returns `true` if anything was actually
+    /// deleted so the caller can gate a rebuild; `false` on empty selection
+    /// or no-op removes. Node deletion orphans immediate children (they
+    /// become roots) and strips every edge that touched the deleted node.
+    /// For multi-select, one undo entry is pushed per node so Ctrl+Z
+    /// unwinds them in reverse order.
+    pub fn apply_delete_selection(&mut self) -> bool {
+        enum DelKind {
+            Edge(EdgeRef),
+            Portal(PortalRef),
+            Node(String),
+            Nodes(Vec<String>),
+        }
+        let kind = match &self.selection {
+            SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
+            SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
+            SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
+            SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
+            SelectionState::None => None,
+        };
+        match kind {
+            Some(DelKind::Edge(edge_ref)) => {
+                if let Some((index, edge)) = self.remove_edge(&edge_ref) {
+                    self.undo_stack.push(UndoAction::DeleteEdge { index, edge });
+                    self.selection = SelectionState::None;
+                    self.dirty = true;
+                    return true;
+                }
+            }
+            Some(DelKind::Portal(pref)) => {
+                if self.apply_delete_portal(&pref).is_some() {
+                    self.selection = SelectionState::None;
+                    return true;
+                }
+            }
+            Some(DelKind::Node(id)) => {
+                if let Some(undo) = self.delete_node(&id) {
+                    self.undo_stack.push(undo);
+                    self.selection = SelectionState::None;
+                    return true;
+                }
+            }
+            Some(DelKind::Nodes(ids)) => {
+                let mut any = false;
+                for id in ids {
+                    if let Some(undo) = self.delete_node(&id) {
+                        self.undo_stack.push(undo);
+                        any = true;
+                    }
+                }
+                if any {
+                    self.selection = SelectionState::None;
+                    return true;
+                }
+            }
+            None => {}
+        }
+        false
+    }
+
     /// Generate a fresh node id that doesn't collide with any existing
     /// node. The format is `new-<n>` where `n` starts at 1 and increments
     /// until the id is free. Deterministic for testing.
@@ -1973,6 +2071,31 @@ pub fn hit_test(canvas_pos: Vec2, tree: &MindMapTree) -> Option<String> {
     best.map(|(id, _)| id)
 }
 
+/// Is `canvas_pos` inside the AABB of node `node_id`? Reads the tree-side
+/// glyph area so drag-preview positions count (tree is authoritative
+/// during in-flight mutations; identical to the model when idle).
+///
+/// Unlike `hit_test`, this answers a point-in-specific-node question —
+/// a click over a child of `node_id` still counts as "inside" `node_id`,
+/// which is what the text editor's click-outside-commit gesture wants.
+pub fn point_in_node_aabb(canvas_pos: Vec2, node_id: &str, tree: &MindMapTree) -> bool {
+    tree.node_map
+        .get(node_id)
+        .and_then(|nid| tree.tree.arena.get(*nid))
+        .and_then(|n| n.get().glyph_area())
+        .map(|area| {
+            let x = area.position.x.0;
+            let y = area.position.y.0;
+            let w = area.render_bounds.x.0;
+            let h = area.render_bounds.y.0;
+            canvas_pos.x >= x
+                && canvas_pos.x <= x + w
+                && canvas_pos.y >= y
+                && canvas_pos.y <= y + h
+        })
+        .unwrap_or(false)
+}
+
 /// Hit test edges: find the nearest visible edge within `tolerance` canvas
 /// units of `canvas_pos`. Returns an `EdgeRef` for the closest edge, or
 /// `None` if nothing is within range.
@@ -2196,9 +2319,11 @@ mod tests {
         // Find a parent-child pair where child is inside parent's bounds
         // "Lord God" (348068464) has children — find one whose bounds overlap
         let parent_id_str = "348068464";
-        let parent_node_id = tree.node_map.get(parent_id_str).unwrap();
-        let parent_area = tree.tree.arena.get(*parent_node_id).unwrap().get().glyph_area().unwrap();
-        let parent_size = parent_area.render_bounds.x.0 * parent_area.render_bounds.y.0;
+        let parent_size = {
+            let nid = tree.node_map.get(parent_id_str).unwrap();
+            let area = tree.tree.arena.get(*nid).unwrap().get().glyph_area().unwrap();
+            area.render_bounds.x.0 * area.render_bounds.y.0
+        };
 
         // Find any child node that's smaller and test its center
         for (mind_id, &nid) in &tree.node_map {
@@ -2212,16 +2337,9 @@ mod tests {
                 a.position.x.0 + a.render_bounds.x.0 / 2.0,
                 a.position.y.0 + a.render_bounds.y.0 / 2.0,
             );
-            // Check if this child center also hits the parent
-            let px = parent_area.position.x.0;
-            let py = parent_area.position.y.0;
-            let pw = parent_area.render_bounds.x.0;
-            let ph = parent_area.render_bounds.y.0;
-            if child_center.x >= px && child_center.x <= px + pw
-                && child_center.y >= py && child_center.y <= py + ph
-                && child_size < parent_size
+            if child_size < parent_size
+                && point_in_node_aabb(child_center, parent_id_str, &tree)
             {
-                // Both parent and child contain this point — should return the smaller one
                 let result = hit_test(child_center, &tree);
                 assert_eq!(result, Some(mind_id.clone()),
                     "Should select smaller child node, not parent");

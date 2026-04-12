@@ -5,12 +5,31 @@ use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 use pollster::block_on;
+
+/// Cross-platform monotonic clock returning milliseconds since first call.
+/// Native: uses `Instant` (guaranteed monotonic). WASM: uses
+/// `performance.now()` (monotonic from page load, Spectre-clamped to ≥1ms
+/// but fine for our 400ms double-click window).
+#[cfg(not(target_arch = "wasm32"))]
+fn now_ms() -> f64 {
+    use std::sync::OnceLock;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
+}
 use glam::Vec2;
 use indextree::Arena;
 use wgpu::{Instance, SurfaceTargetUnsafe};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ControlFlow;
-use winit::keyboard::Key;
+use winit::keyboard::{Key, ModifiersState};
 use winit::window::CursorIcon;
 use winit::{event_loop::EventLoop, window::Window};
 
@@ -22,7 +41,7 @@ use crate::application::document::{
     HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 use crate::application::frame_throttle::MutationFrequencyThrottle;
-use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name};
+use crate::application::keybinds::{Action, ResolvedKeybinds};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::application::palette::{
     PaletteContext, PaletteEffects, filter_actions, PALETTE_ACTIONS,
@@ -32,7 +51,6 @@ use crate::application::renderer::Renderer;
 use baumhard::gfx_structs::element::GfxElement;
 #[cfg(not(target_arch = "wasm32"))]
 use baumhard::mindmap::custom_mutation::{PlatformContext, Trigger};
-#[cfg(not(target_arch = "wasm32"))]
 use baumhard::util::grapheme_chad;
 
 /// Screen-space click tolerance (in pixels) for edge hit testing. Converted
@@ -111,7 +129,6 @@ impl LabelEditState {
 /// char-index offset within `buffer`. The transient edits flow
 /// through Baumhard's `Mutation::AreaDelta` vocabulary applied to the
 /// live tree — the model is untouched until commit.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 enum TextEditState {
     Closed,
@@ -128,7 +145,6 @@ enum TextEditState {
     },
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl TextEditState {
     fn is_open(&self) -> bool {
         matches!(self, TextEditState::Open { .. })
@@ -141,14 +157,14 @@ impl TextEditState {
     }
 }
 
-/// Session 7A: tracks the previous left-click in screen space so a
-/// second click within a short time + distance window is recognized as
-/// a double-click. Double-click fires on the second `Pressed` event,
-/// not the second release.
-#[cfg(not(target_arch = "wasm32"))]
+/// Tracks the previous left-click in screen space so a second click
+/// within a short time + distance window is recognized as a
+/// double-click. Double-click fires on the second `Pressed` event,
+/// not the second release. `time` is `f64` milliseconds from the
+/// cross-platform `now_ms()` helper.
 #[derive(Debug, Clone)]
 struct LastClick {
-    time: Instant,
+    time: f64,
     screen_pos: (f64, f64),
     /// Which node, if any, the first click landed on. Two clicks with
     /// the same `hit` (both `Some(id)` for the same id, or both
@@ -157,30 +173,26 @@ struct LastClick {
 }
 
 /// Double-click window in milliseconds. Matches GNOME/winit convention.
-#[cfg(not(target_arch = "wasm32"))]
-const DOUBLE_CLICK_MS: u128 = 400;
+const DOUBLE_CLICK_MS: f64 = 400.0;
 
 /// Double-click maximum distance² in screen-space pixels.
-#[cfg(not(target_arch = "wasm32"))]
 const DOUBLE_CLICK_DIST_SQ: f64 = 16.0 * 16.0;
 
 /// Session 7A: glyph rendered at the cursor position while a node
 /// text editor is open. Reuses the same caret as `LabelEditState`.
-#[cfg(not(target_arch = "wasm32"))]
 const TEXT_EDIT_CARET: char = '\u{258C}';
 
-/// Session 7A: returns `true` when a new click-down qualifies as a
-/// double-click given the previous click. Extracted as a pure helper
-/// so cursor/time math can be unit-tested without a winit event loop.
-#[cfg(not(target_arch = "wasm32"))]
+/// Returns `true` when a new click-down qualifies as a double-click
+/// given the previous click. Pure helper so cursor/time math can be
+/// unit-tested without a winit event loop.
 fn is_double_click(
     prev: &LastClick,
-    new_time: Instant,
+    new_time_ms: f64,
     new_screen_pos: (f64, f64),
     new_hit: &Option<String>,
 ) -> bool {
-    let elapsed = new_time.duration_since(prev.time).as_millis();
-    if elapsed >= DOUBLE_CLICK_MS {
+    let elapsed = new_time_ms - prev.time;
+    if elapsed < 0.0 || elapsed >= DOUBLE_CLICK_MS {
         return false;
     }
     let dx = new_screen_pos.0 - prev.screen_pos.0;
@@ -205,7 +217,6 @@ fn is_double_click(
 
 /// Insert one character at grapheme index `cursor` in `buffer`,
 /// returning the new cursor position (one grapheme past the insert).
-#[cfg(not(target_arch = "wasm32"))]
 fn insert_at_cursor(buffer: &mut String, cursor: usize, ch: char) -> usize {
     grapheme_chad::insert_str_at_grapheme(buffer, cursor, &ch.to_string());
     cursor + 1
@@ -213,7 +224,6 @@ fn insert_at_cursor(buffer: &mut String, cursor: usize, ch: char) -> usize {
 
 /// Delete the grapheme cluster immediately before `cursor` (Backspace
 /// semantics). Returns the new cursor position. No-op at `cursor == 0`.
-#[cfg(not(target_arch = "wasm32"))]
 fn delete_before_cursor(buffer: &mut String, cursor: usize) -> usize {
     if cursor == 0 {
         return 0;
@@ -224,7 +234,6 @@ fn delete_before_cursor(buffer: &mut String, cursor: usize) -> usize {
 
 /// Delete the grapheme cluster at `cursor` (Delete semantics). Returns
 /// the unchanged cursor position. No-op at end of buffer.
-#[cfg(not(target_arch = "wasm32"))]
 fn delete_at_cursor(buffer: &mut String, cursor: usize) -> usize {
     let total = grapheme_chad::count_grapheme_clusters(buffer);
     if cursor >= total {
@@ -238,7 +247,6 @@ fn delete_at_cursor(buffer: &mut String, cursor: usize) -> usize {
 /// `cursor` — i.e. the position just after the most recent `\n`
 /// strictly before `cursor`, or 0 if no prior `\n`. `\n` is always its
 /// own grapheme cluster, so walking by graphemes is correct here.
-#[cfg(not(target_arch = "wasm32"))]
 fn cursor_to_line_start(buffer: &str, cursor: usize) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
     let mut line_start = 0usize;
@@ -256,7 +264,6 @@ fn cursor_to_line_start(buffer: &str, cursor: usize) -> usize {
 /// Return the grapheme index of the end of the line containing
 /// `cursor` — the position of the next `\n` at or after `cursor`, or
 /// the total grapheme count if no `\n` follows.
-#[cfg(not(target_arch = "wasm32"))]
 fn cursor_to_line_end(buffer: &str, cursor: usize) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
     let mut total = 0usize;
@@ -273,7 +280,6 @@ fn cursor_to_line_end(buffer: &str, cursor: usize) -> usize {
 /// is computed as `cursor - line_start` in graphemes; the new
 /// position lands at `prev_line_start + min(col, prev_line_len)`.
 /// No-op if already on the first line.
-#[cfg(not(target_arch = "wasm32"))]
 fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
     let line_start = cursor_to_line_start(buffer, cursor);
     if line_start == 0 {
@@ -289,7 +295,6 @@ fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
 
 /// Move the cursor down one line, preserving the visual column.
 /// No-op if already on the last line.
-#[cfg(not(target_arch = "wasm32"))]
 fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
     let total = grapheme_chad::count_grapheme_clusters(buffer);
     let line_start = cursor_to_line_start(buffer, cursor);
@@ -307,7 +312,6 @@ fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
 /// Build the display text for the edited node by inserting the caret
 /// glyph at the cursor's grapheme position. Used on every keystroke
 /// to produce the `Mutation::AreaDelta` payload.
-#[cfg(not(target_arch = "wasm32"))]
 fn insert_caret(buffer: &str, cursor: usize) -> String {
     let byte = grapheme_chad::find_byte_index_of_grapheme(buffer, cursor)
         .unwrap_or(buffer.len());
@@ -520,9 +524,7 @@ impl Application {
         // double-click detection. Cleared after a double-click fires.
         let mut last_click: Option<LastClick> = None;
         let mut hovered_node: Option<String> = None;
-        let mut shift_pressed = false;
-        let mut alt_pressed = false;
-        let mut ctrl_pressed = false;
+        let mut modifiers = ModifiersState::empty();
         // True while the cursor is hovering a node with any trigger
         // bindings (a "button"). Tracked so we only call set_cursor on
         // transitions instead of every CursorMoved event.
@@ -692,7 +694,7 @@ impl Application {
                                 // in-progress buffer. Let the press fall
                                 // through; the corresponding release
                                 // will be swallowed as click-inside.
-                                let now = Instant::now();
+                                let now = now_ms();
                                 let already_editing_same_target = text_edit_state
                                     .node_id()
                                     .map(|id| hit_node.as_deref() == Some(id))
@@ -748,10 +750,7 @@ impl Application {
                                             .unwrap_or(false);
                                         if allow_create {
                                             if let Some(doc) = document.as_mut() {
-                                                let new_id = doc.apply_create_orphan_node(canvas_pos);
-                                                doc.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
-                                                doc.selection = SelectionState::Single(new_id.clone());
-                                                doc.dirty = true;
+                                                let new_id = doc.create_orphan_and_select(canvas_pos);
                                                 rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                                 open_text_edit(
                                                     &new_id,
@@ -815,24 +814,13 @@ impl Application {
                                                 cursor_pos.0 as f32,
                                                 cursor_pos.1 as f32,
                                             );
-                                            let edited_id = text_edit_state
+                                            let inside = text_edit_state
                                                 .node_id()
-                                                .map(|s| s.to_string());
-                                            let inside = edited_id
-                                                .as_ref()
-                                                .and_then(|id| {
-                                                    document.as_ref().and_then(|doc| {
-                                                        doc.mindmap.nodes.get(id).map(|n| {
-                                                            let x0 = n.position.x as f32;
-                                                            let y0 = n.position.y as f32;
-                                                            let x1 = x0 + n.size.width as f32;
-                                                            let y1 = y0 + n.size.height as f32;
-                                                            release_canvas.x >= x0
-                                                                && release_canvas.x <= x1
-                                                                && release_canvas.y >= y0
-                                                                && release_canvas.y <= y1
-                                                        })
-                                                    })
+                                                .zip(mindmap_tree.as_ref())
+                                                .map(|(id, tree)| {
+                                                    crate::application::document::point_in_node_aabb(
+                                                        release_canvas, id, tree,
+                                                    )
                                                 })
                                                 .unwrap_or(false);
                                             if inside {
@@ -915,7 +903,7 @@ impl Application {
                                             handle_click(
                                                 hit_node,
                                                 cursor_pos,
-                                                shift_pressed,
+                                                modifiers.shift_key(),
                                                 &mut document,
                                                 &mut mindmap_tree,
                                                 &mut renderer,
@@ -1192,7 +1180,7 @@ impl Application {
                                         }
                                     }
                                     // Shift+drag: move all selected nodes together
-                                    let node_ids = if shift_pressed {
+                                    let node_ids = if modifiers.shift_key() {
                                         if let Some(doc) = document.as_ref() {
                                             let mut ids: Vec<String> = doc.selection.selected_ids()
                                                 .iter().map(|s| s.to_string()).collect();
@@ -1221,9 +1209,9 @@ impl Application {
                                         node_ids,
                                         total_delta: Vec2::ZERO,
                                         pending_delta: Vec2::ZERO,
-                                        individual: alt_pressed,
+                                        individual: modifiers.alt_key(),
                                     };
-                                } else if shift_pressed {
+                                } else if modifiers.shift_key() {
                                     // Shift+drag on empty space: rubber-band selection
                                     let start_canvas = renderer.screen_to_canvas(
                                         start_pos.0 as f32, start_pos.1 as f32,
@@ -1255,12 +1243,10 @@ impl Application {
                 //// KEYBOARD ////
                 //////////////////
                 Event::WindowEvent {
-                    event: WindowEvent::ModifiersChanged(modifiers),
+                    event: WindowEvent::ModifiersChanged(mods),
                     ..
                 } => {
-                    shift_pressed = modifiers.state().shift_key();
-                    alt_pressed = modifiers.state().alt_key();
-                    ctrl_pressed = modifiers.state().control_key();
+                    modifiers = mods.state();
                 }
                 Event::WindowEvent {
                     event: WindowEvent::KeyboardInput {
@@ -1273,15 +1259,7 @@ impl Application {
                     },
                     ..
                 } => {
-                    // Resolve the pressed key through the configured keybinds.
-                    // Convert the winit `Key` into the lowercase string form
-                    // that `KeyBind::parse` produces so the comparison is
-                    // symmetric.
-                    let key_name = match &logical_key {
-                        Key::Character(c) => Some(normalize_key_name(c.as_ref())),
-                        Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),
-                        _ => None,
-                    };
+                    let key_name = crate::application::keybinds::key_to_name(&logical_key);
 
                     // Session 6C: when the palette is open, it steals
                     // all keyboard input. Character keys go into the
@@ -1366,7 +1344,7 @@ impl Application {
                     // user to accidentally rebind away their only
                     // discovery path).
                     if key_name.as_deref() == Some("/")
-                        && !ctrl_pressed && !alt_pressed
+                        && !modifiers.control_key() && !modifiers.alt_key()
                     {
                         let ctx = document.as_ref().map(|doc| PaletteContext { document: doc });
                         if let Some(ctx) = ctx {
@@ -1386,7 +1364,12 @@ impl Application {
                     }
 
                     let action = key_name.as_deref().and_then(|k| {
-                        keybinds.action_for(k, ctrl_pressed, shift_pressed, alt_pressed)
+                        keybinds.action_for(
+                            k,
+                            modifiers.control_key(),
+                            modifiers.shift_key(),
+                            modifiers.alt_key(),
+                        )
                     });
 
                     match action {
@@ -1443,77 +1426,9 @@ impl Application {
                             }
                         }
                         Some(Action::DeleteSelection) => {
-                            // Session 7A follow-up: node deletion is now
-                            // supported alongside edge and portal
-                            // deletion. Deleting a node orphans its
-                            // immediate children (they become roots) and
-                            // removes every edge that touched the node.
                             if let Some(doc) = document.as_mut() {
-                                enum DelKind {
-                                    Edge(crate::application::document::EdgeRef),
-                                    Portal(crate::application::document::PortalRef),
-                                    Node(String),
-                                    Nodes(Vec<String>),
-                                }
-                                let kind = match &doc.selection {
-                                    SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
-                                    SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
-                                    SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
-                                    SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
-                                    SelectionState::None => None,
-                                };
-                                match kind {
-                                    Some(DelKind::Edge(edge_ref)) => {
-                                        if let Some((idx, edge)) = doc.remove_edge(&edge_ref) {
-                                            doc.undo_stack.push(UndoAction::DeleteEdge {
-                                                index: idx,
-                                                edge,
-                                            });
-                                            doc.selection = SelectionState::None;
-                                            doc.dirty = true;
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                                        }
-                                    }
-                                    Some(DelKind::Portal(pref)) => {
-                                        // `apply_delete_portal` records the
-                                        // DeletePortal undo entry internally;
-                                        // we just clear selection + rebuild.
-                                        if doc.apply_delete_portal(&pref).is_some() {
-                                            doc.selection = SelectionState::None;
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                                        }
-                                    }
-                                    Some(DelKind::Node(id)) => {
-                                        if let Some(undo) = doc.delete_node(&id) {
-                                            doc.undo_stack.push(undo);
-                                            doc.selection = SelectionState::None;
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                                        }
-                                    }
-                                    Some(DelKind::Nodes(ids)) => {
-                                        // Multi-select delete: push one
-                                        // undo entry per node so Ctrl+Z
-                                        // unwinds them in reverse order.
-                                        // Each `delete_node` call is
-                                        // self-contained — if a later id
-                                        // happens to be a child of an
-                                        // earlier one, the earlier delete
-                                        // already orphaned it, so the
-                                        // later delete just removes the
-                                        // (now-root) node.
-                                        let mut any = false;
-                                        for id in ids {
-                                            if let Some(undo) = doc.delete_node(&id) {
-                                                doc.undo_stack.push(undo);
-                                                any = true;
-                                            }
-                                        }
-                                        if any {
-                                            doc.selection = SelectionState::None;
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                                        }
-                                    }
-                                    None => {}
+                                if doc.apply_delete_selection() {
+                                    rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                 }
                             }
                         }
@@ -1522,75 +1437,34 @@ impl Application {
                                 let canvas_pos = renderer.screen_to_canvas(
                                     cursor_pos.0 as f32, cursor_pos.1 as f32,
                                 );
-                                let new_id = doc.apply_create_orphan_node(canvas_pos);
-                                doc.undo_stack.push(UndoAction::CreateNode {
-                                    node_id: new_id.clone(),
-                                });
-                                doc.selection = SelectionState::Single(new_id);
-                                doc.dirty = true;
+                                doc.create_orphan_and_select(canvas_pos);
                                 rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                             }
                         }
                         Some(Action::OrphanSelection) => {
                             if let Some(doc) = document.as_mut() {
-                                let sel: Vec<String> = doc.selection.selected_ids()
-                                    .iter().map(|s| s.to_string()).collect();
-                                if !sel.is_empty() {
-                                    let undo_data = doc.apply_orphan_selection(&sel);
-                                    if !undo_data.entries.is_empty() {
-                                        doc.undo_stack.push(UndoAction::ReparentNodes {
-                                            entries: undo_data.entries,
-                                            old_edges: undo_data.old_edges,
-                                        });
-                                        doc.dirty = true;
-                                    }
+                                if doc.apply_orphan_selection_with_undo() {
                                     rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                 }
                             }
                         }
-                        Some(Action::EditSelection) => {
-                            // Session 7A follow-up: open the text editor
-                            // on the selected single node with its
-                            // existing text, cursor at end. The
-                            // text-editor steal at the top of the
-                            // keyboard dispatch (`text_edit_state.is_open()`
-                            // branch above) means this can't fire while
-                            // the editor is already open, so Enter-inside-
-                            // editor stays literal.
+                        Some(a @ (Action::EditSelection | Action::EditSelectionClean)) => {
+                            // Open the text editor on the selected single
+                            // node. `EditSelectionClean` opens with an empty
+                            // buffer (the "clean slate" retype gesture);
+                            // `EditSelection` opens on the node's current
+                            // text with cursor at end. The text-editor
+                            // steal at the top of keyboard dispatch means
+                            // these never fire while the editor is already
+                            // open, so Enter/Backspace stay literal inside
+                            // the editor.
+                            let clean = matches!(a, Action::EditSelectionClean);
                             if let Some(doc) = document.as_mut() {
-                                let target = if let SelectionState::Single(id) = &doc.selection {
-                                    Some(id.clone())
-                                } else {
-                                    None
-                                };
-                                if let Some(id) = target {
+                                if let SelectionState::Single(id) = &doc.selection {
+                                    let nid = id.clone();
                                     open_text_edit(
-                                        &id,
-                                        false,
-                                        doc,
-                                        &mut text_edit_state,
-                                        &mut mindmap_tree,
-                                        &mut renderer,
-                                    );
-                                }
-                            }
-                        }
-                        Some(Action::EditSelectionClean) => {
-                            // Session 7A follow-up: open the editor with
-                            // an empty buffer. On commit, `set_node_text`
-                            // replaces the node's text wholesale and
-                            // pushes an `EditNodeText` undo entry — no
-                            // new undo variant needed.
-                            if let Some(doc) = document.as_mut() {
-                                let target = if let SelectionState::Single(id) = &doc.selection {
-                                    Some(id.clone())
-                                } else {
-                                    None
-                                };
-                                if let Some(id) = target {
-                                    open_text_edit(
-                                        &id,
-                                        true,
+                                        &nid,
+                                        clean,
                                         doc,
                                         &mut text_edit_state,
                                         &mut mindmap_tree,
@@ -1879,6 +1753,9 @@ impl Application {
     pub fn run(mut self) {
         use wasm_bindgen::JsCast;
         use winit::platform::web::WindowExtWebSys;
+        use std::rc::Rc;
+        use std::cell::{Cell, RefCell};
+        use baumhard::mindmap::tree_builder::MindMapTree;
 
         baumhard::font::fonts::init();
 
@@ -1887,10 +1764,6 @@ impl Application {
         // see KeybindConfig::load_for_web().
         self.options.keybind_config =
             crate::application::keybinds::KeybindConfig::load_for_web();
-        let _keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
-        // TODO (WASM): once keyboard input is forwarded to the document,
-        // dispatch through `_keybinds.action_for(...)` the same way the
-        // native path does.
 
         // Attach canvas to DOM
         let canvas = self.window.canvas().expect("Failed to get canvas");
@@ -1901,6 +1774,45 @@ impl Application {
         canvas.set_width(web_window.inner_width().unwrap().as_f64().unwrap() as u32);
         canvas.set_height(web_window.inner_height().unwrap().as_f64().unwrap() as u32);
 
+        // Canvas must be focusable for keyboard events to reach winit.
+        // Without tabindex, an HTMLCanvasElement never receives focus.
+        canvas.set_attribute("tabindex", "0").ok();
+        let _ = canvas.focus();
+
+        // Re-focus on mousedown so clicking the canvas after tabbing
+        // to another element restores keyboard input.
+        {
+            let canvas_for_focus = canvas.clone();
+            let focus_cb = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+                move |_: web_sys::Event| {
+                    let _ = canvas_for_focus.focus();
+                },
+            );
+            canvas
+                .add_event_listener_with_callback("mousedown", focus_cb.as_ref().unchecked_ref())
+                .ok();
+            focus_cb.forget(); // leak — lives for the page lifetime
+        }
+
+        // preventDefault on keydown while the text editor is open so
+        // Tab/Enter/Backspace/arrows don't fire browser defaults
+        // (tab-navigation, history-back, page-scroll).
+        let suppress_keys: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        {
+            let suppress = suppress_keys.clone();
+            let pd_cb = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+                move |evt: web_sys::Event| {
+                    if suppress.get() {
+                        evt.prevent_default();
+                    }
+                },
+            );
+            canvas
+                .add_event_listener_with_callback("keydown", pd_cb.as_ref().unchecked_ref())
+                .ok();
+            pd_cb.forget();
+        }
+
         let gfx_arena: Arc<RwLock<Arena<GfxElement>>> = Arc::new(RwLock::new(Arena::new()));
         let renderer_window = Arc::clone(&self.window);
 
@@ -1908,7 +1820,6 @@ impl Application {
         let mindmap_path = {
             let web_window = web_sys::window().expect("No global window");
             let search = web_window.location().search().unwrap_or_default();
-            // Handle both "?map=foo" and "?keybinds=...&map=foo" forms.
             let mut map_path: Option<String> = None;
             let trimmed = search.trim_start_matches('?');
             for pair in trimmed.split('&') {
@@ -1918,6 +1829,36 @@ impl Application {
             }
             map_path.unwrap_or_else(|| self.options.mindmap_path.clone())
         };
+
+        // Shared state between the rAF render loop and the winit event
+        // loop. Two RefCells so input handlers can borrow InputState
+        // and Renderer simultaneously without conflict.
+        /// Pending left-click awaiting a release. `None` on init and after
+        /// release consumed; `Empty` after a click-down on empty canvas;
+        /// `Node(id)` after a click-down on a node. Full drag machine
+        /// (pan, move, reparent, connect) deferred to a later
+        /// WASM-parity session.
+        enum PendingClick {
+            None,
+            Empty,
+            Node(String),
+        }
+        struct WasmInputState {
+            document: MindMapDocument,
+            mindmap_tree: Option<MindMapTree>,
+            text_edit_state: TextEditState,
+            last_click: Option<LastClick>,
+            cursor_pos: (f64, f64),
+            pending_click: PendingClick,
+            modifiers: winit::keyboard::ModifiersState,
+        }
+
+        let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
+        let input_rc: Rc<RefCell<Option<WasmInputState>>> = Rc::new(RefCell::new(None));
+
+        // Clone Rcs for the spawn_local init future
+        let renderer_for_init = renderer_rc.clone();
+        let input_for_init = input_rc.clone();
 
         // On WASM we run single-threaded -- spawn the renderer init as a future
         wasm_bindgen_futures::spawn_local(async move {
@@ -1938,43 +1879,63 @@ impl Application {
             renderer.process_decree(RenderDecree::SetSurfaceSize(size, height));
 
             // Load mindmap through Document -> Tree + Scene -> Renderer flow
-            if let Ok(document) = MindMapDocument::load(&mindmap_path) {
-                // Nodes: build Baumhard tree from MindMap hierarchy
-                let mindmap_tree = document.build_tree();
+            let mut doc_opt: Option<MindMapDocument> = None;
+            let mut tree_opt: Option<MindMapTree> = None;
+            if let Ok(doc) = MindMapDocument::load(&mindmap_path) {
+                let mindmap_tree = doc.build_tree();
                 renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
                 renderer.fit_camera_to_tree(&mindmap_tree.tree);
 
-                // Connections + borders: flat pipeline from RenderScene.
-                // `fit_camera_to_tree` above settled the zoom, so pass
-                // it through for correct glyph sizing.
-                let scene = document.build_scene(renderer.camera_zoom());
+                let scene = doc.build_scene(renderer.camera_zoom());
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 renderer.rebuild_border_buffers(&scene.border_elements);
                 renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
                 renderer.rebuild_portal_buffers(&scene.portal_elements);
+                tree_opt = Some(mindmap_tree);
+                doc_opt = Some(doc);
             }
 
             renderer.process_decree(RenderDecree::StartRender);
 
-            // Store renderer in a RefCell for the event loop
-            let renderer = std::cell::RefCell::new(renderer);
+            // Populate the shared state now that init is complete.
+            *renderer_for_init.borrow_mut() = Some(renderer);
+
+            if let Some(doc) = doc_opt {
+                *input_for_init.borrow_mut() = Some(WasmInputState {
+                    document: doc,
+                    mindmap_tree: tree_opt,
+                    text_edit_state: TextEditState::Closed,
+                    last_click: None,
+                    cursor_pos: (0.0, 0.0),
+                    pending_click: PendingClick::None,
+                    modifiers: winit::keyboard::ModifiersState::empty(),
+                });
+            }
 
             // WASM render loop via requestAnimationFrame
             use wasm_bindgen::closure::Closure;
-            let f: std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
-                std::rc::Rc::new(std::cell::RefCell::new(None));
+            let renderer_for_raf = renderer_for_init.clone();
+            let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> =
+                Rc::new(RefCell::new(None));
             let g = f.clone();
 
             *g.borrow_mut() = Some(Closure::new(move || {
-                renderer.borrow_mut().process();
+                if let Some(r) = renderer_for_raf.borrow_mut().as_mut() {
+                    r.process();
+                }
                 request_animation_frame(f.borrow().as_ref().unwrap());
             }));
             request_animation_frame(g.borrow().as_ref().unwrap());
         });
 
-        // The event loop handles input but doesn't block on WASM
-        let mut cursor_pos: (f64, f64) = (0.0, 0.0);
-        let mut is_panning = false;
+        // Resolve the keybind config once. `action_for(key, ctrl, shift, alt)`
+        // answers the dispatch question for every keydown.
+        let keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
+
+        // Clone Rcs for the event loop closure
+        let renderer_for_events = renderer_rc.clone();
+        let input_for_events = input_rc.clone();
+        let suppress_for_events = suppress_keys.clone();
 
         self.event_loop.run(move |event, _window_target| {
             _ = (&self.window, &mut self.options);
@@ -1990,30 +1951,293 @@ impl Application {
                 } => {
                     // WASM doesn't really close
                 }
+
+                // --- Modifier tracking ---
                 Event::WindowEvent {
-                    event: WindowEvent::MouseInput { state, button, .. }, ..
+                    event: WindowEvent::ModifiersChanged(mods), ..
                 } => {
-                    if button == MouseButton::Left || button == MouseButton::Middle {
-                        is_panning = state == ElementState::Pressed;
+                    if let Some(input) = input_for_events.borrow_mut().as_mut() {
+                        input.modifiers = mods.state();
                     }
                 }
+
+                // --- Keyboard input ---
                 Event::WindowEvent {
-                    event: WindowEvent::MouseWheel { delta, .. }, ..
+                    event: WindowEvent::KeyboardInput {
+                        event: KeyEvent {
+                            state: ElementState::Pressed,
+                            logical_key: ref logical_key,
+                            ..
+                        },
+                        ..
+                    },
+                    ..
                 } => {
-                    let _scroll_y = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y as f64,
-                        MouseScrollDelta::PixelDelta(pos) => pos.y / 50.0,
-                    };
-                    // TODO: WASM input needs to be forwarded to the renderer
+                    let key_name = crate::application::keybinds::key_to_name(logical_key);
+
+                    let mut input_borrow = input_for_events.borrow_mut();
+                    let mut renderer_borrow = renderer_for_events.borrow_mut();
+                    let (Some(input), Some(renderer)) =
+                        (input_borrow.as_mut(), renderer_borrow.as_mut())
+                    else { return; };
+
+                    // Editor keyboard-steal: if open, route all keys
+                    // to the editor so hotkeys don't collide with typed text.
+                    if input.text_edit_state.is_open() {
+                        handle_text_edit_key(
+                            &key_name,
+                            logical_key,
+                            &mut input.text_edit_state,
+                            &mut input.document,
+                            &mut input.mindmap_tree,
+                            renderer,
+                        );
+                        suppress_for_events.set(input.text_edit_state.is_open());
+                        return;
+                    }
+
+                    // Hotkey dispatch via keybinds.
+                    let action = key_name.as_deref().and_then(|k| {
+                        keybinds.action_for(
+                            k,
+                            input.modifiers.control_key(),
+                            input.modifiers.shift_key(),
+                            input.modifiers.alt_key(),
+                        )
+                    });
+                    match action {
+                        Some(Action::Undo) => {
+                            if input.document.undo() {
+                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                            }
+                        }
+                        Some(Action::CreateOrphanNode) => {
+                            let canvas_pos = renderer.screen_to_canvas(
+                                input.cursor_pos.0 as f32,
+                                input.cursor_pos.1 as f32,
+                            );
+                            input.document.create_orphan_and_select(canvas_pos);
+                            rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                        }
+                        Some(Action::OrphanSelection) => {
+                            if input.document.apply_orphan_selection_with_undo() {
+                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                            }
+                        }
+                        Some(Action::DeleteSelection) => {
+                            if input.document.apply_delete_selection() {
+                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                            }
+                        }
+                        Some(a @ (Action::EditSelection | Action::EditSelectionClean)) => {
+                            let clean = matches!(a, Action::EditSelectionClean);
+                            if let SelectionState::Single(id) = &input.document.selection {
+                                let nid = id.clone();
+                                open_text_edit(
+                                    &nid, clean,
+                                    &mut input.document,
+                                    &mut input.text_edit_state,
+                                    &mut input.mindmap_tree,
+                                    renderer,
+                                );
+                                suppress_for_events.set(input.text_edit_state.is_open());
+                            }
+                        }
+                        Some(Action::CancelMode) => {
+                            // No AppMode on WASM yet; clear any pending click
+                            // so a post-Esc click isn't retroactively paired
+                            // with a pre-Esc click.
+                            input.last_click = None;
+                        }
+                        Some(a @ (Action::EnterReparentMode | Action::EnterConnectMode)) => {
+                            // AppMode state is still native-only; these
+                            // actions are deferred on WASM (would require
+                            // de-gating AppMode, hovered_node, and the
+                            // reparent/connect click handlers).
+                            log::debug!("WASM: mode-based action {:?} deferred", a);
+                        }
+                        None => {}
+                    }
                 }
+
+                // --- Mouse input ---
                 Event::WindowEvent {
                     event: WindowEvent::CursorMoved { position, .. }, ..
                 } => {
-                    let _dx = position.x - cursor_pos.0;
-                    let _dy = position.y - cursor_pos.1;
-                    cursor_pos = (position.x, position.y);
-                    // TODO: WASM input needs to be forwarded to the renderer
+                    if let Some(input) = input_for_events.borrow_mut().as_mut() {
+                        input.cursor_pos = (position.x, position.y);
+                    }
                 }
+
+                Event::WindowEvent {
+                    event: WindowEvent::MouseInput {
+                        state: btn_state,
+                        button: MouseButton::Left,
+                        ..
+                    },
+                    ..
+                } => {
+                    if btn_state == ElementState::Pressed {
+                        // --- Left mouse Pressed ---
+                        let mut input_borrow = input_for_events.borrow_mut();
+                        let Some(input) = input_borrow.as_mut() else { return; };
+
+                        // Compute canvas position via renderer
+                        let canvas_pos = {
+                            let renderer_borrow = renderer_for_events.borrow();
+                            match renderer_borrow.as_ref() {
+                                Some(r) => r.screen_to_canvas(
+                                    input.cursor_pos.0 as f32,
+                                    input.cursor_pos.1 as f32,
+                                ),
+                                None => return,
+                            }
+                        };
+
+                        // Hit test against nodes
+                        let hit_node: Option<String> = input.mindmap_tree
+                            .as_ref()
+                            .and_then(|tree| {
+                                crate::application::document::hit_test(canvas_pos, tree)
+                            });
+
+                        // Double-click detection
+                        let now = now_ms();
+                        let already_editing_same_target = input.text_edit_state
+                            .node_id()
+                            .map(|id| hit_node.as_deref() == Some(id))
+                            .unwrap_or(false);
+                        let is_dblclick = !already_editing_same_target
+                            && input.last_click
+                                .as_ref()
+                                .map(|prev| is_double_click(prev, now, input.cursor_pos, &hit_node))
+                                .unwrap_or(false);
+
+                        if is_dblclick {
+                            input.last_click = None;
+
+                            let mut renderer_borrow = renderer_for_events.borrow_mut();
+                            let Some(renderer) = renderer_borrow.as_mut() else { return; };
+
+                            if let Some(ref node_id) = hit_node {
+                                let nid = node_id.clone();
+                                input.document.selection = SelectionState::Single(nid.clone());
+                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                open_text_edit(
+                                    &nid, false,
+                                    &mut input.document,
+                                    &mut input.text_edit_state,
+                                    &mut input.mindmap_tree,
+                                    renderer,
+                                );
+                            } else {
+                                let allow_create = !matches!(
+                                    input.document.selection,
+                                    SelectionState::Edge(_) | SelectionState::Portal(_)
+                                );
+                                if allow_create {
+                                    let new_id = input.document.create_orphan_and_select(canvas_pos);
+                                    rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                    open_text_edit(
+                                        &new_id, true,
+                                        &mut input.document,
+                                        &mut input.text_edit_state,
+                                        &mut input.mindmap_tree,
+                                        renderer,
+                                    );
+                                }
+                            }
+                            suppress_for_events.set(input.text_edit_state.is_open());
+                            return;
+                        }
+
+                        input.pending_click = match hit_node.clone() {
+                            Some(id) => PendingClick::Node(id),
+                            None => PendingClick::Empty,
+                        };
+                        input.last_click = Some(LastClick {
+                            time: now,
+                            screen_pos: input.cursor_pos,
+                            hit: hit_node,
+                        });
+                    } else {
+                        // --- Left mouse Released ---
+                        let mut input_borrow = input_for_events.borrow_mut();
+                        let Some(input) = input_borrow.as_mut() else { return; };
+
+                        let pending = std::mem::replace(&mut input.pending_click, PendingClick::None);
+                        if matches!(pending, PendingClick::None) { return; }
+
+                        if input.text_edit_state.is_open() {
+                            let mut renderer_borrow = renderer_for_events.borrow_mut();
+                            let Some(renderer) = renderer_borrow.as_mut() else { return; };
+                            let release_canvas = renderer.screen_to_canvas(
+                                input.cursor_pos.0 as f32,
+                                input.cursor_pos.1 as f32,
+                            );
+
+                            let inside_edit_node = input.text_edit_state
+                                .node_id()
+                                .zip(input.mindmap_tree.as_ref())
+                                .map(|(id, tree)| {
+                                    crate::application::document::point_in_node_aabb(
+                                        release_canvas, id, tree,
+                                    )
+                                })
+                                .unwrap_or(false);
+
+                            if inside_edit_node {
+                                return;
+                            }
+
+                            close_text_edit(
+                                true,
+                                &mut input.document,
+                                &mut input.text_edit_state,
+                                &mut input.mindmap_tree,
+                                renderer,
+                            );
+                            suppress_for_events.set(false);
+                            return;
+                        }
+
+                        // Plain selection click
+                        input.document.selection = match pending {
+                            PendingClick::Node(node_id) => SelectionState::Single(node_id),
+                            _ => SelectionState::None,
+                        };
+                        let mut renderer_borrow = renderer_for_events.borrow_mut();
+                        if let Some(renderer) = renderer_borrow.as_mut() {
+                            rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                        }
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::MouseWheel { delta, .. }, ..
+                } => {
+                    let scroll_y = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        MouseScrollDelta::PixelDelta(pos) => pos.y / 50.0,
+                    };
+                    let factor = if scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                    let mut input_borrow = input_for_events.borrow_mut();
+                    let mut renderer_borrow = renderer_for_events.borrow_mut();
+                    if let (Some(input), Some(renderer)) =
+                        (input_borrow.as_mut(), renderer_borrow.as_mut())
+                    {
+                        renderer.process_decree(RenderDecree::CameraZoom {
+                            screen_x: input.cursor_pos.0 as f32,
+                            screen_y: input.cursor_pos.1 as f32,
+                            factor: factor as f32,
+                        });
+                        // Zoom touches scene geometry (connection glyph
+                        // sample spacing, viewport cull rect) but not the
+                        // node text tree — scene-only rebuild is enough.
+                        rebuild_scene_only(&input.document, renderer);
+                    }
+                }
+
                 _ => {}
             }
         }).expect("Event loop error");
@@ -2342,7 +2566,6 @@ fn rebuild_all(
 /// color preview doesn't change node text, borders, or positions,
 /// so the tree rebuild is wasted work. Halves the hot-path cost vs
 /// `rebuild_all` on maps with many nodes.
-#[cfg(not(target_arch = "wasm32"))]
 fn rebuild_scene_only(doc: &MindMapDocument, renderer: &mut Renderer) {
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_buffers(&scene.connection_elements);
@@ -2503,7 +2726,6 @@ fn close_label_edit(
 /// model itself *is* the pre-edit state. `set_node_text` takes its
 /// own "before" snapshot at commit time, and cancel just rebuilds
 /// the tree from the unchanged model.
-#[cfg(not(target_arch = "wasm32"))]
 fn open_text_edit(
     node_id: &str,
     from_creation: bool,
@@ -2541,7 +2763,6 @@ fn open_text_edit(
 /// entry if the value actually differs. Cancel just calls
 /// `rebuild_all`, which rebuilds the tree from the untouched model —
 /// the transient caret-bearing tree state is discarded wholesale.
-#[cfg(not(target_arch = "wasm32"))]
 fn close_text_edit(
     commit: bool,
     doc: &mut MindMapDocument,
@@ -2571,7 +2792,6 @@ fn close_text_edit(
 /// `Mutation::apply_to_area` vocabulary. The renderer's text buffers
 /// are rebuilt from the mutated tree so the next frame reflects the
 /// keystroke.
-#[cfg(not(target_arch = "wasm32"))]
 fn apply_text_edit_to_tree(
     node_id: &str,
     buffer: &str,
@@ -2657,7 +2877,6 @@ fn apply_text_edit_to_tree(
 /// Backspace/Delete delete, and printable chars are inserted at the
 /// cursor. Every successful mutation is pushed through
 /// `apply_text_edit_to_tree` so the tree and renderer stay in sync.
-#[cfg(not(target_arch = "wasm32"))]
 fn handle_text_edit_key(
     key_name: &Option<String>,
     logical_key: &Key,
@@ -3829,10 +4048,9 @@ pub struct Options {
 // Event-loop integration is verified manually via `cargo run`.
 // =====================================================================
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod text_edit_tests {
     use super::*;
-    use std::time::Duration;
 
     // -----------------------------------------------------------------
     // Cursor math
@@ -3985,16 +4203,14 @@ mod text_edit_tests {
 
     #[test]
     fn test_double_click_same_target_within_window_fires() {
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (100.0, 100.0),
             hit: Some("node-a".to_string()),
         };
-        let t1 = t0 + Duration::from_millis(100);
         assert!(is_double_click(
             &prev,
-            t1,
+            1100.0,
             (101.0, 100.0),
             &Some("node-a".to_string()),
         ));
@@ -4002,16 +4218,14 @@ mod text_edit_tests {
 
     #[test]
     fn test_double_click_different_targets_does_not_fire() {
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (100.0, 100.0),
             hit: Some("node-a".to_string()),
         };
-        let t1 = t0 + Duration::from_millis(100);
         assert!(!is_double_click(
             &prev,
-            t1,
+            1100.0,
             (100.0, 100.0),
             &Some("node-b".to_string()),
         ));
@@ -4019,41 +4233,56 @@ mod text_edit_tests {
 
     #[test]
     fn test_double_click_too_far_apart_does_not_fire() {
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (100.0, 100.0),
             hit: None,
         };
-        let t1 = t0 + Duration::from_millis(100);
         // Distance = sqrt(20² + 0²) = 20px → dist² = 400, threshold = 256.
-        assert!(!is_double_click(&prev, t1, (120.0, 100.0), &None));
+        assert!(!is_double_click(&prev, 1100.0, (120.0, 100.0), &None));
     }
 
     #[test]
     fn test_double_click_expired_does_not_fire() {
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (100.0, 100.0),
             hit: None,
         };
-        let t1 = t0 + Duration::from_millis(500);
-        assert!(!is_double_click(&prev, t1, (100.0, 100.0), &None));
+        assert!(!is_double_click(&prev, 1500.0, (100.0, 100.0), &None));
     }
 
     #[test]
     fn test_double_click_empty_space_both_misses_fires() {
         // Both clicks landed on no node — valid double-click for
         // the "create orphan" gesture.
-        let t0 = Instant::now();
         let prev = LastClick {
-            time: t0,
+            time: 1000.0,
             screen_pos: (50.0, 50.0),
             hit: None,
         };
-        let t1 = t0 + Duration::from_millis(150);
-        assert!(is_double_click(&prev, t1, (52.0, 51.0), &None));
+        assert!(is_double_click(&prev, 1150.0, (52.0, 51.0), &None));
+    }
+
+    #[test]
+    fn test_double_click_exact_boundary_does_not_fire() {
+        // At exactly DOUBLE_CLICK_MS elapsed, should NOT fire (uses >= threshold).
+        let prev = LastClick {
+            time: 1000.0,
+            screen_pos: (100.0, 100.0),
+            hit: None,
+        };
+        assert!(!is_double_click(&prev, 1400.0, (100.0, 100.0), &None));
+    }
+
+    #[test]
+    fn test_double_click_just_under_boundary_fires() {
+        let prev = LastClick {
+            time: 1000.0,
+            screen_pos: (100.0, 100.0),
+            hit: None,
+        };
+        assert!(is_double_click(&prev, 1399.0, (100.0, 100.0), &None));
     }
 
     // -----------------------------------------------------------------
