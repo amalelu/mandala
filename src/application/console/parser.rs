@@ -15,6 +15,7 @@
 //!   the concrete command + remaining args.
 
 use super::commands::{command_by_name, Command};
+use std::collections::HashMap;
 
 /// Split `input` into tokens. Returns an empty `Vec` for empty /
 /// whitespace-only input. A trailing unterminated quote is tolerated
@@ -81,11 +82,57 @@ pub enum ParseResult {
 /// return the parse result. No applicability checks happen here — the
 /// caller decides whether to execute.
 pub fn parse(input: &str) -> ParseResult {
+    parse_with_aliases(input, &HashMap::new())
+}
+
+/// Variant that also expands `alias <name> <expansion>` entries at
+/// parse time. If the first token matches a key in `aliases`, the
+/// alias's expansion replaces the first token *as raw text* before
+/// the tokenize-and-resolve step runs, so an alias that expands to
+/// a multi-token command works transparently.
+pub fn parse_with_aliases(input: &str, aliases: &HashMap<String, String>) -> ParseResult {
     let tokens = tokenize(input);
     if tokens.is_empty() {
         return ParseResult::Empty;
     }
     let (head, rest) = tokens.split_first().unwrap();
+    if let Some(expansion) = aliases.get(head) {
+        // Re-tokenize the expansion + the remaining args. Building a
+        // single input string keeps the expansion semantics shell-
+        // like: `alias g "foo bar"` + `g baz` → `foo bar baz`.
+        let mut merged = String::with_capacity(expansion.len() + 1);
+        merged.push_str(expansion);
+        for tok in rest {
+            merged.push(' ');
+            // Re-quote tokens containing whitespace so they survive
+            // the second tokenize pass.
+            if tok.contains(char::is_whitespace) {
+                merged.push('"');
+                merged.push_str(&tok.replace('\\', "\\\\").replace('"', "\\\""));
+                merged.push('"');
+            } else {
+                merged.push_str(tok);
+            }
+        }
+        // Guard against `alias a a` infinite loops — if the head of
+        // the expansion is the same alias name, fall through to the
+        // command lookup without re-expanding.
+        let expanded_tokens = tokenize(&merged);
+        if let Some(new_head) = expanded_tokens.first() {
+            if new_head == head {
+                match command_by_name(new_head) {
+                    Some(cmd) => {
+                        return ParseResult::Ok {
+                            cmd,
+                            args: expanded_tokens[1..].to_vec(),
+                        }
+                    }
+                    None => return ParseResult::Unknown(new_head.clone()),
+                }
+            }
+        }
+        return parse_with_aliases(&merged, aliases);
+    }
     match command_by_name(head) {
         Some(cmd) => ParseResult::Ok {
             cmd,
@@ -282,6 +329,52 @@ mod tests {
         let toks: Vec<String> = vec!["foo".into()];
         let args = Args::new(&toks);
         assert_eq!(args.flag_value("scope"), None);
+    }
+
+    #[test]
+    fn test_parse_with_aliases_expands_first_token() {
+        let mut aliases = HashMap::new();
+        aliases.insert("a".to_string(), "anchor set from auto".to_string());
+        match parse_with_aliases("a", &aliases) {
+            ParseResult::Ok { cmd, args } => {
+                assert_eq!(cmd.name, "anchor");
+                assert_eq!(args, vec!["set", "from", "auto"]);
+            }
+            _ => panic!("expected alias expansion to resolve"),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_aliases_merges_remaining_args() {
+        let mut aliases = HashMap::new();
+        aliases.insert("b".to_string(), "body".to_string());
+        match parse_with_aliases("b dash", &aliases) {
+            ParseResult::Ok { cmd, args } => {
+                assert_eq!(cmd.name, "body");
+                assert_eq!(args, vec!["dash"]);
+            }
+            _ => panic!("expected expansion to merge trailing args"),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_aliases_self_reference_falls_through_without_loop() {
+        // An alias pointing at its own name should resolve once,
+        // not infinitely.
+        let mut aliases = HashMap::new();
+        aliases.insert("help".to_string(), "help".to_string());
+        match parse_with_aliases("help", &aliases) {
+            ParseResult::Ok { cmd, .. } => assert_eq!(cmd.name, "help"),
+            other => panic!("expected Ok, got {:?}", matches!(other, ParseResult::Empty)),
+        }
+    }
+
+    #[test]
+    fn test_parse_without_aliases_passes_through() {
+        match parse("help") {
+            ParseResult::Ok { cmd, .. } => assert_eq!(cmd.name, "help"),
+            _ => panic!("expected bare parse to still work"),
+        }
     }
 
     #[test]

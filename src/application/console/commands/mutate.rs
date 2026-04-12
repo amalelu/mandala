@@ -16,7 +16,7 @@ use crate::application::console::completion::{enum_completion, Completion, Compl
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
 use crate::application::console::{
-    ConsoleContext, ConsoleEffects, ExecResult, RunMutationRequest,
+    BindMutationRequest, ConsoleContext, ConsoleEffects, ExecResult, RunMutationRequest,
 };
 use crate::application::document::SelectionState;
 
@@ -57,12 +57,38 @@ fn execute_mutate(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     match sub.as_str() {
         "list" => execute_list(eff),
         "run" => execute_run(args, eff),
-        "bind" | "unbind" => ExecResult::err(format!(
-            "mutate {}: not yet wired up (landing in commit 4)",
-            sub
-        )),
+        "bind" => execute_bind(args, eff),
+        "unbind" => execute_unbind(args, eff),
         other => ExecResult::err(format!("unknown mutate subcommand '{}'", other)),
     }
+}
+
+fn execute_bind(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
+    let combo = match args.positional(1) {
+        Some(k) => k.to_string(),
+        None => return ExecResult::err("usage: mutate bind <key> <mutation_id>"),
+    };
+    let mutation_id = match args.positional(2) {
+        Some(id) => id.to_string(),
+        None => return ExecResult::err("usage: mutate bind <key> <mutation_id>"),
+    };
+    if !eff.document.mutation_registry.contains_key(&mutation_id) {
+        return ExecResult::err(format!("no mutation with id '{}'", mutation_id));
+    }
+    eff.bind_mutation = Some(BindMutationRequest {
+        combo: combo.clone(),
+        mutation_id: mutation_id.clone(),
+    });
+    ExecResult::ok_msg(format!("bound {} → {}", combo, mutation_id))
+}
+
+fn execute_unbind(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
+    let combo = match args.positional(1) {
+        Some(k) => k.to_string(),
+        None => return ExecResult::err("usage: mutate unbind <key>"),
+    };
+    eff.unbind_mutation = Some(combo.clone());
+    ExecResult::ok_msg(format!("unbind {} requested", combo))
 }
 
 fn execute_list(eff: &mut ConsoleEffects) -> ExecResult {

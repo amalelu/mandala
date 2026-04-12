@@ -27,6 +27,7 @@ use crate::application::document::{EdgeRef, MindMapDocument};
 use baumhard::mindmap::custom_mutation::CustomMutation;
 use std::collections::HashMap;
 
+pub mod bindings_overlay;
 pub mod commands;
 pub mod completion;
 pub mod constants;
@@ -91,12 +92,36 @@ pub struct ConsoleEffects<'a> {
     /// command fn doesn't have access to (it only holds the
     /// document).
     pub run_mutation: Option<RunMutationRequest>,
+    /// If set, the dispatcher installs the binding into
+    /// `ResolvedKeybinds` at runtime and persists to the bindings
+    /// overlay file.
+    pub bind_mutation: Option<BindMutationRequest>,
+    /// If set, the dispatcher removes the binding at runtime and
+    /// updates the overlay file.
+    pub unbind_mutation: Option<String>,
+    /// If set, the dispatcher installs the alias into the session
+    /// map and, when `save` is true, writes it to the user
+    /// mutations file.
+    pub set_alias: Option<SetAliasRequest>,
 }
 
 #[derive(Clone, Debug)]
 pub struct RunMutationRequest {
     pub mutation_id: String,
     pub node_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct BindMutationRequest {
+    pub combo: String,
+    pub mutation_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SetAliasRequest {
+    pub name: String,
+    pub expansion: String,
+    pub save: bool,
 }
 
 impl<'a> ConsoleEffects<'a> {
@@ -107,6 +132,9 @@ impl<'a> ConsoleEffects<'a> {
             open_color_picker: None,
             close_console: false,
             run_mutation: None,
+            bind_mutation: None,
+            unbind_mutation: None,
+            set_alias: None,
         }
     }
 }

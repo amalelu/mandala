@@ -12,5 +12,7 @@
 
   "console_border": "#",
   "console_font": "",
-  "console_font_size": 16.0
+  "console_font_size": 16.0,
+
+  "custom_mutation_bindings": {}
 }

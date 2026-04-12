@@ -637,6 +637,85 @@ fn test_mutate_run_explicit_node_id_overrides_selection() {
 }
 
 // ============================================================
+// `mutate bind` / `mutate unbind`
+// ============================================================
+
+#[test]
+fn test_mutate_bind_sets_deferred_request() {
+    let mut doc = load_test_doc();
+    doc.mutation_registry
+        .insert("m1".into(), sample_custom_mutation("m1", "One"));
+    let (cmd, toks) = match parse("mutate bind Ctrl+Shift+M m1") {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        _ => panic!("parse failed"),
+    };
+    let mut eff = ConsoleEffects::new(&mut doc);
+    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
+    let req = eff.bind_mutation.take().expect("bind_mutation should be set");
+    assert_eq!(req.combo, "Ctrl+Shift+M");
+    assert_eq!(req.mutation_id, "m1");
+}
+
+#[test]
+fn test_mutate_bind_errors_on_unknown_mutation_id() {
+    let mut doc = load_test_doc();
+    let result = run("mutate bind Ctrl+Shift+M nope", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)));
+}
+
+#[test]
+fn test_mutate_unbind_sets_deferred_request() {
+    let mut doc = load_test_doc();
+    let (cmd, toks) = match parse("mutate unbind Ctrl+Shift+M") {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        _ => panic!("parse failed"),
+    };
+    let mut eff = ConsoleEffects::new(&mut doc);
+    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
+    let combo = eff.unbind_mutation.take().expect("unbind should be set");
+    assert_eq!(combo, "Ctrl+Shift+M");
+}
+
+// ============================================================
+// `alias`
+// ============================================================
+
+#[test]
+fn test_alias_sets_deferred_request_session_scoped_by_default() {
+    let mut doc = load_test_doc();
+    let (cmd, toks) = match parse("alias a anchor set from auto") {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        _ => panic!("parse failed"),
+    };
+    let mut eff = ConsoleEffects::new(&mut doc);
+    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
+    let req = eff.set_alias.take().expect("set_alias should be set");
+    assert_eq!(req.name, "a");
+    assert_eq!(req.expansion, "anchor set from auto");
+    assert!(!req.save);
+}
+
+#[test]
+fn test_alias_with_save_flag_requests_persistence() {
+    let mut doc = load_test_doc();
+    let (cmd, toks) = match parse("alias a anchor set from auto --save") {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        _ => panic!("parse failed"),
+    };
+    let mut eff = ConsoleEffects::new(&mut doc);
+    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
+    let req = eff.set_alias.take().unwrap();
+    assert!(req.save);
+}
+
+#[test]
+fn test_alias_without_expansion_errors() {
+    let mut doc = load_test_doc();
+    let result = run("alias a", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)));
+}
+
+// ============================================================
 // User-mutation precedence (user < map < inline)
 // ============================================================
 
