@@ -983,23 +983,23 @@ impl Renderer {
         if micros == 0 {
             return;
         }
-        self.fps = Some(
-            usize::try_from(Duration::from_secs(1).as_micros()).unwrap()
-                / usize::try_from(micros).unwrap(),
-        );
+        // FPS is a debug readout — saturate on overflow rather than panic.
+        let one_sec = usize::try_from(Duration::from_secs(1).as_micros()).unwrap_or(usize::MAX);
+        let micros = usize::try_from(micros).unwrap_or(usize::MAX);
+        self.fps = Some(one_sec / micros.max(1));
     }
 
     #[inline]
     fn calculate_fps(&mut self, delta_time: Duration) {
-        self.fps = Some(
-            usize::try_from(Duration::from_secs(1).as_micros()).unwrap()
-                / usize::try_from(
-                    (self.last_render_time
-                        + Duration::max(delta_time, Self::ZERO_DURATION.clone()))
-                    .as_micros(),
-                )
-                .unwrap(),
-        );
+        // FPS is a debug readout — saturate on overflow rather than panic.
+        let one_sec = usize::try_from(Duration::from_secs(1).as_micros()).unwrap_or(usize::MAX);
+        let frame_micros = usize::try_from(
+            (self.last_render_time
+                + Duration::max(delta_time, Self::ZERO_DURATION.clone()))
+            .as_micros(),
+        )
+        .unwrap_or(usize::MAX);
+        self.fps = Some(one_sec / frame_micros.max(1));
     }
 
     #[inline]
@@ -1050,18 +1050,20 @@ impl Renderer {
     }
 
     fn update_buffer_cache(&mut self) {
-        let arena_lock = self.graphics_arena.try_read();
-        if arena_lock.is_ok() {
-            for node in arena_lock.unwrap().iter() {
-                if !node.is_removed() {
-                    let element = node.get();
-                    Self::prepare_glyph_block(
-                        element.glyph_area().unwrap(),
-                        &element.unique_id(),
-                        &mut self.buffer_cache,
-                    );
-                }
+        // Interactive path: a contended arena lock or a node that has
+        // shed its glyph_area mid-mutation must not abort the frame.
+        let Ok(arena) = self.graphics_arena.try_read() else {
+            return;
+        };
+        for node in arena.iter() {
+            if node.is_removed() {
+                continue;
             }
+            let element = node.get();
+            let Some(area) = element.glyph_area() else {
+                continue;
+            };
+            Self::prepare_glyph_block(area, &element.unique_id(), &mut self.buffer_cache);
         }
     }
 
@@ -1256,36 +1258,39 @@ impl Renderer {
             .try_write()
             .expect("Failed to acquire font_system lock");
 
-        self.text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut font_system,
-                &mut self.atlas,
-                &self.viewport,
-                main_text_areas,
-                &mut self.swash_cache,
-            )
-            .unwrap();
-        self.palette_text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut font_system,
-                &mut self.atlas,
-                &self.viewport,
-                palette_text_areas,
-                &mut self.swash_cache,
-            )
-            .unwrap();
-        drop(font_system);
-
-        let frame_result = self.surface.get_current_texture();
-        if frame_result.is_err() {
-            debug!("Failed to get the surface texture, can't render.");
+        // Interactive path: a glyphon prepare failure must degrade the
+        // frame, not abort the process. Skip the whole render so we
+        // don't run a half-prepared atlas through the GPU.
+        if let Err(e) = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut font_system,
+            &mut self.atlas,
+            &self.viewport,
+            main_text_areas,
+            &mut self.swash_cache,
+        ) {
+            log::warn!("text_renderer.prepare failed, skipping frame: {e}");
             return;
         }
-        let frame = frame_result.unwrap();
+        if let Err(e) = self.palette_text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut font_system,
+            &mut self.atlas,
+            &self.viewport,
+            palette_text_areas,
+            &mut self.swash_cache,
+        ) {
+            log::warn!("palette_text_renderer.prepare failed, skipping frame: {e}");
+            return;
+        }
+        drop(font_system);
+
+        let Ok(frame) = self.surface.get_current_texture() else {
+            debug!("Failed to get the surface texture, can't render.");
+            return;
+        };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1323,7 +1328,13 @@ impl Renderer {
             // 2. Main text pass — node text, borders, connections,
             //    edge handles, camera-transformed and screen-space
             //    overlays, all drawn on top of the node backgrounds.
-            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).unwrap();
+            //    Interactive path: log and continue on render failure
+            //    so a single bad atlas frame doesn't crash the editor.
+            if let Err(e) =
+                self.text_renderer.render(&self.atlas, &self.viewport, &mut pass)
+            {
+                log::warn!("text_renderer.render failed: {e}");
+            }
 
             // 3. Palette backdrop (rect pipeline, screen-space).
             //    Drawn AFTER the main text pass so node text
@@ -1342,9 +1353,13 @@ impl Renderer {
             // 4. Palette text pass — cyan border, query line,
             //    filtered action rows. Drawn on top of the palette
             //    backdrop so every glyph sits cleanly on solid fill.
-            self.palette_text_renderer
+            //    Interactive path: log and continue on render failure.
+            if let Err(e) = self
+                .palette_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
-                .unwrap();
+            {
+                log::warn!("palette_text_renderer.render failed: {e}");
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
