@@ -33,7 +33,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 use baumhard::util::color::{hex_to_hsv_safe, resolve_var};
 
-use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, UndoAction};
+use crate::application::document::{EdgeRef, MindMapDocument, PortalRef};
 
 /// Number of hue slots on the outer ring. 24 slots = 15° per step. Fine
 /// enough that adjacent slots feel continuous, coarse enough that each
@@ -302,16 +302,22 @@ pub fn current_hsv_at(
 // State machine
 // =============================================================
 
-/// Modal state for the glyph-wheel color picker. The `Open` variant
-/// carries both the pre-picker snapshot (as an `UndoAction` — cleaner
-/// than a parallel `ColorPickerSnapshot` enum that was structurally
-/// isomorphic anyway) and the live HSV values being previewed.
+/// Modal state for the glyph-wheel color picker.
 ///
-/// Hot path design: `kind` and `target_index` are captured at open time
-/// and used directly by the hover handler to mutate `doc.mindmap.edges
-/// [index]` or `doc.mindmap.portals[index]` without re-resolving any
-/// `EdgeRef`/`PortalRef`. This removes ~6 `String` clones per cursor
-/// move.
+/// The previous revision of this struct also stored a
+/// `snapshot: UndoAction` so a pre-picker clone of the edited
+/// edge/portal could be restored on cancel. That snapshot is no
+/// longer needed: preview is now a purely visual substitution via
+/// `MindMapDocument::color_picker_preview`, so cancel just clears
+/// the preview and commit calls `set_edge_color` /
+/// `set_portal_color` once on the final HSV — the committed model
+/// is untouched during hover and the fork-on-first-edit semantics
+/// of `ensure_glyph_connection` only fire on commit.
+///
+/// Hot path design: `kind` and `target_index` are captured at open
+/// time so the hover handler can push `(target_index, hex)` into
+/// the document preview without re-resolving any `EdgeRef` /
+/// `PortalRef`.
 #[derive(Debug, Clone)]
 pub enum ColorPickerState {
     Closed,
@@ -322,11 +328,6 @@ pub enum ColorPickerState {
         /// captured at open time. Stable for the picker's lifetime because
         /// the modal suppresses all other document edits.
         target_index: usize,
-        /// Pre-picker snapshot stored directly as the `UndoAction` that
-        /// `commit_color_picker` will push. Cancel reads the `before`
-        /// field and restores it in place without touching the undo
-        /// stack. One `UndoAction` per picker session.
-        snapshot: UndoAction,
         /// Current preview hue in degrees, `[0, 360)`.
         hue_deg: f32,
         /// Current preview saturation, `[0, 1]`.
@@ -353,6 +354,15 @@ pub enum ColorPickerState {
         /// Same, for the 24 hue ring glyphs at
         /// `font_size * HUE_RING_FONT_SCALE`. Measured once at open.
         max_ring_advance: f32,
+        /// Tracks what the commit should do. `Hsv` → commit the
+        /// current HSV hex as a per-edge/portal override. `Var(raw)`
+        /// → commit the `var(--...)` string so theme-var resolution
+        /// runs at render time. `ResetToInherited` → clear the edge
+        /// override (cfg.color = None) for edges, or re-seed to the
+        /// --accent fallback for portals. Set by `apply_picker_chip`;
+        /// HSV nudges and mouse hover on the wheel reset it back to
+        /// `Hsv`.
+        commit_mode: CommitMode,
         /// Cached layout from the last rebuild. `None` between `Open`
         /// construction and the first `rebuild_color_picker_overlay`
         /// call (a narrow window — the rebuild is the very next line
@@ -360,6 +370,19 @@ pub enum ColorPickerState {
         /// explicit rather than relying on a placeholder).
         layout: Option<ColorPickerLayout>,
     },
+}
+
+/// What the picker will commit to the model on Enter / click-commit.
+#[derive(Debug, Clone)]
+pub enum CommitMode {
+    /// Commit the current HSV value as a concrete hex.
+    Hsv,
+    /// Commit a raw `var(--name)` reference. Set by a theme chip.
+    Var(String),
+    /// Commit a "clear override" — `set_edge_color(None)` for edges;
+    /// re-seed to `--accent` for portals (which have a non-optional
+    /// color field).
+    ResetToInherited,
 }
 
 impl ColorPickerState {
@@ -525,7 +548,10 @@ pub fn compute_color_picker_layout(
     // Recompute ring_r from the possibly-clamped side so layout is
     // consistent. On unconstrained windows this is a no-op; on small
     // windows it shrinks the ring to fit.
-    let outer_radius = side * 0.5 - font_size;
+    // Guard against side < 2*font_size producing a negative radius
+    // on very small windows. Clamp to 0 so downstream consumers
+    // (chip_row_y placement, backdrop math) get a sane value.
+    let outer_radius = (side * 0.5 - font_size).max(0.0);
     let ring_r = (outer_radius - ring_font_size * 0.5).max(0.0);
     let center = (screen_w * 0.5, screen_h * 0.5);
 
@@ -999,9 +1025,12 @@ mod tests {
 
     /// Hue ring slots must not overlap at the new 1.5× font scale.
     /// On a full-size window, consecutive slot centers should be at
-    /// least `max_ring_advance` apart along the tangent — anything
-    /// less means the ring radius got clamped too tight and glyphs
-    /// will collide visually.
+    /// least `0.9 * max_ring_advance` apart by straight-line (chord)
+    /// distance — anything less means the ring radius got clamped too
+    /// tight and glyphs will collide visually. Chord distance (not
+    /// arc) because that's what matters for glyph collision: the
+    /// glyphs sit at the slot centers, and two glyphs collide when
+    /// their chord distance falls below their shaped widths.
     #[test]
     fn hue_ring_slots_do_not_overlap_at_new_font_scale() {
         let g = sample_geometry();

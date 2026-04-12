@@ -22,6 +22,9 @@ borders, connection paths — is laid out as positioned font glyphs.
 - **`CODE_CONVENTIONS.md`** — the codebase's guiding spirit: KISS,
   readability, code-as-art, and explicit acceptance that the conventions
   are aspirational rather than enforced.
+- **`TEST_CONVENTIONS.md`** — testing philosophy, where to put tests, the
+  `do_*()` benchmark-reuse pattern, and what we deliberately don't do
+  (no mocks, no snapshots, no GPU tests).
 - **`lib/baumhard/src/mindmap/`** — the data model, loaders, scene
   builders, and the tree bridge. Most interesting logic lives here.
 - **`src/application/`** — the app shell: event loop, document state,
@@ -55,7 +58,13 @@ borders, connection paths — is laid out as positioned font glyphs.
 
 ## Common tasks
 
-- **Run tests**: `./test.sh` (runs the full suite across both crates).
+- **Run tests**: `./test.sh` (runs the full suite across both crates and
+  prints a test count). Variants: `./test.sh --coverage` runs under
+  `cargo-llvm-cov` (install once with `cargo install cargo-llvm-cov`,
+  produces `target/llvm-cov/html/index.html` and
+  `target/llvm-cov/lcov.info`); `./test.sh --lint` adds an advisory
+  `cargo fmt --check` + `cargo clippy` pass (never fails the run);
+  `./test.sh --bench` also runs the criterion benches after tests pass.
 - **Run the app**: `cargo run -- maps/testament.mindmap.json` (native) or
   `trunk serve` (WASM).
 - **Target a specific test**: `cargo test -p baumhard --lib <pattern>` or

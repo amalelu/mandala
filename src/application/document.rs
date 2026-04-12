@@ -3,6 +3,10 @@ use std::path::Path;
 use glam::Vec2;
 use log::{error, info};
 use baumhard::core::primitives::Range;
+use baumhard::gfx_structs::area::GlyphAreaCommand;
+use baumhard::gfx_structs::mutator::{GfxMutator, Mutation};
+use baumhard::gfx_structs::tree::MutatorTree;
+use baumhard::gfx_structs::tree_walker::walk_tree_from;
 use baumhard::mindmap::custom_mutation::{
     CustomMutation, DocumentAction, MutationBehavior, TargetScope, Trigger,
     PlatformContext, apply_mutations_to_element,
@@ -10,21 +14,21 @@ use baumhard::mindmap::custom_mutation::{
 use baumhard::mindmap::connection;
 use baumhard::mindmap::model::{
     Canvas, GlyphConnectionConfig, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle,
-    PortalPair, Position, Size, PORTAL_GLYPH_PRESETS,
+    PortalPair, Position, Size, TextRun, PORTAL_GLYPH_PRESETS,
 };
 use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
 use baumhard::mindmap::tree_builder::{self, MindMapTree};
 
 /// Selection highlight color: bright cyan [R, G, B, A]
-const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
+pub const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
 
 /// Reparent-mode source color: orange, used for nodes currently being reparented.
-const REPARENT_SOURCE_COLOR: [f32; 4] = [1.0, 0.55, 0.0, 1.0];
+pub const REPARENT_SOURCE_COLOR: [f32; 4] = [1.0, 0.55, 0.0, 1.0];
 
 /// Reparent-mode target color: green, used for the node currently hovered as
 /// a potential reparent target.
-const REPARENT_TARGET_COLOR: [f32; 4] = [0.2, 1.0, 0.4, 1.0];
+pub const REPARENT_TARGET_COLOR: [f32; 4] = [0.2, 1.0, 0.4, 1.0];
 
 /// Identifies an edge in the MindMap by its endpoints and type. Edges have
 /// no stable ID, so this triple is the canonical reference (matching how
@@ -184,7 +188,6 @@ fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
 /// placeholder text so it's visible on the canvas until the user edits it
 /// (text editing is still WIP; see roadmap M7).
 fn default_orphan_node(id: &str, position: Vec2, index: i32) -> MindNode {
-    use baumhard::mindmap::model::TextRun;
     let text = "New node".to_string();
     let text_runs = vec![TextRun {
         start: 0,
@@ -286,6 +289,14 @@ pub enum UndoAction {
     /// A new node was created (via `apply_create_orphan_node`). Undo
     /// removes the node from `mindmap.nodes` by id.
     CreateNode { node_id: String },
+    /// Session 7A: the `text` (and possibly `text_runs`) of a node was
+    /// edited in place via `set_node_text`. Undo restores the pre-edit
+    /// `text` and `text_runs` on the node, if it still exists.
+    EditNodeText {
+        node_id: String,
+        before_text: String,
+        before_runs: Vec<TextRun>,
+    },
     /// Snapshot of the entire `Canvas` taken before a document action
     /// (theme switch, etc.) mutated it. The canvas is small and cloning
     /// the whole thing is cheaper than tracking field-level diffs, and
@@ -316,6 +327,41 @@ pub struct MindMapDocument {
     pub mutation_registry: HashMap<String, CustomMutation>,
     /// Tracks active toggle mutations per node: (node_id, mutation_id).
     pub active_toggles: HashSet<(String, String)>,
+    /// Transient label edit preview. When `Some((edge_key, buffer))`,
+    /// scene-building substitutes `buffer` (plus a trailing caret) for
+    /// the matching edge's `ConnectionLabelElement.text` — the inline
+    /// label editor's live display. Cleared on commit or cancel.
+    ///
+    /// Lives on the document rather than on the app layer so all
+    /// `build_scene_*` callers see the override without extra
+    /// plumbing. The committed `MindEdge.label` in `self.mindmap` is
+    /// never touched during editing; the preview is purely a
+    /// scene-level substitution.
+    pub label_edit_preview: Option<(baumhard::mindmap::scene_cache::EdgeKey, String)>,
+    /// Transient color-picker hover preview. When `Some(...)`, the
+    /// scene builder substitutes the preview color for the edge or
+    /// portal under the wheel — overriding both the resolved
+    /// `config.color` and any selection highlight on the previewed
+    /// element so the user sees the live HSV value on the element
+    /// being edited. Commit (`set_edge_color` / `set_portal_color`)
+    /// and cancel both clear the preview; neither the committed
+    /// model nor the undo stack is touched during hover.
+    pub color_picker_preview: Option<ColorPickerPreview>,
+}
+
+/// Transient visual-only substitution of a color-pickerable element's
+/// color. Read by `build_scene_*` and consumed by `scene_builder`'s
+/// `EdgeColorPreview` / `PortalColorPreview` threaded params.
+#[derive(Debug, Clone)]
+pub enum ColorPickerPreview {
+    Edge {
+        key: baumhard::mindmap::scene_cache::EdgeKey,
+        color: String,
+    },
+    Portal {
+        key: baumhard::mindmap::scene_builder::PortalRefKey,
+        color: String,
+    },
 }
 
 /// Walk every node in the map and grow its stored `size` in place until
@@ -398,6 +444,8 @@ impl MindMapDocument {
                     undo_stack: Vec::new(),
                     mutation_registry: HashMap::new(),
                     active_toggles: HashSet::new(),
+                    label_edit_preview: None,
+                    color_picker_preview: None,
                 };
                 doc.build_mutation_registry();
                 Ok(doc)
@@ -442,6 +490,11 @@ impl MindMapDocument {
     /// edges skip the `sample_path` geometry work entirely — Phase B of
     /// the connection-render cost fix. See
     /// `baumhard::mindmap::scene_cache` for invariants.
+    ///
+    /// Automatically threads the document's transient UI overrides
+    /// into the scene builder:
+    /// - `label_edit_preview`: live inline-label buffer + caret.
+    /// - `color_picker_preview`: live color-picker hover HSV.
     pub fn build_scene_with_cache(
         &self,
         offsets: &HashMap<String, (f32, f32)>,
@@ -452,24 +505,72 @@ impl MindMapDocument {
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
         let portal_sel = self.selection.selected_portal()
             .map(|p| (p.label.as_str(), p.endpoint_a.as_str(), p.endpoint_b.as_str()));
+        let label_edit = self
+            .label_edit_preview
+            .as_ref()
+            .map(|(k, s)| (k, s.as_str()));
+        let edge_preview = match &self.color_picker_preview {
+            Some(ColorPickerPreview::Edge { key, color }) => {
+                Some(scene_builder::EdgeColorPreview { edge_key: key, color: color.as_str() })
+            }
+            _ => None,
+        };
+        let portal_preview = match &self.color_picker_preview {
+            Some(ColorPickerPreview::Portal { key, color }) => {
+                Some(scene_builder::PortalColorPreview { portal_key: key, color: color.as_str() })
+            }
+            _ => None,
+        };
         scene_builder::build_scene_with_cache(
-            &self.mindmap, offsets, sel, portal_sel, cache, camera_zoom,
+            &self.mindmap,
+            offsets,
+            sel,
+            portal_sel,
+            label_edit,
+            edge_preview,
+            portal_preview,
+            cache,
+            camera_zoom,
         )
     }
 
     /// Build a RenderScene that also reflects the current edge selection.
     /// The selected edge (if any) gets a cyan color override baked into its
     /// ConnectionElement so the renderer paints it in the highlight color.
+    ///
+    /// Like `build_scene_with_cache`, this also threads the document's
+    /// `label_edit_preview` and `color_picker_preview` into the scene
+    /// build so live interaction previews are visible on any scene
+    /// that flows through this entry point.
     pub fn build_scene_with_selection(&self, camera_zoom: f32) -> RenderScene {
         let sel = self.selection.selected_edge()
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
         let portal_sel = self.selection.selected_portal()
             .map(|p| (p.label.as_str(), p.endpoint_a.as_str(), p.endpoint_b.as_str()));
-        scene_builder::build_scene_with_offsets_and_selection(
+        let label_edit = self
+            .label_edit_preview
+            .as_ref()
+            .map(|(k, s)| (k, s.as_str()));
+        let edge_preview = match &self.color_picker_preview {
+            Some(ColorPickerPreview::Edge { key, color }) => {
+                Some(scene_builder::EdgeColorPreview { edge_key: key, color: color.as_str() })
+            }
+            _ => None,
+        };
+        let portal_preview = match &self.color_picker_preview {
+            Some(ColorPickerPreview::Portal { key, color }) => {
+                Some(scene_builder::PortalColorPreview { portal_key: key, color: color.as_str() })
+            }
+            _ => None,
+        };
+        scene_builder::build_scene_with_offsets_selection_and_overrides(
             &self.mindmap,
             &HashMap::new(),
             sel,
             portal_sel,
+            label_edit,
+            edge_preview,
+            portal_preview,
             camera_zoom,
         )
     }
@@ -708,50 +809,6 @@ impl MindMapDocument {
         cfg.cap_end = new_val;
         self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
         self.dirty = true;
-        true
-    }
-
-    /// Non-undoing in-place color preview, used by the glyph-wheel
-    /// color picker during hover. The picker captures a pre-open
-    /// snapshot once and then calls this on every cursor move; on
-    /// commit a single `UndoAction::EditEdge { before }` is pushed
-    /// (with the captured snapshot), so per-frame previews never
-    /// pollute the undo stack. Mirrors how `apply_edge_handle_drag`
-    /// in `app.rs` mutates per-frame and lets the release path push
-    /// undo. Returns `true` if the edge was found.
-    ///
-    /// `dirty` is intentionally NOT flipped here — preview state is
-    /// transient until the picker commits.
-    pub fn preview_edge_color(
-        &mut self,
-        edge_ref: &EdgeRef,
-        color: Option<&str>,
-    ) -> bool {
-        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
-            Some(i) => i,
-            None => return false,
-        };
-        self.preview_edge_color_by_index(idx, color)
-    }
-
-    /// By-index variant of `preview_edge_color`. The glyph-wheel
-    /// color picker captures the target's index at open time and
-    /// calls this every cursor-move, avoiding a linear scan + ref
-    /// clone on the hot hover path. Returns `true` if `idx` is in
-    /// bounds.
-    pub fn preview_edge_color_by_index(
-        &mut self,
-        idx: usize,
-        color: Option<&str>,
-    ) -> bool {
-        if idx >= self.mindmap.edges.len() {
-            return false;
-        }
-        let cfg = Self::ensure_glyph_connection(
-            &mut self.mindmap.edges[idx],
-            &self.mindmap.canvas,
-        );
-        cfg.color = color.map(|s| s.to_string());
         true
     }
 
@@ -1065,31 +1122,55 @@ impl MindMapDocument {
         self.apply_edit_portal(portal_ref, move |p| p.color = color_owned)
     }
 
-    /// Non-undoing in-place portal color preview, parallel to
-    /// `preview_edge_color`. Used by the glyph-wheel color picker for
-    /// per-frame hover updates without polluting the undo stack.
-    /// `dirty` is intentionally NOT flipped — the picker commits via
-    /// the regular `set_portal_color` path on Enter, which carries the
-    /// captured pre-picker snapshot for undo.
-    pub fn preview_portal_color(
-        &mut self,
-        portal_ref: &PortalRef,
-        color: &str,
-    ) -> bool {
-        let idx = match self.mindmap.portals.iter().position(|p| portal_ref.matches(p)) {
-            Some(i) => i,
+    /// Session 7A: replace a node's `text` and collapse its `text_runs`
+    /// to a single run inheriting the first original run's formatting
+    /// (font, size_pt, color, bold, italic, underline). If the original
+    /// had no runs, a white 24pt Liberation Sans run is synthesized —
+    /// mirrors `default_orphan_node`.
+    ///
+    /// Returns `true` if the value actually changed. No-op / no undo
+    /// push on unchanged text, matching `set_edge_label`'s contract.
+    ///
+    /// **Collapse caveat**: authored multi-run nodes lose their per-span
+    /// formatting on any edit. Session 7B's `TextRun` splitting will
+    /// preserve it.
+    pub fn set_node_text(&mut self, node_id: &str, new_text: String) -> bool {
+        let node = match self.mindmap.nodes.get_mut(node_id) {
+            Some(n) => n,
             None => return false,
         };
-        self.preview_portal_color_by_index(idx, color)
-    }
-
-    /// By-index variant of `preview_portal_color`; see
-    /// `preview_edge_color_by_index` for the hot-path rationale.
-    pub fn preview_portal_color_by_index(&mut self, idx: usize, color: &str) -> bool {
-        if idx >= self.mindmap.portals.len() {
+        if node.text == new_text {
             return false;
         }
-        self.mindmap.portals[idx].color = color.to_string();
+        let before_text = node.text.clone();
+        let before_runs = node.text_runs.clone();
+        // Collapse to a single run that spans the new text. Inherit
+        // formatting from the first original run, or fall back to the
+        // default-orphan defaults if the node had no runs.
+        let template = before_runs.first().cloned().unwrap_or_else(|| TextRun {
+            start: 0,
+            end: 0,
+            bold: false,
+            italic: false,
+            underline: false,
+            font: "LiberationSans".to_string(),
+            size_pt: 24,
+            color: "#ffffff".to_string(),
+            hyperlink: None,
+        });
+        let new_runs = vec![TextRun {
+            start: 0,
+            end: new_text.chars().count(),
+            ..template
+        }];
+        node.text = new_text;
+        node.text_runs = new_runs;
+        self.undo_stack.push(UndoAction::EditNodeText {
+            node_id: node_id.to_string(),
+            before_text,
+            before_runs,
+        });
+        self.dirty = true;
         true
     }
 
@@ -1416,6 +1497,16 @@ impl MindMapDocument {
                     self.mindmap.nodes.remove(&node_id);
                     if self.selection.is_selected(&node_id) {
                         self.selection = SelectionState::None;
+                    }
+                }
+                UndoAction::EditNodeText { node_id, before_text, before_runs } => {
+                    // Restore the pre-edit text and text_runs. If the node
+                    // has been removed since the action was recorded (e.g.
+                    // a later delete that hasn't been undone yet), silently
+                    // skip — matches the `EditEdge` clamp-on-missing pattern.
+                    if let Some(node) = self.mindmap.nodes.get_mut(&node_id) {
+                        node.text = before_text;
+                        node.text_runs = before_runs;
                     }
                 }
                 UndoAction::CanvasSnapshot { canvas } => {
@@ -1834,80 +1925,65 @@ pub fn rect_select(corner_a: Vec2, corner_b: Vec2, tree: &MindMapTree) -> Vec<St
     hits
 }
 
-/// Apply selection highlight to the tree by modifying selected nodes' color regions.
-/// Call this after `build_tree()` and before passing the tree to the renderer.
-/// The tree is modified in-place; rebuilding restores original colors from the MindMap model.
-pub fn apply_selection_highlight(tree: &mut MindMapTree, selection: &SelectionState) {
-    for selected_id in selection.selected_ids() {
-        let node_id = match tree.node_map.get(selected_id) {
-            Some(&id) => id,
-            None => continue,
-        };
-        let node = match tree.tree.arena.get_mut(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-        let element = node.get_mut();
-        if let Some(glyph_area) = element.glyph_area_mut() {
-            // Collect existing region ranges first, then update each one's color.
-            // Using the exact existing ranges ensures set_or_insert finds a match
-            // and updates in place rather than inserting a duplicate region.
-            let ranges: Vec<Range> = glyph_area.regions.all_regions()
-                .iter()
-                .map(|r| r.range)
-                .collect();
-            for range in &ranges {
-                glyph_area.set_region_color(range, &HIGHLIGHT_COLOR);
-            }
-        }
-    }
-}
+/// Apply a set of node highlights as baumhard mutations. For each
+/// `(mind_node_id, color)` pair, the node's existing text-run ranges
+/// are collected from its `GlyphArea` and a `GfxMutator::Macro` of one
+/// `SetRegionColor(range, color)` mutation per range is applied through
+/// `walk_tree_from` — i.e. the highlight is expressed in the same
+/// mutation language as the rest of baumhard's tree-walker flow rather
+/// than reaching into the arena imperatively.
+///
+/// Later pairs override earlier ones when the same node appears twice,
+/// which is what the reparent/connect modes rely on: callers pass
+/// selection highlights first (cyan), then source (orange), then target
+/// (green), and the last write wins on conflicts.
+///
+/// Architectural note: this replaces the earlier trio of
+/// `apply_selection_highlight` / `apply_reparent_source_highlight` /
+/// `apply_reparent_target_highlight` helpers, which all did the same
+/// direct arena patching with different constants. The single function
+/// here is both shorter and aligns with architectural decision #6 in
+/// ROADMAP.md (mutations as the interaction model).
+pub fn apply_tree_highlights<'a, I>(tree: &mut MindMapTree, highlights: I)
+where
+    I: IntoIterator<Item = (&'a str, [f32; 4])>,
+{
+    for (mind_id, color) in highlights {
+        let Some(&node_id) = tree.node_map.get(mind_id) else { continue };
 
-/// Apply an orange "reparent-source" highlight to the given nodes in the tree.
-/// Used in reparent mode to indicate which nodes the user is about to move.
-/// Call after `apply_selection_highlight` if you want it to override the cyan
-/// selection color for source nodes.
-pub fn apply_reparent_source_highlight(tree: &mut MindMapTree, sources: &[String]) {
-    for source_id in sources {
-        let node_id = match tree.node_map.get(source_id) {
-            Some(&id) => id,
-            None => continue,
+        // Collect existing region ranges up front. The SetRegionColor
+        // mutation needs the exact `Range` of each target region so that
+        // the underlying `set_or_insert` finds a match and updates
+        // in-place rather than inserting a duplicate region.
+        let (ranges, target_channel): (Vec<Range>, usize) = {
+            let Some(node) = tree.tree.arena.get(node_id) else { continue };
+            let element = node.get();
+            let Some(area) = element.glyph_area() else { continue };
+            let ranges = area.regions.all_regions().iter().map(|r| r.range).collect();
+            // Match the element's channel so the walker's channel-
+            // alignment check in `apply_if_matching_channel` passes.
+            let channel = {
+                use baumhard::gfx_structs::tree::BranchChannel;
+                element.channel()
+            };
+            (ranges, channel)
         };
-        let node = match tree.tree.arena.get_mut(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-        if let Some(glyph_area) = node.get_mut().glyph_area_mut() {
-            let ranges: Vec<Range> = glyph_area.regions.all_regions()
-                .iter()
-                .map(|r| r.range)
-                .collect();
-            for range in &ranges {
-                glyph_area.set_region_color(range, &REPARENT_SOURCE_COLOR);
-            }
+        if ranges.is_empty() {
+            continue;
         }
-    }
-}
 
-/// Apply a green "reparent-target" highlight to a single node in the tree.
-/// Used in reparent mode to indicate the currently-hovered drop target.
-pub fn apply_reparent_target_highlight(tree: &mut MindMapTree, target_id: &str) {
-    let node_id = match tree.node_map.get(target_id) {
-        Some(&id) => id,
-        None => return,
-    };
-    let node = match tree.tree.arena.get_mut(node_id) {
-        Some(n) => n,
-        None => return,
-    };
-    if let Some(glyph_area) = node.get_mut().glyph_area_mut() {
-        let ranges: Vec<Range> = glyph_area.regions.all_regions()
-            .iter()
-            .map(|r| r.range)
+        let mutations: Vec<Mutation> = ranges
+            .into_iter()
+            .map(|r| Mutation::area_command(GlyphAreaCommand::SetRegionColor(r, color)))
             .collect();
-        for range in &ranges {
-            glyph_area.set_region_color(range, &REPARENT_TARGET_COLOR);
-        }
+        let mutator_tree = MutatorTree::new_with(GfxMutator::new_macro(mutations, target_channel));
+
+        // `walk_tree_from` applied at a specific target_id with a
+        // single-node MutatorTree runs the macro on that element only
+        // (no descendants are touched because the mutator tree has no
+        // children, so `align_child_walks` is a no-op). This is the
+        // idiomatic "one-shot mutation to a specific node" shape.
+        walk_tree_from(&mut tree.tree, &mutator_tree, node_id, mutator_tree.root);
     }
 }
 
@@ -1957,6 +2033,8 @@ mod tests {
             undo_stack: Vec::new(),
             mutation_registry: HashMap::new(),
             active_toggles: HashSet::new(),
+            label_edit_preview: None,
+            color_picker_preview: None,
         };
         doc.build_mutation_registry();
         doc
@@ -2045,9 +2123,8 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_selection_highlight() {
+    fn test_apply_tree_highlights_via_walker() {
         let mut tree = load_test_tree();
-        let selection = SelectionState::Single("348068464".to_string());
         let node_id = *tree.node_map.get("348068464").unwrap();
 
         // Before highlight: original color (white)
@@ -2055,8 +2132,11 @@ mod tests {
         let original_color = area.regions.all_regions()[0].color.unwrap();
         assert!((original_color[0] - 1.0).abs() < 0.01, "Expected white before highlight");
 
-        // Apply highlight
-        apply_selection_highlight(&mut tree, &selection);
+        // Apply highlight via the new mutator-driven path.
+        apply_tree_highlights(
+            &mut tree,
+            std::iter::once(("348068464", HIGHLIGHT_COLOR)),
+        );
 
         // After highlight: cyan
         let area = tree.tree.arena.get(node_id).unwrap().get().glyph_area().unwrap();
@@ -2067,11 +2147,10 @@ mod tests {
     }
 
     #[test]
-    fn test_highlight_does_not_affect_unselected() {
+    fn test_apply_tree_highlights_does_not_affect_others() {
         let mut tree = load_test_tree();
-        let selection = SelectionState::Single("348068464".to_string());
 
-        // Pick a different node and copy its NodeId and regions before mutation
+        // Pick a different node and copy its regions before mutation.
         let other_id = tree.node_map.keys()
             .find(|k| *k != "348068464")
             .unwrap().clone();
@@ -2079,11 +2158,37 @@ mod tests {
         let before = tree.tree.arena.get(other_node_id).unwrap().get()
             .glyph_area().unwrap().regions.clone();
 
-        apply_selection_highlight(&mut tree, &selection);
+        apply_tree_highlights(
+            &mut tree,
+            std::iter::once(("348068464", HIGHLIGHT_COLOR)),
+        );
 
         let after = tree.tree.arena.get(other_node_id).unwrap().get()
             .glyph_area().unwrap().regions.clone();
         assert_eq!(before, after, "Unselected node colors should not change");
+    }
+
+    #[test]
+    fn test_apply_tree_highlights_later_pair_overrides_earlier() {
+        // The reparent-mode flow relies on source-orange overriding the
+        // previously-applied selection-cyan on the same node. Verify the
+        // last-write-wins semantics of apply_tree_highlights.
+        let mut tree = load_test_tree();
+        let node_id = *tree.node_map.get("348068464").unwrap();
+
+        apply_tree_highlights(
+            &mut tree,
+            vec![
+                ("348068464", HIGHLIGHT_COLOR),
+                ("348068464", REPARENT_SOURCE_COLOR),
+            ],
+        );
+
+        let area = tree.tree.arena.get(node_id).unwrap().get().glyph_area().unwrap();
+        let c = area.regions.all_regions()[0].color.unwrap();
+        assert!((c[0] - REPARENT_SOURCE_COLOR[0]).abs() < 0.01);
+        assert!((c[1] - REPARENT_SOURCE_COLOR[1]).abs() < 0.01);
+        assert!((c[2] - REPARENT_SOURCE_COLOR[2]).abs() < 0.01);
     }
 
     #[test]
@@ -3421,194 +3526,78 @@ mod tests {
         assert_eq!(cfg.spacing, 6.0);
     }
 
+    /// Glyph-wheel color picker invariant: setting
+    /// `doc.color_picker_preview` never pushes an undo entry and
+    /// never flips dirty. Mirrors what the picker hover path does
+    /// after the Step C refactor, which moved preview from model-
+    /// mutation (`preview_edge_color`) to a transient scene-level
+    /// substitution via the document field.
     #[test]
-    fn test_preview_edge_color_does_not_push_undo_or_dirty() {
-        // Glyph-wheel color picker invariant: per-frame previews must
-        // never push undo or flip the dirty flag. Only the final
-        // commit (via set_edge_color or a manual EditEdge push) does.
-        let mut doc = load_test_doc();
-        let er = first_testament_edge_ref(&doc);
-        let stack_depth = doc.undo_stack.len();
-        doc.dirty = false;
-
-        let changed = doc.preview_edge_color(&er, Some("#abcdef"));
-        assert!(changed);
-        assert_eq!(doc.undo_stack.len(), stack_depth, "preview must not push undo");
-        assert!(!doc.dirty, "preview must not flip dirty");
-
-        // The model should reflect the previewed color so the next
-        // scene rebuild draws it.
-        let idx = doc.edge_index(&er).unwrap();
-        assert_eq!(
-            doc.mindmap.edges[idx]
-                .glyph_connection
-                .as_ref()
-                .and_then(|gc| gc.color.as_deref()),
-            Some("#abcdef"),
-        );
-    }
-
-    #[test]
-    fn test_preview_edge_color_none_clears_override_in_place() {
-        let mut doc = load_test_doc();
-        let er = first_testament_edge_ref(&doc);
-        // First seed an override the picker would later clear.
-        doc.preview_edge_color(&er, Some("#112233"));
-        // Now the picker user "presses Tab to the reset chip then Enter".
-        let stack_depth = doc.undo_stack.len();
-        doc.preview_edge_color(&er, None);
-        assert_eq!(doc.undo_stack.len(), stack_depth);
-        let idx = doc.edge_index(&er).unwrap();
-        assert!(doc.mindmap.edges[idx]
-            .glyph_connection
-            .as_ref()
-            .and_then(|gc| gc.color.as_ref())
-            .is_none());
-    }
-
-    /// Color-picker snapshot/cancel invariant: capturing a snapshot,
-    /// running multiple previews, then restoring from the snapshot
-    /// must (a) leave the model byte-identical to the pre-snapshot
-    /// state and (b) leave the undo stack untouched. Mirrors what
-    /// `cancel_color_picker` does in `app.rs`.
-    #[test]
-    fn test_color_picker_snapshot_cancel_roundtrip_edge() {
-        let mut doc = load_test_doc();
-        let er = first_testament_edge_ref(&doc);
-        let idx = doc.edge_index(&er).unwrap();
-        let stack_depth = doc.undo_stack.len();
-
-        // Capture pre-picker snapshot.
-        let before_snapshot = doc.mindmap.edges[idx].clone();
-
-        // Simulate hover: several preview calls, none of which push
-        // undo or flip dirty.
-        doc.preview_edge_color(&er, Some("#aabbcc"));
-        doc.preview_edge_color(&er, Some("#112233"));
-        doc.preview_edge_color(&er, Some("#ff00ff"));
-        assert_eq!(doc.undo_stack.len(), stack_depth, "preview must not push undo");
-
-        // Simulate cancel: restore the snapshot in place.
-        doc.mindmap.edges[idx] = before_snapshot.clone();
-
-        // The model is restored byte-identical and the undo stack is
-        // unchanged. Ctrl+Z right after cancel undoes whatever was
-        // BEFORE the picker session, not the picker itself.
-        assert_eq!(doc.mindmap.edges[idx], before_snapshot,
-            "cancel must restore the snapshot byte-identical");
-        assert_eq!(doc.undo_stack.len(), stack_depth,
-            "cancel must not touch the undo stack");
-    }
-
-    /// Commit-no-op invariant: opening the picker on an edge,
-    /// preview-then-restoring (or never moving), and "committing"
-    /// against an unchanged model must NOT push an undo entry. The
-    /// equality check in `commit_color_picker` is the gate. Without
-    /// it, no-op picks pollute the undo stack and Ctrl+Z appears
-    /// broken.
-    #[test]
-    fn test_color_picker_commit_noop_does_not_push_undo() {
+    fn test_color_picker_preview_does_not_push_undo_or_dirty() {
         let mut doc = load_test_doc();
         let er = first_testament_edge_ref(&doc);
         let idx = doc.edge_index(&er).unwrap();
         let stack_depth = doc.undo_stack.len();
         let before = doc.mindmap.edges[idx].clone();
+        doc.dirty = false;
 
-        // Hover to a different color, then back to the original via
-        // preview_*_color (no undo pushed at any point).
-        let original_glyph_connection = before.glyph_connection.clone();
-        doc.preview_edge_color(&er, Some("#abcdef"));
-        // Restore the pre-picker glyph_connection in place — this is
-        // what cancel does, but we're testing the commit path where
-        // the user happened to land on the same value.
-        doc.mindmap.edges[idx].glyph_connection = original_glyph_connection;
+        let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(
+            &doc.mindmap.edges[idx],
+        );
+        doc.color_picker_preview = Some(ColorPickerPreview::Edge {
+            key,
+            color: "#abcdef".to_string(),
+        });
 
-        // Now simulate commit's equality guard: byte-identical means
-        // no undo push.
-        assert_eq!(doc.mindmap.edges[idx], before,
-            "after restoring glyph_connection, edge must equal snapshot");
-        // commit_color_picker would skip the push here. Just verify
-        // the undo stack is still at its original depth.
+        // Model is byte-identical to the pre-preview state.
+        assert_eq!(doc.mindmap.edges[idx], before);
         assert_eq!(doc.undo_stack.len(), stack_depth);
+        assert!(!doc.dirty);
+
+        // And the scene builder substitutes the preview color into
+        // the matching edge's label element.
+        doc.selection = SelectionState::Edge(er.clone());
+        let scene = doc.build_scene_with_selection(1.0);
+        // The edge has a glyph label → scene_builder should emit a
+        // ConnectionLabelElement for it. If the edge has no label
+        // this test case simply verifies nothing crashes.
+        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(
+            &doc.mindmap.edges[idx],
+        );
+        // Preview beats selection on the previewed edge → the
+        // connection color (body glyphs) should be the preview hex,
+        // not the selection cyan.
+        if let Some(conn) = scene
+            .connection_elements
+            .iter()
+            .find(|c| c.edge_key == edge_key)
+        {
+            assert_eq!(conn.color, "#abcdef",
+                "preview should beat selection override on the previewed edge");
+        }
     }
 
-    /// Commit happy-path: a real picker session must push exactly
-    /// one undo entry, and that entry's `before` must be the
-    /// pre-picker snapshot — NOT the last hover state, not the last
-    /// preview value, not anything in between. Many hovers must
-    /// collapse into one undo step.
+    /// Clearing `doc.color_picker_preview` returns scene output to
+    /// the pre-preview state without any model mutation.
     #[test]
-    fn test_color_picker_commit_pushes_one_undo_with_pre_picker_before() {
+    fn test_color_picker_preview_cleared_returns_to_committed() {
         let mut doc = load_test_doc();
         let er = first_testament_edge_ref(&doc);
         let idx = doc.edge_index(&er).unwrap();
-        let stack_depth = doc.undo_stack.len();
-        let snapshot_before = doc.mindmap.edges[idx].clone();
+        let committed_before = doc.mindmap.edges[idx].clone();
 
-        // Many preview calls (simulating mouse hover across the wheel).
-        doc.preview_edge_color(&er, Some("#111111"));
-        doc.preview_edge_color(&er, Some("#222222"));
-        doc.preview_edge_color(&er, Some("#333333"));
-        doc.preview_edge_color(&er, Some("#aabbcc"));
+        let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(
+            &doc.mindmap.edges[idx],
+        );
+        doc.color_picker_preview = Some(ColorPickerPreview::Edge {
+            key,
+            color: "#112233".to_string(),
+        });
+        // ... hover frames would call build_scene here ...
+        doc.color_picker_preview = None;
 
-        // Simulate commit_color_picker's push path manually (the
-        // picker code is in app.rs and uses UndoAction::EditEdge):
-        if doc.mindmap.edges[idx] != snapshot_before {
-            doc.undo_stack.push(UndoAction::EditEdge {
-                index: idx,
-                before: snapshot_before.clone(),
-            });
-            doc.dirty = true;
-        }
-
-        // Exactly one new entry, and its `before` is the pre-picker
-        // snapshot — not any of the intermediate hover values.
-        assert_eq!(doc.undo_stack.len(), stack_depth + 1);
-        if let Some(UndoAction::EditEdge { index, before }) = doc.undo_stack.last() {
-            assert_eq!(*index, idx);
-            assert_eq!(before, &snapshot_before);
-            // The committed model has the LAST preview value, not the snapshot.
-            assert_eq!(
-                doc.mindmap.edges[idx]
-                    .glyph_connection
-                    .as_ref()
-                    .and_then(|gc| gc.color.as_deref()),
-                Some("#aabbcc"),
-            );
-        } else {
-            panic!("expected EditEdge at top of undo stack");
-        }
-
-        // Undo restores the pre-picker snapshot exactly.
-        doc.undo();
-        assert_eq!(doc.mindmap.edges[idx], snapshot_before);
-    }
-
-    /// Same invariant for portals — different setter, different
-    /// undo variant, same shape.
-    #[test]
-    fn test_color_picker_snapshot_cancel_roundtrip_portal() {
-        let mut doc = load_test_doc();
-        // Build a portal between the first two nodes.
-        let mut ids = doc.mindmap.nodes.keys().cloned();
-        let a = ids.next().unwrap();
-        let b = ids.next().unwrap();
-        let pref = doc.apply_create_portal(&a, &b).expect("create portal");
-        // Clear the create-portal undo entry so we measure starting
-        // from a clean stack depth.
-        doc.undo_stack.clear();
-        let idx = doc.mindmap.portals.iter().position(|p| pref.matches(p)).unwrap();
-        let before = doc.mindmap.portals[idx].clone();
-
-        doc.preview_portal_color(&pref, "#abc123");
-        doc.preview_portal_color(&pref, "#bca456");
-        assert_eq!(doc.undo_stack.len(), 0,
-            "portal preview must not push undo");
-
-        // Cancel: restore in place.
-        doc.mindmap.portals[idx] = before.clone();
-        assert_eq!(doc.mindmap.portals[idx], before);
-        assert_eq!(doc.undo_stack.len(), 0);
+        // Model is untouched across the full preview session.
+        assert_eq!(doc.mindmap.edges[idx], committed_before);
     }
 
     #[test]
@@ -4159,5 +4148,127 @@ mod tests {
         assert!(doc.selection.selected_ids().is_empty());
         assert_eq!(doc.selection.selected_portal(), Some(&pref));
         assert_eq!(doc.selection.selected_edge(), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Session 7A: node text editing
+    // -----------------------------------------------------------------
+
+    /// Pick a stable node id from the testament map that has a real
+    /// text value. The root node id is well-known from other tests.
+    fn first_testament_node_id(_doc: &MindMapDocument) -> String {
+        "348068464".to_string()
+    }
+
+    #[test]
+    fn test_set_node_text_updates_text_and_collapses_runs() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let changed = doc.set_node_text(&nid, "Hello world".to_string());
+        assert!(changed);
+        let node = doc.mindmap.nodes.get(&nid).unwrap();
+        assert_eq!(node.text, "Hello world");
+        assert_eq!(node.text_runs.len(), 1);
+        assert_eq!(node.text_runs[0].start, 0);
+        assert_eq!(node.text_runs[0].end, "Hello world".chars().count());
+        assert!(doc.dirty);
+        assert!(matches!(
+            doc.undo_stack.last(),
+            Some(UndoAction::EditNodeText { .. })
+        ));
+    }
+
+    #[test]
+    fn test_set_node_text_noop_on_unchanged() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let current = doc.mindmap.nodes.get(&nid).unwrap().text.clone();
+        doc.undo_stack.clear();
+        doc.dirty = false;
+        let changed = doc.set_node_text(&nid, current);
+        assert!(!changed);
+        assert!(doc.undo_stack.is_empty());
+        assert!(!doc.dirty);
+    }
+
+    #[test]
+    fn test_set_node_text_undo_round_trip() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let before_text = doc.mindmap.nodes.get(&nid).unwrap().text.clone();
+        let before_runs_len = doc.mindmap.nodes.get(&nid).unwrap().text_runs.len();
+        let before_first_run_color = doc
+            .mindmap
+            .nodes
+            .get(&nid)
+            .unwrap()
+            .text_runs
+            .first()
+            .map(|r| r.color.clone());
+        assert!(doc.set_node_text(&nid, "mutated".to_string()));
+        assert_eq!(doc.mindmap.nodes.get(&nid).unwrap().text, "mutated");
+        assert!(doc.undo());
+        let restored = doc.mindmap.nodes.get(&nid).unwrap();
+        assert_eq!(restored.text, before_text);
+        // TextRun doesn't implement PartialEq, so compare the parts
+        // we care about: count + first run's color.
+        assert_eq!(restored.text_runs.len(), before_runs_len);
+        assert_eq!(
+            restored.text_runs.first().map(|r| r.color.clone()),
+            before_first_run_color
+        );
+    }
+
+    #[test]
+    fn test_set_node_text_multiline_with_newlines() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        assert!(doc.set_node_text(&nid, "line 1\nline 2\nline 3".to_string()));
+        let node = doc.mindmap.nodes.get(&nid).unwrap();
+        assert_eq!(node.text, "line 1\nline 2\nline 3");
+        // Collapsed single run spans the full char count, including newlines.
+        assert_eq!(node.text_runs.len(), 1);
+        assert_eq!(node.text_runs[0].end, "line 1\nline 2\nline 3".chars().count());
+    }
+
+    #[test]
+    fn test_set_node_text_unknown_id_returns_false() {
+        let mut doc = load_test_doc();
+        doc.undo_stack.clear();
+        doc.dirty = false;
+        assert!(!doc.set_node_text("nonexistent-id", "x".to_string()));
+        assert!(doc.undo_stack.is_empty());
+        assert!(!doc.dirty);
+    }
+
+    #[test]
+    fn test_set_node_text_inherits_first_run_formatting() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        // Force a specific first-run formatting we can check for.
+        {
+            let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+            if node.text_runs.is_empty() {
+                node.text_runs.push(TextRun {
+                    start: 0,
+                    end: node.text.chars().count(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font: "LiberationSans".to_string(),
+                    size_pt: 24,
+                    color: "#ffffff".to_string(),
+                    hyperlink: None,
+                });
+            }
+            node.text_runs[0].bold = true;
+            node.text_runs[0].color = "#abcdef".to_string();
+            node.text_runs[0].size_pt = 33;
+        }
+        assert!(doc.set_node_text(&nid, "rewritten".to_string()));
+        let run = &doc.mindmap.nodes.get(&nid).unwrap().text_runs[0];
+        assert!(run.bold);
+        assert_eq!(run.color, "#abcdef");
+        assert_eq!(run.size_pt, 33);
     }
 }

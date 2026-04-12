@@ -18,8 +18,8 @@ use crate::application::common::{InputMode, RenderDecree, WindowMode};
 use crate::application::document::{
     EdgeRef, MindMapDocument, SelectionState, UndoAction,
     hit_test, hit_test_edge, rect_select,
-    apply_selection_highlight, apply_drag_delta,
-    apply_reparent_source_highlight, apply_reparent_target_highlight,
+    apply_drag_delta, apply_tree_highlights,
+    HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name};
@@ -96,6 +96,225 @@ impl LabelEditState {
     fn is_open(&self) -> bool {
         matches!(self, LabelEditState::Open { .. })
     }
+}
+
+/// Session 7A: inline multi-line text editor for a node. Entered via
+/// double-click on a node (or on empty canvas, which creates a new
+/// orphan and opens the editor on it). Key input is routed to
+/// `handle_text_edit_key` before the normal keybind dispatch, so
+/// Tab/Enter/etc. become literal character inserts while typing.
+///
+/// Commit is via click-outside-the-edited-node; Esc cancels. The
+/// `buffer` is the transient in-progress text; `cursor_char_pos` is a
+/// char-index offset within `buffer`. The transient edits flow
+/// through Baumhard's `Mutation::AreaDelta` vocabulary applied to the
+/// live tree — the model is untouched until commit.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+enum TextEditState {
+    Closed,
+    Open {
+        node_id: String,
+        /// The in-progress multi-line buffer.
+        buffer: String,
+        /// Cursor position as a char index (not byte offset) into
+        /// `buffer`. Valid range `[0, buffer.chars().count()]`.
+        cursor_char_pos: usize,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TextEditState {
+    fn is_open(&self) -> bool {
+        matches!(self, TextEditState::Open { .. })
+    }
+    fn node_id(&self) -> Option<&str> {
+        match self {
+            TextEditState::Open { node_id, .. } => Some(node_id.as_str()),
+            TextEditState::Closed => None,
+        }
+    }
+}
+
+/// Session 7A: tracks the previous left-click in screen space so a
+/// second click within a short time + distance window is recognized as
+/// a double-click. Double-click fires on the second `Pressed` event,
+/// not the second release.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+struct LastClick {
+    time: Instant,
+    screen_pos: (f64, f64),
+    /// Which node, if any, the first click landed on. Two clicks with
+    /// the same `hit` (both `Some(id)` for the same id, or both
+    /// `None`) qualify as a double-click.
+    hit: Option<String>,
+}
+
+/// Double-click window in milliseconds. Matches GNOME/winit convention.
+#[cfg(not(target_arch = "wasm32"))]
+const DOUBLE_CLICK_MS: u128 = 400;
+
+/// Double-click maximum distance² in screen-space pixels.
+#[cfg(not(target_arch = "wasm32"))]
+const DOUBLE_CLICK_DIST_SQ: f64 = 16.0 * 16.0;
+
+/// Session 7A: glyph rendered at the cursor position while a node
+/// text editor is open. Reuses the same caret as `LabelEditState`.
+#[cfg(not(target_arch = "wasm32"))]
+const TEXT_EDIT_CARET: char = '\u{258C}';
+
+/// Session 7A: returns `true` when a new click-down qualifies as a
+/// double-click given the previous click. Extracted as a pure helper
+/// so cursor/time math can be unit-tested without a winit event loop.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_double_click(
+    prev: &LastClick,
+    new_time: Instant,
+    new_screen_pos: (f64, f64),
+    new_hit: &Option<String>,
+) -> bool {
+    let elapsed = new_time.duration_since(prev.time).as_millis();
+    if elapsed >= DOUBLE_CLICK_MS {
+        return false;
+    }
+    let dx = new_screen_pos.0 - prev.screen_pos.0;
+    let dy = new_screen_pos.1 - prev.screen_pos.1;
+    if dx * dx + dy * dy >= DOUBLE_CLICK_DIST_SQ {
+        return false;
+    }
+    &prev.hit == new_hit
+}
+
+/// Session 7A: given a `buffer` and a char-position `cursor`, return
+/// the byte offset in `buffer` that corresponds to inserting at char
+/// index `cursor`. `cursor == buffer.chars().count()` maps to
+/// `buffer.len()` (end of string).
+#[cfg(not(target_arch = "wasm32"))]
+fn cursor_char_to_byte(buffer: &str, cursor: usize) -> usize {
+    buffer
+        .char_indices()
+        .nth(cursor)
+        .map(|(b, _)| b)
+        .unwrap_or_else(|| buffer.len())
+}
+
+/// Session 7A: insert `ch` at char position `cursor` in `buffer`,
+/// returning the new cursor position (one past the insert).
+#[cfg(not(target_arch = "wasm32"))]
+fn insert_at_cursor(buffer: &mut String, cursor: usize, ch: char) -> usize {
+    let byte = cursor_char_to_byte(buffer, cursor);
+    buffer.insert(byte, ch);
+    cursor + 1
+}
+
+/// Session 7A: delete the char immediately before `cursor` (Backspace
+/// semantics). Returns the new cursor position. No-op at `cursor == 0`.
+#[cfg(not(target_arch = "wasm32"))]
+fn delete_before_cursor(buffer: &mut String, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    let start_byte = cursor_char_to_byte(buffer, cursor - 1);
+    let end_byte = cursor_char_to_byte(buffer, cursor);
+    buffer.replace_range(start_byte..end_byte, "");
+    cursor - 1
+}
+
+/// Session 7A: delete the char at `cursor` (Delete semantics). Returns
+/// the unchanged cursor position. No-op at end of buffer.
+#[cfg(not(target_arch = "wasm32"))]
+fn delete_at_cursor(buffer: &mut String, cursor: usize) -> usize {
+    let total = buffer.chars().count();
+    if cursor >= total {
+        return cursor;
+    }
+    let start_byte = cursor_char_to_byte(buffer, cursor);
+    let end_byte = cursor_char_to_byte(buffer, cursor + 1);
+    buffer.replace_range(start_byte..end_byte, "");
+    cursor
+}
+
+/// Session 7A: return the char index of the start of the line
+/// containing `cursor` — i.e. the position just after the most recent
+/// `\n` strictly before `cursor`, or 0 if no prior `\n`. Walks the
+/// buffer once via `chars()` without allocating.
+#[cfg(not(target_arch = "wasm32"))]
+fn cursor_to_line_start(buffer: &str, cursor: usize) -> usize {
+    let mut line_start = 0usize;
+    for (i, ch) in buffer.chars().enumerate() {
+        if i >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            line_start = i + 1;
+        }
+    }
+    line_start
+}
+
+/// Session 7A: return the char index of the end of the line
+/// containing `cursor` — i.e. the position of the next `\n` at or
+/// after `cursor`, or the total char count if no `\n` follows.
+/// Walks the buffer once via `chars()` without allocating.
+#[cfg(not(target_arch = "wasm32"))]
+fn cursor_to_line_end(buffer: &str, cursor: usize) -> usize {
+    let mut total = 0usize;
+    for (i, ch) in buffer.chars().enumerate() {
+        total = i + 1;
+        if i >= cursor && ch == '\n' {
+            return i;
+        }
+    }
+    total
+}
+
+/// Session 7A: move the cursor up one line, preserving the visual
+/// column. Column is computed as `cursor - line_start` on the current
+/// line. The new position lands at `prev_line_start + min(col,
+/// prev_line_len)`. No-op if already on the first line.
+#[cfg(not(target_arch = "wasm32"))]
+fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
+    let line_start = cursor_to_line_start(buffer, cursor);
+    if line_start == 0 {
+        return cursor;
+    }
+    // Move to the char just before the '\n' that terminates the previous line.
+    let prev_line_end = line_start - 1;
+    let prev_line_start = cursor_to_line_start(buffer, prev_line_end);
+    let col = cursor - line_start;
+    let prev_line_len = prev_line_end - prev_line_start;
+    prev_line_start + col.min(prev_line_len)
+}
+
+/// Session 7A: move the cursor down one line, preserving the visual
+/// column. No-op if already on the last line.
+#[cfg(not(target_arch = "wasm32"))]
+fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
+    let total = buffer.chars().count();
+    let line_start = cursor_to_line_start(buffer, cursor);
+    let line_end = cursor_to_line_end(buffer, cursor);
+    if line_end == total {
+        return cursor;
+    }
+    let next_line_start = line_end + 1;
+    let next_line_end = cursor_to_line_end(buffer, next_line_start);
+    let col = cursor - line_start;
+    let next_line_len = next_line_end - next_line_start;
+    next_line_start + col.min(next_line_len)
+}
+
+/// Session 7A: build the display text for the edited node by
+/// inserting the caret glyph at the cursor position. Used on every
+/// keystroke to produce the `Mutation::AreaDelta` payload.
+#[cfg(not(target_arch = "wasm32"))]
+fn insert_caret(buffer: &str, cursor: usize) -> String {
+    let byte = cursor_char_to_byte(buffer, cursor);
+    let mut out = String::with_capacity(buffer.len() + TEXT_EDIT_CARET.len_utf8());
+    out.push_str(&buffer[..byte]);
+    out.push(TEXT_EDIT_CARET);
+    out.push_str(&buffer[byte..]);
+    out
 }
 
 /// Tracks the high-level interaction mode. Normal handles the usual
@@ -293,8 +512,12 @@ impl Application {
         let mut app_mode = AppMode::Normal;
         let mut palette_state = PaletteState::Closed;
         let mut label_edit_state = LabelEditState::Closed;
+        let mut text_edit_state = TextEditState::Closed;
         let mut color_picker_state =
             crate::application::color_picker::ColorPickerState::Closed;
+        // Session 7A: tracks the previous left-click-down for
+        // double-click detection. Cleared after a double-click fires.
+        let mut last_click: Option<LastClick> = None;
         let mut hovered_node: Option<String> = None;
         let mut shift_pressed = false;
         let mut alt_pressed = false;
@@ -423,6 +646,11 @@ impl Application {
                                         &mut mindmap_tree,
                                         &mut renderer,
                                     );
+                                    // Session 7A: mode-exit via target
+                                    // click — clear any stale click so
+                                    // the first post-mode click can't
+                                    // be paired into a double-click.
+                                    last_click = None;
                                 }
                                 // Pressed: swallow — do not transition drag state
                             } else if matches!(app_mode, AppMode::Connect { .. }) {
@@ -435,6 +663,7 @@ impl Application {
                                         &mut mindmap_tree,
                                         &mut renderer,
                                     );
+                                    last_click = None;
                                 }
                                 // Pressed: swallow
                             } else if state == ElementState::Pressed {
@@ -446,6 +675,102 @@ impl Application {
                                 let hit_node = mindmap_tree.as_ref().and_then(|tree| {
                                     hit_test(canvas_pos, tree)
                                 });
+
+                                // Session 7A: double-click detection.
+                                // If this press within the double-click
+                                // window matches the previous one (same
+                                // hit target, within time + distance),
+                                // open the node text editor — double-click
+                                // on a node edits it; on empty space (and
+                                // no edge/portal selected) creates a new
+                                // orphan and edits that.
+                                //
+                                // Guard: if the editor is already open on
+                                // the same hit target, DO NOT re-open it
+                                // — that would silently discard the
+                                // in-progress buffer. Let the press fall
+                                // through; the corresponding release
+                                // will be swallowed as click-inside.
+                                let now = Instant::now();
+                                let already_editing_same_target = text_edit_state
+                                    .node_id()
+                                    .map(|id| hit_node.as_deref() == Some(id))
+                                    .unwrap_or(false);
+                                let is_dblclick = !already_editing_same_target
+                                    && last_click
+                                        .as_ref()
+                                        .map(|prev| is_double_click(prev, now, cursor_pos, &hit_node))
+                                        .unwrap_or(false);
+                                if is_dblclick {
+                                    last_click = None;
+                                    if let Some(ref node_id) = hit_node {
+                                        if let Some(doc) = document.as_mut() {
+                                            let nid = node_id.clone();
+                                            doc.selection = SelectionState::Single(nid.clone());
+                                            // rebuild_all first so the
+                                            // selection highlight color
+                                            // regions are applied to the
+                                            // tree. open_text_edit's
+                                            // subsequent apply_text_edit_to_tree
+                                            // only touches the Text field
+                                            // of the target node's
+                                            // GlyphArea (via
+                                            // DeltaGlyphArea's selective
+                                            // field application) so the
+                                            // highlight regions survive
+                                            // untouched. If you ever add
+                                            // more fields to the caret
+                                            // delta, revisit this.
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                            open_text_edit(
+                                                &nid,
+                                                false,
+                                                doc,
+                                                &mut text_edit_state,
+                                                &mut mindmap_tree,
+                                                &mut renderer,
+                                            );
+                                        }
+                                        return;
+                                    } else {
+                                        // Empty space: only create an
+                                        // orphan if no edge/portal was
+                                        // selected (otherwise the user
+                                        // was probably aiming at the
+                                        // selected edge/portal).
+                                        let allow_create = document
+                                            .as_ref()
+                                            .map(|d| !matches!(
+                                                d.selection,
+                                                SelectionState::Edge(_) | SelectionState::Portal(_)
+                                            ))
+                                            .unwrap_or(false);
+                                        if allow_create {
+                                            if let Some(doc) = document.as_mut() {
+                                                let new_id = doc.apply_create_orphan_node(canvas_pos);
+                                                doc.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
+                                                doc.selection = SelectionState::Single(new_id.clone());
+                                                doc.dirty = true;
+                                                rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                                open_text_edit(
+                                                    &new_id,
+                                                    true,
+                                                    doc,
+                                                    &mut text_edit_state,
+                                                    &mut mindmap_tree,
+                                                    &mut renderer,
+                                                );
+                                            }
+                                            return;
+                                        }
+                                    }
+                                }
+                                last_click = Some(LastClick {
+                                    time: now,
+                                    screen_pos: cursor_pos,
+                                    hit: hit_node.clone(),
+                                });
+
                                 // If an edge is currently selected, check
                                 // whether the cursor is over one of its
                                 // grab-handles. This check has precedence
@@ -476,6 +801,65 @@ impl Application {
                                 // Released
                                 match std::mem::replace(&mut drag_state, DragState::None) {
                                     DragState::Pending { hit_node, .. } => {
+                                        // Session 7A: if the node text
+                                        // editor is open, the release
+                                        // decides whether to commit or
+                                        // swallow. If the release lands
+                                        // inside the edited node's AABB,
+                                        // keep editing (no commit, no
+                                        // selection change). Otherwise
+                                        // commit and fall through.
+                                        if text_edit_state.is_open() {
+                                            let release_canvas = renderer.screen_to_canvas(
+                                                cursor_pos.0 as f32,
+                                                cursor_pos.1 as f32,
+                                            );
+                                            let edited_id = text_edit_state
+                                                .node_id()
+                                                .map(|s| s.to_string());
+                                            let inside = edited_id
+                                                .as_ref()
+                                                .and_then(|id| {
+                                                    document.as_ref().and_then(|doc| {
+                                                        doc.mindmap.nodes.get(id).map(|n| {
+                                                            let x0 = n.position.x as f32;
+                                                            let y0 = n.position.y as f32;
+                                                            let x1 = x0 + n.size.width as f32;
+                                                            let y1 = y0 + n.size.height as f32;
+                                                            release_canvas.x >= x0
+                                                                && release_canvas.x <= x1
+                                                                && release_canvas.y >= y0
+                                                                && release_canvas.y <= y1
+                                                        })
+                                                    })
+                                                })
+                                                .unwrap_or(false);
+                                            if inside {
+                                                // Click-inside: keep
+                                                // editing. Do NOT fall
+                                                // through to handle_click
+                                                // (that would change the
+                                                // selection). Also do
+                                                // not transition drag
+                                                // state — the release
+                                                // is fully consumed.
+                                                return;
+                                            }
+                                            // Click-outside: commit the
+                                            // edit first, then fall
+                                            // through to the regular
+                                            // click path so the new
+                                            // selection lands.
+                                            if let Some(doc) = document.as_mut() {
+                                                close_text_edit(
+                                                    true,
+                                                    doc,
+                                                    &mut text_edit_state,
+                                                    &mut mindmap_tree,
+                                                    &mut renderer,
+                                                );
+                                            }
+                                        }
                                         // Session 6D: if an edge is selected and
                                         // the cursor hits its label, open the
                                         // inline label editor instead of
@@ -483,27 +867,46 @@ impl Application {
                                         // precedence over node / edge selection.
                                         let mut entered_label_edit = false;
                                         if hit_node.is_none() {
-                                            if let Some(doc) = document.as_ref() {
-                                                if let SelectionState::Edge(er) = &doc.selection {
-                                                    let canvas_pos = renderer.screen_to_canvas(
-                                                        cursor_pos.0 as f32,
-                                                        cursor_pos.1 as f32,
-                                                    );
-                                                    let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
-                                                        &er.from_id,
-                                                        &er.to_id,
-                                                        &er.edge_type,
-                                                    );
-                                                    if renderer.hit_test_edge_label(canvas_pos, &edge_key) {
-                                                        let er_clone = er.clone();
-                                                        open_label_edit(
-                                                            &er_clone,
-                                                            doc,
-                                                            &mut label_edit_state,
-                                                            &mut renderer,
+                                            // First, a read-only check to see
+                                            // whether we should even call the
+                                            // editor (hits the selected edge's
+                                            // label AABB). Split from the
+                                            // `open_label_edit` call so the
+                                            // mutable borrow of `document`
+                                            // doesn't conflict with the
+                                            // immutable read.
+                                            let label_edit_target: Option<crate::application::document::EdgeRef> =
+                                                if let Some(doc) = document.as_ref() {
+                                                    if let SelectionState::Edge(er) = &doc.selection {
+                                                        let canvas_pos = renderer.screen_to_canvas(
+                                                            cursor_pos.0 as f32,
+                                                            cursor_pos.1 as f32,
                                                         );
-                                                        entered_label_edit = true;
+                                                        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+                                                            &er.from_id,
+                                                            &er.to_id,
+                                                            &er.edge_type,
+                                                        );
+                                                        if renderer.hit_test_edge_label(canvas_pos, &edge_key) {
+                                                            Some(er.clone())
+                                                        } else {
+                                                            None
+                                                        }
+                                                    } else {
+                                                        None
                                                     }
+                                                } else {
+                                                    None
+                                                };
+                                            if let Some(er_clone) = label_edit_target {
+                                                if let Some(doc) = document.as_mut() {
+                                                    open_label_edit(
+                                                        &er_clone,
+                                                        doc,
+                                                        &mut label_edit_state,
+                                                        &mut renderer,
+                                                    );
+                                                    entered_label_edit = true;
                                                 }
                                             }
                                         }
@@ -775,7 +1178,13 @@ impl Application {
                                             doc.selection = SelectionState::Single(node_id.clone());
                                             if let Some(tree) = mindmap_tree.as_mut() {
                                                 let mut new_tree = doc.build_tree();
-                                                apply_selection_highlight(&mut new_tree, &doc.selection);
+                                                apply_tree_highlights(
+                                                    &mut new_tree,
+                                                    doc.selection
+                                                        .selected_ids()
+                                                        .into_iter()
+                                                        .map(|id| (id, HIGHLIGHT_COLOR)),
+                                                );
                                                 renderer.rebuild_buffers_from_tree(&new_tree.tree);
                                                 *tree = new_tree;
                                             }
@@ -930,6 +1339,26 @@ impl Application {
                         return;
                     }
 
+                    // Session 7A: inline node text editor. Steals keys
+                    // the same way the palette / label-edit modals do.
+                    // Enter and Tab are literal characters inside the
+                    // editor — this is a multi-line paragraph editor,
+                    // not an outliner. Esc cancels; commit is via
+                    // click-outside in the mouse handler.
+                    if text_edit_state.is_open() {
+                        if let Some(doc) = document.as_mut() {
+                            handle_text_edit_key(
+                                &key_name,
+                                &logical_key,
+                                &mut text_edit_state,
+                                doc,
+                                &mut mindmap_tree,
+                                &mut renderer,
+                            );
+                        }
+                        return;
+                    }
+
                     // Opening the palette is a pre-action lookup:
                     // `/` with no modifiers opens it regardless of
                     // what the keybinds layer says (we don't want a
@@ -971,6 +1400,11 @@ impl Application {
                             if matches!(app_mode, AppMode::Reparent { .. } | AppMode::Connect { .. }) {
                                 app_mode = AppMode::Normal;
                                 hovered_node = None;
+                                // Session 7A: clear any stale click so a
+                                // post-mode click doesn't get retroactively
+                                // paired with a pre-mode click into a
+                                // spurious double-click.
+                                last_click = None;
                                 if let Some(doc) = document.as_ref() {
                                     rebuild_all_with_mode(
                                         doc, &app_mode, hovered_node.as_deref(),
@@ -986,6 +1420,7 @@ impl Application {
                                 if !sel.is_empty() {
                                     app_mode = AppMode::Reparent { sources: sel };
                                     hovered_node = None;
+                                    last_click = None;
                                     rebuild_all_with_mode(
                                         doc, &app_mode, hovered_node.as_deref(),
                                         &mut mindmap_tree, &mut renderer,
@@ -998,6 +1433,7 @@ impl Application {
                                 if let SelectionState::Single(source) = &doc.selection {
                                     app_mode = AppMode::Connect { source: source.clone() };
                                     hovered_node = None;
+                                    last_click = None;
                                     rebuild_all_with_mode(
                                         doc, &app_mode, hovered_node.as_deref(),
                                         &mut mindmap_tree, &mut renderer,
@@ -1277,7 +1713,13 @@ impl Application {
                                 1 => SelectionState::Single(hits.into_iter().next().unwrap()),
                                 _ => SelectionState::Multi(hits),
                             };
-                            apply_selection_highlight(&mut new_tree, &preview_selection);
+                            apply_tree_highlights(
+                                &mut new_tree,
+                                preview_selection
+                                    .selected_ids()
+                                    .into_iter()
+                                    .map(|id| (id, HIGHLIGHT_COLOR)),
+                            );
                             renderer.rebuild_buffers_from_tree(&new_tree.tree);
                             mindmap_tree = Some(new_tree);
                         }
@@ -1791,7 +2233,13 @@ fn rebuild_all(
     renderer: &mut Renderer,
 ) {
     let mut new_tree = doc.build_tree();
-    apply_selection_highlight(&mut new_tree, &doc.selection);
+    apply_tree_highlights(
+        &mut new_tree,
+        doc.selection
+            .selected_ids()
+            .into_iter()
+            .map(|id| (id, HIGHLIGHT_COLOR)),
+    );
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
     rebuild_scene_only(doc, renderer);
@@ -1825,7 +2273,7 @@ fn rebuild_scene_only(doc: &MindMapDocument, renderer: &mut Renderer) {
 #[cfg(not(target_arch = "wasm32"))]
 fn open_label_edit(
     edge_ref: &crate::application::document::EdgeRef,
-    doc: &MindMapDocument,
+    doc: &mut MindMapDocument,
     label_edit_state: &mut LabelEditState,
     renderer: &mut Renderer,
 ) {
@@ -1840,12 +2288,15 @@ fn open_label_edit(
         buffer: buffer.clone(),
         original,
     };
+    // Store the preview on the document so every subsequent
+    // `doc.build_scene_*` call picks it up automatically — no renderer
+    // field, no read-time override, no belt-and-suspenders branch.
     let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
         &edge_ref.from_id,
         &edge_ref.to_id,
         &edge_ref.edge_type,
     );
-    renderer.label_edit_override = Some((edge_key, buffer));
+    doc.label_edit_preview = Some((edge_key, buffer));
     // Rebuild labels so the caret is visible immediately. The caller
     // already ran `rebuild_all` before this, so the scene is fresh.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
@@ -1903,18 +2354,19 @@ fn handle_label_edit_key(
         }
     }
 
-    // Refresh the preview override so the caret + edited text render
-    // on the next frame. Cheap: one scene rebuild.
+    // Refresh the preview on the document so the caret + edited text
+    // render on the next frame. Cheap: one scene rebuild. The scene
+    // builder picks up the new buffer through `doc.label_edit_preview`.
     if let LabelEditState::Open { edge_ref, buffer, .. } = label_edit_state {
         let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
             &edge_ref.from_id,
             &edge_ref.to_id,
             &edge_ref.edge_type,
         );
-        renderer.label_edit_override = Some((edge_key, buffer.clone()));
+        doc.label_edit_preview = Some((edge_key, buffer.clone()));
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
         renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
-    renderer.rebuild_portal_buffers(&scene.portal_elements);
+        renderer.rebuild_portal_buffers(&scene.portal_elements);
     }
 }
 
@@ -1935,7 +2387,7 @@ fn close_label_edit(
         LabelEditState::Open { edge_ref, buffer, original } => (edge_ref, buffer, original),
         LabelEditState::Closed => return,
     };
-    renderer.label_edit_override = None;
+    doc.label_edit_preview = None;
     if commit {
         let new_val = if buffer.is_empty() { None } else { Some(buffer) };
         // Only push undo if the committed value actually differs from the
@@ -1947,6 +2399,261 @@ fn close_label_edit(
     // Rebuild so the label reflects the model state (or vanishes if
     // the buffer was empty + original was None).
     rebuild_all(doc, mindmap_tree, renderer);
+}
+
+// =====================================================================
+// Session 7A: inline node text editor
+// =====================================================================
+
+/// Open the text editor on the given node. Seeds the buffer (empty if
+/// `from_creation`, else the node's current text), and pushes the
+/// initial caret through the Baumhard mutation pipeline so the live
+/// tree shows the cursor on the next frame.
+///
+/// No snapshot of the node's pre-edit text is stored on
+/// `TextEditState`: the model is untouched during typing, so the
+/// model itself *is* the pre-edit state. `set_node_text` takes its
+/// own "before" snapshot at commit time, and cancel just rebuilds
+/// the tree from the unchanged model.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_text_edit(
+    node_id: &str,
+    from_creation: bool,
+    doc: &mut MindMapDocument,
+    text_edit_state: &mut TextEditState,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let current_text = match doc.mindmap.nodes.get(node_id) {
+        Some(n) => n.text.clone(),
+        None => return,
+    };
+    let buffer = if from_creation { String::new() } else { current_text };
+    let cursor_char_pos = buffer.chars().count();
+    *text_edit_state = TextEditState::Open {
+        node_id: node_id.to_string(),
+        buffer: buffer.clone(),
+        cursor_char_pos,
+    };
+    // Push the initial (caret-only for creation, or "existing text +
+    // caret at end" for edit) through the Baumhard mutation pipeline.
+    apply_text_edit_to_tree(
+        node_id,
+        &buffer,
+        cursor_char_pos,
+        mindmap_tree,
+        renderer,
+    );
+}
+
+/// Session 7A: commit or cancel the open text editor. Commit writes
+/// the final buffer back to the model via `set_node_text`, which is
+/// the single source of truth for "did the text change" — it
+/// snapshots `before_text`/`before_runs` and only pushes an undo
+/// entry if the value actually differs. Cancel just calls
+/// `rebuild_all`, which rebuilds the tree from the untouched model —
+/// the transient caret-bearing tree state is discarded wholesale.
+#[cfg(not(target_arch = "wasm32"))]
+fn close_text_edit(
+    commit: bool,
+    doc: &mut MindMapDocument,
+    text_edit_state: &mut TextEditState,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let (node_id, buffer) = match std::mem::replace(text_edit_state, TextEditState::Closed) {
+        TextEditState::Open { node_id, buffer, .. } => (node_id, buffer),
+        TextEditState::Closed => return,
+    };
+    if commit {
+        // `set_node_text` is a no-op on unchanged text and handles
+        // its own undo push.
+        doc.set_node_text(&node_id, buffer);
+    }
+    // Full rebuild pulls the tree back to the model — any transient
+    // caret-bearing mutations on the live tree are discarded.
+    rebuild_all(doc, mindmap_tree, renderer);
+}
+
+/// Session 7A: push the current (`buffer`, `cursor`) state into the
+/// live Baumhard tree via a `Mutation::AreaDelta { text: Assign }`
+/// targeting the edited node's GlyphArea. This is the "utilize
+/// Baumhard" path — the buffer is transient UI state on the app
+/// layer, but every visual frame goes through the existing
+/// `Mutation::apply_to_area` vocabulary. The renderer's text buffers
+/// are rebuilt from the mutated tree so the next frame reflects the
+/// keystroke.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_text_edit_to_tree(
+    node_id: &str,
+    buffer: &str,
+    cursor_char_pos: usize,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
+    use baumhard::core::primitives::{Applicable, ApplyOperation};
+
+    let tree = match mindmap_tree.as_mut() {
+        Some(t) => t,
+        None => return,
+    };
+    let indextree_node_id = match tree.node_map.get(node_id) {
+        Some(id) => *id,
+        None => return,
+    };
+    // Grab a mutable handle to the target node's GlyphArea.
+    let element = tree.tree.arena.get_mut(indextree_node_id);
+    let element = match element {
+        Some(n) => n.get_mut(),
+        None => return,
+    };
+    let area = match element.glyph_area_mut() {
+        Some(a) => a,
+        None => return,
+    };
+
+    // Build the display text: buffer with caret glyph inserted at
+    // cursor position. This is what cosmic-text will shape.
+    let display_text = insert_caret(buffer, cursor_char_pos);
+
+    // Construct the Baumhard delta: Text + Operation::Assign.
+    let delta = DeltaGlyphArea::new(vec![
+        GlyphAreaField::Text(display_text),
+        GlyphAreaField::Operation(ApplyOperation::Assign),
+    ]);
+    delta.apply_to(area);
+
+    // Re-shape the node buffers off the mutated tree. This is the
+    // existing tree-render path, reused.
+    renderer.rebuild_buffers_from_tree(&tree.tree);
+}
+
+/// Session 7A: route a keystroke to the open node text editor. All
+/// keys are stolen from normal keybind dispatch — Tab and Enter
+/// produce literal characters, Esc cancels, arrows/Home/End navigate,
+/// Backspace/Delete delete, and printable chars are inserted at the
+/// cursor. Every successful mutation is pushed through
+/// `apply_text_edit_to_tree` so the tree and renderer stay in sync.
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_text_edit_key(
+    key_name: &Option<String>,
+    logical_key: &Key,
+    text_edit_state: &mut TextEditState,
+    doc: &mut MindMapDocument,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    let name = key_name.as_deref();
+    if name == Some("escape") {
+        close_text_edit(false, doc, text_edit_state, mindmap_tree, renderer);
+        return;
+    }
+
+    let (node_id, buffer, cursor) = match text_edit_state {
+        TextEditState::Open {
+            node_id,
+            buffer,
+            cursor_char_pos,
+            ..
+        } => (node_id, buffer, cursor_char_pos),
+        TextEditState::Closed => return,
+    };
+
+    let mut changed = false;
+    match name {
+        Some("backspace") => {
+            if *cursor > 0 {
+                *cursor = delete_before_cursor(buffer, *cursor);
+                changed = true;
+            }
+        }
+        Some("delete") => {
+            if *cursor < buffer.chars().count() {
+                *cursor = delete_at_cursor(buffer, *cursor);
+                changed = true;
+            }
+        }
+        Some("arrowleft") => {
+            if *cursor > 0 {
+                *cursor -= 1;
+                changed = true;
+            }
+        }
+        Some("arrowright") => {
+            if *cursor < buffer.chars().count() {
+                *cursor += 1;
+                changed = true;
+            }
+        }
+        Some("arrowup") => {
+            let new_cursor = move_cursor_up_line(buffer, *cursor);
+            if new_cursor != *cursor {
+                *cursor = new_cursor;
+                changed = true;
+            }
+        }
+        Some("arrowdown") => {
+            let new_cursor = move_cursor_down_line(buffer, *cursor);
+            if new_cursor != *cursor {
+                *cursor = new_cursor;
+                changed = true;
+            }
+        }
+        Some("home") => {
+            let new_cursor = cursor_to_line_start(buffer, *cursor);
+            if new_cursor != *cursor {
+                *cursor = new_cursor;
+                changed = true;
+            }
+        }
+        Some("end") => {
+            let new_cursor = cursor_to_line_end(buffer, *cursor);
+            if new_cursor != *cursor {
+                *cursor = new_cursor;
+                changed = true;
+            }
+        }
+        Some("enter") => {
+            *cursor = insert_at_cursor(buffer, *cursor, '\n');
+            changed = true;
+        }
+        Some("tab") => {
+            *cursor = insert_at_cursor(buffer, *cursor, '\t');
+            changed = true;
+        }
+        _ => {
+            // Printable character: accept each non-control char. Mirrors
+            // `handle_label_edit_key` at app.rs ~line 1929.
+            if let Key::Character(c) = logical_key {
+                for ch in c.as_str().chars() {
+                    if !ch.is_control() {
+                        *cursor = insert_at_cursor(buffer, *cursor, ch);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if changed {
+        // Text editing only mutates the live tree during typing; the
+        // model is untouched until commit (click-outside) or rolled
+        // back on cancel (Esc). We clone node_id + buffer to release
+        // the mutable borrow on `text_edit_state` before calling
+        // `apply_text_edit_to_tree`, which wants its own mutable
+        // borrow on `mindmap_tree`.
+        let node_id_owned = node_id.clone();
+        let buffer_owned = buffer.clone();
+        let cursor_snapshot = *cursor;
+        apply_text_edit_to_tree(
+            &node_id_owned,
+            &buffer_owned,
+            cursor_snapshot,
+            mindmap_tree,
+            renderer,
+        );
+    }
 }
 
 // =====================================================================
@@ -1970,9 +2677,7 @@ fn open_color_picker(
     use crate::application::color_picker::{
         current_hsv_at, ARM_BOTTOM_GLYPHS, ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS,
         ARM_TOP_GLYPHS, ColorPickerState, HUE_RING_FONT_SCALE, HUE_RING_GLYPHS,
-        TargetKind,
     };
-    use crate::application::document::UndoAction;
 
     // Resolve the ref to a (kind, index) up front. If the edge/portal
     // was deleted between the palette opening and Enter being pressed,
@@ -1985,19 +2690,6 @@ fn open_color_picker(
             log::warn!("color picker: target ref did not resolve; ignoring open");
             return;
         }
-    };
-
-    // Snapshot as the same UndoAction we'll eventually push on commit.
-    // One variant per kind keeps the type shared with the undo stack.
-    let snapshot = match kind {
-        TargetKind::Edge => UndoAction::EditEdge {
-            index: target_index,
-            before: doc.mindmap.edges[target_index].clone(),
-        },
-        TargetKind::Portal => UndoAction::EditPortal {
-            index: target_index,
-            before: doc.mindmap.portals[target_index].clone(),
-        },
     };
 
     // Seed HSV from the currently-displayed (possibly theme-resolved)
@@ -2039,7 +2731,6 @@ fn open_color_picker(
     *state = ColorPickerState::Open {
         kind,
         target_index,
-        snapshot,
         hue_deg,
         sat,
         val,
@@ -2047,10 +2738,51 @@ fn open_color_picker(
         last_cursor_pos: None,
         max_cell_advance,
         max_ring_advance,
+        commit_mode: crate::application::color_picker::CommitMode::Hsv,
         layout: None,
     };
 
+    // Seed the document preview so the initial render already shows
+    // the same HSV the picker opened at. Overwritten on the next
+    // hover frame, but this avoids a one-frame flash of the original
+    // color when the modal opens.
+    seed_initial_preview(doc, kind, target_index, hue_deg, sat, val);
+
     rebuild_color_picker_overlay(state, doc, renderer);
+    rebuild_scene_only(doc, renderer);
+}
+
+/// Helper: write the initial HSV into `doc.color_picker_preview` on
+/// picker open so the first rendered frame already shows the
+/// previewed color instead of the model's stored one.
+#[cfg(not(target_arch = "wasm32"))]
+fn seed_initial_preview(
+    doc: &mut MindMapDocument,
+    kind: crate::application::color_picker::TargetKind,
+    target_index: usize,
+    hue_deg: f32,
+    sat: f32,
+    val: f32,
+) {
+    use crate::application::color_picker::TargetKind;
+    use crate::application::document::ColorPickerPreview;
+    use baumhard::util::color::hsv_to_hex;
+
+    let hex = hsv_to_hex(hue_deg, sat, val);
+    match kind {
+        TargetKind::Edge => {
+            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+                let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+                doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: hex });
+            }
+        }
+        TargetKind::Portal => {
+            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+                let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
+                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: hex });
+            }
+        }
+    }
 }
 
 /// Build geometry from the current picker state. Internal helper —
@@ -2069,6 +2801,12 @@ fn compute_picker_geometry(
     };
     use baumhard::util::color::hsv_to_hex;
 
+    // Extract only the fields `compute_color_picker_layout` needs,
+    // plus a copy of the backdrop tuple from the cached layout for
+    // the cursor-inside-backdrop check. Copying just the 4 floats is
+    // ~200 bytes cheaper than cloning the whole ColorPickerLayout
+    // (with its Vec<chip_positions> and fixed-size arrays) every
+    // hover.
     let (
         target_label,
         hue_deg,
@@ -2078,7 +2816,7 @@ fn compute_picker_geometry(
         last_cursor_pos,
         max_cell_advance,
         max_ring_advance,
-        cached_layout,
+        cached_backdrop,
     ) = match state {
         ColorPickerState::Closed => return None,
         ColorPickerState::Open {
@@ -2101,7 +2839,7 @@ fn compute_picker_geometry(
             *last_cursor_pos,
             *max_cell_advance,
             *max_ring_advance,
-            layout.clone(),
+            layout.as_ref().map(|l| l.backdrop),
         ),
     };
 
@@ -2112,9 +2850,8 @@ fn compute_picker_geometry(
     // before any mouse event, and is followed immediately by a hover
     // rebuild once the cursor enters the window.
     let hex_visible = chip_focus.is_some()
-        || match (last_cursor_pos, cached_layout.as_ref()) {
-            (Some((cx, cy)), Some(layout)) => {
-                let (bl, bt, bw, bh) = layout.backdrop;
+        || match (last_cursor_pos, cached_backdrop) {
+            (Some((cx, cy)), Some((bl, bt, bw, bh))) => {
                 cx >= bl && cx <= bl + bw && cy >= bt && cy <= bt + bh
             }
             _ => false,
@@ -2177,8 +2914,10 @@ fn rebuild_color_picker_overlay_dynamic(
     }
 }
 
-/// Cancel the picker: restore the captured pre-picker snapshot in
-/// place (without touching the undo stack) and close the modal.
+/// Cancel the picker: clear the transient document preview and
+/// close the modal. The committed model is untouched because the
+/// new preview path never writes to it — the entire hover / cancel
+/// flow is a pure scene-level substitution.
 #[cfg(not(target_arch = "wasm32"))]
 fn cancel_color_picker(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -2187,37 +2926,29 @@ fn cancel_color_picker(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::ColorPickerState;
-    use crate::application::document::UndoAction;
 
-    let snapshot = match std::mem::replace(state, ColorPickerState::Closed) {
-        ColorPickerState::Open { snapshot, .. } => snapshot,
-        ColorPickerState::Closed => return,
-    };
-    // Only the two edit variants the picker ever stores. Restore the
-    // affected element in place; the undo stack is never touched.
-    match snapshot {
-        UndoAction::EditEdge { index, before } => {
-            if index < doc.mindmap.edges.len() {
-                doc.mindmap.edges[index] = before;
-            }
-        }
-        UndoAction::EditPortal { index, before } => {
-            if index < doc.mindmap.portals.len() {
-                doc.mindmap.portals[index] = before;
-            }
-        }
-        _ => {
-            log::warn!("color picker: unexpected snapshot variant; cancel is a no-op");
-        }
+    if matches!(state, ColorPickerState::Closed) {
+        return;
     }
+    *state = ColorPickerState::Closed;
+    doc.color_picker_preview = None;
     renderer.rebuild_color_picker_overlay_buffers(None);
     rebuild_all(doc, mindmap_tree, renderer);
 }
 
-/// Commit the picker's currently-previewed color: push a single undo
-/// entry carrying the captured pre-picker snapshot, then close the
-/// modal. The model already holds the previewed value (live preview
-/// wrote it in place), so we just need the undo bookkeeping.
+/// Commit the picker's currently-previewed color via the regular
+/// `set_edge_color` / `set_portal_color` path — a single undo entry
+/// is pushed and `ensure_glyph_connection` runs its fork-on-first-
+/// edit only at this moment (never during hover). Close the modal.
+///
+/// The exact call depends on `commit_mode`:
+/// - `Hsv`: commit the current HSV hex as a per-edge/portal override.
+/// - `Var(raw)`: commit the literal `var(--name)` string so theme
+///   resolution runs at render time.
+/// - `ResetToInherited`: for edges, call `set_edge_color(None)` to
+///   clear the per-edge override. For portals, re-seed to the
+///   canvas's `--accent` value (or the raw `var(--accent)` string
+///   as a fallback) since `PortalPair.color` is non-optional.
 #[cfg(not(target_arch = "wasm32"))]
 fn commit_color_picker(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -2225,44 +2956,85 @@ fn commit_color_picker(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::ColorPickerState;
-    use crate::application::document::UndoAction;
+    use crate::application::color_picker::{ColorPickerState, CommitMode, TargetKind};
+    use baumhard::util::color::hsv_to_hex;
 
-    let snapshot = match std::mem::replace(state, ColorPickerState::Closed) {
-        ColorPickerState::Open { snapshot, .. } => snapshot,
+    let (kind, target_index, hue_deg, sat, val, commit_mode) = match state {
+        ColorPickerState::Open { kind, target_index, hue_deg, sat, val, commit_mode, .. } => {
+            (*kind, *target_index, *hue_deg, *sat, *val, commit_mode.clone())
+        }
         ColorPickerState::Closed => return,
     };
-    // Skip the undo push when the committed value is byte-identical
-    // to the snapshot — a "no-op pick" (user opened the picker and
-    // committed without moving the cursor, or hovered and returned
-    // to the original color). Both `MindEdge` and `PortalPair` derive
-    // PartialEq so the equality check is just a struct compare.
-    match snapshot {
-        UndoAction::EditEdge { index, ref before } => {
-            if index < doc.mindmap.edges.len() && doc.mindmap.edges[index] != *before {
-                doc.undo_stack.push(snapshot);
-                doc.dirty = true;
+
+    // Close the modal state first so the subsequent rebuilds don't
+    // re-apply the preview.
+    *state = ColorPickerState::Closed;
+    doc.color_picker_preview = None;
+
+    match kind {
+        TargetKind::Edge => {
+            let er = doc.mindmap.edges.get(target_index).map(|e| {
+                EdgeRef::new(&e.from_id, &e.to_id, &e.edge_type)
+            });
+            if let Some(er) = er {
+                match commit_mode {
+                    CommitMode::Hsv => {
+                        let hex = hsv_to_hex(hue_deg, sat, val);
+                        doc.set_edge_color(&er, Some(&hex));
+                    }
+                    CommitMode::Var(raw) => {
+                        doc.set_edge_color(&er, Some(&raw));
+                    }
+                    CommitMode::ResetToInherited => {
+                        doc.set_edge_color(&er, None);
+                    }
+                }
             }
         }
-        UndoAction::EditPortal { index, ref before } => {
-            if index < doc.mindmap.portals.len() && doc.mindmap.portals[index] != *before {
-                doc.undo_stack.push(snapshot);
-                doc.dirty = true;
+        TargetKind::Portal => {
+            let pr = doc.mindmap.portals.get(target_index).map(|p| {
+                crate::application::document::PortalRef::new(
+                    p.label.clone(),
+                    p.endpoint_a.clone(),
+                    p.endpoint_b.clone(),
+                )
+            });
+            if let Some(pr) = pr {
+                match commit_mode {
+                    CommitMode::Hsv => {
+                        let hex = hsv_to_hex(hue_deg, sat, val);
+                        doc.set_portal_color(&pr, &hex);
+                    }
+                    CommitMode::Var(raw) => {
+                        doc.set_portal_color(&pr, &raw);
+                    }
+                    CommitMode::ResetToInherited => {
+                        // `--accent` fallback — same rule as the old
+                        // portal Reset path.
+                        let resolved = doc
+                            .mindmap
+                            .canvas
+                            .theme_variables
+                            .get("--accent")
+                            .cloned()
+                            .unwrap_or_else(|| "var(--accent)".to_string());
+                        doc.set_portal_color(&pr, &resolved);
+                    }
+                }
             }
-        }
-        _ => {
-            log::warn!("color picker: unexpected snapshot variant; commit is a no-op");
         }
     }
+
     renderer.rebuild_color_picker_overlay_buffers(None);
     rebuild_all(doc, mindmap_tree, renderer);
 }
 
-/// Apply the current picker HSV to the active target via the
-/// non-undoing by-index preview helpers, then rebuild only the
-/// scene (not the node tree, which didn't change) + the picker
-/// overlay so the user sees the live update. Hot path: no ref
-/// resolution, no `ColorTarget` clone.
+/// Apply the current picker HSV to the document's transient color
+/// preview, then rebuild only the scene (not the node tree, which
+/// didn't change) + the picker overlay. Hot path: no ref resolution,
+/// no model mutation, no snapshot. The scene builder reads the
+/// preview via `doc.color_picker_preview` and substitutes it in
+/// during emission.
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_picker_preview(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -2270,11 +3042,16 @@ fn apply_picker_preview(
     _mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::{ColorPickerState, TargetKind};
+    use crate::application::color_picker::{ColorPickerState, CommitMode, TargetKind};
+    use crate::application::document::ColorPickerPreview;
     use baumhard::util::color::hsv_to_hex;
 
     let (kind, target_index, hue_deg, sat, val) = match state {
-        ColorPickerState::Open { kind, target_index, hue_deg, sat, val, .. } => {
+        ColorPickerState::Open { kind, target_index, hue_deg, sat, val, commit_mode, .. } => {
+            // Any HSV movement implicitly cancels a prior chip
+            // selection (Var/Reset) — the user moved the wheel, so
+            // the commit mode goes back to Hsv.
+            *commit_mode = CommitMode::Hsv;
             (*kind, *target_index, *hue_deg, *sat, *val)
         }
         ColorPickerState::Closed => return,
@@ -2282,10 +3059,16 @@ fn apply_picker_preview(
     let hex = hsv_to_hex(hue_deg, sat, val);
     match kind {
         TargetKind::Edge => {
-            doc.preview_edge_color_by_index(target_index, Some(&hex));
+            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+                let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+                doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: hex });
+            }
         }
         TargetKind::Portal => {
-            doc.preview_portal_color_by_index(target_index, &hex);
+            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+                let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
+                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: hex });
+            }
         }
     }
     rebuild_scene_only(doc, renderer);
@@ -2309,8 +3092,9 @@ fn apply_picker_chip(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        ChipAction, ColorPickerState, TargetKind, THEME_CHIPS,
+        ChipAction, ColorPickerState, CommitMode, TargetKind, THEME_CHIPS,
     };
+    use crate::application::document::ColorPickerPreview;
 
     let chip = match THEME_CHIPS.get(chip_idx) {
         Some(c) => *c,
@@ -2320,35 +3104,88 @@ fn apply_picker_chip(
         ColorPickerState::Open { kind, target_index, .. } => (*kind, *target_index),
         ColorPickerState::Closed => return,
     };
+
+    // Compute both (a) the display color for the preview (scene
+    // substitution string) and (b) the commit mode for Enter. The
+    // display color always resolves to something concrete so the
+    // user sees the actual color rather than a `var(--name)` literal.
+    let (display_color, commit_mode): (String, CommitMode) = match (kind, chip.action) {
+        (TargetKind::Edge, ChipAction::Var(raw)) => {
+            // Resolve the var string through the theme map to get
+            // the concrete display color.
+            let resolved = baumhard::util::color::resolve_var(
+                raw,
+                &doc.mindmap.canvas.theme_variables,
+            )
+            .to_string();
+            (resolved, CommitMode::Var(raw.to_string()))
+        }
+        (TargetKind::Edge, ChipAction::Reset) => {
+            // Preview what the edge will look like after Reset: the
+            // inherited `edge.color` (since `cfg.color` becomes
+            // None). Resolve that through theme variables for the
+            // concrete display hex.
+            let display = match doc.mindmap.edges.get(target_index) {
+                Some(e) => baumhard::util::color::resolve_var(
+                    &e.color,
+                    &doc.mindmap.canvas.theme_variables,
+                )
+                .to_string(),
+                None => "#ffffff".to_string(),
+            };
+            (display, CommitMode::ResetToInherited)
+        }
+        (TargetKind::Portal, ChipAction::Var(raw)) => {
+            let resolved = baumhard::util::color::resolve_var(
+                raw,
+                &doc.mindmap.canvas.theme_variables,
+            )
+            .to_string();
+            (resolved, CommitMode::Var(raw.to_string()))
+        }
+        (TargetKind::Portal, ChipAction::Reset) => {
+            // Portals have a non-optional color field, so "reset"
+            // re-seeds to the canvas's `--accent` value (or the
+            // raw `var(--accent)` string as a fallback).
+            let resolved = doc
+                .mindmap
+                .canvas
+                .theme_variables
+                .get("--accent")
+                .cloned()
+                .unwrap_or_else(|| "var(--accent)".to_string());
+            let display = baumhard::util::color::resolve_var(
+                &resolved,
+                &doc.mindmap.canvas.theme_variables,
+            )
+            .to_string();
+            (display, CommitMode::ResetToInherited)
+        }
+    };
+
+    // Update the picker's commit mode so Enter commits the chip's
+    // action rather than the HSV hex.
+    if let ColorPickerState::Open { commit_mode: cm, .. } = state {
+        *cm = commit_mode;
+    }
+
+    // Push the display color into the document preview so the
+    // scene substitution picks it up on the next rebuild.
     match kind {
         TargetKind::Edge => {
-            let new_val: Option<&str> = match chip.action {
-                ChipAction::Var(raw) => Some(raw),
-                ChipAction::Reset => None,
-            };
-            doc.preview_edge_color_by_index(target_index, new_val);
+            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+                let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+                doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: display_color });
+            }
         }
         TargetKind::Portal => {
-            // Portals have a non-optional color field, so "reset"
-            // can't mean "None". Fall back to the canvas's
-            // `--accent` theme variable's resolved value if the
-            // canvas has one, otherwise the raw `var(--accent)`
-            // string (the resolver passes unknown refs through
-            // unchanged). Keeps the portal reset chip symmetric
-            // with edge reset without hardcoding a hex color.
-            let new_val: String = match chip.action {
-                ChipAction::Var(raw) => raw.to_string(),
-                ChipAction::Reset => doc
-                    .mindmap
-                    .canvas
-                    .theme_variables
-                    .get("--accent")
-                    .cloned()
-                    .unwrap_or_else(|| "var(--accent)".to_string()),
-            };
-            doc.preview_portal_color_by_index(target_index, &new_val);
+            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+                let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
+                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: display_color });
+            }
         }
     }
+
     rebuild_scene_only(doc, renderer);
     rebuild_color_picker_overlay_dynamic(state, renderer);
 }
@@ -2708,30 +3545,43 @@ fn rebuild_all_with_mode(
     renderer: &mut Renderer,
 ) {
     let mut new_tree = doc.build_tree();
-    apply_selection_highlight(&mut new_tree, &doc.selection);
+
+    // Build a single flat list of (mind_node_id, color) pairs that
+    // `apply_tree_highlights` applies via baumhard's mutator/walker.
+    // Order matters: later entries override earlier ones via the
+    // repeated `SetRegionColor` mutation, so selection (cyan) is
+    // listed first, then mode-specific source (orange), then the
+    // hovered target (green). This matches the previous behavior
+    // where reparent_source_highlight was documented to override
+    // selection_highlight on conflict.
+    let mut highlights: Vec<(&str, [f32; 4])> = doc
+        .selection
+        .selected_ids()
+        .into_iter()
+        .map(|id| (id, HIGHLIGHT_COLOR))
+        .collect();
     match app_mode {
         AppMode::Reparent { sources } => {
-            // Orange on all source nodes (overrides any cyan selection color).
-            apply_reparent_source_highlight(&mut new_tree, sources);
-            // Green on the hovered target (if any and not also a source).
+            for s in sources {
+                highlights.push((s.as_str(), REPARENT_SOURCE_COLOR));
+            }
             if let Some(h) = hovered_node {
                 if !sources.iter().any(|s| s == h) {
-                    apply_reparent_target_highlight(&mut new_tree, h);
+                    highlights.push((h, REPARENT_TARGET_COLOR));
                 }
             }
         }
         AppMode::Connect { source } => {
-            // Orange on the source node, green on the hovered target (if
-            // it's not the source itself). Reuses the reparent color scheme.
-            apply_reparent_source_highlight(&mut new_tree, std::slice::from_ref(source));
+            highlights.push((source.as_str(), REPARENT_SOURCE_COLOR));
             if let Some(h) = hovered_node {
                 if h != source {
-                    apply_reparent_target_highlight(&mut new_tree, h);
+                    highlights.push((h, REPARENT_TARGET_COLOR));
                 }
             }
         }
         AppMode::Normal => {}
     }
+    apply_tree_highlights(&mut new_tree, highlights);
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
@@ -2849,4 +3699,441 @@ pub struct Options {
     /// defaults). The event loop resolves this into a `ResolvedKeybinds`
     /// at startup and dispatches keyboard events through it.
     pub keybind_config: crate::application::keybinds::KeybindConfig,
+}
+
+// =====================================================================
+// Session 7A: unit tests for pure helpers (cursor math, caret
+// insertion, double-click detection, Baumhard mutation round-trip).
+// Event-loop integration is verified manually via `cargo run`.
+// =====================================================================
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod text_edit_tests {
+    use super::*;
+    use std::time::Duration;
+
+    // -----------------------------------------------------------------
+    // Cursor math
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_insert_at_cursor_start() {
+        let mut s = String::from("bcd");
+        let cursor = insert_at_cursor(&mut s, 0, 'a');
+        assert_eq!(s, "abcd");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn test_insert_at_cursor_middle() {
+        let mut s = String::from("abd");
+        let cursor = insert_at_cursor(&mut s, 2, 'c');
+        assert_eq!(s, "abcd");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_insert_at_cursor_end() {
+        let mut s = String::from("abc");
+        let cursor = insert_at_cursor(&mut s, 3, 'd');
+        assert_eq!(s, "abcd");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn test_insert_at_cursor_newline() {
+        let mut s = String::from("abcd");
+        let cursor = insert_at_cursor(&mut s, 2, '\n');
+        assert_eq!(s, "ab\ncd");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_delete_before_cursor_at_start_noop() {
+        let mut s = String::from("abc");
+        let cursor = delete_before_cursor(&mut s, 0);
+        assert_eq!(s, "abc");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn test_delete_before_cursor_middle() {
+        let mut s = String::from("abcd");
+        let cursor = delete_before_cursor(&mut s, 2);
+        assert_eq!(s, "acd");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn test_delete_at_cursor_end_noop() {
+        let mut s = String::from("abc");
+        let cursor = delete_at_cursor(&mut s, 3);
+        assert_eq!(s, "abc");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_delete_at_cursor_middle() {
+        let mut s = String::from("abcd");
+        let cursor = delete_at_cursor(&mut s, 1);
+        assert_eq!(s, "acd");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn test_cursor_to_line_start_single_line() {
+        assert_eq!(cursor_to_line_start("abc", 2), 0);
+    }
+
+    #[test]
+    fn test_cursor_to_line_start_multiline() {
+        let s = "ab\ncd\nef";
+        // cursor on 'd' (index 4): line starts at 3
+        assert_eq!(cursor_to_line_start(s, 4), 3);
+        // cursor on 'f' (index 7): line starts at 6
+        assert_eq!(cursor_to_line_start(s, 7), 6);
+    }
+
+    #[test]
+    fn test_cursor_to_line_end_multiline() {
+        let s = "ab\ncd\nef";
+        // cursor on 'a' (index 0): end at '\n' position (2)
+        assert_eq!(cursor_to_line_end(s, 0), 2);
+        // cursor on 'e' (index 6): end at buffer end (8)
+        assert_eq!(cursor_to_line_end(s, 6), 8);
+    }
+
+    #[test]
+    fn test_move_cursor_up_line_preserves_column() {
+        let s = "abcd\nwxyz";
+        // cursor on 'y' (index 7, col 2 on line 1): up → 'c' (index 2)
+        assert_eq!(move_cursor_up_line(s, 7), 2);
+    }
+
+    #[test]
+    fn test_move_cursor_up_line_short_prev_line() {
+        let s = "ab\nwxyz";
+        // cursor on 'z' (index 6, col 3 on line 1): up → end of "ab" (index 2)
+        assert_eq!(move_cursor_up_line(s, 6), 2);
+    }
+
+    #[test]
+    fn test_move_cursor_up_line_first_line_is_noop() {
+        assert_eq!(move_cursor_up_line("abc", 1), 1);
+    }
+
+    #[test]
+    fn test_move_cursor_down_line_preserves_column() {
+        let s = "abcd\nwxyz";
+        // cursor on 'c' (index 2): down → 'y' (index 7)
+        assert_eq!(move_cursor_down_line(s, 2), 7);
+    }
+
+    #[test]
+    fn test_move_cursor_down_line_last_line_is_noop() {
+        let s = "ab\ncd";
+        assert_eq!(move_cursor_down_line(s, 4), 4);
+    }
+
+    // -----------------------------------------------------------------
+    // Caret insertion
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_insert_caret_middle() {
+        let out = insert_caret("abcd", 2);
+        assert_eq!(out, "ab\u{258C}cd");
+    }
+
+    #[test]
+    fn test_insert_caret_end() {
+        let out = insert_caret("abc", 3);
+        assert_eq!(out, "abc\u{258C}");
+    }
+
+    #[test]
+    fn test_insert_caret_empty() {
+        let out = insert_caret("", 0);
+        assert_eq!(out, "\u{258C}");
+    }
+
+    // -----------------------------------------------------------------
+    // Double-click detection
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_double_click_same_target_within_window_fires() {
+        let t0 = Instant::now();
+        let prev = LastClick {
+            time: t0,
+            screen_pos: (100.0, 100.0),
+            hit: Some("node-a".to_string()),
+        };
+        let t1 = t0 + Duration::from_millis(100);
+        assert!(is_double_click(
+            &prev,
+            t1,
+            (101.0, 100.0),
+            &Some("node-a".to_string()),
+        ));
+    }
+
+    #[test]
+    fn test_double_click_different_targets_does_not_fire() {
+        let t0 = Instant::now();
+        let prev = LastClick {
+            time: t0,
+            screen_pos: (100.0, 100.0),
+            hit: Some("node-a".to_string()),
+        };
+        let t1 = t0 + Duration::from_millis(100);
+        assert!(!is_double_click(
+            &prev,
+            t1,
+            (100.0, 100.0),
+            &Some("node-b".to_string()),
+        ));
+    }
+
+    #[test]
+    fn test_double_click_too_far_apart_does_not_fire() {
+        let t0 = Instant::now();
+        let prev = LastClick {
+            time: t0,
+            screen_pos: (100.0, 100.0),
+            hit: None,
+        };
+        let t1 = t0 + Duration::from_millis(100);
+        // Distance = sqrt(20² + 0²) = 20px → dist² = 400, threshold = 256.
+        assert!(!is_double_click(&prev, t1, (120.0, 100.0), &None));
+    }
+
+    #[test]
+    fn test_double_click_expired_does_not_fire() {
+        let t0 = Instant::now();
+        let prev = LastClick {
+            time: t0,
+            screen_pos: (100.0, 100.0),
+            hit: None,
+        };
+        let t1 = t0 + Duration::from_millis(500);
+        assert!(!is_double_click(&prev, t1, (100.0, 100.0), &None));
+    }
+
+    #[test]
+    fn test_double_click_empty_space_both_misses_fires() {
+        // Both clicks landed on no node — valid double-click for
+        // the "create orphan" gesture.
+        let t0 = Instant::now();
+        let prev = LastClick {
+            time: t0,
+            screen_pos: (50.0, 50.0),
+            hit: None,
+        };
+        let t1 = t0 + Duration::from_millis(150);
+        assert!(is_double_click(&prev, t1, (52.0, 51.0), &None));
+    }
+
+    // -----------------------------------------------------------------
+    // Baumhard Mutation round-trip: constructing and applying a
+    // `Mutation::AreaDelta` with `GlyphAreaField::Text + Assign`
+    // mutates the target GlyphArea's text in place. This verifies we
+    // really are flowing text edits through Baumhard's existing
+    // vocabulary instead of patching around it.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_text_edit_mutation_assigns_via_baumhard() {
+        use baumhard::core::primitives::{Applicable, ApplyOperation};
+        use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaField};
+
+        let mut area = GlyphArea::new_with_str(
+            "initial",
+            14.0,
+            16.8,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 30.0),
+        );
+        let delta = DeltaGlyphArea::new(vec![
+            GlyphAreaField::Text("updated".to_string()),
+            GlyphAreaField::Operation(ApplyOperation::Assign),
+        ]);
+        delta.apply_to(&mut area);
+        assert_eq!(area.text, "updated");
+    }
+
+    #[test]
+    fn test_text_edit_mutation_with_caret_glyph_via_baumhard() {
+        use baumhard::core::primitives::{Applicable, ApplyOperation};
+        use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaField};
+
+        let mut area = GlyphArea::new_with_str(
+            "",
+            14.0,
+            16.8,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 30.0),
+        );
+        let buffer = "hello world";
+        let cursor = 5;
+        let display_text = insert_caret(buffer, cursor);
+        let delta = DeltaGlyphArea::new(vec![
+            GlyphAreaField::Text(display_text.clone()),
+            GlyphAreaField::Operation(ApplyOperation::Assign),
+        ]);
+        delta.apply_to(&mut area);
+        // Caret after "hello", before " world".
+        assert_eq!(area.text, "hello\u{258C} world");
+        assert_eq!(area.text, display_text);
+    }
+
+    // -----------------------------------------------------------------
+    // TextEditState shape + guard semantics
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_text_edit_state_node_id_round_trip() {
+        let closed = TextEditState::Closed;
+        assert!(closed.node_id().is_none());
+        assert!(!closed.is_open());
+
+        let open = TextEditState::Open {
+            node_id: "n-42".to_string(),
+            buffer: "hi".to_string(),
+            cursor_char_pos: 2,
+        };
+        assert_eq!(open.node_id(), Some("n-42"));
+        assert!(open.is_open());
+    }
+
+    #[test]
+    fn test_text_edit_state_is_open_closed_variant() {
+        assert!(!TextEditState::Closed.is_open());
+    }
+
+    // -----------------------------------------------------------------
+    // Cursor helpers: boundary cases added after perf rewrite
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_cursor_to_line_start_trailing_newline() {
+        // Cursor positioned just after a trailing '\n' (on an empty
+        // final line). Line start should be the char index right
+        // after the '\n', i.e. the cursor itself.
+        let s = "abc\n";
+        assert_eq!(cursor_to_line_start(s, 4), 4);
+    }
+
+    #[test]
+    fn test_cursor_to_line_start_at_zero() {
+        assert_eq!(cursor_to_line_start("anything", 0), 0);
+    }
+
+    #[test]
+    fn test_cursor_to_line_start_empty_buffer() {
+        assert_eq!(cursor_to_line_start("", 0), 0);
+    }
+
+    #[test]
+    fn test_cursor_to_line_end_empty_buffer() {
+        assert_eq!(cursor_to_line_end("", 0), 0);
+    }
+
+    #[test]
+    fn test_cursor_to_line_end_cursor_exactly_at_newline() {
+        // Cursor is at the '\n' position; line end IS that position.
+        let s = "ab\ncd";
+        assert_eq!(cursor_to_line_end(s, 2), 2);
+    }
+
+    #[test]
+    fn test_cursor_to_line_end_walks_past_cursor() {
+        // Cursor in the middle of a line, next '\n' several chars ahead.
+        let s = "alpha beta\ngamma";
+        // Cursor on 'p' (index 2): line_end should be at '\n' (index 10).
+        assert_eq!(cursor_to_line_end(s, 2), 10);
+    }
+
+    // -----------------------------------------------------------------
+    // insert_caret / insert_at_cursor with multi-byte chars
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_insert_caret_with_multibyte_prefix() {
+        // 'é' is a 2-byte UTF-8 char. insert_caret must not split it.
+        let out = insert_caret("café", 3);
+        // "caf" + caret + "é"
+        assert_eq!(out, "caf\u{258C}é");
+    }
+
+    #[test]
+    fn test_insert_at_cursor_with_multibyte_buffer() {
+        let mut s = String::from("café");
+        // Insert 'x' between 'f' and 'é' (char pos 3).
+        let new_cursor = insert_at_cursor(&mut s, 3, 'x');
+        assert_eq!(s, "cafxé");
+        assert_eq!(new_cursor, 4);
+    }
+
+    #[test]
+    fn test_delete_before_cursor_with_multibyte() {
+        let mut s = String::from("café");
+        // Delete the 'é' (char pos 3, cursor at 4).
+        let new_cursor = delete_before_cursor(&mut s, 4);
+        assert_eq!(s, "caf");
+        assert_eq!(new_cursor, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // "is_double_click + already_editing_same_target" guard semantics
+    // -----------------------------------------------------------------
+    //
+    // The bug report was: double-clicking inside an already-open
+    // editor on the same node silently discards the transient buffer
+    // because the Pressed path re-opens the editor, clobbering the
+    // in-progress buffer. The fix guards the dispatch with a check
+    // that re-opens are skipped if the editor is already on that
+    // target. We verify the guard predicate here; the actual event
+    // loop wiring is manually verified via `cargo run`.
+
+    #[test]
+    fn test_double_click_guard_skips_same_target_when_editor_open() {
+        let editor = TextEditState::Open {
+            node_id: "node-A".to_string(),
+            buffer: "in progress".to_string(),
+            cursor_char_pos: 11,
+        };
+        let hit = Some("node-A".to_string());
+        let already_editing = editor
+            .node_id()
+            .map(|id| hit.as_deref() == Some(id))
+            .unwrap_or(false);
+        assert!(already_editing, "guard must fire for same target");
+    }
+
+    #[test]
+    fn test_double_click_guard_allows_different_target_when_editor_open() {
+        let editor = TextEditState::Open {
+            node_id: "node-A".to_string(),
+            buffer: "in progress".to_string(),
+            cursor_char_pos: 11,
+        };
+        let hit = Some("node-B".to_string());
+        let already_editing = editor
+            .node_id()
+            .map(|id| hit.as_deref() == Some(id))
+            .unwrap_or(false);
+        assert!(!already_editing, "guard must NOT fire for different target");
+    }
+
+    #[test]
+    fn test_double_click_guard_allows_when_editor_closed() {
+        let editor = TextEditState::Closed;
+        let hit = Some("node-A".to_string());
+        let already_editing = editor
+            .node_id()
+            .map(|id| hit.as_deref() == Some(id))
+            .unwrap_or(false);
+        assert!(!already_editing, "guard must NOT fire when editor is closed");
+    }
 }

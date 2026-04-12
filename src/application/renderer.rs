@@ -448,12 +448,6 @@ pub struct Renderer {
     /// inline click-to-edit. Stored as `(min, max)` canvas-space
     /// corners so the hit test is a pair of comparisons per edge.
     connection_label_hitboxes: FxHashMap<EdgeKey, (Vec2, Vec2)>,
-    /// Session 6D: when set to `Some((key, text))`, the renderer
-    /// substitutes the given text (with a trailing caret glyph) for
-    /// whichever label matches `key` during
-    /// `rebuild_connection_label_buffers`. Used by inline label edit
-    /// mode to preview uncommitted text without mutating the model.
-    pub label_edit_override: Option<(EdgeKey, String)>,
     /// Session 6E: per-endpoint portal marker buffers, keyed by
     /// `(portal_ref, endpoint_node_id)` so each of the two marker
     /// glyphs of a pair is stored separately. Rebuilt every scene
@@ -713,7 +707,6 @@ impl Renderer {
             edge_handle_buffers: Vec::new(),
             connection_label_buffers: FxHashMap::default(),
             connection_label_hitboxes: FxHashMap::default(),
-            label_edit_override: None,
             portal_buffers: FxHashMap::default(),
             portal_hitboxes: FxHashMap::default(),
             palette_overlay_buffers: Vec::new(),
@@ -2021,7 +2014,8 @@ impl Renderer {
 
         let font_size = layout.font_size;
         let ring_font_size = layout.ring_font_size;
-        let ring_glyph_box = (ring_font_size * 1.5, ring_font_size * 1.5);
+        let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
+        let ring_glyph_box = (ring_box_w, ring_font_size * 1.5);
 
         // ---- Title bar ----
         let title_text = format!("\u{0950} {} color", geometry.target_label);
@@ -2040,10 +2034,14 @@ impl Renderer {
         // ---- Hue ring (24 sacred-script glyphs) — three 8-glyph
         // arcs clockwise from 12 o'clock: Devanagari, Hebrew, Tibetan.
         // Each slot renders at HUE_RING_FONT_SCALE × base font size
-        // so the ring reads as the dominant visual element. The
-        // dynamic pass later overlays a cyan outline ring ◯ on top
-        // of the currently-selected slot, so we don't need to
-        // rebuild the hue ring when the selection moves.
+        // so the ring reads as the dominant visual element. Each
+        // glyph is center-aligned inside its box so scripts with
+        // different shaped widths (Devanagari headstrokes are
+        // noticeably wider than Tibetan consonants) don't throw the
+        // ring visually out of round. The dynamic pass later
+        // overlays a cyan outline ring ◯ on top of the currently-
+        // selected slot, so we don't need to rebuild the hue ring
+        // when the selection moves.
         for i in 0..HUE_SLOT_COUNT {
             let hue = hue_slot_to_degrees(i);
             let rgb = hsv_to_rgb(hue, 1.0, 1.0);
@@ -2052,12 +2050,12 @@ impl Renderer {
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(ring_font_size, ring_font_size));
             let pos = layout.hue_slot_positions[i];
-            self.color_picker_static_buffers.push(create_border_buffer(
+            self.color_picker_static_buffers.push(create_centered_cell_buffer(
                 &mut font_system,
                 HUE_RING_GLYPHS[i],
                 &attrs,
                 ring_font_size,
-                (pos.0 - ring_font_size * 0.5, pos.1 - ring_font_size * 0.5),
+                (pos.0 - ring_box_w * 0.5, pos.1 - ring_font_size * 0.5),
                 ring_glyph_box,
             ));
         }
@@ -2117,10 +2115,17 @@ impl Renderer {
         );
 
         let font_size = layout.font_size;
-        let char_width = layout.char_width;
         let ring_font_size = layout.ring_font_size;
-        let glyph_box = (font_size * 1.5, font_size * 1.5);
-        let ring_glyph_box = (ring_font_size * 1.5, ring_font_size * 1.5);
+        // Cell-box width: at least the widest crosshair glyph, with a
+        // font-size floor so narrow Latin-width glyphs (chips, etc.)
+        // don't end up with absurdly small boxes. Center-alignment
+        // inside the box (via `create_centered_cell_buffer`) then
+        // pins each glyph's visual midpoint to the cell midpoint,
+        // independent of per-script advance.
+        let cell_box_w = (layout.cell_advance * 1.2).max(font_size * 1.5);
+        let cell_box = (cell_box_w, font_size * 1.5);
+        let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
+        let ring_glyph_box = (ring_box_w, ring_font_size * 1.5);
 
         // ---- Saturation crosshair bar (horizontal) ----
         // Each cell shows the color at (current_hue, cell_sat, current_val)
@@ -2128,16 +2133,29 @@ impl Renderer {
         // like for the chosen hue?" preview. Cell CROSSHAIR_CENTER_CELL
         // is the wheel center and is NOT rendered as a bar cell — the
         // ॐ glyph drawn below occupies that position.
-        let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0)).round() as usize;
-        let current_val_cell =
-            ((1.0 - geometry.val) * (VAL_CELL_COUNT as f32 - 1.0)).round() as usize;
+        //
+        // Note on mid-value highlight: when `sat` or `val` is exactly
+        // 0.5, the quantization lands on `CROSSHAIR_CENTER_CELL`
+        // (sat=10/20=0.5), which is the skipped center slot — so no
+        // arm cell receives the highlight tint at that exact value.
+        // The center ॐ glyph already renders with the previewed HSV
+        // color, so it serves as the implicit selection indicator at
+        // mid values. Normal values away from 0.5 highlight an arm
+        // cell as usual. Clamp defensively so a future out-of-range
+        // sat/val never overflows the usize cast.
+        let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0))
+            .round()
+            .clamp(0.0, (SAT_CELL_COUNT - 1) as f32) as usize;
+        let current_val_cell = ((1.0 - geometry.val) * (VAL_CELL_COUNT as f32 - 1.0))
+            .round()
+            .clamp(0.0, (VAL_CELL_COUNT - 1) as f32) as usize;
         for i in 0..SAT_CELL_COUNT {
             if i == CROSSHAIR_CENTER_CELL {
                 continue;
             }
             let cell_sat = sat_cell_to_value(i);
             let base_rgb = hsv_to_rgb(geometry.hue_deg, cell_sat, geometry.val);
-            // Selected cell gets a tint-up toward cyan so it pops out
+            // Selected cell gets a tint-up toward white so it pops out
             // against its arm-mate cells — replaces the earlier
             // ■ → ◆ glyph-swap highlight which doesn't translate to
             // sacred-script glyphs (we'd lose the per-cell script
@@ -2156,13 +2174,18 @@ impl Renderer {
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
             let (cx, cy) = layout.sat_cell_positions[i];
-            self.color_picker_dynamic_buffers.push(create_border_buffer(
+            // Center the cell box on (cx, cy). `create_centered_cell_buffer`
+            // uses `Align::Center` so the glyph visually centers on the
+            // cell midpoint regardless of its shaped width — Hebrew
+            // aleph (~5 px) and Egyptian hieroglyphs (~20 px) both land
+            // on the same visual column.
+            self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
                 &mut font_system,
                 glyph,
                 &attrs,
                 font_size,
-                (cx - char_width * 0.5, cy - font_size * 0.5),
-                glyph_box,
+                (cx - cell_box_w * 0.5, cy - font_size * 0.5),
+                cell_box,
             ));
         }
 
@@ -2187,13 +2210,13 @@ impl Renderer {
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
             let (cx, cy) = layout.val_cell_positions[i];
-            self.color_picker_dynamic_buffers.push(create_border_buffer(
+            self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
                 &mut font_system,
                 glyph,
                 &attrs,
                 font_size,
-                (cx - char_width * 0.5, cy - font_size * 0.5),
-                glyph_box,
+                (cx - cell_box_w * 0.5, cy - font_size * 0.5),
+                cell_box,
             ));
         }
 
@@ -2203,7 +2226,9 @@ impl Renderer {
         // ◯ is hollow, so the user can still read the hue-colored
         // letter through the indicator ring. Font size matches the
         // ring's HUE_RING_FONT_SCALE so the ring encircles the
-        // glyph rather than sitting inside it.
+        // glyph rather than sitting inside it. Center-aligned so
+        // the ring stays concentric with the ring glyph it overlays
+        // even on non-integer positions.
         let current_hue_slot = ((geometry.hue_deg.rem_euclid(360.0) / 360.0)
             * HUE_SLOT_COUNT as f32)
             .round() as usize
@@ -2212,12 +2237,12 @@ impl Renderer {
             .color(cosmic_text::Color::rgba(0, 229, 255, 255))
             .metrics(cosmic_text::Metrics::new(ring_font_size, ring_font_size));
         let slot_pos = layout.hue_slot_positions[current_hue_slot];
-        self.color_picker_dynamic_buffers.push(create_border_buffer(
+        self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
             &mut font_system,
             "\u{25EF}",
             &indicator_attrs,
             ring_font_size,
-            (slot_pos.0 - ring_font_size * 0.5, slot_pos.1 - ring_font_size * 0.5),
+            (slot_pos.0 - ring_box_w * 0.5, slot_pos.1 - ring_font_size * 0.5),
             ring_glyph_box,
         ));
 
@@ -2455,19 +2480,17 @@ impl Renderer {
     /// buffers centered on their AABB, with a hitbox recorded so the
     /// app can detect clicks for inline label editing.
     ///
-    /// If `self.label_edit_override` is `Some((key, text))`, the
-    /// matching edge's label is drawn from `text` (with a trailing
-    /// caret) instead of the element's committed text — the inline
-    /// edit preview. The override is consulted only by the buffer
-    /// rebuild; the AABB is still computed from the scene element's
-    /// bounds, so the hitbox stays stable across keystrokes.
+    /// The inline label-edit preview (buffer text + caret) is applied
+    /// upstream in `scene_builder` via `MindMapDocument::label_edit_preview`,
+    /// so the renderer can treat every label element as the final
+    /// text to draw — no read-time override, no side channel.
     pub fn rebuild_connection_label_buffers(
         &mut self,
         label_elements: &[baumhard::mindmap::scene_builder::ConnectionLabelElement],
     ) {
         self.connection_label_buffers.clear();
         self.connection_label_hitboxes.clear();
-        if label_elements.is_empty() && self.label_edit_override.is_none() {
+        if label_elements.is_empty() {
             return;
         }
         let mut font_system = fonts::FONT_SYSTEM
@@ -2481,19 +2504,9 @@ impl Renderer {
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(elem.font_size_pt, elem.font_size_pt));
 
-            // Preview override (inline label editor): substitute the
-            // edited buffer text + caret for whichever edge is being
-            // edited right now.
-            let rendered_text: String = match self.label_edit_override.as_ref() {
-                Some((key, text)) if *key == elem.edge_key => {
-                    format!("{text}\u{258C}")
-                }
-                _ => elem.text.clone(),
-            };
-
             let buffer = create_border_buffer(
                 &mut font_system,
-                &rendered_text,
+                &elem.text,
                 &attrs,
                 elem.font_size_pt,
                 elem.position,
@@ -2509,24 +2522,6 @@ impl Renderer {
             );
             self.connection_label_hitboxes
                 .insert(elem.edge_key.clone(), (min, max));
-        }
-
-        // If an override points at an edge whose label element isn't
-        // in the scene (e.g. the user is typing the very first
-        // character of a brand-new label whose committed text is
-        // still empty), synthesize a preview buffer at the edge
-        // anchor so the caret is visible while typing. The app is
-        // responsible for passing a scene that includes a
-        // ConnectionLabelElement for the edited edge once the buffer
-        // is non-empty; this branch is a belt-and-suspenders guard.
-        if let Some((key, text)) = self.label_edit_override.as_ref() {
-            if !self.connection_label_buffers.contains_key(key) {
-                // No scene element to anchor to — do nothing. Callers
-                // ensure the scene is rebuilt after opening the
-                // editor so this branch is exercised only on the
-                // first keystroke before the next scene build.
-                let _ = (text,);
-            }
         }
     }
 
@@ -2982,6 +2977,38 @@ fn create_border_buffer(
         &Attrs::new(),
         cosmic_text::Shaping::Advanced,
         None,
+    );
+    buf.shape_until_scroll(font_system, false);
+    MindMapTextBuffer { buffer: buf, pos, bounds }
+}
+
+/// Like `create_border_buffer` but center-aligns the text within its
+/// box via `cosmic_text::Align::Center`. Used for the color picker's
+/// crosshair-arm glyphs and hue-ring glyphs: with sacred-script
+/// glyphs varying significantly in shaped width (~5 px for Hebrew,
+/// ~20 px for Egyptian hieroglyphs at base `font_size`), flush-left
+/// positioning would produce a visibly drifting cross and a ring
+/// thrown out of round. Center alignment pins each glyph's visual
+/// center to the middle of its box, independent of advance width.
+fn create_centered_cell_buffer(
+    font_system: &mut FontSystem,
+    text: &str,
+    attrs: &Attrs,
+    font_size: f32,
+    pos: (f32, f32),
+    bounds: (f32, f32),
+) -> MindMapTextBuffer {
+    let mut buf = cosmic_text::Buffer::new(
+        font_system,
+        cosmic_text::Metrics::new(font_size, font_size),
+    );
+    buf.set_size(font_system, Some(bounds.0), Some(bounds.1));
+    buf.set_rich_text(
+        font_system,
+        vec![(text, attrs.clone())],
+        &Attrs::new(),
+        cosmic_text::Shaping::Advanced,
+        Some(cosmic_text::Align::Center),
     );
     buf.shape_until_scroll(font_system, false);
     MindMapTextBuffer { buffer: buf, pos, bounds }
