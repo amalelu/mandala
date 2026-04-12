@@ -38,35 +38,87 @@ use baumhard::mindmap::scene_cache::EdgeKey;
 use glam::Vec2;
 use std::path::Path;
 
-/// Session 6C: pre-layout palette data handed from the app event
-/// loop to the renderer every time the palette state changes. The
-/// renderer turns it into cosmic-text buffers in
-/// `rebuild_palette_overlay_buffers`. Kept as a plain struct (no
-/// rendering primitives) so unit tests can construct one trivially.
-pub struct PaletteOverlayGeometry {
-    /// Current query text, shown after the `/` prefix on the input
-    /// line. Empty when the palette just opened.
-    pub query_text: String,
-    /// One entry per currently-filtered action, in display order.
-    pub rows: Vec<PaletteOverlayRow>,
-    /// Which row is highlighted. Index into `rows`.
-    pub selected_row: usize,
+/// Pre-layout console data handed from the app event loop to the
+/// renderer every time the console state changes. The renderer turns
+/// it into cosmic-text buffers in `rebuild_console_overlay_buffers`.
+/// Kept as a plain struct (no rendering primitives) so unit tests
+/// can construct one trivially.
+///
+/// Layout shape: a bottom-anchored strip with (bottom → top)
+/// prompt line → completion popup → scrollback region. The
+/// scrollback shows the most recent N output lines; the completion
+/// popup is empty unless the user pressed Tab.
+///
+/// Styling (`border_unit`, `font_family`, `font_size`) is threaded
+/// in from the user config. The renderer stays dumb about where
+/// those values came from — it just draws what the geometry says.
+#[derive(Clone, Debug)]
+pub struct ConsoleOverlayGeometry {
+    /// Input buffer text, rendered after the `❯ ` prompt glyph.
+    pub input: String,
+    /// Grapheme-cluster index of the cursor. The renderer converts
+    /// this to a byte offset via
+    /// `baumhard::util::grapheme_chad::find_byte_index_of_grapheme`
+    /// so the prompt-line `split_at` lands on a grapheme boundary
+    /// even for ZWJ emoji / combining marks.
+    pub cursor_grapheme: usize,
+    /// Scrollback lines, oldest first. Only the trailing
+    /// `MAX_CONSOLE_SCROLLBACK_ROWS` are drawn; anything above scrolls
+    /// off the top.
+    pub scrollback: Vec<ConsoleOverlayLine>,
+    /// Completion candidates. Empty when the popup is closed.
+    pub completions: Vec<ConsoleOverlayCompletion>,
+    /// Which completion is highlighted. `None` when `completions` is
+    /// empty. Index into `completions` otherwise.
+    pub selected_completion: Option<usize>,
+    /// Border unit string. Repeated horizontally on the top and
+    /// bottom rows; characters stacked vertically (one per line) on
+    /// the left and right columns. Default `"#"` in the stock config.
+    pub border_unit: String,
+    /// Font family name passed to cosmic-text via
+    /// `Attrs::new().family(Family::Name(..))`. Empty string means
+    /// "use cosmic-text's default family", which lets cosmic-text's
+    /// own fallback chain resolve it.
+    pub font_family: String,
+    /// Font size in pixels. The whole overlay scales with this value;
+    /// row height, frame extents, and border repetition counts are
+    /// all derived from it.
+    pub font_size: f32,
 }
 
-/// One row in the palette overlay — label + description, matching
-/// the fields on `PaletteAction`.
-pub struct PaletteOverlayRow {
-    pub label: String,
-    pub description: String,
+/// One line in the scrollback, carrying its kind so the renderer can
+/// color input echoes, normal output, and errors differently.
+#[derive(Clone, Debug)]
+pub struct ConsoleOverlayLine {
+    pub text: String,
+    pub kind: ConsoleOverlayLineKind,
 }
 
-/// Pure-function output of the palette-overlay layout pass. Holds
-/// the derived screen-space dimensions for the palette frame so the
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsoleOverlayLineKind {
+    /// Echo of a user-entered command (e.g. `> anchor set from top`).
+    Input,
+    /// Normal output line from a successful command.
+    Output,
+    /// Error output from a failed command.
+    Error,
+}
+
+/// One completion candidate: the replacement text plus an optional
+/// dim hint printed to the right (e.g. the command's summary).
+#[derive(Clone, Debug)]
+pub struct ConsoleOverlayCompletion {
+    pub text: String,
+    pub hint: Option<String>,
+}
+
+/// Pure-function output of the console-overlay layout pass. Holds
+/// the derived screen-space dimensions for the console frame so the
 /// backdrop rectangle and the border-glyph positions agree exactly.
 /// Extracted to a plain struct so unit tests can verify the
 /// alignment invariant without constructing a full `Renderer`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PaletteFrameLayout {
+pub struct ConsoleFrameLayout {
     pub left: f32,
     pub top: f32,
     pub frame_width: f32,
@@ -75,24 +127,35 @@ pub struct PaletteFrameLayout {
     pub char_width: f32,
     pub row_height: f32,
     pub inner_padding: f32,
-    /// How many filtered rows are rendered inside the frame. Clamped
-    /// to `MAX_PALETTE_VISIBLE_ROWS`.
-    pub shown_rows: usize,
-    /// Index of the first row in `PaletteOverlayGeometry.rows` that
-    /// is visible inside the frame — scroll-window origin. Always
-    /// zero when the total filtered row count fits inside
-    /// `shown_rows`; otherwise chosen so `selected_row` stays
-    /// roughly centered (see `compute_palette_frame_layout`).
-    pub first_visible: usize,
+    /// How many scrollback rows fit inside the frame — clamped to
+    /// `MAX_CONSOLE_SCROLLBACK_ROWS` and the available vertical
+    /// space.
+    pub scrollback_rows: usize,
+    /// How many completion rows are drawn. 0 when the popup is
+    /// closed. Completions sit directly above the prompt line.
+    pub completion_rows: usize,
 }
 
-/// Maximum number of filtered rows drawn inside the palette frame.
-/// With the new ~34 px row height this keeps the modal from
-/// dominating the canvas while still showing a useful slice of a
-/// long filtered list.
-pub const MAX_PALETTE_VISIBLE_ROWS: usize = 8;
+/// Maximum number of scrollback lines rendered. The scrollback
+/// vector itself can grow unboundedly in memory, but only the
+/// trailing N lines ever reach the screen.
+pub const MAX_CONSOLE_SCROLLBACK_ROWS: usize = 12;
 
-impl PaletteFrameLayout {
+/// Maximum number of completion candidates drawn in the popup above
+/// the prompt.
+pub const MAX_CONSOLE_COMPLETION_ROWS: usize = 8;
+
+/// Leading character on every console input line (the `❯` glyph).
+const PROMPT_GLYPH: &str = "\u{276F}";
+/// The block cursor (`▌`) drawn at the current cursor position.
+const CURSOR_GLYPH: &str = "\u{258C}";
+/// Prefix attached to the currently-selected completion row (`▸ `).
+const SELECTED_COMPLETION_MARKER: &str = "\u{25B8} ";
+/// Padding for unselected completion rows so the list stays
+/// vertically aligned with the selected row's marker.
+const UNSELECTED_COMPLETION_MARKER: &str = "  ";
+
+impl ConsoleFrameLayout {
     /// Screen-space rectangle covered by the opaque backdrop. Matches
     /// the border-glyph bounds exactly: the top border row sits at
     /// `y = top`, the bottom border row extends to
@@ -106,224 +169,145 @@ impl PaletteFrameLayout {
             self.frame_height + self.font_size,
         )
     }
-}
 
-/// Selects between Unicode and ASCII rendering for the palette
-/// "sacred border" — the decorative border made of repeating words
-/// for God in Sanskrit (top: ॐ, the syllable Om) and ancient Hebrew
-/// (bottom: אל, the word "El"), replacing the old Unicode box-
-/// drawing border. Dual mode because fonts covering Devanagari /
-/// Hebrew are not guaranteed (CI images, stripped-down desktops,
-/// etc.) and the ASCII path produces a useful fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SacredBorderStyle {
-    /// Devanagari + Hebrew. Native default.
-    Unicode,
-    /// ASCII fallback. Used when `MANDALA_PALETTE_ASCII_BORDER=1`
-    /// is set in the environment, and in unit tests that need a
-    /// font-independent baseline.
-    Ascii,
-}
-
-impl SacredBorderStyle {
-    /// Read the style from the environment. Defaults to `Unicode`;
-    /// set `MANDALA_PALETTE_ASCII_BORDER=1` to force `Ascii`.
-    pub fn from_env() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if std::env::var("MANDALA_PALETTE_ASCII_BORDER")
-                .map(|v| v == "1")
-                .unwrap_or(false)
-            {
-                return SacredBorderStyle::Ascii;
-            }
-        }
-        SacredBorderStyle::Unicode
-    }
-
-    fn top_unit(self) -> &'static str {
-        match self {
-            SacredBorderStyle::Unicode => "ॐ ",
-            SacredBorderStyle::Ascii => " GOD ",
-        }
-    }
-
-    fn bottom_unit(self) -> &'static str {
-        match self {
-            SacredBorderStyle::Unicode => "אל ",
-            SacredBorderStyle::Ascii => " AUM ",
-        }
-    }
-
-    fn side_unit(self) -> &'static str {
-        match self {
-            SacredBorderStyle::Unicode => "·\n",
-            SacredBorderStyle::Ascii => ".\n",
-        }
+    /// Y offset of the prompt line's baseline (inner-padded, inside
+    /// the frame).
+    pub fn prompt_y(&self) -> f32 {
+        self.top + self.frame_height - self.inner_padding - self.font_size
     }
 }
 
 /// Build the four border strings (top, bottom, left_column,
-/// right_column) for the command palette "sacred border". The
-/// strings are sized to approximately fill the given frame extent
-/// — small over/underfill is cosmetically fine because the opaque
-/// palette backdrop rect masks any overshoot and the Devanagari /
-/// Hebrew glyphs are decorative rather than load-bearing grid.
+/// right_column) for the console frame from a single user-supplied
+/// unit string. The top and bottom rows are `unit` repeated
+/// horizontally; the left and right columns are `unit`'s characters
+/// stacked vertically (one per line), repeating to fill the frame
+/// height — i.e. the unit "rotated" onto the vertical axis.
 ///
-/// Returns `(top, bottom, left, right)`. Left and right columns
-/// are identical strings (same per-line repetition count); the
-/// caller places them at different x positions.
-pub fn build_sacred_border_strings(
+/// An empty `unit` falls back to `"#"` so the frame always has a
+/// visible border. Small over/underfill is cosmetically fine because
+/// the opaque backdrop rect masks any overshoot.
+///
+/// Returns `(top, bottom, left, right)`. Left and right columns are
+/// identical strings; the caller places them at different x
+/// positions.
+pub fn build_console_border_strings(
+    unit: &str,
     inner_width_px: f32,
     inner_height_px: f32,
     font_size: f32,
-    style: SacredBorderStyle,
 ) -> (String, String, String, String) {
-    // Conservative average glyph width — wider than a typical
-    // Latin character so the repetition count leans slightly low
+    let unit = if unit.is_empty() { "#" } else { unit };
+    // Conservative average glyph width — wider than a typical Latin
+    // character so the repetition count leans slightly low
     // (under-fill, masked by the backdrop) rather than high
-    // (over-fill, wraps onto a second line and visually doubles
-    // up).
+    // (over-fill, wraps onto a second line and visually doubles up).
     let avg_glyph_width = (font_size * 0.7).max(1.0);
-    let top_unit = style.top_unit();
-    let bottom_unit = style.bottom_unit();
-    let side_unit = style.side_unit();
+    let unit_char_count = unit.chars().count().max(1) as f32;
 
-    let top_unit_chars = top_unit.chars().count().max(1) as f32;
-    let bottom_unit_chars = bottom_unit.chars().count().max(1) as f32;
+    let horiz_reps = ((inner_width_px / (avg_glyph_width * unit_char_count)).ceil() as usize).max(1);
+    let top = unit.repeat(horiz_reps);
+    let bottom = top.clone();
 
-    let top_repetitions =
-        ((inner_width_px / (avg_glyph_width * top_unit_chars)).ceil() as usize).max(1);
-    let bottom_repetitions =
-        ((inner_width_px / (avg_glyph_width * bottom_unit_chars)).ceil() as usize).max(1);
-
-    // Side columns are laid out in `font_size`-tall line-height
-    // slots, *not* in ROW_HEIGHT slots — the side buffer is a
-    // single cosmic-text buffer with `\n`-separated lines, and
-    // each line takes `font_size` of vertical space. Deriving the
-    // count from the palette's row height would leave the rail
-    // short under the new 34 px ROW_HEIGHT.
-    let line_count =
-        ((inner_height_px / font_size).ceil() as usize).max(1);
-
-    let top = top_unit.repeat(top_repetitions);
-    let bottom = bottom_unit.repeat(bottom_repetitions);
-    let side = side_unit.repeat(line_count);
+    // Side column: each character of `unit` becomes its own line,
+    // and the whole stack is repeated vertically. `font_size` maps
+    // one grapheme to one line-height cell.
+    let lines_needed = ((inner_height_px / font_size).ceil() as usize).max(1);
+    let unit_char_count_usize = unit.chars().count().max(1);
+    let vert_reps = lines_needed.div_ceil(unit_char_count_usize);
+    let mut side = String::with_capacity(unit.len() * vert_reps + vert_reps * unit_char_count_usize);
+    for _ in 0..vert_reps {
+        for c in unit.chars() {
+            side.push(c);
+            side.push('\n');
+        }
+    }
     (top, bottom, side.clone(), side)
 }
 
-/// Compute the screen-space layout for the command-palette overlay
-/// from a `PaletteOverlayGeometry` and the current screen width.
-/// Pure function — no GPU or font-system access. Called by
-/// `rebuild_palette_overlay_buffers` to derive positions for the
-/// backdrop rect, border glyphs, and row text, and by unit tests to
-/// assert the backdrop-vs-border alignment invariant.
-pub fn compute_palette_frame_layout(
-    geometry: &PaletteOverlayGeometry,
+/// Compute the screen-space layout for the console overlay from a
+/// `ConsoleOverlayGeometry` and the current screen dimensions. Pure
+/// function — no GPU or font-system access. Called by
+/// `rebuild_console_overlay_buffers` to derive positions for the
+/// backdrop rect, border glyphs, prompt, scrollback, and completion
+/// popup. Unit tests use it directly to assert the backdrop-vs-border
+/// alignment invariant and the scrollback/completion row math.
+///
+/// The console is a bottom-anchored strip: rows run (bottom → top)
+/// **prompt → completion popup (if any) → scrollback region**. The
+/// frame grows upward from the bottom of the window as scrollback or
+/// completions accumulate, up to the built-in caps.
+pub fn compute_console_frame_layout(
+    geometry: &ConsoleOverlayGeometry,
     screen_width: f32,
-) -> PaletteFrameLayout {
-    // Layout constants, in screen-space pixels. Sized to be
-    // legible at a typical desktop DPI without overlaying too much
-    // of the map. Kept in sync with the values used inside
-    // `rebuild_palette_overlay_buffers`.
-    let font_size: f32 = 16.0;
+    screen_height: f32,
+) -> ConsoleFrameLayout {
+    // Layout constants derive from the configured font size so the
+    // whole overlay scales cleanly when users bump the setting. The
+    // inner padding stays a fixed pixel value — it's visual breathing
+    // room, not a function of glyph size.
+    let font_size = geometry.font_size.max(4.0);
     let char_width = font_size * 0.6;
     let inner_padding: f32 = 8.0;
+    // One row of 16px glyphs + 2px of vertical breathing room so
+    // consecutive rows don't visually merge.
+    let row_height = font_size + 2.0;
 
-    // Per-row layout. The label and description are drawn in
-    // separate, non-overlapping sub-regions inside each row slot,
-    // with a gap below the description so successive rows have
-    // clear visual rhythm — the pre-session-6D layout drew the
-    // description inside the same `font_size * 1.5 = 24 px` cell
-    // as the label, which caused a visible collision.
-    //
-    // LABEL_LINE   — vertical budget for the label text. Matches
-    //                `font_size` since cosmic-text's line box is
-    //                ~`font_size` tall at `Metrics::new(fs, fs)`.
-    // DESC_SIZE    — font size for the description line.
-    // DESC_Y_OFFSET — y offset from the row's top (label baseline
-    //                anchor) to the description's top. Hard-coded
-    //                rather than derived from `font_size` so the
-    //                relationship between label and description is
-    //                explicit in the code.
-    // ROW_GAP      — empty space below the description before the
-    //                next row's label starts.
-    // ROW_HEIGHT   — total vertical cost of a single row, the sum
-    //                of the three above.
-    const LABEL_LINE: f32 = 16.0;
-    const DESC_SIZE: f32 = 12.0;
-    const DESC_Y_OFFSET: f32 = LABEL_LINE + 4.0;
-    const ROW_GAP: f32 = 6.0;
-    const ROW_HEIGHT: f32 = LABEL_LINE + DESC_SIZE + ROW_GAP;
-    // Query line vertical budget — slightly taller than a label
-    // line so the cursor glyph sits clear of the top border.
-    let query_line = font_size * 1.4;
-    let row_height = ROW_HEIGHT;
+    let scrollback_rows = geometry
+        .scrollback
+        .len()
+        .min(MAX_CONSOLE_SCROLLBACK_ROWS);
+    let completion_rows = geometry
+        .completions
+        .len()
+        .min(MAX_CONSOLE_COMPLETION_ROWS);
 
-    let shown_rows = geometry.rows.len().min(MAX_PALETTE_VISIBLE_ROWS);
-    // Frame height is strictly linear in `shown_rows` now — no
-    // "+2 row premium" like the old `row_height * (2 + N) + 2*pad`
-    // formula. The query line is accounted for exactly once, and
-    // each visible filtered row contributes exactly ROW_HEIGHT.
-    let frame_height =
-        query_line + inner_padding * 2.0 + ROW_HEIGHT * shown_rows as f32;
+    // Prompt line gets slightly extra vertical budget so the cursor
+    // glyph sits clear of the bottom border.
+    let prompt_budget = font_size * 1.4;
+    let frame_height = prompt_budget
+        + row_height * completion_rows as f32
+        + row_height * scrollback_rows as f32
+        + inner_padding * 2.0;
 
-    // Scroll window: recompute per rebuild from `selected_row` so
-    // the highlight stays visible on Up/Down navigation through a
-    // filtered list longer than `shown_rows`. Centered-window
-    // policy: selection stays roughly mid-frame, pinning to the
-    // top or bottom when it runs out of room. Stateless — safe
-    // because the palette has no "scroll without moving the
-    // selection" gesture (no PageUp/PageDown yet, and filter
-    // changes always reset `selected` to 0).
-    let total_rows = geometry.rows.len();
-    let first_visible = if total_rows <= shown_rows {
-        0
-    } else {
-        let half = shown_rows / 2;
-        let sel = geometry.selected_row.min(total_rows.saturating_sub(1));
-        if sel < half {
-            0
-        } else if sel + (shown_rows - half) >= total_rows {
-            total_rows - shown_rows
-        } else {
-            sel - half
-        }
-    };
-
-    // Adaptive frame width: wrap tightly around the longest
-    // visible content row (query line, label, or description),
-    // with a minimum so very short content doesn't produce a
-    // postage stamp and a maximum so a stray long description
-    // doesn't blow the palette across the whole window.
-    let query_chars = geometry.query_text.chars().count() + 3; // "/…▌"
-    let longest_label = geometry
-        .rows
+    // Width: adapt to the longest visible line, clamped so a short
+    // prompt doesn't produce a postage stamp and a stray long
+    // scrollback line doesn't blow the frame across the whole
+    // window.
+    let prompt_chars = geometry.input.chars().count() + 3; // "❯ " + cursor
+    let longest_scrollback = geometry
+        .scrollback
         .iter()
-        .skip(first_visible)
-        .take(shown_rows)
-        .map(|r| r.label.chars().count() + 2) // "▸ "
+        .rev()
+        .take(scrollback_rows)
+        .map(|l| l.text.chars().count())
         .max()
         .unwrap_or(0);
-    let longest_desc = geometry
-        .rows
+    let longest_completion = geometry
+        .completions
         .iter()
-        .skip(first_visible)
-        .take(shown_rows)
-        .map(|r| r.description.chars().count() + 4) // "    "
+        .take(completion_rows)
+        .map(|c| {
+            let hint_len = c.hint.as_deref().map(|s| s.chars().count() + 4).unwrap_or(0);
+            c.text.chars().count() + 2 + hint_len
+        })
         .max()
         .unwrap_or(0);
-    let content_chars = query_chars.max(longest_label).max(longest_desc);
+    let content_chars = prompt_chars
+        .max(longest_scrollback)
+        .max(longest_completion);
     let frame_width = ((content_chars as f32 + 2.0) * char_width
         + inner_padding * 2.0
         + char_width * 2.0)
-        .clamp(320.0, 720.0);
+        .clamp(360.0, 960.0);
 
-    // Center horizontally, fixed offset from the top.
+    // Horizontal: center. Vertical: anchor to the bottom of the
+    // window, with a small pad so the border doesn't kiss the edge.
     let left = ((screen_width - frame_width) * 0.5).max(0.0);
-    let top: f32 = 80.0;
+    let top = (screen_height - frame_height - inner_padding - font_size)
+        .max(inner_padding);
 
-    PaletteFrameLayout {
+    ConsoleFrameLayout {
         left,
         top,
         frame_width,
@@ -332,8 +316,8 @@ pub fn compute_palette_frame_layout(
         char_width,
         row_height,
         inner_padding,
-        shown_rows,
-        first_visible,
+        scrollback_rows,
+        completion_rows,
     }
 }
 
@@ -408,7 +392,7 @@ pub struct Renderer {
     /// draw BETWEEN the two text renders inside one render pass
     /// (otherwise re-preparing the single text renderer would
     /// race with the pass's already-recorded draw commands).
-    palette_text_renderer: TextRenderer,
+    console_text_renderer: TextRenderer,
     texture_format: TextureFormat,
     surface_capabilities: SurfaceCapabilities,
     redraw_mode: RedrawMode,
@@ -464,7 +448,7 @@ pub struct Renderer {
     /// Session 6C: command palette overlay buffers. Rendered above
     /// everything else in screen coordinates. Populated only when
     /// the palette is open; cleared otherwise.
-    palette_overlay_buffers: Vec<MindMapTextBuffer>,
+    console_overlay_buffers: Vec<MindMapTextBuffer>,
     /// Glyph-wheel color picker static overlay buffers. Shaped once
     /// when the picker opens (and rebuilt on window resize) and left
     /// alone thereafter — they cover the parts of the modal whose
@@ -517,7 +501,7 @@ pub struct Renderer {
     /// Persistent vertex buffer for the rect pipeline. Grows
     /// (doubling) on overflow, never shrinks. Re-uploaded each
     /// frame with the concatenation of `main_rect_vertices` and
-    /// `palette_rect_vertices`; the two batches draw separately
+    /// `console_rect_vertices`; the two batches draw separately
     /// using offset + count so a single buffer keeps the code
     /// simple.
     rect_vertex_buffer: wgpu::Buffer,
@@ -537,13 +521,13 @@ pub struct Renderer {
     /// Packed vertex floats for the "overlay" (palette backdrop)
     /// rect batch, rebuilt whenever the palette opens/closes or
     /// the viewport resizes. Stays empty when the palette is shut.
-    palette_rect_vertices: Vec<f32>,
+    console_rect_vertices: Vec<f32>,
     /// Screen-space geometry of the palette's opaque backdrop.
-    /// Captured inside `rebuild_palette_overlay_buffers` so
+    /// Captured inside `rebuild_console_overlay_buffers` so
     /// `render()` can turn it into NDC vertices against the
     /// current viewport size without re-running the layout.
     /// `None` whenever the palette is closed.
-    palette_backdrop: Option<(f32, f32, f32, f32)>, // (left, top, width, height)
+    console_backdrop: Option<(f32, f32, f32, f32)>, // (left, top, width, height)
     /// Clear color for the render pass, driven by the map's
     /// `Canvas.background_color`. Starts as opaque black so the
     /// app looks sensible before a map loads; the event loop
@@ -599,7 +583,7 @@ impl Renderer {
         let mut atlas = TextAtlas::new(&device, &queue, &glyphon_cache, swapchain_format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
-        let palette_text_renderer =
+        let console_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let viewport = Viewport::new(&device, &glyphon_cache);
         let camera = Camera2D::new(size.width, size.height);
@@ -688,7 +672,7 @@ impl Renderer {
             shaders,
             render_pipeline,
             text_renderer,
-            palette_text_renderer,
+            console_text_renderer,
             texture_format,
             surface_capabilities,
             should_render: false,
@@ -709,7 +693,7 @@ impl Renderer {
             connection_label_hitboxes: FxHashMap::default(),
             portal_buffers: FxHashMap::default(),
             portal_hitboxes: FxHashMap::default(),
-            palette_overlay_buffers: Vec::new(),
+            console_overlay_buffers: Vec::new(),
             color_picker_static_buffers: Vec::new(),
             color_picker_dynamic_buffers: Vec::new(),
             color_picker_backdrop: None,
@@ -721,8 +705,8 @@ impl Renderer {
             rect_vertex_buffer_capacity: RECT_VBUF_INITIAL_CAPACITY,
             node_background_rects: Vec::new(),
             main_rect_vertices: Vec::new(),
-            palette_rect_vertices: Vec::new(),
-            palette_backdrop: None,
+            console_rect_vertices: Vec::new(),
+            console_backdrop: None,
             clear_color: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
         }
     }
@@ -1109,8 +1093,8 @@ impl Renderer {
         // picker, in screen space. The two modals are mutually
         // exclusive but a single batch handles either case (or
         // both, if a future variant ever overlaps them).
-        self.palette_rect_vertices.clear();
-        if let Some((left, top, w, h)) = self.palette_backdrop {
+        self.console_rect_vertices.clear();
+        if let Some((left, top, w, h)) = self.console_backdrop {
             let (ndc_min, ndc_max) = Self::screen_rect_to_ndc_bounds(
                 left, top, w, h, vp_w_px, vp_h_px,
             );
@@ -1119,7 +1103,7 @@ impl Renderer {
             // cyan foreground.
             let bg_color = [0.0, 0.0, 0.0, 1.0];
             Self::push_rect_ndc(
-                &mut self.palette_rect_vertices,
+                &mut self.console_rect_vertices,
                 ndc_min,
                 ndc_max,
                 bg_color,
@@ -1134,7 +1118,7 @@ impl Renderer {
             // that pop against true black with no tinting.
             let bg_color = [0.0, 0.0, 0.0, 1.0];
             Self::push_rect_ndc(
-                &mut self.palette_rect_vertices,
+                &mut self.console_rect_vertices,
                 ndc_min,
                 ndc_max,
                 bg_color,
@@ -1145,7 +1129,7 @@ impl Renderer {
         // growing if the combined size exceeds the current
         // capacity. Layout: `[main_bytes | palette_bytes]`.
         let main_bytes_len = self.main_rect_vertices.len() * std::mem::size_of::<f32>();
-        let palette_bytes_len = self.palette_rect_vertices.len() * std::mem::size_of::<f32>();
+        let palette_bytes_len = self.console_rect_vertices.len() * std::mem::size_of::<f32>();
         let total_bytes = (main_bytes_len + palette_bytes_len) as u64;
         if total_bytes > self.rect_vertex_buffer_capacity {
             let mut new_cap = self.rect_vertex_buffer_capacity.max(RECT_VBUF_INITIAL_CAPACITY);
@@ -1172,7 +1156,7 @@ impl Renderer {
         if palette_bytes_len > 0 {
             let bytes = unsafe {
                 std::slice::from_raw_parts(
-                    self.palette_rect_vertices.as_ptr() as *const u8,
+                    self.console_rect_vertices.as_ptr() as *const u8,
                     palette_bytes_len,
                 )
             };
@@ -1183,7 +1167,7 @@ impl Renderer {
             );
         }
         let main_vertex_count = (self.main_rect_vertices.len() / 6) as u32;
-        let palette_vertex_count = (self.palette_rect_vertices.len() / 6) as u32;
+        let palette_vertex_count = (self.console_rect_vertices.len() / 6) as u32;
 
         // Collect "main" text areas: the mindmap + borders +
         // connections + edge handles + overlays + arena buffers.
@@ -1239,7 +1223,7 @@ impl Renderer {
         // hex, chips, selection indicator — shaped every hover)
         // buffer lists; both chain in here so a single render
         // pass handles them.
-        let palette_text_areas: Vec<TextArea> = self.palette_overlay_buffers.iter()
+        let palette_text_areas: Vec<TextArea> = self.console_overlay_buffers.iter()
             .chain(self.color_picker_static_buffers.iter())
             .chain(self.color_picker_dynamic_buffers.iter())
             .map(|tb| TextArea {
@@ -1275,7 +1259,7 @@ impl Renderer {
             log::warn!("text_renderer.prepare failed, skipping frame: {e}");
             return;
         }
-        if let Err(e) = self.palette_text_renderer.prepare(
+        if let Err(e) = self.console_text_renderer.prepare(
             &self.device,
             &self.queue,
             &mut font_system,
@@ -1284,7 +1268,7 @@ impl Renderer {
             palette_text_areas,
             &mut self.swash_cache,
         ) {
-            log::warn!("palette_text_renderer.prepare failed, skipping frame: {e}");
+            log::warn!("console_text_renderer.prepare failed, skipping frame: {e}");
             return;
         }
         drop(font_system);
@@ -1357,10 +1341,10 @@ impl Renderer {
             //    backdrop so every glyph sits cleanly on solid fill.
             //    Interactive path: log and continue on render failure.
             if let Err(e) = self
-                .palette_text_renderer
+                .console_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
             {
-                log::warn!("palette_text_renderer.render failed: {e}");
+                log::warn!("console_text_renderer.render failed: {e}");
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -1771,25 +1755,24 @@ impl Renderer {
         }
     }
 
-    /// Rebuild the command palette overlay buffers. When
-    /// `geometry` is `None`, the palette is closed — clear the
-    /// buffer list and return. When `Some`, lay out a glyph-rendered
-    /// frame at a fixed screen position: a box-drawing border, a
-    /// query line with a trailing cursor, and one row per filtered
-    /// action.
+    /// Rebuild the console overlay buffers. When `geometry` is
+    /// `None`, the console is closed — clear the buffer list and the
+    /// backdrop, and return. When `Some`, lay out a bottom-anchored
+    /// glyph-rendered strip: sacred border, scrollback region,
+    /// optional completion popup, and the prompt line with cursor.
     ///
     /// Everything is positioned in screen coordinates (the render
-    /// pass draws `palette_overlay_buffers` with `scale = 1.0`), so
-    /// the palette stays a fixed size regardless of canvas zoom.
-    pub fn rebuild_palette_overlay_buffers(
+    /// pass draws `console_overlay_buffers` with `scale = 1.0`), so
+    /// the console stays a fixed size regardless of canvas zoom.
+    pub fn rebuild_console_overlay_buffers(
         &mut self,
-        geometry: Option<&PaletteOverlayGeometry>,
+        geometry: Option<&ConsoleOverlayGeometry>,
     ) {
-        self.palette_overlay_buffers.clear();
+        self.console_overlay_buffers.clear();
         // Drop any previously-recorded backdrop — the render pass
-        // emits a palette rect only when this is `Some`, so closing
-        // the palette also clears the backdrop.
-        self.palette_backdrop = None;
+        // emits a console rect only when this is `Some`, so closing
+        // the console also clears the backdrop.
+        self.console_backdrop = None;
         let geometry = match geometry {
             Some(g) => g,
             None => return,
@@ -1801,9 +1784,13 @@ impl Renderer {
 
         // Compute the screen-space layout via the pure helper so the
         // backdrop rect and the border-glyph positions come from the
-        // same source of truth. See `compute_palette_frame_layout`.
-        let layout = compute_palette_frame_layout(geometry, self.config.width as f32);
-        let PaletteFrameLayout {
+        // same source of truth. See `compute_console_frame_layout`.
+        let layout = compute_console_frame_layout(
+            geometry,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+        let ConsoleFrameLayout {
             left,
             top,
             frame_width,
@@ -1812,43 +1799,47 @@ impl Renderer {
             char_width,
             row_height,
             inner_padding,
-            shown_rows,
-            first_visible,
+            scrollback_rows,
+            completion_rows,
         } = layout;
 
-        let palette_color = cosmic_text::Color::rgba(0, 229, 255, 255); // cyan
+        let border_color = cosmic_text::Color::rgba(0, 229, 255, 255); // cyan
         let text_color = cosmic_text::Color::rgba(235, 235, 235, 255);
-        let dim_color = cosmic_text::Color::rgba(150, 150, 160, 255);
+        let error_color = cosmic_text::Color::rgba(255, 110, 110, 255);
+        let input_echo_color = cosmic_text::Color::rgba(120, 200, 255, 255);
         let selected_color = cosmic_text::Color::rgba(0, 229, 255, 255);
 
-        // Record the backdrop geometry for the rect pipeline.
-        // `render()` rebuilds the palette rect batch from this each
-        // frame (cheap — one rect) and draws it between the main
-        // text pass and the palette text pass, so the fill is truly
-        // opaque and no node text bleeds through. The rect matches
-        // the border bounds exactly — top border glyphs sit at
-        // `y = top`, bottom border glyphs extend down to
-        // `y = top + frame_height + font_size`, and the left/right
-        // columns span `[left, left + frame_width]` horizontally.
-        self.palette_backdrop = Some(layout.backdrop_rect());
+        // Backdrop spans exactly from the top border glyph row to
+        // the bottom border glyph row.
+        self.console_backdrop = Some(layout.backdrop_rect());
 
-        // Sacred border: top row repeats ॐ (Sanskrit "Om"), bottom
-        // row repeats אל (Hebrew "El"), left/right columns repeat a
-        // neutral dot. Falls back to ASCII if the environment asks
-        // for it — see `SacredBorderStyle::from_env`.
-        let sacred_style = SacredBorderStyle::from_env();
-        let (top_border, bottom_border, left_col, right_col) = build_sacred_border_strings(
+        // Border: single user-supplied unit string (default "#")
+        // repeated horizontally on top/bottom and stacked vertically
+        // on the left/right sides. See
+        // `build_console_border_strings`.
+        let (top_border, bottom_border, left_col, right_col) = build_console_border_strings(
+            &geometry.border_unit,
             frame_width - char_width * 2.0,
             frame_height,
             font_size,
-            sacred_style,
         );
 
-        let border_attrs = Attrs::new()
-            .color(palette_color)
-            .metrics(cosmic_text::Metrics::new(font_size, font_size));
+        // Cosmic-text's `Family::Name` doesn't own the string — we
+        // have to keep the source alive for the duration of `attrs`.
+        // Empty = cosmic-text default fallback chain.
+        let font_family = geometry.font_family.as_str();
+        let mk_attrs = |color: cosmic_text::Color, fs: f32| {
+            let mut a = Attrs::new()
+                .color(color)
+                .metrics(cosmic_text::Metrics::new(fs, fs));
+            if !font_family.is_empty() {
+                a = a.family(cosmic_text::Family::Name(font_family));
+            }
+            a
+        };
+        let border_attrs = mk_attrs(border_color, font_size);
 
-        self.palette_overlay_buffers.push(create_border_buffer(
+        self.console_overlay_buffers.push(create_border_buffer(
             &mut font_system,
             &top_border,
             &border_attrs,
@@ -1856,7 +1847,7 @@ impl Renderer {
             (left, top),
             (frame_width, font_size * 1.5),
         ));
-        self.palette_overlay_buffers.push(create_border_buffer(
+        self.console_overlay_buffers.push(create_border_buffer(
             &mut font_system,
             &bottom_border,
             &border_attrs,
@@ -1864,7 +1855,7 @@ impl Renderer {
             (left, top + frame_height),
             (frame_width, font_size * 1.5),
         ));
-        self.palette_overlay_buffers.push(create_border_buffer(
+        self.console_overlay_buffers.push(create_border_buffer(
             &mut font_system,
             &left_col,
             &border_attrs,
@@ -1872,7 +1863,7 @@ impl Renderer {
             (left, top + font_size),
             (char_width, frame_height),
         ));
-        self.palette_overlay_buffers.push(create_border_buffer(
+        self.console_overlay_buffers.push(create_border_buffer(
             &mut font_system,
             &right_col,
             &border_attrs,
@@ -1881,88 +1872,97 @@ impl Renderer {
             (char_width, frame_height),
         ));
 
-        // Query line: "/query▌" where "▌" is a cursor glyph.
-        let query_line_text = format!("/{}\u{258C}", geometry.query_text);
-        let query_attrs = Attrs::new()
-            .color(text_color)
-            .metrics(cosmic_text::Metrics::new(font_size, font_size));
-        let query_line_budget = font_size * 1.4;
-        self.palette_overlay_buffers.push(create_border_buffer(
-            &mut font_system,
-            &query_line_text,
-            &query_attrs,
-            font_size,
-            (left + inner_padding + char_width, top + inner_padding),
-            (
-                frame_width - inner_padding * 2.0 - char_width * 2.0,
-                query_line_budget,
-            ),
-        ));
+        // Content column: inner-padded, avoiding the left/right
+        // border columns.
+        let content_left = left + inner_padding + char_width;
+        let content_width = frame_width - inner_padding * 2.0 - char_width * 2.0;
+        let content_top = top + font_size + inner_padding;
 
-        // Filtered rows. Iterate over the scroll window (not the
-        // full filtered list), so a long list doesn't leave the
-        // highlight off-screen. The selected-row check compares
-        // against the absolute index into `geometry.rows`, not
-        // `i` — the visible index `i` would reset to 0 at
-        // `first_visible`, misrepresenting selection on a scrolled
-        // list.
-        //
-        // Row layout per `compute_palette_frame_layout`:
-        //
-        //     row_y(i) = top + inner_padding + query_line_budget
-        //                + ROW_HEIGHT * i
-        //     label    drawn at (x, row_y)
-        //     description drawn at (x, row_y + DESC_Y_OFFSET)
-        //
-        // where ROW_HEIGHT = 34 px and DESC_Y_OFFSET = 20 px.
-        const DESC_SIZE: f32 = 12.0;
-        const DESC_Y_OFFSET: f32 = 20.0;
-        let rows_top = top + inner_padding + query_line_budget;
-        for (i, row) in geometry
-            .rows
+        // Scrollback region: bottom-most N lines, rendered top → bottom.
+        // Row y in the order they're drawn = content_top + i * row_height.
+        let skip = geometry.scrollback.len().saturating_sub(scrollback_rows);
+        for (i, line) in geometry
+            .scrollback
             .iter()
-            .skip(first_visible)
-            .take(shown_rows)
+            .skip(skip)
+            .take(scrollback_rows)
             .enumerate()
         {
-            let absolute_index = first_visible + i;
-            let is_selected = absolute_index == geometry.selected_row;
-            let prefix = if is_selected { "\u{25B8} " } else { "  " };
-            let row_attrs = Attrs::new()
-                .color(if is_selected { selected_color } else { text_color })
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
-            let label_line = format!("{prefix}{}", row.label);
-            let row_y = rows_top + row_height * i as f32;
-            self.palette_overlay_buffers.push(create_border_buffer(
+            let color = match line.kind {
+                ConsoleOverlayLineKind::Input => input_echo_color,
+                ConsoleOverlayLineKind::Output => text_color,
+                ConsoleOverlayLineKind::Error => error_color,
+            };
+            let attrs = mk_attrs(color, font_size);
+            let y = content_top + row_height * i as f32;
+            self.console_overlay_buffers.push(create_border_buffer(
                 &mut font_system,
-                &label_line,
-                &row_attrs,
+                &line.text,
+                &attrs,
                 font_size,
-                (left + inner_padding + char_width, row_y),
-                (
-                    frame_width - inner_padding * 2.0 - char_width * 2.0,
-                    row_height,
-                ),
-            ));
-            let desc_attrs = Attrs::new()
-                .color(dim_color)
-                .metrics(cosmic_text::Metrics::new(DESC_SIZE, DESC_SIZE));
-            let desc_line = format!("    {}", row.description);
-            self.palette_overlay_buffers.push(create_border_buffer(
-                &mut font_system,
-                &desc_line,
-                &desc_attrs,
-                DESC_SIZE,
-                (
-                    left + inner_padding + char_width,
-                    row_y + DESC_Y_OFFSET,
-                ),
-                (
-                    frame_width - inner_padding * 2.0 - char_width * 2.0,
-                    row_height,
-                ),
+                (content_left, y),
+                (content_width, row_height),
             ));
         }
+
+        // Completion popup: sits directly above the prompt line.
+        let completion_top =
+            content_top + row_height * scrollback_rows as f32;
+        for (i, c) in geometry
+            .completions
+            .iter()
+            .take(completion_rows)
+            .enumerate()
+        {
+            let is_selected = geometry.selected_completion == Some(i);
+            let color = if is_selected { selected_color } else { text_color };
+            let attrs = mk_attrs(color, font_size);
+            let prefix = if is_selected {
+                SELECTED_COMPLETION_MARKER
+            } else {
+                UNSELECTED_COMPLETION_MARKER
+            };
+            let line = match &c.hint {
+                Some(hint) => format!("{prefix}{}    {}", c.text, hint),
+                None => format!("{prefix}{}", c.text),
+            };
+            let y = completion_top + row_height * i as f32;
+            self.console_overlay_buffers.push(create_border_buffer(
+                &mut font_system,
+                &line,
+                &attrs,
+                font_size,
+                (content_left, y),
+                (content_width, row_height),
+            ));
+        }
+
+        // Prompt line: `PROMPT_GLYPH + input_before_cursor +
+        // CURSOR_GLYPH + input_after_cursor`. The cursor is a
+        // grapheme-cluster index; we translate to a byte offset via
+        // `find_byte_index_of_grapheme` so the split lands on a
+        // valid grapheme boundary even for ZWJ emoji / combining
+        // marks (CODE_CONVENTIONS §2).
+        let prompt_attrs = mk_attrs(text_color, font_size);
+        let prompt_budget = font_size * 1.4;
+        let cursor_byte =
+            baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
+                &geometry.input,
+                geometry.cursor_grapheme,
+            )
+            .unwrap_or(geometry.input.len());
+        let (pre, post) = geometry.input.split_at(cursor_byte);
+        let prompt_line = format!("{PROMPT_GLYPH} {}{CURSOR_GLYPH}{}", pre, post);
+        let y = layout.prompt_y();
+        self.console_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            &prompt_line,
+            &prompt_attrs,
+            font_size,
+            (content_left, y),
+            (content_width, prompt_budget),
+        ));
+
     }
 
     /// Rebuild the glyph-wheel color picker's full overlay —
@@ -3143,320 +3143,219 @@ mod tests {
     }
 
     // ====================================================================
-    // Phase 0 — Command palette overlay polish (Session 6D bug fixes)
+    // Console overlay layout
     // ====================================================================
 
-    fn sample_palette_geometry() -> PaletteOverlayGeometry {
-        PaletteOverlayGeometry {
-            query_text: "hello".to_string(),
-            rows: vec![
-                PaletteOverlayRow {
-                    label: "Reset connection to straight".to_string(),
-                    description: "Remove all control points".to_string(),
+    fn empty_console_geometry() -> ConsoleOverlayGeometry {
+        ConsoleOverlayGeometry {
+            input: String::new(),
+            cursor_grapheme: 0,
+            scrollback: Vec::new(),
+            completions: Vec::new(),
+            selected_completion: None,
+            border_unit: "#".to_string(),
+            font_family: String::new(),
+            font_size: 16.0,
+        }
+    }
+
+    fn sample_console_geometry() -> ConsoleOverlayGeometry {
+        ConsoleOverlayGeometry {
+            input: "anchor set from t".to_string(),
+            cursor_grapheme: 17,
+            scrollback: vec![
+                ConsoleOverlayLine {
+                    text: "> help".to_string(),
+                    kind: ConsoleOverlayLineKind::Input,
                 },
-                PaletteOverlayRow {
-                    label: "Set from-anchor: Top".to_string(),
-                    description: "Attach the source of the edge to the top".to_string(),
+                ConsoleOverlayLine {
+                    text: "commands:".to_string(),
+                    kind: ConsoleOverlayLineKind::Output,
                 },
             ],
-            selected_row: 0,
+            completions: vec![
+                ConsoleOverlayCompletion {
+                    text: "top".to_string(),
+                    hint: None,
+                },
+            ],
+            selected_completion: Some(0),
+            border_unit: "#".to_string(),
+            font_family: String::new(),
+            font_size: 16.0,
         }
     }
 
     #[test]
-    fn palette_backdrop_matches_border_bounds_exactly() {
-        // Bug fix: before Session 6D, the backdrop rect was inflated
-        // by `char_width` on each horizontal side and by ~(font_size - 2.0)
-        // below the bottom border, so the opaque background leaked out
-        // past the cyan border. After the fix the backdrop must match
-        // the border bounds exactly — no horizontal overhang, no
-        // vertical overhang.
-        let geometry = sample_palette_geometry();
-        let layout = compute_palette_frame_layout(&geometry, 1920.0);
-
+    fn test_console_backdrop_matches_border_bounds_exactly() {
+        let geometry = sample_console_geometry();
+        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
         let (bd_left, bd_top, bd_w, bd_h) = layout.backdrop_rect();
-
-        // Left edge aligned with the border's left column.
         assert_eq!(bd_left, layout.left);
-        // Top edge aligned with the top border row.
         assert_eq!(bd_top, layout.top);
-        // Width matches the border frame width exactly — no horizontal overhang.
         assert_eq!(bd_w, layout.frame_width);
-        // Height covers the whole border box: frame_height for the
-        // interior + one font_size row for the bottom border glyphs.
         assert_eq!(bd_h, layout.frame_height + layout.font_size);
     }
 
     #[test]
-    fn palette_backdrop_has_no_horizontal_overhang() {
-        // Explicit regression guard for the horizontal overhang bug.
-        let geometry = sample_palette_geometry();
-        let layout = compute_palette_frame_layout(&geometry, 1920.0);
+    fn test_console_backdrop_has_no_horizontal_overhang() {
+        let geometry = sample_console_geometry();
+        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
         let (bd_left, _, bd_w, _) = layout.backdrop_rect();
-        // Backdrop right edge.
         let bd_right = bd_left + bd_w;
-        // Border right edge (rightmost column of border glyphs).
         let border_right = layout.left + layout.frame_width;
+        assert!(bd_right <= border_right + 0.001);
+        assert!(bd_left >= layout.left - 0.001);
+    }
+
+    #[test]
+    fn test_console_frame_is_bottom_anchored() {
+        let geometry = sample_console_geometry();
+        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
+        // Bottom border glyph row extends `font_size` below frame_height.
+        // Its bottom edge should sit within `inner_padding` of the
+        // screen bottom.
+        let frame_bottom = layout.top + layout.frame_height + layout.font_size;
+        let gap = 1080.0 - frame_bottom;
         assert!(
-            bd_right <= border_right + 0.001,
-            "backdrop right {} overhangs border right {}",
-            bd_right,
-            border_right
-        );
-        assert!(
-            bd_left >= layout.left - 0.001,
-            "backdrop left {} overhangs border left {}",
-            bd_left,
-            layout.left
+            gap <= layout.inner_padding + 0.5 && gap >= 0.0,
+            "frame not bottom-anchored: gap={gap}"
         );
     }
 
     #[test]
-    fn palette_backdrop_has_no_vertical_overhang() {
-        // Explicit regression guard for the vertical overhang bug.
-        let geometry = sample_palette_geometry();
-        let layout = compute_palette_frame_layout(&geometry, 1920.0);
-        let (_, bd_top, _, bd_h) = layout.backdrop_rect();
-        let bd_bottom = bd_top + bd_h;
-        // The bottom border is drawn at `y = top + frame_height` and its
-        // glyphs extend down by one font_size row.
-        let border_bottom = layout.top + layout.frame_height + layout.font_size;
-        assert!(
-            bd_bottom <= border_bottom + 0.001,
-            "backdrop bottom {} overhangs border bottom {}",
-            bd_bottom,
-            border_bottom
-        );
-        assert!(
-            bd_top >= layout.top - 0.001,
-            "backdrop top {} overhangs border top {}",
-            bd_top,
-            layout.top
-        );
+    fn test_console_frame_height_linear_in_scrollback_rows() {
+        let g_empty = empty_console_geometry();
+        let mut g_one = empty_console_geometry();
+        g_one.scrollback.push(ConsoleOverlayLine {
+            text: "one".into(),
+            kind: ConsoleOverlayLineKind::Output,
+        });
+        let mut g_two = g_one.clone();
+        g_two.scrollback.push(ConsoleOverlayLine {
+            text: "two".into(),
+            kind: ConsoleOverlayLineKind::Output,
+        });
+        let h0 = compute_console_frame_layout(&g_empty, 1920.0, 1080.0).frame_height;
+        let h1 = compute_console_frame_layout(&g_one, 1920.0, 1080.0).frame_height;
+        let h2 = compute_console_frame_layout(&g_two, 1920.0, 1080.0).frame_height;
+        let delta1 = h1 - h0;
+        let delta2 = h2 - h1;
+        assert!((delta1 - delta2).abs() < 0.01);
     }
 
     #[test]
-    fn palette_frame_layout_clamps_width_between_min_and_max() {
-        // A tiny query and zero rows should still produce at least the
-        // minimum frame width.
-        let empty = PaletteOverlayGeometry {
-            query_text: String::new(),
-            rows: Vec::new(),
-            selected_row: 0,
-        };
-        let min_layout = compute_palette_frame_layout(&empty, 1920.0);
-        assert!(
-            min_layout.frame_width >= 320.0,
-            "frame_width {} below min 320",
-            min_layout.frame_width
-        );
-
-        // A gigantic description should cap out at the max width.
-        let huge = PaletteOverlayGeometry {
-            query_text: String::new(),
-            rows: vec![PaletteOverlayRow {
-                label: "x".to_string(),
-                description: "y".repeat(500),
-            }],
-            selected_row: 0,
-        };
-        let max_layout = compute_palette_frame_layout(&huge, 1920.0);
-        assert!(
-            max_layout.frame_width <= 720.0,
-            "frame_width {} above max 720",
-            max_layout.frame_width
-        );
-    }
-
-    #[test]
-    fn palette_frame_layout_centers_horizontally() {
-        let geometry = sample_palette_geometry();
-        let layout = compute_palette_frame_layout(&geometry, 1920.0);
-        // The frame should be centered: distance from screen-left to
-        // frame-left equals distance from frame-right to screen-right.
-        let right_margin = 1920.0 - (layout.left + layout.frame_width);
-        assert!(
-            (layout.left - right_margin).abs() < 0.5,
-            "frame not centered: left={} right_margin={}",
-            layout.left,
-            right_margin
-        );
-    }
-
-    // -----------------------------------------------------------------
-    // Scroll-window tests
-    //
-    // `compute_palette_frame_layout` is stateless — it derives
-    // `first_visible` from `selected_row` every rebuild. These tests
-    // lock in the centered-window clamp policy so a selection past
-    // `MAX_PALETTE_VISIBLE_ROWS` doesn't leave the highlight off-
-    // screen and so the window pins cleanly at both ends.
-    // -----------------------------------------------------------------
-
-    fn many_row_geometry(total: usize, selected: usize) -> PaletteOverlayGeometry {
-        PaletteOverlayGeometry {
-            query_text: String::new(),
-            rows: (0..total)
-                .map(|i| PaletteOverlayRow {
-                    label: format!("label_{i}"),
-                    description: format!("desc_{i}"),
-                })
-                .collect(),
-            selected_row: selected,
+    fn test_console_scrollback_clamped_to_max_rows() {
+        let mut geometry = empty_console_geometry();
+        for i in 0..100 {
+            geometry.scrollback.push(ConsoleOverlayLine {
+                text: format!("line {i}"),
+                kind: ConsoleOverlayLineKind::Output,
+            });
         }
+        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
+        assert_eq!(layout.scrollback_rows, MAX_CONSOLE_SCROLLBACK_ROWS);
     }
 
-    /// With more rows than `MAX_PALETTE_VISIBLE_ROWS` and a selection
-    /// past the visible count, the scroll window must advance so the
-    /// selected row is inside `[first_visible, first_visible +
-    /// shown_rows)`.
     #[test]
-    fn palette_scroll_window_follows_selection() {
-        let geometry = many_row_geometry(15, 12);
-        let layout = compute_palette_frame_layout(&geometry, 1920.0);
-        assert_eq!(layout.shown_rows, MAX_PALETTE_VISIBLE_ROWS);
-        let top = layout.first_visible;
-        let bottom = top + layout.shown_rows;
-        assert!(
-            top <= 12 && 12 < bottom,
-            "selection 12 not visible: window [{top}, {bottom})"
-        );
+    fn test_console_completions_clamped_to_max_rows() {
+        let mut geometry = empty_console_geometry();
+        for i in 0..100 {
+            geometry.completions.push(ConsoleOverlayCompletion {
+                text: format!("cmd_{i}"),
+                hint: None,
+            });
+        }
+        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
+        assert_eq!(layout.completion_rows, MAX_CONSOLE_COMPLETION_ROWS);
     }
 
-    /// With a selection near the top of a long filtered list, the
-    /// window must pin to the top — `first_visible == 0`. Otherwise
-    /// centering would leave empty rows above the content.
     #[test]
-    fn palette_scroll_window_pins_to_top_when_selection_low() {
-        let geometry = many_row_geometry(15, 0);
-        let layout = compute_palette_frame_layout(&geometry, 1920.0);
-        assert_eq!(layout.first_visible, 0);
-        assert_eq!(layout.shown_rows, MAX_PALETTE_VISIBLE_ROWS);
+    fn test_console_frame_width_clamped() {
+        let min = compute_console_frame_layout(&empty_console_geometry(), 1920.0, 1080.0);
+        assert!(min.frame_width >= 360.0);
+
+        let mut huge = empty_console_geometry();
+        huge.scrollback.push(ConsoleOverlayLine {
+            text: "x".repeat(500),
+            kind: ConsoleOverlayLineKind::Output,
+        });
+        let max = compute_console_frame_layout(&huge, 1920.0, 1080.0);
+        assert!(max.frame_width <= 960.0);
     }
 
-    /// With a selection at the bottom of a long filtered list, the
-    /// window must pin to the bottom — `first_visible + shown_rows
-    /// == total_rows`. Otherwise centering would overshoot and
-    /// leave empty rows below the content.
     #[test]
-    fn palette_scroll_window_pins_to_bottom_when_selection_high() {
-        let geometry = many_row_geometry(15, 14);
-        let layout = compute_palette_frame_layout(&geometry, 1920.0);
-        assert_eq!(
-            layout.first_visible + layout.shown_rows,
-            15,
-            "window did not pin to bottom: first_visible={}, shown_rows={}",
-            layout.first_visible,
-            layout.shown_rows
-        );
-    }
-
-    /// With fewer rows than `shown_rows`, `first_visible` must be 0
-    /// and `shown_rows == total_rows` (no scroll window needed).
-    #[test]
-    fn palette_scroll_window_no_clamp_when_total_fits() {
-        let geometry = many_row_geometry(3, 2);
-        let layout = compute_palette_frame_layout(&geometry, 1920.0);
-        assert_eq!(layout.first_visible, 0);
-        assert_eq!(layout.shown_rows, 3);
-    }
-
-    /// New frame height formula is strictly linear in
-    /// `shown_rows` — no hidden "+2 row premium" like the old
-    /// `row_height * (2.0 + shown_rows)` math. Guards against
-    /// accidentally reintroducing the wasted bottom space.
-    #[test]
-    fn palette_frame_height_is_linear_in_visible_rows() {
-        let one = many_row_geometry(1, 0);
-        let two = many_row_geometry(2, 0);
-        let three = many_row_geometry(3, 0);
-        let h1 = compute_palette_frame_layout(&one, 1920.0).frame_height;
-        let h2 = compute_palette_frame_layout(&two, 1920.0).frame_height;
-        let h3 = compute_palette_frame_layout(&three, 1920.0).frame_height;
-        // Each extra row adds exactly one ROW_HEIGHT (34 px).
-        let delta_21 = h2 - h1;
-        let delta_32 = h3 - h2;
-        assert!(
-            (delta_21 - delta_32).abs() < 0.01,
-            "non-linear row delta: 2-1={delta_21}, 3-2={delta_32}"
-        );
-        assert!(
-            (delta_21 - 34.0).abs() < 0.01,
-            "expected row delta ~34 px, got {delta_21}"
-        );
+    fn test_console_frame_centers_horizontally() {
+        let geometry = sample_console_geometry();
+        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
+        let right_margin = 1920.0 - (layout.left + layout.frame_width);
+        assert!((layout.left - right_margin).abs() < 0.5);
     }
 
     // -----------------------------------------------------------------
-    // Sacred border source-string tests
+    // Console border source-string tests
     //
     // Assertions only check the *source strings* produced by the
-    // helper, never the shaped glyph output. This keeps the tests
-    // green in CI environments that lack Devanagari / Hebrew fonts —
-    // the shaper will render .notdef tofu there, but the source
-    // strings themselves are stable.
+    // helper, never the shaped glyph output. The default unit is
+    // "#"; users can override via `console_border` in their config.
     // -----------------------------------------------------------------
 
     #[test]
-    fn palette_sacred_border_unicode_contains_devanagari_and_hebrew() {
-        let (top, bottom, left, right) = build_sacred_border_strings(
-            400.0, 320.0, 16.0, SacredBorderStyle::Unicode,
-        );
-        // Top border contains the Om syllable (U+0950).
-        assert!(
-            top.contains('\u{0950}'),
-            "top missing Devanagari Om (U+0950): {top:?}"
-        );
-        // Bottom border contains Hebrew aleph (U+05D0) and lamed (U+05DC).
-        assert!(
-            bottom.contains('\u{05D0}') && bottom.contains('\u{05DC}'),
-            "bottom missing Hebrew El (אל): {bottom:?}"
-        );
-        // Side columns contain the neutral middle-dot rail.
-        assert!(left.contains('\u{00B7}'), "left missing dot rail: {left:?}");
-        assert!(right.contains('\u{00B7}'), "right missing dot rail: {right:?}");
-        // Side columns are newline-separated, so their length should
-        // scale with the inner height.
-        let newline_count = left.chars().filter(|c| *c == '\n').count();
-        assert!(
-            newline_count >= 1,
-            "side column has no newlines: {left:?}"
-        );
-    }
-
-    #[test]
-    fn palette_sacred_border_ascii_uses_ascii_only() {
-        let (top, bottom, left, right) = build_sacred_border_strings(
-            400.0, 320.0, 16.0, SacredBorderStyle::Ascii,
-        );
-        assert!(top.contains("GOD"), "ascii top missing GOD: {top:?}");
-        assert!(bottom.contains("AUM"), "ascii bottom missing AUM: {bottom:?}");
-        // All characters must be ASCII (no Devanagari / Hebrew bleed-
-        // through from the wrong style).
-        for c in top.chars().chain(bottom.chars()).chain(left.chars()).chain(right.chars()) {
-            assert!(
-                c.is_ascii() || c == '\n',
-                "ascii border contains non-ASCII {c:?}"
-            );
+    fn test_console_border_default_unit_produces_hashes() {
+        let (top, bottom, left, right) =
+            build_console_border_strings("#", 400.0, 320.0, 16.0);
+        assert!(top.chars().all(|c| c == '#'));
+        assert!(bottom.chars().all(|c| c == '#'));
+        for c in left.chars().chain(right.chars()) {
+            assert!(c == '#' || c == '\n', "unexpected side char: {c:?}");
         }
     }
 
     #[test]
-    fn palette_sacred_border_scales_with_width_and_height() {
+    fn test_console_border_empty_unit_falls_back_to_hash() {
+        let (top, _, _, _) = build_console_border_strings("", 400.0, 320.0, 16.0);
+        assert!(top.contains('#'));
+    }
+
+    #[test]
+    fn test_console_border_multichar_unit_tiles_and_rotates() {
+        // A unit like "=#" should tile horizontally on top/bottom
+        // and stack vertically on the sides — one char per line.
+        let (top, _, left, _) =
+            build_console_border_strings("=#", 200.0, 100.0, 16.0);
+        // Every pair of consecutive chars in `top` is the unit.
+        let top_chars: Vec<char> = top.chars().collect();
+        for pair in top_chars.chunks_exact(2) {
+            assert_eq!(pair, &['=', '#']);
+        }
+        // Side column: alternating `=`, `\n`, `#`, `\n`, `=`, `\n`, ...
+        let side_chars: Vec<char> = left.chars().collect();
+        for quad in side_chars.chunks_exact(4) {
+            assert_eq!(quad, &['=', '\n', '#', '\n']);
+        }
+    }
+
+    #[test]
+    fn test_console_border_scales_with_width_and_height() {
         let (top_narrow, _, left_short, _) =
-            build_sacred_border_strings(100.0, 100.0, 16.0, SacredBorderStyle::Unicode);
+            build_console_border_strings("#", 100.0, 100.0, 16.0);
         let (top_wide, _, left_tall, _) =
-            build_sacred_border_strings(800.0, 400.0, 16.0, SacredBorderStyle::Unicode);
-        assert!(
-            top_wide.chars().count() > top_narrow.chars().count(),
-            "wide border not longer than narrow: {} vs {}",
-            top_wide.chars().count(),
-            top_narrow.chars().count()
-        );
+            build_console_border_strings("#", 800.0, 400.0, 16.0);
+        assert!(top_wide.chars().count() > top_narrow.chars().count());
         let short_lines = left_short.chars().filter(|c| *c == '\n').count();
         let tall_lines = left_tall.chars().filter(|c| *c == '\n').count();
-        assert!(
-            tall_lines > short_lines,
-            "tall side column not longer than short: {tall_lines} vs {short_lines}"
-        );
+        assert!(tall_lines > short_lines);
+    }
+
+    #[test]
+    fn test_console_frame_layout_scales_with_font_size() {
+        let mut g = empty_console_geometry();
+        g.font_size = 8.0;
+        let small = compute_console_frame_layout(&g, 1920.0, 1080.0);
+        g.font_size = 32.0;
+        let large = compute_console_frame_layout(&g, 1920.0, 1080.0);
+        assert!(large.font_size > small.font_size);
+        assert!(large.row_height > small.row_height);
+        assert!(large.frame_height > small.frame_height);
     }
 }
