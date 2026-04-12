@@ -1,4 +1,4 @@
-workspace = { members = ["lib/baumhard"] }
+workspace = { members = ["lib/baumhard", "crates/maptool"] }
 [package]
 name = "mandala"
 version = "0.1.0"

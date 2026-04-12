@@ -2,7 +2,6 @@ use crate::core::primitives::{
     Applicable, ApplyOperation, ColorFontRegion, ColorFontRegions, Range,
 };
 use crate::font::fonts::AppFont;
-use crate::gfx_structs::util::regions::{RegionIndexer, RegionParams};
 use crate::util::color::FloatRgba;
 use crate::util::grapheme_chad;
 use crate::util::ordered_vec2::OrderedVec2;
@@ -13,7 +12,6 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::ops::Add;
-use std::sync::Arc;
 use strum_macros::{Display, EnumIter};
 use crate::gfx_structs::util::hitbox::HitBox;
 
@@ -154,12 +152,6 @@ pub struct GlyphArea {
     pub background_color: Option<[u8; 4]>,
     #[derivative(PartialEq = "ignore")]
     pub hitbox: HitBox,
-    #[serde(skip)]
-    #[derivative(PartialEq = "ignore")]
-    screen_region_params: Option<Arc<RegionParams>>,
-    #[serde(skip)]
-    #[derivative(PartialEq = "ignore")]
-    tree_index: Option<Arc<RegionIndexer>>,
 }
 
 impl Hash for GlyphArea {
@@ -187,8 +179,6 @@ impl GlyphArea {
             regions: ColorFontRegions::default(),
             background_color: None,
             hitbox: HitBox::new(),
-            screen_region_params: None,
-            tree_index: None,
         }
     }
     pub fn new_with_str(
@@ -207,8 +197,6 @@ impl GlyphArea {
             regions: ColorFontRegions::default(),
             background_color: None,
             hitbox: HitBox::new(),
-            screen_region_params: None,
-            tree_index: None,
         }
     }
 
@@ -222,20 +210,17 @@ impl GlyphArea {
 
     pub fn apply_operation(&mut self, delta: &DeltaGlyphArea) {
         let operation = delta.operation_variant();
-        let mut should_update_index = false;
 
         if delta.position().is_some() {
             let position = OrderedVec2::from_vec2(delta.position().unwrap());
             operation.apply(&mut self.position.x, position.x);
             operation.apply(&mut self.position.y, position.y);
-            should_update_index = true;
         }
 
         if delta.bounds().is_some() {
             let bounds = OrderedVec2::from_vec2(delta.bounds().unwrap());
             operation.apply(&mut self.render_bounds.x, bounds.x);
             operation.apply(&mut self.render_bounds.y, bounds.y);
-            should_update_index = true;
         }
 
         if delta.line_height().is_some() {
@@ -277,16 +262,6 @@ impl GlyphArea {
                 _ => {}
             }
         }
-        if should_update_index {
-            self.update_index_if_relevant()
-        }
-    }
-
-    pub(crate) fn update_index_if_relevant(&mut self) {
-        if self.tree_index.is_some() && self.screen_region_params.is_some() {
-            // TODO update ..
-            //self.tree_index.unwrap()
-        }
     }
 
     pub fn pop_front(&mut self, pop_count: usize) {
@@ -300,27 +275,22 @@ impl GlyphArea {
     pub fn move_position(&mut self, x: f32, y: f32) {
         self.position.x += x;
         self.position.y += y;
-        self.update_index_if_relevant();
     }
 
     pub fn nudge_right(&mut self, nudge: f32) {
         self.position.x += nudge;
-        self.update_index_if_relevant();
     }
 
     pub fn nudge_left(&mut self, nudge: f32) {
         self.position.x -= nudge;
-        self.update_index_if_relevant();
     }
 
     pub fn nudge_up(&mut self, nudge: f32) {
         self.position.y -= nudge;
-        self.update_index_if_relevant();
     }
 
     pub fn nudge_down(&mut self, nudge: f32) {
         self.position.y += nudge;
-        self.update_index_if_relevant();
     }
 
     pub fn grow_font(&mut self, value: &f32) {
@@ -333,7 +303,6 @@ impl GlyphArea {
 
     pub fn set_bounds(&mut self, bounds: (f32, f32)) {
         self.render_bounds = OrderedVec2::new_f32(bounds.0, bounds.1);
-        self.update_index_if_relevant();
     }
 
     pub fn delete_color_font_region(&mut self, range: &Range) {
@@ -379,7 +348,6 @@ impl GlyphArea {
 
     pub fn set_position(&mut self, to_set: (f32, f32)) {
         self.position = OrderedVec2::new_f32(to_set.0, to_set.1);
-        self.update_index_if_relevant();
     }
 
     pub fn rotate(&mut self, pivot: Vec2, angle: f32) {

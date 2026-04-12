@@ -2,9 +2,9 @@ use lazy_static::lazy_static;
 
 use crate::util::grapheme_chad::{
    count_grapheme_clusters, count_number_lines, delete_back_unicode, delete_front_unicode,
-   find_byte_index_of_grapheme, find_nth_line_byte_range, find_nth_line_grapheme_range,
-   insert_new_lines, push_spaces, replace_graphemes_until_newline, slice_to_newline,
-   split_off_graphemes,
+   delete_grapheme_at, find_byte_index_of_grapheme, find_nth_line_byte_range,
+   find_nth_line_grapheme_range, insert_new_lines, insert_str_at_grapheme, push_spaces,
+   replace_graphemes_until_newline, slice_to_newline, split_off_graphemes,
 };
 
 lazy_static! {
@@ -348,4 +348,64 @@ pub fn do_truncate_unicode() {
       delete_back_unicode(&mut our_og, n);
       assert_eq!(our_og, expected);
    }
+}
+
+#[test]
+pub fn test_insert_str_at_grapheme() {
+   do_insert_str_at_grapheme();
+}
+
+pub fn do_insert_str_at_grapheme() {
+   // ASCII insert in the middle.
+   let mut s = String::from("abcd");
+   insert_str_at_grapheme(&mut s, 2, "X");
+   assert_eq!(s, "abXcd");
+
+   // Insert past the end appends.
+   let mut s = String::from("abc");
+   insert_str_at_grapheme(&mut s, 99, "Z");
+   assert_eq!(s, "abcZ");
+
+   // Multi-byte char doesn't split a grapheme.
+   let mut s = String::from("café"); // 4 graphemes; 'é' is 2 bytes
+   insert_str_at_grapheme(&mut s, 4, "!");
+   assert_eq!(s, "café!");
+   let mut s = String::from("café");
+   insert_str_at_grapheme(&mut s, 3, "!");
+   assert_eq!(s, "caf!é");
+
+   // Emoji ZWJ cluster is treated as one unit.
+   let mut s = String::from("ab🧑‍🚀cd");
+   insert_str_at_grapheme(&mut s, 3, "Z");
+   assert_eq!(s, "ab🧑‍🚀Zcd");
+}
+
+#[test]
+pub fn test_delete_grapheme_at() {
+   do_delete_grapheme_at();
+}
+
+pub fn do_delete_grapheme_at() {
+   // ASCII delete in the middle.
+   let mut s = String::from("abcd");
+   delete_grapheme_at(&mut s, 1);
+   assert_eq!(s, "acd");
+
+   // Delete past the end is a no-op.
+   let mut s = String::from("abc");
+   delete_grapheme_at(&mut s, 99);
+   assert_eq!(s, "abc");
+
+   // Delete the last cluster.
+   let mut s = String::from("abc");
+   delete_grapheme_at(&mut s, 2);
+   assert_eq!(s, "ab");
+
+   // Multi-byte char and ZWJ cluster delete as one unit.
+   let mut s = String::from("café");
+   delete_grapheme_at(&mut s, 3);
+   assert_eq!(s, "caf");
+   let mut s = String::from("ab🧑‍🚀cd");
+   delete_grapheme_at(&mut s, 2);
+   assert_eq!(s, "abcd");
 }

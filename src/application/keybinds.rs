@@ -52,6 +52,18 @@ pub enum Action {
     /// it — this only severs the link between the selection and its
     /// former parent, not the selection and its children.
     OrphanSelection,
+    /// Open the inline text editor on the currently selected single node
+    /// with the node's existing text, cursor at end. Paired with
+    /// `EditSelectionClean` which opens with an empty buffer instead.
+    /// Only fires at the document level — the text-edit steal at the
+    /// top of keyboard dispatch means this action can't collide with
+    /// editor-mode Enter/Backspace.
+    EditSelection,
+    /// Same as `EditSelection` but opens the editor with an empty buffer.
+    /// On commit the node's text is replaced wholesale — the "clean
+    /// slate" gesture: press Backspace on a selected node to retype it
+    /// from scratch.
+    EditSelectionClean,
 }
 
 /// A parsed keybinding: a logical key name plus modifier flags. Key names
@@ -145,6 +157,8 @@ pub struct KeybindConfig {
     pub cancel_mode: Vec<String>,
     pub create_orphan_node: Vec<String>,
     pub orphan_selection: Vec<String>,
+    pub edit_selection: Vec<String>,
+    pub edit_selection_clean: Vec<String>,
 }
 
 impl Default for KeybindConfig {
@@ -157,6 +171,8 @@ impl Default for KeybindConfig {
             cancel_mode: vec!["Escape".into()],
             create_orphan_node: vec!["Ctrl+N".into()],
             orphan_selection: vec!["Ctrl+O".into()],
+            edit_selection: vec!["Enter".into()],
+            edit_selection_clean: vec!["Backspace".into()],
         }
     }
 }
@@ -181,6 +197,8 @@ impl KeybindConfig {
             (Action::CancelMode, &self.cancel_mode),
             (Action::CreateOrphanNode, &self.create_orphan_node),
             (Action::OrphanSelection, &self.orphan_selection),
+            (Action::EditSelection, &self.edit_selection),
+            (Action::EditSelectionClean, &self.edit_selection_clean),
         ];
         for (action, strings) in sets {
             for s in strings {
@@ -422,6 +440,8 @@ mod tests {
         assert_eq!(resolved.action_for("escape", false, false, false), Some(Action::CancelMode));
         assert_eq!(resolved.action_for("n", true, false, false), Some(Action::CreateOrphanNode));
         assert_eq!(resolved.action_for("o", true, false, false), Some(Action::OrphanSelection));
+        assert_eq!(resolved.action_for("enter", false, false, false), Some(Action::EditSelection));
+        assert_eq!(resolved.action_for("backspace", false, false, false), Some(Action::EditSelectionClean));
     }
 
     #[test]

@@ -48,15 +48,6 @@ macro_rules! hex {
     }};
 }
 
-fn hex_char_to_value(c: u8) -> u8 {
-    match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => panic!("Invalid character in color code"),
-    }
-}
-
 pub fn convert_f32_to_u8(color: &[f32; 4]) -> [u8; 4] {
     let mut u8_color = [0u8; 4];
     for (i, &float_val) in color.iter().enumerate() {
@@ -65,30 +56,6 @@ pub fn convert_f32_to_u8(color: &[f32; 4]) -> [u8; 4] {
         u8_color[i] = (float_val * 255.0).round() as u8;
     }
     u8_color
-}
-
-pub fn hex_to_rgba(color: &str) -> [f32; 4] {
-    let color = color.trim_start_matches('#');
-    let length = color.len();
-
-    if length == 6 || length == 8 {
-        let mut rgba = [0.0; 4];
-        let mut byte_iter = color.bytes();
-
-        for i in 0..(length / 2) {
-            let high_nibble = hex_char_to_value(byte_iter.next().unwrap()) << 4;
-            let low_nibble = hex_char_to_value(byte_iter.next().unwrap());
-            rgba[i] = (high_nibble | low_nibble) as f32 / 255.0;
-        }
-
-        if length == 6 {
-            rgba[3] = 1.0;
-        }
-
-        rgba
-    } else {
-        panic!("Invalid color length, expected 6 or 8 characters");
-    }
 }
 
 /// Resolve a (possibly `var(--name)`) color reference against a set of
@@ -113,11 +80,11 @@ pub fn resolve_var<'a>(raw: &'a str, vars: &'a HashMap<String, String>) -> &'a s
     }
 }
 
-/// Non-panicking hex-to-rgba. Parses the same set of inputs as
-/// `hex_to_rgba` (6 or 8 hex chars, optional leading `#`) but returns
-/// `fallback` on any parse failure instead of panicking. Intended for
-/// render-time color resolution paths that should never crash the app
-/// over a typo in a theme variable.
+/// Parse a hex color string into an `[f32; 4]` RGBA quad, returning
+/// `fallback` on any parse failure. Accepts 3, 4, 6, or 8 hex chars
+/// with an optional leading `#`. Intended for render-time color
+/// resolution paths that should never crash the app over a typo in a
+/// theme variable.
 pub fn hex_to_rgba_safe(color: &str, fallback: [f32; 4]) -> [f32; 4] {
     let color = color.trim_start_matches('#');
     let length = color.len();
@@ -245,10 +212,12 @@ pub fn hex_to_hsv_safe(hex: &str) -> Option<(f32, f32, f32)> {
     Some(rgb_to_hsv(rgba[0], rgba[1], rgba[2]))
 }
 
+/// Parse a slice of hex color strings into rgba quads. Bad strings
+/// fall back to opaque black via `hex_to_rgba_safe`.
 pub fn from_hex(colors: &[&str]) -> Vec<[f32; 4]> {
     let mut rgba_colors: Vec<[f32; 4]> = Vec::with_capacity(colors.len());
     for color in colors.iter() {
-        rgba_colors.push(hex_to_rgba(color));
+        rgba_colors.push(hex_to_rgba_safe(color, [0.0, 0.0, 0.0, 1.0]));
     }
     rgba_colors
 }

@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use crate::util::color::from_hex;
+use crate::util::color::{from_hex, hex_to_rgba_safe};
 use crate::{hex, rgb, rgba};
 
 #[test]
@@ -42,6 +42,30 @@ pub fn do_from_hex_lazy_static() {
    assert_eq!(RGBA_COLORS.get(1).unwrap(), &CONTROL_2.clone());
    assert_eq!(RGBA_COLORS.get(2).unwrap(), &CONTROL_3.clone());
    assert_eq!(RGBA_COLORS.get(3).unwrap(), &CONTROL_4.clone());
+}
+
+#[test]
+fn test_from_hex_garbage_falls_back_to_black() {
+   do_from_hex_garbage_falls_back_to_black();
+}
+
+/// Regression: bad hex strings must degrade to the fallback instead
+/// of crashing. The valid entry in the middle ensures surrounding
+/// items still parse correctly. The sentinel fallback `[0.42, …]`
+/// distinguishes "returned the fallback" from "hardcoded black".
+pub fn do_from_hex_garbage_falls_back_to_black() {
+   // from_hex uses opaque-black as fallback internally.
+   let rgba = from_hex(&["zzzzzz", "ff0000", "not-a-color", ""]);
+   assert_eq!(rgba.len(), 4);
+   assert_eq!(rgba[0], [0.0, 0.0, 0.0, 1.0]);
+   assert_eq!(rgba[1], [1.0, 0.0, 0.0, 1.0]);
+   assert_eq!(rgba[2], [0.0, 0.0, 0.0, 1.0]);
+   assert_eq!(rgba[3], [0.0, 0.0, 0.0, 1.0]);
+   // Use a sentinel fallback to prove hex_to_rgba_safe actually
+   // returns the caller's fallback rather than a hardcoded value.
+   let sentinel = [0.42, 0.42, 0.42, 0.42];
+   assert_eq!(hex_to_rgba_safe("garbage", sentinel), sentinel);
+   assert_eq!(hex_to_rgba_safe("", sentinel), sentinel);
 }
 
 #[test]

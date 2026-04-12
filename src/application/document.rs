@@ -314,6 +314,23 @@ pub enum UndoAction {
     /// or any other field change via `apply_edit_portal`). Undo
     /// replaces `mindmap.portals[index]` with the `before` snapshot.
     EditPortal { index: usize, before: PortalPair },
+    /// A node was deleted. Restored by re-inserting the node, re-inserting
+    /// every edge that touched it at its original `mindmap.edges` index,
+    /// and restoring the `parent_id`/`index` of every child that was
+    /// orphaned by the delete. Mirrors the `DeleteEdge`/`DeletePortal`
+    /// pattern, extended for the extra bookkeeping node deletion requires.
+    DeleteNode {
+        node: MindNode,
+        /// Edges that referenced the deleted node (parent_child, cross_link,
+        /// etc.), paired with their original index in `mindmap.edges`.
+        /// Stored in ascending index order so the insertion loop on undo
+        /// re-inserts them in the order they were removed.
+        removed_edges: Vec<(usize, MindEdge)>,
+        /// For each child that was orphaned by the delete, its id and
+        /// pre-delete sibling `index`. `parent_id` is always the deleted
+        /// node's id so it doesn't need to be stored separately.
+        orphaned_children: Vec<(String, i32)>,
+    },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -582,6 +599,87 @@ impl MindMapDocument {
         let idx = self.mindmap.edges.iter().position(|e| edge_ref.matches(e))?;
         let edge = self.mindmap.edges.remove(idx);
         Some((idx, edge))
+    }
+
+    /// Remove a node from the map, orphaning its immediate children (they
+    /// become roots with fresh sibling indices), and removing every edge
+    /// that touched the node (parent_child, cross_link, etc.). Returns an
+    /// `UndoAction::DeleteNode` payload that fully reverses the operation
+    /// on undo, or `None` if the node doesn't exist.
+    ///
+    /// Orphaning is shallow — only direct children are promoted. Each
+    /// grand-child stays attached to its parent, so entire subtrees
+    /// survive the delete intact, just one level higher in the hierarchy.
+    /// Matches the user request "orphan children" at Session 7A follow-up.
+    ///
+    /// The caller is expected to push the returned undo payload onto the
+    /// stack and trigger a `rebuild_all`.
+    pub fn delete_node(&mut self, node_id: &str) -> Option<UndoAction> {
+        // Remove the node itself. Bail early if the id doesn't exist so
+        // we don't leave the model in a half-mutated state.
+        let node = self.mindmap.nodes.remove(node_id)?;
+
+        // Orphan immediate children: clear `parent_id`, assign fresh root
+        // indices one past the current maximum so they sort last among
+        // roots. Mirrors the indexing in `apply_create_orphan_node`.
+        let next_root_index = self
+            .mindmap
+            .root_nodes()
+            .iter()
+            .map(|n| n.index)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        let child_ids: Vec<String> = self
+            .mindmap
+            .nodes
+            .values()
+            .filter(|n| n.parent_id.as_deref() == Some(node_id))
+            .map(|n| n.id.clone())
+            .collect();
+        let mut orphaned_children: Vec<(String, i32)> = Vec::new();
+        for (i, cid) in child_ids.iter().enumerate() {
+            if let Some(child) = self.mindmap.nodes.get_mut(cid) {
+                orphaned_children.push((cid.clone(), child.index));
+                child.parent_id = None;
+                child.index = next_root_index + i as i32;
+            }
+        }
+
+        // Collect every edge that touches the deleted node, paired
+        // with its index in the **pre-removal** edge vec. The indices
+        // matter for undo: ascending-order re-insertion at the original
+        // positions correctly reconstructs the original edge order
+        // because each earlier-index re-insert shifts later elements
+        // right by exactly one, so the next stored original index is
+        // still the right slot.
+        //
+        // We must NOT compute the index during an in-place remove
+        // loop — by the time we reach the second touching edge, the
+        // prior removal has already shifted its index down by one, so
+        // storing the loop index would record a stale post-removal
+        // position. Undo would then re-insert at the wrong slot and
+        // silently reorder edges the caller never touched. Collect
+        // first (using `enumerate()` on the original vec), then drop
+        // the touching edges with `retain()`.
+        let removed_edges: Vec<(usize, MindEdge)> = self
+            .mindmap
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.from_id == node_id || e.to_id == node_id)
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        self.mindmap
+            .edges
+            .retain(|e| e.from_id != node_id && e.to_id != node_id);
+
+        self.dirty = true;
+        Some(UndoAction::DeleteNode {
+            node,
+            removed_edges,
+            orphaned_children,
+        })
     }
 
     /// Hit-test the grab-handles of a specific edge at `canvas_pos`.
@@ -1537,6 +1635,32 @@ impl MindMapDocument {
                         self.mindmap.portals[index] = before;
                     }
                 }
+                UndoAction::DeleteNode { node, removed_edges, orphaned_children } => {
+                    // Re-insert the node itself.
+                    let restored_id = node.id.clone();
+                    self.mindmap.nodes.insert(restored_id.clone(), node);
+                    // Re-insert edges at their original pre-delete
+                    // indices. `delete_node` stores each index relative
+                    // to the *original* edge vec (via `enumerate()` on
+                    // the live vec before `retain()` drops the matches),
+                    // so ascending-order re-insertion correctly slots
+                    // each one into its original position — each earlier
+                    // re-insert shifts all later elements right by
+                    // exactly one, so the next stored index still
+                    // points at the correct slot.
+                    for (idx, edge) in removed_edges {
+                        let idx = idx.min(self.mindmap.edges.len());
+                        self.mindmap.edges.insert(idx, edge);
+                    }
+                    // Re-attach orphaned children: restore `parent_id`
+                    // and the pre-delete sibling `index`.
+                    for (cid, old_index) in orphaned_children {
+                        if let Some(child) = self.mindmap.nodes.get_mut(&cid) {
+                            child.parent_id = Some(restored_id.clone());
+                            child.index = old_index;
+                        }
+                    }
+                }
             }
             true
         } else {
@@ -2455,6 +2579,86 @@ mod tests {
         }
     }
 
+    /// Build a `CustomMutation` whose only payload is a single
+    /// `SetThemeVariables` document-level action that sets `--bg`
+    /// to the given value. Used by the `apply_document_actions`
+    /// regression tests.
+    fn make_set_bg_doc_mutation(value: &str) -> CM {
+        use baumhard::mindmap::custom_mutation::DocumentAction;
+        let mut vars = HashMap::new();
+        vars.insert("--bg".to_string(), value.to_string());
+        CM {
+            id: "set-bg".to_string(),
+            name: "Set --bg".to_string(),
+            mutations: vec![],
+            target_scope: TS::SelfOnly,
+            behavior: MB::Persistent,
+            predicate: None,
+            document_actions: vec![DocumentAction::SetThemeVariables(vars)],
+        }
+    }
+
+    /// Round-trip regression for `UndoAction::CanvasSnapshot`. The
+    /// `apply_document_actions` path is the only producer of this
+    /// variant, and prior to chunk 5 it had zero test coverage —
+    /// CODE_CONVENTIONS.md §6 says every undo variant ships with at
+    /// least a forward-and-back test.
+    #[test]
+    fn test_apply_document_actions_undo_round_trip() {
+        let mut doc = load_test_doc();
+        // Capture the canvas state before any document-level mutation.
+        let before = doc.mindmap.canvas.clone();
+        let undo_len_before = doc.undo_stack.len();
+
+        // Apply a single SetThemeVariables action that sets --bg to a
+        // sentinel value not present in the testament map.
+        let custom = make_set_bg_doc_mutation("#bada55");
+        let changed = doc.apply_document_actions(&custom);
+        assert!(changed, "applying a new theme var must report a change");
+        assert_eq!(
+            doc.mindmap.canvas.theme_variables.get("--bg"),
+            Some(&"#bada55".to_string())
+        );
+        assert_eq!(
+            doc.undo_stack.len(),
+            undo_len_before + 1,
+            "exactly one CanvasSnapshot entry should have been pushed"
+        );
+        assert!(doc.dirty);
+
+        // Undo restores the entire pre-mutation canvas wholesale.
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.canvas.theme_variables, before.theme_variables);
+        assert_eq!(doc.mindmap.canvas.background_color, before.background_color);
+        assert_eq!(
+            doc.undo_stack.len(),
+            undo_len_before,
+            "undo should have popped the CanvasSnapshot entry"
+        );
+    }
+
+    /// `apply_document_actions` returns false and pushes nothing
+    /// when the action would not actually change anything (writing
+    /// the same value that's already there). Guards the dirty/undo
+    /// no-op path that the docstring on `apply_document_actions`
+    /// promises.
+    #[test]
+    fn test_apply_document_actions_noop_does_not_push_undo() {
+        let mut doc = load_test_doc();
+        // First write — should change the canvas and push undo.
+        let custom = make_set_bg_doc_mutation("#bada55");
+        doc.apply_document_actions(&custom);
+        let undo_len_after_first = doc.undo_stack.len();
+        doc.dirty = false;
+
+        // Second write of the same value — no-op, no undo push,
+        // dirty flag should stay false.
+        let changed = doc.apply_document_actions(&custom);
+        assert!(!changed, "writing the same value must not report a change");
+        assert_eq!(doc.undo_stack.len(), undo_len_after_first);
+        assert!(!doc.dirty);
+    }
+
     #[test]
     fn test_mutation_registry_empty_for_existing_map() {
         let doc = load_test_doc();
@@ -2996,6 +3200,233 @@ mod tests {
         // The edge should be back at its original position
         let restored = &doc.mindmap.edges[orig_idx];
         assert!(edge_ref.matches(restored));
+    }
+
+    // ---------------------------------------------------------------
+    // Node deletion (Session 7A follow-up)
+    // ---------------------------------------------------------------
+
+    /// Pick a node from the testament map that has at least one child
+    /// and at least one parent_child edge pointing at it. The "Lord
+    /// God" node has plenty of children and is a root, so we walk one
+    /// level down to find a good candidate that also has a parent.
+    fn find_node_with_children_and_parent(doc: &MindMapDocument) -> String {
+        doc.mindmap.nodes.values()
+            .find(|n| {
+                n.parent_id.is_some()
+                    && !doc.mindmap.children_of(&n.id).is_empty()
+            })
+            .map(|n| n.id.clone())
+            .expect("testament should have at least one non-root node with children")
+    }
+
+    #[test]
+    fn test_delete_node_orphans_children() {
+        let mut doc = load_test_doc();
+        let target = find_node_with_children_and_parent(&doc);
+        let child_ids: Vec<String> = doc.mindmap.children_of(&target)
+            .iter().map(|n| n.id.clone()).collect();
+        assert!(!child_ids.is_empty(), "target should have at least one child");
+
+        let undo = doc.delete_node(&target).expect("delete should succeed");
+        assert!(matches!(undo, UndoAction::DeleteNode { .. }));
+
+        // The node itself is gone.
+        assert!(!doc.mindmap.nodes.contains_key(&target));
+        // Every child is now a root (parent_id == None).
+        for cid in &child_ids {
+            let child = doc.mindmap.nodes.get(cid)
+                .expect("child should still exist — only direct attachment is severed");
+            assert!(child.parent_id.is_none(),
+                "child {} should be orphaned", cid);
+        }
+        // No parent_child edges touch the deleted id anymore.
+        assert!(doc.mindmap.edges.iter().all(|e|
+            e.from_id != target && e.to_id != target
+        ), "no edges should reference the deleted node");
+    }
+
+    #[test]
+    fn test_delete_node_removes_all_touching_edges() {
+        let mut doc = load_test_doc();
+        let target = find_node_with_children_and_parent(&doc);
+        // Count edges touching the target beforehand.
+        let touching_before = doc.mindmap.edges.iter()
+            .filter(|e| e.from_id == target || e.to_id == target)
+            .count();
+        assert!(touching_before > 0,
+            "testament target should have at least one incident edge (parent_child)");
+
+        doc.delete_node(&target).unwrap();
+
+        let touching_after = doc.mindmap.edges.iter()
+            .filter(|e| e.from_id == target || e.to_id == target)
+            .count();
+        assert_eq!(touching_after, 0, "all incident edges should be removed");
+    }
+
+    #[test]
+    fn test_delete_node_undo_restores_node_edges_and_children() {
+        let mut doc = load_test_doc();
+        let target = find_node_with_children_and_parent(&doc);
+
+        // Capture pre-delete state to compare after undo.
+        let orig_node = doc.mindmap.nodes.get(&target).cloned().unwrap();
+        let orig_edges = doc.mindmap.edges.clone();
+        let orig_child_state: Vec<(String, Option<String>, i32)> = doc.mindmap
+            .children_of(&target)
+            .iter()
+            .map(|n| (n.id.clone(), n.parent_id.clone(), n.index))
+            .collect();
+
+        let undo = doc.delete_node(&target).unwrap();
+        doc.undo_stack.push(undo);
+        doc.dirty = true;
+
+        assert!(doc.undo(), "undo should succeed");
+
+        // Node is back.
+        let restored = doc.mindmap.nodes.get(&target)
+            .expect("node should be restored");
+        assert_eq!(restored.id, orig_node.id);
+        assert_eq!(restored.text, orig_node.text);
+        // Edges are fully restored — same count AND same order.
+        // Ordering matters: earlier versions of `delete_node` stored
+        // post-removal indices, which silently reordered edges that
+        // shared the deleted node's neighborhood. Compare each slot
+        // by the (from, to, edge_type) triple since edges have no
+        // stable id.
+        assert_eq!(doc.mindmap.edges.len(), orig_edges.len(),
+            "edge count should be restored");
+        for (i, (orig, restored)) in orig_edges.iter()
+            .zip(doc.mindmap.edges.iter()).enumerate()
+        {
+            assert_eq!(
+                (orig.from_id.as_str(), orig.to_id.as_str(), orig.edge_type.as_str()),
+                (restored.from_id.as_str(), restored.to_id.as_str(), restored.edge_type.as_str()),
+                "edge at index {} should match after undo", i,
+            );
+        }
+        // Children are re-attached with original parent_id + index.
+        for (cid, old_parent, old_idx) in orig_child_state {
+            let child = doc.mindmap.nodes.get(&cid).unwrap();
+            assert_eq!(child.parent_id, old_parent,
+                "child {} parent_id should be restored", cid);
+            assert_eq!(child.index, old_idx,
+                "child {} index should be restored", cid);
+        }
+    }
+
+    /// Regression test for the edge-ordering bug found in review of
+    /// the initial Session 7A follow-up commit. When a deleted node
+    /// has multiple incident edges scattered through the edge vec,
+    /// naive in-place removal stores post-removal indices, so the
+    /// undo reinserts them at the wrong positions and silently
+    /// reorders edges the caller never touched. The fix stores
+    /// pre-removal indices via `enumerate()` + `retain()`.
+    ///
+    /// Built as a self-contained test so we control the edge
+    /// neighborhood precisely.
+    #[test]
+    fn test_delete_node_undo_preserves_edge_order_with_gaps() {
+        use baumhard::mindmap::model::MindEdge;
+
+        let mut doc = load_test_doc();
+        // Pick any node with at least one incident edge.
+        let target = find_node_with_children_and_parent(&doc);
+
+        // Reset edges to a known layout: a mix of edges touching and
+        // not touching the target, spaced out so the bug's effect
+        // is visible. Use existing node ids so the edges are valid
+        // references (any two existing-but-not-target ids work).
+        let other_ids: Vec<String> = doc.mindmap.nodes.keys()
+            .filter(|id| id.as_str() != target.as_str())
+            .take(4)
+            .cloned()
+            .collect();
+        assert!(other_ids.len() >= 4, "need at least 4 non-target nodes");
+        let a = other_ids[0].clone();
+        let b = other_ids[1].clone();
+        let c = other_ids[2].clone();
+        let d = other_ids[3].clone();
+
+        let mk_edge = |from: &str, to: &str, etype: &str| MindEdge {
+            from_id: from.to_string(),
+            to_id: to.to_string(),
+            edge_type: etype.to_string(),
+            color: "#ffffff".to_string(),
+            width: 1,
+            line_style: 0,
+            visible: true,
+            label: None,
+            label_position_t: None,
+            anchor_from: 0,
+            anchor_to: 0,
+            control_points: Vec::new(),
+            glyph_connection: None,
+        };
+
+        // Edge layout: [a→b, a→target, c→d, target→d, b→c]
+        //               idx 0      1       2      3       4
+        // Positions 1 and 3 touch the target; 0, 2, 4 are bystanders.
+        // Wrong behavior would end up reordering the bystanders.
+        doc.mindmap.edges = vec![
+            mk_edge(&a, &b, "cross_link"),
+            mk_edge(&a, &target, "cross_link"),
+            mk_edge(&c, &d, "cross_link"),
+            mk_edge(&target, &d, "cross_link"),
+            mk_edge(&b, &c, "cross_link"),
+        ];
+        let orig_edges = doc.mindmap.edges.clone();
+
+        let undo = doc.delete_node(&target).unwrap();
+        // Sanity: the two touching edges are gone, bystanders remain.
+        assert_eq!(doc.mindmap.edges.len(), 3);
+        assert_eq!(doc.mindmap.edges[0].to_id, b);
+        assert_eq!(doc.mindmap.edges[1].from_id, c);
+        assert_eq!(doc.mindmap.edges[2].from_id, b);
+
+        // Undo and verify byte-for-byte positional recovery.
+        doc.undo_stack.push(undo);
+        doc.dirty = true;
+        assert!(doc.undo());
+
+        assert_eq!(doc.mindmap.edges.len(), orig_edges.len());
+        for (i, (orig, restored)) in orig_edges.iter()
+            .zip(doc.mindmap.edges.iter()).enumerate()
+        {
+            assert_eq!(
+                (orig.from_id.as_str(), orig.to_id.as_str()),
+                (restored.from_id.as_str(), restored.to_id.as_str()),
+                "edge at index {} out of order after undo", i,
+            );
+        }
+    }
+
+    #[test]
+    fn test_delete_node_missing_returns_none() {
+        let mut doc = load_test_doc();
+        assert!(doc.delete_node("no_such_node_id_exists").is_none());
+    }
+
+    #[test]
+    fn test_delete_root_node_works() {
+        // Delete a top-level root and confirm its children become
+        // their own roots. Tests that "orphan children" handles the
+        // case where the deleted node has no parent itself.
+        let mut doc = load_test_doc();
+        // "Lord God" is a known root with children in testament.
+        let target = "348068464".to_string();
+        assert!(doc.mindmap.nodes.get(&target).unwrap().parent_id.is_none());
+        let child_ids: Vec<String> = doc.mindmap.children_of(&target)
+            .iter().map(|n| n.id.clone()).collect();
+        assert!(!child_ids.is_empty());
+
+        doc.delete_node(&target).unwrap();
+        assert!(!doc.mindmap.nodes.contains_key(&target));
+        for cid in &child_ids {
+            assert!(doc.mindmap.nodes.get(cid).unwrap().parent_id.is_none());
+        }
     }
 
     #[test]

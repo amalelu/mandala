@@ -51,6 +51,7 @@ use crate::application::renderer::Renderer;
 use baumhard::gfx_structs::element::GfxElement;
 #[cfg(not(target_arch = "wasm32"))]
 use baumhard::mindmap::custom_mutation::{PlatformContext, Trigger};
+use baumhard::util::grapheme_chad;
 
 /// Screen-space click tolerance (in pixels) for edge hit testing. Converted
 /// to canvas units via `Renderer::canvas_per_pixel()` so the click target
@@ -135,9 +136,12 @@ enum TextEditState {
         node_id: String,
         /// The in-progress multi-line buffer.
         buffer: String,
-        /// Cursor position as a char index (not byte offset) into
-        /// `buffer`. Valid range `[0, buffer.chars().count()]`.
-        cursor_char_pos: usize,
+        /// Cursor position as a grapheme-cluster index into `buffer`.
+        /// Valid range `[0, count_grapheme_clusters(buffer)]`. Stored
+        /// in graphemes (not chars or bytes) so backspace over an
+        /// emoji or ZWJ cluster removes the whole user-visible
+        /// character — see `CODE_CONVENTIONS.md §2`/`§B2`.
+        cursor_grapheme_pos: usize,
     },
 }
 
@@ -199,93 +203,89 @@ fn is_double_click(
     &prev.hit == new_hit
 }
 
-/// Session 7A: given a `buffer` and a char-position `cursor`, return
-/// the byte offset in `buffer` that corresponds to inserting at char
-/// index `cursor`. `cursor == buffer.chars().count()` maps to
-/// `buffer.len()` (end of string).
-fn cursor_char_to_byte(buffer: &str, cursor: usize) -> usize {
-    buffer
-        .char_indices()
-        .nth(cursor)
-        .map(|(b, _)| b)
-        .unwrap_or_else(|| buffer.len())
-}
+// Session 7A text-edit cursor helpers.
+//
+// These all operate on **grapheme-cluster indices** (not chars or
+// bytes), routing through `baumhard::util::grapheme_chad`. This is
+// what `CODE_CONVENTIONS.md §2` and `§B2` mandate for any code that
+// touches user-typed text — char indexing splits emoji and combining
+// marks mid-cluster, leaving a corrupted buffer the next time the
+// renderer shapes it.
+//
+// For ASCII-only buffers grapheme indices coincide with char indices,
+// which is why the existing test suite still passes unchanged.
 
-/// Session 7A: insert `ch` at char position `cursor` in `buffer`,
-/// returning the new cursor position (one past the insert).
+/// Insert one character at grapheme index `cursor` in `buffer`,
+/// returning the new cursor position (one grapheme past the insert).
 fn insert_at_cursor(buffer: &mut String, cursor: usize, ch: char) -> usize {
-    let byte = cursor_char_to_byte(buffer, cursor);
-    buffer.insert(byte, ch);
+    grapheme_chad::insert_str_at_grapheme(buffer, cursor, &ch.to_string());
     cursor + 1
 }
 
-/// Session 7A: delete the char immediately before `cursor` (Backspace
+/// Delete the grapheme cluster immediately before `cursor` (Backspace
 /// semantics). Returns the new cursor position. No-op at `cursor == 0`.
 fn delete_before_cursor(buffer: &mut String, cursor: usize) -> usize {
     if cursor == 0 {
         return 0;
     }
-    let start_byte = cursor_char_to_byte(buffer, cursor - 1);
-    let end_byte = cursor_char_to_byte(buffer, cursor);
-    buffer.replace_range(start_byte..end_byte, "");
+    grapheme_chad::delete_grapheme_at(buffer, cursor - 1);
     cursor - 1
 }
 
-/// Session 7A: delete the char at `cursor` (Delete semantics). Returns
+/// Delete the grapheme cluster at `cursor` (Delete semantics). Returns
 /// the unchanged cursor position. No-op at end of buffer.
 fn delete_at_cursor(buffer: &mut String, cursor: usize) -> usize {
-    let total = buffer.chars().count();
+    let total = grapheme_chad::count_grapheme_clusters(buffer);
     if cursor >= total {
         return cursor;
     }
-    let start_byte = cursor_char_to_byte(buffer, cursor);
-    let end_byte = cursor_char_to_byte(buffer, cursor + 1);
-    buffer.replace_range(start_byte..end_byte, "");
+    grapheme_chad::delete_grapheme_at(buffer, cursor);
     cursor
 }
 
-/// Session 7A: return the char index of the start of the line
-/// containing `cursor` — i.e. the position just after the most recent
-/// `\n` strictly before `cursor`, or 0 if no prior `\n`. Walks the
-/// buffer once via `chars()` without allocating.
+/// Return the grapheme index of the start of the line containing
+/// `cursor` — i.e. the position just after the most recent `\n`
+/// strictly before `cursor`, or 0 if no prior `\n`. `\n` is always its
+/// own grapheme cluster, so walking by graphemes is correct here.
 fn cursor_to_line_start(buffer: &str, cursor: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut line_start = 0usize;
-    for (i, ch) in buffer.chars().enumerate() {
+    for (i, g) in buffer.graphemes(true).enumerate() {
         if i >= cursor {
             break;
         }
-        if ch == '\n' {
+        if g == "\n" {
             line_start = i + 1;
         }
     }
     line_start
 }
 
-/// Session 7A: return the char index of the end of the line
-/// containing `cursor` — i.e. the position of the next `\n` at or
-/// after `cursor`, or the total char count if no `\n` follows.
-/// Walks the buffer once via `chars()` without allocating.
+/// Return the grapheme index of the end of the line containing
+/// `cursor` — the position of the next `\n` at or after `cursor`, or
+/// the total grapheme count if no `\n` follows.
 fn cursor_to_line_end(buffer: &str, cursor: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut total = 0usize;
-    for (i, ch) in buffer.chars().enumerate() {
+    for (i, g) in buffer.graphemes(true).enumerate() {
         total = i + 1;
-        if i >= cursor && ch == '\n' {
+        if i >= cursor && g == "\n" {
             return i;
         }
     }
     total
 }
 
-/// Session 7A: move the cursor up one line, preserving the visual
-/// column. Column is computed as `cursor - line_start` on the current
-/// line. The new position lands at `prev_line_start + min(col,
-/// prev_line_len)`. No-op if already on the first line.
+/// Move the cursor up one line, preserving the visual column. Column
+/// is computed as `cursor - line_start` in graphemes; the new
+/// position lands at `prev_line_start + min(col, prev_line_len)`.
+/// No-op if already on the first line.
 fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
     let line_start = cursor_to_line_start(buffer, cursor);
     if line_start == 0 {
         return cursor;
     }
-    // Move to the char just before the '\n' that terminates the previous line.
+    // Move to the grapheme just before the '\n' that terminates the previous line.
     let prev_line_end = line_start - 1;
     let prev_line_start = cursor_to_line_start(buffer, prev_line_end);
     let col = cursor - line_start;
@@ -293,10 +293,10 @@ fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
     prev_line_start + col.min(prev_line_len)
 }
 
-/// Session 7A: move the cursor down one line, preserving the visual
-/// column. No-op if already on the last line.
+/// Move the cursor down one line, preserving the visual column.
+/// No-op if already on the last line.
 fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
-    let total = buffer.chars().count();
+    let total = grapheme_chad::count_grapheme_clusters(buffer);
     let line_start = cursor_to_line_start(buffer, cursor);
     let line_end = cursor_to_line_end(buffer, cursor);
     if line_end == total {
@@ -309,11 +309,12 @@ fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
     next_line_start + col.min(next_line_len)
 }
 
-/// Session 7A: build the display text for the edited node by
-/// inserting the caret glyph at the cursor position. Used on every
-/// keystroke to produce the `Mutation::AreaDelta` payload.
+/// Build the display text for the edited node by inserting the caret
+/// glyph at the cursor's grapheme position. Used on every keystroke
+/// to produce the `Mutation::AreaDelta` payload.
 fn insert_caret(buffer: &str, cursor: usize) -> String {
-    let byte = cursor_char_to_byte(buffer, cursor);
+    let byte = grapheme_chad::find_byte_index_of_grapheme(buffer, cursor)
+        .unwrap_or(buffer.len());
     let mut out = String::with_capacity(buffer.len() + TEXT_EDIT_CARET.len_utf8());
     out.push_str(&buffer[..byte]);
     out.push(TEXT_EDIT_CARET);
@@ -1427,18 +1428,24 @@ impl Application {
                             }
                         }
                         Some(Action::DeleteSelection) => {
-                            // Currently wired to edge and portal deletion.
-                            // Node deletion is scoped to a future roadmap
-                            // milestone.
+                            // Session 7A follow-up: node deletion is now
+                            // supported alongside edge and portal
+                            // deletion. Deleting a node orphans its
+                            // immediate children (they become roots) and
+                            // removes every edge that touched the node.
                             if let Some(doc) = document.as_mut() {
                                 enum DelKind {
                                     Edge(crate::application::document::EdgeRef),
                                     Portal(crate::application::document::PortalRef),
+                                    Node(String),
+                                    Nodes(Vec<String>),
                                 }
                                 let kind = match &doc.selection {
                                     SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
                                     SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
-                                    _ => None,
+                                    SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
+                                    SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
+                                    SelectionState::None => None,
                                 };
                                 match kind {
                                     Some(DelKind::Edge(edge_ref)) => {
@@ -1457,6 +1464,36 @@ impl Application {
                                         // DeletePortal undo entry internally;
                                         // we just clear selection + rebuild.
                                         if doc.apply_delete_portal(&pref).is_some() {
+                                            doc.selection = SelectionState::None;
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
+                                    }
+                                    Some(DelKind::Node(id)) => {
+                                        if let Some(undo) = doc.delete_node(&id) {
+                                            doc.undo_stack.push(undo);
+                                            doc.selection = SelectionState::None;
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
+                                    }
+                                    Some(DelKind::Nodes(ids)) => {
+                                        // Multi-select delete: push one
+                                        // undo entry per node so Ctrl+Z
+                                        // unwinds them in reverse order.
+                                        // Each `delete_node` call is
+                                        // self-contained — if a later id
+                                        // happens to be a child of an
+                                        // earlier one, the earlier delete
+                                        // already orphaned it, so the
+                                        // later delete just removes the
+                                        // (now-root) node.
+                                        let mut any = false;
+                                        for id in ids {
+                                            if let Some(undo) = doc.delete_node(&id) {
+                                                doc.undo_stack.push(undo);
+                                                any = true;
+                                            }
+                                        }
+                                        if any {
                                             doc.selection = SelectionState::None;
                                             rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                         }
@@ -1493,6 +1530,57 @@ impl Application {
                                         doc.dirty = true;
                                     }
                                     rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                }
+                            }
+                        }
+                        Some(Action::EditSelection) => {
+                            // Session 7A follow-up: open the text editor
+                            // on the selected single node with its
+                            // existing text, cursor at end. The
+                            // text-editor steal at the top of the
+                            // keyboard dispatch (`text_edit_state.is_open()`
+                            // branch above) means this can't fire while
+                            // the editor is already open, so Enter-inside-
+                            // editor stays literal.
+                            if let Some(doc) = document.as_mut() {
+                                let target = if let SelectionState::Single(id) = &doc.selection {
+                                    Some(id.clone())
+                                } else {
+                                    None
+                                };
+                                if let Some(id) = target {
+                                    open_text_edit(
+                                        &id,
+                                        false,
+                                        doc,
+                                        &mut text_edit_state,
+                                        &mut mindmap_tree,
+                                        &mut renderer,
+                                    );
+                                }
+                            }
+                        }
+                        Some(Action::EditSelectionClean) => {
+                            // Session 7A follow-up: open the editor with
+                            // an empty buffer. On commit, `set_node_text`
+                            // replaces the node's text wholesale and
+                            // pushes an `EditNodeText` undo entry — no
+                            // new undo variant needed.
+                            if let Some(doc) = document.as_mut() {
+                                let target = if let SelectionState::Single(id) = &doc.selection {
+                                    Some(id.clone())
+                                } else {
+                                    None
+                                };
+                                if let Some(id) = target {
+                                    open_text_edit(
+                                        &id,
+                                        true,
+                                        doc,
+                                        &mut text_edit_state,
+                                        &mut mindmap_tree,
+                                        &mut renderer,
+                                    );
                                 }
                             }
                         }
@@ -2675,18 +2763,18 @@ fn open_text_edit(
         None => return,
     };
     let buffer = if from_creation { String::new() } else { current_text };
-    let cursor_char_pos = buffer.chars().count();
+    let cursor_grapheme_pos = grapheme_chad::count_grapheme_clusters(&buffer);
     *text_edit_state = TextEditState::Open {
         node_id: node_id.to_string(),
         buffer: buffer.clone(),
-        cursor_char_pos,
+        cursor_grapheme_pos,
     };
     // Push the initial (caret-only for creation, or "existing text +
     // caret at end" for edit) through the Baumhard mutation pipeline.
     apply_text_edit_to_tree(
         node_id,
         &buffer,
-        cursor_char_pos,
+        cursor_grapheme_pos,
         mindmap_tree,
         renderer,
     );
@@ -2731,12 +2819,14 @@ fn close_text_edit(
 fn apply_text_edit_to_tree(
     node_id: &str,
     buffer: &str,
-    cursor_char_pos: usize,
+    cursor_grapheme_pos: usize,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
     use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
-    use baumhard::core::primitives::{Applicable, ApplyOperation};
+    use baumhard::core::primitives::{
+        Applicable, ApplyOperation, ColorFontRegion, ColorFontRegions, Range,
+    };
 
     let tree = match mindmap_tree.as_mut() {
         Some(t) => t,
@@ -2758,12 +2848,44 @@ fn apply_text_edit_to_tree(
     };
 
     // Build the display text: buffer with caret glyph inserted at
-    // cursor position. This is what cosmic-text will shape.
-    let display_text = insert_caret(buffer, cursor_char_pos);
+    // the cursor's grapheme position. This is what cosmic-text will
+    // shape.
+    let display_text = insert_caret(buffer, cursor_grapheme_pos);
 
-    // Construct the Baumhard delta: Text + Operation::Assign.
+    // Inherit the color of the first existing region so edited text
+    // matches the pre-edit styling. Fall back to `None` (renderer
+    // default) if there are no regions. `rebuild_buffers_from_tree`
+    // only draws characters that fall inside at least one region, so
+    // the replacement region has to span the *entire* new text —
+    // including the trailing caret glyph — or the caret and any
+    // just-typed characters past the original text length would be
+    // silently dropped by the span filter (renderer.rs:1500-1520).
+    // This was the root cause of the "double-click existing node does
+    // nothing" bug: the old regions were left in place, so the caret
+    // at char position == old_len was outside every region and never
+    // rendered.
+    let inherited_color = area
+        .regions
+        .all_regions()
+        .first()
+        .and_then(|r| r.color);
+    let display_char_count = display_text.chars().count();
+    let mut new_regions = ColorFontRegions::new_empty();
+    if display_char_count > 0 {
+        new_regions.submit_region(ColorFontRegion::new(
+            Range::new(0, display_char_count),
+            None,
+            inherited_color,
+        ));
+    }
+
+    // Construct the Baumhard delta: Text + ColorFontRegions + Assign.
+    // The Assign operation replaces both fields wholesale — see
+    // `GlyphArea::apply_operation` at area.rs:261 for regions and
+    // area.rs:273 for text.
     let delta = DeltaGlyphArea::new(vec![
         GlyphAreaField::Text(display_text),
+        GlyphAreaField::ColorFontRegions(new_regions),
         GlyphAreaField::Operation(ApplyOperation::Assign),
     ]);
     delta.apply_to(area);
@@ -2797,9 +2919,9 @@ fn handle_text_edit_key(
         TextEditState::Open {
             node_id,
             buffer,
-            cursor_char_pos,
+            cursor_grapheme_pos,
             ..
-        } => (node_id, buffer, cursor_char_pos),
+        } => (node_id, buffer, cursor_grapheme_pos),
         TextEditState::Closed => return,
     };
 
@@ -2812,7 +2934,7 @@ fn handle_text_edit_key(
             }
         }
         Some("delete") => {
-            if *cursor < buffer.chars().count() {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
                 *cursor = delete_at_cursor(buffer, *cursor);
                 changed = true;
             }
@@ -2824,7 +2946,7 @@ fn handle_text_edit_key(
             }
         }
         Some("arrowright") => {
-            if *cursor < buffer.chars().count() {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
                 *cursor += 1;
                 changed = true;
             }
@@ -4240,6 +4362,73 @@ mod text_edit_tests {
         assert_eq!(area.text, display_text);
     }
 
+    /// Regression test for the Session 7A follow-up bug: applying a
+    /// text edit delta to a GlyphArea with pre-existing
+    /// `ColorFontRegions` (i.e. an existing multi-run node) must
+    /// replace those regions with one that spans the entire new
+    /// display text — including the trailing caret glyph. Otherwise
+    /// `rebuild_buffers_from_tree` at renderer.rs:1500-1520 silently
+    /// drops any character outside the old ranges, making the caret
+    /// and newly-typed characters invisible.
+    #[test]
+    fn test_text_edit_replaces_stale_regions_to_cover_caret() {
+        use baumhard::core::primitives::{
+            Applicable, ApplyOperation, ColorFontRegion, ColorFontRegions, Range,
+        };
+        use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaField};
+
+        // Simulate an existing multi-run node with text "Hello" and
+        // a single region over [0, 5) colored red.
+        let mut area = GlyphArea::new_with_str(
+            "Hello",
+            14.0,
+            16.8,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 30.0),
+        );
+        let red = [1.0f32, 0.0, 0.0, 1.0];
+        let mut initial_regions = ColorFontRegions::new_empty();
+        initial_regions.submit_region(ColorFontRegion::new(
+            Range::new(0, 5),
+            None,
+            Some(red),
+        ));
+        area.regions = initial_regions;
+        assert_eq!(area.regions.num_regions(), 1);
+
+        // Build the same delta `apply_text_edit_to_tree` produces
+        // for buffer="Hello" at cursor=5: text="Hello▌", regions =
+        // single region [0, 6) inheriting the red color.
+        let buffer = "Hello";
+        let cursor = buffer.chars().count();
+        let display_text = insert_caret(buffer, cursor);
+        let display_char_count = display_text.chars().count();
+        let inherited_color = area.regions.all_regions().first().and_then(|r| r.color);
+        let mut new_regions = ColorFontRegions::new_empty();
+        new_regions.submit_region(ColorFontRegion::new(
+            Range::new(0, display_char_count),
+            None,
+            inherited_color,
+        ));
+
+        let delta = DeltaGlyphArea::new(vec![
+            GlyphAreaField::Text(display_text.clone()),
+            GlyphAreaField::ColorFontRegions(new_regions),
+            GlyphAreaField::Operation(ApplyOperation::Assign),
+        ]);
+        delta.apply_to(&mut area);
+
+        // Text updated.
+        assert_eq!(area.text, "Hello\u{258C}");
+        // Exactly one region, covering char positions 0..6 (includes
+        // the caret), and inheriting the original red color.
+        assert_eq!(area.regions.num_regions(), 1);
+        let region = area.regions.all_regions()[0];
+        assert_eq!(region.range.start, 0);
+        assert_eq!(region.range.end, 6);
+        assert_eq!(region.color, Some(red));
+    }
+
     // -----------------------------------------------------------------
     // TextEditState shape + guard semantics
     // -----------------------------------------------------------------
@@ -4253,7 +4442,7 @@ mod text_edit_tests {
         let open = TextEditState::Open {
             node_id: "n-42".to_string(),
             buffer: "hi".to_string(),
-            cursor_char_pos: 2,
+            cursor_grapheme_pos: 2,
         };
         assert_eq!(open.node_id(), Some("n-42"));
         assert!(open.is_open());
@@ -4331,10 +4520,61 @@ mod text_edit_tests {
     #[test]
     fn test_delete_before_cursor_with_multibyte() {
         let mut s = String::from("café");
-        // Delete the 'é' (char pos 3, cursor at 4).
+        // Delete the 'é' (grapheme pos 3, cursor at 4).
         let new_cursor = delete_before_cursor(&mut s, 4);
         assert_eq!(s, "caf");
         assert_eq!(new_cursor, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Grapheme-cluster regression tests (chunk 3 / §B2)
+    // -----------------------------------------------------------------
+    //
+    // These guard the rule that a single Backspace/Delete removes a
+    // whole grapheme cluster, not a Unicode scalar. Pre-chunk-3 the
+    // helpers used `chars()` and would corrupt emoji and ZWJ
+    // sequences mid-cluster on the first Backspace.
+
+    #[test]
+    fn test_cursor_edit_with_emoji_backspace() {
+        // 🍕 is a single grapheme but two `char`s (it's a single
+        // codepoint above U+FFFF, encoded as a surrogate pair in
+        // UTF-16; in UTF-8 it's 4 bytes / 1 char).
+        let mut s = String::from("ab🍕cd");
+        // Cursor sits just after the pizza (grapheme index 3).
+        let new_cursor = delete_before_cursor(&mut s, 3);
+        // The whole pizza is gone, not just half of it.
+        assert_eq!(s, "abcd");
+        assert_eq!(new_cursor, 2);
+    }
+
+    #[test]
+    fn test_cursor_edit_with_zwj_backspace() {
+        // 🧑‍🚀 is a ZWJ sequence: 🧑 + ZWJ + 🚀, three codepoints
+        // and five chars, but a single user-visible grapheme cluster.
+        // Backspace must remove the whole thing in one keystroke.
+        let mut s = String::from("hi🧑\u{200D}🚀!");
+        let new_cursor = delete_before_cursor(&mut s, 3);
+        assert_eq!(s, "hi!");
+        assert_eq!(new_cursor, 2);
+    }
+
+    #[test]
+    fn test_cursor_edit_with_emoji_delete_forward() {
+        // Delete (forward delete) at the position before the pizza
+        // removes the whole cluster.
+        let mut s = String::from("ab🍕cd");
+        let new_cursor = delete_at_cursor(&mut s, 2);
+        assert_eq!(s, "abcd");
+        // Forward delete leaves the cursor in place.
+        assert_eq!(new_cursor, 2);
+    }
+
+    #[test]
+    fn test_insert_caret_after_emoji() {
+        // Caret rendered after a pizza emoji should not split it.
+        let out = insert_caret("ab🍕cd", 3);
+        assert_eq!(out, "ab🍕\u{258C}cd");
     }
 
     // -----------------------------------------------------------------
@@ -4354,7 +4594,7 @@ mod text_edit_tests {
         let editor = TextEditState::Open {
             node_id: "node-A".to_string(),
             buffer: "in progress".to_string(),
-            cursor_char_pos: 11,
+            cursor_grapheme_pos: 11,
         };
         let hit = Some("node-A".to_string());
         let already_editing = editor
@@ -4369,7 +4609,7 @@ mod text_edit_tests {
         let editor = TextEditState::Open {
             node_id: "node-A".to_string(),
             buffer: "in progress".to_string(),
-            cursor_char_pos: 11,
+            cursor_grapheme_pos: 11,
         };
         let hit = Some("node-B".to_string());
         let already_editing = editor

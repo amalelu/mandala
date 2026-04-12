@@ -28,7 +28,7 @@ use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
-use crate::application::baumhard_adapter::to_cosmic_text;
+use baumhard::font::attrs::attrs_list_from_regions;
 use baumhard::gfx_structs::camera::Camera2D;
 use baumhard::mindmap::model::MindMap;
 use baumhard::mindmap::loader;
@@ -983,23 +983,20 @@ impl Renderer {
         if micros == 0 {
             return;
         }
-        self.fps = Some(
-            usize::try_from(Duration::from_secs(1).as_micros()).unwrap()
-                / usize::try_from(micros).unwrap(),
-        );
+        self.fps = Some((1_000_000u128 / micros) as usize);
     }
 
     #[inline]
     fn calculate_fps(&mut self, delta_time: Duration) {
-        self.fps = Some(
-            usize::try_from(Duration::from_secs(1).as_micros()).unwrap()
-                / usize::try_from(
-                    (self.last_render_time
-                        + Duration::max(delta_time, Self::ZERO_DURATION.clone()))
-                    .as_micros(),
-                )
-                .unwrap(),
-        );
+        let frame_micros = (self.last_render_time
+            + Duration::max(delta_time, Self::ZERO_DURATION.clone()))
+        .as_micros();
+        // Guard against divide-by-zero on the first frame when both
+        // last_render_time and delta_time are zero.
+        if frame_micros == 0 {
+            return;
+        }
+        self.fps = Some((1_000_000u128 / frame_micros) as usize);
     }
 
     #[inline]
@@ -1031,12 +1028,14 @@ impl Renderer {
                block.render_bounds.x.0,
                block.render_bounds.y.0,
             );
-            let mut font_system = fonts::FONT_SYSTEM
-                .try_write()
-                .expect("Failed to acquire font-system write lock");
+            // Interactive path: a contended font-system lock skips
+            // this node's buffer update — the next frame will retry.
+            let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
+                return;
+            };
             editor.insert_string(
                 block.text.as_str(),
-                Some(to_cosmic_text(&block.regions, &mut font_system)),
+                Some(attrs_list_from_regions(&block.regions, &mut font_system)),
             );
             editor.shape_as_needed(&mut font_system, false);
             let text_buffer = TextBuffer::new(
@@ -1050,18 +1049,20 @@ impl Renderer {
     }
 
     fn update_buffer_cache(&mut self) {
-        let arena_lock = self.graphics_arena.try_read();
-        if arena_lock.is_ok() {
-            for node in arena_lock.unwrap().iter() {
-                if !node.is_removed() {
-                    let element = node.get();
-                    Self::prepare_glyph_block(
-                        element.glyph_area().unwrap(),
-                        &element.unique_id(),
-                        &mut self.buffer_cache,
-                    );
-                }
+        // Interactive path: a contended arena lock or a node that has
+        // shed its glyph_area mid-mutation must not abort the frame.
+        let Ok(arena) = self.graphics_arena.try_read() else {
+            return;
+        };
+        for node in arena.iter() {
+            if node.is_removed() {
+                continue;
             }
+            let element = node.get();
+            let Some(area) = element.glyph_area() else {
+                continue;
+            };
+            Self::prepare_glyph_block(area, &element.unique_id(), &mut self.buffer_cache);
         }
     }
 
@@ -1252,40 +1253,46 @@ impl Renderer {
             })
             .collect();
 
-        let mut font_system = fonts::FONT_SYSTEM
-            .try_write()
-            .expect("Failed to acquire font_system lock");
+        // Interactive path: a contended font-system lock must skip
+        // the frame, not abort the process.
+        let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
+            log::warn!("font_system lock contended in render(), skipping frame");
+            return;
+        };
 
-        self.text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut font_system,
-                &mut self.atlas,
-                &self.viewport,
-                main_text_areas,
-                &mut self.swash_cache,
-            )
-            .unwrap();
-        self.palette_text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut font_system,
-                &mut self.atlas,
-                &self.viewport,
-                palette_text_areas,
-                &mut self.swash_cache,
-            )
-            .unwrap();
-        drop(font_system);
-
-        let frame_result = self.surface.get_current_texture();
-        if frame_result.is_err() {
-            debug!("Failed to get the surface texture, can't render.");
+        // Interactive path: a glyphon prepare failure must degrade the
+        // frame, not abort the process. Skip the whole render so we
+        // don't run a half-prepared atlas through the GPU.
+        if let Err(e) = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut font_system,
+            &mut self.atlas,
+            &self.viewport,
+            main_text_areas,
+            &mut self.swash_cache,
+        ) {
+            log::warn!("text_renderer.prepare failed, skipping frame: {e}");
             return;
         }
-        let frame = frame_result.unwrap();
+        if let Err(e) = self.palette_text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut font_system,
+            &mut self.atlas,
+            &self.viewport,
+            palette_text_areas,
+            &mut self.swash_cache,
+        ) {
+            log::warn!("palette_text_renderer.prepare failed, skipping frame: {e}");
+            return;
+        }
+        drop(font_system);
+
+        let Ok(frame) = self.surface.get_current_texture() else {
+            debug!("Failed to get the surface texture, can't render.");
+            return;
+        };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1323,7 +1330,13 @@ impl Renderer {
             // 2. Main text pass — node text, borders, connections,
             //    edge handles, camera-transformed and screen-space
             //    overlays, all drawn on top of the node backgrounds.
-            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).unwrap();
+            //    Interactive path: log and continue on render failure
+            //    so a single bad atlas frame doesn't crash the editor.
+            if let Err(e) =
+                self.text_renderer.render(&self.atlas, &self.viewport, &mut pass)
+            {
+                log::warn!("text_renderer.render failed: {e}");
+            }
 
             // 3. Palette backdrop (rect pipeline, screen-space).
             //    Drawn AFTER the main text pass so node text
@@ -1342,9 +1355,13 @@ impl Renderer {
             // 4. Palette text pass — cyan border, query line,
             //    filtered action rows. Drawn on top of the palette
             //    backdrop so every glyph sits cleanly on solid fill.
-            self.palette_text_renderer
+            //    Interactive path: log and continue on render failure.
+            if let Err(e) = self
+                .palette_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
-                .unwrap();
+            {
+                log::warn!("palette_text_renderer.render failed: {e}");
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();

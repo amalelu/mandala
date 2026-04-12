@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use std::hash::{Hash, Hasher};
 use std::ops::{AddAssign, MulAssign, SubAssign};
-use log::{debug};
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::font::fonts::AppFont;
@@ -89,9 +89,19 @@ impl ColorFontRegions {
         self.regions.len()
     }
 
+    /// Insert a region, replacing any existing region with the same
+    /// key. An inverted range (`start > end`) is dropped with a
+    /// warning rather than panicking — `submit_region` is reachable
+    /// from interactive text-edit paths (see `app.rs` callers around
+    /// the `Type` action), and CODE_CONVENTIONS.md §4 says those must
+    /// not abort the editor over a single bad mutation.
     pub fn submit_region(&mut self, region: ColorFontRegion) {
         if region.range.start > region.range.end {
-            panic!("Range start is higher than range end!");
+            warn!(
+                "submit_region dropped inverted range {}..{}",
+                region.range.start, region.range.end
+            );
+            return;
         }
         if self.regions.contains(&region) {
             self.regions.remove(&region);
