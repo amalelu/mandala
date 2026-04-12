@@ -646,23 +646,33 @@ impl MindMapDocument {
             }
         }
 
-        // Remove every edge that touches the deleted node. Walk the vec
-        // in place so `removed_edges` ends up in ascending-index order;
-        // undo re-inserts them in the same order, which is safe because
-        // each re-insertion shifts later entries right by exactly one.
-        let mut removed_edges: Vec<(usize, MindEdge)> = Vec::new();
-        let mut i = 0;
-        while i < self.mindmap.edges.len() {
-            let e = &self.mindmap.edges[i];
-            if e.from_id == node_id || e.to_id == node_id {
-                let edge = self.mindmap.edges.remove(i);
-                removed_edges.push((i, edge));
-                // Don't advance i — the next element just slid into
-                // this position.
-            } else {
-                i += 1;
-            }
-        }
+        // Collect every edge that touches the deleted node, paired
+        // with its index in the **pre-removal** edge vec. The indices
+        // matter for undo: ascending-order re-insertion at the original
+        // positions correctly reconstructs the original edge order
+        // because each earlier-index re-insert shifts later elements
+        // right by exactly one, so the next stored original index is
+        // still the right slot.
+        //
+        // We must NOT compute the index during an in-place remove
+        // loop — by the time we reach the second touching edge, the
+        // prior removal has already shifted its index down by one, so
+        // storing the loop index would record a stale post-removal
+        // position. Undo would then re-insert at the wrong slot and
+        // silently reorder edges the caller never touched. Collect
+        // first (using `enumerate()` on the original vec), then drop
+        // the touching edges with `retain()`.
+        let removed_edges: Vec<(usize, MindEdge)> = self
+            .mindmap
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.from_id == node_id || e.to_id == node_id)
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        self.mindmap
+            .edges
+            .retain(|e| e.from_id != node_id && e.to_id != node_id);
 
         self.dirty = true;
         Some(UndoAction::DeleteNode {
@@ -1629,11 +1639,15 @@ impl MindMapDocument {
                     // Re-insert the node itself.
                     let restored_id = node.id.clone();
                     self.mindmap.nodes.insert(restored_id.clone(), node);
-                    // Re-insert edges in ascending-index order. Because
-                    // `delete_node` recorded indices in the same order
-                    // it removed them, each re-insertion slides later
-                    // entries right by exactly one — the stored index
-                    // remains valid for each subsequent insert.
+                    // Re-insert edges at their original pre-delete
+                    // indices. `delete_node` stores each index relative
+                    // to the *original* edge vec (via `enumerate()` on
+                    // the live vec before `retain()` drops the matches),
+                    // so ascending-order re-insertion correctly slots
+                    // each one into its original position — each earlier
+                    // re-insert shifts all later elements right by
+                    // exactly one, so the next stored index still
+                    // points at the correct slot.
                     for (idx, edge) in removed_edges {
                         let idx = idx.min(self.mindmap.edges.len());
                         self.mindmap.edges.insert(idx, edge);
@@ -3176,18 +3190,23 @@ mod tests {
             .expect("node should be restored");
         assert_eq!(restored.id, orig_node.id);
         assert_eq!(restored.text, orig_node.text);
-        // Edges are fully restored (count matches).
+        // Edges are fully restored — same count AND same order.
+        // Ordering matters: earlier versions of `delete_node` stored
+        // post-removal indices, which silently reordered edges that
+        // shared the deleted node's neighborhood. Compare each slot
+        // by the (from, to, edge_type) triple since edges have no
+        // stable id.
         assert_eq!(doc.mindmap.edges.len(), orig_edges.len(),
             "edge count should be restored");
-        // Every originally-incident edge is present again.
-        let still_has_all_edges = orig_edges.iter().all(|oe|
-            doc.mindmap.edges.iter().any(|ne|
-                ne.from_id == oe.from_id
-                    && ne.to_id == oe.to_id
-                    && ne.edge_type == oe.edge_type
-            )
-        );
-        assert!(still_has_all_edges, "every original edge should be restored");
+        for (i, (orig, restored)) in orig_edges.iter()
+            .zip(doc.mindmap.edges.iter()).enumerate()
+        {
+            assert_eq!(
+                (orig.from_id.as_str(), orig.to_id.as_str(), orig.edge_type.as_str()),
+                (restored.from_id.as_str(), restored.to_id.as_str(), restored.edge_type.as_str()),
+                "edge at index {} should match after undo", i,
+            );
+        }
         // Children are re-attached with original parent_id + index.
         for (cid, old_parent, old_idx) in orig_child_state {
             let child = doc.mindmap.nodes.get(&cid).unwrap();
@@ -3195,6 +3214,92 @@ mod tests {
                 "child {} parent_id should be restored", cid);
             assert_eq!(child.index, old_idx,
                 "child {} index should be restored", cid);
+        }
+    }
+
+    /// Regression test for the edge-ordering bug found in review of
+    /// the initial Session 7A follow-up commit. When a deleted node
+    /// has multiple incident edges scattered through the edge vec,
+    /// naive in-place removal stores post-removal indices, so the
+    /// undo reinserts them at the wrong positions and silently
+    /// reorders edges the caller never touched. The fix stores
+    /// pre-removal indices via `enumerate()` + `retain()`.
+    ///
+    /// Built as a self-contained test so we control the edge
+    /// neighborhood precisely.
+    #[test]
+    fn test_delete_node_undo_preserves_edge_order_with_gaps() {
+        use baumhard::mindmap::model::MindEdge;
+
+        let mut doc = load_test_doc();
+        // Pick any node with at least one incident edge.
+        let target = find_node_with_children_and_parent(&doc);
+
+        // Reset edges to a known layout: a mix of edges touching and
+        // not touching the target, spaced out so the bug's effect
+        // is visible. Use existing node ids so the edges are valid
+        // references (any two existing-but-not-target ids work).
+        let other_ids: Vec<String> = doc.mindmap.nodes.keys()
+            .filter(|id| id.as_str() != target.as_str())
+            .take(4)
+            .cloned()
+            .collect();
+        assert!(other_ids.len() >= 4, "need at least 4 non-target nodes");
+        let a = other_ids[0].clone();
+        let b = other_ids[1].clone();
+        let c = other_ids[2].clone();
+        let d = other_ids[3].clone();
+
+        let mk_edge = |from: &str, to: &str, etype: &str| MindEdge {
+            from_id: from.to_string(),
+            to_id: to.to_string(),
+            edge_type: etype.to_string(),
+            color: "#ffffff".to_string(),
+            width: 1,
+            line_style: 0,
+            visible: true,
+            label: None,
+            label_position_t: None,
+            anchor_from: 0,
+            anchor_to: 0,
+            control_points: Vec::new(),
+            glyph_connection: None,
+        };
+
+        // Edge layout: [a→b, a→target, c→d, target→d, b→c]
+        //               idx 0      1       2      3       4
+        // Positions 1 and 3 touch the target; 0, 2, 4 are bystanders.
+        // Wrong behavior would end up reordering the bystanders.
+        doc.mindmap.edges = vec![
+            mk_edge(&a, &b, "cross_link"),
+            mk_edge(&a, &target, "cross_link"),
+            mk_edge(&c, &d, "cross_link"),
+            mk_edge(&target, &d, "cross_link"),
+            mk_edge(&b, &c, "cross_link"),
+        ];
+        let orig_edges = doc.mindmap.edges.clone();
+
+        let undo = doc.delete_node(&target).unwrap();
+        // Sanity: the two touching edges are gone, bystanders remain.
+        assert_eq!(doc.mindmap.edges.len(), 3);
+        assert_eq!(doc.mindmap.edges[0].to_id, b);
+        assert_eq!(doc.mindmap.edges[1].from_id, c);
+        assert_eq!(doc.mindmap.edges[2].from_id, b);
+
+        // Undo and verify byte-for-byte positional recovery.
+        doc.undo_stack.push(undo);
+        doc.dirty = true;
+        assert!(doc.undo());
+
+        assert_eq!(doc.mindmap.edges.len(), orig_edges.len());
+        for (i, (orig, restored)) in orig_edges.iter()
+            .zip(doc.mindmap.edges.iter()).enumerate()
+        {
+            assert_eq!(
+                (orig.from_id.as_str(), orig.to_id.as_str()),
+                (restored.from_id.as_str(), restored.to_id.as_str()),
+                "edge at index {} out of order after undo", i,
+            );
         }
     }
 
