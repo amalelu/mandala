@@ -314,6 +314,23 @@ pub enum UndoAction {
     /// or any other field change via `apply_edit_portal`). Undo
     /// replaces `mindmap.portals[index]` with the `before` snapshot.
     EditPortal { index: usize, before: PortalPair },
+    /// A node was deleted. Restored by re-inserting the node, re-inserting
+    /// every edge that touched it at its original `mindmap.edges` index,
+    /// and restoring the `parent_id`/`index` of every child that was
+    /// orphaned by the delete. Mirrors the `DeleteEdge`/`DeletePortal`
+    /// pattern, extended for the extra bookkeeping node deletion requires.
+    DeleteNode {
+        node: MindNode,
+        /// Edges that referenced the deleted node (parent_child, cross_link,
+        /// etc.), paired with their original index in `mindmap.edges`.
+        /// Stored in ascending index order so the insertion loop on undo
+        /// re-inserts them in the order they were removed.
+        removed_edges: Vec<(usize, MindEdge)>,
+        /// For each child that was orphaned by the delete, its id and
+        /// pre-delete sibling `index`. `parent_id` is always the deleted
+        /// node's id so it doesn't need to be stored separately.
+        orphaned_children: Vec<(String, i32)>,
+    },
 }
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
@@ -582,6 +599,77 @@ impl MindMapDocument {
         let idx = self.mindmap.edges.iter().position(|e| edge_ref.matches(e))?;
         let edge = self.mindmap.edges.remove(idx);
         Some((idx, edge))
+    }
+
+    /// Remove a node from the map, orphaning its immediate children (they
+    /// become roots with fresh sibling indices), and removing every edge
+    /// that touched the node (parent_child, cross_link, etc.). Returns an
+    /// `UndoAction::DeleteNode` payload that fully reverses the operation
+    /// on undo, or `None` if the node doesn't exist.
+    ///
+    /// Orphaning is shallow — only direct children are promoted. Each
+    /// grand-child stays attached to its parent, so entire subtrees
+    /// survive the delete intact, just one level higher in the hierarchy.
+    /// Matches the user request "orphan children" at Session 7A follow-up.
+    ///
+    /// The caller is expected to push the returned undo payload onto the
+    /// stack and trigger a `rebuild_all`.
+    pub fn delete_node(&mut self, node_id: &str) -> Option<UndoAction> {
+        // Remove the node itself. Bail early if the id doesn't exist so
+        // we don't leave the model in a half-mutated state.
+        let node = self.mindmap.nodes.remove(node_id)?;
+
+        // Orphan immediate children: clear `parent_id`, assign fresh root
+        // indices one past the current maximum so they sort last among
+        // roots. Mirrors the indexing in `apply_create_orphan_node`.
+        let next_root_index = self
+            .mindmap
+            .root_nodes()
+            .iter()
+            .map(|n| n.index)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        let child_ids: Vec<String> = self
+            .mindmap
+            .nodes
+            .values()
+            .filter(|n| n.parent_id.as_deref() == Some(node_id))
+            .map(|n| n.id.clone())
+            .collect();
+        let mut orphaned_children: Vec<(String, i32)> = Vec::new();
+        for (i, cid) in child_ids.iter().enumerate() {
+            if let Some(child) = self.mindmap.nodes.get_mut(cid) {
+                orphaned_children.push((cid.clone(), child.index));
+                child.parent_id = None;
+                child.index = next_root_index + i as i32;
+            }
+        }
+
+        // Remove every edge that touches the deleted node. Walk the vec
+        // in place so `removed_edges` ends up in ascending-index order;
+        // undo re-inserts them in the same order, which is safe because
+        // each re-insertion shifts later entries right by exactly one.
+        let mut removed_edges: Vec<(usize, MindEdge)> = Vec::new();
+        let mut i = 0;
+        while i < self.mindmap.edges.len() {
+            let e = &self.mindmap.edges[i];
+            if e.from_id == node_id || e.to_id == node_id {
+                let edge = self.mindmap.edges.remove(i);
+                removed_edges.push((i, edge));
+                // Don't advance i — the next element just slid into
+                // this position.
+            } else {
+                i += 1;
+            }
+        }
+
+        self.dirty = true;
+        Some(UndoAction::DeleteNode {
+            node,
+            removed_edges,
+            orphaned_children,
+        })
     }
 
     /// Hit-test the grab-handles of a specific edge at `canvas_pos`.
@@ -1535,6 +1623,28 @@ impl MindMapDocument {
                     // Mirror `EditEdge`: replace in place, clamped.
                     if index < self.mindmap.portals.len() {
                         self.mindmap.portals[index] = before;
+                    }
+                }
+                UndoAction::DeleteNode { node, removed_edges, orphaned_children } => {
+                    // Re-insert the node itself.
+                    let restored_id = node.id.clone();
+                    self.mindmap.nodes.insert(restored_id.clone(), node);
+                    // Re-insert edges in ascending-index order. Because
+                    // `delete_node` recorded indices in the same order
+                    // it removed them, each re-insertion slides later
+                    // entries right by exactly one — the stored index
+                    // remains valid for each subsequent insert.
+                    for (idx, edge) in removed_edges {
+                        let idx = idx.min(self.mindmap.edges.len());
+                        self.mindmap.edges.insert(idx, edge);
+                    }
+                    // Re-attach orphaned children: restore `parent_id`
+                    // and the pre-delete sibling `index`.
+                    for (cid, old_index) in orphaned_children {
+                        if let Some(child) = self.mindmap.nodes.get_mut(&cid) {
+                            child.parent_id = Some(restored_id.clone());
+                            child.index = old_index;
+                        }
                     }
                 }
             }
@@ -2976,6 +3086,142 @@ mod tests {
         // The edge should be back at its original position
         let restored = &doc.mindmap.edges[orig_idx];
         assert!(edge_ref.matches(restored));
+    }
+
+    // ---------------------------------------------------------------
+    // Node deletion (Session 7A follow-up)
+    // ---------------------------------------------------------------
+
+    /// Pick a node from the testament map that has at least one child
+    /// and at least one parent_child edge pointing at it. The "Lord
+    /// God" node has plenty of children and is a root, so we walk one
+    /// level down to find a good candidate that also has a parent.
+    fn find_node_with_children_and_parent(doc: &MindMapDocument) -> String {
+        doc.mindmap.nodes.values()
+            .find(|n| {
+                n.parent_id.is_some()
+                    && !doc.mindmap.children_of(&n.id).is_empty()
+            })
+            .map(|n| n.id.clone())
+            .expect("testament should have at least one non-root node with children")
+    }
+
+    #[test]
+    fn test_delete_node_orphans_children() {
+        let mut doc = load_test_doc();
+        let target = find_node_with_children_and_parent(&doc);
+        let child_ids: Vec<String> = doc.mindmap.children_of(&target)
+            .iter().map(|n| n.id.clone()).collect();
+        assert!(!child_ids.is_empty(), "target should have at least one child");
+
+        let undo = doc.delete_node(&target).expect("delete should succeed");
+        assert!(matches!(undo, UndoAction::DeleteNode { .. }));
+
+        // The node itself is gone.
+        assert!(!doc.mindmap.nodes.contains_key(&target));
+        // Every child is now a root (parent_id == None).
+        for cid in &child_ids {
+            let child = doc.mindmap.nodes.get(cid)
+                .expect("child should still exist — only direct attachment is severed");
+            assert!(child.parent_id.is_none(),
+                "child {} should be orphaned", cid);
+        }
+        // No parent_child edges touch the deleted id anymore.
+        assert!(doc.mindmap.edges.iter().all(|e|
+            e.from_id != target && e.to_id != target
+        ), "no edges should reference the deleted node");
+    }
+
+    #[test]
+    fn test_delete_node_removes_all_touching_edges() {
+        let mut doc = load_test_doc();
+        let target = find_node_with_children_and_parent(&doc);
+        // Count edges touching the target beforehand.
+        let touching_before = doc.mindmap.edges.iter()
+            .filter(|e| e.from_id == target || e.to_id == target)
+            .count();
+        assert!(touching_before > 0,
+            "testament target should have at least one incident edge (parent_child)");
+
+        doc.delete_node(&target).unwrap();
+
+        let touching_after = doc.mindmap.edges.iter()
+            .filter(|e| e.from_id == target || e.to_id == target)
+            .count();
+        assert_eq!(touching_after, 0, "all incident edges should be removed");
+    }
+
+    #[test]
+    fn test_delete_node_undo_restores_node_edges_and_children() {
+        let mut doc = load_test_doc();
+        let target = find_node_with_children_and_parent(&doc);
+
+        // Capture pre-delete state to compare after undo.
+        let orig_node = doc.mindmap.nodes.get(&target).cloned().unwrap();
+        let orig_edges = doc.mindmap.edges.clone();
+        let orig_child_state: Vec<(String, Option<String>, i32)> = doc.mindmap
+            .children_of(&target)
+            .iter()
+            .map(|n| (n.id.clone(), n.parent_id.clone(), n.index))
+            .collect();
+
+        let undo = doc.delete_node(&target).unwrap();
+        doc.undo_stack.push(undo);
+        doc.dirty = true;
+
+        assert!(doc.undo(), "undo should succeed");
+
+        // Node is back.
+        let restored = doc.mindmap.nodes.get(&target)
+            .expect("node should be restored");
+        assert_eq!(restored.id, orig_node.id);
+        assert_eq!(restored.text, orig_node.text);
+        // Edges are fully restored (count matches).
+        assert_eq!(doc.mindmap.edges.len(), orig_edges.len(),
+            "edge count should be restored");
+        // Every originally-incident edge is present again.
+        let still_has_all_edges = orig_edges.iter().all(|oe|
+            doc.mindmap.edges.iter().any(|ne|
+                ne.from_id == oe.from_id
+                    && ne.to_id == oe.to_id
+                    && ne.edge_type == oe.edge_type
+            )
+        );
+        assert!(still_has_all_edges, "every original edge should be restored");
+        // Children are re-attached with original parent_id + index.
+        for (cid, old_parent, old_idx) in orig_child_state {
+            let child = doc.mindmap.nodes.get(&cid).unwrap();
+            assert_eq!(child.parent_id, old_parent,
+                "child {} parent_id should be restored", cid);
+            assert_eq!(child.index, old_idx,
+                "child {} index should be restored", cid);
+        }
+    }
+
+    #[test]
+    fn test_delete_node_missing_returns_none() {
+        let mut doc = load_test_doc();
+        assert!(doc.delete_node("no_such_node_id_exists").is_none());
+    }
+
+    #[test]
+    fn test_delete_root_node_works() {
+        // Delete a top-level root and confirm its children become
+        // their own roots. Tests that "orphan children" handles the
+        // case where the deleted node has no parent itself.
+        let mut doc = load_test_doc();
+        // "Lord God" is a known root with children in testament.
+        let target = "348068464".to_string();
+        assert!(doc.mindmap.nodes.get(&target).unwrap().parent_id.is_none());
+        let child_ids: Vec<String> = doc.mindmap.children_of(&target)
+            .iter().map(|n| n.id.clone()).collect();
+        assert!(!child_ids.is_empty());
+
+        doc.delete_node(&target).unwrap();
+        assert!(!doc.mindmap.nodes.contains_key(&target));
+        for cid in &child_ids {
+            assert!(doc.mindmap.nodes.get(cid).unwrap().parent_id.is_none());
+        }
     }
 
     #[test]

@@ -1442,18 +1442,24 @@ impl Application {
                             }
                         }
                         Some(Action::DeleteSelection) => {
-                            // Currently wired to edge and portal deletion.
-                            // Node deletion is scoped to a future roadmap
-                            // milestone.
+                            // Session 7A follow-up: node deletion is now
+                            // supported alongside edge and portal
+                            // deletion. Deleting a node orphans its
+                            // immediate children (they become roots) and
+                            // removes every edge that touched the node.
                             if let Some(doc) = document.as_mut() {
                                 enum DelKind {
                                     Edge(crate::application::document::EdgeRef),
                                     Portal(crate::application::document::PortalRef),
+                                    Node(String),
+                                    Nodes(Vec<String>),
                                 }
                                 let kind = match &doc.selection {
                                     SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
                                     SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
-                                    _ => None,
+                                    SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
+                                    SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
+                                    SelectionState::None => None,
                                 };
                                 match kind {
                                     Some(DelKind::Edge(edge_ref)) => {
@@ -1472,6 +1478,36 @@ impl Application {
                                         // DeletePortal undo entry internally;
                                         // we just clear selection + rebuild.
                                         if doc.apply_delete_portal(&pref).is_some() {
+                                            doc.selection = SelectionState::None;
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
+                                    }
+                                    Some(DelKind::Node(id)) => {
+                                        if let Some(undo) = doc.delete_node(&id) {
+                                            doc.undo_stack.push(undo);
+                                            doc.selection = SelectionState::None;
+                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                        }
+                                    }
+                                    Some(DelKind::Nodes(ids)) => {
+                                        // Multi-select delete: push one
+                                        // undo entry per node so Ctrl+Z
+                                        // unwinds them in reverse order.
+                                        // Each `delete_node` call is
+                                        // self-contained — if a later id
+                                        // happens to be a child of an
+                                        // earlier one, the earlier delete
+                                        // already orphaned it, so the
+                                        // later delete just removes the
+                                        // (now-root) node.
+                                        let mut any = false;
+                                        for id in ids {
+                                            if let Some(undo) = doc.delete_node(&id) {
+                                                doc.undo_stack.push(undo);
+                                                any = true;
+                                            }
+                                        }
+                                        if any {
                                             doc.selection = SelectionState::None;
                                             rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                         }
@@ -1508,6 +1544,57 @@ impl Application {
                                         doc.dirty = true;
                                     }
                                     rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                }
+                            }
+                        }
+                        Some(Action::EditSelection) => {
+                            // Session 7A follow-up: open the text editor
+                            // on the selected single node with its
+                            // existing text, cursor at end. The
+                            // text-editor steal at the top of the
+                            // keyboard dispatch (`text_edit_state.is_open()`
+                            // branch above) means this can't fire while
+                            // the editor is already open, so Enter-inside-
+                            // editor stays literal.
+                            if let Some(doc) = document.as_mut() {
+                                let target = if let SelectionState::Single(id) = &doc.selection {
+                                    Some(id.clone())
+                                } else {
+                                    None
+                                };
+                                if let Some(id) = target {
+                                    open_text_edit(
+                                        &id,
+                                        false,
+                                        doc,
+                                        &mut text_edit_state,
+                                        &mut mindmap_tree,
+                                        &mut renderer,
+                                    );
+                                }
+                            }
+                        }
+                        Some(Action::EditSelectionClean) => {
+                            // Session 7A follow-up: open the editor with
+                            // an empty buffer. On commit, `set_node_text`
+                            // replaces the node's text wholesale and
+                            // pushes an `EditNodeText` undo entry — no
+                            // new undo variant needed.
+                            if let Some(doc) = document.as_mut() {
+                                let target = if let SelectionState::Single(id) = &doc.selection {
+                                    Some(id.clone())
+                                } else {
+                                    None
+                                };
+                                if let Some(id) = target {
+                                    open_text_edit(
+                                        &id,
+                                        true,
+                                        doc,
+                                        &mut text_edit_state,
+                                        &mut mindmap_tree,
+                                        &mut renderer,
+                                    );
                                 }
                             }
                         }
@@ -2492,7 +2579,9 @@ fn apply_text_edit_to_tree(
     renderer: &mut Renderer,
 ) {
     use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
-    use baumhard::core::primitives::{Applicable, ApplyOperation};
+    use baumhard::core::primitives::{
+        Applicable, ApplyOperation, ColorFontRegion, ColorFontRegions, Range,
+    };
 
     let tree = match mindmap_tree.as_mut() {
         Some(t) => t,
@@ -2517,9 +2606,40 @@ fn apply_text_edit_to_tree(
     // cursor position. This is what cosmic-text will shape.
     let display_text = insert_caret(buffer, cursor_char_pos);
 
-    // Construct the Baumhard delta: Text + Operation::Assign.
+    // Inherit the color of the first existing region so edited text
+    // matches the pre-edit styling. Fall back to `None` (renderer
+    // default) if there are no regions. `rebuild_buffers_from_tree`
+    // only draws characters that fall inside at least one region, so
+    // the replacement region has to span the *entire* new text —
+    // including the trailing caret glyph — or the caret and any
+    // just-typed characters past the original text length would be
+    // silently dropped by the span filter (renderer.rs:1500-1520).
+    // This was the root cause of the "double-click existing node does
+    // nothing" bug: the old regions were left in place, so the caret
+    // at char position == old_len was outside every region and never
+    // rendered.
+    let inherited_color = area
+        .regions
+        .all_regions()
+        .first()
+        .and_then(|r| r.color);
+    let display_char_count = display_text.chars().count();
+    let mut new_regions = ColorFontRegions::new_empty();
+    if display_char_count > 0 {
+        new_regions.submit_region(ColorFontRegion::new(
+            Range::new(0, display_char_count),
+            None,
+            inherited_color,
+        ));
+    }
+
+    // Construct the Baumhard delta: Text + ColorFontRegions + Assign.
+    // The Assign operation replaces both fields wholesale — see
+    // `GlyphArea::apply_operation` at area.rs:261 for regions and
+    // area.rs:273 for text.
     let delta = DeltaGlyphArea::new(vec![
         GlyphAreaField::Text(display_text),
+        GlyphAreaField::ColorFontRegions(new_regions),
         GlyphAreaField::Operation(ApplyOperation::Assign),
     ]);
     delta.apply_to(area);
@@ -3985,6 +4105,73 @@ mod text_edit_tests {
         // Caret after "hello", before " world".
         assert_eq!(area.text, "hello\u{258C} world");
         assert_eq!(area.text, display_text);
+    }
+
+    /// Regression test for the Session 7A follow-up bug: applying a
+    /// text edit delta to a GlyphArea with pre-existing
+    /// `ColorFontRegions` (i.e. an existing multi-run node) must
+    /// replace those regions with one that spans the entire new
+    /// display text — including the trailing caret glyph. Otherwise
+    /// `rebuild_buffers_from_tree` at renderer.rs:1500-1520 silently
+    /// drops any character outside the old ranges, making the caret
+    /// and newly-typed characters invisible.
+    #[test]
+    fn test_text_edit_replaces_stale_regions_to_cover_caret() {
+        use baumhard::core::primitives::{
+            Applicable, ApplyOperation, ColorFontRegion, ColorFontRegions, Range,
+        };
+        use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaField};
+
+        // Simulate an existing multi-run node with text "Hello" and
+        // a single region over [0, 5) colored red.
+        let mut area = GlyphArea::new_with_str(
+            "Hello",
+            14.0,
+            16.8,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 30.0),
+        );
+        let red = [1.0f32, 0.0, 0.0, 1.0];
+        let mut initial_regions = ColorFontRegions::new_empty();
+        initial_regions.submit_region(ColorFontRegion::new(
+            Range::new(0, 5),
+            None,
+            Some(red),
+        ));
+        area.regions = initial_regions;
+        assert_eq!(area.regions.num_regions(), 1);
+
+        // Build the same delta `apply_text_edit_to_tree` produces
+        // for buffer="Hello" at cursor=5: text="Hello▌", regions =
+        // single region [0, 6) inheriting the red color.
+        let buffer = "Hello";
+        let cursor = buffer.chars().count();
+        let display_text = insert_caret(buffer, cursor);
+        let display_char_count = display_text.chars().count();
+        let inherited_color = area.regions.all_regions().first().and_then(|r| r.color);
+        let mut new_regions = ColorFontRegions::new_empty();
+        new_regions.submit_region(ColorFontRegion::new(
+            Range::new(0, display_char_count),
+            None,
+            inherited_color,
+        ));
+
+        let delta = DeltaGlyphArea::new(vec![
+            GlyphAreaField::Text(display_text.clone()),
+            GlyphAreaField::ColorFontRegions(new_regions),
+            GlyphAreaField::Operation(ApplyOperation::Assign),
+        ]);
+        delta.apply_to(&mut area);
+
+        // Text updated.
+        assert_eq!(area.text, "Hello\u{258C}");
+        // Exactly one region, covering char positions 0..6 (includes
+        // the caret), and inheriting the original red color.
+        assert_eq!(area.regions.num_regions(), 1);
+        let region = area.regions.all_regions()[0];
+        assert_eq!(region.range.start, 0);
+        assert_eq!(region.range.end, 6);
+        assert_eq!(region.color, Some(red));
     }
 
     // -----------------------------------------------------------------
