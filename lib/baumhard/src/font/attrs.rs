@@ -3,15 +3,8 @@
 //! Bridges baumhard's `ColorFontRegions` (the model-level
 //! representation of styled text runs) into a cosmic-text `AttrsList`
 //! that the renderer can hand to `Editor::insert_string`. Lives in
-//! `font/` because it's the canonical, blessed point of contact
-//! between application data and cosmic-text — see
-//! [`crate::CONVENTIONS`](../../CONVENTIONS.md) §2 / §B4.
-//!
-//! Used to be a hand-rolled `to_cosmic_text` helper in the app crate
-//! (`src/application/baumhard_adapter.rs`) that reached straight into
-//! `font_system.db().face(...)` and panicked on three different
-//! `unwrap()`s. Centralised here so the app crate has zero direct
-//! cosmic-text usage on the styling path.
+//! `font/` so all cosmic-text styling goes through a single blessed
+//! module — see `CODE_CONVENTIONS.md` §2 and `CONVENTIONS.md` §B4.
 
 use cosmic_text::{Attrs, AttrsList, Color, Family, FontSystem, Style};
 use log::warn;
@@ -25,9 +18,9 @@ use crate::util::color::convert_f32_to_u8;
 /// One span is emitted per region. A region with `color = Some(rgba)`
 /// gets that color; otherwise the span uses cosmic-text's default. A
 /// region with `font = Some(id)` resolves to that font family; an
-/// unknown font id falls back to `Family::Monospace` with a warning,
-/// rather than panicking — this function runs inside the renderer's
-/// frame loop and a corrupt save must not abort it.
+/// unknown or unresolvable font id falls back to `Family::Monospace`
+/// with a warning — this function runs inside the renderer's frame
+/// loop and a corrupt save must not abort it.
 ///
 /// Cost: O(n_regions) iteration plus one `font_system.db().face()`
 /// lookup per region with a font id. The caller is expected to hold
@@ -46,47 +39,41 @@ pub fn attrs_list_from_regions(
             attrs = attrs.color(Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3]));
         }
 
-        // Resolve the font family lazily so a missing font id degrades
-        // to monospace instead of panicking on .unwrap(). Both lookups
-        // (compiled-id map miss, fontdb face miss) hit the same
-        // fallback.
-        let resolved_family: Option<String> = match region.font.as_ref() {
-            Some(font_id) => {
-                let face_ids = COMPILED_FONT_ID_MAP.get(font_id);
-                let face_ids = match face_ids {
-                    Some(ids) if !ids.is_empty() => ids,
-                    _ => {
-                        warn!(
-                            "attrs_list_from_regions: unknown font id {:?}, falling back to Monospace",
-                            font_id
-                        );
-                        attr_list.add_span(region.range.to_rust_range(), &attrs.family(Family::Monospace));
-                        continue;
-                    }
-                };
-                font_system
-                    .db()
-                    .face(face_ids[0])
-                    .map(|face| face.families[0].0.clone())
-            }
-            None => None,
+        // Resolve the font family. Both miss paths (compiled-id map
+        // miss, fontdb face miss) fall back to Monospace with a
+        // warning — consistent with §4's "degrade the frame, not
+        // abort the process" rule.
+        let family = resolve_font_family(region.font.as_ref(), font_system);
+        attrs = match family {
+            Some(ref name) => attrs.family(Family::Name(name.as_str())),
+            None => attrs.family(Family::Monospace),
         };
-
-        match resolved_family {
-            Some(family) => {
-                // Reborrow the family string for the span lifetime —
-                // AttrsList copies internally on `add_span`, so the
-                // local owns the storage just long enough.
-                attrs = attrs.family(Family::Name(family.as_str()));
-                attr_list.add_span(region.range.to_rust_range(), &attrs);
-            }
-            None => {
-                attrs = attrs.family(Family::Monospace);
-                attr_list.add_span(region.range.to_rust_range(), &attrs);
-            }
-        }
+        attr_list.add_span(region.range.to_rust_range(), &attrs);
     }
     attr_list
+}
+
+/// Look up the font-family name for a compiled font id. Returns
+/// `None` (monospace fallback) with a warning on any miss.
+fn resolve_font_family(
+    font_id: Option<&crate::font::fonts::AppFont>,
+    font_system: &mut FontSystem,
+) -> Option<String> {
+    let font_id = font_id?;
+    let face_ids = match COMPILED_FONT_ID_MAP.get(font_id) {
+        Some(ids) if !ids.is_empty() => ids,
+        _ => {
+            warn!("attrs_list_from_regions: unknown font id {font_id:?}, falling back to Monospace");
+            return None;
+        }
+    };
+    match font_system.db().face(face_ids[0]) {
+        Some(face) => Some(face.families[0].0.clone()),
+        None => {
+            warn!("attrs_list_from_regions: fontdb face miss for {font_id:?}, falling back to Monospace");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

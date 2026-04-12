@@ -309,9 +309,12 @@ fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
 /// to produce the `Mutation::AreaDelta` payload.
 #[cfg(not(target_arch = "wasm32"))]
 fn insert_caret(buffer: &str, cursor: usize) -> String {
+    let byte = grapheme_chad::find_byte_index_of_grapheme(buffer, cursor)
+        .unwrap_or(buffer.len());
     let mut out = String::with_capacity(buffer.len() + TEXT_EDIT_CARET.len_utf8());
-    out.push_str(buffer);
-    grapheme_chad::insert_str_at_grapheme(&mut out, cursor, &TEXT_EDIT_CARET.to_string());
+    out.push_str(&buffer[..byte]);
+    out.push(TEXT_EDIT_CARET);
+    out.push_str(&buffer[byte..]);
     out
 }
 

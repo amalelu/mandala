@@ -983,23 +983,20 @@ impl Renderer {
         if micros == 0 {
             return;
         }
-        // FPS is a debug readout — saturate on overflow rather than panic.
-        let one_sec = usize::try_from(Duration::from_secs(1).as_micros()).unwrap_or(usize::MAX);
-        let micros = usize::try_from(micros).unwrap_or(usize::MAX);
-        self.fps = Some(one_sec / micros.max(1));
+        self.fps = Some((1_000_000u128 / micros) as usize);
     }
 
     #[inline]
     fn calculate_fps(&mut self, delta_time: Duration) {
-        // FPS is a debug readout — saturate on overflow rather than panic.
-        let one_sec = usize::try_from(Duration::from_secs(1).as_micros()).unwrap_or(usize::MAX);
-        let frame_micros = usize::try_from(
-            (self.last_render_time
-                + Duration::max(delta_time, Self::ZERO_DURATION.clone()))
-            .as_micros(),
-        )
-        .unwrap_or(usize::MAX);
-        self.fps = Some(one_sec / frame_micros.max(1));
+        let frame_micros = (self.last_render_time
+            + Duration::max(delta_time, Self::ZERO_DURATION.clone()))
+        .as_micros();
+        // Guard against divide-by-zero on the first frame when both
+        // last_render_time and delta_time are zero.
+        if frame_micros == 0 {
+            return;
+        }
+        self.fps = Some((1_000_000u128 / frame_micros) as usize);
     }
 
     #[inline]
@@ -1031,9 +1028,11 @@ impl Renderer {
                block.render_bounds.x.0,
                block.render_bounds.y.0,
             );
-            let mut font_system = fonts::FONT_SYSTEM
-                .try_write()
-                .expect("Failed to acquire font-system write lock");
+            // Interactive path: a contended font-system lock skips
+            // this node's buffer update — the next frame will retry.
+            let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
+                return;
+            };
             editor.insert_string(
                 block.text.as_str(),
                 Some(attrs_list_from_regions(&block.regions, &mut font_system)),
@@ -1254,9 +1253,12 @@ impl Renderer {
             })
             .collect();
 
-        let mut font_system = fonts::FONT_SYSTEM
-            .try_write()
-            .expect("Failed to acquire font_system lock");
+        // Interactive path: a contended font-system lock must skip
+        // the frame, not abort the process.
+        let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
+            log::warn!("font_system lock contended in render(), skipping frame");
+            return;
+        };
 
         // Interactive path: a glyphon prepare failure must degrade the
         // frame, not abort the process. Skip the whole render so we

@@ -80,11 +80,11 @@ pub fn resolve_var<'a>(raw: &'a str, vars: &'a HashMap<String, String>) -> &'a s
     }
 }
 
-/// Non-panicking hex-to-rgba. Parses the same set of inputs as
-/// `hex_to_rgba` (6 or 8 hex chars, optional leading `#`) but returns
-/// `fallback` on any parse failure instead of panicking. Intended for
-/// render-time color resolution paths that should never crash the app
-/// over a typo in a theme variable.
+/// Parse a hex color string into an `[f32; 4]` RGBA quad, returning
+/// `fallback` on any parse failure. Accepts 3, 4, 6, or 8 hex chars
+/// with an optional leading `#`. Intended for render-time color
+/// resolution paths that should never crash the app over a typo in a
+/// theme variable.
 pub fn hex_to_rgba_safe(color: &str, fallback: [f32; 4]) -> [f32; 4] {
     let color = color.trim_start_matches('#');
     let length = color.len();
@@ -213,10 +213,7 @@ pub fn hex_to_hsv_safe(hex: &str) -> Option<(f32, f32, f32)> {
 }
 
 /// Parse a slice of hex color strings into rgba quads. Bad strings
-/// fall back to opaque black via `hex_to_rgba_safe` rather than
-/// panicking — this used to call a panicking `hex_to_rgba`, which
-/// violated CODE_CONVENTIONS.md §4 because the same code path is
-/// reachable from runtime palette loaders.
+/// fall back to opaque black via `hex_to_rgba_safe`.
 pub fn from_hex(colors: &[&str]) -> Vec<[f32; 4]> {
     let mut rgba_colors: Vec<[f32; 4]> = Vec::with_capacity(colors.len());
     for color in colors.iter() {
