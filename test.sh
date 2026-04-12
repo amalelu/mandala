@@ -62,7 +62,7 @@ else
   echo "== tests =="
   TEST_LOG=$(mktemp)
   trap 'rm -f "$TEST_LOG"' EXIT
-  cargo test -p baumhard -p mandala 2>&1 | tee "$TEST_LOG"
+  cargo test -p baumhard -p mandala -p maptool 2>&1 | tee "$TEST_LOG"
 
   TOTAL=$(grep -E '^test result: ok\. [0-9]+ passed' "$TEST_LOG" \
     | awk '{ sum += $4 } END { print sum+0 }')
