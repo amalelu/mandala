@@ -25,6 +25,7 @@
 
 use log::warn;
 use serde::{Deserialize, Serialize};
+use winit::keyboard::Key;
 
 /// High-level user actions that can be bound to keys. Add a new variant
 /// here when a new keyboard interaction is introduced, extend
@@ -133,6 +134,18 @@ impl KeyBind {
 /// lowercases and trims it.
 pub fn normalize_key_name(raw: &str) -> String {
     raw.trim().to_ascii_lowercase()
+}
+
+/// Convert a winit `Key` into the lowercase string form that
+/// `KeyBind::parse` produces, so keybind comparison is symmetric.
+/// Pairs with `normalize_key_name`; the two together produce comparable
+/// strings from either the stored-config side or the live-event side.
+pub fn key_to_name(key: &Key) -> Option<String> {
+    match key {
+        Key::Character(c) => Some(normalize_key_name(c.as_ref())),
+        Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),
+        _ => None,
+    }
 }
 
 /// The raw, user-editable config. Every field is a list of binding strings

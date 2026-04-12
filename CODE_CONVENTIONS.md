@@ -48,11 +48,11 @@ before it belongs in code.
   `RenderScene` for edges / borders / portals). The renderer never
   reaches into the document's data model directly, and the document
   never holds GPU handles.
-- **Two-pipeline render.** Nodes render through the Baumhard tree;
-  connections, borders, and portals render through the flat
+- **Two-pipeline render.** Nodes, and connections render through the Baumhard tree;
+  , borders, and portals render (for now) through the flat
   `RenderScene`. These are two independent paths wired side-by-side in
-  the event loop. New visuals must choose a pipeline on purpose — do
-  not bolt rectangles onto the tree path or trees onto the flat path.
+  the event loop. New visuals must choose a pipeline on purpose — but ideally
+  everything should use the Baumhard tree unless it has a good reason not to.
 - **Mutation-first interaction.** Where a user action can be expressed
   as a `MutatorTree<GfxMutator>` applied to the node tree, express it
   that way. Where it cannot (edges, borders, overlays), reach for the
