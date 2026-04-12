@@ -1310,6 +1310,81 @@ impl MindMapDocument {
         self.apply_reparent(node_ids, None)
     }
 
+    /// Create an orphan node at `canvas_pos`, push the `CreateNode` undo
+    /// entry, select the new node, and mark the document dirty. Returns
+    /// the new node's id. Shared between the Ctrl+N / double-click-empty
+    /// paths on native and WASM — each caller then typically opens the
+    /// text editor on the returned id.
+    pub fn create_orphan_and_select(&mut self, canvas_pos: Vec2) -> String {
+        let new_id = self.apply_create_orphan_node(canvas_pos);
+        self.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
+        self.selection = SelectionState::Single(new_id.clone());
+        self.dirty = true;
+        new_id
+    }
+
+    /// Delete whatever is currently selected (edge / portal / single node /
+    /// multiple nodes), push the appropriate undo entries, clear the
+    /// selection, and mark dirty. Returns `true` if anything was actually
+    /// deleted so the caller can gate a rebuild; `false` on empty selection
+    /// or no-op removes. Node deletion orphans immediate children (they
+    /// become roots) and strips every edge that touched the deleted node.
+    /// For multi-select, one undo entry is pushed per node so Ctrl+Z
+    /// unwinds them in reverse order.
+    pub fn apply_delete_selection(&mut self) -> bool {
+        enum DelKind {
+            Edge(EdgeRef),
+            Portal(PortalRef),
+            Node(String),
+            Nodes(Vec<String>),
+        }
+        let kind = match &self.selection {
+            SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
+            SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
+            SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
+            SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
+            SelectionState::None => None,
+        };
+        match kind {
+            Some(DelKind::Edge(edge_ref)) => {
+                if let Some((index, edge)) = self.remove_edge(&edge_ref) {
+                    self.undo_stack.push(UndoAction::DeleteEdge { index, edge });
+                    self.selection = SelectionState::None;
+                    self.dirty = true;
+                    return true;
+                }
+            }
+            Some(DelKind::Portal(pref)) => {
+                if self.apply_delete_portal(&pref).is_some() {
+                    self.selection = SelectionState::None;
+                    return true;
+                }
+            }
+            Some(DelKind::Node(id)) => {
+                if let Some(undo) = self.delete_node(&id) {
+                    self.undo_stack.push(undo);
+                    self.selection = SelectionState::None;
+                    return true;
+                }
+            }
+            Some(DelKind::Nodes(ids)) => {
+                let mut any = false;
+                for id in ids {
+                    if let Some(undo) = self.delete_node(&id) {
+                        self.undo_stack.push(undo);
+                        any = true;
+                    }
+                }
+                if any {
+                    self.selection = SelectionState::None;
+                    return true;
+                }
+            }
+            None => {}
+        }
+        false
+    }
+
     /// Generate a fresh node id that doesn't collide with any existing
     /// node. The format is `new-<n>` where `n` starts at 1 and increments
     /// until the id is free. Deterministic for testing.

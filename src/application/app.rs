@@ -752,10 +752,7 @@ impl Application {
                                             .unwrap_or(false);
                                         if allow_create {
                                             if let Some(doc) = document.as_mut() {
-                                                let new_id = doc.apply_create_orphan_node(canvas_pos);
-                                                doc.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
-                                                doc.selection = SelectionState::Single(new_id.clone());
-                                                doc.dirty = true;
+                                                let new_id = doc.create_orphan_and_select(canvas_pos);
                                                 rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                                 open_text_edit(
                                                     &new_id,
@@ -1428,77 +1425,9 @@ impl Application {
                             }
                         }
                         Some(Action::DeleteSelection) => {
-                            // Session 7A follow-up: node deletion is now
-                            // supported alongside edge and portal
-                            // deletion. Deleting a node orphans its
-                            // immediate children (they become roots) and
-                            // removes every edge that touched the node.
                             if let Some(doc) = document.as_mut() {
-                                enum DelKind {
-                                    Edge(crate::application::document::EdgeRef),
-                                    Portal(crate::application::document::PortalRef),
-                                    Node(String),
-                                    Nodes(Vec<String>),
-                                }
-                                let kind = match &doc.selection {
-                                    SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
-                                    SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
-                                    SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
-                                    SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
-                                    SelectionState::None => None,
-                                };
-                                match kind {
-                                    Some(DelKind::Edge(edge_ref)) => {
-                                        if let Some((idx, edge)) = doc.remove_edge(&edge_ref) {
-                                            doc.undo_stack.push(UndoAction::DeleteEdge {
-                                                index: idx,
-                                                edge,
-                                            });
-                                            doc.selection = SelectionState::None;
-                                            doc.dirty = true;
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                                        }
-                                    }
-                                    Some(DelKind::Portal(pref)) => {
-                                        // `apply_delete_portal` records the
-                                        // DeletePortal undo entry internally;
-                                        // we just clear selection + rebuild.
-                                        if doc.apply_delete_portal(&pref).is_some() {
-                                            doc.selection = SelectionState::None;
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                                        }
-                                    }
-                                    Some(DelKind::Node(id)) => {
-                                        if let Some(undo) = doc.delete_node(&id) {
-                                            doc.undo_stack.push(undo);
-                                            doc.selection = SelectionState::None;
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                                        }
-                                    }
-                                    Some(DelKind::Nodes(ids)) => {
-                                        // Multi-select delete: push one
-                                        // undo entry per node so Ctrl+Z
-                                        // unwinds them in reverse order.
-                                        // Each `delete_node` call is
-                                        // self-contained — if a later id
-                                        // happens to be a child of an
-                                        // earlier one, the earlier delete
-                                        // already orphaned it, so the
-                                        // later delete just removes the
-                                        // (now-root) node.
-                                        let mut any = false;
-                                        for id in ids {
-                                            if let Some(undo) = doc.delete_node(&id) {
-                                                doc.undo_stack.push(undo);
-                                                any = true;
-                                            }
-                                        }
-                                        if any {
-                                            doc.selection = SelectionState::None;
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
-                                        }
-                                    }
-                                    None => {}
+                                if doc.apply_delete_selection() {
+                                    rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                 }
                             }
                         }
@@ -1507,12 +1436,7 @@ impl Application {
                                 let canvas_pos = renderer.screen_to_canvas(
                                     cursor_pos.0 as f32, cursor_pos.1 as f32,
                                 );
-                                let new_id = doc.apply_create_orphan_node(canvas_pos);
-                                doc.undo_stack.push(UndoAction::CreateNode {
-                                    node_id: new_id.clone(),
-                                });
-                                doc.selection = SelectionState::Single(new_id);
-                                doc.dirty = true;
+                                doc.create_orphan_and_select(canvas_pos);
                                 rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                             }
                         }
@@ -1961,9 +1885,7 @@ impl Application {
             last_click: Option<LastClick>,
             cursor_pos: (f64, f64),
             pending_click: PendingClick,
-            ctrl_held: bool,
-            shift_held: bool,
-            alt_held: bool,
+            modifiers: winit::keyboard::ModifiersState,
         }
 
         let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
@@ -2021,9 +1943,7 @@ impl Application {
                     last_click: None,
                     cursor_pos: (0.0, 0.0),
                     pending_click: PendingClick::None,
-                    ctrl_held: false,
-                    shift_held: false,
-                    alt_held: false,
+                    modifiers: winit::keyboard::ModifiersState::empty(),
                 });
             }
 
@@ -2072,10 +1992,7 @@ impl Application {
                     event: WindowEvent::ModifiersChanged(mods), ..
                 } => {
                     if let Some(input) = input_for_events.borrow_mut().as_mut() {
-                        let s = mods.state();
-                        input.ctrl_held = s.control_key();
-                        input.shift_held = s.shift_key();
-                        input.alt_held = s.alt_key();
+                        input.modifiers = mods.state();
                     }
                 }
 
@@ -2116,7 +2033,12 @@ impl Application {
 
                     // Hotkey dispatch via keybinds.
                     let action = key_name.as_deref().and_then(|k| {
-                        keybinds.action_for(k, input.ctrl_held, input.shift_held, input.alt_held)
+                        keybinds.action_for(
+                            k,
+                            input.modifiers.control_key(),
+                            input.modifiers.shift_key(),
+                            input.modifiers.alt_key(),
+                        )
                     });
                     match action {
                         Some(Action::Undo) => {
@@ -2129,12 +2051,7 @@ impl Application {
                                 input.cursor_pos.0 as f32,
                                 input.cursor_pos.1 as f32,
                             );
-                            let new_id = input.document.apply_create_orphan_node(canvas_pos);
-                            input.document.undo_stack.push(UndoAction::CreateNode {
-                                node_id: new_id.clone(),
-                            });
-                            input.document.selection = SelectionState::Single(new_id);
-                            input.document.dirty = true;
+                            input.document.create_orphan_and_select(canvas_pos);
                             rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
                         }
                         Some(Action::OrphanSelection) => {
@@ -2153,60 +2070,8 @@ impl Application {
                             }
                         }
                         Some(Action::DeleteSelection) => {
-                            // Mirrors the native `DelKind` branch. Node deletion
-                            // orphans immediate children and removes every
-                            // edge that touched the node.
-                            enum DelKind {
-                                Edge(crate::application::document::EdgeRef),
-                                Portal(crate::application::document::PortalRef),
-                                Node(String),
-                                Nodes(Vec<String>),
-                            }
-                            let kind = match &input.document.selection {
-                                SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
-                                SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
-                                SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
-                                SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
-                                SelectionState::None => None,
-                            };
-                            match kind {
-                                Some(DelKind::Edge(edge_ref)) => {
-                                    if let Some((idx, edge)) = input.document.remove_edge(&edge_ref) {
-                                        input.document.undo_stack.push(UndoAction::DeleteEdge {
-                                            index: idx, edge,
-                                        });
-                                        input.document.selection = SelectionState::None;
-                                        input.document.dirty = true;
-                                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
-                                    }
-                                }
-                                Some(DelKind::Portal(pref)) => {
-                                    if input.document.apply_delete_portal(&pref).is_some() {
-                                        input.document.selection = SelectionState::None;
-                                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
-                                    }
-                                }
-                                Some(DelKind::Node(id)) => {
-                                    if let Some(undo) = input.document.delete_node(&id) {
-                                        input.document.undo_stack.push(undo);
-                                        input.document.selection = SelectionState::None;
-                                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
-                                    }
-                                }
-                                Some(DelKind::Nodes(ids)) => {
-                                    let mut any = false;
-                                    for id in ids {
-                                        if let Some(undo) = input.document.delete_node(&id) {
-                                            input.document.undo_stack.push(undo);
-                                            any = true;
-                                        }
-                                    }
-                                    if any {
-                                        input.document.selection = SelectionState::None;
-                                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
-                                    }
-                                }
-                                None => {}
+                            if input.document.apply_delete_selection() {
+                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
                             }
                         }
                         Some(Action::EditSelection) => {
@@ -2241,13 +2106,12 @@ impl Application {
                             // with a pre-Esc click.
                             input.last_click = None;
                         }
-                        Some(Action::EnterReparentMode)
-                        | Some(Action::EnterConnectMode) => {
+                        Some(a @ (Action::EnterReparentMode | Action::EnterConnectMode)) => {
                             // AppMode state is still native-only; these
                             // actions are deferred on WASM (would require
                             // de-gating AppMode, hovered_node, and the
                             // reparent/connect click handlers).
-                            log::warn!("WASM: mode-based action {:?} deferred", action);
+                            log::debug!("WASM: mode-based action {:?} deferred", a);
                         }
                         None => {}
                     }
@@ -2329,10 +2193,7 @@ impl Application {
                                     SelectionState::Edge(_) | SelectionState::Portal(_)
                                 );
                                 if allow_create {
-                                    let new_id = input.document.apply_create_orphan_node(canvas_pos);
-                                    input.document.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
-                                    input.document.selection = SelectionState::Single(new_id.clone());
-                                    input.document.dirty = true;
+                                    let new_id = input.document.create_orphan_and_select(canvas_pos);
                                     rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
                                     open_text_edit(
                                         &new_id, true,
@@ -2427,10 +2288,10 @@ impl Application {
                             screen_y: input.cursor_pos.1 as f32,
                             factor: factor as f32,
                         });
-                        // Camera change requires rebuilding the scene so
-                        // connection viewport culling picks up the new
-                        // visible rect.
-                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                        // Zoom touches scene geometry (connection glyph
+                        // sample spacing, viewport cull rect) but not the
+                        // node text tree — scene-only rebuild is enough.
+                        rebuild_scene_only(&input.document, renderer);
                     }
                 }
 
