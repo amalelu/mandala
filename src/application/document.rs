@@ -2097,9 +2097,11 @@ mod tests {
         // Find a parent-child pair where child is inside parent's bounds
         // "Lord God" (348068464) has children — find one whose bounds overlap
         let parent_id_str = "348068464";
-        let parent_node_id = tree.node_map.get(parent_id_str).unwrap();
-        let parent_area = tree.tree.arena.get(*parent_node_id).unwrap().get().glyph_area().unwrap();
-        let parent_size = parent_area.render_bounds.x.0 * parent_area.render_bounds.y.0;
+        let parent_size = {
+            let nid = tree.node_map.get(parent_id_str).unwrap();
+            let area = tree.tree.arena.get(*nid).unwrap().get().glyph_area().unwrap();
+            area.render_bounds.x.0 * area.render_bounds.y.0
+        };
 
         // Find any child node that's smaller and test its center
         for (mind_id, &nid) in &tree.node_map {
@@ -2113,16 +2115,9 @@ mod tests {
                 a.position.x.0 + a.render_bounds.x.0 / 2.0,
                 a.position.y.0 + a.render_bounds.y.0 / 2.0,
             );
-            // Check if this child center also hits the parent
-            let px = parent_area.position.x.0;
-            let py = parent_area.position.y.0;
-            let pw = parent_area.render_bounds.x.0;
-            let ph = parent_area.render_bounds.y.0;
-            if child_center.x >= px && child_center.x <= px + pw
-                && child_center.y >= py && child_center.y <= py + ph
-                && child_size < parent_size
+            if child_size < parent_size
+                && point_in_node_aabb(child_center, parent_id_str, &tree)
             {
-                // Both parent and child contain this point — should return the smaller one
                 let result = hit_test(child_center, &tree);
                 assert_eq!(result, Some(mind_id.clone()),
                     "Should select smaller child node, not parent");

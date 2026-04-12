@@ -25,6 +25,7 @@
 
 use log::warn;
 use serde::{Deserialize, Serialize};
+use winit::keyboard::Key;
 
 /// High-level user actions that can be bound to keys. Add a new variant
 /// here when a new keyboard interaction is introduced, extend
@@ -121,8 +122,7 @@ pub fn normalize_key_name(raw: &str) -> String {
 /// `KeyBind::parse` produces, so keybind comparison is symmetric.
 /// Pairs with `normalize_key_name`; the two together produce comparable
 /// strings from either the stored-config side or the live-event side.
-pub fn key_to_name(key: &winit::keyboard::Key) -> Option<String> {
-    use winit::keyboard::Key;
+pub fn key_to_name(key: &Key) -> Option<String> {
     match key {
         Key::Character(c) => Some(normalize_key_name(c.as_ref())),
         Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),

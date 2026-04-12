@@ -1856,18 +1856,23 @@ impl Application {
         // Shared state between the rAF render loop and the winit event
         // loop. Two RefCells so input handlers can borrow InputState
         // and Renderer simultaneously without conflict.
+        /// Pending left-click awaiting a release. `None` on init and after
+        /// release consumed; `Empty` after a click-down on empty canvas;
+        /// `Node(id)` after a click-down on a node. Full drag machine
+        /// (pan, move, reparent, connect) deferred to a later
+        /// WASM-parity session.
+        enum PendingClick {
+            None,
+            Empty,
+            Node(String),
+        }
         struct WasmInputState {
             document: MindMapDocument,
             mindmap_tree: Option<MindMapTree>,
             text_edit_state: TextEditState,
             last_click: Option<LastClick>,
             cursor_pos: (f64, f64),
-            /// Pending left-click: outer `Some` = click-down happened and a
-            /// release is expected; inner `Option<String>` is the node that
-            /// was hit, or `None` for empty canvas. Full drag machine (pan,
-            /// move, reparent, connect) deferred to a later WASM-parity
-            /// session.
-            pending_click_hit: Option<Option<String>>,
+            pending_click: PendingClick,
         }
 
         let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
@@ -1924,7 +1929,7 @@ impl Application {
                     text_edit_state: TextEditState::Closed,
                     last_click: None,
                     cursor_pos: (0.0, 0.0),
-                    pending_click_hit: None,
+                    pending_click: PendingClick::None,
                 });
             }
 
@@ -2101,7 +2106,10 @@ impl Application {
                             return;
                         }
 
-                        input.pending_click_hit = Some(hit_node.clone());
+                        input.pending_click = match hit_node.clone() {
+                            Some(id) => PendingClick::Node(id),
+                            None => PendingClick::Empty,
+                        };
                         input.last_click = Some(LastClick {
                             time: now,
                             screen_pos: input.cursor_pos,
@@ -2112,7 +2120,8 @@ impl Application {
                         let mut input_borrow = input_for_events.borrow_mut();
                         let Some(input) = input_borrow.as_mut() else { return; };
 
-                        let Some(pending_hit) = input.pending_click_hit.take() else { return; };
+                        let pending = std::mem::replace(&mut input.pending_click, PendingClick::None);
+                        if matches!(pending, PendingClick::None) { return; }
 
                         if input.text_edit_state.is_open() {
                             let mut renderer_borrow = renderer_for_events.borrow_mut();
@@ -2148,9 +2157,9 @@ impl Application {
                         }
 
                         // Plain selection click
-                        input.document.selection = match pending_hit {
-                            Some(node_id) => SelectionState::Single(node_id),
-                            None => SelectionState::None,
+                        input.document.selection = match pending {
+                            PendingClick::Node(node_id) => SelectionState::Single(node_id),
+                            _ => SelectionState::None,
                         };
                         let mut renderer_borrow = renderer_for_events.borrow_mut();
                         if let Some(renderer) = renderer_borrow.as_mut() {
