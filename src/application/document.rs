@@ -1671,12 +1671,27 @@ impl MindMapDocument {
     /// Build the mutation registry from map-level and inline node mutations.
     /// Inline mutations override map-level mutations with the same id.
     pub fn build_mutation_registry(&mut self) {
+        self.build_mutation_registry_with_user(&[]);
+    }
+
+    /// Variant that also accepts a slice of user-defined mutations
+    /// (from `$XDG_CONFIG_HOME/mandala/mutations.json`). Precedence
+    /// is user < map < inline: user mutations are inserted first, so
+    /// map and inline entries with the same id overwrite them.
+    pub fn build_mutation_registry_with_user(
+        &mut self,
+        user_mutations: &[CustomMutation],
+    ) {
         self.mutation_registry.clear();
-        // Map-level mutations (lower precedence)
+        // User-defined mutations (lowest precedence).
+        for cm in user_mutations {
+            self.mutation_registry.insert(cm.id.clone(), cm.clone());
+        }
+        // Map-level mutations (overrides user).
         for cm in &self.mindmap.custom_mutations {
             self.mutation_registry.insert(cm.id.clone(), cm.clone());
         }
-        // Inline node mutations (higher precedence — override map-level)
+        // Inline node mutations (highest — overrides map and user).
         for node in self.mindmap.nodes.values() {
             for cm in &node.inline_mutations {
                 self.mutation_registry.insert(cm.id.clone(), cm.clone());

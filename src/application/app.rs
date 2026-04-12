@@ -446,8 +446,19 @@ impl Application {
         // optimisation — nothing about the model depends on it.
         let mut scene_cache = baumhard::mindmap::scene_cache::SceneConnectionCache::new();
 
+        // User-defined custom-mutations file, loaded once at startup.
+        // Merged into the registry at the lowest precedence so map +
+        // inline mutations always win on id collision.
+        let user_mutations_file =
+            crate::application::console::user_mutations::UserMutationsFile::load_for_desktop();
+
         match MindMapDocument::load(&self.options.mindmap_path) {
-            Ok(doc) => {
+            Ok(mut doc) => {
+                // Re-resolve the registry with user mutations merged
+                // in. `MindMapDocument::load` built one without them;
+                // the console needs them visible to `mutate list` and
+                // `mutate run`.
+                doc.build_mutation_registry_with_user(&user_mutations_file.mutations);
                 // Canvas background: resolve through theme
                 // variables so `"var(--bg)"` works, then hand off
                 // to the renderer as the render-pass clear color.
@@ -2397,6 +2408,7 @@ fn execute_console_line(
     let label_edit_req = effects.open_label_edit.take();
     let color_picker_req = effects.open_color_picker.take();
     let close_after = effects.close_console;
+    let run_mutation_req = effects.run_mutation.take();
 
     // Emit the command's result lines into the scrollback.
     match result {
@@ -2410,6 +2422,30 @@ fn execute_console_line(
             for l in lines {
                 push_scrollback_output(console_state, l);
             }
+        }
+    }
+
+    // `mutate run` needs tree access, so commands defer it to here.
+    // The registry lookup + node check already happened inside
+    // `execute_mutate_run`; this is pure dispatch.
+    if let Some(req) = run_mutation_req {
+        // Clone the mutation out of the registry before borrowing
+        // `doc` mutably for `apply_custom_mutation`.
+        let mutation = doc.mutation_registry.get(&req.mutation_id).cloned();
+        if let (Some(m), Some(tree)) = (mutation, mindmap_tree.as_mut()) {
+            doc.apply_custom_mutation(&m, &req.node_id, tree);
+            push_scrollback_output(
+                console_state,
+                format!("applied {} to {}", req.mutation_id, req.node_id),
+            );
+        } else {
+            push_scrollback_error(
+                console_state,
+                format!(
+                    "mutate run {}: tree not ready or mutation vanished",
+                    req.mutation_id
+                ),
+            );
         }
     }
 

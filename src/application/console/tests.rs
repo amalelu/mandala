@@ -459,6 +459,165 @@ fn test_complete_select_node_completes_ids() {
 }
 
 // ============================================================
+// `mutate list` / `mutate run`
+// ============================================================
+
+fn sample_custom_mutation(id: &str, name: &str) -> baumhard::mindmap::custom_mutation::CustomMutation {
+    baumhard::mindmap::custom_mutation::CustomMutation {
+        id: id.to_string(),
+        name: name.to_string(),
+        mutations: Vec::new(),
+        target_scope: baumhard::mindmap::custom_mutation::TargetScope::SelfOnly,
+        behavior: baumhard::mindmap::custom_mutation::MutationBehavior::Persistent,
+        predicate: None,
+        document_actions: Vec::new(),
+    }
+}
+
+#[test]
+fn test_mutate_list_with_empty_registry_reports_empty() {
+    let mut doc = load_test_doc();
+    doc.mutation_registry.clear();
+    let result = run("mutate list", &mut doc);
+    match result {
+        ExecResult::Ok(s) => assert!(s.contains("no mutations")),
+        other => panic!("expected Ok with 'no mutations', got {:?}", other),
+    }
+}
+
+#[test]
+fn test_mutate_list_prints_registered_ids() {
+    let mut doc = load_test_doc();
+    doc.mutation_registry.insert(
+        "test-m1".into(),
+        sample_custom_mutation("test-m1", "Test One"),
+    );
+    let result = run("mutate list", &mut doc);
+    match result {
+        ExecResult::Lines(lines) => {
+            assert!(lines.iter().any(|l| l.contains("test-m1")));
+            assert!(lines.iter().any(|l| l.contains("Test One")));
+        }
+        other => panic!("expected Lines, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_mutate_list_classifies_source_as_map() {
+    let mut doc = load_test_doc();
+    doc.mindmap
+        .custom_mutations
+        .push(sample_custom_mutation("map-mut", "Map Mutation"));
+    doc.build_mutation_registry();
+    let result = run("mutate list", &mut doc);
+    match result {
+        ExecResult::Lines(lines) => {
+            let hit = lines.iter().find(|l| l.contains("map-mut"));
+            assert!(hit.is_some(), "map-mut not in listing");
+            assert!(hit.unwrap().contains("map"));
+        }
+        other => panic!("expected Lines, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_mutate_run_without_selection_errors() {
+    let mut doc = load_test_doc();
+    doc.mutation_registry.insert(
+        "test-m".into(),
+        sample_custom_mutation("test-m", "Test"),
+    );
+    doc.selection = SelectionState::None;
+    let result = run("mutate run test-m", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
+}
+
+#[test]
+fn test_mutate_run_unknown_id_errors() {
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid);
+    let result = run("mutate run does-not-exist", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)));
+}
+
+#[test]
+fn test_mutate_run_sets_deferred_request_on_effects() {
+    let mut doc = load_test_doc();
+    doc.mutation_registry.insert(
+        "test-m".into(),
+        sample_custom_mutation("test-m", "Test"),
+    );
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid.clone());
+
+    let (cmd, toks) = match parse("mutate run test-m") {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        _ => panic!("parse failed"),
+    };
+    let mut eff = ConsoleEffects::new(&mut doc);
+    let result = (cmd.execute)(&Args::new(&toks), &mut eff);
+    assert!(matches!(result, ExecResult::Ok(_)));
+    let req = eff.run_mutation.take().expect("run_mutation should be set");
+    assert_eq!(req.mutation_id, "test-m");
+    assert_eq!(req.node_id, nid);
+}
+
+#[test]
+fn test_mutate_run_explicit_node_id_overrides_selection() {
+    let mut doc = load_test_doc();
+    doc.mutation_registry.insert(
+        "test-m".into(),
+        sample_custom_mutation("test-m", "Test"),
+    );
+    let mut ids = doc.mindmap.nodes.keys().cloned();
+    let sel_id = ids.next().unwrap();
+    let arg_id = ids.next().unwrap();
+    doc.selection = SelectionState::Single(sel_id.clone());
+
+    let (cmd, toks) = match parse(&format!("mutate run test-m {}", arg_id)) {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        _ => panic!("parse failed"),
+    };
+    let mut eff = ConsoleEffects::new(&mut doc);
+    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
+    let req = eff.run_mutation.take().unwrap();
+    assert_eq!(req.node_id, arg_id);
+    assert_ne!(req.node_id, sel_id);
+}
+
+// ============================================================
+// User-mutation precedence (user < map < inline)
+// ============================================================
+
+#[test]
+fn test_user_mutations_merged_at_lowest_precedence() {
+    let mut doc = load_test_doc();
+    let user = vec![sample_custom_mutation("shared-id", "user version")];
+    doc.build_mutation_registry_with_user(&user);
+    assert_eq!(
+        doc.mutation_registry.get("shared-id").map(|m| m.name.as_str()),
+        Some("user version"),
+        "user mutation should be visible when no map/inline override"
+    );
+}
+
+#[test]
+fn test_map_mutation_overrides_user_mutation_with_same_id() {
+    let mut doc = load_test_doc();
+    doc.mindmap
+        .custom_mutations
+        .push(sample_custom_mutation("shared-id", "map version"));
+    let user = vec![sample_custom_mutation("shared-id", "user version")];
+    doc.build_mutation_registry_with_user(&user);
+    assert_eq!(
+        doc.mutation_registry.get("shared-id").map(|m| m.name.as_str()),
+        Some("map version"),
+        "map mutation should overwrite user mutation on id collision"
+    );
+}
+
+// ============================================================
 // Backward compat: every palette action has a console invocation
 // ============================================================
 

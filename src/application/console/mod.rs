@@ -32,6 +32,7 @@ pub mod completion;
 pub mod fuzzy;
 pub mod parser;
 pub mod predicates;
+pub mod user_mutations;
 
 #[cfg(test)]
 mod tests;
@@ -68,7 +69,8 @@ impl<'a> ConsoleContext<'a> {
 
 /// Mutable handles handed to `execute`. Superset of the former
 /// `PaletteEffects` — keeps the two modal-handoff fields the palette
-/// already used.
+/// already used, plus `run_mutation` for `mutate run` (needs tree
+/// access that only the event-loop dispatcher has).
 pub struct ConsoleEffects<'a> {
     pub document: &'a mut MindMapDocument,
     /// If set when `execute` returns, the dispatcher transitions to
@@ -81,6 +83,19 @@ pub struct ConsoleEffects<'a> {
     /// console even on a successful command (e.g. `quit`, or after a
     /// modal handoff).
     pub close_console: bool,
+    /// If set when `execute` returns, the dispatcher calls
+    /// `MindMapDocument::apply_custom_mutation` with these
+    /// arguments. Exposed as a deferred request because
+    /// `apply_custom_mutation` needs `&mut MindMapTree`, which the
+    /// command fn doesn't have access to (it only holds the
+    /// document).
+    pub run_mutation: Option<RunMutationRequest>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RunMutationRequest {
+    pub mutation_id: String,
+    pub node_id: String,
 }
 
 impl<'a> ConsoleEffects<'a> {
@@ -90,6 +105,7 @@ impl<'a> ConsoleEffects<'a> {
             open_label_edit: None,
             open_color_picker: None,
             close_console: false,
+            run_mutation: None,
         }
     }
 }
