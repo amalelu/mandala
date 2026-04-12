@@ -3,12 +3,13 @@
 
 use super::Command;
 use crate::application::console::completion::{enum_completion, Completion, CompletionState};
+use crate::application::console::constants::{EDGE_TYPE_CROSS_LINK, EDGE_TYPE_PARENT_CHILD};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 use crate::application::document::SelectionState;
 
-pub const EDGE_TYPES: &[&str] = &["cross_link", "parent_child"];
+pub const EDGE_TYPES: &[&str] = &[EDGE_TYPE_CROSS_LINK, EDGE_TYPE_PARENT_CHILD];
 
 pub const COMMAND: Command = Command {
     name: "edge",

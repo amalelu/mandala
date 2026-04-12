@@ -56,8 +56,12 @@ use std::path::Path;
 pub struct ConsoleOverlayGeometry {
     /// Input buffer text, rendered after the `❯ ` prompt glyph.
     pub input: String,
-    /// Byte position into `input` of the cursor glyph.
-    pub cursor_byte: usize,
+    /// Grapheme-cluster index of the cursor. The renderer converts
+    /// this to a byte offset via
+    /// `baumhard::util::grapheme_chad::find_byte_index_of_grapheme`
+    /// so the prompt-line `split_at` lands on a grapheme boundary
+    /// even for ZWJ emoji / combining marks.
+    pub cursor_grapheme: usize,
     /// Scrollback lines, oldest first. Only the trailing
     /// `MAX_CONSOLE_SCROLLBACK_ROWS` are drawn; anything above scrolls
     /// off the top.
@@ -140,6 +144,16 @@ pub const MAX_CONSOLE_SCROLLBACK_ROWS: usize = 12;
 /// Maximum number of completion candidates drawn in the popup above
 /// the prompt.
 pub const MAX_CONSOLE_COMPLETION_ROWS: usize = 8;
+
+/// Leading character on every console input line (the `❯` glyph).
+const PROMPT_GLYPH: &str = "\u{276F}";
+/// The block cursor (`▌`) drawn at the current cursor position.
+const CURSOR_GLYPH: &str = "\u{258C}";
+/// Prefix attached to the currently-selected completion row (`▸ `).
+const SELECTED_COMPLETION_MARKER: &str = "\u{25B8} ";
+/// Padding for unselected completion rows so the list stays
+/// vertically aligned with the selected row's marker.
+const UNSELECTED_COMPLETION_MARKER: &str = "  ";
 
 impl ConsoleFrameLayout {
     /// Screen-space rectangle covered by the opaque backdrop. Matches
@@ -1903,7 +1917,11 @@ impl Renderer {
             let is_selected = geometry.selected_completion == Some(i);
             let color = if is_selected { selected_color } else { text_color };
             let attrs = mk_attrs(color, font_size);
-            let prefix = if is_selected { "\u{25B8} " } else { "  " };
+            let prefix = if is_selected {
+                SELECTED_COMPLETION_MARKER
+            } else {
+                UNSELECTED_COMPLETION_MARKER
+            };
             let line = match &c.hint {
                 Some(hint) => format!("{prefix}{}    {}", c.text, hint),
                 None => format!("{prefix}{}", c.text),
@@ -1919,16 +1937,22 @@ impl Renderer {
             ));
         }
 
-        // Prompt line: "❯ <input>▌" with the cursor glyph inserted
-        // at `cursor_byte`. The byte-indexed split is safe because
-        // the input only ever takes single-char insertions from
-        // winit `Key::Character` payloads — no emoji, no combining
-        // marks. See CODE_CONVENTIONS §2.
+        // Prompt line: `PROMPT_GLYPH + input_before_cursor +
+        // CURSOR_GLYPH + input_after_cursor`. The cursor is a
+        // grapheme-cluster index; we translate to a byte offset via
+        // `find_byte_index_of_grapheme` so the split lands on a
+        // valid grapheme boundary even for ZWJ emoji / combining
+        // marks (CODE_CONVENTIONS §2).
         let prompt_attrs = mk_attrs(text_color, font_size);
         let prompt_budget = font_size * 1.4;
-        let cursor_byte = geometry.cursor_byte.min(geometry.input.len());
+        let cursor_byte =
+            baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
+                &geometry.input,
+                geometry.cursor_grapheme,
+            )
+            .unwrap_or(geometry.input.len());
         let (pre, post) = geometry.input.split_at(cursor_byte);
-        let prompt_line = format!("\u{276F} {}\u{258C}{}", pre, post);
+        let prompt_line = format!("{PROMPT_GLYPH} {}{CURSOR_GLYPH}{}", pre, post);
         let y = layout.prompt_y();
         self.console_overlay_buffers.push(create_border_buffer(
             &mut font_system,
@@ -3125,7 +3149,7 @@ mod tests {
     fn empty_console_geometry() -> ConsoleOverlayGeometry {
         ConsoleOverlayGeometry {
             input: String::new(),
-            cursor_byte: 0,
+            cursor_grapheme: 0,
             scrollback: Vec::new(),
             completions: Vec::new(),
             selected_completion: None,
@@ -3138,7 +3162,7 @@ mod tests {
     fn sample_console_geometry() -> ConsoleOverlayGeometry {
         ConsoleOverlayGeometry {
             input: "anchor set from t".to_string(),
-            cursor_byte: 17,
+            cursor_grapheme: 17,
             scrollback: vec![
                 ConsoleOverlayLine {
                     text: "> help".to_string(),

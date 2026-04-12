@@ -23,8 +23,11 @@ pub const COMMAND: Command = Command {
     name: "select",
     aliases: &["sel"],
     summary: "Set the current selection programmatically",
-    usage: "select <none | node <id>>",
-    tags: &["selection", "select", "node", "none"],
+    // `edge` / `portal` complete but currently print an
+    // "not yet wired" error — keep them in the usage string so the
+    // command discovery surface stays truthful once they land.
+    usage: "select <none | node <id> | edge | portal>",
+    tags: &["selection", "select", "node", "none", "edge", "portal"],
     applicable: always,
     complete: complete_select,
     execute: execute_select,

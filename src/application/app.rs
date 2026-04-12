@@ -2250,12 +2250,64 @@ fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
 /// Rebuild tree from model with selection highlight, plus connections and borders.
 /// When the current selection is an edge, its `ConnectionElement` gets a
 /// cyan color override baked in via `build_scene_with_selection()`.
+// --- Console line-editor key names ---------------------------------
+//
+// `keybinds::normalize_key_name` lowercases the winit key identifier,
+// so every console-handled key matches the lowercase forms here. Kept
+// local to `app.rs` because this is the only module that dispatches
+// on them.
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_ESCAPE: &str = "escape";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_ENTER: &str = "enter";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_TAB: &str = "tab";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_ARROW_UP: &str = "arrowup";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_UP: &str = "up";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_ARROW_DOWN: &str = "arrowdown";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_DOWN: &str = "down";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_ARROW_LEFT: &str = "arrowleft";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_LEFT: &str = "left";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_ARROW_RIGHT: &str = "arrowright";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_RIGHT: &str = "right";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_HOME: &str = "home";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_END: &str = "end";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_BACKSPACE: &str = "backspace";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_DELETE: &str = "delete";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_CTRL_A: &str = "a";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_CTRL_C: &str = "c";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_CTRL_E: &str = "e";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_CTRL_U: &str = "u";
+#[cfg(not(target_arch = "wasm32"))]
+const CONSOLE_KEY_CTRL_W: &str = "w";
+
 /// Handle a keystroke while the console is open. The console is a
 /// shell-style line editor: char input inserts at the cursor, Tab
 /// cycles completions, Up/Down walks history, Enter parses +
 /// executes the buffered line, and Escape closes. Regular hotkeys
 /// are suppressed — this runs entirely outside the keybinds
 /// resolver.
+///
+/// Cursor arithmetic throughout this function is **grapheme-indexed**,
+/// not byte-indexed, to satisfy CODE_CONVENTIONS §2. All mutations
+/// route through `baumhard::util::grapheme_chad` so ZWJ emoji and
+/// combining marks are treated as atomic cursor cells.
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_console_key(
     key_name: &Option<String>,
@@ -2272,6 +2324,11 @@ fn handle_console_key(
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
     keybinds: &ResolvedKeybinds,
 ) {
+    use baumhard::util::grapheme_chad::{
+        count_grapheme_clusters, delete_front_unicode, delete_grapheme_at,
+        find_byte_index_of_grapheme, insert_str_at_grapheme,
+    };
+
     let name = match key_name.as_deref() {
         Some(n) => n,
         None => return,
@@ -2280,7 +2337,7 @@ fn handle_console_key(
     // Ctrl+C / Ctrl+A / etc. don't get swallowed by the `_` branch.
     if ctrl_pressed {
         match name {
-            "c" => {
+            CONSOLE_KEY_CTRL_C => {
                 // Clear input without closing — same as the shell
                 // muscle-memory: Ctrl+C abandons the current line.
                 if let ConsoleState::Open { input, cursor, completions, completion_idx, history_idx, .. } = console_state {
@@ -2295,7 +2352,7 @@ fn handle_console_key(
                 }
                 return;
             }
-            "a" => {
+            CONSOLE_KEY_CTRL_A => {
                 if let ConsoleState::Open { cursor, .. } = console_state {
                     *cursor = 0;
                 }
@@ -2304,19 +2361,20 @@ fn handle_console_key(
                 }
                 return;
             }
-            "e" => {
+            CONSOLE_KEY_CTRL_E => {
                 if let ConsoleState::Open { cursor, input, .. } = console_state {
-                    *cursor = input.len();
+                    *cursor = count_grapheme_clusters(input);
                 }
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
                 return;
             }
-            "u" => {
-                // Kill to start of line.
+            CONSOLE_KEY_CTRL_U => {
+                // Kill to start of line — drop the first `cursor`
+                // grapheme clusters via `delete_front_unicode`.
                 if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
-                    input.drain(..*cursor);
+                    delete_front_unicode(input, *cursor);
                     *cursor = 0;
                     completions.clear();
                     *completion_idx = None;
@@ -2326,21 +2384,37 @@ fn handle_console_key(
                 }
                 return;
             }
-            "w" => {
+            CONSOLE_KEY_CTRL_W => {
                 // Kill word before cursor (whitespace-separated).
+                // Walk back through grapheme clusters, first skipping
+                // trailing whitespace, then the word — everything is
+                // kept grapheme-indexed.
                 if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
-                    let end = *cursor;
-                    // Skip trailing whitespace, then the word.
-                    let bytes = input.as_bytes();
-                    let mut start = end;
-                    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
-                        start -= 1;
+                    let end_g = *cursor;
+                    // Collect graphemes up to `end_g` so we can walk
+                    // them backwards without re-parsing.
+                    use unicode_segmentation::UnicodeSegmentation;
+                    let prefix_bytes = find_byte_index_of_grapheme(input, end_g)
+                        .unwrap_or(input.len());
+                    let clusters: Vec<&str> = input[..prefix_bytes].graphemes(true).collect();
+                    let mut start_g = clusters.len();
+                    while start_g > 0
+                        && clusters[start_g - 1].chars().all(|c| c.is_whitespace())
+                    {
+                        start_g -= 1;
                     }
-                    while start > 0 && !bytes[start - 1].is_ascii_whitespace() {
-                        start -= 1;
+                    while start_g > 0
+                        && !clusters[start_g - 1].chars().all(|c| c.is_whitespace())
+                    {
+                        start_g -= 1;
                     }
-                    input.drain(start..end);
-                    *cursor = start;
+                    // Drop `end_g - start_g` graphemes starting at
+                    // `start_g` by deleting them one at a time from
+                    // the back forward.
+                    for _ in 0..(end_g - start_g) {
+                        delete_grapheme_at(input, start_g);
+                    }
+                    *cursor = start_g;
                     completions.clear();
                     *completion_idx = None;
                 }
@@ -2353,12 +2427,12 @@ fn handle_console_key(
         }
     }
     match name {
-        "escape" => {
+        CONSOLE_KEY_ESCAPE => {
             save_console_history(console_history);
             *console_state = ConsoleState::Closed;
             renderer.rebuild_console_overlay_buffers(None);
         }
-        "enter" => {
+        CONSOLE_KEY_ENTER => {
             // Snapshot input, reset state, then parse + execute.
             // Append the executed line to persistent history + the
             // in-state history copy, then re-rebuild the overlay.
@@ -2415,15 +2489,19 @@ fn handle_console_key(
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "tab" => {
+        CONSOLE_KEY_TAB => {
             // Cycle completions. First Tab: compute + select first.
             // Subsequent Tabs: advance (or reverse on Shift+Tab).
+            // The completion engine takes a byte cursor; translate
+            // from grapheme index via `find_byte_index_of_grapheme`.
             let (has_completions, advance) = match console_state {
                 ConsoleState::Open { completions, completion_idx, input, cursor, .. } => {
                     if completions.is_empty() {
                         if let Some(doc) = document.as_ref() {
+                            let byte_cursor = find_byte_index_of_grapheme(input, *cursor)
+                                .unwrap_or(input.len());
                             let ctx = ConsoleContext::from_document(doc);
-                            let new = complete_console(input, *cursor, &ctx);
+                            let new = complete_console(input, byte_cursor, &ctx);
                             *completions = new
                                 .into_iter()
                                 .map(|c| crate::application::console::completion::Completion {
@@ -2453,7 +2531,7 @@ fn handle_console_key(
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "arrowup" | "up" => {
+        CONSOLE_KEY_ARROW_UP | CONSOLE_KEY_UP => {
             if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
                 if !history.is_empty() {
                     let next = match history_idx {
@@ -2463,21 +2541,21 @@ fn handle_console_key(
                     };
                     *history_idx = Some(next);
                     *input = history[next].clone();
-                    *cursor = input.len();
+                    *cursor = count_grapheme_clusters(input);
                 }
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "arrowdown" | "down" => {
+        CONSOLE_KEY_ARROW_DOWN | CONSOLE_KEY_DOWN => {
             if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
                 match history_idx {
                     Some(i) if *i + 1 < history.len() => {
                         let next = *i + 1;
                         *history_idx = Some(next);
                         *input = history[next].clone();
-                        *cursor = input.len();
+                        *cursor = count_grapheme_clusters(input);
                     }
                     Some(_) => {
                         *history_idx = None;
@@ -2491,35 +2569,28 @@ fn handle_console_key(
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "arrowleft" | "left" => {
-            if let ConsoleState::Open { cursor, input, .. } = console_state {
+        CONSOLE_KEY_ARROW_LEFT | CONSOLE_KEY_LEFT => {
+            if let ConsoleState::Open { cursor, .. } = console_state {
                 if *cursor > 0 {
-                    // Walk back one char boundary (byte-safe).
-                    let new = input[..*cursor]
-                        .char_indices()
-                        .last()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    *cursor = new;
+                    *cursor -= 1;
                 }
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "arrowright" | "right" => {
+        CONSOLE_KEY_ARROW_RIGHT | CONSOLE_KEY_RIGHT => {
             if let ConsoleState::Open { cursor, input, .. } = console_state {
-                if *cursor < input.len() {
-                    let rest = &input[*cursor..];
-                    let step = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-                    *cursor += step;
+                let max = count_grapheme_clusters(input);
+                if *cursor < max {
+                    *cursor += 1;
                 }
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "home" => {
+        CONSOLE_KEY_HOME => {
             if let ConsoleState::Open { cursor, .. } = console_state {
                 *cursor = 0;
             }
@@ -2527,24 +2598,19 @@ fn handle_console_key(
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "end" => {
+        CONSOLE_KEY_END => {
             if let ConsoleState::Open { cursor, input, .. } = console_state {
-                *cursor = input.len();
+                *cursor = count_grapheme_clusters(input);
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "backspace" => {
+        CONSOLE_KEY_BACKSPACE => {
             if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
                 if *cursor > 0 {
-                    let prev = input[..*cursor]
-                        .char_indices()
-                        .last()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    input.drain(prev..*cursor);
-                    *cursor = prev;
+                    *cursor -= 1;
+                    delete_grapheme_at(input, *cursor);
                     completions.clear();
                     *completion_idx = None;
                 }
@@ -2553,12 +2619,10 @@ fn handle_console_key(
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
-        "delete" => {
+        CONSOLE_KEY_DELETE => {
             if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
-                if *cursor < input.len() {
-                    let rest = &input[*cursor..];
-                    let step = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-                    input.drain(*cursor..*cursor + step);
+                if *cursor < count_grapheme_clusters(input) {
+                    delete_grapheme_at(input, *cursor);
                     completions.clear();
                     *completion_idx = None;
                 }
@@ -2568,7 +2632,14 @@ fn handle_console_key(
             }
         }
         _ => {
-            // Character input: insert at cursor.
+            // Character input: insert at cursor, one grapheme at a
+            // time. Filter control chars to match
+            // `handle_text_edit_key` at app.rs:3386 — dead keys / IME
+            // can occasionally ship control payloads via
+            // `Key::Character` and those must not land in the input
+            // buffer as literal glyphs. Inserts go through
+            // `insert_str_at_grapheme` so the cursor stays a
+            // grapheme index.
             if let Key::Character(c) = logical_key {
                 if let ConsoleState::Open {
                     input,
@@ -2579,9 +2650,15 @@ fn handle_console_key(
                     ..
                 } = console_state
                 {
-                    let s: &str = c.as_ref();
-                    input.insert_str(*cursor, s);
-                    *cursor += s.len();
+                    for ch in c.as_str().chars() {
+                        if ch.is_control() {
+                            continue;
+                        }
+                        let mut buf = [0u8; 4];
+                        let encoded = ch.encode_utf8(&mut buf);
+                        insert_str_at_grapheme(input, *cursor, encoded);
+                        *cursor += 1;
+                    }
                     completions.clear();
                     *completion_idx = None;
                     *history_idx = None;
@@ -2759,7 +2836,7 @@ fn rebuild_console_overlay(
         .collect();
     let geometry = ConsoleOverlayGeometry {
         input: input.clone(),
-        cursor_byte: cursor,
+        cursor_grapheme: cursor,
         scrollback: scrollback_lines,
         completions: completion_geo,
         selected_completion,

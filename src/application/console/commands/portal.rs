@@ -5,6 +5,9 @@
 
 use super::Command;
 use crate::application::console::completion::{enum_completion, Completion, CompletionState};
+use crate::application::console::constants::{
+    PORTAL_DEFAULT_COLOR, VAR_ACCENT, VAR_EDGE, VAR_FG,
+};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
@@ -22,10 +25,10 @@ pub const GLYPHS: &[(&str, &str)] = &[
 
 /// Portal color presets. `reset` maps to the default hex.
 pub const COLORS: &[(&str, &str)] = &[
-    ("accent", "var(--accent)"),
-    ("edge", "var(--edge)"),
-    ("fg", "var(--fg)"),
-    ("reset", "#aa88cc"),
+    ("accent", VAR_ACCENT),
+    ("edge", VAR_EDGE),
+    ("fg", VAR_FG),
+    ("reset", PORTAL_DEFAULT_COLOR),
 ];
 
 pub const COMMAND: Command = Command {

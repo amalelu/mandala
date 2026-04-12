@@ -9,6 +9,7 @@
 use super::Command;
 use crate::application::color_picker::ColorTarget;
 use crate::application::console::completion::{enum_completion, Completion, CompletionState};
+use crate::application::console::constants::{VAR_ACCENT, VAR_EDGE, VAR_FG};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::{edge_or_portal_selected, edge_selected};
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
@@ -59,9 +60,9 @@ fn execute_color(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                 _ => return ExecResult::err("no edge selected"),
             };
             let color = match sub.as_str() {
-                "accent" => Some("var(--accent)"),
-                "edge" => Some("var(--edge)"),
-                "fg" => Some("var(--fg)"),
+                "accent" => Some(VAR_ACCENT),
+                "edge" => Some(VAR_EDGE),
+                "fg" => Some(VAR_FG),
                 "reset" => None,
                 _ => unreachable!(),
             };

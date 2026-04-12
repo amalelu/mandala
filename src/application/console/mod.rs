@@ -29,6 +29,7 @@ use std::collections::HashMap;
 
 pub mod commands;
 pub mod completion;
+pub mod constants;
 pub mod fuzzy;
 pub mod parser;
 pub mod predicates;
@@ -169,12 +170,12 @@ pub enum ConsoleState {
         /// Current input buffer. Not shell-expanded; that happens at
         /// `parse` time on Enter.
         input: String,
-        /// Byte index into `input` where the cursor sits. Kept as a
-        /// byte index (not char / grapheme) because the line editor
-        /// only inserts `Key::Character` single-char payloads — no
-        /// emoji, no combining marks. See CODE_CONVENTIONS §2; the
-        /// command surface is ASCII-dominant enough that byte cursor
-        /// is the right simple choice for the primary CLI.
+        /// Grapheme-cluster index into `input` where the cursor
+        /// sits. Edits go through `baumhard::util::grapheme_chad`
+        /// helpers (`insert_str_at_grapheme`, `delete_grapheme_at`,
+        /// `count_grapheme_clusters`, `find_byte_index_of_grapheme`)
+        /// so ZWJ emoji / flag sequences / combining marks are
+        /// treated as single cursor cells — per CODE_CONVENTIONS §2.
         cursor: usize,
         /// Past commands, oldest first. Up/Down scrolls an index into
         /// this vec; appended on every `Enter`.
