@@ -24,8 +24,11 @@ use crate::application::document::{
 use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::application::palette::{
-    PaletteContext, PaletteEffects, filter_actions, PALETTE_ACTIONS,
+use crate::application::console::{
+    commands::Command,
+    completion::complete as complete_console,
+    parser::{parse as parse_console, Args, ParseResult},
+    ConsoleContext, ConsoleEffects, ConsoleLine, ConsoleState, ExecResult, MAX_HISTORY,
 };
 use crate::application::renderer::Renderer;
 
@@ -48,35 +51,11 @@ const EDGE_HIT_TOLERANCE_PX: f32 = 8.0;
 #[cfg(not(target_arch = "wasm32"))]
 const EDGE_HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
 
-/// Session 6C command palette state. When open, all keyboard input
-/// is routed to the palette (query editing, navigation, execute,
-/// close) and regular hotkeys are suppressed until it closes.
-#[cfg(not(target_arch = "wasm32"))]
-enum PaletteState {
-    Closed,
-    Open {
-        query: String,
-        /// Indices into `PALETTE_ACTIONS`, sorted by fuzzy score
-        /// descending. Rebuilt on every keystroke.
-        filtered: Vec<usize>,
-        /// Which row of `filtered` is highlighted; wraps via
-        /// Up/Down.
-        selected: usize,
-    },
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl PaletteState {
-    fn is_open(&self) -> bool {
-        matches!(self, PaletteState::Open { .. })
-    }
-}
-
 /// Session 6D: inline-edit state for a connection's label. When
 /// `Open`, all keyboard input is routed to the label-edit handler
-/// (just like `PaletteState::Open` captures keys for the palette
-/// query). Mutually exclusive with `PaletteState::Open` — the
-/// palette check runs first, so opening the palette while editing a
+/// (just like `ConsoleState::Open` captures keys for the console
+/// input line). Mutually exclusive with `ConsoleState::Open` — the
+/// console check runs first, so opening the console while editing a
 /// label is a no-op.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
@@ -511,7 +490,11 @@ impl Application {
         let mut cursor_pos: (f64, f64) = (0.0, 0.0);
         let mut drag_state = DragState::None;
         let mut app_mode = AppMode::Normal;
-        let mut palette_state = PaletteState::Closed;
+        let mut console_state = ConsoleState::Closed;
+        // Cross-session history loaded from disk on startup; appended
+        // to on every Enter; written back on close. See
+        // `load_console_history` / `save_console_history`.
+        let mut console_history: Vec<String> = load_console_history();
         let mut label_edit_state = LabelEditState::Closed;
         let mut text_edit_state = TextEditState::Closed;
         let mut color_picker_state =
@@ -593,13 +576,14 @@ impl Application {
                     event: WindowEvent::MouseInput { state, button, .. },
                     ..
                 } => {
-                    // Session 6C: the palette swallows mouse clicks
-                    // as a close gesture. Clicking anywhere while
-                    // open dismisses the palette without running
-                    // an action, mirroring Escape.
-                    if palette_state.is_open() && state == ElementState::Pressed {
-                        palette_state = PaletteState::Closed;
-                        renderer.rebuild_palette_overlay_buffers(None);
+                    // The console swallows mouse clicks as a close
+                    // gesture. Clicking anywhere while open dismisses
+                    // the console without running a command, mirroring
+                    // Escape.
+                    if console_state.is_open() && state == ElementState::Pressed {
+                        save_console_history(&console_history);
+                        console_state = ConsoleState::Closed;
+                        renderer.rebuild_console_overlay_buffers(None);
                         return;
                     }
 
@@ -1283,28 +1267,33 @@ impl Application {
                         _ => None,
                     };
 
-                    // Session 6C: when the palette is open, it steals
-                    // all keyboard input. Character keys go into the
-                    // query, Up/Down navigate, Enter executes, Escape
+                    // When the console is open, it steals all
+                    // keyboard input. Character keys insert at the
+                    // cursor, Tab triggers completion, Up/Down walks
+                    // history, Enter parses + executes, Escape
                     // closes. Regular hotkeys are suppressed until
-                    // the palette closes.
-                    if palette_state.is_open() {
-                        handle_palette_key(
+                    // the console closes.
+                    if console_state.is_open() {
+                        handle_console_key(
                             &key_name,
                             &logical_key,
-                            &mut palette_state,
+                            shift_pressed,
+                            ctrl_pressed,
+                            &mut console_state,
+                            &mut console_history,
                             &mut label_edit_state,
                             &mut color_picker_state,
                             &mut document,
                             &mut mindmap_tree,
                             &mut renderer,
                             &mut scene_cache,
+                            &keybinds,
                         );
                         return;
                     }
 
                     // Glyph-wheel color picker key handling. Mutually
-                    // exclusive with palette and label-edit. Steals
+                    // exclusive with console and label-edit. Steals
                     // all keyboard input the same way: Esc cancels,
                     // Enter commits, Tab cycles theme chips, h/s/v
                     // nudge HSV, character keys are otherwise ignored.
@@ -1323,7 +1312,7 @@ impl Application {
                     }
 
                     // Session 6D: inline label edit modal. Steals keys
-                    // the same way the palette does. Escape discards,
+                    // the same way the console does. Escape discards,
                     // Enter commits, Backspace pops, character keys
                     // append.
                     if label_edit_state.is_open() {
@@ -1341,7 +1330,7 @@ impl Application {
                     }
 
                     // Session 7A: inline node text editor. Steals keys
-                    // the same way the palette / label-edit modals do.
+                    // the same way the console / label-edit modals do.
                     // Enter and Tab are literal characters inside the
                     // editor — this is a multi-line paragraph editor,
                     // not an outliner. Esc cancels; commit is via
@@ -1360,36 +1349,30 @@ impl Application {
                         return;
                     }
 
-                    // Opening the palette is a pre-action lookup:
-                    // `/` with no modifiers opens it regardless of
-                    // what the keybinds layer says (we don't want a
-                    // user to accidentally rebind away their only
-                    // discovery path).
-                    if key_name.as_deref() == Some("/")
-                        && !ctrl_pressed && !alt_pressed
-                    {
-                        let ctx = document.as_ref().map(|doc| PaletteContext { document: doc });
-                        if let Some(ctx) = ctx {
-                            let filtered = filter_actions("", &ctx);
-                            palette_state = PaletteState::Open {
-                                query: String::new(),
-                                filtered,
-                                selected: 0,
-                            };
-                            if let Some(doc) = document.as_ref() {
-                                rebuild_palette_overlay(
-                                    &palette_state, doc, &mut renderer,
-                                );
-                            }
-                        }
-                        return;
-                    }
-
                     let action = key_name.as_deref().and_then(|k| {
                         keybinds.action_for(k, ctrl_pressed, shift_pressed, alt_pressed)
                     });
 
                     match action {
+                        Some(Action::OpenConsole) => {
+                            // Toggle: already open → close. Otherwise
+                            // construct a fresh state seeded with the
+                            // persisted history. Rebuild the overlay
+                            // so the frame appears immediately.
+                            if console_state.is_open() {
+                                save_console_history(&console_history);
+                                console_state = ConsoleState::Closed;
+                                renderer.rebuild_console_overlay_buffers(None);
+                            } else {
+                                console_state = ConsoleState::open(console_history.clone());
+                                if let Some(doc) = document.as_ref() {
+                                    rebuild_console_overlay(
+                                        &console_state, doc, &mut renderer, &keybinds,
+                                    );
+                                }
+                            }
+                            return;
+                        }
                         Some(Action::Undo) => {
                             if let Some(doc) = document.as_mut() {
                                 if doc.undo() {
@@ -2032,173 +2015,570 @@ fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
 /// Rebuild tree from model with selection highlight, plus connections and borders.
 /// When the current selection is an edge, its `ConnectionElement` gets a
 /// cyan color override baked in via `build_scene_with_selection()`.
+/// Handle a keystroke while the console is open. The console is a
+/// shell-style line editor: char input inserts at the cursor, Tab
+/// cycles completions, Up/Down walks history, Enter parses +
+/// executes the buffered line, and Escape closes. Regular hotkeys
+/// are suppressed — this runs entirely outside the keybinds
+/// resolver.
 #[cfg(not(target_arch = "wasm32"))]
-/// Handle a keystroke while the command palette is open. Character
-/// keys append to the query (and re-filter), Backspace pops, Up/Down
-/// navigate the filtered list, Enter runs the selected action, and
-/// Escape closes without running anything. Regular hotkeys are
-/// suppressed — this runs entirely outside the keybinds resolver.
-#[cfg(not(target_arch = "wasm32"))]
-fn handle_palette_key(
+fn handle_console_key(
     key_name: &Option<String>,
     logical_key: &Key,
-    palette_state: &mut PaletteState,
+    shift_pressed: bool,
+    ctrl_pressed: bool,
+    console_state: &mut ConsoleState,
+    console_history: &mut Vec<String>,
     label_edit_state: &mut LabelEditState,
     color_picker_state: &mut crate::application::color_picker::ColorPickerState,
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
+    keybinds: &ResolvedKeybinds,
 ) {
     let name = match key_name.as_deref() {
         Some(n) => n,
         None => return,
     };
+    // Ctrl-chords take priority over named / character handling so
+    // Ctrl+C / Ctrl+A / etc. don't get swallowed by the `_` branch.
+    if ctrl_pressed {
+        match name {
+            "c" => {
+                // Clear input without closing — same as the shell
+                // muscle-memory: Ctrl+C abandons the current line.
+                if let ConsoleState::Open { input, cursor, completions, completion_idx, history_idx, .. } = console_state {
+                    input.clear();
+                    *cursor = 0;
+                    completions.clear();
+                    *completion_idx = None;
+                    *history_idx = None;
+                }
+                if let Some(doc) = document.as_ref() {
+                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                }
+                return;
+            }
+            "a" => {
+                if let ConsoleState::Open { cursor, .. } = console_state {
+                    *cursor = 0;
+                }
+                if let Some(doc) = document.as_ref() {
+                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                }
+                return;
+            }
+            "e" => {
+                if let ConsoleState::Open { cursor, input, .. } = console_state {
+                    *cursor = input.len();
+                }
+                if let Some(doc) = document.as_ref() {
+                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                }
+                return;
+            }
+            "u" => {
+                // Kill to start of line.
+                if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+                    input.drain(..*cursor);
+                    *cursor = 0;
+                    completions.clear();
+                    *completion_idx = None;
+                }
+                if let Some(doc) = document.as_ref() {
+                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                }
+                return;
+            }
+            "w" => {
+                // Kill word before cursor (whitespace-separated).
+                if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+                    let end = *cursor;
+                    // Skip trailing whitespace, then the word.
+                    let bytes = input.as_bytes();
+                    let mut start = end;
+                    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+                        start -= 1;
+                    }
+                    while start > 0 && !bytes[start - 1].is_ascii_whitespace() {
+                        start -= 1;
+                    }
+                    input.drain(start..end);
+                    *cursor = start;
+                    completions.clear();
+                    *completion_idx = None;
+                }
+                if let Some(doc) = document.as_ref() {
+                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
     match name {
         "escape" => {
-            *palette_state = PaletteState::Closed;
-            renderer.rebuild_palette_overlay_buffers(None);
+            save_console_history(console_history);
+            *console_state = ConsoleState::Closed;
+            renderer.rebuild_console_overlay_buffers(None);
         }
         "enter" => {
-            let (id_to_run, ran) = {
-                if let PaletteState::Open { filtered, selected, .. } = palette_state {
-                    if let Some(idx) = filtered.get(*selected).copied() {
-                        (Some(PALETTE_ACTIONS[idx].id), true)
-                    } else {
-                        (None, false)
-                    }
-                } else {
-                    (None, false)
-                }
+            // Snapshot input, reset state, then parse + execute.
+            // Append the executed line to persistent history + the
+            // in-state history copy, then re-rebuild the overlay.
+            let line = match console_state {
+                ConsoleState::Open { input, .. } => std::mem::take(input),
+                ConsoleState::Closed => return,
             };
-            if ran {
-                if let Some(doc) = document.as_mut() {
-                    if let Some(id) = id_to_run {
-                        if let Some((_, action)) = crate::application::palette::action_by_id(id) {
-                            let mut effects = PaletteEffects {
-                                document: doc,
-                                open_label_edit: None,
-                                open_color_picker: None,
-                            };
-                            (action.execute)(&mut effects);
-                            let label_edit_req = effects.open_label_edit.take();
-                            let color_picker_req = effects.open_color_picker.take();
-                            scene_cache.clear();
-                            rebuild_all(doc, mindmap_tree, renderer);
-                            // Session 6D: if the action asked to open the
-                            // inline label editor (e.g. "Edit connection
-                            // label"), transition to the label-edit modal.
-                            if let Some(er) = label_edit_req {
-                                open_label_edit(
-                                    &er,
-                                    doc,
-                                    label_edit_state,
-                                    renderer,
-                                );
-                            }
-                            // Glyph-wheel color picker handoff: a
-                            // "Pick * color…" palette action sets
-                            // `open_color_picker = Some(target)`. We
-                            // drain it after the regular rebuild and
-                            // transition to the picker modal.
-                            if let Some(target) = color_picker_req {
-                                open_color_picker(
-                                    target,
-                                    doc,
-                                    color_picker_state,
-                                    renderer,
-                                );
-                            }
+            if let ConsoleState::Open {
+                cursor,
+                history_idx,
+                scrollback,
+                completions,
+                completion_idx,
+                history,
+                ..
+            } = console_state
+            {
+                *cursor = 0;
+                *history_idx = None;
+                completions.clear();
+                *completion_idx = None;
+                scrollback.push(ConsoleLine::Input(format!("> {}", line)));
+                if !line.trim().is_empty() {
+                    // Dedup against the most recent history entry —
+                    // the shell convention that repeated commands
+                    // don't clutter the stack.
+                    if history.last().map(|s| s.as_str()) != Some(line.as_str()) {
+                        history.push(line.clone());
+                        if history.len() > MAX_HISTORY {
+                            let drop = history.len() - MAX_HISTORY;
+                            history.drain(..drop);
+                        }
+                        console_history.push(line.clone());
+                        if console_history.len() > MAX_HISTORY {
+                            let drop = console_history.len() - MAX_HISTORY;
+                            console_history.drain(..drop);
                         }
                     }
                 }
-            }
-            *palette_state = PaletteState::Closed;
-            renderer.rebuild_palette_overlay_buffers(None);
-        }
-        "arrowup" | "up" => {
-            if let PaletteState::Open { filtered, selected, .. } = palette_state {
-                if !filtered.is_empty() && *selected > 0 {
-                    *selected -= 1;
+                if let Some(doc) = document.as_mut() {
+                    execute_console_line(
+                        &line,
+                        console_state,
+                        label_edit_state,
+                        color_picker_state,
+                        doc,
+                        mindmap_tree,
+                        renderer,
+                        scene_cache,
+                    );
                 }
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_palette_overlay(palette_state, doc, renderer);
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+            }
+        }
+        "tab" => {
+            // Cycle completions. First Tab: compute + select first.
+            // Subsequent Tabs: advance (or reverse on Shift+Tab).
+            let (has_completions, advance) = match console_state {
+                ConsoleState::Open { completions, completion_idx, input, cursor, .. } => {
+                    if completions.is_empty() {
+                        if let Some(doc) = document.as_ref() {
+                            let ctx = ConsoleContext::from_document(doc);
+                            let new = complete_console(input, *cursor, &ctx);
+                            *completions = new
+                                .into_iter()
+                                .map(|c| crate::application::console::completion::Completion {
+                                    text: c.text,
+                                    display: c.display,
+                                    hint: c.hint,
+                                })
+                                .collect();
+                            *completion_idx = if completions.is_empty() { None } else { Some(0) };
+                        }
+                        (false, 0i32)
+                    } else {
+                        (true, if shift_pressed { -1 } else { 1 })
+                    }
+                }
+                _ => (false, 0),
+            };
+            if has_completions {
+                if let ConsoleState::Open { completions, completion_idx, .. } = console_state {
+                    let len = completions.len() as i32;
+                    let cur = completion_idx.map(|i| i as i32).unwrap_or(-1);
+                    let next = ((cur + advance).rem_euclid(len)) as usize;
+                    *completion_idx = Some(next);
+                }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+            }
+        }
+        "arrowup" | "up" => {
+            if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
+                if !history.is_empty() {
+                    let next = match history_idx {
+                        None => history.len() - 1,
+                        Some(0) => 0,
+                        Some(i) => *i - 1,
+                    };
+                    *history_idx = Some(next);
+                    *input = history[next].clone();
+                    *cursor = input.len();
+                }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         "arrowdown" | "down" => {
-            if let PaletteState::Open { filtered, selected, .. } = palette_state {
-                if !filtered.is_empty() && *selected + 1 < filtered.len() {
-                    *selected += 1;
+            if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
+                match history_idx {
+                    Some(i) if *i + 1 < history.len() => {
+                        let next = *i + 1;
+                        *history_idx = Some(next);
+                        *input = history[next].clone();
+                        *cursor = input.len();
+                    }
+                    Some(_) => {
+                        *history_idx = None;
+                        input.clear();
+                        *cursor = 0;
+                    }
+                    None => {}
                 }
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_palette_overlay(palette_state, doc, renderer);
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+            }
+        }
+        "arrowleft" | "left" => {
+            if let ConsoleState::Open { cursor, input, .. } = console_state {
+                if *cursor > 0 {
+                    // Walk back one char boundary (byte-safe).
+                    let new = input[..*cursor]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    *cursor = new;
+                }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+            }
+        }
+        "arrowright" | "right" => {
+            if let ConsoleState::Open { cursor, input, .. } = console_state {
+                if *cursor < input.len() {
+                    let rest = &input[*cursor..];
+                    let step = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                    *cursor += step;
+                }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+            }
+        }
+        "home" => {
+            if let ConsoleState::Open { cursor, .. } = console_state {
+                *cursor = 0;
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+            }
+        }
+        "end" => {
+            if let ConsoleState::Open { cursor, input, .. } = console_state {
+                *cursor = input.len();
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         "backspace" => {
-            if let PaletteState::Open { query, filtered, selected, .. } = palette_state {
-                query.pop();
-                if let Some(doc) = document.as_ref() {
-                    let ctx = PaletteContext { document: doc };
-                    *filtered = filter_actions(query, &ctx);
-                    *selected = 0;
-                    rebuild_palette_overlay(palette_state, doc, renderer);
+            if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+                if *cursor > 0 {
+                    let prev = input[..*cursor]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    input.drain(prev..*cursor);
+                    *cursor = prev;
+                    completions.clear();
+                    *completion_idx = None;
                 }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+            }
+        }
+        "delete" => {
+            if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+                if *cursor < input.len() {
+                    let rest = &input[*cursor..];
+                    let step = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                    input.drain(*cursor..*cursor + step);
+                    completions.clear();
+                    *completion_idx = None;
+                }
+            }
+            if let Some(doc) = document.as_ref() {
+                rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         _ => {
-            // Character input: append to the query. Only accept
-            // single-char keys to avoid stuffing "ArrowLeft" or
-            // "Control" into the query text.
+            // Character input: insert at cursor.
             if let Key::Character(c) = logical_key {
-                if let PaletteState::Open { query, filtered, selected, .. } = palette_state {
-                    query.push_str(c.as_ref());
-                    if let Some(doc) = document.as_ref() {
-                        let ctx = PaletteContext { document: doc };
-                        *filtered = filter_actions(query, &ctx);
-                        *selected = 0;
-                        rebuild_palette_overlay(palette_state, doc, renderer);
-                    }
+                if let ConsoleState::Open {
+                    input,
+                    cursor,
+                    completions,
+                    completion_idx,
+                    history_idx,
+                    ..
+                } = console_state
+                {
+                    let s: &str = c.as_ref();
+                    input.insert_str(*cursor, s);
+                    *cursor += s.len();
+                    completions.clear();
+                    *completion_idx = None;
+                    *history_idx = None;
+                }
+                if let Some(doc) = document.as_ref() {
+                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
             }
         }
     }
 }
 
-/// Build the palette overlay geometry from the current state and
-/// push it to the renderer for glyph-rendering. Called whenever the
-/// palette opens, the query changes, or the selected row changes.
+/// Parse and execute a console line. Handles completion acceptance
+/// (if the popup is open and the user hit Enter, the typed input is
+/// what's executed — completion is only applied on Tab). Appends the
+/// result to the scrollback. Rebuilds the scene on any document
+/// mutation and transitions to label-edit / color-picker modals on
+/// request.
 #[cfg(not(target_arch = "wasm32"))]
-fn rebuild_palette_overlay(
-    palette_state: &PaletteState,
-    _document: &MindMapDocument,
+fn execute_console_line(
+    line: &str,
+    console_state: &mut ConsoleState,
+    label_edit_state: &mut LabelEditState,
+    color_picker_state: &mut crate::application::color_picker::ColorPickerState,
+    doc: &mut MindMapDocument,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
-    use crate::application::renderer::{PaletteOverlayGeometry, PaletteOverlayRow};
-    let (query, filtered, selected) = match palette_state {
-        PaletteState::Closed => {
-            renderer.rebuild_palette_overlay_buffers(None);
+    if line.trim().is_empty() {
+        return;
+    }
+    let parsed = parse_console(line);
+    let (cmd, args) = match parsed {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        ParseResult::Empty => return,
+        ParseResult::Unknown(ref head) => {
+            push_scrollback_error(
+                console_state,
+                format!("unknown command: {}", head),
+            );
             return;
         }
-        PaletteState::Open { query, filtered, selected } => (query, filtered, *selected),
     };
-    let rows: Vec<PaletteOverlayRow> = filtered
-        .iter()
-        .map(|&idx| {
-            let a = &PALETTE_ACTIONS[idx];
-            PaletteOverlayRow {
-                label: a.label.to_string(),
-                description: a.description.to_string(),
+    let cmd: &'static Command = cmd;
+    let mut effects = ConsoleEffects::new(doc);
+    let result = (cmd.execute)(&Args::new(&args), &mut effects);
+    let label_edit_req = effects.open_label_edit.take();
+    let color_picker_req = effects.open_color_picker.take();
+    let close_after = effects.close_console;
+
+    // Emit the command's result lines into the scrollback.
+    match result {
+        ExecResult::Ok(s) => {
+            if !s.is_empty() {
+                push_scrollback_output(console_state, s);
             }
+        }
+        ExecResult::Err(s) => push_scrollback_error(console_state, s),
+        ExecResult::Lines(lines) => {
+            for l in lines {
+                push_scrollback_output(console_state, l);
+            }
+        }
+    }
+
+    // Any successful command may have mutated the doc; rebuild.
+    scene_cache.clear();
+    rebuild_all(doc, mindmap_tree, renderer);
+
+    if let Some(er) = label_edit_req {
+        open_label_edit(&er, doc, label_edit_state, renderer);
+        *console_state = ConsoleState::Closed;
+        renderer.rebuild_console_overlay_buffers(None);
+    } else if let Some(target) = color_picker_req {
+        open_color_picker(target, doc, color_picker_state, renderer);
+        *console_state = ConsoleState::Closed;
+        renderer.rebuild_console_overlay_buffers(None);
+    } else if close_after {
+        *console_state = ConsoleState::Closed;
+        renderer.rebuild_console_overlay_buffers(None);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn push_scrollback_output(state: &mut ConsoleState, text: String) {
+    if let ConsoleState::Open { scrollback, .. } = state {
+        scrollback.push(ConsoleLine::Output(text));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn push_scrollback_error(state: &mut ConsoleState, text: String) {
+    if let ConsoleState::Open { scrollback, .. } = state {
+        scrollback.push(ConsoleLine::Error(text));
+    }
+}
+
+/// Build the console overlay geometry from the current state and
+/// push it to the renderer. Called whenever the console opens, the
+/// input changes, or scrollback / completions update.
+#[cfg(not(target_arch = "wasm32"))]
+fn rebuild_console_overlay(
+    console_state: &ConsoleState,
+    _document: &MindMapDocument,
+    renderer: &mut Renderer,
+    keybinds: &ResolvedKeybinds,
+) {
+    use crate::application::renderer::{
+        ConsoleOverlayCompletion, ConsoleOverlayGeometry, ConsoleOverlayLine,
+        ConsoleOverlayLineKind,
+    };
+    let (input, cursor, scrollback, completions, selected_completion) = match console_state {
+        ConsoleState::Closed => {
+            renderer.rebuild_console_overlay_buffers(None);
+            return;
+        }
+        ConsoleState::Open {
+            input,
+            cursor,
+            scrollback,
+            completions,
+            completion_idx,
+            ..
+        } => (input, *cursor, scrollback, completions, *completion_idx),
+    };
+    let scrollback_lines: Vec<ConsoleOverlayLine> = scrollback
+        .iter()
+        .map(|l| match l {
+            ConsoleLine::Input(t) => ConsoleOverlayLine {
+                text: t.clone(),
+                kind: ConsoleOverlayLineKind::Input,
+            },
+            ConsoleLine::Output(t) => ConsoleOverlayLine {
+                text: t.clone(),
+                kind: ConsoleOverlayLineKind::Output,
+            },
+            ConsoleLine::Error(t) => ConsoleOverlayLine {
+                text: t.clone(),
+                kind: ConsoleOverlayLineKind::Error,
+            },
         })
         .collect();
-    let geometry = PaletteOverlayGeometry {
-        query_text: query.clone(),
-        rows,
-        selected_row: selected,
+    let completion_geo: Vec<ConsoleOverlayCompletion> = completions
+        .iter()
+        .map(|c| ConsoleOverlayCompletion {
+            text: c.text.clone(),
+            hint: c.hint.clone(),
+        })
+        .collect();
+    let geometry = ConsoleOverlayGeometry {
+        input: input.clone(),
+        cursor_byte: cursor,
+        scrollback: scrollback_lines,
+        completions: completion_geo,
+        selected_completion,
+        border_unit: keybinds.console_border.clone(),
+        font_family: keybinds.console_font.clone(),
+        font_size: keybinds.console_font_size,
     };
-    renderer.rebuild_palette_overlay_buffers(Some(&geometry));
+    renderer.rebuild_console_overlay_buffers(Some(&geometry));
+}
+
+/// Load persisted console history from `$XDG_STATE_HOME/mandala/history`
+/// (or `$HOME/.local/state/mandala/history`). Returns an empty vec
+/// on any failure — history is best-effort and must never take the
+/// app down.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_console_history() -> Vec<String> {
+    let path = match console_history_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<String> = contents
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    if out.len() > MAX_HISTORY {
+        let drop = out.len() - MAX_HISTORY;
+        out.drain(..drop);
+    }
+    out
+}
+
+/// Write the current history to disk. Best-effort — logs and moves
+/// on if the directory can't be created or the file can't be written.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_console_history(history: &[String]) {
+    let path = match console_history_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("console history: create dir {}: {}", parent.display(), e);
+            return;
+        }
+    }
+    let start = history.len().saturating_sub(MAX_HISTORY);
+    let body: String = history[start..].join("\n") + "\n";
+    if let Err(e) = std::fs::write(&path, body) {
+        log::warn!("console history: write {}: {}", path.display(), e);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn console_history_path() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            let mut p = PathBuf::from(xdg);
+            p.push("mandala");
+            p.push("history");
+            return Some(p);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            let mut p = PathBuf::from(home);
+            p.push(".local");
+            p.push("state");
+            p.push("mandala");
+            p.push("history");
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// Apply a full edge-handle drag to the document model in place —

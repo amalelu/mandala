@@ -5,5 +5,4 @@ pub(crate) mod console;
 pub(crate) mod document;
 pub(crate) mod frame_throttle;
 pub(crate) mod keybinds;
-pub(crate) mod palette;
 pub mod renderer;

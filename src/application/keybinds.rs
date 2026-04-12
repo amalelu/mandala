@@ -63,6 +63,12 @@ pub enum Action {
     /// slate" gesture: press Backspace on a selected node to retype it
     /// from scratch.
     EditSelectionClean,
+    /// Open (or toggle) the CLI console. Suppressed while any other
+    /// keyboard-capturing modal is active (`LabelEditState`,
+    /// `ColorPickerState`, `TextEditState`). Pressing again while the
+    /// console is open closes it — symmetric with Esc and the shell
+    /// muscle memory around a toggle-open console.
+    OpenConsole,
 }
 
 /// A parsed keybinding: a logical key name plus modifier flags. Key names
@@ -146,6 +152,19 @@ pub struct KeybindConfig {
     pub orphan_selection: Vec<String>,
     pub edit_selection: Vec<String>,
     pub edit_selection_clean: Vec<String>,
+    pub open_console: Vec<String>,
+    /// Unit string repeated horizontally on the console's top/bottom
+    /// border and stacked vertically on its left/right columns.
+    /// Default `"#"`. See `build_console_border_strings`.
+    pub console_border: String,
+    /// Font family name for the console overlay. Passed verbatim to
+    /// cosmic-text's `Family::Name`. Empty means "use the default
+    /// fallback chain", which is usually what you want unless you've
+    /// embedded a specific font.
+    pub console_font: String,
+    /// Font size in pixels for the console overlay. The whole frame
+    /// scales with this value.
+    pub console_font_size: f32,
 }
 
 impl Default for KeybindConfig {
@@ -160,6 +179,10 @@ impl Default for KeybindConfig {
             orphan_selection: vec!["Ctrl+O".into()],
             edit_selection: vec!["Enter".into()],
             edit_selection_clean: vec!["Backspace".into()],
+            open_console: vec!["/".into()],
+            console_border: "#".into(),
+            console_font: String::new(),
+            console_font_size: 16.0,
         }
     }
 }
@@ -186,6 +209,7 @@ impl KeybindConfig {
             (Action::OrphanSelection, &self.orphan_selection),
             (Action::EditSelection, &self.edit_selection),
             (Action::EditSelectionClean, &self.edit_selection_clean),
+            (Action::OpenConsole, &self.open_console),
         ];
         for (action, strings) in sets {
             for s in strings {
@@ -195,7 +219,16 @@ impl KeybindConfig {
                 }
             }
         }
-        ResolvedKeybinds { binds }
+        ResolvedKeybinds {
+            binds,
+            console_border: if self.console_border.is_empty() {
+                "#".to_string()
+            } else {
+                self.console_border.clone()
+            },
+            console_font: self.console_font.clone(),
+            console_font_size: self.console_font_size.max(4.0),
+        }
     }
 
     /// Load a config from a file on disk. Desktop-only; WASM users load
@@ -269,6 +302,14 @@ impl KeybindConfig {
 #[derive(Debug, Clone)]
 pub struct ResolvedKeybinds {
     binds: Vec<(Action, KeyBind)>,
+    /// Console border unit string. Not a keybind, but carried on this
+    /// struct because it's loaded from the same config file and the
+    /// event loop already has a reference to `ResolvedKeybinds`.
+    pub console_border: String,
+    /// Console font family. Empty means "use cosmic-text default".
+    pub console_font: String,
+    /// Console overlay font size in pixels.
+    pub console_font_size: f32,
 }
 
 impl ResolvedKeybinds {
@@ -429,6 +470,52 @@ mod tests {
         assert_eq!(resolved.action_for("o", true, false, false), Some(Action::OrphanSelection));
         assert_eq!(resolved.action_for("enter", false, false, false), Some(Action::EditSelection));
         assert_eq!(resolved.action_for("backspace", false, false, false), Some(Action::EditSelectionClean));
+    }
+
+    #[test]
+    fn test_default_console_border_is_hash() {
+        let cfg = KeybindConfig::default();
+        assert_eq!(cfg.console_border, "#");
+    }
+
+    #[test]
+    fn test_default_console_font_size_is_16() {
+        let cfg = KeybindConfig::default();
+        assert!((cfg.console_font_size - 16.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_resolve_exposes_console_style_fields() {
+        let cfg = KeybindConfig {
+            console_border: "=".into(),
+            console_font: "MyFont".into(),
+            console_font_size: 20.0,
+            ..KeybindConfig::default()
+        };
+        let r = cfg.resolve();
+        assert_eq!(r.console_border, "=");
+        assert_eq!(r.console_font, "MyFont");
+        assert!((r.console_font_size - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_resolve_empty_console_border_falls_back_to_hash() {
+        let cfg = KeybindConfig {
+            console_border: String::new(),
+            ..KeybindConfig::default()
+        };
+        let r = cfg.resolve();
+        assert_eq!(r.console_border, "#");
+    }
+
+    #[test]
+    fn test_open_console_default_bound_to_slash() {
+        let cfg = KeybindConfig::default();
+        let resolved = cfg.resolve();
+        assert_eq!(
+            resolved.action_for("/", false, false, false),
+            Some(Action::OpenConsole)
+        );
     }
 
     #[test]
