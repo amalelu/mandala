@@ -164,22 +164,25 @@ discussing it in a roadmap entry first.
 - **No custom error types.** The codebase panics at startup for GPU and
   loader failures and logs at runtime. Matching this posture keeps the
   surface small.
-- **`expect("<reason>")` is acceptable** when the failure is genuinely
+- **`expect("<reason>")` at startup is acceptable** when the failure is
   unrecoverable and the message helps a human understand what went
   wrong (see `src/application/renderer.rs` for the shape:
-  `expect("Failed to create device")`, and `src/application/document.rs`
-  for lock-poisoning messages). Every `expect` carries a useful message.
-  The existing codebase has ~300 `expect`/`unwrap` calls in
-  `src/application/`; most are justified by "the alternative is
-  incoherent state". If in doubt, keep the `expect` and write a
-  descriptive message.
-- **Prefer graceful degradation over panics in new interactive code.**
-  When writing *new* input handlers, mutation appliers, or frame-render
-  paths, reach for `if let Some(...)` / `match`/ early return and
-  `log::warn!` rather than introducing another `unwrap`. A defensive
-  check that prevents a crash during editing is a valid exception to
-  §3 — "trust internal invariants" stops at the edge of code that runs
-  sixty times a second in front of a user.
+  `expect("Failed to create device")`). Every `expect` carries a useful
+  message. Bare `unwrap()` in non-test code is a bug.
+- **Interactive paths must not panic.** Input handling, mutation
+  application, frame render, and document mutation — none of these
+  may abort the process. Degrade the frame, log via `log::warn!` or
+  `log::error!`, and keep running. A crash during editing is the one
+  user-visible failure this codebase cannot tolerate. The existing
+  app crate is not yet fully up to this bar — there are `expect` and
+  `unwrap` calls in interactive paths that predate this rule — and
+  new code must not make the situation worse; refactors that remove
+  an `unwrap` from an interactive path are welcome drive-bys.
+- **Defensive checks in interactive paths are the sanctioned exception
+  to §3.** "Trust internal invariants" stops at the edge of code that
+  runs sixty times a second in front of a user. A `let Some(node) =
+  ... else { return; }` to prevent a panic is earned; the same check
+  in a pure function with controlled inputs is noise.
 - **`unwrap()` without a message is acceptable only in tests.** Inside
   `#[cfg(test)]` or `pub mod tests;`, it is fine.
 
@@ -190,18 +193,17 @@ often than by the author. Document accordingly. But documentation is
 also a liability: every comment you write is a thing that can become
 stale.
 
-- **New and modified `pub` items in baumhard carry `///` doc comments.**
-  When you add a new `pub` function, type, trait, or module under
-  `lib/baumhard/src/`, or when you meaningfully change the signature
-  or behaviour of an existing one, leave a doc comment that explains
-  *what it does, why it exists, and what it costs*. "Costs" is
-  specific to baumhard — note an O(n) walk, an allocation, a clone, a
-  lock acquisition. See
-  [`lib/baumhard/CONVENTIONS.md §B8`](./lib/baumhard/CONVENTIONS.md)
-  for the full rule. Existing undocumented `pub` items are not a bug
-  to be fixed in a sweep — they get documented as they are touched.
-  The direction of travel is towards full coverage; the speed is "as
-  the code evolves", not "all at once".
+- **Every `pub` item in baumhard carries a `///` doc comment.** Every
+  `pub` function, type, trait, and module under `lib/baumhard/src/`
+  gets a doc comment that explains *what it does, why it exists, and
+  what it costs*. "Costs" is specific to baumhard — note an O(n)
+  walk, an allocation, a clone, a lock acquisition. See
+  [`lib/baumhard/CONVENTIONS.md §B8`](./lib/baumhard/CONVENTIONS.md).
+  `cargo doc -p baumhard --no-deps` is a first-class deliverable and
+  the consumer's entry point to the library. The current crate is
+  not fully documented; the rule is aspirational in the strict sense
+  — we are moving towards it, not away from it, and every edit that
+  touches a `pub` item closes the gap a little.
 - **Public items in the mandala crate are documented when the purpose
   is non-obvious.** An event-handler method with a descriptive name
   does not need a doc comment; a private layout calculation does not
