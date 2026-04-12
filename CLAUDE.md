@@ -19,9 +19,14 @@ borders, connection paths — is laid out as positioned font glyphs.
   Milestones section documents what each session did. Read this before
   proposing large changes so you don't step on in-flight work or re-do
   something that's already landed.
-- **`CODE_CONVENTIONS.md`** — the codebase's guiding spirit: KISS,
-  readability, code-as-art, and explicit acceptance that the conventions
-  are aspirational rather than enforced.
+- **`CODE_CONVENTIONS.md`** — the workspace-wide coding spec:
+  architectural invariants, how to use baumhard, complexity and KISS
+  heuristics, error-handling posture, and documentation standards.
+  Prescriptive where `CLAUDE.md` is descriptive.
+- **`lib/baumhard/CONVENTIONS.md`** — crate-local rules for baumhard:
+  mutation-not-rebuild, grapheme-aware text, arena discipline,
+  benchmark-reuse, no-unsafe policy, and performance rules. Read this
+  before touching anything under `lib/baumhard/`.
 - **`TEST_CONVENTIONS.md`** — testing philosophy, where to put tests, the
   `do_*()` benchmark-reuse pattern, and what we deliberately don't do
   (no mocks, no snapshots, no GPU tests).
