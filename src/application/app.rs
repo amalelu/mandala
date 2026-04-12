@@ -32,6 +32,8 @@ use crate::application::renderer::Renderer;
 use baumhard::gfx_structs::element::GfxElement;
 #[cfg(not(target_arch = "wasm32"))]
 use baumhard::mindmap::custom_mutation::{PlatformContext, Trigger};
+#[cfg(not(target_arch = "wasm32"))]
+use baumhard::util::grapheme_chad;
 
 /// Screen-space click tolerance (in pixels) for edge hit testing. Converted
 /// to canvas units via `Renderer::canvas_per_pixel()` so the click target
@@ -117,9 +119,12 @@ enum TextEditState {
         node_id: String,
         /// The in-progress multi-line buffer.
         buffer: String,
-        /// Cursor position as a char index (not byte offset) into
-        /// `buffer`. Valid range `[0, buffer.chars().count()]`.
-        cursor_char_pos: usize,
+        /// Cursor position as a grapheme-cluster index into `buffer`.
+        /// Valid range `[0, count_grapheme_clusters(buffer)]`. Stored
+        /// in graphemes (not chars or bytes) so backspace over an
+        /// emoji or ZWJ cluster removes the whole user-visible
+        /// character — see `CODE_CONVENTIONS.md §2`/`§B2`.
+        cursor_grapheme_pos: usize,
     },
 }
 
@@ -186,100 +191,95 @@ fn is_double_click(
     &prev.hit == new_hit
 }
 
-/// Session 7A: given a `buffer` and a char-position `cursor`, return
-/// the byte offset in `buffer` that corresponds to inserting at char
-/// index `cursor`. `cursor == buffer.chars().count()` maps to
-/// `buffer.len()` (end of string).
-#[cfg(not(target_arch = "wasm32"))]
-fn cursor_char_to_byte(buffer: &str, cursor: usize) -> usize {
-    buffer
-        .char_indices()
-        .nth(cursor)
-        .map(|(b, _)| b)
-        .unwrap_or_else(|| buffer.len())
-}
+// Session 7A text-edit cursor helpers.
+//
+// These all operate on **grapheme-cluster indices** (not chars or
+// bytes), routing through `baumhard::util::grapheme_chad`. This is
+// what `CODE_CONVENTIONS.md §2` and `§B2` mandate for any code that
+// touches user-typed text — char indexing splits emoji and combining
+// marks mid-cluster, leaving a corrupted buffer the next time the
+// renderer shapes it.
+//
+// For ASCII-only buffers grapheme indices coincide with char indices,
+// which is why the existing test suite still passes unchanged.
 
-/// Session 7A: insert `ch` at char position `cursor` in `buffer`,
-/// returning the new cursor position (one past the insert).
+/// Insert one character at grapheme index `cursor` in `buffer`,
+/// returning the new cursor position (one grapheme past the insert).
 #[cfg(not(target_arch = "wasm32"))]
 fn insert_at_cursor(buffer: &mut String, cursor: usize, ch: char) -> usize {
-    let byte = cursor_char_to_byte(buffer, cursor);
-    buffer.insert(byte, ch);
+    grapheme_chad::insert_str_at_grapheme(buffer, cursor, &ch.to_string());
     cursor + 1
 }
 
-/// Session 7A: delete the char immediately before `cursor` (Backspace
+/// Delete the grapheme cluster immediately before `cursor` (Backspace
 /// semantics). Returns the new cursor position. No-op at `cursor == 0`.
 #[cfg(not(target_arch = "wasm32"))]
 fn delete_before_cursor(buffer: &mut String, cursor: usize) -> usize {
     if cursor == 0 {
         return 0;
     }
-    let start_byte = cursor_char_to_byte(buffer, cursor - 1);
-    let end_byte = cursor_char_to_byte(buffer, cursor);
-    buffer.replace_range(start_byte..end_byte, "");
+    grapheme_chad::delete_grapheme_at(buffer, cursor - 1);
     cursor - 1
 }
 
-/// Session 7A: delete the char at `cursor` (Delete semantics). Returns
+/// Delete the grapheme cluster at `cursor` (Delete semantics). Returns
 /// the unchanged cursor position. No-op at end of buffer.
 #[cfg(not(target_arch = "wasm32"))]
 fn delete_at_cursor(buffer: &mut String, cursor: usize) -> usize {
-    let total = buffer.chars().count();
+    let total = grapheme_chad::count_grapheme_clusters(buffer);
     if cursor >= total {
         return cursor;
     }
-    let start_byte = cursor_char_to_byte(buffer, cursor);
-    let end_byte = cursor_char_to_byte(buffer, cursor + 1);
-    buffer.replace_range(start_byte..end_byte, "");
+    grapheme_chad::delete_grapheme_at(buffer, cursor);
     cursor
 }
 
-/// Session 7A: return the char index of the start of the line
-/// containing `cursor` — i.e. the position just after the most recent
-/// `\n` strictly before `cursor`, or 0 if no prior `\n`. Walks the
-/// buffer once via `chars()` without allocating.
+/// Return the grapheme index of the start of the line containing
+/// `cursor` — i.e. the position just after the most recent `\n`
+/// strictly before `cursor`, or 0 if no prior `\n`. `\n` is always its
+/// own grapheme cluster, so walking by graphemes is correct here.
 #[cfg(not(target_arch = "wasm32"))]
 fn cursor_to_line_start(buffer: &str, cursor: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut line_start = 0usize;
-    for (i, ch) in buffer.chars().enumerate() {
+    for (i, g) in buffer.graphemes(true).enumerate() {
         if i >= cursor {
             break;
         }
-        if ch == '\n' {
+        if g == "\n" {
             line_start = i + 1;
         }
     }
     line_start
 }
 
-/// Session 7A: return the char index of the end of the line
-/// containing `cursor` — i.e. the position of the next `\n` at or
-/// after `cursor`, or the total char count if no `\n` follows.
-/// Walks the buffer once via `chars()` without allocating.
+/// Return the grapheme index of the end of the line containing
+/// `cursor` — the position of the next `\n` at or after `cursor`, or
+/// the total grapheme count if no `\n` follows.
 #[cfg(not(target_arch = "wasm32"))]
 fn cursor_to_line_end(buffer: &str, cursor: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut total = 0usize;
-    for (i, ch) in buffer.chars().enumerate() {
+    for (i, g) in buffer.graphemes(true).enumerate() {
         total = i + 1;
-        if i >= cursor && ch == '\n' {
+        if i >= cursor && g == "\n" {
             return i;
         }
     }
     total
 }
 
-/// Session 7A: move the cursor up one line, preserving the visual
-/// column. Column is computed as `cursor - line_start` on the current
-/// line. The new position lands at `prev_line_start + min(col,
-/// prev_line_len)`. No-op if already on the first line.
+/// Move the cursor up one line, preserving the visual column. Column
+/// is computed as `cursor - line_start` in graphemes; the new
+/// position lands at `prev_line_start + min(col, prev_line_len)`.
+/// No-op if already on the first line.
 #[cfg(not(target_arch = "wasm32"))]
 fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
     let line_start = cursor_to_line_start(buffer, cursor);
     if line_start == 0 {
         return cursor;
     }
-    // Move to the char just before the '\n' that terminates the previous line.
+    // Move to the grapheme just before the '\n' that terminates the previous line.
     let prev_line_end = line_start - 1;
     let prev_line_start = cursor_to_line_start(buffer, prev_line_end);
     let col = cursor - line_start;
@@ -287,11 +287,11 @@ fn move_cursor_up_line(buffer: &str, cursor: usize) -> usize {
     prev_line_start + col.min(prev_line_len)
 }
 
-/// Session 7A: move the cursor down one line, preserving the visual
-/// column. No-op if already on the last line.
+/// Move the cursor down one line, preserving the visual column.
+/// No-op if already on the last line.
 #[cfg(not(target_arch = "wasm32"))]
 fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
-    let total = buffer.chars().count();
+    let total = grapheme_chad::count_grapheme_clusters(buffer);
     let line_start = cursor_to_line_start(buffer, cursor);
     let line_end = cursor_to_line_end(buffer, cursor);
     if line_end == total {
@@ -304,16 +304,14 @@ fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
     next_line_start + col.min(next_line_len)
 }
 
-/// Session 7A: build the display text for the edited node by
-/// inserting the caret glyph at the cursor position. Used on every
-/// keystroke to produce the `Mutation::AreaDelta` payload.
+/// Build the display text for the edited node by inserting the caret
+/// glyph at the cursor's grapheme position. Used on every keystroke
+/// to produce the `Mutation::AreaDelta` payload.
 #[cfg(not(target_arch = "wasm32"))]
 fn insert_caret(buffer: &str, cursor: usize) -> String {
-    let byte = cursor_char_to_byte(buffer, cursor);
     let mut out = String::with_capacity(buffer.len() + TEXT_EDIT_CARET.len_utf8());
-    out.push_str(&buffer[..byte]);
-    out.push(TEXT_EDIT_CARET);
-    out.push_str(&buffer[byte..]);
+    out.push_str(buffer);
+    grapheme_chad::insert_str_at_grapheme(&mut out, cursor, &TEXT_EDIT_CARET.to_string());
     out
 }
 
@@ -2516,18 +2514,18 @@ fn open_text_edit(
         None => return,
     };
     let buffer = if from_creation { String::new() } else { current_text };
-    let cursor_char_pos = buffer.chars().count();
+    let cursor_grapheme_pos = grapheme_chad::count_grapheme_clusters(&buffer);
     *text_edit_state = TextEditState::Open {
         node_id: node_id.to_string(),
         buffer: buffer.clone(),
-        cursor_char_pos,
+        cursor_grapheme_pos,
     };
     // Push the initial (caret-only for creation, or "existing text +
     // caret at end" for edit) through the Baumhard mutation pipeline.
     apply_text_edit_to_tree(
         node_id,
         &buffer,
-        cursor_char_pos,
+        cursor_grapheme_pos,
         mindmap_tree,
         renderer,
     );
@@ -2574,7 +2572,7 @@ fn close_text_edit(
 fn apply_text_edit_to_tree(
     node_id: &str,
     buffer: &str,
-    cursor_char_pos: usize,
+    cursor_grapheme_pos: usize,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
@@ -2603,8 +2601,9 @@ fn apply_text_edit_to_tree(
     };
 
     // Build the display text: buffer with caret glyph inserted at
-    // cursor position. This is what cosmic-text will shape.
-    let display_text = insert_caret(buffer, cursor_char_pos);
+    // the cursor's grapheme position. This is what cosmic-text will
+    // shape.
+    let display_text = insert_caret(buffer, cursor_grapheme_pos);
 
     // Inherit the color of the first existing region so edited text
     // matches the pre-edit styling. Fall back to `None` (renderer
@@ -2674,9 +2673,9 @@ fn handle_text_edit_key(
         TextEditState::Open {
             node_id,
             buffer,
-            cursor_char_pos,
+            cursor_grapheme_pos,
             ..
-        } => (node_id, buffer, cursor_char_pos),
+        } => (node_id, buffer, cursor_grapheme_pos),
         TextEditState::Closed => return,
     };
 
@@ -2689,7 +2688,7 @@ fn handle_text_edit_key(
             }
         }
         Some("delete") => {
-            if *cursor < buffer.chars().count() {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
                 *cursor = delete_at_cursor(buffer, *cursor);
                 changed = true;
             }
@@ -2701,7 +2700,7 @@ fn handle_text_edit_key(
             }
         }
         Some("arrowright") => {
-            if *cursor < buffer.chars().count() {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
                 *cursor += 1;
                 changed = true;
             }
@@ -4187,7 +4186,7 @@ mod text_edit_tests {
         let open = TextEditState::Open {
             node_id: "n-42".to_string(),
             buffer: "hi".to_string(),
-            cursor_char_pos: 2,
+            cursor_grapheme_pos: 2,
         };
         assert_eq!(open.node_id(), Some("n-42"));
         assert!(open.is_open());
@@ -4265,10 +4264,61 @@ mod text_edit_tests {
     #[test]
     fn test_delete_before_cursor_with_multibyte() {
         let mut s = String::from("café");
-        // Delete the 'é' (char pos 3, cursor at 4).
+        // Delete the 'é' (grapheme pos 3, cursor at 4).
         let new_cursor = delete_before_cursor(&mut s, 4);
         assert_eq!(s, "caf");
         assert_eq!(new_cursor, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Grapheme-cluster regression tests (chunk 3 / §B2)
+    // -----------------------------------------------------------------
+    //
+    // These guard the rule that a single Backspace/Delete removes a
+    // whole grapheme cluster, not a Unicode scalar. Pre-chunk-3 the
+    // helpers used `chars()` and would corrupt emoji and ZWJ
+    // sequences mid-cluster on the first Backspace.
+
+    #[test]
+    fn test_cursor_edit_with_emoji_backspace() {
+        // 🍕 is a single grapheme but two `char`s (it's a single
+        // codepoint above U+FFFF, encoded as a surrogate pair in
+        // UTF-16; in UTF-8 it's 4 bytes / 1 char).
+        let mut s = String::from("ab🍕cd");
+        // Cursor sits just after the pizza (grapheme index 3).
+        let new_cursor = delete_before_cursor(&mut s, 3);
+        // The whole pizza is gone, not just half of it.
+        assert_eq!(s, "abcd");
+        assert_eq!(new_cursor, 2);
+    }
+
+    #[test]
+    fn test_cursor_edit_with_zwj_backspace() {
+        // 🧑‍🚀 is a ZWJ sequence: 🧑 + ZWJ + 🚀, three codepoints
+        // and five chars, but a single user-visible grapheme cluster.
+        // Backspace must remove the whole thing in one keystroke.
+        let mut s = String::from("hi🧑\u{200D}🚀!");
+        let new_cursor = delete_before_cursor(&mut s, 3);
+        assert_eq!(s, "hi!");
+        assert_eq!(new_cursor, 2);
+    }
+
+    #[test]
+    fn test_cursor_edit_with_emoji_delete_forward() {
+        // Delete (forward delete) at the position before the pizza
+        // removes the whole cluster.
+        let mut s = String::from("ab🍕cd");
+        let new_cursor = delete_at_cursor(&mut s, 2);
+        assert_eq!(s, "abcd");
+        // Forward delete leaves the cursor in place.
+        assert_eq!(new_cursor, 2);
+    }
+
+    #[test]
+    fn test_insert_caret_after_emoji() {
+        // Caret rendered after a pizza emoji should not split it.
+        let out = insert_caret("ab🍕cd", 3);
+        assert_eq!(out, "ab🍕\u{258C}cd");
     }
 
     // -----------------------------------------------------------------
@@ -4288,7 +4338,7 @@ mod text_edit_tests {
         let editor = TextEditState::Open {
             node_id: "node-A".to_string(),
             buffer: "in progress".to_string(),
-            cursor_char_pos: 11,
+            cursor_grapheme_pos: 11,
         };
         let hit = Some("node-A".to_string());
         let already_editing = editor
@@ -4303,7 +4353,7 @@ mod text_edit_tests {
         let editor = TextEditState::Open {
             node_id: "node-A".to_string(),
             buffer: "in progress".to_string(),
-            cursor_char_pos: 11,
+            cursor_grapheme_pos: 11,
         };
         let hit = Some("node-B".to_string());
         let already_editing = editor

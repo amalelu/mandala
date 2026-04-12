@@ -208,6 +208,37 @@ pub fn insert_spaces(s: &mut String, idx: usize, n: usize) {
     }
 }
 
+/// Insert `source` into `s` at grapheme-cluster index `idx`. If `idx`
+/// equals or exceeds `s`'s grapheme count the source is appended.
+///
+/// Cost: O(n) over `s` to walk to the nth grapheme boundary, plus the
+/// underlying `String::insert_str` shift. No allocation beyond the
+/// string growth.
+///
+/// This is the grapheme-correct counterpart to `String::insert_str`,
+/// and exists so caller code can stop reaching for `char_indices()` —
+/// the latter splits emoji and combining marks mid-cluster.
+pub fn insert_str_at_grapheme(s: &mut String, idx: usize, source: &str) {
+    match find_byte_index_of_grapheme(s, idx) {
+        Some(byte) => s.insert_str(byte, source),
+        None => s.push_str(source),
+    }
+}
+
+/// Delete the grapheme cluster at grapheme index `idx`. No-op if `idx`
+/// is past the end.
+///
+/// Cost: O(n) over `s` to walk two grapheme boundaries. No allocation.
+pub fn delete_grapheme_at(s: &mut String, idx: usize) {
+    let Some(start) = find_byte_index_of_grapheme(s, idx) else {
+        return;
+    };
+    // The end is the start of the *next* grapheme, or the buffer end
+    // if `idx` is the last cluster.
+    let end = find_byte_index_of_grapheme(s, idx + 1).unwrap_or(s.len());
+    s.replace_range(start..end, "");
+}
+
 pub fn count_grapheme_clusters(s: &str) -> usize {
     s.graphemes(true).count()
 }
