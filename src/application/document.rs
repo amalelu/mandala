@@ -1323,6 +1323,29 @@ impl MindMapDocument {
         new_id
     }
 
+    /// Detach every currently-selected node from its parent (promote to
+    /// root), push the `ReparentNodes` undo entry, and mark dirty.
+    /// Returns `true` if anything was actually orphaned — callers gate a
+    /// rebuild on this. No-op on empty selection or when no nodes
+    /// actually moved.
+    pub fn apply_orphan_selection_with_undo(&mut self) -> bool {
+        let sel: Vec<String> = self.selection
+            .selected_ids().iter().map(|s| s.to_string()).collect();
+        if sel.is_empty() {
+            return false;
+        }
+        let undo_data = self.apply_orphan_selection(&sel);
+        if undo_data.entries.is_empty() {
+            return false;
+        }
+        self.undo_stack.push(UndoAction::ReparentNodes {
+            entries: undo_data.entries,
+            old_edges: undo_data.old_edges,
+        });
+        self.dirty = true;
+        true
+    }
+
     /// Delete whatever is currently selected (edge / portal / single node /
     /// multiple nodes), push the appropriate undo entries, clear the
     /// selection, and mark dirty. Returns `true` if anything was actually

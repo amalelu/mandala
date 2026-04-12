@@ -29,7 +29,7 @@ use indextree::Arena;
 use wgpu::{Instance, SurfaceTargetUnsafe};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ControlFlow;
-use winit::keyboard::Key;
+use winit::keyboard::{Key, ModifiersState};
 use winit::window::CursorIcon;
 use winit::{event_loop::EventLoop, window::Window};
 
@@ -524,9 +524,7 @@ impl Application {
         // double-click detection. Cleared after a double-click fires.
         let mut last_click: Option<LastClick> = None;
         let mut hovered_node: Option<String> = None;
-        let mut shift_pressed = false;
-        let mut alt_pressed = false;
-        let mut ctrl_pressed = false;
+        let mut modifiers = ModifiersState::empty();
         // True while the cursor is hovering a node with any trigger
         // bindings (a "button"). Tracked so we only call set_cursor on
         // transitions instead of every CursorMoved event.
@@ -905,7 +903,7 @@ impl Application {
                                             handle_click(
                                                 hit_node,
                                                 cursor_pos,
-                                                shift_pressed,
+                                                modifiers.shift_key(),
                                                 &mut document,
                                                 &mut mindmap_tree,
                                                 &mut renderer,
@@ -1182,7 +1180,7 @@ impl Application {
                                         }
                                     }
                                     // Shift+drag: move all selected nodes together
-                                    let node_ids = if shift_pressed {
+                                    let node_ids = if modifiers.shift_key() {
                                         if let Some(doc) = document.as_ref() {
                                             let mut ids: Vec<String> = doc.selection.selected_ids()
                                                 .iter().map(|s| s.to_string()).collect();
@@ -1211,9 +1209,9 @@ impl Application {
                                         node_ids,
                                         total_delta: Vec2::ZERO,
                                         pending_delta: Vec2::ZERO,
-                                        individual: alt_pressed,
+                                        individual: modifiers.alt_key(),
                                     };
-                                } else if shift_pressed {
+                                } else if modifiers.shift_key() {
                                     // Shift+drag on empty space: rubber-band selection
                                     let start_canvas = renderer.screen_to_canvas(
                                         start_pos.0 as f32, start_pos.1 as f32,
@@ -1245,12 +1243,10 @@ impl Application {
                 //// KEYBOARD ////
                 //////////////////
                 Event::WindowEvent {
-                    event: WindowEvent::ModifiersChanged(modifiers),
+                    event: WindowEvent::ModifiersChanged(mods),
                     ..
                 } => {
-                    shift_pressed = modifiers.state().shift_key();
-                    alt_pressed = modifiers.state().alt_key();
-                    ctrl_pressed = modifiers.state().control_key();
+                    modifiers = mods.state();
                 }
                 Event::WindowEvent {
                     event: WindowEvent::KeyboardInput {
@@ -1348,7 +1344,7 @@ impl Application {
                     // user to accidentally rebind away their only
                     // discovery path).
                     if key_name.as_deref() == Some("/")
-                        && !ctrl_pressed && !alt_pressed
+                        && !modifiers.control_key() && !modifiers.alt_key()
                     {
                         let ctx = document.as_ref().map(|doc| PaletteContext { document: doc });
                         if let Some(ctx) = ctx {
@@ -1368,7 +1364,12 @@ impl Application {
                     }
 
                     let action = key_name.as_deref().and_then(|k| {
-                        keybinds.action_for(k, ctrl_pressed, shift_pressed, alt_pressed)
+                        keybinds.action_for(
+                            k,
+                            modifiers.control_key(),
+                            modifiers.shift_key(),
+                            modifiers.alt_key(),
+                        )
                     });
 
                     match action {
@@ -1442,64 +1443,28 @@ impl Application {
                         }
                         Some(Action::OrphanSelection) => {
                             if let Some(doc) = document.as_mut() {
-                                let sel: Vec<String> = doc.selection.selected_ids()
-                                    .iter().map(|s| s.to_string()).collect();
-                                if !sel.is_empty() {
-                                    let undo_data = doc.apply_orphan_selection(&sel);
-                                    if !undo_data.entries.is_empty() {
-                                        doc.undo_stack.push(UndoAction::ReparentNodes {
-                                            entries: undo_data.entries,
-                                            old_edges: undo_data.old_edges,
-                                        });
-                                        doc.dirty = true;
-                                    }
+                                if doc.apply_orphan_selection_with_undo() {
                                     rebuild_all(doc, &mut mindmap_tree, &mut renderer);
                                 }
                             }
                         }
-                        Some(Action::EditSelection) => {
-                            // Session 7A follow-up: open the text editor
-                            // on the selected single node with its
-                            // existing text, cursor at end. The
-                            // text-editor steal at the top of the
-                            // keyboard dispatch (`text_edit_state.is_open()`
-                            // branch above) means this can't fire while
-                            // the editor is already open, so Enter-inside-
-                            // editor stays literal.
+                        Some(a @ (Action::EditSelection | Action::EditSelectionClean)) => {
+                            // Open the text editor on the selected single
+                            // node. `EditSelectionClean` opens with an empty
+                            // buffer (the "clean slate" retype gesture);
+                            // `EditSelection` opens on the node's current
+                            // text with cursor at end. The text-editor
+                            // steal at the top of keyboard dispatch means
+                            // these never fire while the editor is already
+                            // open, so Enter/Backspace stay literal inside
+                            // the editor.
+                            let clean = matches!(a, Action::EditSelectionClean);
                             if let Some(doc) = document.as_mut() {
-                                let target = if let SelectionState::Single(id) = &doc.selection {
-                                    Some(id.clone())
-                                } else {
-                                    None
-                                };
-                                if let Some(id) = target {
+                                if let SelectionState::Single(id) = &doc.selection {
+                                    let nid = id.clone();
                                     open_text_edit(
-                                        &id,
-                                        false,
-                                        doc,
-                                        &mut text_edit_state,
-                                        &mut mindmap_tree,
-                                        &mut renderer,
-                                    );
-                                }
-                            }
-                        }
-                        Some(Action::EditSelectionClean) => {
-                            // Session 7A follow-up: open the editor with
-                            // an empty buffer. On commit, `set_node_text`
-                            // replaces the node's text wholesale and
-                            // pushes an `EditNodeText` undo entry — no
-                            // new undo variant needed.
-                            if let Some(doc) = document.as_mut() {
-                                let target = if let SelectionState::Single(id) = &doc.selection {
-                                    Some(id.clone())
-                                } else {
-                                    None
-                                };
-                                if let Some(id) = target {
-                                    open_text_edit(
-                                        &id,
-                                        true,
+                                        &nid,
+                                        clean,
                                         doc,
                                         &mut text_edit_state,
                                         &mut mindmap_tree,
@@ -2055,17 +2020,7 @@ impl Application {
                             rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
                         }
                         Some(Action::OrphanSelection) => {
-                            let sel: Vec<String> = input.document.selection
-                                .selected_ids().iter().map(|s| s.to_string()).collect();
-                            if !sel.is_empty() {
-                                let undo_data = input.document.apply_orphan_selection(&sel);
-                                if !undo_data.entries.is_empty() {
-                                    input.document.undo_stack.push(UndoAction::ReparentNodes {
-                                        entries: undo_data.entries,
-                                        old_edges: undo_data.old_edges,
-                                    });
-                                    input.document.dirty = true;
-                                }
+                            if input.document.apply_orphan_selection_with_undo() {
                                 rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
                             }
                         }
@@ -2074,24 +2029,12 @@ impl Application {
                                 rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
                             }
                         }
-                        Some(Action::EditSelection) => {
+                        Some(a @ (Action::EditSelection | Action::EditSelectionClean)) => {
+                            let clean = matches!(a, Action::EditSelectionClean);
                             if let SelectionState::Single(id) = &input.document.selection {
                                 let nid = id.clone();
                                 open_text_edit(
-                                    &nid, false,
-                                    &mut input.document,
-                                    &mut input.text_edit_state,
-                                    &mut input.mindmap_tree,
-                                    renderer,
-                                );
-                                suppress_for_events.set(input.text_edit_state.is_open());
-                            }
-                        }
-                        Some(Action::EditSelectionClean) => {
-                            if let SelectionState::Single(id) = &input.document.selection {
-                                let nid = id.clone();
-                                open_text_edit(
-                                    &nid, true,
+                                    &nid, clean,
                                     &mut input.document,
                                     &mut input.text_edit_state,
                                     &mut input.mindmap_tree,
