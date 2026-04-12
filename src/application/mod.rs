@@ -1,6 +1,7 @@
 pub(crate) mod app;
 pub(crate) mod color_picker;
 pub(crate) mod common;
+pub(crate) mod console;
 pub(crate) mod document;
 pub(crate) mod frame_throttle;
 pub(crate) mod keybinds;
