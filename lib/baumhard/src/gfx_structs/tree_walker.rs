@@ -1,5 +1,5 @@
 use indextree::{Arena, Node, NodeId};
-use log::debug;
+use log::{debug, warn};
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::tree::{BranchChannel, MutatorTree, Tree};
 use crate::gfx_structs::mutator::{GfxMutator, Instruction};
@@ -106,16 +106,20 @@ fn process_instruction_node(
         Instruction::RepeatWhile(condition) => {
             let mutator = get_mutator(&mutator_tree.arena, mutator_id);
             let target = get_target(&mut gfx_tree.arena, target_id);
-            let current_mutator_child_id = mutator.first_child()
-               .expect("Trying to process an instruction node that does not exist! This is a logic error, \
-               as in this is probably my fault, not whomever brave soul might be reading this. \
-               This is a massive bug, call me.");
-            let maybe_target_child_id = target.first_child();
-            if maybe_target_child_id.is_none() {
+            // Interactive path: a malformed RepeatWhile mutator (no
+            // children to repeat) should degrade the walk, not abort
+            // mutation application. The caller treats a no-op as
+            // success.
+            let Some(current_mutator_child_id) = mutator.first_child() else {
+                warn!(
+                    "RepeatWhile instruction node has no children, skipping branch"
+                );
+                return;
+            };
+            let Some(current_target_child_id) = target.first_child() else {
                 debug!("The target has no children - completing walk down this branch.");
                 return;
-            }
-            let current_target_child_id = maybe_target_child_id.unwrap();
+            };
             compare_apply_repeat_while(
                 gfx_tree,
                 mutator_tree,
@@ -186,14 +190,33 @@ fn compare_apply_repeat_while(
     }
 }
 
+/// Look up a mutator-tree node by id.
+///
+/// **Precondition:** `id` must come from `mutator_tree.arena` (every
+/// caller in this file walks the same arena it was handed). Violating
+/// the precondition means the mutator tree is corrupted, which is a
+/// bug at the call site, not user-recoverable input.
+///
+/// The remaining `expect` is *not* an interactive-path violation under
+/// CODE_CONVENTIONS.md §4: it asserts a tight internal invariant that,
+/// if broken, means the walker is operating on inconsistent state and
+/// continuing would silently corrupt the user's mindmap. We prefer a
+/// clean panic over a corrupt save.
 #[inline]
 fn get_mutator(arena: &Arena<GfxMutator>, id: NodeId) -> &Node<GfxMutator> {
-    arena.get(id).expect("No mutator found for the given ID")
+    arena
+        .get(id)
+        .expect("walker invariant: mutator NodeId must belong to mutator_tree.arena")
 }
 
+/// Look up a target-tree node by id, see [`get_mutator`] for the
+/// invariant rationale. Same precondition: `id` must originate from
+/// `gfx_tree.arena`.
 #[inline]
 fn get_target(arena: &mut Arena<GfxElement>, id: NodeId) -> &mut Node<GfxElement> {
-    arena.get_mut(id).expect("No target found for the given ID")
+    arena
+        .get_mut(id)
+        .expect("walker invariant: target NodeId must belong to gfx_tree.arena")
 }
 
 /// Take the children of the mutator, and the target, and start a walk for each matching channel pairs

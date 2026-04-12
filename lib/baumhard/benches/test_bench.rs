@@ -51,6 +51,9 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("complex_tree_mutation", |b| b.iter(|| complex_tree_mutation()));
     c.bench_function("simple_tree_mutation", |b| b.iter(|| simple_tree_mutation()));
     c.bench_function("repeat_while_skip_while", |b| b.iter(|| repeat_while_skip_while()));
+    c.bench_function("repeat_while_without_children_is_noop", |b| {
+        b.iter(|| repeat_while_without_children_is_noop())
+    });
     c.bench_function("event_propagation_complex", |b| b.iter(|| event_propagation_complex_symmetric()));
     c.bench_function("event_propagation_simple", |b| b.iter(|| event_propagation_simple()));
     // regions //
@@ -86,11 +89,17 @@ fn criterion_benchmark(c: &mut Criterion) {
     // color //
     c.bench_function("from_hex", |b| b.iter(|| do_from_hex()));
     c.bench_function("from_hex_lazy_static", |b| b.iter(|| do_from_hex_lazy_static()));
+    c.bench_function("from_hex_garbage_falls_back_to_black", |b| {
+        b.iter(|| do_from_hex_garbage_falls_back_to_black())
+    });
     c.bench_function("rgba_hex_macros", |b| b.iter(|| do_rgba_hex_macros()));
     // primitives //
     c.bench_function("overlaps", |b| b.iter(|| do_overlaps()));
     c.bench_function("split_and_separate_1", |b| b.iter(|| do_split_and_separate_1()));
     c.bench_function("split_and_separate_2", |b| b.iter(|| do_split_and_separate_2()));
+    c.bench_function("submit_region_drops_inverted_range", |b| {
+        b.iter(|| do_submit_region_drops_inverted_range())
+    });
     // arena_utils //
     c.bench_function("arena_utils_clone", |b| b.iter(|| do_clone()));
     // primes //

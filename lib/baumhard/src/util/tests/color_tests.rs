@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use crate::util::color::from_hex;
+use crate::util::color::{from_hex, hex_to_rgba_safe};
 use crate::{hex, rgb, rgba};
 
 #[test]
@@ -42,6 +42,30 @@ pub fn do_from_hex_lazy_static() {
    assert_eq!(RGBA_COLORS.get(1).unwrap(), &CONTROL_2.clone());
    assert_eq!(RGBA_COLORS.get(2).unwrap(), &CONTROL_3.clone());
    assert_eq!(RGBA_COLORS.get(3).unwrap(), &CONTROL_4.clone());
+}
+
+#[test]
+fn test_from_hex_garbage_falls_back_to_black() {
+   do_from_hex_garbage_falls_back_to_black();
+}
+
+/// Regression for the `hex_to_rgba` panic removed in chunk 2: bad
+/// hex strings now degrade to opaque black instead of crashing the
+/// caller. The valid entry in the middle ensures the surrounding
+/// items still parse correctly.
+pub fn do_from_hex_garbage_falls_back_to_black() {
+   let rgba = from_hex(&["zzzzzz", "ff0000", "not-a-color", ""]);
+   assert_eq!(rgba.len(), 4);
+   assert_eq!(rgba[0], [0.0, 0.0, 0.0, 1.0]);
+   assert_eq!(rgba[1], [1.0, 0.0, 0.0, 1.0]);
+   assert_eq!(rgba[2], [0.0, 0.0, 0.0, 1.0]);
+   assert_eq!(rgba[3], [0.0, 0.0, 0.0, 1.0]);
+   // hex_to_rgba_safe is exercised directly elsewhere; this asserts
+   // the from_hex wrapper now routes through it.
+   assert_eq!(
+      hex_to_rgba_safe("garbage", [0.0, 0.0, 0.0, 1.0]),
+      [0.0, 0.0, 0.0, 1.0]
+   );
 }
 
 #[test]

@@ -54,3 +54,21 @@ pub fn do_split_and_separate_2() {
    let _region_2 = regions.get(Range::new(8, 20)).unwrap();
    let _region_3 = regions.get(Range::new(20, 36)).unwrap();
 }
+
+#[test]
+fn test_submit_region_drops_inverted_range() {
+   do_submit_region_drops_inverted_range();
+}
+
+/// Regression for the `panic!` removed from `submit_region` in chunk
+/// 2: an inverted (`start > end`) range used to abort the editor.
+/// It now logs and is silently dropped, so a malformed mutation
+/// degrades the frame instead.
+pub fn do_submit_region_drops_inverted_range() {
+   let mut regions = ColorFontRegions::new_empty();
+   regions.submit_region(ColorFontRegion::new_key_only(Range::new(0, 16)));
+   // Intentionally inverted — start > end. Pre-fix this would panic.
+   regions.submit_region(ColorFontRegion::new_key_only(Range::new(20, 5)));
+   assert_eq!(regions.num_regions(), 1);
+   let _kept = regions.get(Range::new(0, 16)).unwrap();
+}
