@@ -2125,8 +2125,6 @@ impl Application {
                             return;
                         }
 
-                        // Not a double-click: store as pending click and
-                        // record LastClick for next potential double-click.
                         input.pending_click = Some(WasmPendingClick {
                             hit_node: hit_node.clone(),
                         });
@@ -2137,8 +2135,6 @@ impl Application {
                         });
                     } else {
                         // --- Left mouse Released ---
-                        // Replicate native click-outside-commit from
-                        // DragState::Pending → Released at ~line 802-862.
                         let mut input_borrow = input_for_events.borrow_mut();
                         let Some(input) = input_borrow.as_mut() else { return; };
 
@@ -2146,13 +2142,12 @@ impl Application {
                         let Some(pending) = pending else { return; };
 
                         if input.text_edit_state.is_open() {
-                            let renderer_borrow = renderer_for_events.borrow();
-                            let Some(r) = renderer_borrow.as_ref() else { return; };
-                            let release_canvas = r.screen_to_canvas(
+                            let mut renderer_borrow = renderer_for_events.borrow_mut();
+                            let Some(renderer) = renderer_borrow.as_mut() else { return; };
+                            let release_canvas = renderer.screen_to_canvas(
                                 input.cursor_pos.0 as f32,
                                 input.cursor_pos.1 as f32,
                             );
-                            drop(renderer_borrow);
 
                             let edited_node_id = input.text_edit_state.node_id().unwrap().to_string();
                             let inside_edit_node = input.mindmap_tree
@@ -2177,16 +2172,13 @@ impl Application {
                                 return;
                             }
 
-                            let mut renderer_borrow = renderer_for_events.borrow_mut();
-                            if let Some(renderer) = renderer_borrow.as_mut() {
-                                close_text_edit(
-                                    true,
-                                    &mut input.document,
-                                    &mut input.text_edit_state,
-                                    &mut input.mindmap_tree,
-                                    renderer,
-                                );
-                            }
+                            close_text_edit(
+                                true,
+                                &mut input.document,
+                                &mut input.text_edit_state,
+                                &mut input.mindmap_tree,
+                                renderer,
+                            );
                             suppress_for_events.set(false);
                             return;
                         }
