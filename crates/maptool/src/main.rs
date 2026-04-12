@@ -9,11 +9,12 @@ Usage: maptool <command> <map.json> <args...>
 
 Commands:
   show <map.json> <node-id>     Print the text of the node with this ID.
-  grep <map.json> <pattern>     Print every node whose text matches the
-                                regex <pattern>. Literal strings also
-                                work (they're valid regexes). Use -i
-                                before the map path for case-insensitive
-                                matching.";
+  grep <map.json> <pattern>     Print every line in any node whose text
+                                or notes matches the regex <pattern>,
+                                one match per line as '<node-id>: <line>'.
+                                Literal strings also work (they're valid
+                                regexes). Pass -i anywhere before the
+                                pattern for case-insensitive matching.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -34,6 +35,14 @@ fn main() -> ExitCode {
     }
 }
 
+/// Deviation from `CODE_CONVENTIONS.md §4` ("no custom error types"):
+/// a CLI binary genuinely needs to map distinct failure modes to
+/// distinct exit codes. The app-crate rule assumes an interactive/GPU
+/// posture where panicking at startup and logging at runtime is fine;
+/// that doesn't translate to a tool that's supposed to be scriptable.
+/// This enum is kept deliberately tiny — three string variants, no
+/// `impl Error`, no `From` chains, no `thiserror` — so it stays a
+/// dispatch table for exit codes rather than a growing taxonomy.
 #[derive(Debug)]
 enum CliError {
     Usage(String),
@@ -60,26 +69,19 @@ fn run(args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         "grep" => {
-            let mut rest = &args[1..];
-            let mut case_insensitive = false;
-            if rest.first().map(|s| s.as_str()) == Some("-i") {
-                case_insensitive = true;
-                rest = &rest[1..];
-            }
-            let map_path = rest
-                .first()
-                .ok_or_else(|| CliError::Usage("grep: missing <map.json>".into()))?;
-            let pattern = rest
-                .get(1)
-                .ok_or_else(|| CliError::Usage("grep: missing <pattern>".into()))?;
-            let regex = build_regex(pattern, case_insensitive)?;
-            let map = load_map(map_path)?;
+            let parsed = parse_grep_args(&args[1..])?;
+            let regex = build_regex(parsed.pattern, parsed.case_insensitive)
+                .map_err(|msg| CliError::Usage(format!("grep: {msg}")))?;
+            let map = load_map(parsed.map_path)?;
             let matches = grep_nodes(&map, &regex);
             if matches.is_empty() {
-                return Err(CliError::NotFound(format!("no matches for: {pattern}")));
+                return Err(CliError::NotFound(format!(
+                    "no matches for: {}",
+                    parsed.pattern
+                )));
             }
-            for (id, text) in matches {
-                print_match(id, text);
+            for (id, line) in matches {
+                println!("{id}: {line}");
             }
             Ok(())
         }
@@ -100,39 +102,83 @@ fn show_node<'a>(map: &'a MindMap, node_id: &str) -> Option<&'a str> {
     map.nodes.get(node_id).map(|n| n.text.as_str())
 }
 
-/// Compile a user-supplied pattern into a regex, mapping any syntax
-/// error into a `CliError::Usage` so it's reported with exit code 2.
-fn build_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, CliError> {
+/// Parsed form of the `grep` subcommand's positional arguments.
+/// Borrowed from the caller's `&[String]` slice — no allocations.
+struct GrepArgs<'a> {
+    map_path: &'a str,
+    pattern: &'a str,
+    case_insensitive: bool,
+}
+
+/// Parse the args that follow `grep` on the command line. `-i` is
+/// recognised anywhere in the arg list (not just immediately after
+/// `grep`), and anything that isn't `-i` is treated as a positional
+/// in its declared order. Users who legitimately need to match a
+/// literal `-i` can escape it in the regex (e.g. `\-i`).
+fn parse_grep_args(args: &[String]) -> Result<GrepArgs<'_>, CliError> {
+    let mut case_insensitive = false;
+    let mut positional: Vec<&str> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-i" => case_insensitive = true,
+            other => positional.push(other),
+        }
+    }
+    let map_path = positional
+        .first()
+        .copied()
+        .ok_or_else(|| CliError::Usage("grep: missing <map.json>".into()))?;
+    let pattern = positional
+        .get(1)
+        .copied()
+        .ok_or_else(|| CliError::Usage("grep: missing <pattern>".into()))?;
+    Ok(GrepArgs {
+        map_path,
+        pattern,
+        case_insensitive,
+    })
+}
+
+/// Compile a user-supplied pattern into a regex. Returns a plain
+/// message on failure so the caller can prefix it with a subcommand
+/// name (`grep: invalid regex ...`) without this helper knowing
+/// which command invoked it.
+fn build_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, String> {
     RegexBuilder::new(pattern)
         .case_insensitive(case_insensitive)
         .build()
-        .map_err(|e| CliError::Usage(format!("grep: invalid regex {pattern:?}: {e}")))
+        .map_err(|e| format!("invalid regex {pattern:?}: {e}"))
 }
 
-/// Return every (id, text) pair whose text matches `regex`.
-/// Results are sorted by node ID so output is deterministic.
+/// Return every `(id, line)` pair where `line` is a line of a node's
+/// `text` or `notes` that matches `regex`. A single node can produce
+/// several entries if more than one of its lines matches (grep-style).
+///
+/// Results are sorted by node ID. IDs that parse as `u64` are
+/// compared numerically (so `"97982720"` sorts before `"352207208"`
+/// even though lexicographically it wouldn't); IDs that don't parse
+/// fall back to lexicographic order. The sort is stable, so within a
+/// node lines keep their natural order: `text` lines first, in
+/// order, then `notes` lines, in order.
 fn grep_nodes<'a>(map: &'a MindMap, regex: &Regex) -> Vec<(&'a str, &'a str)> {
-    let mut out: Vec<(&str, &str)> = map
-        .nodes
-        .values()
-        .filter(|n| regex.is_match(&n.text))
-        .map(|n| (n.id.as_str(), n.text.as_str()))
-        .collect();
-    out.sort_by_key(|(id, _)| *id);
-    out
-}
-
-/// Format a single grep match. Single-line text stays on one line;
-/// multi-line text gets indented underneath the ID for readability.
-fn print_match(id: &str, text: &str) {
-    if text.contains('\n') {
-        println!("{id}:");
-        for line in text.lines() {
-            println!("  {line}");
+    let mut out: Vec<(&'a str, &'a str)> = Vec::new();
+    for node in map.nodes.values() {
+        for line in node.text.lines() {
+            if regex.is_match(line) {
+                out.push((node.id.as_str(), line));
+            }
         }
-    } else {
-        println!("{id}: {text}");
+        for line in node.notes.lines() {
+            if regex.is_match(line) {
+                out.push((node.id.as_str(), line));
+            }
+        }
     }
+    out.sort_by(|(a, _), (b, _)| match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    });
+    out
 }
 
 #[cfg(test)]
@@ -148,6 +194,12 @@ mod tests {
         load_from_file(&p).unwrap()
     }
 
+    fn rx(pattern: &str, case_insensitive: bool) -> Regex {
+        build_regex(pattern, case_insensitive).unwrap()
+    }
+
+    // --- show -------------------------------------------------------
+
     #[test]
     fn show_returns_text_for_known_id() {
         let map = testament();
@@ -160,9 +212,7 @@ mod tests {
         assert!(show_node(&map, "does-not-exist").is_none());
     }
 
-    fn rx(pattern: &str, case_insensitive: bool) -> Regex {
-        build_regex(pattern, case_insensitive).unwrap()
-    }
+    // --- grep / grep_nodes ------------------------------------------
 
     #[test]
     fn grep_finds_literal_pattern() {
@@ -203,17 +253,163 @@ mod tests {
     #[test]
     fn grep_regex_anchor_matches() {
         let map = testament();
-        // "Lord God" is at the start of the root node's text.
+        // "^Lord God" anchors on the start of a line (the root node
+        // text has "Lord God" as its first and only line).
         let hits = grep_nodes(&map, &rx("^Lord God", false));
         assert!(hits.iter().any(|(id, _)| *id == "348068464"));
     }
 
     #[test]
-    fn grep_invalid_regex_is_usage_error() {
-        // Unclosed bracket is a syntax error.
-        match build_regex("[unclosed", false) {
-            Err(CliError::Usage(msg)) => assert!(msg.contains("invalid regex")),
-            _ => panic!("expected usage error for invalid regex"),
+    fn grep_invalid_regex_message() {
+        // Unclosed bracket is a syntax error; build_regex returns a
+        // bare message without the "grep:" prefix (that's added by
+        // the caller in the grep subcommand).
+        let err = build_regex("[unclosed", false).unwrap_err();
+        assert!(err.contains("invalid regex"), "got: {err}");
+        assert!(!err.starts_with("grep:"), "build_regex must not hardcode subcommand prefix");
+    }
+
+    #[test]
+    fn grep_searches_notes_field() {
+        // Inject a unique sentinel into one node's notes. No other
+        // node in testament contains this token, and it isn't in
+        // any node's text — so finding it proves notes are searched.
+        let mut map = testament();
+        map.nodes
+            .get_mut("348068464")
+            .unwrap()
+            .notes = "SENTINEL_ZXCVBNM_12345".into();
+
+        let hits = grep_nodes(&map, &rx("SENTINEL_ZXCVBNM_12345", false));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "348068464");
+        assert!(hits[0].1.contains("SENTINEL_ZXCVBNM_12345"));
+    }
+
+    #[test]
+    fn grep_returns_text_lines_before_notes_lines() {
+        let mut map = testament();
+        let node = map.nodes.get_mut("348068464").unwrap();
+        node.text = "MARK_A\nMARK_B".into();
+        node.notes = "MARK_C".into();
+
+        let hits = grep_nodes(&map, &rx("^MARK_", false));
+        let just_this: Vec<&str> = hits
+            .iter()
+            .filter(|(id, _)| *id == "348068464")
+            .map(|(_, line)| *line)
+            .collect();
+        assert_eq!(just_this, vec!["MARK_A", "MARK_B", "MARK_C"]);
+    }
+
+    // --- parse_grep_args --------------------------------------------
+
+    fn as_strings(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_grep_args_i_first() {
+        let args = as_strings(&["-i", "map.json", "pat"]);
+        let p = parse_grep_args(&args).unwrap();
+        assert_eq!(p.map_path, "map.json");
+        assert_eq!(p.pattern, "pat");
+        assert!(p.case_insensitive);
+    }
+
+    #[test]
+    fn parse_grep_args_i_after_map_path() {
+        // The position bug from the review: -i between map and pattern.
+        let args = as_strings(&["map.json", "-i", "pat"]);
+        let p = parse_grep_args(&args).unwrap();
+        assert_eq!(p.map_path, "map.json");
+        assert_eq!(p.pattern, "pat");
+        assert!(p.case_insensitive);
+    }
+
+    #[test]
+    fn parse_grep_args_i_after_pattern() {
+        let args = as_strings(&["map.json", "pat", "-i"]);
+        let p = parse_grep_args(&args).unwrap();
+        assert_eq!(p.map_path, "map.json");
+        assert_eq!(p.pattern, "pat");
+        assert!(p.case_insensitive);
+    }
+
+    #[test]
+    fn parse_grep_args_no_i_flag() {
+        let args = as_strings(&["map.json", "pat"]);
+        let p = parse_grep_args(&args).unwrap();
+        assert!(!p.case_insensitive);
+    }
+
+    #[test]
+    fn parse_grep_args_missing_map_errors() {
+        let args: Vec<String> = vec![];
+        assert!(matches!(parse_grep_args(&args), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn parse_grep_args_missing_pattern_errors() {
+        let args = as_strings(&["map.json"]);
+        assert!(matches!(parse_grep_args(&args), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn parse_grep_args_only_flag_is_missing_map() {
+        let args = as_strings(&["-i"]);
+        // `-i` is consumed; no positional map path remains.
+        assert!(matches!(parse_grep_args(&args), Err(CliError::Usage(_))));
+    }
+
+    // --- run() dispatch ---------------------------------------------
+
+    #[test]
+    fn run_no_command_is_usage_error() {
+        let args: Vec<String> = vec![];
+        assert!(matches!(run(&args), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn run_unknown_command_is_usage_error() {
+        let args = as_strings(&["foobar"]);
+        assert!(matches!(run(&args), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn run_show_missing_map_is_usage_error() {
+        let args = as_strings(&["show"]);
+        assert!(matches!(run(&args), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn run_show_missing_node_id_is_usage_error() {
+        // Note: uses a bogus map path — parser short-circuits before
+        // load, so no I/O hits disk.
+        let args = as_strings(&["show", "__does_not_exist.json"]);
+        assert!(matches!(run(&args), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn run_grep_missing_pattern_is_usage_error() {
+        let args = as_strings(&["grep", "__does_not_exist.json"]);
+        assert!(matches!(run(&args), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn run_grep_invalid_regex_is_usage_error() {
+        let args = as_strings(&["grep", "__does_not_exist.json", "[unclosed"]);
+        match run(&args) {
+            Err(CliError::Usage(msg)) => assert!(msg.starts_with("grep: invalid regex")),
+            other => panic!("expected grep: invalid regex usage error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_help_succeeds() {
+        for flag in ["-h", "--help", "help"] {
+            let args = as_strings(&[flag]);
+            assert!(run(&args).is_ok(), "{flag} should succeed");
         }
     }
 }
