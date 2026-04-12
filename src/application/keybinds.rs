@@ -117,6 +117,19 @@ pub fn normalize_key_name(raw: &str) -> String {
     raw.trim().to_ascii_lowercase()
 }
 
+/// Convert a winit `Key` into the lowercase string form that
+/// `KeyBind::parse` produces, so keybind comparison is symmetric.
+/// Pairs with `normalize_key_name`; the two together produce comparable
+/// strings from either the stored-config side or the live-event side.
+pub fn key_to_name(key: &winit::keyboard::Key) -> Option<String> {
+    use winit::keyboard::Key;
+    match key {
+        Key::Character(c) => Some(normalize_key_name(c.as_ref())),
+        Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),
+        _ => None,
+    }
+}
+
 /// The raw, user-editable config. Every field is a list of binding strings
 /// so users can assign multiple keys to the same action (e.g. Ctrl+Z and
 /// the Undo key both mapped to `Undo`). Fields default via serde so a

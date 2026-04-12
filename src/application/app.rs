@@ -321,18 +321,6 @@ fn insert_caret(buffer: &str, cursor: usize) -> String {
     out
 }
 
-/// Convert a winit `Key` into the lowercase string form that
-/// `KeyBind::parse` produces, so keybind comparison is symmetric.
-/// Shared between native and WASM keyboard handlers.
-fn key_to_name(key: &Key) -> Option<String> {
-    use crate::application::keybinds::normalize_key_name;
-    match key {
-        Key::Character(c) => Some(normalize_key_name(c.as_ref())),
-        Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),
-        _ => None,
-    }
-}
-
 /// Tracks the high-level interaction mode. Normal handles the usual
 /// select/drag/pan flow; Reparent mode is entered via Ctrl+P and captures
 /// the next left-click as a "choose reparent target" gesture. Connect mode
@@ -830,24 +818,13 @@ impl Application {
                                                 cursor_pos.0 as f32,
                                                 cursor_pos.1 as f32,
                                             );
-                                            let edited_id = text_edit_state
+                                            let inside = text_edit_state
                                                 .node_id()
-                                                .map(|s| s.to_string());
-                                            let inside = edited_id
-                                                .as_ref()
-                                                .and_then(|id| {
-                                                    document.as_ref().and_then(|doc| {
-                                                        doc.mindmap.nodes.get(id).map(|n| {
-                                                            let x0 = n.position.x as f32;
-                                                            let y0 = n.position.y as f32;
-                                                            let x1 = x0 + n.size.width as f32;
-                                                            let y1 = y0 + n.size.height as f32;
-                                                            release_canvas.x >= x0
-                                                                && release_canvas.x <= x1
-                                                                && release_canvas.y >= y0
-                                                                && release_canvas.y <= y1
-                                                        })
-                                                    })
+                                                .zip(mindmap_tree.as_ref())
+                                                .map(|(id, tree)| {
+                                                    crate::application::document::point_in_node_aabb(
+                                                        release_canvas, id, tree,
+                                                    )
                                                 })
                                                 .unwrap_or(false);
                                             if inside {
@@ -1288,7 +1265,7 @@ impl Application {
                     },
                     ..
                 } => {
-                    let key_name = key_to_name(&logical_key);
+                    let key_name = crate::application::keybinds::key_to_name(&logical_key);
 
                     // Session 6C: when the palette is open, it steals
                     // all keyboard input. Character keys go into the
@@ -1885,13 +1862,12 @@ impl Application {
             text_edit_state: TextEditState,
             last_click: Option<LastClick>,
             cursor_pos: (f64, f64),
-            /// Minimal drag state for click-outside-commit. Full drag
-            /// machine (pan, move, reparent, connect) deferred to a later
-            /// WASM-parity session.
-            pending_click: Option<WasmPendingClick>,
-        }
-        struct WasmPendingClick {
-            hit_node: Option<String>,
+            /// Pending left-click: outer `Some` = click-down happened and a
+            /// release is expected; inner `Option<String>` is the node that
+            /// was hit, or `None` for empty canvas. Full drag machine (pan,
+            /// move, reparent, connect) deferred to a later WASM-parity
+            /// session.
+            pending_click_hit: Option<Option<String>>,
         }
 
         let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
@@ -1948,7 +1924,7 @@ impl Application {
                     text_edit_state: TextEditState::Closed,
                     last_click: None,
                     cursor_pos: (0.0, 0.0),
-                    pending_click: None,
+                    pending_click_hit: None,
                 });
             }
 
@@ -2000,7 +1976,7 @@ impl Application {
                     },
                     ..
                 } => {
-                    let key_name = key_to_name(logical_key);
+                    let key_name = crate::application::keybinds::key_to_name(logical_key);
 
                     // Text editor keyboard-steal: if open, route all keys
                     // to the editor. This mirrors the native cascade at
@@ -2125,9 +2101,7 @@ impl Application {
                             return;
                         }
 
-                        input.pending_click = Some(WasmPendingClick {
-                            hit_node: hit_node.clone(),
-                        });
+                        input.pending_click_hit = Some(hit_node.clone());
                         input.last_click = Some(LastClick {
                             time: now,
                             screen_pos: input.cursor_pos,
@@ -2138,8 +2112,7 @@ impl Application {
                         let mut input_borrow = input_for_events.borrow_mut();
                         let Some(input) = input_borrow.as_mut() else { return; };
 
-                        let pending = input.pending_click.take();
-                        let Some(pending) = pending else { return; };
+                        let Some(pending_hit) = input.pending_click_hit.take() else { return; };
 
                         if input.text_edit_state.is_open() {
                             let mut renderer_borrow = renderer_for_events.borrow_mut();
@@ -2149,22 +2122,13 @@ impl Application {
                                 input.cursor_pos.1 as f32,
                             );
 
-                            let edited_node_id = input.text_edit_state.node_id().unwrap().to_string();
-                            let inside_edit_node = input.mindmap_tree
-                                .as_ref()
-                                .and_then(|tree| {
-                                    tree.node_map.get(&edited_node_id)
-                                        .and_then(|nid| tree.tree.arena.get(*nid))
-                                        .and_then(|n| n.get().glyph_area())
-                                        .map(|area| {
-                                            let pos = area.position();
-                                            let bx = area.render_bounds.x.0;
-                                            let by = area.render_bounds.y.0;
-                                            release_canvas.x >= pos.x
-                                                && release_canvas.x <= pos.x + bx
-                                                && release_canvas.y >= pos.y
-                                                && release_canvas.y <= pos.y + by
-                                        })
+                            let inside_edit_node = input.text_edit_state
+                                .node_id()
+                                .zip(input.mindmap_tree.as_ref())
+                                .map(|(id, tree)| {
+                                    crate::application::document::point_in_node_aabb(
+                                        release_canvas, id, tree,
+                                    )
                                 })
                                 .unwrap_or(false);
 
@@ -2184,11 +2148,10 @@ impl Application {
                         }
 
                         // Plain selection click
-                        if let Some(ref node_id) = pending.hit_node {
-                            input.document.selection = SelectionState::Single(node_id.clone());
-                        } else {
-                            input.document.selection = SelectionState::None;
-                        }
+                        input.document.selection = match pending_hit {
+                            Some(node_id) => SelectionState::Single(node_id),
+                            None => SelectionState::None,
+                        };
                         let mut renderer_borrow = renderer_for_events.borrow_mut();
                         if let Some(renderer) = renderer_borrow.as_mut() {
                             rebuild_all(&input.document, &mut input.mindmap_tree, renderer);

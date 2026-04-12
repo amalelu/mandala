@@ -1849,6 +1849,31 @@ pub fn hit_test(canvas_pos: Vec2, tree: &MindMapTree) -> Option<String> {
     best.map(|(id, _)| id)
 }
 
+/// Is `canvas_pos` inside the AABB of node `node_id`? Reads the tree-side
+/// glyph area so drag-preview positions count (tree is authoritative
+/// during in-flight mutations; identical to the model when idle).
+///
+/// Unlike `hit_test`, this answers a point-in-specific-node question —
+/// a click over a child of `node_id` still counts as "inside" `node_id`,
+/// which is what the text editor's click-outside-commit gesture wants.
+pub fn point_in_node_aabb(canvas_pos: Vec2, node_id: &str, tree: &MindMapTree) -> bool {
+    tree.node_map
+        .get(node_id)
+        .and_then(|nid| tree.tree.arena.get(*nid))
+        .and_then(|n| n.get().glyph_area())
+        .map(|area| {
+            let x = area.position.x.0;
+            let y = area.position.y.0;
+            let w = area.render_bounds.x.0;
+            let h = area.render_bounds.y.0;
+            canvas_pos.x >= x
+                && canvas_pos.x <= x + w
+                && canvas_pos.y >= y
+                && canvas_pos.y <= y + h
+        })
+        .unwrap_or(false)
+}
+
 /// Hit test edges: find the nearest visible edge within `tolerance` canvas
 /// units of `canvas_pos`. Returns an `EdgeRef` for the closest edge, or
 /// `None` if nothing is within range.
