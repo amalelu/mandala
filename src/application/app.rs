@@ -1961,6 +1961,9 @@ impl Application {
             last_click: Option<LastClick>,
             cursor_pos: (f64, f64),
             pending_click: PendingClick,
+            ctrl_held: bool,
+            shift_held: bool,
+            alt_held: bool,
         }
 
         let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
@@ -2018,6 +2021,9 @@ impl Application {
                     last_click: None,
                     cursor_pos: (0.0, 0.0),
                     pending_click: PendingClick::None,
+                    ctrl_held: false,
+                    shift_held: false,
+                    alt_held: false,
                 });
             }
 
@@ -2036,6 +2042,10 @@ impl Application {
             }));
             request_animation_frame(g.borrow().as_ref().unwrap());
         });
+
+        // Resolve the keybind config once. `action_for(key, ctrl, shift, alt)`
+        // answers the dispatch question for every keydown.
+        let keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
 
         // Clone Rcs for the event loop closure
         let renderer_for_events = renderer_rc.clone();
@@ -2057,6 +2067,18 @@ impl Application {
                     // WASM doesn't really close
                 }
 
+                // --- Modifier tracking ---
+                Event::WindowEvent {
+                    event: WindowEvent::ModifiersChanged(mods), ..
+                } => {
+                    if let Some(input) = input_for_events.borrow_mut().as_mut() {
+                        let s = mods.state();
+                        input.ctrl_held = s.control_key();
+                        input.shift_held = s.shift_key();
+                        input.alt_held = s.alt_key();
+                    }
+                }
+
                 // --- Keyboard input ---
                 Event::WindowEvent {
                     event: WindowEvent::KeyboardInput {
@@ -2071,33 +2093,164 @@ impl Application {
                 } => {
                     let key_name = crate::application::keybinds::key_to_name(logical_key);
 
-                    // Text editor keyboard-steal: if open, route all keys
-                    // to the editor. This mirrors the native cascade at
-                    // ~line 1348.
-                    let editor_is_open = {
-                        let borrow = input_for_events.borrow();
-                        borrow.as_ref().map(|s| s.text_edit_state.is_open()).unwrap_or(false)
-                    };
-                    if editor_is_open {
-                        let mut input_borrow = input_for_events.borrow_mut();
-                        let mut renderer_borrow = renderer_for_events.borrow_mut();
-                        if let (Some(input), Some(renderer)) =
-                            (input_borrow.as_mut(), renderer_borrow.as_mut())
-                        {
-                            handle_text_edit_key(
-                                &key_name,
-                                logical_key,
-                                &mut input.text_edit_state,
-                                &mut input.document,
-                                &mut input.mindmap_tree,
-                                renderer,
-                            );
-                            suppress_for_events.set(input.text_edit_state.is_open());
-                        }
+                    let mut input_borrow = input_for_events.borrow_mut();
+                    let mut renderer_borrow = renderer_for_events.borrow_mut();
+                    let (Some(input), Some(renderer)) =
+                        (input_borrow.as_mut(), renderer_borrow.as_mut())
+                    else { return; };
+
+                    // Editor keyboard-steal: if open, route all keys
+                    // to the editor so hotkeys don't collide with typed text.
+                    if input.text_edit_state.is_open() {
+                        handle_text_edit_key(
+                            &key_name,
+                            logical_key,
+                            &mut input.text_edit_state,
+                            &mut input.document,
+                            &mut input.mindmap_tree,
+                            renderer,
+                        );
+                        suppress_for_events.set(input.text_edit_state.is_open());
                         return;
                     }
-                    // Full hotkey dispatch via keybinds deferred to a
-                    // later WASM-parity session.
+
+                    // Hotkey dispatch via keybinds.
+                    let action = key_name.as_deref().and_then(|k| {
+                        keybinds.action_for(k, input.ctrl_held, input.shift_held, input.alt_held)
+                    });
+                    match action {
+                        Some(Action::Undo) => {
+                            if input.document.undo() {
+                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                            }
+                        }
+                        Some(Action::CreateOrphanNode) => {
+                            let canvas_pos = renderer.screen_to_canvas(
+                                input.cursor_pos.0 as f32,
+                                input.cursor_pos.1 as f32,
+                            );
+                            let new_id = input.document.apply_create_orphan_node(canvas_pos);
+                            input.document.undo_stack.push(UndoAction::CreateNode {
+                                node_id: new_id.clone(),
+                            });
+                            input.document.selection = SelectionState::Single(new_id);
+                            input.document.dirty = true;
+                            rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                        }
+                        Some(Action::OrphanSelection) => {
+                            let sel: Vec<String> = input.document.selection
+                                .selected_ids().iter().map(|s| s.to_string()).collect();
+                            if !sel.is_empty() {
+                                let undo_data = input.document.apply_orphan_selection(&sel);
+                                if !undo_data.entries.is_empty() {
+                                    input.document.undo_stack.push(UndoAction::ReparentNodes {
+                                        entries: undo_data.entries,
+                                        old_edges: undo_data.old_edges,
+                                    });
+                                    input.document.dirty = true;
+                                }
+                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                            }
+                        }
+                        Some(Action::DeleteSelection) => {
+                            // Mirrors the native `DelKind` branch. Node deletion
+                            // orphans immediate children and removes every
+                            // edge that touched the node.
+                            enum DelKind {
+                                Edge(crate::application::document::EdgeRef),
+                                Portal(crate::application::document::PortalRef),
+                                Node(String),
+                                Nodes(Vec<String>),
+                            }
+                            let kind = match &input.document.selection {
+                                SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
+                                SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
+                                SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
+                                SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
+                                SelectionState::None => None,
+                            };
+                            match kind {
+                                Some(DelKind::Edge(edge_ref)) => {
+                                    if let Some((idx, edge)) = input.document.remove_edge(&edge_ref) {
+                                        input.document.undo_stack.push(UndoAction::DeleteEdge {
+                                            index: idx, edge,
+                                        });
+                                        input.document.selection = SelectionState::None;
+                                        input.document.dirty = true;
+                                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                    }
+                                }
+                                Some(DelKind::Portal(pref)) => {
+                                    if input.document.apply_delete_portal(&pref).is_some() {
+                                        input.document.selection = SelectionState::None;
+                                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                    }
+                                }
+                                Some(DelKind::Node(id)) => {
+                                    if let Some(undo) = input.document.delete_node(&id) {
+                                        input.document.undo_stack.push(undo);
+                                        input.document.selection = SelectionState::None;
+                                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                    }
+                                }
+                                Some(DelKind::Nodes(ids)) => {
+                                    let mut any = false;
+                                    for id in ids {
+                                        if let Some(undo) = input.document.delete_node(&id) {
+                                            input.document.undo_stack.push(undo);
+                                            any = true;
+                                        }
+                                    }
+                                    if any {
+                                        input.document.selection = SelectionState::None;
+                                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        Some(Action::EditSelection) => {
+                            if let SelectionState::Single(id) = &input.document.selection {
+                                let nid = id.clone();
+                                open_text_edit(
+                                    &nid, false,
+                                    &mut input.document,
+                                    &mut input.text_edit_state,
+                                    &mut input.mindmap_tree,
+                                    renderer,
+                                );
+                                suppress_for_events.set(input.text_edit_state.is_open());
+                            }
+                        }
+                        Some(Action::EditSelectionClean) => {
+                            if let SelectionState::Single(id) = &input.document.selection {
+                                let nid = id.clone();
+                                open_text_edit(
+                                    &nid, true,
+                                    &mut input.document,
+                                    &mut input.text_edit_state,
+                                    &mut input.mindmap_tree,
+                                    renderer,
+                                );
+                                suppress_for_events.set(input.text_edit_state.is_open());
+                            }
+                        }
+                        Some(Action::CancelMode) => {
+                            // No AppMode on WASM yet; clear any pending click
+                            // so a post-Esc click isn't retroactively paired
+                            // with a pre-Esc click.
+                            input.last_click = None;
+                        }
+                        Some(Action::EnterReparentMode)
+                        | Some(Action::EnterConnectMode) => {
+                            // AppMode state is still native-only; these
+                            // actions are deferred on WASM (would require
+                            // de-gating AppMode, hovered_node, and the
+                            // reparent/connect click handlers).
+                            log::warn!("WASM: mode-based action {:?} deferred", action);
+                        }
+                        None => {}
+                    }
                 }
 
                 // --- Mouse input ---
@@ -2257,9 +2410,28 @@ impl Application {
                 }
 
                 Event::WindowEvent {
-                    event: WindowEvent::MouseWheel { .. }, ..
+                    event: WindowEvent::MouseWheel { delta, .. }, ..
                 } => {
-                    // Zoom deferred to a later WASM-parity session.
+                    let scroll_y = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        MouseScrollDelta::PixelDelta(pos) => pos.y / 50.0,
+                    };
+                    let factor = if scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                    let mut input_borrow = input_for_events.borrow_mut();
+                    let mut renderer_borrow = renderer_for_events.borrow_mut();
+                    if let (Some(input), Some(renderer)) =
+                        (input_borrow.as_mut(), renderer_borrow.as_mut())
+                    {
+                        renderer.process_decree(RenderDecree::CameraZoom {
+                            screen_x: input.cursor_pos.0 as f32,
+                            screen_y: input.cursor_pos.1 as f32,
+                            factor: factor as f32,
+                        });
+                        // Camera change requires rebuilding the scene so
+                        // connection viewport culling picks up the new
+                        // visible rect.
+                        rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                    }
                 }
 
                 _ => {}
