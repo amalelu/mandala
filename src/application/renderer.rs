@@ -28,7 +28,7 @@ use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
-use crate::application::baumhard_adapter::to_cosmic_text;
+use baumhard::font::attrs::attrs_list_from_regions;
 use baumhard::gfx_structs::camera::Camera2D;
 use baumhard::mindmap::model::MindMap;
 use baumhard::mindmap::loader;
@@ -1036,7 +1036,7 @@ impl Renderer {
                 .expect("Failed to acquire font-system write lock");
             editor.insert_string(
                 block.text.as_str(),
-                Some(to_cosmic_text(&block.regions, &mut font_system)),
+                Some(attrs_list_from_regions(&block.regions, &mut font_system)),
             );
             editor.shape_as_needed(&mut font_system, false);
             let text_buffer = TextBuffer::new(
