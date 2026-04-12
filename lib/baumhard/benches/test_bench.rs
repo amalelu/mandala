@@ -80,6 +80,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("truncate_unicode", |b| b.iter(|| do_truncate_unicode()));
     c.bench_function("insert_str_at_grapheme", |b| b.iter(|| do_insert_str_at_grapheme()));
     c.bench_function("delete_grapheme_at", |b| b.iter(|| do_delete_grapheme_at()));
+    c.bench_function("grapheme_display_width", |b| b.iter(|| do_grapheme_display_width()));
     // geometry //
     c.bench_function("90_deg_rotation", |b| b.iter(|| do_90_deg_rotation()));
     c.bench_function("180_deg_rotation", |b| b.iter(|| do_180_deg_rotation()));
