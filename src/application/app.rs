@@ -41,7 +41,7 @@ use crate::application::document::{
     HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 use crate::application::frame_throttle::MutationFrequencyThrottle;
-use crate::application::keybinds::{Action, ResolvedKeybinds, normalize_key_name};
+use crate::application::keybinds::{Action, ResolvedKeybinds};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::application::palette::{
     PaletteContext, PaletteEffects, filter_actions, PALETTE_ACTIONS,
@@ -153,14 +153,11 @@ impl TextEditState {
     }
 }
 
-/// Session 7A: tracks the previous left-click in screen space so a
-/// second click within a short time + distance window is recognized as
-/// a double-click. Double-click fires on the second `Pressed` event,
-/// not the second release.
-///
-/// Session 7B: `time` changed from `Instant` to `f64` milliseconds
-/// via the cross-platform `now_ms()` helper so this struct compiles
-/// on both native and WASM.
+/// Tracks the previous left-click in screen space so a second click
+/// within a short time + distance window is recognized as a
+/// double-click. Double-click fires on the second `Pressed` event,
+/// not the second release. `time` is `f64` milliseconds from the
+/// cross-platform `now_ms()` helper.
 #[derive(Debug, Clone)]
 struct LastClick {
     time: f64,
@@ -181,12 +178,9 @@ const DOUBLE_CLICK_DIST_SQ: f64 = 16.0 * 16.0;
 /// text editor is open. Reuses the same caret as `LabelEditState`.
 const TEXT_EDIT_CARET: char = '\u{258C}';
 
-/// Session 7A: returns `true` when a new click-down qualifies as a
-/// double-click given the previous click. Extracted as a pure helper
-/// so cursor/time math can be unit-tested without a winit event loop.
-///
-/// Session 7B: rewritten to use `f64` millisecond timestamps from
-/// `now_ms()` instead of `Instant`, enabling WASM compatibility.
+/// Returns `true` when a new click-down qualifies as a double-click
+/// given the previous click. Pure helper so cursor/time math can be
+/// unit-tested without a winit event loop.
 fn is_double_click(
     prev: &LastClick,
     new_time_ms: f64,
@@ -325,6 +319,18 @@ fn insert_caret(buffer: &str, cursor: usize) -> String {
     out.push(TEXT_EDIT_CARET);
     out.push_str(&buffer[byte..]);
     out
+}
+
+/// Convert a winit `Key` into the lowercase string form that
+/// `KeyBind::parse` produces, so keybind comparison is symmetric.
+/// Shared between native and WASM keyboard handlers.
+fn key_to_name(key: &Key) -> Option<String> {
+    use crate::application::keybinds::normalize_key_name;
+    match key {
+        Key::Character(c) => Some(normalize_key_name(c.as_ref())),
+        Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),
+        _ => None,
+    }
 }
 
 /// Tracks the high-level interaction mode. Normal handles the usual
@@ -1282,15 +1288,7 @@ impl Application {
                     },
                     ..
                 } => {
-                    // Resolve the pressed key through the configured keybinds.
-                    // Convert the winit `Key` into the lowercase string form
-                    // that `KeyBind::parse` produces so the comparison is
-                    // symmetric.
-                    let key_name = match &logical_key {
-                        Key::Character(c) => Some(normalize_key_name(c.as_ref())),
-                        Key::Named(named) => Some(normalize_key_name(&format!("{:?}", named))),
-                        _ => None,
-                    };
+                    let key_name = key_to_name(&logical_key);
 
                     // Session 6C: when the palette is open, it steals
                     // all keyboard input. Character keys go into the
@@ -1822,14 +1820,13 @@ impl Application {
         canvas.set_width(web_window.inner_width().unwrap().as_f64().unwrap() as u32);
         canvas.set_height(web_window.inner_height().unwrap().as_f64().unwrap() as u32);
 
-        // Phase 3: canvas must be focusable for keyboard events to reach
-        // winit. Without tabindex, an HTMLCanvasElement never receives
-        // focus in any browser.
+        // Canvas must be focusable for keyboard events to reach winit.
+        // Without tabindex, an HTMLCanvasElement never receives focus.
         canvas.set_attribute("tabindex", "0").ok();
         let _ = canvas.focus();
 
-        // Phase 3: re-focus on mousedown so clicking the canvas after
-        // tabbing to another element restores keyboard input.
+        // Re-focus on mousedown so clicking the canvas after tabbing
+        // to another element restores keyboard input.
         {
             let canvas_for_focus = canvas.clone();
             let focus_cb = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
@@ -1843,10 +1840,9 @@ impl Application {
             focus_cb.forget(); // leak — lives for the page lifetime
         }
 
-        // Phase 3: preventDefault on keydown while the text editor is
-        // open so Tab/Enter/Backspace/arrows don't fire browser defaults
-        // (tab-navigation, history-back, page-scroll). The flag is shared
-        // with the input handlers that set it.
+        // preventDefault on keydown while the text editor is open so
+        // Tab/Enter/Backspace/arrows don't fire browser defaults
+        // (tab-navigation, history-back, page-scroll).
         let suppress_keys: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         {
             let suppress = suppress_keys.clone();
@@ -1880,10 +1876,9 @@ impl Application {
             map_path.unwrap_or_else(|| self.options.mindmap_path.clone())
         };
 
-        // Phase 4: shared state between the rAF render loop and the
-        // winit event loop. Two RefCells to minimize borrow surface —
-        // input handlers only touch InputState most of the time, borrowing
-        // the renderer only briefly for screen_to_canvas or rebuild calls.
+        // Shared state between the rAF render loop and the winit event
+        // loop. Two RefCells so input handlers can borrow InputState
+        // and Renderer simultaneously without conflict.
         struct WasmInputState {
             document: MindMapDocument,
             mindmap_tree: Option<MindMapTree>,
@@ -1896,13 +1891,11 @@ impl Application {
             pending_click: Option<WasmPendingClick>,
         }
         struct WasmPendingClick {
-            start_pos: (f64, f64),
             hit_node: Option<String>,
         }
 
         let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
         let input_rc: Rc<RefCell<Option<WasmInputState>>> = Rc::new(RefCell::new(None));
-        let suppress_for_init = suppress_keys.clone();
 
         // Clone Rcs for the spawn_local init future
         let renderer_for_init = renderer_rc.clone();
@@ -1995,9 +1988,7 @@ impl Application {
                     // WASM doesn't really close
                 }
 
-                // -------------------------------------------------------
-                // Phase 5: Keyboard input — text editor dispatch
-                // -------------------------------------------------------
+                // --- Keyboard input ---
                 Event::WindowEvent {
                     event: WindowEvent::KeyboardInput {
                         event: KeyEvent {
@@ -2009,18 +2000,7 @@ impl Application {
                     },
                     ..
                 } => {
-                    // Extract key name the same way native does at ~line 1279
-                    let key_name: Option<String> = match logical_key {
-                        Key::Character(c) => Some(
-                            crate::application::keybinds::normalize_key_name(c.as_ref()),
-                        ),
-                        Key::Named(named) => Some(
-                            crate::application::keybinds::normalize_key_name(
-                                &format!("{:?}", named),
-                            ),
-                        ),
-                        _ => None,
-                    };
+                    let key_name = key_to_name(logical_key);
 
                     // Text editor keyboard-steal: if open, route all keys
                     // to the editor. This mirrors the native cascade at
@@ -2051,9 +2031,7 @@ impl Application {
                     // later WASM-parity session.
                 }
 
-                // -------------------------------------------------------
-                // Phase 5: Mouse input — click to open/commit editor
-                // -------------------------------------------------------
+                // --- Mouse input ---
                 Event::WindowEvent {
                     event: WindowEvent::CursorMoved { position, .. }, ..
                 } => {
@@ -2109,18 +2087,10 @@ impl Application {
                         if is_dblclick {
                             input.last_click = None;
 
-                            // Need renderer for open_text_edit — drop input, grab both
-                            let cursor_pos = input.cursor_pos;
-                            let hit_clone = hit_node.clone();
-                            drop(input_borrow);
-
-                            let mut input_borrow = input_for_events.borrow_mut();
-                            let input = input_borrow.as_mut().unwrap();
                             let mut renderer_borrow = renderer_for_events.borrow_mut();
                             let Some(renderer) = renderer_borrow.as_mut() else { return; };
 
-                            if let Some(ref node_id) = hit_clone {
-                                // Double-click on node → open editor
+                            if let Some(ref node_id) = hit_node {
                                 let nid = node_id.clone();
                                 input.document.selection = SelectionState::Single(nid.clone());
                                 rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
@@ -2132,17 +2102,12 @@ impl Application {
                                     renderer,
                                 );
                             } else {
-                                // Double-click empty space → create orphan + edit
                                 let allow_create = !matches!(
                                     input.document.selection,
                                     SelectionState::Edge(_) | SelectionState::Portal(_)
                                 );
                                 if allow_create {
-                                    let canvas_pos_for_create = renderer.screen_to_canvas(
-                                        cursor_pos.0 as f32,
-                                        cursor_pos.1 as f32,
-                                    );
-                                    let new_id = input.document.apply_create_orphan_node(canvas_pos_for_create);
+                                    let new_id = input.document.apply_create_orphan_node(canvas_pos);
                                     input.document.undo_stack.push(UndoAction::CreateNode { node_id: new_id.clone() });
                                     input.document.selection = SelectionState::Single(new_id.clone());
                                     input.document.dirty = true;
@@ -2163,7 +2128,6 @@ impl Application {
                         // Not a double-click: store as pending click and
                         // record LastClick for next potential double-click.
                         input.pending_click = Some(WasmPendingClick {
-                            start_pos: input.cursor_pos,
                             hit_node: hit_node.clone(),
                         });
                         input.last_click = Some(LastClick {
@@ -2182,19 +2146,14 @@ impl Application {
                         let Some(pending) = pending else { return; };
 
                         if input.text_edit_state.is_open() {
-                            // Compute release canvas position
-                            let release_canvas = {
-                                let renderer_borrow = renderer_for_events.borrow();
-                                match renderer_borrow.as_ref() {
-                                    Some(r) => r.screen_to_canvas(
-                                        input.cursor_pos.0 as f32,
-                                        input.cursor_pos.1 as f32,
-                                    ),
-                                    None => return,
-                                }
-                            };
+                            let renderer_borrow = renderer_for_events.borrow();
+                            let Some(r) = renderer_borrow.as_ref() else { return; };
+                            let release_canvas = r.screen_to_canvas(
+                                input.cursor_pos.0 as f32,
+                                input.cursor_pos.1 as f32,
+                            );
+                            drop(renderer_borrow);
 
-                            // Check if release is inside the edited node's AABB
                             let edited_node_id = input.text_edit_state.node_id().unwrap().to_string();
                             let inside_edit_node = input.mindmap_tree
                                 .as_ref()
@@ -2215,15 +2174,9 @@ impl Application {
                                 .unwrap_or(false);
 
                             if inside_edit_node {
-                                // Click inside edited node → swallow, stay editing
                                 return;
                             }
 
-                            // Click outside → commit the editor.
-                            // Need renderer — release input, take both borrows.
-                            drop(input_borrow);
-                            let mut input_borrow = input_for_events.borrow_mut();
-                            let input = input_borrow.as_mut().unwrap();
                             let mut renderer_borrow = renderer_for_events.borrow_mut();
                             if let Some(renderer) = renderer_borrow.as_mut() {
                                 close_text_edit(
@@ -2238,16 +2191,12 @@ impl Application {
                             return;
                         }
 
-                        // Not editing — plain selection click
+                        // Plain selection click
                         if let Some(ref node_id) = pending.hit_node {
                             input.document.selection = SelectionState::Single(node_id.clone());
                         } else {
                             input.document.selection = SelectionState::None;
                         }
-                        // Rebuild to show selection highlight
-                        drop(input_borrow);
-                        let mut input_borrow = input_for_events.borrow_mut();
-                        let input = input_borrow.as_mut().unwrap();
                         let mut renderer_borrow = renderer_for_events.borrow_mut();
                         if let Some(renderer) = renderer_borrow.as_mut() {
                             rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
