@@ -151,9 +151,13 @@ These are the specific rules that make baumhard measurably fast.
   at `lib/baumhard/src/gfx_structs/model.rs:68` is the exemplar:
   tiny, called in the tight loop, inlined on purpose. `#[inline]` on
   a cold function just slows down compilation.
-- **`unsafe` is forbidden.** There is currently no `unsafe` in
-  baumhard. New `unsafe` is a roadmap-scale decision and needs a
-  benchmark plus a review.
+- **`unsafe` is restricted to CPU-feature gating.** The only sanctioned
+  `unsafe` in baumhard is in `lib/baumhard/src/util/simd.rs`, which
+  guards AVX2 intrinsics behind `is_x86_feature_detected!`. New
+  `unsafe` outside this pattern is a roadmap-scale decision and needs
+  a benchmark plus a review. `unsafe` for lifetime laundering, raw
+  pointer arithmetic, or "I know better than the borrow checker" is
+  forbidden.
 - **Every user-visible primitive has a criterion bench.** New
   primitives ship with a new entry in `benches/test_bench.rs`;
   removed primitives drop theirs in the same commit. The bench file
@@ -187,8 +191,14 @@ Baumhard is a library. Its consumers — currently the Mandala app, but
 the design assumes more — read its docs via `cargo doc`. Treat
 `cargo doc -p baumhard --no-deps` as a first-class deliverable.
 
-- **Every `pub` item carries a `///` doc comment.** No exceptions.
-  Every `pub` function, struct, enum, trait, and module.
+- **New and modified `pub` items carry a `///` doc comment.** Every
+  time you add a `pub` function, struct, enum, trait, or module — or
+  meaningfully change the signature or behaviour of an existing one —
+  leave a doc comment. Existing undocumented `pub` items from earlier
+  sessions are not a bug; they get documented when they are touched.
+  Do not open a docs-only PR to sweep the crate; do not skip the doc
+  comment on the item you are already editing. The direction of
+  travel is towards full coverage.
 - **Doc comments state *purpose, inputs, costs*.** "Costs" is the
   thing that separates a baumhard doc comment from a generic one:
   note an O(n) walk, an allocation, a clone, a lock acquisition, a
