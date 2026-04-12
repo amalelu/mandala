@@ -492,3 +492,41 @@ pub fn clone_preserves_unique_id_and_channel() {
     assert_eq!(cloned.channel(), 7);
     assert_eq!(cloned.position(), Vec2::new(10.0, 20.0));
 }
+
+#[test]
+pub fn test_repeat_while_without_children_is_noop() {
+    repeat_while_without_children_is_noop();
+}
+
+/// Regression for the `expect("Trying to process an instruction
+/// node…")` removed in chunk 2: a `RepeatWhile` instruction node
+/// with no child mutators used to panic mid-walk. It now logs a
+/// warning and skips the branch, leaving the target tree unchanged.
+pub fn repeat_while_without_children_is_noop() {
+    fonts::init();
+    let mut model: Tree<GfxElement, GfxMutator> =
+        Tree::new_non_indexed_with(mk_area(0.0, 0.0, 0, 0));
+    let root = model.root;
+    let target = append_area(&mut model, root, 100.0, 100.0, 0, 1);
+
+    let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new();
+    // Predicate is irrelevant — we never reach evaluation because the
+    // instruction node has no children to repeat.
+    let mut predicate = Predicate::new();
+    predicate.fields.push((
+        GfxElementField::GlyphArea(GlyphAreaField::Position(OrderedVec2::new_f32(0.0, 0.0))),
+        Comparator::not_equals(),
+    ));
+    let instruction = mutator.arena.new_node(GfxMutator::Instruction {
+        instruction: RepeatWhile(predicate),
+        channel: 0,
+        mutation: Mutation::None,
+    });
+    mutator.root.append(instruction, &mut mutator.arena);
+
+    // Pre-fix this would panic; we just need it to return cleanly.
+    walk_tree(&mut model, &mutator);
+
+    // Target is untouched.
+    assert_pos(&model, target, 100.0, 100.0);
+}

@@ -3,16 +3,13 @@ use crate::gfx_structs::area::{GlyphArea, GlyphAreaField};
 use crate::gfx_structs::model::{GlyphModel, GlyphModelField};
 use crate::gfx_structs::mutator::GlyphTreeEventInstance;
 use crate::gfx_structs::tree::{BranchChannel, EventSubscriber, TreeEventConsumer, TreeNode};
-use crate::gfx_structs::util::regions::{RegionElementKeyPair, RegionIndexer, RegionParams};
 use crate::util::color::FloatRgba;
 use crate::util::geometry::clockwise_rotation_around_pivot;
 use crate::util::ordered_vec2::OrderedVec2;
-use crossbeam_channel::{SendError, Sender};
 use glam::Vec2;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum GfxElementField {
@@ -38,8 +35,6 @@ pub enum GfxElement {
         channel: usize,
         unique_id: usize,
         event_subscribers: Vec<EventSubscriber>,
-        region_params: Option<Arc<RegionParams>>,
-        tree_index_sender: Option<Sender<RegionElementKeyPair>>,
     },
     /// A [GlyphModel] typically needs a container (such as [GlyphArea]) in order to make sense
     GlyphModel {
@@ -48,8 +43,6 @@ pub enum GfxElement {
         channel: usize,
         unique_id: usize,
         event_subscribers: Vec<EventSubscriber>,
-        region_params: Option<Arc<RegionParams>>,
-        tree_index_sender: Option<Sender<RegionElementKeyPair>>,
     },
     /// A Void element is simply a tool to create trees where certain nodes are ignored
     /// For the purpose of following some pattern, for example conforming to an existing mutator tree
@@ -76,35 +69,6 @@ impl GfxElement {
             channel,
             unique_id,
             event_subscribers: vec![],
-            region_params: None,
-            tree_index_sender: None,
-        }
-    }
-
-    pub fn new_area_indexed(
-        section: GlyphArea,
-        channel: usize,
-        region_params: Arc<RegionParams>,
-        tree_index_sender: Sender<RegionElementKeyPair>,
-    ) -> GfxElement {
-        Self::new_area_indexed_with_id(section, channel, 0, region_params, tree_index_sender)
-    }
-
-    pub fn new_area_indexed_with_id(
-        section: GlyphArea,
-        channel: usize,
-        unique_id: usize,
-        region_params: Arc<RegionParams>,
-        tree_index_sender: Sender<RegionElementKeyPair>,
-    ) -> GfxElement {
-        GfxElement::GlyphArea {
-            glyph_area: Box::new(section),
-            flags: Default::default(),
-            channel,
-            unique_id,
-            event_subscribers: vec![],
-            region_params: Some(region_params),
-            tree_index_sender: Some(tree_index_sender),
         }
     }
 
@@ -120,33 +84,6 @@ impl GfxElement {
             flags: Default::default(),
         }
     }
-    pub fn new_model_indexed_with_id(
-        model: GlyphModel,
-        channel: usize,
-        unique_id: usize,
-        region_params: Arc<RegionParams>,
-        tree_index_sender: Sender<RegionElementKeyPair>,
-    ) -> GfxElement {
-        GfxElement::GlyphModel {
-            glyph_model: Box::new(model),
-            flags: Default::default(),
-            channel,
-            unique_id,
-            event_subscribers: vec![],
-            region_params: Some(region_params),
-            tree_index_sender: Some(tree_index_sender),
-        }
-    }
-
-    pub fn new_model_indexed(
-        model: GlyphModel,
-        channel: usize,
-        region_params: Arc<RegionParams>,
-        tree_index_sender: Sender<RegionElementKeyPair>,
-    ) -> Self {
-        Self::new_model_indexed_with_id(model, channel, 0, region_params, tree_index_sender)
-    }
-
     pub fn new_model_non_indexed(model: GlyphModel, channel: usize, unique_id: usize) -> Self {
         Self::new_model_non_indexed_with_id(model, channel, unique_id)
     }
@@ -162,8 +99,6 @@ impl GfxElement {
             channel,
             unique_id,
             event_subscribers: vec![],
-            region_params: None,
-            tree_index_sender: None,
         }
     }
 
@@ -178,8 +113,6 @@ impl GfxElement {
             channel,
             unique_id,
             event_subscribers: vec![],
-            region_params: None,
-            tree_index_sender: None,
         }
     }
 

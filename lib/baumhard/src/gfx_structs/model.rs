@@ -4,7 +4,6 @@ use crate::core::primitives::{
 use crate::font::fonts::AppFont;
 use crate::util::color::{Color, FloatRgba};
 
-use crate::gfx_structs::util::regions::{RegionElementKeyPair, RegionIndexer, RegionParams};
 use crate::util::geometry;
 use crate::util::grapheme_chad::{
     count_grapheme_clusters, count_number_lines, delete_back_unicode, delete_front_unicode,
@@ -12,7 +11,6 @@ use crate::util::grapheme_chad::{
     replace_graphemes_until_newline, split_off_graphemes,
 };
 use crate::util::ordered_vec2::OrderedVec2;
-use crossbeam_channel::Sender;
 use derivative::Derivative;
 use glam::Vec2;
 use log::debug;
@@ -21,7 +19,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::ops::{Add, AddAssign, Index, IndexMut, MulAssign, SubAssign};
-use std::sync::Arc;
 use strum_macros::{Display, EnumIter};
 use crate::gfx_structs::util::hitbox::HitBox;
 ////////////////////////////////////////
@@ -742,12 +739,6 @@ pub struct GlyphModel {
     pub position: OrderedVec2,
     #[derivative(PartialEq = "ignore")]
     pub hitbox: HitBox,
-    #[serde(skip)]
-    #[derivative(PartialEq = "ignore")]
-    screen_region_params: Option<Arc<RegionParams>>,
-    #[serde(skip)]
-    #[derivative(PartialEq = "ignore")]
-    tree_index: Option<Arc<RegionIndexer>>,
 }
 
 impl GlyphModel {
@@ -758,15 +749,6 @@ impl GlyphModel {
             layer: 0,
             position: OrderedVec2::new_f32(0.0, 0.0),
             hitbox: HitBox::new(),
-            screen_region_params: None,
-            tree_index: None,
-        }
-    }
-
-    pub fn update_index_if_relevant(&mut self) {
-        if self.tree_index.is_some() && self.screen_region_params.is_some() {
-            // TODO update ..
-            //self.tree_index.unwrap()
         }
     }
 
@@ -780,40 +762,33 @@ impl GlyphModel {
 
     pub fn add_line(&mut self, line: GlyphLine) {
         self.glyph_matrix.push(line);
-        //update_index_if_relevant??
     }
 
     pub fn nudge_left(&mut self, amount: &f32) {
         self.position.x -= amount;
-        self.update_index_if_relevant();
     }
 
     pub fn nudge_right(&mut self, amount: &f32) {
         self.position.x += amount;
-        self.update_index_if_relevant();
     }
 
     pub fn nudge_up(&mut self, amount: &f32) {
         self.position.y -= amount;
-        self.update_index_if_relevant();
     }
 
     pub fn nudge_down(&mut self, amount: &f32) {
         self.position.y += amount;
-        self.update_index_if_relevant();
     }
 
     pub fn move_to(&mut self, x: &f32, y: &f32) {
         self.position.x = OrderedFloat::from(*x);
         self.position.y = OrderedFloat::from(*y);
-        self.update_index_if_relevant();
     }
 
     pub fn rotate(&mut self, pivot: &Vec2, degrees: &f32) {
         let new_position =
             geometry::clockwise_rotation_around_pivot(self.position.to_vec2(), *pivot, *degrees);
         self.position = OrderedVec2::from_vec2(new_position);
-        self.update_index_if_relevant();
     }
 
     pub fn rude_insert(&mut self, component: &GlyphComponent, line_num: &usize, at_idx: &usize) {
@@ -832,26 +807,18 @@ impl GlyphModel {
     }
 
     fn apply_operation(&mut self, delta: &DeltaGlyphModel) {
-        let mut should_update_index = false;
         let operation = delta.operation_variant();
         if let Some(position_delta) = delta.position() {
             operation.apply(&mut self.position.x, position_delta.x);
             operation.apply(&mut self.position.y, position_delta.y);
-            should_update_index = true;
         }
 
         if let Some(delta_layer) = delta.layer() {
             operation.apply(&mut self.layer, delta_layer);
-            // We should be using layers in the indices somehow
-            should_update_index = true;
         }
 
         if let Some(glyph_matrix) = delta.glyph_matrix() {
             operation.apply(&mut self.glyph_matrix, glyph_matrix);
-            //should or should not update? Probably should
-        }
-        if should_update_index {
-            self.update_index_if_relevant();
         }
     }
 }

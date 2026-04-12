@@ -2559,6 +2559,86 @@ mod tests {
         }
     }
 
+    /// Build a `CustomMutation` whose only payload is a single
+    /// `SetThemeVariables` document-level action that sets `--bg`
+    /// to the given value. Used by the `apply_document_actions`
+    /// regression tests.
+    fn make_set_bg_doc_mutation(value: &str) -> CM {
+        use baumhard::mindmap::custom_mutation::DocumentAction;
+        let mut vars = HashMap::new();
+        vars.insert("--bg".to_string(), value.to_string());
+        CM {
+            id: "set-bg".to_string(),
+            name: "Set --bg".to_string(),
+            mutations: vec![],
+            target_scope: TS::SelfOnly,
+            behavior: MB::Persistent,
+            predicate: None,
+            document_actions: vec![DocumentAction::SetThemeVariables(vars)],
+        }
+    }
+
+    /// Round-trip regression for `UndoAction::CanvasSnapshot`. The
+    /// `apply_document_actions` path is the only producer of this
+    /// variant, and prior to chunk 5 it had zero test coverage —
+    /// CODE_CONVENTIONS.md §6 says every undo variant ships with at
+    /// least a forward-and-back test.
+    #[test]
+    fn test_apply_document_actions_undo_round_trip() {
+        let mut doc = load_test_doc();
+        // Capture the canvas state before any document-level mutation.
+        let before = doc.mindmap.canvas.clone();
+        let undo_len_before = doc.undo_stack.len();
+
+        // Apply a single SetThemeVariables action that sets --bg to a
+        // sentinel value not present in the testament map.
+        let custom = make_set_bg_doc_mutation("#bada55");
+        let changed = doc.apply_document_actions(&custom);
+        assert!(changed, "applying a new theme var must report a change");
+        assert_eq!(
+            doc.mindmap.canvas.theme_variables.get("--bg"),
+            Some(&"#bada55".to_string())
+        );
+        assert_eq!(
+            doc.undo_stack.len(),
+            undo_len_before + 1,
+            "exactly one CanvasSnapshot entry should have been pushed"
+        );
+        assert!(doc.dirty);
+
+        // Undo restores the entire pre-mutation canvas wholesale.
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.canvas.theme_variables, before.theme_variables);
+        assert_eq!(doc.mindmap.canvas.background_color, before.background_color);
+        assert_eq!(
+            doc.undo_stack.len(),
+            undo_len_before,
+            "undo should have popped the CanvasSnapshot entry"
+        );
+    }
+
+    /// `apply_document_actions` returns false and pushes nothing
+    /// when the action would not actually change anything (writing
+    /// the same value that's already there). Guards the dirty/undo
+    /// no-op path that the docstring on `apply_document_actions`
+    /// promises.
+    #[test]
+    fn test_apply_document_actions_noop_does_not_push_undo() {
+        let mut doc = load_test_doc();
+        // First write — should change the canvas and push undo.
+        let custom = make_set_bg_doc_mutation("#bada55");
+        doc.apply_document_actions(&custom);
+        let undo_len_after_first = doc.undo_stack.len();
+        doc.dirty = false;
+
+        // Second write of the same value — no-op, no undo push,
+        // dirty flag should stay false.
+        let changed = doc.apply_document_actions(&custom);
+        assert!(!changed, "writing the same value must not report a change");
+        assert_eq!(doc.undo_stack.len(), undo_len_after_first);
+        assert!(!doc.dirty);
+    }
+
     #[test]
     fn test_mutation_registry_empty_for_existing_map() {
         let doc = load_test_doc();
