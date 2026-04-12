@@ -2675,7 +2675,8 @@ fn open_color_picker(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        current_hsv_at, ColorPickerState,
+        current_hsv_at, ARM_BOTTOM_GLYPHS, ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS,
+        ARM_TOP_GLYPHS, ColorPickerState, HUE_RING_FONT_SCALE, HUE_RING_GLYPHS,
     };
 
     // Resolve the ref to a (kind, index) up front. If the edge/portal
@@ -2695,6 +2696,38 @@ fn open_color_picker(
     // color so the picker opens right where the user already is.
     let (hue_deg, sat, val) = current_hsv_at(doc, kind, target_index);
 
+    // Measure the widest shaped advance across every crosshair-arm
+    // glyph and every hue-ring glyph. These become the spacing units
+    // the layout pure-fn uses for cell and ring-slot positions —
+    // measuring once here avoids per-hover font-system traffic and
+    // keeps `compute_color_picker_layout` pure. Both measurements
+    // happen behind the font-system write lock, which is also what
+    // the renderer's buffer builders need, so we grab it once.
+    let base_font_size: f32 = 16.0;
+    let ring_font_size = base_font_size * HUE_RING_FONT_SCALE;
+    let (max_cell_advance, max_ring_advance) = {
+        let mut font_system = baumhard::font::fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+        let mut crosshair: Vec<&str> = Vec::with_capacity(40);
+        crosshair.extend(ARM_TOP_GLYPHS.iter().copied());
+        crosshair.extend(ARM_BOTTOM_GLYPHS.iter().copied());
+        crosshair.extend(ARM_LEFT_GLYPHS.iter().copied());
+        crosshair.extend(ARM_RIGHT_GLYPHS.iter().copied());
+        let cell = crate::application::renderer::measure_max_glyph_advance(
+            &mut font_system,
+            &crosshair,
+            base_font_size,
+        );
+        let ring_glyphs: Vec<&str> = HUE_RING_GLYPHS.iter().copied().collect();
+        let ring = crate::application::renderer::measure_max_glyph_advance(
+            &mut font_system,
+            &ring_glyphs,
+            ring_font_size,
+        );
+        (cell, ring)
+    };
+
     *state = ColorPickerState::Open {
         kind,
         target_index,
@@ -2702,6 +2735,9 @@ fn open_color_picker(
         sat,
         val,
         chip_focus: None,
+        last_cursor_pos: None,
+        max_cell_advance,
+        max_ring_advance,
         commit_mode: crate::application::color_picker::CommitMode::Hsv,
         layout: None,
     };
@@ -2765,12 +2801,61 @@ fn compute_picker_geometry(
     };
     use baumhard::util::color::hsv_to_hex;
 
-    let (target_label, hue_deg, sat, val, chip_focus) = match state {
+    // Extract only the fields `compute_color_picker_layout` needs,
+    // plus a copy of the backdrop tuple from the cached layout for
+    // the cursor-inside-backdrop check. Copying just the 4 floats is
+    // ~200 bytes cheaper than cloning the whole ColorPickerLayout
+    // (with its Vec<chip_positions> and fixed-size arrays) every
+    // hover.
+    let (
+        target_label,
+        hue_deg,
+        sat,
+        val,
+        chip_focus,
+        last_cursor_pos,
+        max_cell_advance,
+        max_ring_advance,
+        cached_backdrop,
+    ) = match state {
         ColorPickerState::Closed => return None,
-        ColorPickerState::Open { kind, hue_deg, sat, val, chip_focus, .. } => {
-            (kind.label(), *hue_deg, *sat, *val, *chip_focus)
-        }
+        ColorPickerState::Open {
+            kind,
+            hue_deg,
+            sat,
+            val,
+            chip_focus,
+            last_cursor_pos,
+            max_cell_advance,
+            max_ring_advance,
+            layout,
+            ..
+        } => (
+            kind.label(),
+            *hue_deg,
+            *sat,
+            *val,
+            *chip_focus,
+            *last_cursor_pos,
+            *max_cell_advance,
+            *max_ring_advance,
+            layout.as_ref().map(|l| l.backdrop),
+        ),
     };
+
+    // Hex readout is visible when the cursor is inside the backdrop
+    // OR a chip is focused. Without a cached layout from a previous
+    // rebuild we can't hit-test the backdrop, so fall back to the
+    // chip_focus signal — the first rebuild happens at open time
+    // before any mouse event, and is followed immediately by a hover
+    // rebuild once the cursor enters the window.
+    let hex_visible = chip_focus.is_some()
+        || match (last_cursor_pos, cached_backdrop) {
+            (Some((cx, cy)), Some((bl, bt, bw, bh))) => {
+                cx >= bl && cx <= bl + bw && cy >= bt && cy <= bt + bh
+            }
+            _ => false,
+        };
 
     let geometry = ColorPickerOverlayGeometry {
         target_label,
@@ -2779,6 +2864,9 @@ fn compute_picker_geometry(
         val,
         preview_hex: hsv_to_hex(hue_deg, sat, val),
         chip_focus,
+        hex_visible,
+        max_cell_advance,
+        max_ring_advance,
     };
 
     // Cache the layout into the state so the mouse hit-test can use it.
@@ -3208,8 +3296,19 @@ fn handle_color_picker_mouse_move(
         ColorPickerState, PickerHit,
     };
 
+    // Always record the cursor position on the state before hit-
+    // testing — `compute_picker_geometry` reads it to toggle
+    // `hex_visible` based on "cursor inside backdrop". A move that
+    // doesn't hit any interactive element still needs this update so
+    // the hex readout can appear/disappear as the cursor crosses the
+    // backdrop boundary.
+    let cursor = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+    if let ColorPickerState::Open { last_cursor_pos, .. } = state {
+        *last_cursor_pos = Some(cursor);
+    }
+
     let hit = if let ColorPickerState::Open { layout: Some(layout), .. } = state {
-        hit_test_picker(layout, cursor_pos.0 as f32, cursor_pos.1 as f32)
+        hit_test_picker(layout, cursor.0, cursor.1)
     } else {
         // Picker closed, or open but the first rebuild hasn't happened
         // yet — no cached layout to hit-test against. The open path
@@ -3249,8 +3348,11 @@ fn handle_color_picker_mouse_move(
     if hsv_changed {
         apply_picker_preview(state, doc, mindmap_tree, renderer);
     } else {
-        // Only chip focus moved (or we're hovering inert padding).
-        // Dynamic rebuild is sufficient.
+        // Only chip focus moved, or we're hovering inert padding /
+        // outside the backdrop entirely. The dynamic rebuild re-runs
+        // `compute_picker_geometry` which picks up the updated
+        // cursor_pos and toggles hex_visible accordingly — so even
+        // Inside / Outside hits are meaningful rebuild triggers now.
         rebuild_color_picker_overlay_dynamic(state, renderer);
     }
 }

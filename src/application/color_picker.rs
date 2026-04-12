@@ -41,9 +41,129 @@ use crate::application::document::{EdgeRef, MindMapDocument, PortalRef};
 pub const HUE_SLOT_COUNT: usize = 24;
 
 /// Number of cells on each crosshair bar. Odd so the center cell sits
-/// exactly on the bar's midpoint (sat=0.5 / val=0.5).
-pub const SAT_CELL_COUNT: usize = 11;
-pub const VAL_CELL_COUNT: usize = 11;
+/// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 10 is the
+/// wheel center where ॐ lives — it's counted in the HSV quantization
+/// but not rendered as a bar cell.
+pub const SAT_CELL_COUNT: usize = 21;
+pub const VAL_CELL_COUNT: usize = 21;
+
+/// The center cell index of each 21-cell crosshair bar — the wheel
+/// center where ॐ sits. Skipped during bar rendering so the ॐ glyph
+/// shows through cleanly; still counted in sat/val quantization.
+pub const CROSSHAIR_CENTER_CELL: usize = 10;
+
+/// Hue ring font size multiplier over the picker's base font_size. The
+/// ring is the dominant visual element of the mandala-shaped picker, so
+/// it renders larger than the bars, chips, and title. 1.5× strikes a
+/// balance: visibly ornate without overflowing the backdrop on a
+/// normally-sized window.
+pub const HUE_RING_FONT_SCALE: f32 = 1.5;
+
+/// Hue ring sacred-script glyphs, clockwise from 12 o'clock. Three
+/// 8-glyph arcs: Devanagari (top-right), Hebrew (bottom-right), Tibetan
+/// (bottom-left → top-left). Each glyph indexes directly into
+/// `hue_slot_positions[i]`.
+pub const HUE_RING_GLYPHS: [&str; HUE_SLOT_COUNT] = [
+    // Slots 0-7 — Devanagari consonants
+    "\u{0915}", // क KA
+    "\u{0916}", // ख KHA
+    "\u{0917}", // ग GA
+    "\u{0918}", // घ GHA
+    "\u{091A}", // च CA
+    "\u{091C}", // ज JA
+    "\u{091F}", // ट TTA
+    "\u{0921}", // ड DDA
+    // Slots 8-15 — Hebrew alefbet (first 8 letters)
+    "\u{05D0}", // א ALEF
+    "\u{05D1}", // ב BET
+    "\u{05D2}", // ג GIMEL
+    "\u{05D3}", // ד DALET
+    "\u{05D4}", // ה HE
+    "\u{05D5}", // ו VAV
+    "\u{05D6}", // ז ZAYIN
+    "\u{05D7}", // ח HET
+    // Slots 16-23 — Tibetan consonants
+    "\u{0F40}", // ཀ KA
+    "\u{0F41}", // ཁ KHA
+    "\u{0F42}", // ག GA
+    "\u{0F44}", // ང NGA
+    "\u{0F45}", // ཅ CA
+    "\u{0F4F}", // ཏ TA
+    "\u{0F54}", // པ PA
+    "\u{0F58}", // མ MA
+];
+
+/// Val bar top arm (cells 0..CROSSHAIR_CENTER_CELL, brightest → mid).
+/// Devanagari independent vowels — the script sits on the top arm so
+/// the cross reads as a typographic compass with one script per arm.
+pub const ARM_TOP_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
+    "\u{0905}", // अ A
+    "\u{0906}", // आ AA
+    "\u{0907}", // इ I
+    "\u{0908}", // ई II
+    "\u{0909}", // उ U
+    "\u{090A}", // ऊ UU
+    "\u{090B}", // ऋ R-VOCALIC
+    "\u{090F}", // ए E
+    "\u{0910}", // ऐ AI
+    "\u{0913}", // ओ O
+];
+
+/// Val bar bottom arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
+/// mid → darkest). Hebrew letters beyond the ring's first 8 — script
+/// contrast with the Devanagari top arm across the wheel's vertical
+/// axis.
+pub const ARM_BOTTOM_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
+    "\u{05D8}", // ט TET
+    "\u{05D9}", // י YOD
+    "\u{05DB}", // כ KAF
+    "\u{05DC}", // ל LAMED
+    "\u{05DE}", // מ MEM
+    "\u{05E0}", // נ NUN
+    "\u{05E1}", // ס SAMEKH
+    "\u{05E2}", // ע AYIN
+    "\u{05E4}", // פ PE
+    "\u{05E6}", // צ TSADE
+];
+
+/// Sat bar left arm (cells 0..CROSSHAIR_CENTER_CELL, desaturated →
+/// mid). Tibetan consonants not used in the hue ring — gives the
+/// left-of-center arm its own distinct script.
+pub const ARM_LEFT_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
+    "\u{0F49}", // ཉ NYA
+    "\u{0F50}", // ཐ THA
+    "\u{0F51}", // ད DA
+    "\u{0F53}", // ན NA
+    "\u{0F55}", // ཕ PHA
+    "\u{0F56}", // བ BA
+    "\u{0F59}", // ཙ TSA
+    "\u{0F5E}", // ཞ ZHA
+    "\u{0F62}", // ར RA
+    "\u{0F66}", // ས SA
+];
+
+/// Sat bar right arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
+/// mid → saturated). Egyptian Hieroglyph narrow uniliterals from
+/// Gardiner's alphabet — the hieroglyphic "alphabet" of single-
+/// consonant signs, picked to match the visual weight of the other
+/// three arms (no wide biliterals / triliterals).
+pub const ARM_RIGHT_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
+    "\u{131CB}", // 𓇋 i — reed flower
+    "\u{13171}", // 𓅱 w — quail chick
+    "\u{130C0}", // 𓃀 b — leg
+    "\u{132AA}", // 𓊪 p — stool
+    "\u{13191}", // 𓆑 f — horned viper
+    "\u{13216}", // 𓈖 n — water ripple
+    "\u{1308B}", // 𓂋 r — mouth
+    "\u{13254}", // 𓉔 h — reed shelter
+    "\u{132F4}", // 𓋴 s — folded cloth
+    "\u{133CF}", // 𓏏 t — bread loaf
+];
+
+/// Center wheel preview glyph — ॐ (U+0950, Devanagari Om). Replaces
+/// the earlier ✦ dingbat as the focal point of the mandala-shaped
+/// picker. Rendered at `layout.preview_size = font_size * 2.0`.
+pub const CENTER_PREVIEW_GLYPH: &str = "\u{0950}";
 
 /// What a theme-variable quick-pick chip commits when clicked or
 /// Enter-activated with focus.
@@ -218,6 +338,22 @@ pub enum ColorPickerState {
         /// HSV. Tab cycles through chips; Enter on a focused chip
         /// commits the chip's raw color string instead of the HSV hex.
         chip_focus: Option<usize>,
+        /// Last cursor position seen by `handle_color_picker_mouse_move`,
+        /// in window-space pixels. `None` before the first mouse event
+        /// after open. Threaded into geometry so `compute_picker_geometry`
+        /// can toggle `hex_visible` based on "cursor inside backdrop".
+        last_cursor_pos: Option<(f32, f32)>,
+        /// Widest shaped advance across all 40 crosshair-arm glyphs at
+        /// base `font_size`. Measured once at picker-open via
+        /// cosmic-text in `open_color_picker`, cached here so every
+        /// subsequent `compute_picker_geometry` call can forward it to
+        /// the pure layout fn as the cell-spacing unit. Keeps the four
+        /// arms symmetric even when one script shapes wider than the
+        /// others.
+        max_cell_advance: f32,
+        /// Same, for the 24 hue ring glyphs at
+        /// `font_size * HUE_RING_FONT_SCALE`. Measured once at open.
+        max_ring_advance: f32,
         /// Tracks what the commit should do. `Hsv` → commit the
         /// current HSV hex as a per-edge/portal override. `Var(raw)`
         /// → commit the `var(--...)` string so theme-var resolution
@@ -271,6 +407,23 @@ pub struct ColorPickerOverlayGeometry {
     pub val: f32,
     pub preview_hex: String,
     pub chip_focus: Option<usize>,
+    /// Whether the hex readout should render this frame. `true` when
+    /// the cursor is inside the backdrop OR a chip is focused; `false`
+    /// otherwise. The readout was previously always-on and collided
+    /// with the lower val bar cells — now it appears only when the
+    /// user is actively engaging with the picker.
+    pub hex_visible: bool,
+    /// Widest shaped advance across the 40 crosshair-arm glyphs at
+    /// base `font_size`. Measured by the renderer via cosmic-text at
+    /// picker open. Used by `compute_color_picker_layout` as the
+    /// cell-spacing unit for both bars so all four arms stay symmetric
+    /// regardless of per-script shaping width.
+    pub max_cell_advance: f32,
+    /// Same, for the 24 hue ring glyphs at
+    /// `font_size * HUE_RING_FONT_SCALE`. Used as the ring's
+    /// tangential slot-spacing baseline so slots never overlap at the
+    /// new larger font size.
+    pub max_ring_advance: f32,
 }
 
 /// Pure-function output of the color-picker layout pass. All positions
@@ -281,17 +434,27 @@ pub struct ColorPickerLayout {
     pub outer_radius: f32,
     pub font_size: f32,
     pub char_width: f32,
+    /// Actual per-cell advance used for both bars (derived from
+    /// `geometry.max_cell_advance`). Exposed so the hit-test can use
+    /// the same tolerance the renderer uses.
+    pub cell_advance: f32,
+    /// Ring font size actually used (`font_size * HUE_RING_FONT_SCALE`).
+    /// Exposed so the renderer and hit test stay in sync.
+    pub ring_font_size: f32,
     /// 24 hue ring positions, ordered clockwise from 12-o'clock.
     pub hue_slot_positions: [(f32, f32); HUE_SLOT_COUNT],
-    /// 11 sat-bar cell centers, left → right.
+    /// 21 sat-bar cell centers, left → right. Cell 10 is the wheel
+    /// center — NOT rendered (ॐ shows through), but still used by
+    /// hit-testing so a click at the exact center resolves to it.
     pub sat_cell_positions: [(f32, f32); SAT_CELL_COUNT],
-    /// 11 val-bar cell centers, top → bottom (top = brightest).
+    /// 21 val-bar cell centers, top → bottom (top = brightest). Cell
+    /// 10 is the wheel center — same skip rule as sat.
     pub val_cell_positions: [(f32, f32); VAL_CELL_COUNT],
-    /// Center preview glyph anchor (the `✦`). Top-left corner of the
+    /// Center preview glyph anchor (the ॐ). Top-left corner of the
     /// glyph box, computed so the glyph visually centers on the wheel
     /// center given `preview_size`.
     pub preview_pos: (f32, f32),
-    /// Font size for the central `✦` preview glyph. 2× the base
+    /// Font size for the central ॐ preview glyph. 2× the base
     /// `font_size` so the preview reads as a focal point.
     pub preview_size: f32,
     /// One `(x, y, width)` per chip, ordered as `THEME_CHIPS`.
@@ -304,48 +467,96 @@ pub struct ColorPickerLayout {
     pub title_pos: (f32, f32),
     /// Hint footer text anchor.
     pub hint_pos: (f32, f32),
+    /// `Some((x, y))` top-left anchor for the hex readout when it
+    /// should render this frame, `None` otherwise. Derived from
+    /// `geometry.hex_visible`. When `Some`, the readout is anchored
+    /// below the chip row, horizontally centered on `center.0`.
+    pub hex_pos: Option<(f32, f32)>,
 }
 
 
 /// Pure-function layout. No GPU access, no font system — mirrors
 /// `compute_palette_frame_layout` so unit tests can construct one from
 /// nothing but a geometry struct + screen dimensions.
+///
+/// The cell-spacing unit (`geometry.max_cell_advance`) and ring-slot
+/// spacing unit (`geometry.max_ring_advance`) are measured at picker
+/// open time by the renderer (see `measure_max_glyph_advance` in
+/// `renderer.rs`) and threaded through `ColorPickerOverlayGeometry`.
+/// That keeps this fn pure but lets the layout honor the real shaped
+/// width of sacred-script glyphs — crucial because Devanagari
+/// clusters, Tibetan stacks, and especially Egyptian hieroglyphs
+/// shape much wider than `font_size * 0.6`, and all four crosshair
+/// arms must share a single cell advance so the cross reads as a
+/// symmetric cross.
 pub fn compute_color_picker_layout(
-    _geometry: &ColorPickerOverlayGeometry,
+    geometry: &ColorPickerOverlayGeometry,
     screen_w: f32,
     screen_h: f32,
 ) -> ColorPickerLayout {
     let font_size: f32 = 16.0;
     let char_width = font_size * 0.6;
+    let ring_font_size = font_size * HUE_RING_FONT_SCALE;
 
-    // Square frame, centered on the window. The picker draws the
-    // wheel inside `side`, then adds a chip row + hint footer below
-    // and a title above — see the backdrop computation at the
-    // bottom of this function. The vertical budget consumed by the
-    // backdrop is `side + 5 * font_size`, and the backdrop is
-    // anchored above the wheel by 1 font_size, so the total vertical
-    // extent of the backdrop is bounded by:
-    //
-    //     center.y - side/2 - font_size  ..  center.y + side/2 + 4*font_size
-    //
-    // For the backdrop to fit inside `[0, screen_h]` we need
-    // `side/2 + 4*font_size <= center.y` AND `side/2 + font_size <=
-    // center.y` — at center.y = screen_h/2 the first dominates,
-    // giving `side <= screen_h - 8*font_size`. Same logic
-    // horizontally. Note: the `.min` cascade after the floor would
-    // overflow on small windows, so we put the floor on each clamp.
+    // Cell-advance units from geometry, with floor fallbacks so the
+    // layout still produces sane numbers when called with a stubbed
+    // zero (unit tests, or the very first rebuild before the renderer
+    // has had a chance to measure).
+    let cell_advance = geometry.max_cell_advance.max(char_width);
+    let ring_advance = geometry.max_ring_advance.max(ring_font_size * 0.6);
+
+    // Ring radius has to be large enough that adjacent slots don't
+    // overlap at the new font size. Tangential spacing between
+    // neighbors at radius R is `2*pi*R / 24`, so a minimum radius of
+    // `(ring_advance * 24) / (2*pi)` guarantees no overlap. Then we
+    // pad by half a ring-font so the glyphs have breathing room from
+    // the wheel edge.
+    let min_ring_r = (ring_advance * HUE_SLOT_COUNT as f32) / TAU;
+    // Inner extent needed to fit `(CROSSHAIR_CENTER_CELL) * cell_advance`
+    // between the wheel center and the ring inner edge on each side.
+    let inner_extent = CROSSHAIR_CENTER_CELL as f32 * cell_advance;
+    // Ring must be big enough to enclose both the crosshair bars and
+    // the minimum tangential spacing. Grow `ring_r` to whichever
+    // constraint dominates, plus a small padding between the bar tip
+    // and the ring glyphs so they don't touch.
+    let bar_to_ring_padding = ring_font_size * 0.8;
+    let desired_ring_r = (inner_extent + bar_to_ring_padding).max(min_ring_r);
+
+    // Derive the backdrop extent from the actual ring (plus padding
+    // for title above, chips + hint below). Clamp to window so small
+    // windows still produce a layout that fits.
+    let ring_outer = desired_ring_r + ring_font_size * 0.5;
+    let side_from_ring = (ring_outer + font_size) * 2.0;
     let max_side_for_w = (screen_w - font_size * 2.0).max(0.0);
-    let max_side_for_h = (screen_h - font_size * 8.0).max(0.0);
-    let side = 420f32
+    // Vertical budget derivation: with the new `backdrop_height =
+    // side + font_size * 7.0` and `backdrop_top = center.y - side/2
+    // - font_size`, the backdrop's bottom edge is at
+    //     center.y + side/2 + font_size * 6
+    // and the top edge is at
+    //     center.y - side/2 - font_size.
+    // For the top to be >= 0 we need `side <= screen_h - 2*font_size`.
+    // For the bottom to be <= screen_h we need
+    // `side <= screen_h - 12*font_size`, so the bottom constraint
+    // dominates at `center.y = screen_h/2`. A 12 font_size floor
+    // leaves enough room for title, wheel, chip row, hex readout,
+    // and hint footer even on small windows.
+    let max_side_for_h = (screen_h - font_size * 12.0).max(0.0);
+    let side = side_from_ring
         .min(max_side_for_w)
         .min(max_side_for_h)
         .max(0.0);
+    // Recompute ring_r from the possibly-clamped side so layout is
+    // consistent. On unconstrained windows this is a no-op; on small
+    // windows it shrinks the ring to fit.
+    // Guard against side < 2*font_size producing a negative radius
+    // on very small windows. Clamp to 0 so downstream consumers
+    // (chip_row_y placement, backdrop math) get a sane value.
+    let outer_radius = (side * 0.5 - font_size).max(0.0);
+    let ring_r = (outer_radius - ring_font_size * 0.5).max(0.0);
     let center = (screen_w * 0.5, screen_h * 0.5);
-    let outer_radius = side * 0.45;
 
     // ---- Hue ring (24 slots, clockwise from 12 o'clock) ----
     let mut hue_slot_positions = [(0.0_f32, 0.0_f32); HUE_SLOT_COUNT];
-    let ring_r = outer_radius - font_size * 0.5;
     for (i, slot) in hue_slot_positions.iter_mut().enumerate() {
         let angle = (i as f32 / HUE_SLOT_COUNT as f32) * TAU - FRAC_PI_2;
         *slot = (
@@ -354,26 +565,37 @@ pub fn compute_color_picker_layout(
         );
     }
 
-    // ---- Crosshair sat/val bars, inscribed inside the ring ----
-    let inner_extent = outer_radius * 0.55;
-    let sat_step = (inner_extent * 2.0) / (SAT_CELL_COUNT as f32 - 1.0);
-    let val_step = (inner_extent * 2.0) / (VAL_CELL_COUNT as f32 - 1.0);
+    // ---- Crosshair sat/val bars (21 cells each, center cell is the
+    // wheel center and rendered as ॐ not as a bar cell) ----
+    // Bars span `20 * cell_advance` across the diameter of the inner
+    // cross region. If the constrained ring forced the inner extent
+    // smaller than `CROSSHAIR_CENTER_CELL * cell_advance`, shrink the
+    // actual step so cells still fit — keeps the small-window case
+    // from producing overlapping arm glyphs.
+    let constrained_inner = ring_r - bar_to_ring_padding;
+    let actual_cell_advance = if constrained_inner > 0.0 {
+        (constrained_inner / CROSSHAIR_CENTER_CELL as f32).min(cell_advance)
+    } else {
+        0.0
+    };
+    let step = actual_cell_advance;
+    let bar_span = step * (SAT_CELL_COUNT as f32 - 1.0);
     let mut sat_cell_positions = [(0.0_f32, 0.0_f32); SAT_CELL_COUNT];
     let mut val_cell_positions = [(0.0_f32, 0.0_f32); VAL_CELL_COUNT];
     for i in 0..SAT_CELL_COUNT {
-        sat_cell_positions[i] = (center.0 - inner_extent + i as f32 * sat_step, center.1);
+        sat_cell_positions[i] = (center.0 - bar_span * 0.5 + i as f32 * step, center.1);
     }
     for i in 0..VAL_CELL_COUNT {
-        val_cell_positions[i] = (center.0, center.1 - inner_extent + i as f32 * val_step);
+        val_cell_positions[i] = (center.0, center.1 - bar_span * 0.5 + i as f32 * step);
     }
 
-    // Center preview at the bar intersection. The ✦ glyph renders
-    // at 2× font_size, so the top-left of its box must be offset by
-    // half the preview size in each direction so the visible glyph
-    // sits on the geometric wheel center. cosmic-text's effective
-    // glyph width is ~0.6 of its font size; we use 0.4 horizontally
-    // because the ✦ glyph has whitespace around it that the box
-    // includes but the visible mark does not.
+    // Center preview ॐ at the bar intersection. The glyph renders
+    // at 2× font_size; the top-left of its box is offset by half the
+    // preview size in each direction so the visible glyph sits on
+    // the geometric wheel center. cosmic-text's effective glyph
+    // width is ~0.6 of its font size; we use 0.4 horizontally because
+    // the ॐ glyph (like the earlier ✦) has whitespace around it that
+    // the box includes but the visible mark does not.
     let preview_size = font_size * 2.0;
     let preview_pos = (
         center.0 - preview_size * 0.4,
@@ -404,9 +626,14 @@ pub fn compute_color_picker_layout(
     // backdrop keeps both strings inside the frame at any size —
     // cosmic-text still clips anything past the bounds, which is
     // correct behavior for a text-too-long situation.
+    //
+    // Backdrop height leaves room for title (1 font_size above the
+    // wheel) + wheel diameter + chip row (1.5 font_size) + chip row
+    // height + hex readout row (1.5 font_size) + hint footer (1.5
+    // font_size).
     let backdrop_left = center.0 - side * 0.5;
     let backdrop_top = center.1 - side * 0.5 - font_size;
-    let backdrop_height = side + font_size * 5.0;
+    let backdrop_height = side + font_size * 7.0;
     let backdrop = (backdrop_left, backdrop_top, side, backdrop_height);
     let title_pos = (backdrop_left + font_size * 0.5, backdrop_top + font_size * 0.5);
     let hint_pos = (
@@ -414,11 +641,27 @@ pub fn compute_color_picker_layout(
         backdrop_top + backdrop_height - font_size * 1.5,
     );
 
+    // ---- Hex readout position ----
+    // The hex readout is hidden by default; `geometry.hex_visible`
+    // gates whether it renders this frame. When visible, anchor it
+    // below the chip row (between the chips and the hint footer),
+    // horizontally centered on `center.0`. "#rrggbb" is 7 chars wide,
+    // so the top-left anchor is `center.x - 3.5 * char_width`.
+    let hex_pos = if geometry.hex_visible {
+        let hex_width = char_width * 7.0;
+        let hex_y = chip_row_y + chip_height + font_size * 0.25;
+        Some((center.0 - hex_width * 0.5, hex_y))
+    } else {
+        None
+    };
+
     ColorPickerLayout {
         center,
         outer_radius,
         font_size,
         char_width,
+        cell_advance: step,
+        ring_font_size,
         hue_slot_positions,
         sat_cell_positions,
         val_cell_positions,
@@ -429,6 +672,7 @@ pub fn compute_color_picker_layout(
         backdrop,
         title_pos,
         hint_pos,
+        hex_pos,
     }
 }
 
@@ -472,13 +716,20 @@ pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit 
     }
 
     // Sat/val bars: pick the closer of the two if the cursor is inside
-    // the inner cross region. Each cell is a square of `font_size`.
-    let cell_half = layout.font_size * 0.6;
+    // the inner cross region. Cell tolerance scales with the actual
+    // per-cell advance so denser bars (smaller cell_advance on small
+    // windows) have proportionally smaller hit boxes.
+    let cell_half = (layout.cell_advance * 0.5).max(layout.font_size * 0.4);
 
     // Sat (horizontal) bar — only consider when cursor is vertically
-    // close to the bar line.
+    // close to the bar line. Skip the center cell so a click at the
+    // wheel center falls through to the hue ring (or stays Inside) —
+    // the center cell is visually occupied by ॐ, not by a bar glyph.
     if (y - layout.center.1).abs() <= cell_half {
         for (i, (cx, _)) in layout.sat_cell_positions.iter().enumerate() {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
             if (x - cx).abs() <= cell_half {
                 return PickerHit::SatCell(i);
             }
@@ -487,6 +738,9 @@ pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit 
     // Val (vertical) bar — same in the other axis.
     if (x - layout.center.0).abs() <= cell_half {
         for (i, (_, cy)) in layout.val_cell_positions.iter().enumerate() {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
             if (y - cy).abs() <= cell_half {
                 return PickerHit::ValCell(i);
             }
@@ -494,12 +748,13 @@ pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit 
     }
 
     // Hue ring — annular hit. Only the slot whose glyph contains the
-    // cursor counts (cell_half tolerance), so the empty space inside
+    // cursor counts (ring-scaled tolerance), so the empty space inside
     // the ring stays inert.
+    let ring_half = layout.ring_font_size * 0.5;
     for (i, (px, py)) in layout.hue_slot_positions.iter().enumerate() {
         let dx = x - px;
         let dy = y - py;
-        if dx * dx + dy * dy <= cell_half * cell_half {
+        if dx * dx + dy * dy <= ring_half * ring_half {
             return PickerHit::Hue(i);
         }
     }
@@ -546,7 +801,22 @@ mod tests {
             val: 1.0,
             preview_hex: "#ff0000".to_string(),
             chip_focus: None,
+            hex_visible: false,
+            // Plausible stub advances. 16.0 is the base font_size and
+            // 24.0 is font_size * HUE_RING_FONT_SCALE, so these match
+            // what the renderer would measure for ordinary Latin text.
+            // Real sacred-script measurements will be wider, but the
+            // pure-function layout only cares that the numbers are
+            // non-zero and self-consistent.
+            max_cell_advance: 16.0,
+            max_ring_advance: 24.0,
         }
+    }
+
+    fn sample_geometry_with_hex() -> ColorPickerOverlayGeometry {
+        let mut g = sample_geometry();
+        g.hex_visible = true;
+        g
     }
 
     #[test]
@@ -554,7 +824,10 @@ mod tests {
         let g = sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
         assert_eq!(layout.hue_slot_positions.len(), 24);
-        let r_target = layout.outer_radius - layout.font_size * 0.5;
+        // Ring radius is derived from the actual ring font size, not
+        // the base font_size, since HUE_RING_FONT_SCALE > 1 makes
+        // the ring glyphs larger than the base.
+        let r_target = layout.outer_radius - layout.ring_font_size * 0.5;
         for (i, (px, py)) in layout.hue_slot_positions.iter().enumerate() {
             let dx = px - layout.center.0;
             let dy = py - layout.center.1;
@@ -580,7 +853,7 @@ mod tests {
     fn layout_sat_bar_monotonic_x_constant_y() {
         let g = sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
-        assert_eq!(layout.sat_cell_positions.len(), 11);
+        assert_eq!(layout.sat_cell_positions.len(), SAT_CELL_COUNT);
         for w in layout.sat_cell_positions.windows(2) {
             assert!(w[1].0 > w[0].0, "sat cells must increase in x");
             assert!((w[0].1 - w[1].1).abs() < 0.1, "sat cells share y");
@@ -591,7 +864,7 @@ mod tests {
     fn layout_val_bar_monotonic_y_constant_x() {
         let g = sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
-        assert_eq!(layout.val_cell_positions.len(), 11);
+        assert_eq!(layout.val_cell_positions.len(), VAL_CELL_COUNT);
         for w in layout.val_cell_positions.windows(2) {
             assert!(w[1].1 > w[0].1, "val cells must increase in y");
             assert!((w[0].0 - w[1].0).abs() < 0.1, "val cells share x");
@@ -748,5 +1021,160 @@ mod tests {
         assert_eq!(degrees_to_hue_slot(7.6), 1);
         assert_eq!(degrees_to_hue_slot(22.4), 1);
         assert_eq!(degrees_to_hue_slot(22.6), 2);
+    }
+
+    /// Hue ring slots must not overlap at the new 1.5× font scale.
+    /// On a full-size window, consecutive slot centers should be at
+    /// least `0.9 * max_ring_advance` apart by straight-line (chord)
+    /// distance — anything less means the ring radius got clamped too
+    /// tight and glyphs will collide visually. Chord distance (not
+    /// arc) because that's what matters for glyph collision: the
+    /// glyphs sit at the slot centers, and two glyphs collide when
+    /// their chord distance falls below their shaped widths.
+    #[test]
+    fn hue_ring_slots_do_not_overlap_at_new_font_scale() {
+        let g = sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        for i in 0..HUE_SLOT_COUNT {
+            let j = (i + 1) % HUE_SLOT_COUNT;
+            let (px, py) = layout.hue_slot_positions[i];
+            let (qx, qy) = layout.hue_slot_positions[j];
+            let dx = qx - px;
+            let dy = qy - py;
+            let dist = (dx * dx + dy * dy).sqrt();
+            assert!(
+                dist >= g.max_ring_advance * 0.9,
+                "adjacent hue slots {i} and {j} only {dist} apart, \
+                expected >= {}",
+                g.max_ring_advance * 0.9,
+            );
+        }
+    }
+
+    /// `hex_pos` must be `Some` when geometry declares it visible and
+    /// `None` otherwise. Regression guard against a renderer that
+    /// reaches for hex_pos unconditionally.
+    #[test]
+    fn hex_pos_is_some_iff_hex_visible() {
+        let invisible = compute_color_picker_layout(&sample_geometry(), 1280.0, 720.0);
+        assert!(
+            invisible.hex_pos.is_none(),
+            "hex_pos must be None when hex_visible=false",
+        );
+        let visible = compute_color_picker_layout(&sample_geometry_with_hex(), 1280.0, 720.0);
+        assert!(
+            visible.hex_pos.is_some(),
+            "hex_pos must be Some when hex_visible=true",
+        );
+    }
+
+    /// When visible, the hex readout must be horizontally centered on
+    /// the wheel center. The top-left anchor is offset left by half
+    /// the hex text width (7 chars * char_width).
+    #[test]
+    fn hex_pos_horizontally_centered_on_wheel_center() {
+        let layout = compute_color_picker_layout(&sample_geometry_with_hex(), 1280.0, 720.0);
+        let (hx, _) = layout.hex_pos.expect("hex_pos should be Some");
+        let hex_width = layout.char_width * 7.0;
+        let hex_center_x = hx + hex_width * 0.5;
+        assert!(
+            (hex_center_x - layout.center.0).abs() < 1.0,
+            "hex readout center {hex_center_x} not aligned with wheel center {}",
+            layout.center.0,
+        );
+    }
+
+    /// Each crosshair arm must render exactly 10 cells. The bars
+    /// have SAT_CELL_COUNT / VAL_CELL_COUNT = 21 cells, cell
+    /// CROSSHAIR_CENTER_CELL = 10 is the shared wheel-center slot
+    /// (ॐ overlay), and each arm covers 10 non-center cells —
+    /// totaling 40 rendered crosshair glyphs. Also asserts that the
+    /// center cells of both bars sit exactly on the wheel center.
+    #[test]
+    fn crosshair_arms_render_exactly_10_cells_each() {
+        let layout = compute_color_picker_layout(&sample_geometry(), 1280.0, 720.0);
+        // Center cell of the sat bar = wheel center.
+        let (scx, scy) = layout.sat_cell_positions[CROSSHAIR_CENTER_CELL];
+        assert!((scx - layout.center.0).abs() < 0.1);
+        assert!((scy - layout.center.1).abs() < 0.1);
+        // Center cell of the val bar = wheel center.
+        let (vcx, vcy) = layout.val_cell_positions[CROSSHAIR_CENTER_CELL];
+        assert!((vcx - layout.center.0).abs() < 0.1);
+        assert!((vcy - layout.center.1).abs() < 0.1);
+        // Left arm = 10 cells (0..CROSSHAIR_CENTER_CELL).
+        assert_eq!(CROSSHAIR_CENTER_CELL, 10);
+        assert_eq!(ARM_LEFT_GLYPHS.len(), 10);
+        // Right arm = 10 cells (CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT).
+        assert_eq!(SAT_CELL_COUNT - CROSSHAIR_CENTER_CELL - 1, 10);
+        assert_eq!(ARM_RIGHT_GLYPHS.len(), 10);
+        // Top arm = 10 cells, bottom arm = 10 cells.
+        assert_eq!(ARM_TOP_GLYPHS.len(), 10);
+        assert_eq!(ARM_BOTTOM_GLYPHS.len(), 10);
+        // Four arms × 10 glyphs = 40 total.
+        assert_eq!(
+            ARM_TOP_GLYPHS.len()
+                + ARM_BOTTOM_GLYPHS.len()
+                + ARM_LEFT_GLYPHS.len()
+                + ARM_RIGHT_GLYPHS.len(),
+            40,
+        );
+    }
+
+    /// The four crosshair arms must emit the same per-cell advance so
+    /// the cross reads as a symmetric cross, not a plus sign with one
+    /// fat arm. Checks that consecutive sat cells and consecutive val
+    /// cells have identical step distances.
+    #[test]
+    fn crosshair_arms_emit_symmetric_cell_advance() {
+        let layout = compute_color_picker_layout(&sample_geometry(), 1280.0, 720.0);
+        let sat_step = layout.sat_cell_positions[1].0 - layout.sat_cell_positions[0].0;
+        let val_step = layout.val_cell_positions[1].1 - layout.val_cell_positions[0].1;
+        assert!(
+            (sat_step - val_step).abs() < 0.1,
+            "sat step {sat_step} differs from val step {val_step} — \
+            cross would render asymmetrically",
+        );
+        // Every step should be equal (not just the first pair).
+        for i in 0..SAT_CELL_COUNT - 1 {
+            let s = layout.sat_cell_positions[i + 1].0 - layout.sat_cell_positions[i].0;
+            let v = layout.val_cell_positions[i + 1].1 - layout.val_cell_positions[i].1;
+            assert!((s - sat_step).abs() < 0.1, "sat step {i}→{} drifted", i + 1);
+            assert!((v - val_step).abs() < 0.1, "val step {i}→{} drifted", i + 1);
+        }
+    }
+
+    /// The 24-glyph hue ring array must have a Devanagari arc, a
+    /// Hebrew arc, and a Tibetan arc. Codepoint-range check — not
+    /// the identity of individual glyphs — so swapping letters in
+    /// the same script doesn't break the test.
+    #[test]
+    fn hue_ring_glyphs_are_grouped_by_script() {
+        fn first_cp(s: &str) -> u32 {
+            s.chars().next().expect("glyph string non-empty") as u32
+        }
+        // Slots 0-7 Devanagari
+        for i in 0..8 {
+            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            assert!(
+                (0x0900..=0x097F).contains(&cp),
+                "slot {i} codepoint U+{cp:04X} not in Devanagari",
+            );
+        }
+        // Slots 8-15 Hebrew
+        for i in 8..16 {
+            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            assert!(
+                (0x0590..=0x05FF).contains(&cp),
+                "slot {i} codepoint U+{cp:04X} not in Hebrew",
+            );
+        }
+        // Slots 16-23 Tibetan
+        for i in 16..24 {
+            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            assert!(
+                (0x0F00..=0x0FFF).contains(&cp),
+                "slot {i} codepoint U+{cp:04X} not in Tibetan",
+            );
+        }
     }
 }

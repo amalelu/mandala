@@ -1995,7 +1995,7 @@ impl Renderer {
         geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
     ) {
         use crate::application::color_picker::{
-            compute_color_picker_layout, hue_slot_to_degrees, HUE_SLOT_COUNT,
+            compute_color_picker_layout, hue_slot_to_degrees, HUE_RING_GLYPHS, HUE_SLOT_COUNT,
         };
         use baumhard::util::color::hsv_to_rgb;
 
@@ -2013,11 +2013,12 @@ impl Renderer {
         self.color_picker_backdrop = Some(layout.backdrop);
 
         let font_size = layout.font_size;
-        let char_width = layout.char_width;
-        let glyph_box = (font_size * 1.5, font_size * 1.5);
+        let ring_font_size = layout.ring_font_size;
+        let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
+        let ring_glyph_box = (ring_box_w, ring_font_size * 1.5);
 
         // ---- Title bar ----
-        let title_text = format!("\u{2726} {} color", geometry.target_label);
+        let title_text = format!("\u{0950} {} color", geometry.target_label);
         let title_attrs = Attrs::new()
             .color(cosmic_text::Color::rgba(0, 229, 255, 255))
             .metrics(cosmic_text::Metrics::new(font_size, font_size));
@@ -2030,26 +2031,32 @@ impl Renderer {
             (font_size * 24.0, font_size * 1.5),
         ));
 
-        // ---- Hue ring (24 slots) — always the same 24 hue-colored
-        // `●` glyphs regardless of current pick. The dynamic pass
-        // later overlays a cyan outline ring `◯` on top of the
-        // currently-selected slot, so we don't need to rebuild the
-        // hue ring when the selection moves.
+        // ---- Hue ring (24 sacred-script glyphs) — three 8-glyph
+        // arcs clockwise from 12 o'clock: Devanagari, Hebrew, Tibetan.
+        // Each slot renders at HUE_RING_FONT_SCALE × base font size
+        // so the ring reads as the dominant visual element. Each
+        // glyph is center-aligned inside its box so scripts with
+        // different shaped widths (Devanagari headstrokes are
+        // noticeably wider than Tibetan consonants) don't throw the
+        // ring visually out of round. The dynamic pass later
+        // overlays a cyan outline ring ◯ on top of the currently-
+        // selected slot, so we don't need to rebuild the hue ring
+        // when the selection moves.
         for i in 0..HUE_SLOT_COUNT {
             let hue = hue_slot_to_degrees(i);
             let rgb = hsv_to_rgb(hue, 1.0, 1.0);
             let cosmic_color = rgb_to_cosmic_color(rgb);
             let attrs = Attrs::new()
                 .color(cosmic_color)
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+                .metrics(cosmic_text::Metrics::new(ring_font_size, ring_font_size));
             let pos = layout.hue_slot_positions[i];
-            self.color_picker_static_buffers.push(create_border_buffer(
+            self.color_picker_static_buffers.push(create_centered_cell_buffer(
                 &mut font_system,
-                "\u{25CF}",
+                HUE_RING_GLYPHS[i],
                 &attrs,
-                font_size,
-                (pos.0 - char_width * 0.5, pos.1 - font_size * 0.5),
-                glyph_box,
+                ring_font_size,
+                (pos.0 - ring_box_w * 0.5, pos.1 - ring_font_size * 0.5),
+                ring_glyph_box,
             ));
         }
 
@@ -2089,7 +2096,9 @@ impl Renderer {
     ) {
         use crate::application::color_picker::{
             compute_color_picker_layout, sat_cell_to_value, val_cell_to_value,
-            HUE_SLOT_COUNT, SAT_CELL_COUNT, THEME_CHIPS, VAL_CELL_COUNT,
+            ARM_BOTTOM_GLYPHS, ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS, ARM_TOP_GLYPHS,
+            CENTER_PREVIEW_GLYPH, CROSSHAIR_CENTER_CELL, HUE_SLOT_COUNT, SAT_CELL_COUNT,
+            THEME_CHIPS, VAL_CELL_COUNT,
         };
         use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
 
@@ -2106,86 +2115,138 @@ impl Renderer {
         );
 
         let font_size = layout.font_size;
-        let char_width = layout.char_width;
-        let glyph_box = (font_size * 1.5, font_size * 1.5);
+        let ring_font_size = layout.ring_font_size;
+        // Cell-box width: at least the widest crosshair glyph, with a
+        // font-size floor so narrow Latin-width glyphs (chips, etc.)
+        // don't end up with absurdly small boxes. Center-alignment
+        // inside the box (via `create_centered_cell_buffer`) then
+        // pins each glyph's visual midpoint to the cell midpoint,
+        // independent of per-script advance.
+        let cell_box_w = (layout.cell_advance * 1.2).max(font_size * 1.5);
+        let cell_box = (cell_box_w, font_size * 1.5);
+        let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
+        let ring_glyph_box = (ring_box_w, ring_font_size * 1.5);
 
         // ---- Saturation crosshair bar (horizontal) ----
         // Each cell shows the color at (current_hue, cell_sat, current_val)
         // so the bar acts as a live "what does this saturation look
-        // like for the chosen hue?" preview.
-        let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0)).round() as usize;
-        let current_val_cell =
-            ((1.0 - geometry.val) * (VAL_CELL_COUNT as f32 - 1.0)).round() as usize;
+        // like for the chosen hue?" preview. Cell CROSSHAIR_CENTER_CELL
+        // is the wheel center and is NOT rendered as a bar cell — the
+        // ॐ glyph drawn below occupies that position.
+        //
+        // Note on mid-value highlight: when `sat` or `val` is exactly
+        // 0.5, the quantization lands on `CROSSHAIR_CENTER_CELL`
+        // (sat=10/20=0.5), which is the skipped center slot — so no
+        // arm cell receives the highlight tint at that exact value.
+        // The center ॐ glyph already renders with the previewed HSV
+        // color, so it serves as the implicit selection indicator at
+        // mid values. Normal values away from 0.5 highlight an arm
+        // cell as usual. Clamp defensively so a future out-of-range
+        // sat/val never overflows the usize cast.
+        let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0))
+            .round()
+            .clamp(0.0, (SAT_CELL_COUNT - 1) as f32) as usize;
+        let current_val_cell = ((1.0 - geometry.val) * (VAL_CELL_COUNT as f32 - 1.0))
+            .round()
+            .clamp(0.0, (VAL_CELL_COUNT - 1) as f32) as usize;
         for i in 0..SAT_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
             let cell_sat = sat_cell_to_value(i);
-            let rgb = hsv_to_rgb(geometry.hue_deg, cell_sat, geometry.val);
-            let cosmic_color = rgb_to_cosmic_color(rgb);
-            let glyph = if i == current_sat_cell {
-                "\u{25C6}" // ◆ selected
+            let base_rgb = hsv_to_rgb(geometry.hue_deg, cell_sat, geometry.val);
+            // Selected cell gets a tint-up toward white so it pops out
+            // against its arm-mate cells — replaces the earlier
+            // ■ → ◆ glyph-swap highlight which doesn't translate to
+            // sacred-script glyphs (we'd lose the per-cell script
+            // identity if we swapped glyphs).
+            let cosmic_color = if i == current_sat_cell {
+                highlight_selected_cell_color(base_rgb)
             } else {
-                "\u{25A0}" // ■
+                rgb_to_cosmic_color(base_rgb)
+            };
+            let glyph = if i < CROSSHAIR_CENTER_CELL {
+                ARM_LEFT_GLYPHS[i]
+            } else {
+                ARM_RIGHT_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
             };
             let attrs = Attrs::new()
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
             let (cx, cy) = layout.sat_cell_positions[i];
-            self.color_picker_dynamic_buffers.push(create_border_buffer(
+            // Center the cell box on (cx, cy). `create_centered_cell_buffer`
+            // uses `Align::Center` so the glyph visually centers on the
+            // cell midpoint regardless of its shaped width — Hebrew
+            // aleph (~5 px) and Egyptian hieroglyphs (~20 px) both land
+            // on the same visual column.
+            self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
                 &mut font_system,
                 glyph,
                 &attrs,
                 font_size,
-                (cx - char_width * 0.5, cy - font_size * 0.5),
-                glyph_box,
+                (cx - cell_box_w * 0.5, cy - font_size * 0.5),
+                cell_box,
             ));
         }
 
         // ---- Value crosshair bar (vertical) ----
         for i in 0..VAL_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
             let cell_val = val_cell_to_value(i);
-            let rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, cell_val);
-            let cosmic_color = rgb_to_cosmic_color(rgb);
-            let glyph = if i == current_val_cell {
-                "\u{25C6}"
+            let base_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, cell_val);
+            let cosmic_color = if i == current_val_cell {
+                highlight_selected_cell_color(base_rgb)
             } else {
-                "\u{25A0}"
+                rgb_to_cosmic_color(base_rgb)
+            };
+            let glyph = if i < CROSSHAIR_CENTER_CELL {
+                ARM_TOP_GLYPHS[i]
+            } else {
+                ARM_BOTTOM_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
             };
             let attrs = Attrs::new()
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(font_size, font_size));
             let (cx, cy) = layout.val_cell_positions[i];
-            self.color_picker_dynamic_buffers.push(create_border_buffer(
+            self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
                 &mut font_system,
                 glyph,
                 &attrs,
                 font_size,
-                (cx - char_width * 0.5, cy - font_size * 0.5),
-                glyph_box,
+                (cx - cell_box_w * 0.5, cy - font_size * 0.5),
+                cell_box,
             ));
         }
 
         // ---- Selected hue slot indicator ----
-        // A cyan outline circle `◯` drawn on top of the static hue
-        // ring's `●` at the currently-picked slot. The static ring
-        // stays visible because `◯` is hollow, so the user can
-        // still read the hue color through the indicator ring.
+        // A cyan outline circle ◯ drawn on top of the static hue
+        // ring's sacred-script glyph at the currently-picked slot.
+        // ◯ is hollow, so the user can still read the hue-colored
+        // letter through the indicator ring. Font size matches the
+        // ring's HUE_RING_FONT_SCALE so the ring encircles the
+        // glyph rather than sitting inside it. Center-aligned so
+        // the ring stays concentric with the ring glyph it overlays
+        // even on non-integer positions.
         let current_hue_slot = ((geometry.hue_deg.rem_euclid(360.0) / 360.0)
             * HUE_SLOT_COUNT as f32)
             .round() as usize
             % HUE_SLOT_COUNT;
         let indicator_attrs = Attrs::new()
             .color(cosmic_text::Color::rgba(0, 229, 255, 255))
-            .metrics(cosmic_text::Metrics::new(font_size, font_size));
+            .metrics(cosmic_text::Metrics::new(ring_font_size, ring_font_size));
         let slot_pos = layout.hue_slot_positions[current_hue_slot];
-        self.color_picker_dynamic_buffers.push(create_border_buffer(
+        self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
             &mut font_system,
             "\u{25EF}",
             &indicator_attrs,
-            font_size,
-            (slot_pos.0 - char_width * 0.5, slot_pos.1 - font_size * 0.5),
-            glyph_box,
+            ring_font_size,
+            (slot_pos.0 - ring_box_w * 0.5, slot_pos.1 - ring_font_size * 0.5),
+            ring_glyph_box,
         ));
 
-        // ---- Center preview glyph ✦ at 2× font size ----
+        // ---- Center preview glyph ॐ at 2× font size ----
         // The position and size both come from the layout — the
         // pre-render layout pass owns the centering math, so the
         // glyph anchors correctly even if we tweak preview size.
@@ -2197,30 +2258,34 @@ impl Renderer {
             .metrics(cosmic_text::Metrics::new(preview_size, preview_size));
         self.color_picker_dynamic_buffers.push(create_border_buffer(
             &mut font_system,
-            "\u{2726}",
+            CENTER_PREVIEW_GLYPH,
             &preview_attrs,
             preview_size,
             layout.preview_pos,
             (preview_size * 1.5, preview_size * 1.5),
         ));
 
-        // ---- Preview hex readout (small, below the center glyph) ----
-        let hex_text = hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val);
-        let hex_attrs = Attrs::new()
-            .color(cosmic_text::Color::rgba(220, 220, 220, 255))
-            .metrics(cosmic_text::Metrics::new(font_size, font_size));
-        let hex_pos = (
-            layout.center.0 - char_width * 4.0,
-            layout.center.1 + preview_size * 0.7,
-        );
-        self.color_picker_dynamic_buffers.push(create_border_buffer(
-            &mut font_system,
-            &hex_text,
-            &hex_attrs,
-            font_size,
-            hex_pos,
-            (font_size * 8.0, font_size * 1.5),
-        ));
+        // ---- Preview hex readout (small, below the chip row, only
+        // when geometry.hex_visible) ----
+        // The readout is hidden by default; the layout fn sets
+        // `hex_pos` to `Some(..)` when `geometry.hex_visible` is true
+        // (cursor inside backdrop or chip focused), `None` otherwise.
+        // Anchored horizontally centered on the wheel center, below
+        // the theme chip row.
+        if let Some(hex_anchor) = layout.hex_pos {
+            let hex_text = hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val);
+            let hex_attrs = Attrs::new()
+                .color(cosmic_text::Color::rgba(220, 220, 220, 255))
+                .metrics(cosmic_text::Metrics::new(font_size, font_size));
+            self.color_picker_dynamic_buffers.push(create_border_buffer(
+                &mut font_system,
+                &hex_text,
+                &hex_attrs,
+                font_size,
+                hex_anchor,
+                (font_size * 8.0, font_size * 1.5),
+            ));
+        }
 
         // ---- Theme chips row ----
         // Each chip looks like "▸ --accent" if focused, "  --accent"
@@ -2835,6 +2900,64 @@ fn rgb_to_cosmic_color(rgb: [f32; 3]) -> cosmic_text::Color {
     )
 }
 
+/// Highlight a crosshair-arm cell's color to mark it as "currently
+/// selected". The picker used to swap glyphs (■ → ◆) to indicate
+/// selection, but with sacred-script glyphs that approach would lose
+/// the per-cell script identity. Instead we brighten the cell toward
+/// white, which reads as a subtle glow on top of the hue-saturated
+/// base color.
+#[inline]
+fn highlight_selected_cell_color(rgb: [f32; 3]) -> cosmic_text::Color {
+    // Mix 60% toward white.
+    let mix = |c: f32| (c + (1.0 - c) * 0.6).clamp(0.0, 1.0);
+    rgb_to_cosmic_color([mix(rgb[0]), mix(rgb[1]), mix(rgb[2])])
+}
+
+/// Measure the widest shaped advance across a set of glyph strings
+/// at the given font size, via cosmic-text. Used by the color picker
+/// to pick a cell-spacing unit that accommodates the actual shaped
+/// width of sacred-script glyphs — Devanagari clusters, Tibetan
+/// stacks, and especially Egyptian hieroglyphs shape meaningfully
+/// wider than the Latin `font_size * 0.6` baseline.
+///
+/// Returns the max `glyph.w` (advance in pixels) seen across every
+/// glyph string passed in. Falls back to `font_size * 0.6` if every
+/// glyph somehow shapes to zero width (e.g., tofu + missing fallback).
+pub fn measure_max_glyph_advance(
+    font_system: &mut cosmic_text::FontSystem,
+    glyphs: &[&str],
+    font_size: f32,
+) -> f32 {
+    let mut buffer = cosmic_text::Buffer::new(
+        font_system,
+        cosmic_text::Metrics::new(font_size, font_size),
+    );
+    let attrs = Attrs::new();
+    let mut max_w: f32 = 0.0;
+    for g in glyphs {
+        buffer.set_text(
+            font_system,
+            g,
+            &attrs,
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(font_system, false);
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                if glyph.w > max_w {
+                    max_w = glyph.w;
+                }
+            }
+        }
+    }
+    if max_w <= 0.0 {
+        font_size * 0.6
+    } else {
+        max_w
+    }
+}
+
 fn create_border_buffer(
     font_system: &mut FontSystem,
     text: &str,
@@ -2854,6 +2977,38 @@ fn create_border_buffer(
         &Attrs::new(),
         cosmic_text::Shaping::Advanced,
         None,
+    );
+    buf.shape_until_scroll(font_system, false);
+    MindMapTextBuffer { buffer: buf, pos, bounds }
+}
+
+/// Like `create_border_buffer` but center-aligns the text within its
+/// box via `cosmic_text::Align::Center`. Used for the color picker's
+/// crosshair-arm glyphs and hue-ring glyphs: with sacred-script
+/// glyphs varying significantly in shaped width (~5 px for Hebrew,
+/// ~20 px for Egyptian hieroglyphs at base `font_size`), flush-left
+/// positioning would produce a visibly drifting cross and a ring
+/// thrown out of round. Center alignment pins each glyph's visual
+/// center to the middle of its box, independent of advance width.
+fn create_centered_cell_buffer(
+    font_system: &mut FontSystem,
+    text: &str,
+    attrs: &Attrs,
+    font_size: f32,
+    pos: (f32, f32),
+    bounds: (f32, f32),
+) -> MindMapTextBuffer {
+    let mut buf = cosmic_text::Buffer::new(
+        font_system,
+        cosmic_text::Metrics::new(font_size, font_size),
+    );
+    buf.set_size(font_system, Some(bounds.0), Some(bounds.1));
+    buf.set_rich_text(
+        font_system,
+        vec![(text, attrs.clone())],
+        &Attrs::new(),
+        cosmic_text::Shaping::Advanced,
+        Some(cosmic_text::Align::Center),
     );
     buf.shape_until_scroll(font_system, false);
     MindMapTextBuffer { buffer: buf, pos, bounds }
