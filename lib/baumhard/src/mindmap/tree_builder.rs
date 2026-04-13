@@ -379,38 +379,53 @@ pub struct PortalTree {
     pub hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)>,
 }
 
-/// Build a baumhard tree of every visible portal marker.
+/// Identity tuple for one portal pair: `(label, endpoint_a,
+/// endpoint_b)`. Used to compare two consecutive
+/// [`portal_pair_data`] outputs and decide whether a registered
+/// portal tree's structure still matches — the prerequisite for
+/// the in-place [`build_portal_mutator_tree`] path.
+pub type PortalIdentity = (String, String, String);
+
+/// Per-pair output of [`portal_pair_data`]. Single source of truth
+/// for portal layout consumed by both [`build_portal_tree`] (initial
+/// build) and [`build_portal_mutator_tree`] (in-place §B2 update).
 ///
-/// Tree shape:
+/// `pair_channel` is sequential by visible-portal index — stable
+/// across two calls **iff** their visible-portal sequences are
+/// identical (same identities in the same order). Callers detect
+/// drift by comparing identity slices and fall back to a full
+/// rebuild when they disagree.
+#[derive(Clone, Debug)]
+pub struct PortalPairData {
+    pub identity: PortalIdentity,
+    pub pair_channel: usize,
+    /// Per endpoint: `(slot_channel, area, hitbox, endpoint_node_id)`.
+    /// Slot channels are `1` and `2`, fixed by tree-shape contract.
+    pub endpoints: [(usize, GlyphArea, (Vec2, Vec2), String); 2],
+}
+
+/// Compute the visible-portal-pair layout for the given map state.
 ///
-/// ```text
-/// Void (root)
-/// ├── Void (per portal pair — channel = id_counter)
-/// │   ├── GlyphArea (endpoint A marker, channel = 1)
-/// │   └── GlyphArea (endpoint B marker, channel = 2)
-/// ├── Void (next pair) ...
-/// ```
-///
-/// Pairs are emitted in `MindMap.portals` order (which is a
-/// `Vec`, deterministic). Markers attached to folded nodes are
-/// skipped, mirroring `scene_builder::build_scene`.
+/// Single source of truth shared by [`build_portal_tree`] and
+/// [`build_portal_mutator_tree`] so the two paths cannot drift.
+/// Pairs are returned in `MindMap.portals` order, skipping any pair
+/// whose endpoint is hidden by a folded ancestor (mirrors
+/// `scene_builder::build_scene`).
 ///
 /// # Costs
 ///
-/// O(visible portal-pairs × 2). Allocates one tree arena plus
-/// the auxiliary `hitboxes` HashMap. Color resolution uses
-/// `color::resolve_var` for `var(--name)` references.
-pub fn build_portal_tree(
+/// O(visible portal-pairs). Allocates a `Vec` plus two
+/// `ColorFontRegions` per pair. Color resolution uses
+/// [`color::resolve_var`] for `var(--name)` references.
+pub fn portal_pair_data(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_portal: Option<SelectedPortalRef>,
     color_preview: Option<PortalColorPreviewRef>,
-) -> PortalTree {
-    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)> =
-        HashMap::new();
+) -> Vec<PortalPairData> {
     let vars = &map.canvas.theme_variables;
-    let mut id_counter: usize = 1;
+    let mut pairs: Vec<PortalPairData> = Vec::new();
+    let mut pair_channel: usize = 1;
 
     for portal in &map.portals {
         let Some(node_a) = map.nodes.get(&portal.endpoint_a) else {
@@ -447,21 +462,13 @@ pub fn build_portal_tree(
         let color_rgba =
             color::hex_to_rgba_safe(color_hex, [0.92, 0.92, 0.92, 1.0]);
 
-        let pair_channel = id_counter;
-        let pair_root = tree.arena.new_node(GfxElement::new_void_with_id(
-            pair_channel,
-            pair_channel,
-        ));
-        tree.root.append(pair_root, &mut tree.arena);
-        id_counter += 1;
-
-        let key_tuple = (
+        let identity: PortalIdentity = (
             portal.label.clone(),
             portal.endpoint_a.clone(),
             portal.endpoint_b.clone(),
         );
 
-        for (slot, endpoint) in [(1usize, node_a), (2usize, node_b)] {
+        let make_endpoint = |slot: usize, endpoint: &MindNode| -> (usize, GlyphArea, (Vec2, Vec2), String) {
             let (ox, oy) = offsets.get(&endpoint.id).copied().unwrap_or((0.0, 0.0));
             let node_x = endpoint.position.x as f32 + ox;
             let node_y = endpoint.position.y as f32 + oy;
@@ -492,21 +499,186 @@ pub fn build_portal_tree(
                 area.regions = regions;
             }
 
-            let element =
-                GfxElement::new_area_non_indexed_with_id(area, slot, id_counter);
-            id_counter += 1;
+            let max = top_left + Vec2::new(bounds_w, bounds_h);
+            (slot, area, (top_left, max), endpoint.id.clone())
+        };
+
+        pairs.push(PortalPairData {
+            identity,
+            pair_channel,
+            endpoints: [make_endpoint(1, node_a), make_endpoint(2, node_b)],
+        });
+        pair_channel += 1;
+    }
+
+    pairs
+}
+
+/// Identity sequence for a slice of [`PortalPairData`]. Compared
+/// element-wise against a cached sequence to decide whether the
+/// in-place [`build_portal_mutator_tree`] path is sound — if the
+/// sequences disagree, a portal was added, removed, or reordered
+/// (or an endpoint folded), and the caller must fall back to
+/// [`build_portal_tree`] to rebuild the arena.
+pub fn portal_identity_sequence(pairs: &[PortalPairData]) -> Vec<PortalIdentity> {
+    pairs.iter().map(|p| p.identity.clone()).collect()
+}
+
+/// Build a baumhard tree of every visible portal marker.
+///
+/// Tree shape:
+///
+/// ```text
+/// Void (root)
+/// ├── Void (per portal pair — channel = pair index, 1-based)
+/// │   ├── GlyphArea (endpoint A marker, channel = 1)
+/// │   └── GlyphArea (endpoint B marker, channel = 2)
+/// ├── Void (next pair) ...
+/// ```
+///
+/// Pairs are emitted in `MindMap.portals` order (which is a
+/// `Vec`, deterministic). Markers attached to folded nodes are
+/// skipped, mirroring `scene_builder::build_scene`.
+///
+/// # Costs
+///
+/// O(visible portal-pairs × 2). Allocates one tree arena plus
+/// the auxiliary `hitboxes` HashMap. Internally calls
+/// [`portal_pair_data`] — both this initial-build path and the
+/// in-place [`build_portal_mutator_tree`] path share that helper
+/// so they cannot drift.
+pub fn build_portal_tree(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+    selected_portal: Option<SelectedPortalRef>,
+    color_preview: Option<PortalColorPreviewRef>,
+) -> PortalTree {
+    let pairs = portal_pair_data(map, offsets, selected_portal, color_preview);
+    build_portal_tree_from_pairs(&pairs)
+}
+
+/// Variant of [`build_portal_tree`] that consumes pre-computed
+/// pair data. Use this when the caller already called
+/// [`portal_pair_data`] for the dispatch check between full-rebuild
+/// and the in-place [`build_portal_mutator_tree_from_pairs`] path —
+/// avoids re-walking `MindMap.portals` twice per frame.
+pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)> =
+        HashMap::new();
+    // `unique_id` (the second arg to the `_with_id` constructors) is
+    // monotonically increasing per element across the whole tree;
+    // it's a debug / hit-test affordance independent of the channel
+    // values that the mutator path aligns on.
+    let mut unique_id: usize = 1;
+
+    for pair in pairs {
+        let pair_root = tree.arena.new_node(GfxElement::new_void_with_id(
+            pair.pair_channel,
+            unique_id,
+        ));
+        unique_id += 1;
+        tree.root.append(pair_root, &mut tree.arena);
+
+        for (slot, area, hitbox, endpoint_id) in pair.endpoints.iter() {
+            let element = GfxElement::new_area_non_indexed_with_id(
+                area.clone(),
+                *slot,
+                unique_id,
+            );
+            unique_id += 1;
             let leaf = tree.arena.new_node(element);
             pair_root.append(leaf, &mut tree.arena);
-
-            let max = top_left + Vec2::new(bounds_w, bounds_h);
             hitboxes.insert(
-                (key_tuple.clone(), endpoint.id.clone()),
-                (top_left, max),
+                (pair.identity.clone(), endpoint_id.clone()),
+                *hitbox,
             );
         }
     }
 
     PortalTree { tree, hitboxes }
+}
+
+/// Result of [`build_portal_mutator_tree`]. The `mutator` is
+/// applied to the tree returned by [`build_portal_tree`] via
+/// `MutatorTree::apply_to`; `hitboxes` replaces the renderer's
+/// portal hitbox map (positions move with offsets even on the
+/// in-place path).
+pub struct PortalMutator {
+    pub mutator: crate::gfx_structs::tree::MutatorTree<GfxMutator>,
+    pub hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)>,
+}
+
+/// Build a [`MutatorTree`](crate::gfx_structs::tree::MutatorTree)
+/// that updates an already-registered portal tree to the current
+/// `(map, offsets, selected, preview)` state without rebuilding
+/// the arena. Pairs with [`build_portal_tree`] — channels are
+/// stable across both **iff** the visible-portal identity sequence
+/// hasn't changed since the original build.
+///
+/// Callers must verify the identity sequence first via
+/// [`portal_identity_sequence`]; applying this mutator to a tree
+/// whose structure has drifted will silently misalign because
+/// Baumhard's `align_child_walks` matches mutator children
+/// against target children by ascending channel.
+///
+/// Mirrors the canonical pattern from `color_picker` (commit
+/// `ceaeeb4`): every entry is an `Assign` `DeltaGlyphArea` that
+/// overwrites the variable fields (text, position, bounds, scale,
+/// line_height, regions, outline) so a change in any one is picked
+/// up by the same mutator shape.
+pub fn build_portal_mutator_tree(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+    selected_portal: Option<SelectedPortalRef>,
+    color_preview: Option<PortalColorPreviewRef>,
+) -> PortalMutator {
+    let pairs = portal_pair_data(map, offsets, selected_portal, color_preview);
+    build_portal_mutator_tree_from_pairs(&pairs)
+}
+
+/// Variant of [`build_portal_mutator_tree`] that consumes
+/// pre-computed pair data. Use this in the dispatch path that
+/// already called [`portal_pair_data`] to derive the identity
+/// sequence — saves one pass.
+pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalMutator {
+    use crate::core::primitives::ApplyOperation;
+    use crate::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
+    use crate::gfx_structs::mutator::Mutation;
+    use crate::gfx_structs::tree::MutatorTree;
+
+    let mut mt: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::new_void(0));
+    let mut hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)> =
+        HashMap::new();
+
+    for pair in pairs {
+        let pair_node = mt.arena.new_node(GfxMutator::new_void(pair.pair_channel));
+        mt.root.append(pair_node, &mut mt.arena);
+
+        for (slot, area, hitbox, endpoint_id) in pair.endpoints.iter() {
+            let delta = DeltaGlyphArea::new(vec![
+                GlyphAreaField::Text(area.text.clone()),
+                GlyphAreaField::position(area.position.x.0, area.position.y.0),
+                GlyphAreaField::bounds(area.render_bounds.x.0, area.render_bounds.y.0),
+                GlyphAreaField::scale(area.scale.0),
+                GlyphAreaField::line_height(area.line_height.0),
+                GlyphAreaField::ColorFontRegions(area.regions.clone()),
+                GlyphAreaField::Outline(area.outline.clone()),
+                GlyphAreaField::Operation(ApplyOperation::Assign),
+            ]);
+            let leaf = mt.arena.new_node(GfxMutator::new(
+                Mutation::AreaDelta(Box::new(delta)),
+                *slot,
+            ));
+            pair_node.append(leaf, &mut mt.arena);
+            hitboxes.insert(
+                (pair.identity.clone(), endpoint_id.clone()),
+                *hitbox,
+            );
+        }
+    }
+
+    PortalMutator { mutator: mt, hitboxes }
 }
 
 // =====================================================================
@@ -1497,5 +1669,127 @@ mod tests {
             assert!((c[1] - 229.0 / 255.0).abs() < 0.02);
             assert!((c[2] - 1.0).abs() < 0.02);
         }
+    }
+
+    /// `portal_pair_data` is the single source of truth for both
+    /// [`build_portal_tree`] and [`build_portal_mutator_tree`]; the
+    /// mutator path needs the resulting `pair_channel` set to be
+    /// strictly ascending (Baumhard's `align_child_walks` pairs
+    /// mutator children against target children by ascending
+    /// channel and breaks alignment if the order is violated).
+    #[test]
+    fn portal_pair_channels_are_strictly_ascending() {
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("a", None, 0, 0.0, 0.0),
+                synthetic_node("b", None, 1, 200.0, 0.0),
+                synthetic_node("c", None, 2, 400.0, 0.0),
+            ],
+            vec![],
+        );
+        map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+        map.portals.push(synthetic_portal("Y", "b", "c", "#00ff00"));
+
+        let pairs = portal_pair_data(&map, &HashMap::new(), None, None);
+        assert_eq!(pairs.len(), 2);
+        let channels: Vec<usize> = pairs.iter().map(|p| p.pair_channel).collect();
+        let mut prev = 0;
+        for c in &channels {
+            assert!(*c > prev, "pair channels must be strictly ascending: {channels:?}");
+            prev = *c;
+        }
+    }
+
+    /// Round-trip: building a tree at state A and then applying the
+    /// mutator computed from state B must produce a tree whose
+    /// per-channel GlyphAreas match what `build_portal_tree(B)`
+    /// would produce directly. Pins the canonical §B2
+    /// "mutation, not rebuild" promise — the in-place path's
+    /// observable output is identical to a full rebuild's, modulo
+    /// the arena identity.
+    #[test]
+    fn portal_mutator_round_trip_matches_full_rebuild() {
+        use crate::core::primitives::Applicable;
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("a", None, 0, 0.0, 0.0),
+                synthetic_node("b", None, 1, 200.0, 0.0),
+            ],
+            vec![],
+        );
+        map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+
+        // State A: no offsets, no selection.
+        let mut tree_a = build_portal_tree(&map, &HashMap::new(), None, None).tree;
+
+        // State B: drag offset on `b`, plus selection.
+        let mut offsets = HashMap::new();
+        offsets.insert("b".to_string(), (10.0, -5.0));
+        let selected = Some(("X", "a", "b"));
+
+        let mutator = build_portal_mutator_tree(&map, &offsets, selected, None);
+        mutator.mutator.apply_to(&mut tree_a);
+
+        let expected = build_portal_tree(&map, &offsets, selected, None).tree;
+
+        // Walk both: per pair, per slot, GlyphArea fields (text,
+        // position, bounds, scale, line_height, regions, outline)
+        // must match.
+        let actual_pairs: Vec<NodeId> = tree_a.root.children(&tree_a.arena).collect();
+        let expected_pairs: Vec<NodeId> = expected.root.children(&expected.arena).collect();
+        assert_eq!(actual_pairs.len(), expected_pairs.len());
+        for (a_pair, e_pair) in actual_pairs.iter().zip(expected_pairs.iter()) {
+            let a_markers: Vec<NodeId> = a_pair.children(&tree_a.arena).collect();
+            let e_markers: Vec<NodeId> = e_pair.children(&expected.arena).collect();
+            assert_eq!(a_markers.len(), e_markers.len());
+            for (a_m, e_m) in a_markers.iter().zip(e_markers.iter()) {
+                let a_area = tree_a.arena.get(*a_m).unwrap().get().glyph_area().unwrap();
+                let e_area = expected.arena.get(*e_m).unwrap().get().glyph_area().unwrap();
+                assert_eq!(a_area.text, e_area.text);
+                assert_eq!(a_area.position, e_area.position);
+                assert_eq!(a_area.render_bounds, e_area.render_bounds);
+                assert_eq!(a_area.scale, e_area.scale);
+                assert_eq!(a_area.line_height, e_area.line_height);
+                assert_eq!(a_area.regions, e_area.regions);
+                assert_eq!(a_area.outline, e_area.outline);
+            }
+        }
+    }
+
+    /// `portal_identity_sequence` reflects the visible-portal order
+    /// emitted by `portal_pair_data`. Folded endpoints drop their
+    /// pair from the sequence — the in-place mutator path uses this
+    /// to detect when a fold/unfold has changed the structure and
+    /// trigger a full rebuild instead.
+    #[test]
+    fn portal_identity_sequence_drops_folded_pairs() {
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("a", None, 0, 0.0, 0.0),
+                synthetic_node("b", None, 1, 200.0, 0.0),
+                synthetic_node("parent", None, 2, 400.0, 0.0),
+                synthetic_node("child", Some("parent"), 0, 0.0, 100.0),
+            ],
+            vec![],
+        );
+        map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+        map.portals
+            .push(synthetic_portal("Y", "b", "child", "#00ff00"));
+
+        let pairs_before = portal_pair_data(&map, &HashMap::new(), None, None);
+        assert_eq!(
+            portal_identity_sequence(&pairs_before),
+            vec![
+                ("X".into(), "a".into(), "b".into()),
+                ("Y".into(), "b".into(), "child".into()),
+            ]
+        );
+
+        map.nodes.get_mut("parent").unwrap().folded = true;
+        let pairs_after = portal_pair_data(&map, &HashMap::new(), None, None);
+        assert_eq!(
+            portal_identity_sequence(&pairs_after),
+            vec![("X".into(), "a".into(), "b".into())]
+        );
     }
 }

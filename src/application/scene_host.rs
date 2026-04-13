@@ -21,6 +21,8 @@
 //! migration step and the cleanest to defer until the overlays
 //! are proven working in the new shape (see ROADMAP).
 
+use std::collections::HashMap;
+
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::scene::{Scene, SceneTreeId};
@@ -126,6 +128,16 @@ pub struct AppScene {
     portals: Option<SceneTreeId>,
     edge_handles: Option<SceneTreeId>,
     connection_labels: Option<SceneTreeId>,
+    /// Opaque per-role hash describing the **structural shape** of
+    /// the registered canvas tree (not its variable-field state). A
+    /// caller that wants to dispatch between full-rebuild and §B2
+    /// in-place mutator paths records the structural hash alongside
+    /// the registration; the next call hashes the new state and uses
+    /// equality to decide. Cleared on `unregister_canvas`. The
+    /// definition of "structure" is the caller's — for portals, it's
+    /// the visible-pair identity sequence; for edge handles, it's the
+    /// selected-edge identity; etc.
+    canvas_signatures: HashMap<CanvasRole, u64>,
 }
 
 impl Default for AppScene {
@@ -147,6 +159,7 @@ impl AppScene {
             portals: None,
             edge_handles: None,
             connection_labels: None,
+            canvas_signatures: HashMap::new(),
         }
     }
 
@@ -188,11 +201,31 @@ impl AppScene {
         id
     }
 
-    /// Remove a canvas role's tree, if registered.
+    /// Remove a canvas role's tree, if registered. Also clears any
+    /// recorded structural signature — a future re-register starts
+    /// from a clean slate, forcing a full rebuild before the in-place
+    /// mutator path can run again.
     pub fn unregister_canvas(&mut self, role: CanvasRole) {
         if let Some(id) = self.canvas_role_slot_mut(role).take() {
             self.canvas.remove(id);
         }
+        self.canvas_signatures.remove(&role);
+    }
+
+    /// Record the structural signature of the tree currently
+    /// registered for `role`. Pair with [`Self::canvas_signature`] to
+    /// dispatch between full-rebuild and in-place mutator paths.
+    /// Hash space is the caller's; pass the same hash function on
+    /// both sides.
+    pub fn set_canvas_signature(&mut self, role: CanvasRole, signature: u64) {
+        self.canvas_signatures.insert(role, signature);
+    }
+
+    /// Last recorded structural signature for a canvas role, if any.
+    /// `None` when no tree is registered or the signature was never
+    /// set — the caller treats that as "force full rebuild".
+    pub fn canvas_signature(&self, role: CanvasRole) -> Option<u64> {
+        self.canvas_signatures.get(&role).copied()
     }
 
     /// Handle for a canvas role, if registered.
@@ -408,5 +441,33 @@ mod tests {
 
         let hit = app.overlay_at(Vec2::new(10.0, 10.0));
         assert_eq!(hit, Some((OverlayRole::Console, console_leaf)));
+    }
+
+    /// `canvas_signature` is `None` for an unregistered role and
+    /// any role whose signature was never set. Pins the contract
+    /// that `update_portal_tree` (and the Phase 1.2 / 1.3 sites
+    /// that follow) rely on to dispatch into a full rebuild on
+    /// the first frame after open.
+    #[test]
+    fn canvas_signature_is_none_when_unset_or_unregistered() {
+        let app = AppScene::new();
+        assert_eq!(app.canvas_signature(CanvasRole::Portals), None);
+        assert_eq!(app.canvas_signature(CanvasRole::Borders), None);
+    }
+
+    /// `set_canvas_signature` records a value the next
+    /// `canvas_signature` returns; `unregister_canvas` drops it so
+    /// a subsequent reopen forces a full rebuild before the
+    /// in-place mutator path can run again.
+    #[test]
+    fn canvas_signature_round_trips_and_clears_on_unregister() {
+        let mut app = AppScene::new();
+        let (tree, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        app.register_canvas(CanvasRole::Portals, tree, Vec2::ZERO);
+        app.set_canvas_signature(CanvasRole::Portals, 0xDEADBEEF);
+        assert_eq!(app.canvas_signature(CanvasRole::Portals), Some(0xDEADBEEF));
+
+        app.unregister_canvas(CanvasRole::Portals);
+        assert_eq!(app.canvas_signature(CanvasRole::Portals), None);
     }
 }

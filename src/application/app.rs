@@ -3394,12 +3394,25 @@ fn update_border_tree_with_offsets(
     app_scene.register_canvas(CanvasRole::Borders, tree, glam::Vec2::ZERO);
 }
 
-/// Build the portal tree and register it under
+/// Build or in-place update the portal tree under
 /// [`CanvasRole::Portals`]. Selection-cyan and color-preview
 /// override rules mirror `scene_builder::build_scene`. Hands the
 /// AABB-keyed hitbox map back to the renderer so the legacy
 /// `Renderer::hit_test_portal` keeps working until hit-test
 /// routing migrates to [`Scene::component_at`].
+///
+/// **§B2 dispatch.** Drag, color-preview, and selection toggle
+/// all leave the visible-portal *identity sequence* unchanged —
+/// the same pairs in the same order, only their positions /
+/// colors / regions move. For those continuous interactions we
+/// take the in-place mutator path
+/// (`build_portal_mutator_tree_from_pairs` →
+/// `apply_canvas_mutator`), which reuses the existing tree arena
+/// instead of allocating a new one each frame. When portals are
+/// added, removed, or a fold reveals/hides an endpoint, the
+/// identity sequence shifts and we fall back to a full rebuild.
+/// Mirrors the canonical pattern from the picker (commit
+/// `ceaeeb4`), now applied to a nested-channel tree.
 fn update_portal_tree(
     doc: &MindMapDocument,
     offsets: &std::collections::HashMap<String, (f32, f32)>,
@@ -3408,7 +3421,12 @@ fn update_portal_tree(
 ) {
     use crate::application::document::ColorPickerPreview;
     use crate::application::scene_host::CanvasRole;
-    use baumhard::mindmap::tree_builder::{PortalColorPreviewRef, SelectedPortalRef};
+    use baumhard::mindmap::tree_builder::{
+        build_portal_mutator_tree_from_pairs, build_portal_tree_from_pairs,
+        portal_identity_sequence, portal_pair_data, PortalColorPreviewRef, SelectedPortalRef,
+    };
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     let selected_owned = doc
         .selection
@@ -3428,10 +3446,27 @@ fn update_portal_tree(
         _ => None,
     };
 
-    let result =
-        baumhard::mindmap::tree_builder::build_portal_tree(&doc.mindmap, offsets, selected, preview);
-    renderer.set_portal_hitboxes(result.hitboxes);
-    app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
+    let pairs = portal_pair_data(&doc.mindmap, offsets, selected, preview);
+    let identity = portal_identity_sequence(&pairs);
+    let signature = {
+        let mut h = DefaultHasher::new();
+        identity.hash(&mut h);
+        h.finish()
+    };
+
+    let already_registered = app_scene.canvas_id(CanvasRole::Portals).is_some();
+    let signature_matches = app_scene.canvas_signature(CanvasRole::Portals) == Some(signature);
+
+    if already_registered && signature_matches {
+        let result = build_portal_mutator_tree_from_pairs(&pairs);
+        renderer.set_portal_hitboxes(result.hitboxes);
+        app_scene.apply_canvas_mutator(CanvasRole::Portals, &result.mutator);
+    } else {
+        let result = build_portal_tree_from_pairs(&pairs);
+        renderer.set_portal_hitboxes(result.hitboxes);
+        app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
+        app_scene.set_canvas_signature(CanvasRole::Portals, signature);
+    }
 }
 
 /// Convert a freshly-built `RenderScene`'s connection_elements
