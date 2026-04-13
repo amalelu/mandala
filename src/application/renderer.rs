@@ -3069,7 +3069,16 @@ fn walk_tree_into_buffers(
             cosmic_text::Metrics::new(scale, line_height),
         );
         buffer.set_size(font_system, Some(bound_x), Some(bound_y));
-        buffer.set_wrap(font_system, cosmic_text::Wrap::Word);
+        // Leave wrap at cosmic-text's default `Wrap::WordOrGlyph`.
+        // The legacy mindmap path explicitly set `Wrap::Word`,
+        // but `Word` mode pushes a glyph that doesn't fit
+        // horizontally onto a "next line" that gets clipped by
+        // the cell's vertical bounds — which silently dropped
+        // single supplementary-plane glyphs (e.g. the picker's
+        // Egyptian hieroglyph cells) when their shaped advance
+        // exceeded `cell_box_w`. `WordOrGlyph` falls back to
+        // glyph-level wrap for over-wide single tokens, which is
+        // what every consumer here actually wants.
 
         let text = &area.text;
         let spans: Vec<(&str, Attrs)> = if area.regions.num_regions() == 0 {
