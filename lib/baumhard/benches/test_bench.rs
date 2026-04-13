@@ -2,6 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use baumhard::core::tests::primitives_tests::*;
 use baumhard::gfx_structs::tests::model_tests::*;
 use baumhard::gfx_structs::tests::region_tests::*;
+use baumhard::gfx_structs::tests::scene_tests::*;
 use baumhard::gfx_structs::tests::tree_tests::*;
 use baumhard::gfx_structs::tests::tree_walker_tests::*;
 use baumhard::util::tests::arena_utils_tests::*;
@@ -104,6 +105,13 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("submit_region_drops_inverted_range", |b| {
         b.iter(|| do_submit_region_drops_inverted_range())
     });
+    // scene + hit-test //
+    c.bench_function("descendant_at_hits_single_area", |b| b.iter(|| do_descendant_at_hits_single_area()));
+    c.bench_function("descendant_at_prefers_smallest", |b| b.iter(|| do_descendant_at_prefers_smallest()));
+    c.bench_function("descendants_aabb", |b| b.iter(|| do_descendants_aabb_covers_all_areas()));
+    c.bench_function("scene_component_at", |b| b.iter(|| do_scene_insert_and_component_at()));
+    c.bench_function("scene_layer_order_hit_priority", |b| b.iter(|| do_scene_layer_order_controls_hit_priority()));
+    c.bench_function("scene_offset_hit_test", |b| b.iter(|| do_scene_offset_is_applied_to_hit_test()));
     // arena_utils //
     c.bench_function("arena_utils_clone", |b| b.iter(|| do_clone()));
     // primes //

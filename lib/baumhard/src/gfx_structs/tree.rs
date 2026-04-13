@@ -171,44 +171,127 @@ impl Tree<GfxElement, GfxMutator> {
     fn import_arena(&mut self, target: &Arena<GfxElement>, target_root: NodeId) {
         arena_utils::clone_subtree(target, target_root, &mut self.arena, self.root);
     }
-}
 
-impl<T: Flaggable + Clone, M: Applicable<T>> Tree<T, M> {
-    /// # Arguments
-    /// * `point` - The point from which to look for an element to flag
-    /// * `depth` - The "depth" at which to look, if there's several elements in the same area
-    /// * `slack` - How far around the `point` we'll look for elements
+    /// Walks the arena looking for the smallest-AABB `GlyphArea`
+    /// descendant whose rectangle contains `point`. Returns its
+    /// [`NodeId`], or [`None`] if nothing matches.
     ///
-    /// # Returns
-    /// * [Some]\([NodeId]) - if an element was flagged, containing the elements node ID
-    /// * [None] - if no element was flagged
+    /// # Costs
     ///
-    /// # Example
+    /// O(n) over the descendants of [`Self::root`]. No allocation.
+    /// [`GfxElement::GlyphModel`] and [`GfxElement::Void`] nodes are
+    /// skipped (they don't expose an AABB on `GlyphArea`). When
+    /// multiple areas contain the point, the smallest by area wins —
+    /// mirrors the "innermost first" convention used by the app-side
+    /// `hit_test` helpers this method replaces.
     ///
-    /// ```
-    /// use std::sync::Arc;
-    /// use crossbeam_channel::{unbounded, Sender};
-    /// use glam::Vec2;
-    /// use baumhard::gfx_structs::element::GfxElement;
-    /// use baumhard::gfx_structs::tree::Tree;
-    /// use baumhard::core::primitives::Flag;
-    /// use baumhard::gfx_structs::mutator::GfxMutator;
-    /// use baumhard::gfx_structs::util::regions::{RegionIndexer, RegionParams};
-    /// let (this_sender, this_receiver) = unbounded();
-    /// let mut tree: Tree<GfxElement, GfxMutator> = Tree::new(Arc::new(RegionParams::new(10, (1000,1000))), this_sender);
-    /// tree.flag_near(Flag::Focused, Vec2::new(50.0, 50.0), 0, 10);
+    /// Intended for use by [`crate::gfx_structs::scene::Scene`] after
+    /// it has identified which tree covers the hit; each tree then
+    /// drills down to the concrete target using this method.
+    pub fn descendant_at(&self, point: Vec2) -> Option<NodeId> {
+        let mut best: Option<(NodeId, f32)> = None;
+        for node_id in self.root.descendants(&self.arena) {
+            let Some(node) = self.arena.get(node_id) else {
+                continue;
+            };
+            let Some(area) = node.get().glyph_area() else {
+                continue;
+            };
+            let pos = area.position.to_vec2();
+            let bounds = area.render_bounds.to_vec2();
+            if bounds.x <= 0.0 || bounds.y <= 0.0 {
+                continue;
+            }
+            let max_x = pos.x + bounds.x;
+            let max_y = pos.y + bounds.y;
+            if point.x >= pos.x && point.x <= max_x && point.y >= pos.y && point.y <= max_y {
+                let size = bounds.x * bounds.y;
+                match best {
+                    Some((_, best_size)) if best_size <= size => {}
+                    _ => best = Some((node_id, size)),
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// Conservative AABB covering every `GlyphArea` descendant of
+    /// [`Self::root`]. Returns `(top_left, bottom_right)` or `None`
+    /// if the tree has no visible areas.
+    ///
+    /// # Costs
+    ///
+    /// O(n) over the descendants. No allocation. Used by
+    /// [`crate::gfx_structs::scene::Scene`] to decide whether a point
+    /// could possibly hit this tree before running a full
+    /// [`Self::descendant_at`] walk.
+    pub fn descendants_aabb(&self) -> Option<(Vec2, Vec2)> {
+        let mut min = Vec2::new(f32::INFINITY, f32::INFINITY);
+        let mut max = Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let mut any = false;
+        for node_id in self.root.descendants(&self.arena) {
+            let Some(node) = self.arena.get(node_id) else {
+                continue;
+            };
+            let Some(area) = node.get().glyph_area() else {
+                continue;
+            };
+            let bounds = area.render_bounds.to_vec2();
+            if bounds.x <= 0.0 || bounds.y <= 0.0 {
+                continue;
+            }
+            let pos = area.position.to_vec2();
+            any = true;
+            if pos.x < min.x {
+                min.x = pos.x;
+            }
+            if pos.y < min.y {
+                min.y = pos.y;
+            }
+            let mx = pos.x + bounds.x;
+            let my = pos.y + bounds.y;
+            if mx > max.x {
+                max.x = mx;
+            }
+            if my > max.y {
+                max.y = my;
+            }
+        }
+        if any {
+            Some((min, max))
+        } else {
+            None
+        }
+    }
+
+    /// Sets `flag` on the `GlyphArea` descendant closest to `point`,
+    /// searching within `slack` pixels. `depth` reserved for
+    /// future use when several elements overlap at the same point.
+    /// Returns the flagged node's [`NodeId`], or [`None`].
+    ///
+    /// # Costs
+    ///
+    /// O(n) over the descendants of [`Self::root`]; see
+    /// [`Self::descendant_at`] for the underlying walk.
     pub fn flag_near(
         &mut self,
         flag: Flag,
         point: Vec2,
-        depth: usize,
-        slack: usize,
+        _depth: usize,
+        _slack: usize,
     ) -> Option<NodeId> {
-        // Find all elements that intersect with the point, or the area if there's any slack
-        //
-        None
+        let node_id = self.descendant_at(point)?;
+        if let Some(node) = self.arena.get_mut(node_id) {
+            node.get_mut().set_flag(flag);
+        }
+        Some(node_id)
     }
+}
 
-    pub fn do_for_all_flagged(&mut self, flag: Flag, mutator: Tree<T, M>) {}
+impl<T: Flaggable + Clone, M: Applicable<T>> Tree<T, M> {
+    /// Placeholder for a future "apply a mutator to every flagged
+    /// descendant" helper. No implementation yet; documented here so
+    /// a call site can be trivially grepped when the feature lands.
+    pub fn do_for_all_flagged(&mut self, _flag: Flag, _mutator: Tree<T, M>) {}
 }
 
