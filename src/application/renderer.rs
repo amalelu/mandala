@@ -1779,10 +1779,6 @@ impl Renderer {
         geometry: Option<&ConsoleOverlayGeometry>,
     ) {
         use crate::application::scene_host::OverlayRole;
-        // Legacy buffer list is unused once console rides the overlay
-        // tree path, but keep the field cleared so any stale entry
-        // from an earlier build isn't drawn alongside the new tree.
-        self.console_overlay_buffers.clear();
 
         let Some(geometry) = geometry else {
             // Closed: drop the backdrop, drop the tree, refresh
@@ -1815,17 +1811,23 @@ impl Renderer {
     }
 
 
-    /// Rebuild the glyph-wheel color picker's full overlay —
-    /// BOTH the static buffer list (title, hint, hue ring) AND the
-    /// dynamic buffer list (sat/val bars, preview, hex, chips,
-    /// selection indicator). Called by `open_color_picker` and by
-    /// the `Resized` handler; closing the picker with `None` clears
-    /// both lists.
+    /// Build the picker's overlay tree from `geometry`, register
+    /// it under [`OverlayRole::ColorPicker`](crate::application::scene_host::OverlayRole),
+    /// and walk the overlay sub-scene into
+    /// `overlay_scene_buffers`. `None` means the picker is closed
+    /// — drops the backdrop, unregisters the tree, refreshes
+    /// overlay buffers so it disappears.
     ///
-    /// For per-hover updates — where only the dynamic parts change
-    /// — call `rebuild_color_picker_dynamic_buffers` instead. That
-    /// path skips the static buffers entirely and is the reason
-    /// this method exists as a separate entry point at all.
+    /// Called by `open_color_picker`, the `Resized` handler, and
+    /// the hover / chip-focus / commit / cancel paths in
+    /// `app::rebuild_color_picker_overlay`.
+    ///
+    /// **Performance note**: every invocation re-shapes every
+    /// glyph in the picker (~64 cells). The legacy split that
+    /// skipped re-shaping the static hue ring on hover is gone;
+    /// the planned `MutatorTree`-based hover path will mutate
+    /// only changed cell colors and the indicator's position
+    /// per §B1 of `lib/baumhard/CONVENTIONS.md`.
     pub fn rebuild_color_picker_overlay_buffers(
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,
@@ -1833,12 +1835,6 @@ impl Renderer {
     ) {
         use crate::application::color_picker::compute_color_picker_layout;
         use crate::application::scene_host::OverlayRole;
-
-        // Legacy lists go unused once the picker rides the overlay
-        // tree. Clear so a stale entry from a previous build can't
-        // double-render alongside the tree.
-        self.color_picker_static_buffers.clear();
-        self.color_picker_dynamic_buffers.clear();
 
         let Some(g) = geometry else {
             self.color_picker_backdrop = None;
@@ -2927,11 +2923,14 @@ fn build_console_overlay_tree(
         );
     }
 
-    // Prompt line — split into two GlyphAreas (accent prompt +
-    // text input-with-cursor) rather than a multi-region single
-    // area, because cosmic-text positions per-area while one area
-    // with two color regions still uses the same starting x.
-    // Stacking them as siblings keeps the layout simple.
+    // Prompt line — single GlyphArea with two ColorFontRegions so
+    // cosmic-text shapes "❯ " and the input as one run, and the
+    // input's first glyph lands at the prompt's actual shaped
+    // advance. The legacy `create_border_buffer_spans` path used
+    // the same trick; an earlier draft of this builder split into
+    // two GlyphAreas with a `measured_char_width * 2.0` gap
+    // estimate that visibly drifted on fonts where `❯ ` and
+    // `─/│` advance differently.
     let prompt_budget = font_size * 1.4;
     let y = layout.prompt_y();
     let cursor_byte = baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
@@ -2946,31 +2945,44 @@ fn build_console_overlay_tree(
         content_cols.saturating_sub(2),
     );
     let prompt_text = "\u{276F} ";
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        prompt_text,
-        ACCENT_COLOR,
+    let combined = format!("{prompt_text}{input_clipped}");
+    let prompt_chars = prompt_text.chars().count();
+    let input_chars = input_clipped.chars().count();
+
+    let mut prompt_area = GlyphArea::new_with_str(
+        &combined,
         font_size,
         font_size,
-        (content_left, y),
-        (font_size * 2.0, prompt_budget),
+        Vec2::new(content_left, y),
+        Vec2::new(content_width, prompt_budget),
     );
-    // Input lands one prompt-glyph + one space to the right of
-    // `content_left`. Use the same `measured_char_width` as the
-    // border so the input's first glyph aligns with the column
-    // grid. The two-cell shift mirrors `prompt_text.chars().count()`.
-    let input_x = content_left + measured_char_width * 2.0;
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        input_clipped,
-        TEXT_COLOR,
-        font_size,
-        font_size,
-        (input_x, y),
-        (content_width - measured_char_width * 2.0, prompt_budget),
-    );
+    let mut regions = ColorFontRegions::new_empty();
+    let to_rgba = |c: cosmic_text::Color| -> [f32; 4] {
+        [
+            c.r() as f32 / 255.0,
+            c.g() as f32 / 255.0,
+            c.b() as f32 / 255.0,
+            c.a() as f32 / 255.0,
+        ]
+    };
+    regions.submit_region(ColorFontRegion::new(
+        ColorFontRange::new(0, prompt_chars),
+        None,
+        Some(to_rgba(ACCENT_COLOR)),
+    ));
+    if input_chars > 0 {
+        regions.submit_region(ColorFontRegion::new(
+            ColorFontRange::new(prompt_chars, prompt_chars + input_chars),
+            None,
+            Some(to_rgba(TEXT_COLOR)),
+        ));
+    }
+    prompt_area.regions = regions;
+    let prompt_element =
+        GfxElement::new_area_non_indexed_with_id(prompt_area, id_counter, id_counter);
+    id_counter += 1;
+    let prompt_leaf = tree.arena.new_node(prompt_element);
+    tree.root.append(prompt_leaf, &mut tree.arena);
 
     tree
 }

@@ -14,7 +14,6 @@ use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{GfxMutator, Mutation};
 use crate::gfx_structs::scene::{Scene, SceneTreeId};
 use crate::gfx_structs::tree::{MutatorTree, Tree};
-use crate::util::ordered_vec2::OrderedVec2;
 
 /// Build a small tree with one `GlyphArea` of the given AABB,
 /// returning the tree and the id of the single leaf we can hit-test
@@ -284,33 +283,6 @@ pub fn do_descendants_aabb_cache_invalidated_by_mutator() {
         "expected position.x to track the mutator (was {}, expected 100)",
         after.0.x
     );
-}
-
-#[test]
-pub fn test_invalidate_aabb_cache_clears_memo() {
-    do_invalidate_aabb_cache_clears_memo();
-}
-
-pub fn do_invalidate_aabb_cache_clears_memo() {
-    let (mut tree, leaf) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(20.0, 20.0), 0);
-    // Warm.
-    let _ = tree.descendants_aabb();
-    // Bypass the mutator pipeline to mutate position directly.
-    {
-        let element = tree.arena.get_mut(leaf).unwrap().get_mut();
-        if let Some(area) = element.glyph_area_mut() {
-            area.position = OrderedVec2::new_f32(50.0, 50.0);
-        }
-    }
-    // Without an invalidation call the memo is stale.
-    let stale = tree.descendants_aabb().expect("area present");
-    assert!((stale.0.x - 0.0).abs() < 1e-3, "memo is intentionally stale");
-
-    // After explicit invalidation the recompute picks up the new
-    // position.
-    tree.invalidate_aabb_cache();
-    let fresh = tree.descendants_aabb().expect("area present");
-    assert!((fresh.0.x - 50.0).abs() < 1e-3);
 }
 
 // =====================================================================

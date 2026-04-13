@@ -206,16 +206,10 @@ impl AppScene {
         }
     }
 
-    /// Mutable borrow of a canvas role's tree.
-    pub fn canvas_tree_mut(
-        &mut self,
-        role: CanvasRole,
-    ) -> Option<&mut Tree<GfxElement, GfxMutator>> {
-        let id = self.canvas_id(role)?;
-        self.canvas.tree_mut(id)
-    }
-
-    /// Apply a mutator to a canvas role's tree.
+    /// Apply a mutator to a canvas role's tree. Path of choice
+    /// for incremental updates per §B1 of the baumhard
+    /// conventions — the upcoming connection / border drag
+    /// shaping cache will land through this.
     pub fn apply_canvas_mutator(
         &mut self,
         role: CanvasRole,
@@ -223,22 +217,6 @@ impl AppScene {
     ) {
         if let Some(id) = self.canvas_id(role) {
             self.canvas.apply_mutator(id, mutator);
-        }
-    }
-
-    /// Toggle visibility of a canvas role's tree without removing.
-    pub fn set_canvas_visible(&mut self, role: CanvasRole, visible: bool) {
-        if let Some(id) = self.canvas_id(role) {
-            self.canvas.set_visible(id, visible);
-        }
-    }
-
-    /// Move a canvas role's tree to a new canvas-space offset.
-    /// Used by drag previews that want to translate a whole
-    /// component without rebuilding it.
-    pub fn set_canvas_offset(&mut self, role: CanvasRole, offset: Vec2) {
-        if let Some(id) = self.canvas_id(role) {
-            self.canvas.set_offset(id, offset);
         }
     }
 
@@ -294,16 +272,10 @@ impl AppScene {
         }
     }
 
-    /// Mutable borrow of a specific overlay's tree.
-    pub fn overlay_tree_mut(
-        &mut self,
-        role: OverlayRole,
-    ) -> Option<&mut Tree<GfxElement, GfxMutator>> {
-        let id = self.overlay_id(role)?;
-        self.overlay.tree_mut(id)
-    }
-
-    /// Apply a mutator to the tree registered for an overlay role.
+    /// Apply a mutator to the tree registered for an overlay
+    /// role. Path of choice for hover updates per §B1; the
+    /// upcoming color-picker mutator-only hover path lands
+    /// through this.
     pub fn apply_overlay_mutator(
         &mut self,
         role: OverlayRole,
@@ -314,24 +286,11 @@ impl AppScene {
         }
     }
 
-    /// Toggle visibility of an overlay role's tree without removing.
-    pub fn set_overlay_visible(&mut self, role: OverlayRole, visible: bool) {
-        if let Some(id) = self.overlay_id(role) {
-            self.overlay.set_visible(id, visible);
-        }
-    }
-
-    /// Move an overlay role's tree to a new screen-space offset.
-    pub fn set_overlay_offset(&mut self, role: OverlayRole, offset: Vec2) {
-        if let Some(id) = self.overlay_id(role) {
-            self.overlay.set_offset(id, offset);
-        }
-    }
-
     /// Hit-test the overlay sub-scene. Canvas-space roles are
-    /// intentionally not checked — overlay hits should always win
-    /// over canvas hits, and canvas hits route through the
-    /// mindmap's own `document::hit_test` path until Session 5.
+    /// intentionally not checked — overlay hits should always
+    /// win over canvas hits, and the canvas hit-test still goes
+    /// through `document::hit_test` (deferred — see ROADMAP's
+    /// "hit-test still goes through document path" entry).
     pub fn overlay_at(&mut self, screen_pt: Vec2) -> Option<(OverlayRole, NodeId)> {
         let hit = self.overlay.component_at(screen_pt)?;
         let role = self.overlay_role_for_id(hit.0)?;
