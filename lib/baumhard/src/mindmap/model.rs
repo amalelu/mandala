@@ -274,18 +274,10 @@ impl Default for GlyphConnectionConfig {
 }
 
 impl GlyphConnectionConfig {
-    /// Effective canvas-space font size for this connection at the given
-    /// camera zoom. The renderer applies `TextArea.scale = camera.zoom`
-    /// to every connection glyph, so a canvas-space `S` pt glyph ends
-    /// up `S * camera_zoom` on screen. To keep the on-screen size inside
-    /// `[min_font_size_pt, max_font_size_pt]`, we clamp the target
-    /// screen size and divide back through the zoom.
-    ///
-    /// Because the scene builder uses this value to compute sample
-    /// spacing (`effective_font * 0.6 + spacing`), the glyph count along
-    /// a connection automatically drops when zoomed out and rises when
-    /// zoomed in — the key LOD lever that prevents the dust-cloud
-    /// failure mode at extreme zoom levels.
+    /// Canvas-space font size that renders within
+    /// `[min_font_size_pt, max_font_size_pt]` on screen at the given
+    /// camera zoom. The scene builder derives sample spacing from this,
+    /// so glyph density along the connection path adjusts with zoom.
     pub fn effective_font_size_pt(&self, camera_zoom: f32) -> f32 {
         let z = camera_zoom.max(f32::EPSILON);
         let target_screen = (self.font_size_pt * z)

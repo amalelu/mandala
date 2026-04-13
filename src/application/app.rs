@@ -773,37 +773,21 @@ impl Application {
                     }
 
                     // Camera (pan/zoom/resize) changed → rebuild
-                    // connection buffers against the new viewport. On
-                    // zoom, the document-side scene cache is also stale
-                    // because effective font size depends on zoom, so
-                    // clear it before the rebuild re-samples.
+                    // connection buffers against the new viewport.
+                    // `build_scene_with_cache` calls `ensure_zoom` on
+                    // entry so the scene cache auto-flushes when zoom
+                    // differs — no extra work needed here.
                     //
-                    // Skipped when a node drag is in progress: the
-                    // MovingNode branch above rebuilds with the drag
-                    // offsets on its next non-zero `pending_delta` using
-                    // the current camera, and rebuilding here with
-                    // empty offsets would flicker dragged connections
-                    // back to their pre-drag positions for one frame.
-                    // Wheel-zoom during an active drag with zero
-                    // `pending_delta` leaves connections stale for one
-                    // frame until the next mouse-move flush — an
-                    // acceptable tradeoff to keep the two dirty sources
-                    // separate. Always take the flags (even when
-                    // skipped) so they don't leak across drag frames.
-                    let geometry_dirty = renderer.take_connection_geometry_dirty();
-                    let viewport_dirty = renderer.take_connection_viewport_dirty();
-                    if (geometry_dirty || viewport_dirty)
+                    // Skipped during a node drag: the MovingNode branch
+                    // above owns the rebuild for that case, and using
+                    // empty offsets here would flicker dragged
+                    // connections to their pre-drag positions for one
+                    // frame. Take the flag unconditionally so it
+                    // doesn't leak across drag frames.
+                    if renderer.take_connection_viewport_dirty()
                         && !matches!(drag_state, DragState::MovingNode { .. })
                     {
                         if let Some(doc) = document.as_ref() {
-                            if geometry_dirty {
-                                // `ensure_zoom` inside
-                                // `build_scene_with_cache` would also
-                                // catch this, but clearing explicitly
-                                // here keeps the ordering readable
-                                // next to the rebuild.
-                                scene_cache.clear();
-                            }
                             let scene = doc.build_scene_with_cache(
                                 &HashMap::new(),
                                 &mut scene_cache,
@@ -811,7 +795,7 @@ impl Application {
                             );
                             renderer.rebuild_connection_buffers_keyed(
                                 &scene.connection_elements,
-                                None, // treat all as dirty; buffer cache was cleared
+                                None, // buffer cache was cleared; treat all as dirty
                             );
                         }
                     }

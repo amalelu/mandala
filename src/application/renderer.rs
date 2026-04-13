@@ -83,22 +83,14 @@ pub struct Renderer {
     /// Temporary overlay buffers (e.g., selection rectangle). Camera-transformed.
     overlay_buffers: Vec<MindMapTextBuffer>,
     /// Set whenever the camera's viewport rect changes (pan, zoom,
-    /// resize) and `connection_buffers` was cleared as a result.
-    /// Consumed once per frame by the event loop in `AboutToWait` to
-    /// rebuild the connection buffers against the new viewport.
-    /// Without this flag, clearing the map on camera change would leave
-    /// it empty until the next structural change, which is why
-    /// connections used to vanish on pan.
+    /// resize) and `connection_buffers` was cleared as a result. The
+    /// event loop consumes this once per frame in `AboutToWait` to
+    /// trigger the rebuild against the new viewport — without it,
+    /// connections would stay invisible after the clear until the next
+    /// structural change. Zoom changes set this flag too; the scene
+    /// cache handles its own zoom-invalidation internally via
+    /// `SceneConnectionCache::ensure_zoom`, so one flag is enough.
     connection_viewport_dirty: bool,
-    /// Set whenever the camera *zoom* changes. The document-side
-    /// `SceneConnectionCache` stores pre-clip samples whose spacing
-    /// depends on `GlyphConnectionConfig::effective_font_size_pt`, which
-    /// is a function of zoom — so on zoom the cache must be flushed
-    /// before the next scene build re-samples. `SceneConnectionCache`
-    /// enforces this internally via `ensure_zoom`, but we still raise
-    /// this flag so the event loop can explicitly clear the cache and
-    /// order the rebuild readably alongside the viewport-dirty path.
-    connection_geometry_dirty: bool,
 }
 
 impl Renderer {
@@ -173,32 +165,22 @@ impl Renderer {
             connection_buffers: FxHashMap::default(),
             overlay_buffers: Vec::new(),
             connection_viewport_dirty: false,
-            connection_geometry_dirty: false,
         }
     }
 
-    /// Current camera zoom level, used by the event loop when it needs
-    /// to pass the active zoom into `Document::build_scene*` (the scene
-    /// builder consumes it via
-    /// `GlyphConnectionConfig::effective_font_size_pt`).
+    /// Current camera zoom, forwarded by the event loop into
+    /// `Document::build_scene*` so the scene builder can compute the
+    /// effective glyph size via
+    /// `GlyphConnectionConfig::effective_font_size_pt`.
     pub fn camera_zoom(&self) -> f32 {
         self.camera.zoom
     }
 
-    /// Returns and resets the connection viewport-dirty flag. Called by
-    /// the event loop once per frame in `AboutToWait`; a `true` return
-    /// means the viewport rect changed since the last frame and the
-    /// per-glyph viewport cull needs to run again.
+    /// Returns and resets the viewport-dirty flag. Called once per
+    /// frame in `AboutToWait`; a `true` return means the event loop
+    /// needs to rebuild connection buffers against the new viewport.
     pub fn take_connection_viewport_dirty(&mut self) -> bool {
-        std::mem::replace(&mut self.connection_viewport_dirty, false)
-    }
-
-    /// Returns and resets the connection geometry-dirty flag. Called by
-    /// the event loop once per frame; a `true` return means the zoom
-    /// changed, so the document-side scene cache must be flushed before
-    /// the next scene build.
-    pub fn take_connection_geometry_dirty(&mut self) -> bool {
-        std::mem::replace(&mut self.connection_geometry_dirty, false)
+        std::mem::take(&mut self.connection_viewport_dirty)
     }
 
     #[inline]
@@ -554,10 +536,7 @@ impl Renderer {
         self.viewport.update(&self.queue, Resolution { width, height });
         self.camera.set_viewport_size(width, height);
         // Viewport changed → Phase A's off-screen glyph cull needs to
-        // re-run for every edge. Drop the keyed connection buffer cache
-        // so the next rebuild rebuilds from a clean slate, and raise
-        // the viewport-dirty flag so the event loop actually triggers
-        // that rebuild.
+        // re-run for every edge from a clean slate.
         self.connection_buffers.clear();
         self.connection_viewport_dirty = true;
     }
@@ -1055,16 +1034,12 @@ impl Renderer {
                 Vec2::new(max_x, max_y),
                 0.05,
             );
-            // The fit typically changes both pan and zoom. Today this
-            // is only called from `load_mindmap`, which follows up
-            // with a full connection rebuild against the new zoom —
-            // but raise both dirty flags so any future caller (e.g. a
-            // "fit to selection" command) automatically gets a
-            // rebuild on the next frame instead of silently leaving
-            // stale buffers behind.
+            // Fit usually changes both pan and zoom; today's only caller
+            // (`load_mindmap`) follows up with a full rebuild, but flag
+            // the viewport so any future caller gets one on the next
+            // frame instead of stale buffers.
             self.connection_buffers.clear();
             self.connection_viewport_dirty = true;
-            self.connection_geometry_dirty = true;
         }
     }
 
@@ -1174,30 +1149,33 @@ impl Renderer {
                 self.update_buffer_cache();
             }
             RenderDecree::CameraPan(dx, dy) => {
+                // Coalesced input can produce zero-delta pan events —
+                // skip before touching camera / buffers so we don't
+                // trigger a pointless rebuild next frame.
+                if dx == 0.0 && dy == 0.0 {
+                    return;
+                }
                 self.camera.pan(Vec2::new(dx, dy));
-                // Phase A's off-screen glyph cull is a function of the
-                // camera, so moving the camera invalidates the cached
-                // per-edge visible-glyph layout. Clear the renderer-side
-                // connection cache so the next rebuild re-runs the cull
-                // from scratch, and raise the viewport-dirty flag so the
-                // event loop actually triggers the rebuild. The
+                // Pan invalidates the per-glyph viewport cull. The
                 // document-side `SceneConnectionCache` holds canvas-space
-                // samples whose spacing doesn't depend on pan, so it is
-                // NOT cleared here — geometry stays cached across pans.
+                // samples whose spacing is zoom-dependent only, so it
+                // survives pans untouched.
                 self.connection_buffers.clear();
                 self.connection_viewport_dirty = true;
             }
             RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
+                if factor == 1.0 {
+                    return;
+                }
                 self.camera.zoom_at(Vec2::new(screen_x, screen_y), factor);
-                // Zoom invalidates both the renderer-side cull cache
-                // (viewport-dirty) AND the document-side sample cache
-                // (geometry-dirty), because the effective font size —
-                // and therefore sample spacing along the path — is a
-                // function of zoom via
-                // `GlyphConnectionConfig::effective_font_size_pt`.
+                // Zoom invalidates both the viewport cull AND the
+                // document-side sample cache (spacing depends on
+                // `effective_font_size_pt(zoom)`). The sample cache
+                // handles its own zoom-invalidation via `ensure_zoom`
+                // inside `build_scene_with_cache`, so we don't need a
+                // separate flag for it.
                 self.connection_buffers.clear();
                 self.connection_viewport_dirty = true;
-                self.connection_geometry_dirty = true;
             }
             RenderDecree::LoadMindMap(path) => {
                 self.load_mindmap(&path);
