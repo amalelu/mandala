@@ -4565,42 +4565,66 @@ fn handle_color_picker_mouse_move(
         return;
     };
 
-    let mut hsv_changed = false;
+    // Only mark dirty when the picker's interactive state
+    // actually moved. Mouse events arrive at ~120 Hz and the
+    // user can drag many cursor pixels within the same hue
+    // slot or sat/val cell; without this gate the throttle
+    // runs full-canvas rebuilds for cursor jiggle that has no
+    // visible effect, and the cross feels laggier than the
+    // wheel because cells are smaller (more boundary crossings
+    // per visit).
+    let mut state_changed = false;
     if let ColorPickerState::Open { hue_deg, sat, val, chip_focus, .. } = state {
         match hit {
             PickerHit::Hue(slot) => {
-                *hue_deg = hue_slot_to_degrees(slot);
-                *chip_focus = None;
-                hsv_changed = true;
+                let new_hue = hue_slot_to_degrees(slot);
+                if (*hue_deg - new_hue).abs() > f32::EPSILON || chip_focus.is_some() {
+                    *hue_deg = new_hue;
+                    *chip_focus = None;
+                    state_changed = true;
+                }
             }
             PickerHit::SatCell(i) => {
-                *sat = sat_cell_to_value(i);
-                *chip_focus = None;
-                hsv_changed = true;
+                let new_sat = sat_cell_to_value(i);
+                if (*sat - new_sat).abs() > f32::EPSILON || chip_focus.is_some() {
+                    *sat = new_sat;
+                    *chip_focus = None;
+                    state_changed = true;
+                }
             }
             PickerHit::ValCell(i) => {
-                *val = val_cell_to_value(i);
-                *chip_focus = None;
-                hsv_changed = true;
+                let new_val = val_cell_to_value(i);
+                if (*val - new_val).abs() > f32::EPSILON || chip_focus.is_some() {
+                    *val = new_val;
+                    *chip_focus = None;
+                    state_changed = true;
+                }
             }
             PickerHit::Chip(i) => {
-                *chip_focus = Some(i);
+                if *chip_focus != Some(i) {
+                    *chip_focus = Some(i);
+                    state_changed = true;
+                }
             }
             PickerHit::Inside | PickerHit::Outside => {
-                *chip_focus = None;
+                if chip_focus.is_some() {
+                    *chip_focus = None;
+                    state_changed = true;
+                }
             }
         }
     }
 
-    // Both branches just mark the picker as dirty — the
-    // throttled drain in `AboutToWait` does the actual rebuild.
-    // For Inside / Outside hits the dirty flag is still
-    // meaningful: `compute_picker_geometry` reads `last_cursor_pos`
-    // (already updated above) to toggle the hex readout's
-    // visibility, so a backdrop-boundary cross still wants a
-    // rebuild even without HSV / chip change.
-    let _ = hsv_changed;
-    *picker_dirty = true;
+    // The hex readout's visibility depends on cursor position
+    // crossing the backdrop boundary. We always update
+    // `last_cursor_pos` above, so a subsequent `state_changed`
+    // event will pick up the right `hex_visible` value. Pure
+    // cursor wiggles inside the same cell don't redraw the hex
+    // — which is fine: the readout was already showing the
+    // current value.
+    if state_changed {
+        *picker_dirty = true;
+    }
 }
 
 /// Click handler for the picker. Out-of-frame clicks cancel; in-frame
