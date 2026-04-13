@@ -598,7 +598,7 @@ impl Application {
                     if console_state.is_open() && state == ElementState::Pressed {
                         save_console_history(&console_history);
                         console_state = ConsoleState::Closed;
-                        renderer.rebuild_console_overlay_buffers(None);
+                        renderer.rebuild_console_overlay_buffers(&mut app_scene, None);
                         return;
                     }
 
@@ -1370,12 +1370,12 @@ impl Application {
                             if console_state.is_open() {
                                 save_console_history(&console_history);
                                 console_state = ConsoleState::Closed;
-                                renderer.rebuild_console_overlay_buffers(None);
+                                renderer.rebuild_console_overlay_buffers(&mut app_scene, None);
                             } else {
                                 console_state = ConsoleState::open(console_history.clone());
                                 if let Some(doc) = document.as_ref() {
                                     rebuild_console_overlay(
-                                        &console_state, doc, &mut renderer, &keybinds,
+                                        &console_state, doc, &mut app_scene, &mut renderer, &keybinds,
                                     );
                                 }
                             }
@@ -2422,7 +2422,7 @@ fn handle_console_key(
                 }
                 recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
-                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                    rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
                 }
                 return;
             }
@@ -2431,7 +2431,7 @@ fn handle_console_key(
                     *cursor = 0;
                 }
                 if let Some(doc) = document.as_ref() {
-                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                    rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
                 }
                 return;
             }
@@ -2440,7 +2440,7 @@ fn handle_console_key(
                     *cursor = count_grapheme_clusters(input);
                 }
                 if let Some(doc) = document.as_ref() {
-                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                    rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
                 }
                 return;
             }
@@ -2453,7 +2453,7 @@ fn handle_console_key(
                 }
                 recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
-                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                    rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
                 }
                 return;
             }
@@ -2488,7 +2488,7 @@ fn handle_console_key(
                 }
                 recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
-                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                    rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
                 }
                 return;
             }
@@ -2512,12 +2512,12 @@ fn handle_console_key(
                     *completion_idx = None;
                 }
                 if let Some(doc) = document.as_ref() {
-                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                    rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
                 }
             } else {
                 save_console_history(console_history);
                 *console_state = ConsoleState::Closed;
-                renderer.rebuild_console_overlay_buffers(None);
+                renderer.rebuild_console_overlay_buffers(app_scene, None);
             }
         }
         CONSOLE_KEY_ENTER => {
@@ -2575,7 +2575,7 @@ fn handle_console_key(
                 }
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_TAB => {
@@ -2587,7 +2587,7 @@ fn handle_console_key(
             accept_console_completion(console_state);
             recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_ARROW_UP | CONSOLE_KEY_UP => {
@@ -2611,7 +2611,7 @@ fn handle_console_key(
                 recompute_console_completions(console_state, document.as_ref());
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_ARROW_DOWN | CONSOLE_KEY_DOWN => {
@@ -2638,7 +2638,7 @@ fn handle_console_key(
                 recompute_console_completions(console_state, document.as_ref());
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_ARROW_LEFT | CONSOLE_KEY_LEFT => {
@@ -2648,7 +2648,7 @@ fn handle_console_key(
                 }
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_ARROW_RIGHT | CONSOLE_KEY_RIGHT => {
@@ -2659,7 +2659,7 @@ fn handle_console_key(
                 }
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_HOME => {
@@ -2667,7 +2667,7 @@ fn handle_console_key(
                 *cursor = 0;
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_END => {
@@ -2675,7 +2675,7 @@ fn handle_console_key(
                 *cursor = count_grapheme_clusters(input);
             }
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_BACKSPACE => {
@@ -2687,7 +2687,7 @@ fn handle_console_key(
             }
             recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_DELETE => {
@@ -2698,7 +2698,7 @@ fn handle_console_key(
             }
             recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         CONSOLE_KEY_SPACE => {
@@ -2713,7 +2713,7 @@ fn handle_console_key(
             }
             recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
-                rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
             }
         }
         _ => {
@@ -2742,7 +2742,7 @@ fn handle_console_key(
                 }
                 recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
-                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                    rebuild_console_overlay(console_state, doc, app_scene, renderer, keybinds);
                 }
             }
         }
@@ -2955,14 +2955,14 @@ fn execute_console_line(
     if let Some(er) = label_edit_req {
         open_label_edit(&er, doc, label_edit_state, app_scene, renderer);
         *console_state = ConsoleState::Closed;
-        renderer.rebuild_console_overlay_buffers(None);
+        renderer.rebuild_console_overlay_buffers(app_scene, None);
     } else if let Some(target) = color_picker_req {
         open_color_picker(target, doc, color_picker_state, app_scene, renderer);
         *console_state = ConsoleState::Closed;
-        renderer.rebuild_console_overlay_buffers(None);
+        renderer.rebuild_console_overlay_buffers(app_scene, None);
     } else if close_after {
         *console_state = ConsoleState::Closed;
-        renderer.rebuild_console_overlay_buffers(None);
+        renderer.rebuild_console_overlay_buffers(app_scene, None);
     }
 }
 
@@ -2987,6 +2987,7 @@ fn push_scrollback_error(state: &mut ConsoleState, text: String) {
 fn rebuild_console_overlay(
     console_state: &ConsoleState,
     _document: &MindMapDocument,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
     keybinds: &ResolvedKeybinds,
 ) {
@@ -2996,7 +2997,7 @@ fn rebuild_console_overlay(
     };
     let (input, cursor, scrollback, completions, selected_completion) = match console_state {
         ConsoleState::Closed => {
-            renderer.rebuild_console_overlay_buffers(None);
+            renderer.rebuild_console_overlay_buffers(app_scene, None);
             return;
         }
         ConsoleState::Open {
@@ -3041,7 +3042,7 @@ fn rebuild_console_overlay(
         font_family: keybinds.console_font.clone(),
         font_size: keybinds.console_font_size,
     };
-    renderer.rebuild_console_overlay_buffers(Some(&geometry));
+    renderer.rebuild_console_overlay_buffers(app_scene, Some(&geometry));
 }
 
 /// Load persisted console history from `$XDG_STATE_HOME/mandala/history`

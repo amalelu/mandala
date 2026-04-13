@@ -23,6 +23,9 @@ use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch}
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
 use baumhard::util::grapheme_chad;
+use baumhard::core::primitives::{
+    ColorFontRegion, ColorFontRegions, Range as ColorFontRange,
+};
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::mutator::GfxMutator;
@@ -1797,6 +1800,52 @@ impl Renderer {
     /// the console stays a fixed size regardless of canvas zoom.
     pub fn rebuild_console_overlay_buffers(
         &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
+        geometry: Option<&ConsoleOverlayGeometry>,
+    ) {
+        use crate::application::scene_host::OverlayRole;
+        // Legacy buffer list is unused once console rides the overlay
+        // tree path, but keep the field cleared so any stale entry
+        // from an earlier build isn't drawn alongside the new tree.
+        self.console_overlay_buffers.clear();
+
+        let Some(geometry) = geometry else {
+            // Closed: drop the backdrop, drop the tree, refresh
+            // overlay buffers so the console disappears.
+            self.console_backdrop = None;
+            app_scene.unregister_overlay(OverlayRole::Console);
+            self.rebuild_overlay_scene_buffers(app_scene);
+            return;
+        };
+
+        let layout = compute_console_frame_layout(
+            geometry,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+        self.console_backdrop = Some(layout.backdrop_rect());
+
+        // Build the tree under the FONT_SYSTEM lock — we need it
+        // for `measure_max_glyph_advance` only. Tree construction
+        // itself doesn't shape; that happens during the overlay-
+        // scene walk below.
+        let tree = {
+            let mut font_system = fonts::FONT_SYSTEM
+                .write()
+                .expect("Failed to acquire font_system lock");
+            build_console_overlay_tree(geometry, &layout, &mut font_system)
+        };
+        app_scene.register_overlay(OverlayRole::Console, tree, glam::Vec2::ZERO);
+        self.rebuild_overlay_scene_buffers(app_scene);
+    }
+
+    /// Legacy entrypoint for the bespoke console buffer builder,
+    /// kept temporarily until every call site has migrated to the
+    /// new `(app_scene, geometry)` form. Inlined here so the legacy
+    /// pass and the tree pass share the same module.
+    #[allow(dead_code)]
+    fn rebuild_console_overlay_buffers_legacy(
+        &mut self,
         geometry: Option<&ConsoleOverlayGeometry>,
     ) {
         self.console_overlay_buffers.clear();
@@ -3055,6 +3104,287 @@ pub struct MindMapTextBuffer {
     pub buffer: Buffer,
     pub pos: (f32, f32),
     pub bounds: (f32, f32),
+}
+
+/// Build the console overlay tree from a geometry + pre-computed
+/// layout. One Void root with one GlyphArea per visible element:
+/// 4 borders, gutter glyphs, scrollback rows, completion rows,
+/// and the prompt line. Used by
+/// [`Renderer::rebuild_console_overlay_buffers`] which then
+/// registers the tree under
+/// [`crate::application::scene_host::OverlayRole::Console`] and
+/// walks it through the standard overlay-scene pipeline.
+///
+/// `font_system` is needed only for `measure_max_glyph_advance` —
+/// no shaping happens here. The returned tree's GlyphArea
+/// positions are absolute screen coordinates so the walker's
+/// per-tree offset can be `Vec2::ZERO`.
+fn build_console_overlay_tree(
+    geometry: &ConsoleOverlayGeometry,
+    layout: &ConsoleFrameLayout,
+    font_system: &mut FontSystem,
+) -> Tree<GfxElement, GfxMutator> {
+    use crate::application::console::visuals::{
+        ACCENT_COLOR, BORDER_COLOR, ERROR_COLOR, GUTTER_GLYPH, INPUT_ECHO_COLOR,
+        SCROLLBACK_MIN_ALPHA, SELECTED_COMPLETION_MARKER, TEXT_COLOR,
+        UNSELECTED_COMPLETION_MARKER,
+    };
+
+    let &ConsoleFrameLayout {
+        left,
+        top,
+        frame_width,
+        frame_height,
+        font_size,
+        char_width,
+        row_height,
+        inner_padding,
+        scrollback_rows,
+        completion_rows,
+    } = layout;
+
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut id_counter: usize = 1;
+    let push_area = |tree: &mut Tree<GfxElement, GfxMutator>,
+                     id_counter: &mut usize,
+                     text: &str,
+                     color: cosmic_text::Color,
+                     font_size: f32,
+                     line_height: f32,
+                     pos: (f32, f32),
+                     bounds: (f32, f32)| {
+        let mut area = GlyphArea::new_with_str(
+            text,
+            font_size,
+            line_height,
+            Vec2::new(pos.0, pos.1),
+            Vec2::new(bounds.0, bounds.1),
+        );
+        let cluster_count = text.chars().count();
+        if cluster_count > 0 {
+            let rgba = [
+                color.r() as f32 / 255.0,
+                color.g() as f32 / 255.0,
+                color.b() as f32 / 255.0,
+                color.a() as f32 / 255.0,
+            ];
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                ColorFontRange::new(0, cluster_count),
+                None,
+                Some(rgba),
+            ));
+            area.regions = regions;
+        }
+        let element =
+            GfxElement::new_area_non_indexed_with_id(area, *id_counter, *id_counter);
+        *id_counter += 1;
+        let leaf = tree.arena.new_node(element);
+        tree.root.append(leaf, &mut tree.arena);
+    };
+
+    // Border glyph advance — measured rather than estimated so the
+    // top-right `╮` lands flush with the right side `│` column.
+    let measured_char_width =
+        measure_max_glyph_advance(font_system, &["\u{2500}", "\u{2502}"], font_size);
+    let cols = ((frame_width / measured_char_width).floor() as usize).max(2);
+    let side_rows = side_row_count(frame_height, font_size, row_height);
+    let (top_border, bottom_border, left_col, right_col) =
+        build_console_border_strings(cols, side_rows);
+
+    // Borders
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &top_border,
+        BORDER_COLOR,
+        font_size,
+        font_size,
+        (left, top),
+        (frame_width, font_size * 1.5),
+    );
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &bottom_border,
+        BORDER_COLOR,
+        font_size,
+        font_size,
+        (left, top + frame_height),
+        (frame_width, font_size * 1.5),
+    );
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &left_col,
+        BORDER_COLOR,
+        font_size,
+        row_height,
+        (left, top + font_size),
+        (measured_char_width, frame_height),
+    );
+    let right_col_x = left + (cols.saturating_sub(1) as f32) * measured_char_width;
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &right_col,
+        BORDER_COLOR,
+        font_size,
+        row_height,
+        (right_col_x, top + font_size),
+        (measured_char_width, frame_height),
+    );
+
+    // Scrollback rows (oldest → newest, with alpha dimming)
+    let gutter_x = left + measured_char_width;
+    let content_left = gutter_x + measured_char_width + inner_padding;
+    let content_width = right_col_x - content_left - inner_padding;
+    let content_top = top + font_size + inner_padding;
+    let content_cols = (content_width / measured_char_width).floor() as usize;
+
+    let skip = geometry.scrollback.len().saturating_sub(scrollback_rows);
+    let visible_count = scrollback_rows.max(1);
+    for (i, line) in geometry
+        .scrollback
+        .iter()
+        .skip(skip)
+        .take(scrollback_rows)
+        .enumerate()
+    {
+        let newness = if visible_count <= 1 {
+            1.0
+        } else {
+            i as f32 / (visible_count - 1) as f32
+        };
+        let alpha = lerp_alpha(SCROLLBACK_MIN_ALPHA, 0xff, newness);
+        let (text_color, gutter_color, gutter_glyph) = match line.kind {
+            ConsoleOverlayLineKind::Input => (
+                with_alpha(INPUT_ECHO_COLOR, alpha),
+                with_alpha(INPUT_ECHO_COLOR, alpha),
+                " ",
+            ),
+            ConsoleOverlayLineKind::Output => (
+                with_alpha(TEXT_COLOR, alpha),
+                with_alpha(ACCENT_COLOR, alpha),
+                GUTTER_GLYPH,
+            ),
+            ConsoleOverlayLineKind::Error => (
+                with_alpha(ERROR_COLOR, alpha),
+                with_alpha(ERROR_COLOR, alpha),
+                GUTTER_GLYPH,
+            ),
+        };
+        let y = content_top + row_height * i as f32;
+        if gutter_glyph != " " {
+            push_area(
+                &mut tree,
+                &mut id_counter,
+                gutter_glyph,
+                gutter_color,
+                font_size,
+                row_height,
+                (gutter_x, y),
+                (char_width, row_height),
+            );
+        }
+        let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+            &line.text,
+            content_cols,
+        );
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            clipped,
+            text_color,
+            font_size,
+            row_height,
+            (content_left, y),
+            (content_width, row_height),
+        );
+    }
+
+    // Completion popup rows
+    let completion_top = content_top + row_height * scrollback_rows as f32;
+    for (i, c) in geometry
+        .completions
+        .iter()
+        .take(completion_rows)
+        .enumerate()
+    {
+        let is_selected = geometry.selected_completion == Some(i);
+        let color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+        let prefix = if is_selected {
+            SELECTED_COMPLETION_MARKER
+        } else {
+            UNSELECTED_COMPLETION_MARKER
+        };
+        let line = match &c.hint {
+            Some(hint) => format!("{prefix}{}    {}", c.text, hint),
+            None => format!("{prefix}{}", c.text),
+        };
+        let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+            &line,
+            content_cols,
+        );
+        let y = completion_top + row_height * i as f32;
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            clipped,
+            color,
+            font_size,
+            row_height,
+            (content_left, y),
+            (content_width, row_height),
+        );
+    }
+
+    // Prompt line — split into two GlyphAreas (accent prompt +
+    // text input-with-cursor) rather than a multi-region single
+    // area, because cosmic-text positions per-area while one area
+    // with two color regions still uses the same starting x.
+    // Stacking them as siblings keeps the layout simple.
+    let prompt_budget = font_size * 1.4;
+    let y = layout.prompt_y();
+    let cursor_byte = baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
+        &geometry.input,
+        geometry.cursor_grapheme,
+    )
+    .unwrap_or(geometry.input.len());
+    let (pre, post) = geometry.input.split_at(cursor_byte);
+    let input_with_cursor = format!("{pre}{CURSOR_GLYPH}{post}");
+    let input_clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+        &input_with_cursor,
+        content_cols.saturating_sub(2),
+    );
+    let prompt_text = "\u{276F} ";
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        prompt_text,
+        ACCENT_COLOR,
+        font_size,
+        font_size,
+        (content_left, y),
+        (font_size * 2.0, prompt_budget),
+    );
+    // Input lands one prompt-glyph + one space to the right of
+    // `content_left`. Use the same `measured_char_width` as the
+    // border so the input's first glyph aligns with the column
+    // grid. The two-cell shift mirrors `prompt_text.chars().count()`.
+    let input_x = content_left + measured_char_width * 2.0;
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        input_clipped,
+        TEXT_COLOR,
+        font_size,
+        font_size,
+        (input_x, y),
+        (content_width - measured_char_width * 2.0, prompt_budget),
+    );
+
+    tree
 }
 
 /// Shared tree → cosmic-text buffer walker.
