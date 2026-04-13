@@ -656,6 +656,124 @@ fn append_connection_glyph(
     parent.append(leaf, &mut tree.arena);
 }
 
+// =====================================================================
+// Connection-label and edge-handle tree builders
+//
+// Both are flat — one GlyphArea per element directly under the
+// tree root, no per-element Void wrapper, because nothing needs to
+// target a single label or handle as a structural mutator group
+// today (each element has only one renderable glyph). If grouping
+// becomes necessary, wrap them like portals / borders.
+//
+// Both functions also produce auxiliary AABB maps so the renderer's
+// existing hit-test paths (`hit_test_edge_label`,
+// `hit_test_edge_handle`-equivalents) keep working until Session 5
+// routes hit-testing through `Scene::component_at`.
+// =====================================================================
+
+/// Result of [`build_connection_label_tree`]. Pairs the tree with
+/// the AABB-per-edge hitbox map the legacy
+/// `Renderer::hit_test_edge_label` path needs.
+pub struct ConnectionLabelTree {
+    pub tree: Tree<GfxElement, GfxMutator>,
+    /// `EdgeKey → AABB` for click hit-testing on the label.
+    pub hitboxes: HashMap<crate::mindmap::scene_cache::EdgeKey, (Vec2, Vec2)>,
+}
+
+/// Build a baumhard tree of every connection-label glyph from a
+/// pre-computed `ConnectionLabelElement` slice. Like the
+/// connection tree, geometry comes from `scene_builder` upstream.
+pub fn build_connection_label_tree(
+    elements: &[crate::mindmap::scene_builder::ConnectionLabelElement],
+) -> ConnectionLabelTree {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut hitboxes: HashMap<crate::mindmap::scene_cache::EdgeKey, (Vec2, Vec2)> =
+        HashMap::new();
+    let mut id_counter: usize = 1;
+
+    for elem in elements {
+        let color_rgba =
+            color::hex_to_rgba_safe(&elem.color, [0.92, 0.92, 0.92, 1.0]);
+        let pos = Vec2::new(elem.position.0, elem.position.1);
+        let bounds = Vec2::new(elem.bounds.0, elem.bounds.1);
+
+        let mut area = GlyphArea::new_with_str(
+            &elem.text,
+            elem.font_size_pt,
+            elem.font_size_pt,
+            pos,
+            bounds,
+        );
+        let cluster_count = elem.text.chars().count();
+        if cluster_count > 0 {
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                Range::new(0, cluster_count),
+                None,
+                Some(color_rgba),
+            ));
+            area.regions = regions;
+        }
+
+        let element_node =
+            GfxElement::new_area_non_indexed_with_id(area, id_counter, id_counter);
+        id_counter += 1;
+        let leaf = tree.arena.new_node(element_node);
+        tree.root.append(leaf, &mut tree.arena);
+
+        hitboxes.insert(elem.edge_key.clone(), (pos, pos + bounds));
+    }
+
+    ConnectionLabelTree { tree, hitboxes }
+}
+
+/// Build a baumhard tree of every edge-handle glyph from a
+/// pre-computed `EdgeHandleElement` slice. Handles only exist
+/// while an edge is selected, so this tree is typically empty or
+/// has ≤ 5 leaves.
+pub fn build_edge_handle_tree(
+    elements: &[crate::mindmap::scene_builder::EdgeHandleElement],
+) -> Tree<GfxElement, GfxMutator> {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut id_counter: usize = 1;
+
+    for elem in elements {
+        let color_rgba = color::hex_to_rgba_safe(&elem.color, [0.0, 0.9, 1.0, 1.0]);
+        // Handle glyphs are centered on the position with the same
+        // half-glyph offset the legacy renderer used.
+        let half_w = elem.font_size_pt * 0.3;
+        let half_h = elem.font_size_pt * 0.5;
+        let pos = Vec2::new(elem.position.0 - half_w, elem.position.1 - half_h);
+        let bounds = Vec2::new(elem.font_size_pt, elem.font_size_pt);
+
+        let mut area = GlyphArea::new_with_str(
+            &elem.glyph,
+            elem.font_size_pt,
+            elem.font_size_pt,
+            pos,
+            bounds,
+        );
+        let cluster_count = elem.glyph.chars().count();
+        if cluster_count > 0 {
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                Range::new(0, cluster_count),
+                None,
+                Some(color_rgba),
+            ));
+            area.regions = regions;
+        }
+
+        let element_node =
+            GfxElement::new_area_non_indexed_with_id(area, id_counter, id_counter);
+        id_counter += 1;
+        let leaf = tree.arena.new_node(element_node);
+        tree.root.append(leaf, &mut tree.arena);
+    }
+
+    tree
+}
+
 fn append_border_run(
     tree: &mut Tree<GfxElement, GfxMutator>,
     parent_id: NodeId,

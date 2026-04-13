@@ -2722,6 +2722,22 @@ impl Renderer {
         }
     }
 
+    /// Replace the connection-label hitbox map wholesale.
+    /// Used by `update_connection_label_tree` once labels render
+    /// through the canvas-scene tree path; the tree builder owns
+    /// the AABB computation and hands the map over via this
+    /// setter so the legacy `hit_test_edge_label` keeps working.
+    /// Will go away in Session 5.
+    pub fn set_connection_label_hitboxes(
+        &mut self,
+        hitboxes: std::collections::HashMap<EdgeKey, (Vec2, Vec2)>,
+    ) {
+        self.connection_label_hitboxes.clear();
+        for (k, v) in hitboxes {
+            self.connection_label_hitboxes.insert(k, v);
+        }
+    }
+
     /// Replace the portal-hitbox map wholesale.
     ///
     /// Used by the `update_portal_tree` helper in `app.rs` once

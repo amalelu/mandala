@@ -490,7 +490,7 @@ impl Application {
                     &mut app_scene,
                     &mut renderer,
                 );
-                renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+                update_connection_label_tree(&scene, &mut app_scene, &mut renderer);
 
                 mindmap_tree = Some(tree);
                 document = Some(doc);
@@ -1636,7 +1636,7 @@ impl Application {
                                 // Without this the handles stay pinned
                                 // to the pre-drag positions until mouse
                                 // release triggers a full rebuild.
-                                renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
+                                update_edge_handle_tree(&scene, &mut app_scene, &mut renderer);
                             }
 
                             *pending_delta = Vec2::ZERO;
@@ -1689,7 +1689,7 @@ impl Application {
                                 );
                                 let _ = &dirty_edge_keys;
                                 update_connection_tree(&scene, &mut app_scene, &mut renderer);
-                                renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
+                                update_edge_handle_tree(&scene, &mut app_scene, &mut renderer);
                                 // Labels are rebuilt per frame so a
                                 // control-point drag keeps the label
                                 // correctly anchored to the live path.
@@ -1788,7 +1788,7 @@ impl Application {
                             // zoom with a selected edge used to leave
                             // the handles pinned to stale screen
                             // positions until the next full rebuild.
-                            renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
+                            update_edge_handle_tree(&scene, &mut app_scene, &mut renderer);
                         }
                     }
 
@@ -1956,7 +1956,7 @@ impl Application {
                     &mut init_app_scene,
                     renderer,
                 );
-                renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+                update_connection_label_tree(&scene, app_scene, renderer);
                 tree_opt = Some(mindmap_tree);
                 doc_opt = Some(doc);
             }
@@ -3266,8 +3266,8 @@ fn rebuild_scene_only(
     update_connection_tree(&scene, app_scene, renderer);
     update_border_tree_static(doc, app_scene, renderer);
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
-    renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
-    renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+    update_edge_handle_tree(&scene, app_scene, renderer);
+    update_connection_label_tree(&scene, app_scene, renderer);
 }
 
 /// Build the border tree from the current document (no drag
@@ -3382,6 +3382,39 @@ fn update_connection_tree(
     renderer.rebuild_canvas_scene_buffers(app_scene);
 }
 
+/// Reshape connection labels into the canvas-scene tree path.
+/// Threads the per-edge AABB hitbox map back to the renderer so
+/// `hit_test_edge_label` keeps working until Session 5.
+fn update_connection_label_tree(
+    scene: &baumhard::mindmap::scene_builder::RenderScene,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    use crate::application::scene_host::CanvasRole;
+    let result = baumhard::mindmap::tree_builder::build_connection_label_tree(
+        &scene.connection_label_elements,
+    );
+    renderer.set_connection_label_hitboxes(result.hitboxes);
+    app_scene.register_canvas(CanvasRole::ConnectionLabels, result.tree, glam::Vec2::ZERO);
+    renderer.rebuild_canvas_scene_buffers(app_scene);
+}
+
+/// Reshape edge handles into the canvas-scene tree path. The
+/// handle set is small (≤ 5 per selected edge) so a fresh build
+/// per call is fine. Hit-testing for handles already lives in
+/// `document::hit_test_edge_handle`, so no AABB map is needed
+/// from the tree builder.
+fn update_edge_handle_tree(
+    scene: &baumhard::mindmap::scene_builder::RenderScene,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    use crate::application::scene_host::CanvasRole;
+    let tree = baumhard::mindmap::tree_builder::build_edge_handle_tree(&scene.edge_handles);
+    app_scene.register_canvas(CanvasRole::EdgeHandles, tree, glam::Vec2::ZERO);
+    renderer.rebuild_canvas_scene_buffers(app_scene);
+}
+
 /// Session 6D: transition into inline label edit mode for the given
 /// edge. Seeds the buffer from the edge's current label (or the
 /// empty string) and installs a preview override on the renderer so
@@ -3419,7 +3452,7 @@ fn open_label_edit(
     // Rebuild labels so the caret is visible immediately. The caller
     // already ran `rebuild_all` before this, so the scene is fresh.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
-    renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+    update_connection_label_tree(&scene, app_scene, renderer);
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
 }
 
@@ -3485,7 +3518,7 @@ fn handle_label_edit_key(
         );
         doc.label_edit_preview = Some((edge_key, buffer.clone()));
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
-        renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+        update_connection_label_tree(&scene, app_scene, renderer);
         update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
     }
 }
@@ -4802,8 +4835,8 @@ fn rebuild_all_with_mode(
     update_connection_tree(&scene, app_scene, renderer);
     update_border_tree_static(doc, app_scene, renderer);
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
-    renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
-    renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
+    update_edge_handle_tree(&scene, app_scene, renderer);
+    update_connection_label_tree(&scene, app_scene, renderer);
 
     *mindmap_tree = Some(new_tree);
 }
