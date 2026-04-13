@@ -482,7 +482,7 @@ impl Application {
                 // glyphs against the actual final zoom rather than the
                 // default-init value.
                 let scene = doc.build_scene(renderer.camera_zoom());
-                renderer.rebuild_connection_buffers(&scene.connection_elements);
+                update_connection_tree(&scene, &mut app_scene, &mut renderer);
                 update_border_tree_static(&doc, &mut app_scene, &mut renderer);
                 update_portal_tree(
                     &doc,
@@ -1600,21 +1600,13 @@ impl Application {
                                     renderer.camera_zoom(),
                                 );
 
-                                if first_frame_of_drag {
-                                    // `None` = treat every element as
-                                    // dirty → full re-shape of the keyed
-                                    // maps. One-time per drag; subsequent
-                                    // frames are incremental.
-                                    renderer.rebuild_connection_buffers_keyed(
-                                        &scene.connection_elements,
-                                        None,
-                                    );
-                                } else {
-                                    renderer.rebuild_connection_buffers_keyed(
-                                        &scene.connection_elements,
-                                        Some(&dirty_edge_keys),
-                                    );
-                                }
+                                // Tree-path connection rebuild ignores
+                                // the dirty set today (Session 2f-perf
+                                // tracks the per-edge incremental
+                                // shaping cache). Both branches reduce
+                                // to the same call.
+                                let _ = (first_frame_of_drag, &dirty_edge_keys);
+                                update_connection_tree(&scene, &mut app_scene, &mut renderer);
                                 // Borders go through the canvas-scene
                                 // tree path; drag offsets land on the
                                 // tree builder via this helper. The
@@ -1695,10 +1687,8 @@ impl Application {
                                     &mut scene_cache,
                                     renderer.camera_zoom(),
                                 );
-                                renderer.rebuild_connection_buffers_keyed(
-                                    &scene.connection_elements,
-                                    Some(&dirty_edge_keys),
-                                );
+                                let _ = &dirty_edge_keys;
+                                update_connection_tree(&scene, &mut app_scene, &mut renderer);
                                 renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
                                 // Labels are rebuilt per frame so a
                                 // control-point drag keeps the label
@@ -1783,10 +1773,7 @@ impl Application {
                                 &mut scene_cache,
                                 renderer.camera_zoom(),
                             );
-                            renderer.rebuild_connection_buffers_keyed(
-                                &scene.connection_elements,
-                                None, // treat all as dirty; buffer cache was cleared
-                            );
+                            update_connection_tree(&scene, &mut app_scene, &mut renderer);
                             renderer.rebuild_connection_label_buffers(
                                 &scene.connection_label_elements,
                             );
@@ -1961,7 +1948,7 @@ impl Application {
                 renderer.fit_camera_to_tree(&mindmap_tree.tree);
 
                 let scene = doc.build_scene(renderer.camera_zoom());
-                renderer.rebuild_connection_buffers(&scene.connection_elements);
+                update_connection_tree(&scene, &mut init_app_scene, renderer);
                 update_border_tree_static(&doc, &mut init_app_scene, renderer);
                 update_portal_tree(
                     &doc,
@@ -3276,7 +3263,7 @@ fn rebuild_scene_only(
     renderer: &mut Renderer,
 ) {
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
-    renderer.rebuild_connection_buffers(&scene.connection_elements);
+    update_connection_tree(&scene, app_scene, renderer);
     update_border_tree_static(doc, app_scene, renderer);
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
@@ -3366,6 +3353,32 @@ fn update_portal_tree(
         baumhard::mindmap::tree_builder::build_portal_tree(&doc.mindmap, offsets, selected, preview);
     renderer.set_portal_hitboxes(result.hitboxes);
     app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
+    renderer.rebuild_canvas_scene_buffers(app_scene);
+}
+
+/// Convert a freshly-built `RenderScene`'s connection_elements
+/// into a baumhard tree and register it under
+/// [`CanvasRole::Connections`]. Replaces
+/// `Renderer::rebuild_connection_buffers*` calls. Connection
+/// geometry (bezier sampling, color resolution, drag offsets) is
+/// still owned by `scene_builder::build_scene*` upstream — this
+/// helper is purely a structural reshape from the flat element
+/// list to the tree form so the canvas-scene render pipeline can
+/// consume it.
+///
+/// **Performance note**: the legacy `rebuild_connection_buffers_keyed`
+/// path used a per-edge dirty set to skip cosmic-text shaping on
+/// unchanged edges during drags. The tree-path equivalent doesn't
+/// have that cache yet — every drag frame re-shapes every visible
+/// edge. Tracked as Session 2f-perf in the unified-rendering plan.
+fn update_connection_tree(
+    scene: &baumhard::mindmap::scene_builder::RenderScene,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    use crate::application::scene_host::CanvasRole;
+    let tree = baumhard::mindmap::tree_builder::build_connection_tree(&scene.connection_elements);
+    app_scene.register_canvas(CanvasRole::Connections, tree, glam::Vec2::ZERO);
     renderer.rebuild_canvas_scene_buffers(app_scene);
 }
 
@@ -4786,7 +4799,7 @@ fn rebuild_all_with_mode(
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
-    renderer.rebuild_connection_buffers(&scene.connection_elements);
+    update_connection_tree(&scene, app_scene, renderer);
     update_border_tree_static(doc, app_scene, renderer);
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);

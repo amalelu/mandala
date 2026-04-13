@@ -509,6 +509,153 @@ pub fn build_portal_tree(
     PortalTree { tree, hitboxes }
 }
 
+// =====================================================================
+// Connection tree builder
+//
+// Converts a `&[ConnectionElement]` (the flat-scene representation
+// `scene_builder::build_scene*` already produces) into a baumhard
+// `Tree<GfxElement, GfxMutator>`. Each edge becomes one Void parent
+// with one GlyphArea per glyph along its path (caps included).
+//
+// This deliberately does NOT recompute the geometry. The
+// scene_builder still owns bezier sampling, theme variable
+// resolution, selection / preview color routing, and the drag cache
+// (`SceneConnectionCache`). The tree builder is a structural
+// re-shape from the flat list to the tree form so the canvas-scene
+// renderer can consume connections through the same
+// `walk_tree_into_buffers` pipeline as borders and portals.
+// =====================================================================
+
+/// Build a baumhard tree of connection glyphs from a slice of
+/// pre-computed `ConnectionElement`s.
+///
+/// Tree shape per visible edge:
+///
+/// ```text
+/// Void (per edge — channel = id_counter)
+/// ├── GlyphArea (cap_start, channel = 1)        // optional
+/// ├── GlyphArea (body glyph @ position 0, ch=2)
+/// ├── GlyphArea (body glyph @ position 1, ch=3)
+/// │   ...
+/// └── GlyphArea (cap_end, channel = N)          // optional
+/// ```
+///
+/// Each GlyphArea is sized `(font_size, font_size)` and centred on
+/// the connection-element's reported glyph position via the same
+/// `(half_glyph, half_height)` offset the legacy
+/// `Renderer::rebuild_connection_buffers_keyed` applied. Color is
+/// baked into a single `ColorFontRegion` covering the body glyph.
+///
+/// # Costs
+///
+/// O(sum of glyph_positions across all elements). Allocates the
+/// tree arena. No font shaping happens here — that's the
+/// renderer's `walk_tree_into_buffers` step.
+pub fn build_connection_tree(
+    elements: &[crate::mindmap::scene_builder::ConnectionElement],
+) -> Tree<GfxElement, GfxMutator> {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut id_counter: usize = 1;
+
+    for elem in elements {
+        let font_size = elem.font_size_pt;
+        let half_glyph = font_size * 0.3;
+        let half_height = font_size * 0.5;
+        let glyph_bounds = Vec2::new(font_size, font_size);
+        let color_rgba =
+            color::hex_to_rgba_safe(&elem.color, [0.78, 0.78, 0.78, 1.0]);
+
+        let edge_channel = id_counter;
+        let edge_root = tree
+            .arena
+            .new_node(GfxElement::new_void_with_id(edge_channel, edge_channel));
+        tree.root.append(edge_root, &mut tree.arena);
+        id_counter += 1;
+
+        // Cap-start, body glyphs, cap-end — emitted in the same
+        // order the legacy renderer produced. Channel monotonically
+        // increases so mutator trees can target a specific glyph by
+        // index when the inevitable per-glyph effects land.
+        let mut child_channel: usize = 1;
+        if let Some((glyph_text, (cx, cy))) = elem.cap_start.as_ref() {
+            let pos = Vec2::new(cx - half_glyph, cy - half_height);
+            append_connection_glyph(
+                &mut tree,
+                edge_root,
+                child_channel,
+                id_counter,
+                glyph_text,
+                font_size,
+                pos,
+                glyph_bounds,
+                color_rgba,
+            );
+            id_counter += 1;
+            child_channel += 1;
+        }
+        for &(gx, gy) in &elem.glyph_positions {
+            let pos = Vec2::new(gx - half_glyph, gy - half_height);
+            append_connection_glyph(
+                &mut tree,
+                edge_root,
+                child_channel,
+                id_counter,
+                &elem.body_glyph,
+                font_size,
+                pos,
+                glyph_bounds,
+                color_rgba,
+            );
+            id_counter += 1;
+            child_channel += 1;
+        }
+        if let Some((glyph_text, (cx, cy))) = elem.cap_end.as_ref() {
+            let pos = Vec2::new(cx - half_glyph, cy - half_height);
+            append_connection_glyph(
+                &mut tree,
+                edge_root,
+                child_channel,
+                id_counter,
+                glyph_text,
+                font_size,
+                pos,
+                glyph_bounds,
+                color_rgba,
+            );
+            id_counter += 1;
+        }
+    }
+
+    tree
+}
+
+fn append_connection_glyph(
+    tree: &mut Tree<GfxElement, GfxMutator>,
+    parent: NodeId,
+    channel: usize,
+    unique_id: usize,
+    text: &str,
+    font_size: f32,
+    position: Vec2,
+    bounds: Vec2,
+    color_rgba: [f32; 4],
+) {
+    let mut area = GlyphArea::new_with_str(text, font_size, font_size, position, bounds);
+    let cluster_count = text.chars().count();
+    if cluster_count > 0 {
+        let mut regions = ColorFontRegions::new_empty();
+        regions.submit_region(ColorFontRegion::new(
+            Range::new(0, cluster_count),
+            None,
+            Some(color_rgba),
+        ));
+        area.regions = regions;
+    }
+    let element = GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
+    let leaf = tree.arena.new_node(element);
+    parent.append(leaf, &mut tree.arena);
+}
+
 fn append_border_run(
     tree: &mut Tree<GfxElement, GfxMutator>,
     parent_id: NodeId,
@@ -1152,6 +1299,52 @@ mod tests {
         let result = build_portal_tree(&map, &HashMap::new(), None, None);
         assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
         assert!(result.hitboxes.is_empty());
+    }
+
+    #[test]
+    fn connection_tree_emits_one_void_per_edge_with_glyph_children() {
+        use crate::mindmap::scene_builder::ConnectionElement;
+        use crate::mindmap::scene_cache::EdgeKey;
+
+        let elem = ConnectionElement {
+            edge_key: EdgeKey::new("a", "b", "child"),
+            glyph_positions: vec![(10.0, 0.0), (20.0, 0.0), (30.0, 0.0)],
+            body_glyph: "·".into(),
+            cap_start: Some(("◀".into(), (0.0, 0.0))),
+            cap_end: Some(("▶".into(), (40.0, 0.0))),
+            font: None,
+            font_size_pt: 12.0,
+            color: "#ff0000".into(),
+        };
+        let tree = build_connection_tree(&[elem]);
+        let edge_parents: Vec<NodeId> = tree.root.children(&tree.arena).collect();
+        assert_eq!(edge_parents.len(), 1);
+        let glyphs: Vec<NodeId> = edge_parents[0].children(&tree.arena).collect();
+        // 1 cap-start + 3 body + 1 cap-end = 5
+        assert_eq!(glyphs.len(), 5);
+        for id in &glyphs {
+            assert!(tree.arena.get(*id).unwrap().get().glyph_area().is_some());
+        }
+    }
+
+    #[test]
+    fn connection_tree_skips_caps_when_absent() {
+        use crate::mindmap::scene_builder::ConnectionElement;
+        use crate::mindmap::scene_cache::EdgeKey;
+
+        let elem = ConnectionElement {
+            edge_key: EdgeKey::new("a", "b", "child"),
+            glyph_positions: vec![(0.0, 0.0)],
+            body_glyph: "·".into(),
+            cap_start: None,
+            cap_end: None,
+            font: None,
+            font_size_pt: 12.0,
+            color: "#ffffff".into(),
+        };
+        let tree = build_connection_tree(&[elem]);
+        let edge_parent = tree.root.children(&tree.arena).next().unwrap();
+        assert_eq!(edge_parent.children(&tree.arena).count(), 1);
     }
 
     #[test]
