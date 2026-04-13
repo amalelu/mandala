@@ -304,6 +304,87 @@ fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
     next_line_start + col.min(next_line_len)
 }
 
+/// Pure router for the label-edit key loop. Given the winit
+/// key-name lowercased (`"backspace"`, `"arrowleft"`, ...) and
+/// the optional character payload from `Key::Character` (IME /
+/// dead-key sequences can carry multiple chars), mutates
+/// `(buffer, cursor)` in place through the same
+/// `grapheme_chad` helpers `handle_text_edit_key` uses and
+/// returns `true` iff any state changed. Separated out so the
+/// routing logic is testable without standing up a winit event
+/// loop; `handle_label_edit_key` is the thin shell that routes
+/// scene / renderer plumbing around this.
+#[cfg(not(target_arch = "wasm32"))]
+fn route_label_edit_key(
+    name: Option<&str>,
+    typed: Option<&str>,
+    buffer: &mut String,
+    cursor: &mut usize,
+) -> bool {
+    match name {
+        Some("backspace") => {
+            if *cursor > 0 {
+                *cursor = delete_before_cursor(buffer, *cursor);
+                return true;
+            }
+            false
+        }
+        Some("delete") => {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
+                *cursor = delete_at_cursor(buffer, *cursor);
+                return true;
+            }
+            false
+        }
+        Some("arrowleft") => {
+            if *cursor > 0 {
+                *cursor -= 1;
+                return true;
+            }
+            false
+        }
+        Some("arrowright") => {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
+                *cursor += 1;
+                return true;
+            }
+            false
+        }
+        Some("home") => {
+            if *cursor != 0 {
+                *cursor = 0;
+                return true;
+            }
+            false
+        }
+        Some("end") => {
+            let end = grapheme_chad::count_grapheme_clusters(buffer);
+            if *cursor != end {
+                *cursor = end;
+                return true;
+            }
+            false
+        }
+        _ => {
+            // Printable character: accept each non-control char.
+            // Mirrors `handle_text_edit_key` — winit's
+            // `Key::Character` can carry IME / dead-key
+            // sequences, so iterate.
+            let Some(typed) = typed else {
+                return false;
+            };
+            let mut changed = false;
+            for ch in typed.chars() {
+                if !ch.is_control() {
+                    *cursor = insert_at_cursor(buffer, *cursor, ch);
+                    changed = true;
+                }
+            }
+            changed
+        }
+    }
+}
+
 /// Build the display text for the edited node by inserting the caret
 /// glyph at the cursor's grapheme position. Used on every keystroke
 /// to produce the `Mutation::AreaDelta` payload.
@@ -3713,71 +3794,22 @@ fn handle_label_edit_key(
         return;
     }
 
-    let (buffer, cursor) = match label_edit_state {
+    let Some((buffer, cursor)) = (match label_edit_state {
         LabelEditState::Open {
             buffer,
             cursor_grapheme_pos,
             ..
-        } => (buffer, cursor_grapheme_pos),
-        LabelEditState::Closed => return,
+        } => Some((buffer, cursor_grapheme_pos)),
+        LabelEditState::Closed => None,
+    }) else {
+        return;
     };
 
-    let mut changed = false;
-    match name {
-        Some("backspace") => {
-            if *cursor > 0 {
-                *cursor = delete_before_cursor(buffer, *cursor);
-                changed = true;
-            }
-        }
-        Some("delete") => {
-            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
-                *cursor = delete_at_cursor(buffer, *cursor);
-                changed = true;
-            }
-        }
-        Some("arrowleft") => {
-            if *cursor > 0 {
-                *cursor -= 1;
-                changed = true;
-            }
-        }
-        Some("arrowright") => {
-            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
-                *cursor += 1;
-                changed = true;
-            }
-        }
-        Some("home") => {
-            if *cursor != 0 {
-                *cursor = 0;
-                changed = true;
-            }
-        }
-        Some("end") => {
-            let end = grapheme_chad::count_grapheme_clusters(buffer);
-            if *cursor != end {
-                *cursor = end;
-                changed = true;
-            }
-        }
-        _ => {
-            // Printable character: accept each non-control char.
-            // Mirrors `handle_text_edit_key` — winit's
-            // `Key::Character` can carry IME / dead-key sequences,
-            // so iterate.
-            if let Key::Character(c) = logical_key {
-                for ch in c.as_str().chars() {
-                    if !ch.is_control() {
-                        *cursor = insert_at_cursor(buffer, *cursor, ch);
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-
-    if !changed {
+    let typed = match logical_key {
+        Key::Character(c) => Some(c.as_str()),
+        _ => None,
+    };
+    if !route_label_edit_key(name, typed, buffer, cursor) {
         return;
     }
 
@@ -5553,6 +5585,127 @@ mod text_edit_tests {
         let cursor = delete_at_cursor(&mut s, 1);
         assert_eq!(s, "acd");
         assert_eq!(cursor, 1);
+    }
+
+    // Label-edit key routing (Phase 2.1 surface introduced by the
+    // label-edit grapheme-cursor commit). The routing-to-operation
+    // layer was previously untested — these pin backspace / delete
+    // / arrow / home / end / printable-char behaviour without
+    // needing a winit event loop.
+
+    #[test]
+    fn test_route_label_edit_backspace_deletes_grapheme_before_cursor() {
+        let mut buf = String::from("café");
+        // 4 graphemes: c a f é. Cursor at end; backspace removes é.
+        let mut cursor = 4;
+        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "caf");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_backspace_at_zero_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        assert!(!changed);
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn test_route_label_edit_delete_at_end_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 3;
+        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        assert!(!changed);
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_delete_removes_grapheme_at_cursor() {
+        let mut buf = String::from("abc");
+        let mut cursor = 1;
+        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "ac");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn test_route_label_edit_arrow_left_right_walks_graphemes() {
+        let mut buf = String::from("café");
+        let mut cursor = 4;
+        // Left past é, f, a — landing on the c boundary.
+        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 3);
+        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 2);
+        // Right brings us back.
+        assert!(route_label_edit_key(Some("arrowright"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_arrow_left_at_zero_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 0;
+        assert!(!route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn test_route_label_edit_home_end_jump_to_ends() {
+        let mut buf = String::from("café");
+        let mut cursor = 2;
+        assert!(route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+        // Home again is a no-op.
+        assert!(!route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+        assert!(route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 4);
+        // End again is a no-op.
+        assert!(!route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn test_route_label_edit_printable_inserts_and_advances() {
+        let mut buf = String::from("ab");
+        let mut cursor = 1;
+        let changed = route_label_edit_key(None, Some("X"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "aXb");
+        assert_eq!(cursor, 2);
+    }
+
+    /// IME / dead-key sequences can arrive as multi-char strings.
+    /// Each non-control char inserts in order and the cursor
+    /// advances past them.
+    #[test]
+    fn test_route_label_edit_multichar_typed_payload() {
+        let mut buf = String::from("");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(None, Some("né"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "né");
+        assert_eq!(cursor, 2);
+    }
+
+    /// Control characters in a typed payload are filtered out.
+    /// Pins the regression where an IME sequence like `"a\t"`
+    /// would otherwise insert a literal tab.
+    #[test]
+    fn test_route_label_edit_typed_control_chars_are_skipped() {
+        let mut buf = String::from("");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(None, Some("a\tb"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "ab");
+        assert_eq!(cursor, 2);
     }
 
     #[test]
