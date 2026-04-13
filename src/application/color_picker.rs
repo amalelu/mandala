@@ -30,10 +30,12 @@
 //! input gap tracked in the roadmap.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
+use std::sync::OnceLock;
 
 use baumhard::util::color::{hex_to_hsv_safe, resolve_var};
 
 use crate::application::document::{EdgeRef, MindMapDocument, PortalRef};
+use crate::application::widgets::color_picker_widget::{load_spec, ChipActionSpec};
 
 /// Number of hue slots on the outer ring. 24 slots = 15° per step. Fine
 /// enough that adjacent slots feel continuous, coarse enough that each
@@ -52,117 +54,89 @@ pub const VAL_CELL_COUNT: usize = 21;
 /// shows through cleanly; still counted in sat/val quantization.
 pub const CROSSHAIR_CENTER_CELL: usize = 10;
 
-/// Hue ring font size multiplier over the picker's base font_size. The
-/// ring is the dominant visual element of the mandala-shaped picker, so
-/// it renders larger than the bars, chips, and title. 1.7× strikes a
-/// balance: visibly ornate without overflowing the backdrop on a
-/// normally-sized window, and pairs with the 22 pt base to keep ring
-/// glyphs fat and easy to aim at on high-DPI desktops.
-pub const HUE_RING_FONT_SCALE: f32 = 1.7;
+/// Hue ring font size multiplier over the picker's base font_size.
+///
+/// Backed by [`color_picker.json`](../widgets/color_picker.json).
+/// The function form replaces the old `pub const HUE_RING_FONT_SCALE:
+/// f32 = 1.7` — moving the value into the widget spec was the first
+/// step of the "widget appearance lives in JSON" migration.
+pub fn hue_ring_font_scale() -> f32 {
+    load_spec().geometry.hue_ring_font_scale
+}
 
-/// Hue ring sacred-script glyphs, clockwise from 12 o'clock. Three
-/// 8-glyph arcs: Devanagari (top-right), Hebrew (bottom-right), Tibetan
-/// (bottom-left → top-left). Each glyph indexes directly into
-/// `hue_slot_positions[i]`.
-pub const HUE_RING_GLYPHS: [&str; HUE_SLOT_COUNT] = [
-    // Slots 0-7 — Devanagari consonants
-    "\u{0915}", // क KA
-    "\u{0916}", // ख KHA
-    "\u{0917}", // ग GA
-    "\u{0918}", // घ GHA
-    "\u{091A}", // च CA
-    "\u{091C}", // ज JA
-    "\u{091F}", // ट TTA
-    "\u{0921}", // ड DDA
-    // Slots 8-15 — Hebrew alefbet (first 8 letters)
-    "\u{05D0}", // א ALEF
-    "\u{05D1}", // ב BET
-    "\u{05D2}", // ג GIMEL
-    "\u{05D3}", // ד DALET
-    "\u{05D4}", // ה HE
-    "\u{05D5}", // ו VAV
-    "\u{05D6}", // ז ZAYIN
-    "\u{05D7}", // ח HET
-    // Slots 16-23 — Tibetan consonants
-    "\u{0F40}", // ཀ KA
-    "\u{0F41}", // ཁ KHA
-    "\u{0F42}", // ག GA
-    "\u{0F44}", // ང NGA
-    "\u{0F45}", // ཅ CA
-    "\u{0F4F}", // ཏ TA
-    "\u{0F54}", // པ PA
-    "\u{0F58}", // མ MA
-];
+// =============================================================
+// Glyph accessors — all read from the JSON widget spec
+// =============================================================
+//
+// The old `pub const HUE_RING_GLYPHS: [&str; 24]` (and its four
+// crosshair-arm siblings) moved into `color_picker.json`. Runtime
+// callers go through these accessors, which read from the spec and
+// cache a leaked `&'static [&'static str]` so the existing
+// `[&str]`-shaped call-sites keep working unchanged.
 
-/// Val bar top arm (cells 0..CROSSHAIR_CENTER_CELL, brightest → mid).
-/// Devanagari independent vowels — the script sits on the top arm so
-/// the cross reads as a typographic compass with one script per arm.
-pub const ARM_TOP_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{0905}", // अ A
-    "\u{0906}", // आ AA
-    "\u{0907}", // इ I
-    "\u{0908}", // ई II
-    "\u{0909}", // उ U
-    "\u{090A}", // ऊ UU
-    "\u{090B}", // ऋ R-VOCALIC
-    "\u{090F}", // ए E
-    "\u{0910}", // ऐ AI
-    "\u{0913}", // ओ O
-];
+/// Cached `&'static [&'static str]` derived from a Vec<String> in the
+/// spec. The spec is itself cached; leaking the per-glyph strings
+/// costs one allocation per glyph per process, which is trivial
+/// (~40 glyphs total) and avoids spreading `String` ownership
+/// through the render hot path.
+fn leak_glyphs(v: &[String]) -> &'static [&'static str] {
+    let slice: Vec<&'static str> = v
+        .iter()
+        .map(|s| &*Box::leak(s.clone().into_boxed_str()))
+        .collect();
+    Box::leak(slice.into_boxed_slice())
+}
 
-/// Val bar bottom arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
-/// mid → darkest). Egyptian hieroglyphs — script contrast with the
-/// Devanagari top arm across the wheel's vertical axis.
-pub const ARM_BOTTOM_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{13080}", // 𓂀 — Eye of Horus (wedjat)
-    "\u{132F9}", // 𓋹 — ankh
-    "\u{132BD}", // 𓊽 — djed pillar
-    "\u{1308D}", // 𓂍 — arm holding stick
-    "\u{1328A}", // 𓊊 — boat / bark
-    "\u{132C0}", // 𓋀 — west sign
-    "\u{13180}", // 𓆀 — serpent
-    "\u{1320C}", // 𓈌 — akhet (horizon)
-    "\u{1313F}", // 𓄿 — Egyptian vulture (A)
-    "\u{13099}", // 𓂙 — finger
-];
+/// Hue ring sacred-script glyphs, clockwise from 12 o'clock.
+/// Backed by `color_picker.json`'s `hue_ring_glyphs`. Three 8-glyph
+/// arcs today: Devanagari (top-right), Hebrew (bottom-right),
+/// Tibetan (bottom-left → top-left). Each glyph indexes directly
+/// into `hue_slot_positions[i]`.
+pub fn hue_ring_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().hue_ring_glyphs))
+}
 
-/// Sat bar left arm (cells 0..CROSSHAIR_CENTER_CELL, desaturated →
-/// mid). Tibetan consonants not used in the hue ring — gives the
-/// left-of-center arm its own distinct script.
-pub const ARM_LEFT_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{0F49}", // ཉ NYA
-    "\u{0F50}", // ཐ THA
-    "\u{0F51}", // ད DA
-    "\u{0F53}", // ན NA
-    "\u{0F55}", // ཕ PHA
-    "\u{0F56}", // བ BA
-    "\u{0F59}", // ཙ TSA
-    "\u{0F5E}", // ཞ ZHA
-    "\u{0F62}", // ར RA
-    "\u{0F66}", // ས SA
-];
+/// Val bar top arm glyphs (brightest → mid).
+pub fn arm_top_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_top_glyphs))
+}
 
-/// Sat bar right arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
-/// mid → saturated). Hebrew letters beyond the ring's first 8 — script
-/// contrast with the Tibetan left arm across the wheel's horizontal
-/// axis.
-pub const ARM_RIGHT_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{05D8}", // ט TET
-    "\u{05D9}", // י YOD
-    "\u{05DB}", // כ KAF
-    "\u{05DC}", // ל LAMED
-    "\u{05DE}", // מ MEM
-    "\u{05E0}", // נ NUN
-    "\u{05E1}", // ס SAMEKH
-    "\u{05E2}", // ע AYIN
-    "\u{05E4}", // פ PE
-    "\u{05E6}", // צ TSADE
-];
+/// Val bar bottom arm glyphs (mid → darkest). Typically Egyptian
+/// hieroglyphs; cosmic-text needs an explicit font hint for these —
+/// see [`arm_bottom_font`].
+pub fn arm_bottom_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_bottom_glyphs))
+}
 
-/// Center wheel preview glyph — ॐ (U+0950, Devanagari Om). Replaces
-/// the earlier ✦ dingbat as the focal point of the mandala-shaped
-/// picker. Rendered at `layout.preview_size = font_size * 2.0`.
-pub const CENTER_PREVIEW_GLYPH: &str = "\u{0950}";
+/// Sat bar left arm glyphs (desaturated → mid).
+pub fn arm_left_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_left_glyphs))
+}
+
+/// Sat bar right arm glyphs (mid → saturated).
+pub fn arm_right_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_right_glyphs))
+}
+
+/// Central preview glyph — doubles as the commit button on the ॐ.
+pub fn center_preview_glyph() -> &'static str {
+    static CACHE: OnceLock<&'static str> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Box::leak(load_spec().center_preview_glyph.clone().into_boxed_str())
+    })
+}
+
+/// Explicit font family the renderer should pin when shaping
+/// `arm_bottom_glyphs`. `None` if the spec didn't set one — in which
+/// case cosmic-text's default fallback picks a face.
+pub fn arm_bottom_font() -> Option<baumhard::font::fonts::AppFont> {
+    load_spec().arm_bottom_font
+}
 
 /// What a theme-variable quick-pick chip commits when clicked or
 /// Enter-activated with focus.
@@ -183,17 +157,32 @@ pub struct ThemeChip {
     pub action: ChipAction,
 }
 
-/// Theme-variable quick-pick chips shown below the wheel. Replaces the
-/// prior `(&str, &str)` tuple where an empty string was a stringly-typed
-/// "reset" sentinel — `ChipAction` makes the intent explicit at the
-/// type level.
-pub const THEME_CHIPS: &[ThemeChip] = &[
-    ThemeChip { label: "--accent", action: ChipAction::Var("var(--accent)") },
-    ThemeChip { label: "--bg", action: ChipAction::Var("var(--bg)") },
-    ThemeChip { label: "--fg", action: ChipAction::Var("var(--fg)") },
-    ThemeChip { label: "--edge", action: ChipAction::Var("var(--edge)") },
-    ThemeChip { label: "reset", action: ChipAction::Reset },
-];
+/// Theme-variable quick-pick chips shown below the wheel.
+///
+/// Backed by [`color_picker.json`](../widgets/color_picker.json). The
+/// JSON chip specs are translated into `ThemeChip` once at first
+/// access — labels and `ChipAction::Var` names are leaked to
+/// `&'static str` so this function's return type stays a thin
+/// reference and call-sites don't need lifetime gymnastics.
+pub fn theme_chips() -> &'static [ThemeChip] {
+    static CACHE: OnceLock<&'static [ThemeChip]> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let chips: Vec<ThemeChip> = load_spec()
+            .chips
+            .iter()
+            .map(|c| ThemeChip {
+                label: Box::leak(c.label.clone().into_boxed_str()),
+                action: match &c.action {
+                    ChipActionSpec::Var { name } => {
+                        ChipAction::Var(Box::leak(name.clone().into_boxed_str()))
+                    }
+                    ChipActionSpec::Reset => ChipAction::Reset,
+                },
+            })
+            .collect();
+        Box::leak(chips.into_boxed_slice())
+    })
+}
 
 // =============================================================
 // Target abstraction
@@ -689,7 +678,7 @@ pub fn compute_color_picker_layout(
     // legible even in extreme cases.
     let font_size: f32 = 22.0_f32.min(screen_h / 12.0).max(8.0);
     let char_width = font_size * 0.6;
-    let ring_font_size = font_size * HUE_RING_FONT_SCALE;
+    let ring_font_size = font_size * hue_ring_font_scale();
 
     // Cell-advance units from geometry, with floor fallbacks so the
     // layout still produces sane numbers when called with a stubbed
@@ -802,16 +791,17 @@ pub fn compute_color_picker_layout(
     );
 
     // ---- Theme chips row ----
+    let chips = theme_chips();
     let chip_row_y = center.1 + outer_radius + font_size * 1.5;
     let chip_height = font_size * 1.4;
-    let mut chip_positions: Vec<(f32, f32, f32)> = Vec::with_capacity(THEME_CHIPS.len());
-    let total_chip_width: f32 = THEME_CHIPS
+    let mut chip_positions: Vec<(f32, f32, f32)> = Vec::with_capacity(chips.len());
+    let total_chip_width: f32 = chips
         .iter()
         .map(|c| (c.label.chars().count() + 4) as f32 * char_width)
         .sum::<f32>()
-        + (THEME_CHIPS.len().saturating_sub(1)) as f32 * 6.0;
+        + (chips.len().saturating_sub(1)) as f32 * 6.0;
     let mut x = center.0 - total_chip_width * 0.5;
-    for chip in THEME_CHIPS {
+    for chip in chips {
         let w = (chip.label.chars().count() + 4) as f32 * char_width;
         chip_positions.push((x, chip_row_y, w));
         x += w + 6.0;
@@ -1106,7 +1096,7 @@ mod tests {
     fn layout_includes_one_chip_per_theme_entry() {
         let g = sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
-        assert_eq!(layout.chip_positions.len(), THEME_CHIPS.len());
+        assert_eq!(layout.chip_positions.len(), theme_chips().len());
     }
 
     #[test]
@@ -1417,19 +1407,19 @@ mod tests {
         assert!((vcy - layout.center.1).abs() < 0.1);
         // Left arm = 10 cells (0..CROSSHAIR_CENTER_CELL).
         assert_eq!(CROSSHAIR_CENTER_CELL, 10);
-        assert_eq!(ARM_LEFT_GLYPHS.len(), 10);
+        assert_eq!(arm_left_glyphs().len(), 10);
         // Right arm = 10 cells (CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT).
         assert_eq!(SAT_CELL_COUNT - CROSSHAIR_CENTER_CELL - 1, 10);
-        assert_eq!(ARM_RIGHT_GLYPHS.len(), 10);
+        assert_eq!(arm_right_glyphs().len(), 10);
         // Top arm = 10 cells, bottom arm = 10 cells.
-        assert_eq!(ARM_TOP_GLYPHS.len(), 10);
-        assert_eq!(ARM_BOTTOM_GLYPHS.len(), 10);
+        assert_eq!(arm_top_glyphs().len(), 10);
+        assert_eq!(arm_bottom_glyphs().len(), 10);
         // Four arms × 10 glyphs = 40 total.
         assert_eq!(
-            ARM_TOP_GLYPHS.len()
-                + ARM_BOTTOM_GLYPHS.len()
-                + ARM_LEFT_GLYPHS.len()
-                + ARM_RIGHT_GLYPHS.len(),
+            arm_top_glyphs().len()
+                + arm_bottom_glyphs().len()
+                + arm_left_glyphs().len()
+                + arm_right_glyphs().len(),
             40,
         );
     }
@@ -1468,7 +1458,7 @@ mod tests {
         }
         // Slots 0-7 Devanagari
         for i in 0..8 {
-            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            let cp = first_cp(hue_ring_glyphs()[i]);
             assert!(
                 (0x0900..=0x097F).contains(&cp),
                 "slot {i} codepoint U+{cp:04X} not in Devanagari",
@@ -1476,7 +1466,7 @@ mod tests {
         }
         // Slots 8-15 Hebrew
         for i in 8..16 {
-            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            let cp = first_cp(hue_ring_glyphs()[i]);
             assert!(
                 (0x0590..=0x05FF).contains(&cp),
                 "slot {i} codepoint U+{cp:04X} not in Hebrew",
@@ -1484,7 +1474,7 @@ mod tests {
         }
         // Slots 16-23 Tibetan
         for i in 16..24 {
-            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            let cp = first_cp(hue_ring_glyphs()[i]);
             assert!(
                 (0x0F00..=0x0FFF).contains(&cp),
                 "slot {i} codepoint U+{cp:04X} not in Tibetan",
@@ -1502,7 +1492,7 @@ mod tests {
             s.chars().next().expect("glyph string non-empty") as u32
         }
         // Top arm: Devanagari (U+0900–U+097F)
-        for (i, g) in ARM_TOP_GLYPHS.iter().enumerate() {
+        for (i, g) in arm_top_glyphs().iter().enumerate() {
             let cp = first_cp(g);
             assert!(
                 (0x0900..=0x097F).contains(&cp),
@@ -1510,7 +1500,7 @@ mod tests {
             );
         }
         // Bottom arm: Egyptian Hieroglyphs (U+13000–U+1342F)
-        for (i, g) in ARM_BOTTOM_GLYPHS.iter().enumerate() {
+        for (i, g) in arm_bottom_glyphs().iter().enumerate() {
             let cp = first_cp(g);
             assert!(
                 (0x13000..=0x1342F).contains(&cp),
@@ -1518,7 +1508,7 @@ mod tests {
             );
         }
         // Left arm: Tibetan (U+0F00–U+0FFF)
-        for (i, g) in ARM_LEFT_GLYPHS.iter().enumerate() {
+        for (i, g) in arm_left_glyphs().iter().enumerate() {
             let cp = first_cp(g);
             assert!(
                 (0x0F00..=0x0FFF).contains(&cp),
@@ -1526,7 +1516,7 @@ mod tests {
             );
         }
         // Right arm: Hebrew (U+0590–U+05FF)
-        for (i, g) in ARM_RIGHT_GLYPHS.iter().enumerate() {
+        for (i, g) in arm_right_glyphs().iter().enumerate() {
             let cp = first_cp(g);
             assert!(
                 (0x0590..=0x05FF).contains(&cp),

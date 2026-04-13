@@ -2451,18 +2451,19 @@ fn build_color_picker_overlay_tree(
     layout: &crate::application::color_picker::ColorPickerLayout,
 ) -> Tree<GfxElement, GfxMutator> {
     use crate::application::color_picker::{
-        hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, ARM_BOTTOM_GLYPHS,
-        ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS, ARM_TOP_GLYPHS, CENTER_PREVIEW_GLYPH,
-        CROSSHAIR_CENTER_CELL, HUE_RING_GLYPHS, PickerHit, SAT_CELL_COUNT, THEME_CHIPS,
+        arm_bottom_font, arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs,
+        center_preview_glyph, hue_ring_glyphs, hue_slot_to_degrees, sat_cell_to_value,
+        theme_chips, val_cell_to_value, CROSSHAIR_CENTER_CELL, PickerHit, SAT_CELL_COUNT,
         VAL_CELL_COUNT,
     };
+    use crate::application::widgets::color_picker_widget::load_spec;
     use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
 
-    /// Scale factor applied to the font size AND bounds of the
-    /// currently-hovered cell. A value of 1.3 reads as "this one's
-    /// hot" without pushing into neighbor cells (cell_box_w
-    /// reserves ~40% padding around each glyph, so 1.3× still fits).
-    const HOVER_SCALE: f32 = 1.3;
+    // Scale factor applied to the font size AND bounds of the
+    // currently-hovered cell. Sourced from the widget spec so the
+    // ratio stays in one place (the JSON) — the layout pure-fn
+    // doesn't need it, only the render path.
+    let hover_scale: f32 = load_spec().geometry.hover_scale;
 
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
     let mut id_counter: usize = 1;
@@ -2534,13 +2535,15 @@ fn build_color_picker_overlay_tree(
     let ring_box_w = ring_font_size * 1.8;
     let cell_box_w = (layout.cell_advance * 1.4).max(font_size * 1.5);
 
-    // Title. In contextual mode show the target label; in standalone
-    // mode the bound target is empty and we render a generic
-    // "palette" heading.
+    // Title. In contextual mode the bound target's label substitutes
+    // into the template; in standalone mode the spec's standalone
+    // title renders verbatim. Both strings live in the widget JSON.
+    let spec = load_spec();
     let title_text = if geometry.target_label.is_empty() {
-        "\u{0950} color palette".to_string()
+        spec.title_template_standalone.clone()
     } else {
-        format!("\u{0950} {} color", geometry.target_label)
+        spec.title_template_contextual
+            .replace("{target_label}", geometry.target_label)
     };
     push_area(
         &mut tree,
@@ -2559,7 +2562,7 @@ fn build_color_picker_overlay_tree(
     // from its angular position on the ring. The hovered slot (if
     // any) draws at HOVER_SCALE and brighter; the cyan selection
     // ring was removed in favor of this hover-grow cue.
-    for (i, &ring_glyph) in HUE_RING_GLYPHS.iter().enumerate() {
+    for (i, &ring_glyph) in hue_ring_glyphs().iter().enumerate() {
         let hue = hue_slot_to_degrees(i);
         let rgb = hsv_to_rgb(hue, 1.0, 1.0);
         let is_hovered = matches!(geometry.hovered_hit, Some(PickerHit::Hue(h)) if h == i);
@@ -2568,7 +2571,7 @@ fn build_color_picker_overlay_tree(
         } else {
             rgb_to_cosmic_color(rgb)
         };
-        let scale = if is_hovered { HOVER_SCALE } else { 1.0 };
+        let scale = if is_hovered { hover_scale } else { 1.0 };
         let pos = layout.hue_slot_positions[i];
         let fs = ring_font_size * scale;
         let bw = ring_box_w * scale;
@@ -2586,15 +2589,12 @@ fn build_color_picker_overlay_tree(
         );
     }
 
-    // Hint footer — updated for new gestures: click previews, ॐ
-    // commits (contextual) or applies-to-selection (standalone),
-    // drag the wheel from its interior to move it.
-    let hint_text =
-        "Esc cancel  \u{00B7}  \u{0950} commit  \u{00B7}  click previews  \u{00B7}  drag to move";
+    // Hint footer — sourced from the widget spec so the gestures
+    // copy lives next to the rest of the widget definition.
     push_area(
         &mut tree,
         &mut id_counter,
-        hint_text,
+        spec.hint_text.as_str(),
         cosmic_text::Color::rgba(140, 140, 150, 255),
         font_size * 0.85,
         font_size * 0.85,
@@ -2630,11 +2630,11 @@ fn build_color_picker_overlay_tree(
             rgb_to_cosmic_color(base_rgb)
         };
         let glyph = if i < CROSSHAIR_CENTER_CELL {
-            ARM_LEFT_GLYPHS[i]
+            arm_left_glyphs()[i]
         } else {
-            ARM_RIGHT_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
+            arm_right_glyphs()[i - CROSSHAIR_CENTER_CELL - 1]
         };
-        let scale = if is_hovered { HOVER_SCALE } else { 1.0 };
+        let scale = if is_hovered { hover_scale } else { 1.0 };
         let (cx, cy) = layout.sat_cell_positions[i];
         let fs = font_size * scale;
         let bw = cell_box_w * scale;
@@ -2671,15 +2671,17 @@ fn build_color_picker_overlay_tree(
         // hieroglyphs as tofu. Routing through the compiled font id
         // map guarantees shaping hits Noto Sans Egyptian Hieroglyphs
         // (loaded at startup; see `lib/baumhard/src/font/fonts.rs`).
+        // The exact font is sourced from the widget spec
+        // (`arm_bottom_font`).
         let (glyph, font) = if i < CROSSHAIR_CENTER_CELL {
-            (ARM_TOP_GLYPHS[i], None)
+            (arm_top_glyphs()[i], None)
         } else {
             (
-                ARM_BOTTOM_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1],
-                Some(baumhard::font::fonts::AppFont::NotoSansEgyptianHieroglyphsRegular),
+                arm_bottom_glyphs()[i - CROSSHAIR_CENTER_CELL - 1],
+                arm_bottom_font(),
             )
         };
-        let scale = if is_hovered { HOVER_SCALE } else { 1.0 };
+        let scale = if is_hovered { hover_scale } else { 1.0 };
         let (cx, cy) = layout.val_cell_positions[i];
         let fs = font_size * scale;
         let bw = cell_box_w * scale;
@@ -2709,12 +2711,12 @@ fn build_color_picker_overlay_tree(
     } else {
         rgb_to_cosmic_color(preview_rgb)
     };
-    let preview_scale = if commit_hovered { HOVER_SCALE } else { 1.0 };
+    let preview_scale = if commit_hovered { hover_scale } else { 1.0 };
     let scaled_preview = preview_size * preview_scale;
     push_area(
         &mut tree,
         &mut id_counter,
-        CENTER_PREVIEW_GLYPH,
+        center_preview_glyph(),
         preview_color,
         scaled_preview,
         scaled_preview,
@@ -2748,7 +2750,7 @@ fn build_color_picker_overlay_tree(
     // focus (driven by Tab-cycling through chips) uses the existing
     // caret + cyan color so keyboard and mouse users get distinct
     // affordances.
-    for (i, chip) in THEME_CHIPS.iter().enumerate() {
+    for (i, chip) in theme_chips().iter().enumerate() {
         let focused = geometry.chip_focus == Some(i);
         let hovered = matches!(geometry.hovered_hit, Some(PickerHit::Chip(h)) if h == i);
         let prefix = if focused { "\u{25B8} " } else { "  " };
@@ -2760,7 +2762,7 @@ fn build_color_picker_overlay_tree(
         } else {
             cosmic_text::Color::rgba(200, 200, 200, 255)
         };
-        let scale = if hovered { HOVER_SCALE } else { 1.0 };
+        let scale = if hovered { hover_scale } else { 1.0 };
         let (cx, cy, cw) = layout.chip_positions[i];
         push_area(
             &mut tree,

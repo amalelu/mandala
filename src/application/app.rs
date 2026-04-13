@@ -3976,8 +3976,8 @@ fn open_picker_inner(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        ARM_BOTTOM_GLYPHS, ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS, ARM_TOP_GLYPHS, ColorPickerState,
-        HUE_RING_FONT_SCALE, HUE_RING_GLYPHS,
+        arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs, hue_ring_font_scale,
+        hue_ring_glyphs, ColorPickerState,
     };
 
     // Measure the widest shaped advance across every crosshair-arm
@@ -3987,23 +3987,29 @@ fn open_picker_inner(
     // keeps `compute_color_picker_layout` pure. Both measurements
     // happen behind the font-system write lock, which is also what
     // the renderer's buffer builders need, so we grab it once.
-    let base_font_size: f32 = 22.0;
-    let ring_font_size = base_font_size * HUE_RING_FONT_SCALE;
+    // Base font sourced from the widget spec. Kept as the local
+    // shadow `base_font_size` so the measurement loop reads the same
+    // value as the layout does at render time.
+    let base_font_size: f32 =
+        crate::application::widgets::color_picker_widget::load_spec()
+            .geometry
+            .font_size;
+    let ring_font_size = base_font_size * hue_ring_font_scale();
     let (max_cell_advance, max_ring_advance) = {
         let mut font_system = baumhard::font::fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
         let mut crosshair: Vec<&str> = Vec::with_capacity(40);
-        crosshair.extend(ARM_TOP_GLYPHS.iter().copied());
-        crosshair.extend(ARM_BOTTOM_GLYPHS.iter().copied());
-        crosshair.extend(ARM_LEFT_GLYPHS.iter().copied());
-        crosshair.extend(ARM_RIGHT_GLYPHS.iter().copied());
+        crosshair.extend(arm_top_glyphs().iter().copied());
+        crosshair.extend(arm_bottom_glyphs().iter().copied());
+        crosshair.extend(arm_left_glyphs().iter().copied());
+        crosshair.extend(arm_right_glyphs().iter().copied());
         let cell = crate::application::renderer::measure_max_glyph_advance(
             &mut font_system,
             &crosshair,
             base_font_size,
         );
-        let ring_glyphs: Vec<&str> = HUE_RING_GLYPHS.iter().copied().collect();
+        let ring_glyphs: Vec<&str> = hue_ring_glyphs().iter().copied().collect();
         let ring = crate::application::renderer::measure_max_glyph_advance(
             &mut font_system,
             &ring_glyphs,
@@ -4471,11 +4477,11 @@ fn apply_picker_chip(
     picker_dirty: &mut bool,
 ) {
     use crate::application::color_picker::{
-        ChipAction, ColorPickerState, CommitMode, PickerHandle, THEME_CHIPS,
+        theme_chips, ChipAction, ColorPickerState, CommitMode, PickerHandle,
     };
     use crate::application::document::ColorPickerPreview;
 
-    let chip = match THEME_CHIPS.get(chip_idx) {
+    let chip = match theme_chips().get(chip_idx) {
         Some(c) => *c,
         None => return,
     };
@@ -4597,7 +4603,7 @@ fn handle_color_picker_key(
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::{ColorPickerState, THEME_CHIPS};
+    use crate::application::color_picker::{theme_chips, ColorPickerState};
 
     let name = key_name.as_deref();
     let is_standalone = state.is_standalone();
@@ -4641,7 +4647,7 @@ fn handle_color_picker_key(
         }
         Some("tab") => {
             if let ColorPickerState::Open { chip_focus, .. } = state {
-                let n = THEME_CHIPS.len();
+                let n = theme_chips().len();
                 *chip_focus = match *chip_focus {
                     None => Some(0),
                     Some(i) if i + 1 >= n => None,

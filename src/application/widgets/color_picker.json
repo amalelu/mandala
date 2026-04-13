@@ -1,0 +1,52 @@
+{
+  "_comment": "Widget spec for the glyph-wheel color picker. Loaded once at startup via `include_str!` so WASM can read it. First step toward user-authored widgets — everything that defines the picker's *appearance* (glyphs, proportions, chip list, copy) lives here; the pure-function layout math stays in Rust because it depends on measured shaped-glyph advances and screen dimensions that JSON can't express.",
+
+  "geometry": {
+    "_comment": "Size constants shared by the layout and render paths.",
+    "font_size": 22.0,
+    "hue_ring_font_scale": 1.7,
+    "ring_box_scale": 1.8,
+    "cell_box_scale": 1.4,
+    "preview_size_scale": 2.5,
+    "bar_to_ring_padding_scale": 1.1,
+    "hover_scale": 1.3
+  },
+
+  "hue_ring_glyphs": [
+    "क", "ख", "ग", "घ", "च", "ज", "ट", "ड",
+    "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח",
+    "ཀ", "ཁ", "ག", "ང", "ཅ", "ཏ", "པ", "མ"
+  ],
+
+  "arm_top_glyphs": [
+    "अ", "आ", "इ", "ई", "उ", "ऊ", "ऋ", "ए", "ऐ", "ओ"
+  ],
+
+  "arm_bottom_glyphs": [
+    "𓂀", "𓋹", "𓊽", "𓂍", "𓊊", "𓋀", "𓆀", "𓈌", "𓄿", "𓂙"
+  ],
+
+  "arm_left_glyphs": [
+    "ཉ", "ཐ", "ད", "ན", "ཕ", "བ", "ཙ", "ཞ", "ར", "ས"
+  ],
+
+  "arm_right_glyphs": [
+    "ט", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ"
+  ],
+
+  "center_preview_glyph": "ॐ",
+
+  "arm_bottom_font": "NotoSansEgyptianHieroglyphsRegular",
+
+  "chips": [
+    { "label": "--accent", "action": { "kind": "var", "name": "var(--accent)" } },
+    { "label": "--bg",     "action": { "kind": "var", "name": "var(--bg)" } },
+    { "label": "--fg",     "action": { "kind": "var", "name": "var(--fg)" } },
+    { "label": "--edge",   "action": { "kind": "var", "name": "var(--edge)" } },
+    { "label": "reset",    "action": { "kind": "reset" } }
+  ],
+
+  "title_template_contextual": "ॐ {target_label} color",
+  "title_template_standalone": "ॐ color palette",
+  "hint_text": "Esc cancel  ·  ॐ commit  ·  click previews  ·  drag to move"
+}
