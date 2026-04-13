@@ -44,7 +44,13 @@ fn complete_color(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Complet
             // to the glyph-wheel picker. Suggest them alongside the
             // kv-key forms.
             if *index == 0 {
-                out.extend(prefix_filter(&["pick"], state.partial));
+                out.extend(prefix_filter(&["pick", "picker"], state.partial));
+            }
+            // `color picker` expects `on` / `off` as the next token.
+            if *index == 1
+                && matches!(state.tokens.first().map(String::as_str), Some("picker"))
+            {
+                out.extend(prefix_filter(&["on", "off"], state.partial));
             }
             out
         }
@@ -143,7 +149,25 @@ fn execute_color(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     //  - `color bg | text | border` — pick a color for that axis on
     //    the current selection (node axis for nodes, single-color
     //    target for edges/portals)
+    //  - `color picker on` — open the picker as a persistent
+    //    standalone palette (no target; commit applies to selection)
+    //  - `color picker off` — close any open picker
     if let Some(verb) = args.positional(0) {
+        if verb == "picker" {
+            match args.positional(1) {
+                Some("on") => {
+                    eff.open_color_picker_standalone = true;
+                    eff.close_console = true;
+                    return ExecResult::ok_empty();
+                }
+                Some("off") => {
+                    eff.close_color_picker = true;
+                    eff.close_console = true;
+                    return ExecResult::ok_empty();
+                }
+                _ => return ExecResult::err("usage: color picker on | color picker off"),
+            }
+        }
         if let Some(target) = picker_target_for(verb, &eff.document.selection) {
             eff.open_color_picker = Some(target);
             eff.close_console = true;

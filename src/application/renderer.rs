@@ -2453,10 +2453,16 @@ fn build_color_picker_overlay_tree(
     use crate::application::color_picker::{
         hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, ARM_BOTTOM_GLYPHS,
         ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS, ARM_TOP_GLYPHS, CENTER_PREVIEW_GLYPH,
-        CROSSHAIR_CENTER_CELL, HUE_RING_GLYPHS, HUE_SLOT_COUNT, SAT_CELL_COUNT, THEME_CHIPS,
+        CROSSHAIR_CENTER_CELL, HUE_RING_GLYPHS, PickerHit, SAT_CELL_COUNT, THEME_CHIPS,
         VAL_CELL_COUNT,
     };
     use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
+
+    /// Scale factor applied to the font size AND bounds of the
+    /// currently-hovered cell. A value of 1.3 reads as "this one's
+    /// hot" without pushing into neighbor cells (cell_box_w
+    /// reserves ~40% padding around each glyph, so 1.3× still fits).
+    const HOVER_SCALE: f32 = 1.3;
 
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
     let mut id_counter: usize = 1;
@@ -2468,6 +2474,14 @@ fn build_color_picker_overlay_tree(
     // — matches the legacy `create_centered_cell_buffer` path. Use
     // `false` for left-aligned chrome (title, hint, hex readout,
     // chips).
+    //
+    // `font` pins a specific `AppFont` for this area's region span.
+    // Needed for glyphs outside the Basic Multilingual Plane — the
+    // SMP-range Egyptian hieroglyphs in particular — where
+    // cosmic-text's default fallback may pick a non-covering font
+    // and render as tofu or zero-width. Pass `None` for ordinary
+    // Latin / BMP glyphs; cosmic-text's fallback handles those
+    // fine.
     fn push_area(
         tree: &mut Tree<GfxElement, GfxMutator>,
         id_counter: &mut usize,
@@ -2478,6 +2492,7 @@ fn build_color_picker_overlay_tree(
         pos: (f32, f32),
         bounds: (f32, f32),
         centered: bool,
+        font: Option<baumhard::font::fonts::AppFont>,
     ) {
         let mut area = GlyphArea::new_with_str(
             text,
@@ -2498,7 +2513,7 @@ fn build_color_picker_overlay_tree(
             let mut regions = ColorFontRegions::new_empty();
             regions.submit_region(ColorFontRegion::new(
                 ColorFontRange::new(0, cluster_count),
-                None,
+                font,
                 Some(rgba),
             ));
             area.regions = regions;
@@ -2512,11 +2527,21 @@ fn build_color_picker_overlay_tree(
 
     let font_size = layout.font_size;
     let ring_font_size = layout.ring_font_size;
-    let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
-    let cell_box_w = (layout.cell_advance * 1.2).max(font_size * 1.5);
+    // Widen box reservations past the base glyph so hover-grow has
+    // room to render at HOVER_SCALE without clipping neighbors, and
+    // SMP glyphs (Egyptian hieroglyphs especially) shape without
+    // hitting the right bound.
+    let ring_box_w = ring_font_size * 1.8;
+    let cell_box_w = (layout.cell_advance * 1.4).max(font_size * 1.5);
 
-    // Title
-    let title_text = format!("\u{0950} {} color", geometry.target_label);
+    // Title. In contextual mode show the target label; in standalone
+    // mode the bound target is empty and we render a generic
+    // "palette" heading.
+    let title_text = if geometry.target_label.is_empty() {
+        "\u{0950} color palette".to_string()
+    } else {
+        format!("\u{0950} {} color", geometry.target_label)
+    };
     push_area(
         &mut tree,
         &mut id_counter,
@@ -2527,30 +2552,45 @@ fn build_color_picker_overlay_tree(
         layout.title_pos,
         (font_size * 24.0, font_size * 1.5),
         false,
+        None,
     );
 
-    // Hue ring
-    for i in 0..HUE_SLOT_COUNT {
+    // Hue ring. Each slot carries a fixed glyph and a hue derived
+    // from its angular position on the ring. The hovered slot (if
+    // any) draws at HOVER_SCALE and brighter; the cyan selection
+    // ring was removed in favor of this hover-grow cue.
+    for (i, &ring_glyph) in HUE_RING_GLYPHS.iter().enumerate() {
         let hue = hue_slot_to_degrees(i);
         let rgb = hsv_to_rgb(hue, 1.0, 1.0);
-        let color = rgb_to_cosmic_color(rgb);
+        let is_hovered = matches!(geometry.hovered_hit, Some(PickerHit::Hue(h)) if h == i);
+        let color = if is_hovered {
+            highlight_hovered_cell_color(rgb)
+        } else {
+            rgb_to_cosmic_color(rgb)
+        };
+        let scale = if is_hovered { HOVER_SCALE } else { 1.0 };
         let pos = layout.hue_slot_positions[i];
+        let fs = ring_font_size * scale;
+        let bw = ring_box_w * scale;
         push_area(
             &mut tree,
             &mut id_counter,
-            HUE_RING_GLYPHS[i],
+            ring_glyph,
             color,
-            ring_font_size,
-            ring_font_size,
-            (pos.0 - ring_box_w * 0.5, pos.1 - ring_font_size * 0.5),
-            (ring_box_w, ring_font_size * 1.5),
+            fs,
+            fs,
+            (pos.0 - bw * 0.5, pos.1 - fs * 0.5),
+            (bw, fs * 1.5),
             true,
+            None,
         );
     }
 
-    // Hint footer
+    // Hint footer — updated for new gestures: click previews, ॐ
+    // commits (contextual) or applies-to-selection (standalone),
+    // drag the wheel from its interior to move it.
     let hint_text =
-        "Esc cancel  \u{00B7}  Enter commit  \u{00B7}  h/s/v nudge  \u{00B7}  Tab chips";
+        "Esc cancel  \u{00B7}  \u{0950} commit  \u{00B7}  click previews  \u{00B7}  drag to move";
     push_area(
         &mut tree,
         &mut id_counter,
@@ -2561,9 +2601,13 @@ fn build_color_picker_overlay_tree(
         layout.hint_pos,
         (font_size * 30.0, font_size * 1.5),
         false,
+        None,
     );
 
-    // Sat / val bars (skip centre cell — that's the preview glyph slot)
+    // Sat / val bars (skip centre cell — that's the preview glyph slot).
+    // The "selected" cell (derived from current HSV) gets a subtle
+    // brighten; the hovered cell gets the same brighten plus
+    // HOVER_SCALE font/bounds growth.
     let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0))
         .round()
         .clamp(0.0, (SAT_CELL_COUNT - 1) as f32) as usize;
@@ -2577,7 +2621,10 @@ fn build_color_picker_overlay_tree(
         }
         let cell_sat = sat_cell_to_value(i);
         let base_rgb = hsv_to_rgb(geometry.hue_deg, cell_sat, geometry.val);
-        let color = if i == current_sat_cell {
+        let is_hovered = matches!(geometry.hovered_hit, Some(PickerHit::SatCell(h)) if h == i);
+        let color = if is_hovered {
+            highlight_hovered_cell_color(base_rgb)
+        } else if i == current_sat_cell {
             highlight_selected_cell_color(base_rgb)
         } else {
             rgb_to_cosmic_color(base_rgb)
@@ -2587,17 +2634,21 @@ fn build_color_picker_overlay_tree(
         } else {
             ARM_RIGHT_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
         };
+        let scale = if is_hovered { HOVER_SCALE } else { 1.0 };
         let (cx, cy) = layout.sat_cell_positions[i];
+        let fs = font_size * scale;
+        let bw = cell_box_w * scale;
         push_area(
             &mut tree,
             &mut id_counter,
             glyph,
             color,
-            font_size,
-            font_size,
-            (cx - cell_box_w * 0.5, cy - font_size * 0.5),
-            (cell_box_w, font_size * 1.5),
+            fs,
+            fs,
+            (cx - bw * 0.5, cy - fs * 0.5),
+            (bw, fs * 1.5),
             true,
+            None,
         );
     }
     for i in 0..VAL_CELL_COUNT {
@@ -2606,62 +2657,74 @@ fn build_color_picker_overlay_tree(
         }
         let cell_val = val_cell_to_value(i);
         let base_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, cell_val);
-        let color = if i == current_val_cell {
+        let is_hovered = matches!(geometry.hovered_hit, Some(PickerHit::ValCell(h)) if h == i);
+        let color = if is_hovered {
+            highlight_hovered_cell_color(base_rgb)
+        } else if i == current_val_cell {
             highlight_selected_cell_color(base_rgb)
         } else {
             rgb_to_cosmic_color(base_rgb)
         };
-        let glyph = if i < CROSSHAIR_CENTER_CELL {
-            ARM_TOP_GLYPHS[i]
+        // Pin the Egyptian hieroglyph font explicitly on the bottom
+        // arm — cosmic-text's fallback pipeline sometimes picks a
+        // non-covering font for SMP-range codepoints, which renders
+        // hieroglyphs as tofu. Routing through the compiled font id
+        // map guarantees shaping hits Noto Sans Egyptian Hieroglyphs
+        // (loaded at startup; see `lib/baumhard/src/font/fonts.rs`).
+        let (glyph, font) = if i < CROSSHAIR_CENTER_CELL {
+            (ARM_TOP_GLYPHS[i], None)
         } else {
-            ARM_BOTTOM_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
+            (
+                ARM_BOTTOM_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1],
+                Some(baumhard::font::fonts::AppFont::NotoSansEgyptianHieroglyphsRegular),
+            )
         };
+        let scale = if is_hovered { HOVER_SCALE } else { 1.0 };
         let (cx, cy) = layout.val_cell_positions[i];
+        let fs = font_size * scale;
+        let bw = cell_box_w * scale;
         push_area(
             &mut tree,
             &mut id_counter,
             glyph,
             color,
-            font_size,
-            font_size,
-            (cx - cell_box_w * 0.5, cy - font_size * 0.5),
-            (cell_box_w, font_size * 1.5),
+            fs,
+            fs,
+            (cx - bw * 0.5, cy - fs * 0.5),
+            (bw, fs * 1.5),
             true,
+            font,
         );
     }
 
-    // Selected hue indicator (cyan outline ring)
-    let current_hue_slot = ((geometry.hue_deg.rem_euclid(360.0) / 360.0)
-        * HUE_SLOT_COUNT as f32)
-        .round() as usize
-        % HUE_SLOT_COUNT;
-    let slot_pos = layout.hue_slot_positions[current_hue_slot];
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        "\u{25EF}",
-        cosmic_text::Color::rgba(0, 229, 255, 255),
-        ring_font_size,
-        ring_font_size,
-        (slot_pos.0 - ring_box_w * 0.5, slot_pos.1 - ring_font_size * 0.5),
-        (ring_box_w, ring_font_size * 1.5),
-        true,
-    );
-
-    // Centre preview glyph ॐ
+    // Centre preview glyph ॐ. Acts as the commit button — hovering
+    // it grows it (makes the affordance visible). The color is the
+    // current HSV preview; hover just brightens slightly toward
+    // white so the focal point reads as "pressable".
     let preview_size = layout.preview_size;
     let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
-    let preview_color = rgb_to_cosmic_color(preview_rgb);
+    let commit_hovered = matches!(geometry.hovered_hit, Some(PickerHit::Commit));
+    let preview_color = if commit_hovered {
+        highlight_hovered_cell_color(preview_rgb)
+    } else {
+        rgb_to_cosmic_color(preview_rgb)
+    };
+    let preview_scale = if commit_hovered { HOVER_SCALE } else { 1.0 };
+    let scaled_preview = preview_size * preview_scale;
     push_area(
         &mut tree,
         &mut id_counter,
         CENTER_PREVIEW_GLYPH,
         preview_color,
-        preview_size,
-        preview_size,
-        layout.preview_pos,
-        (preview_size * 1.5, preview_size * 1.5),
+        scaled_preview,
+        scaled_preview,
+        (
+            layout.preview_pos.0 - (scaled_preview - preview_size) * 0.4,
+            layout.preview_pos.1 - (scaled_preview - preview_size) * 0.5,
+        ),
+        (scaled_preview * 1.5, scaled_preview * 1.5),
         true,
+        None,
     );
 
     // Hex readout
@@ -2677,30 +2740,39 @@ fn build_color_picker_overlay_tree(
             hex_anchor,
             (font_size * 8.0, font_size * 1.5),
             false,
+            None,
         );
     }
 
-    // Theme chips row
+    // Theme chips row — hover applies the "brighter + grow" cue;
+    // focus (driven by Tab-cycling through chips) uses the existing
+    // caret + cyan color so keyboard and mouse users get distinct
+    // affordances.
     for (i, chip) in THEME_CHIPS.iter().enumerate() {
         let focused = geometry.chip_focus == Some(i);
+        let hovered = matches!(geometry.hovered_hit, Some(PickerHit::Chip(h)) if h == i);
         let prefix = if focused { "\u{25B8} " } else { "  " };
         let label = format!("{prefix}{}", chip.label);
         let color = if focused {
             cosmic_text::Color::rgba(0, 229, 255, 255)
+        } else if hovered {
+            cosmic_text::Color::rgba(255, 255, 255, 255)
         } else {
             cosmic_text::Color::rgba(200, 200, 200, 255)
         };
+        let scale = if hovered { HOVER_SCALE } else { 1.0 };
         let (cx, cy, cw) = layout.chip_positions[i];
         push_area(
             &mut tree,
             &mut id_counter,
             &label,
             color,
-            font_size,
-            font_size,
+            font_size * scale,
+            font_size * scale,
             (cx, cy),
-            (cw, layout.chip_height),
+            (cw, layout.chip_height * scale),
             false,
+            None,
         );
     }
 
@@ -3155,6 +3227,20 @@ fn rgb_to_cosmic_color(rgb: [f32; 3]) -> cosmic_text::Color {
 fn highlight_selected_cell_color(rgb: [f32; 3]) -> cosmic_text::Color {
     // Mix 60% toward white.
     let mix = |c: f32| (c + (1.0 - c) * 0.6).clamp(0.0, 1.0);
+    rgb_to_cosmic_color([mix(rgb[0]), mix(rgb[1]), mix(rgb[2])])
+}
+
+/// Highlight a cell under the cursor. Distinct from the selected-
+/// cell mix (which marks the HSV-current cell) so the hovered + the
+/// already-selected cell can both be visually distinguishable — the
+/// hovered one reads "whitest" because of the scale bump AND this
+/// deeper mix, while the selected one stays subtly glowing behind
+/// the hover cursor. A 40% mix toward white is enough to pop against
+/// the hue-saturated background but not so saturated that the glyph
+/// character becomes hard to read.
+#[inline]
+fn highlight_hovered_cell_color(rgb: [f32; 3]) -> cosmic_text::Color {
+    let mix = |c: f32| (c + (1.0 - c) * 0.4).clamp(0.0, 1.0);
     rgb_to_cosmic_color([mix(rgb[0]), mix(rgb[1]), mix(rgb[2])])
 }
 
