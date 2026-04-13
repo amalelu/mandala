@@ -2974,11 +2974,17 @@ const CONSOLE_CHANNEL_PROMPT: usize = 100_000;
 /// [`build_console_overlay_mutator`] (the in-place §B2 update path)
 /// consume this so the two paths cannot drift.
 ///
-/// Every `scrollback_rows × 2` scrollback slot and every
-/// `completion_rows` completion slot is emitted, padding with empty
-/// `""` text when the geometry has fewer items than the layout
-/// allows. The walker shapes nothing for empty text, so the cost
-/// of an empty slot is one allocation-free leaf visit.
+/// Emits `4 + scrollback_rows * 2 + completion_rows + 1` leaves:
+/// the 4 border areas, a `(gutter, text)` pair per scrollback row,
+/// one area per completion row, and one prompt. `scrollback_rows`
+/// and `completion_rows` are the layout's capped counts — they
+/// scale with the underlying geometry, so a count change
+/// (scrollback-grow, a Tab firing a new completion list, window
+/// resize that enlarges the frame) shifts the structural
+/// signature and forces a full rebuild. The mutator path runs
+/// whenever the signature is unchanged, which covers keystroke
+/// input, completion-highlight cycling, and scrollback-alpha
+/// changes as the visible window slides.
 ///
 /// **Channel ordering invariant**: returned in strictly ascending
 /// channel order — the constants above are deliberately spaced so
@@ -3108,48 +3114,55 @@ fn console_overlay_areas(
     let content_top = top + font_size + inner_padding;
     let content_cols = (content_width / measured_char_width).floor() as usize;
 
+    // `scrollback_rows` is `min(scrollback.len(), MAX)`, so every
+    // `slot in 0..scrollback_rows` maps to a populated entry via
+    // `skip + slot`. Signature dispatch (`(scrollback_rows,
+    // completion_rows)`) folds count changes into a structural
+    // shift that takes the full-rebuild path; the in-place mutator
+    // path therefore only runs when the count is unchanged, and
+    // every slot inside the loop is `Some`.
     let skip = geometry.scrollback.len().saturating_sub(scrollback_rows);
     let visible_count = scrollback_rows.max(1);
     for slot in 0..scrollback_rows {
-        let line_opt = geometry.scrollback.get(skip + slot);
+        let line = geometry
+            .scrollback
+            .get(skip + slot)
+            .expect("slot index derived from scrollback_rows is always in-bounds");
         let y = content_top + row_height * slot as f32;
-        let (gutter_text, gutter_color, text_str, text_color) = match line_opt {
-            None => (String::new(), BORDER_COLOR, String::new(), TEXT_COLOR),
-            Some(line) => {
-                let newness = if visible_count <= 1 {
-                    1.0
-                } else {
-                    slot as f32 / (visible_count - 1) as f32
-                };
-                let alpha = lerp_alpha(SCROLLBACK_MIN_ALPHA, 0xff, newness);
-                let (text_color, gutter_color, gutter_glyph) = match line.kind {
-                    ConsoleOverlayLineKind::Input => (
-                        with_alpha(INPUT_ECHO_COLOR, alpha),
-                        with_alpha(INPUT_ECHO_COLOR, alpha),
-                        " ",
-                    ),
-                    ConsoleOverlayLineKind::Output => (
-                        with_alpha(TEXT_COLOR, alpha),
-                        with_alpha(ACCENT_COLOR, alpha),
-                        GUTTER_GLYPH,
-                    ),
-                    ConsoleOverlayLineKind::Error => (
-                        with_alpha(ERROR_COLOR, alpha),
-                        with_alpha(ERROR_COLOR, alpha),
-                        GUTTER_GLYPH,
-                    ),
-                };
-                let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
-                    &line.text,
-                    content_cols,
-                );
-                let gutter = if gutter_glyph == " " {
-                    String::new()
-                } else {
-                    gutter_glyph.to_string()
-                };
-                (gutter, gutter_color, clipped.to_string(), text_color)
-            }
+        let (gutter_text, gutter_color, text_str, text_color) = {
+            let newness = if visible_count <= 1 {
+                1.0
+            } else {
+                slot as f32 / (visible_count - 1) as f32
+            };
+            let alpha = lerp_alpha(SCROLLBACK_MIN_ALPHA, 0xff, newness);
+            let (text_color, gutter_color, gutter_glyph) = match line.kind {
+                ConsoleOverlayLineKind::Input => (
+                    with_alpha(INPUT_ECHO_COLOR, alpha),
+                    with_alpha(INPUT_ECHO_COLOR, alpha),
+                    " ",
+                ),
+                ConsoleOverlayLineKind::Output => (
+                    with_alpha(TEXT_COLOR, alpha),
+                    with_alpha(ACCENT_COLOR, alpha),
+                    GUTTER_GLYPH,
+                ),
+                ConsoleOverlayLineKind::Error => (
+                    with_alpha(ERROR_COLOR, alpha),
+                    with_alpha(ERROR_COLOR, alpha),
+                    GUTTER_GLYPH,
+                ),
+            };
+            let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+                &line.text,
+                content_cols,
+            );
+            let gutter = if gutter_glyph == " " {
+                String::new()
+            } else {
+                gutter_glyph.to_string()
+            };
+            (gutter, gutter_color, clipped.to_string(), text_color)
         };
         out.push((
             CONSOLE_CHANNEL_SCROLLBACK_GUTTER_BASE + slot,
@@ -3175,31 +3188,33 @@ fn console_overlay_areas(
         ));
     }
 
-    // Completion popup rows: same always-emit-N pattern.
+    // Completion popup rows: same guarantee as scrollback —
+    // `completion_rows = min(completions.len(), MAX)`, so every
+    // slot index is `Some`.
     let completion_top = content_top + row_height * scrollback_rows as f32;
     for slot in 0..completion_rows {
-        let comp_opt = geometry.completions.get(slot);
+        let c = geometry
+            .completions
+            .get(slot)
+            .expect("slot index derived from completion_rows is always in-bounds");
         let y = completion_top + row_height * slot as f32;
-        let (text_str, color) = match comp_opt {
-            None => (String::new(), TEXT_COLOR),
-            Some(c) => {
-                let is_selected = geometry.selected_completion == Some(slot);
-                let color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
-                let prefix = if is_selected {
-                    SELECTED_COMPLETION_MARKER
-                } else {
-                    UNSELECTED_COMPLETION_MARKER
-                };
-                let line = match &c.hint {
-                    Some(hint) => format!("{prefix}{}    {}", c.text, hint),
-                    None => format!("{prefix}{}", c.text),
-                };
-                let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
-                    &line,
-                    content_cols,
-                );
-                (clipped.to_string(), color)
-            }
+        let (text_str, color) = {
+            let is_selected = geometry.selected_completion == Some(slot);
+            let color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+            let prefix = if is_selected {
+                SELECTED_COMPLETION_MARKER
+            } else {
+                UNSELECTED_COMPLETION_MARKER
+            };
+            let line = match &c.hint {
+                Some(hint) => format!("{prefix}{}    {}", c.text, hint),
+                None => format!("{prefix}{}", c.text),
+            };
+            let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+                &line,
+                content_cols,
+            );
+            (clipped.to_string(), color)
         };
         out.push((
             CONSOLE_CHANNEL_COMPLETION_BASE + slot,
@@ -4319,6 +4334,44 @@ mod tests {
         assert_eq!(
             console_overlay_signature(&layout_a),
             console_overlay_signature(&layout_b)
+        );
+    }
+
+    /// Scrollback-grow shifts the structural signature — the
+    /// dispatcher must take the full-rebuild path, not the
+    /// in-place mutator path. Without this, a mutator computed
+    /// from N+1 scrollback entries applied to a tree built from
+    /// N would walk off the end and silently drop content. Pins
+    /// the structural-signature contract the dispatcher relies
+    /// on in `rebuild_console_overlay_buffers`.
+    #[test]
+    fn console_signature_shifts_on_scrollback_grow() {
+        baumhard::font::fonts::init();
+
+        let mut g_one = sample_console_geometry();
+        g_one.scrollback = vec![ConsoleOverlayLine {
+            text: "> help".into(),
+            kind: ConsoleOverlayLineKind::Input,
+        }];
+        let layout_one = compute_console_frame_layout(&g_one, 1280.0, 720.0);
+
+        let mut g_two = sample_console_geometry();
+        g_two.scrollback = vec![
+            ConsoleOverlayLine {
+                text: "> help".into(),
+                kind: ConsoleOverlayLineKind::Input,
+            },
+            ConsoleOverlayLine {
+                text: "new output line".into(),
+                kind: ConsoleOverlayLineKind::Output,
+            },
+        ];
+        let layout_two = compute_console_frame_layout(&g_two, 1280.0, 720.0);
+
+        assert_ne!(layout_one.scrollback_rows, layout_two.scrollback_rows);
+        assert_ne!(
+            console_overlay_signature(&layout_one),
+            console_overlay_signature(&layout_two)
         );
     }
 

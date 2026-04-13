@@ -5252,7 +5252,7 @@ fn handle_click(
             // `find_triggered_mutations` returned cloned CustomMutations so
             // we can iterate without holding an immutable borrow on doc.
             for cm in triggered {
-                if cm.timing.as_ref().map_or(false, |t| t.duration_ms > 0) {
+                if cm.timing.as_ref().is_some_and(|t| t.duration_ms > 0) {
                     // Animated: snapshot from/to and start an
                     // instance. The AboutToWait tick interpolates
                     // and commits the final mutation at completion.
