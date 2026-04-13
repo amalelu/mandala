@@ -2495,6 +2495,79 @@ pub struct MindMapTextBuffer {
     pub bounds: (f32, f32),
 }
 
+/// Build a `GlyphModel` mirroring a picker `GlyphArea`'s text +
+/// dominant color/font, used as the model child attached to each
+/// picker GlyphArea by `build_color_picker_overlay_tree`.
+///
+/// Establishes the architectural pattern the user requested in the
+/// color-picker restructure: every picker piece is a (GlyphArea
+/// view + GlyphModel source-of-truth) pair. Today the renderer only
+/// reads the `GlyphArea` (a `GlyphModel` "is essentially stamped
+/// into a GlyphArea" — the matrix's text + regions are produced by
+/// `make_area` directly rather than by `GlyphMatrix::place_in`), so
+/// the model node is structural — present in the tree, ignored by
+/// the renderer's `walk_tree_into_buffers` (which skips
+/// `GlyphModel` and `Void` variants). It exists so future per-glyph
+/// mutation / animation work can target the model and re-stamp into
+/// the parent area without rebuilding the arena.
+///
+/// **Mutator-path interaction**: the §B2 `apply_color_picker_overlay_mutator`
+/// path stays GlyphArea-only — it does not produce mutator children
+/// for these model nodes. That's safe because Baumhard's
+/// `align_child_walks` returns immediately when the mutator node
+/// has no children (`tree_walker.rs:237-240`), so the GlyphModel
+/// child is never traversed by the in-place update path.
+///
+/// Picker GlyphAreas use `ColorFontRegions::single_span` (one region
+/// covering all chars), so the first region carries the
+/// authoritative color + optional font pin for the whole text. We
+/// pull both, drop them into a single-component `GlyphLine`, and
+/// position the model at the same screen-space anchor as the area
+/// so the mirrored matrix is geometrically consistent with the
+/// rendered ink. Float-to-byte color conversion uses `.round()`
+/// (not truncation) so the round-trip through float regions →
+/// byte components → float regions is symmetric to the picker's
+/// own byte→float conversion in `make_area`.
+fn glyph_model_from_picker_area(area: &GlyphArea) -> baumhard::gfx_structs::model::GlyphModel {
+    use baumhard::gfx_structs::model::{GlyphComponent, GlyphLine, GlyphModel};
+    use baumhard::util::color::Color as BaumhardColor;
+    use baumhard::util::ordered_vec2::OrderedVec2;
+
+    let mut model = GlyphModel::new();
+    model.position = OrderedVec2::from_vec2(Vec2::new(area.position.x.0, area.position.y.0));
+
+    if area.text.is_empty() {
+        return model;
+    }
+
+    let regions = area.regions.all_regions();
+    let (font, color) = match regions.first() {
+        Some(r) => {
+            let font = r.font.unwrap_or(AppFont::Any);
+            let color = r
+                .color
+                .map(|fc| {
+                    BaumhardColor::new_u8(&[
+                        (fc[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        (fc[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        (fc[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        (fc[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    ])
+                })
+                .unwrap_or_else(BaumhardColor::black);
+            (font, color)
+        }
+        None => (AppFont::Any, BaumhardColor::black()),
+    };
+
+    model.add_line(GlyphLine::new_with(GlyphComponent::text(
+        &area.text,
+        font,
+        color,
+    )));
+    model
+}
+
 /// Build the color-picker overlay tree from a geometry +
 /// pre-computed layout. Mirrors what
 /// `Renderer::rebuild_color_picker_overlay_buffers_legacy` did
@@ -2502,21 +2575,32 @@ pub struct MindMapTextBuffer {
 /// `Tree<GfxElement, GfxMutator>` instead of two parallel buffer
 /// lists.
 ///
-/// Tree shape (flat under root, per-element ordering preserved):
+/// Tree shape (each GlyphArea has a paired GlyphModel child built
+/// by [`glyph_model_from_picker_area`] — see that function's docs
+/// for why the model child exists and how it interacts with the
+/// mutator path):
 ///
 /// ```text
 /// Void (root)
 /// ├── GlyphArea title bar
+/// │   └── GlyphModel mirror
 /// ├── GlyphArea hue ring slot 0
+/// │   └── GlyphModel mirror
 /// │   ...
 /// ├── GlyphArea hue ring slot 23
+/// │   └── GlyphModel mirror
 /// ├── GlyphArea hint footer
+/// │   └── GlyphModel mirror
 /// ├── GlyphArea sat-bar cell 0..N (skipping centre)
+/// │   └── GlyphModel mirror
 /// ├── GlyphArea val-bar cell 0..N (skipping centre)
-/// ├── GlyphArea selected-hue indicator (cyan ring)
+/// │   └── GlyphModel mirror
 /// ├── GlyphArea preview glyph (࿕ at 2× font size)
+/// │   └── GlyphModel mirror
 /// ├── GlyphArea hex readout (when geometry.hex_visible)
+/// │   └── GlyphModel mirror
 /// └── GlyphArea theme chip 0..N
+///     └── GlyphModel mirror
 /// ```
 ///
 /// **Performance note**: this rebuilds every glyph on every
@@ -2534,9 +2618,22 @@ fn build_color_picker_overlay_tree(
 ) -> Tree<GfxElement, GfxMutator> {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
     for (channel, area) in picker_glyph_areas(geometry, layout) {
-        let element = GfxElement::new_area_non_indexed_with_id(area, channel, channel);
-        let leaf = tree.arena.new_node(element);
-        tree.root.append(leaf, &mut tree.arena);
+        // GlyphModel mirror is built *before* the area is moved into
+        // the GlyphArea node so we can read the area's text + regions
+        // without juggling references across the move.
+        let model = glyph_model_from_picker_area(&area);
+        let area_element = GfxElement::new_area_non_indexed_with_id(area, channel, channel);
+        let area_id = tree.arena.new_node(area_element);
+        tree.root.append(area_id, &mut tree.arena);
+        // The model child shares its parent area's channel — there's
+        // no sibling to collide with (each area has exactly one model
+        // child) and the channel match makes future mutator-tree
+        // routing trivial if/when the §B2 path starts targeting models
+        // directly.
+        let model_element =
+            GfxElement::new_model_non_indexed_with_id(model, channel, channel);
+        let model_id = tree.arena.new_node(model_element);
+        area_id.append(model_id, &mut tree.arena);
     }
     tree
 }
@@ -4281,6 +4378,122 @@ mod tests {
                 window[0].0,
                 window[1].0,
             );
+        }
+    }
+
+    /// Each picker `GlyphArea` node in the overlay tree has exactly
+    /// one `GlyphModel` child, sharing the parent's channel — the
+    /// architectural pattern the color-picker restructure asked for.
+    /// The model node is structural source-of-truth (today's renderer
+    /// reads the area; the model is "stamped into" the area at build
+    /// time via `glyph_model_from_picker_area`); future per-glyph
+    /// mutation / animation work can target the model and re-stamp.
+    ///
+    /// Walker safety: this regression also implicitly verifies the
+    /// §B2 mutator path stays viable — Baumhard's `align_child_walks`
+    /// returns immediately when a mutator node has no children
+    /// (`tree_walker.rs:237-240`), so adding GlyphModel children
+    /// under each GlyphArea doesn't trip the existing flat
+    /// `build_color_picker_overlay_mutator` (it produces no mutator
+    /// children for these models, so the walk terminates correctly
+    /// at each GlyphArea level). The `picker_overlay_mutator_round_trips`
+    /// test below exercises the round-trip end-to-end.
+    #[test]
+    fn picker_overlay_tree_pairs_each_area_with_a_model_child() {
+        use baumhard::gfx_structs::element::GfxElementType;
+        use baumhard::gfx_structs::tree::BranchChannel;
+        use crate::application::color_picker::compute_color_picker_layout;
+
+        let g = picker_sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let tree = super::build_color_picker_overlay_tree(&g, &layout);
+
+        let mut area_count = 0usize;
+        let mut model_count = 0usize;
+        for area_id in tree.root.children(&tree.arena) {
+            let area_node = tree.arena.get(area_id).expect("area node in arena");
+            let area_elem = area_node.get();
+            // `GfxElementType` doesn't implement `Debug`, so assert via
+            // `matches!` rather than `assert_eq!` — same coverage, no
+            // upstream-derive change needed.
+            assert!(
+                matches!(area_elem.get_type(), GfxElementType::GlyphArea),
+                "every direct child of root must be a GlyphArea"
+            );
+            area_count += 1;
+            let area_channel = area_elem.channel();
+
+            let mut children = area_id.children(&tree.arena);
+            let model_id = children
+                .next()
+                .expect("each picker GlyphArea must have a paired GlyphModel child");
+            assert!(
+                children.next().is_none(),
+                "each picker GlyphArea has exactly one child (the GlyphModel pair)"
+            );
+            let model_node = tree.arena.get(model_id).expect("model node in arena");
+            let model_elem = model_node.get();
+            assert!(
+                matches!(model_elem.get_type(), GfxElementType::GlyphModel),
+                "the area's child must be a GlyphModel"
+            );
+            assert_eq!(
+                model_elem.channel(),
+                area_channel,
+                "model child shares its parent area's channel"
+            );
+            model_count += 1;
+        }
+        assert!(area_count > 0, "picker tree must emit at least one piece");
+        assert_eq!(area_count, model_count, "every area has its model");
+    }
+
+    /// Mutator round-trip: the §B2 in-place update path keeps working
+    /// across the tree-shape change in `build_color_picker_overlay_tree`.
+    /// Build a tree at state A, apply a mutator computed from state B
+    /// (a different hue / sat / val), and verify the resulting
+    /// GlyphArea fields match a freshly-built state-B tree. Confirms
+    /// the new GlyphModel children don't interfere with channel
+    /// alignment (per `picker_overlay_tree_pairs_each_area_with_a_model_child`'s
+    /// walker note).
+    #[test]
+    fn picker_overlay_mutator_round_trips_across_paired_tree() {
+        use baumhard::core::primitives::Applicable;
+        use baumhard::gfx_structs::tree::BranchChannel;
+        use crate::application::color_picker::compute_color_picker_layout;
+
+        let mut g_a = picker_sample_geometry();
+        g_a.hue_deg = 0.0;
+        g_a.sat = 1.0;
+        g_a.val = 1.0;
+        let layout_a = compute_color_picker_layout(&g_a, 1280.0, 720.0);
+
+        let mut g_b = picker_sample_geometry();
+        g_b.hue_deg = 120.0;
+        g_b.sat = 0.6;
+        g_b.val = 0.4;
+        let layout_b = compute_color_picker_layout(&g_b, 1280.0, 720.0);
+
+        let mut tree = super::build_color_picker_overlay_tree(&g_a, &layout_a);
+        let mutator = super::build_color_picker_overlay_mutator(&g_b, &layout_b);
+        mutator.apply_to(&mut tree);
+
+        let expected = super::picker_glyph_areas(&g_b, &layout_b);
+        let mut got: Vec<(usize, GlyphArea)> = Vec::new();
+        for descendant_id in tree.root().descendants(&tree.arena) {
+            let node = tree.arena.get(descendant_id).expect("arena node");
+            let element = node.get();
+            if let Some(area) = element.glyph_area() {
+                got.push((element.channel(), area.clone()));
+            }
+        }
+
+        assert_eq!(got.len(), expected.len(), "post-mutation area count");
+        for ((c_got, a_got), (c_exp, a_exp)) in got.iter().zip(expected.iter()) {
+            assert_eq!(c_got, c_exp, "channel mismatch on round-trip");
+            assert_eq!(a_got.text, a_exp.text, "text on ch {c_got}");
+            assert_eq!(a_got.position, a_exp.position, "position on ch {c_got}");
+            assert_eq!(a_got.regions, a_exp.regions, "regions on ch {c_got}");
         }
     }
 
