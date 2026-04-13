@@ -2495,39 +2495,6 @@ pub struct MindMapTextBuffer {
     pub bounds: (f32, f32),
 }
 
-/// Build the color-picker overlay tree from a geometry +
-/// pre-computed layout. Mirrors what
-/// `Renderer::rebuild_color_picker_overlay_buffers_legacy` did
-/// across its static + dynamic halves, but as one
-/// `Tree<GfxElement, GfxMutator>` instead of two parallel buffer
-/// lists.
-///
-/// Tree shape (flat under root, per-element ordering preserved):
-///
-/// ```text
-/// Void (root)
-/// ├── GlyphArea title bar
-/// ├── GlyphArea hue ring slot 0
-/// │   ...
-/// ├── GlyphArea hue ring slot 23
-/// ├── GlyphArea hint footer
-/// ├── GlyphArea sat-bar cell 0..N (skipping centre)
-/// ├── GlyphArea val-bar cell 0..N (skipping centre)
-/// ├── GlyphArea selected-hue indicator (cyan ring)
-/// ├── GlyphArea preview glyph (࿕ at 2× font size)
-/// ├── GlyphArea hex readout (when geometry.hex_visible)
-/// └── GlyphArea theme chip 0..N
-/// ```
-///
-/// **Performance note**: this rebuilds every glyph on every
-/// `rebuild_color_picker_overlay_buffers` call, which is the hover
-/// hot path. The legacy split skipped the hue-ring shape on hover.
-/// A follow-up will introduce a `MutatorTree`-based incremental
-/// path (per §B2 of `lib/baumhard/CONVENTIONS.md`) that mutates
-/// only the cells whose colors changed and the indicator's
-/// position, leaving the static hue ring alone. The user
-/// explicitly asked to land the migration first and address
-/// picker sluggishness afterwards.
 /// Build a `GlyphModel` mirroring a picker `GlyphArea`'s text +
 /// dominant color/font, used as the model child attached to each
 /// picker GlyphArea by `build_color_picker_overlay_tree`.
@@ -2557,7 +2524,10 @@ pub struct MindMapTextBuffer {
 /// pull both, drop them into a single-component `GlyphLine`, and
 /// position the model at the same screen-space anchor as the area
 /// so the mirrored matrix is geometrically consistent with the
-/// rendered ink.
+/// rendered ink. Float-to-byte color conversion uses `.round()`
+/// (not truncation) so the round-trip through float regions →
+/// byte components → float regions is symmetric to the picker's
+/// own byte→float conversion in `make_area`.
 fn glyph_model_from_picker_area(area: &GlyphArea) -> baumhard::gfx_structs::model::GlyphModel {
     use baumhard::gfx_structs::model::{GlyphComponent, GlyphLine, GlyphModel};
     use baumhard::util::color::Color as BaumhardColor;
@@ -2578,10 +2548,10 @@ fn glyph_model_from_picker_area(area: &GlyphArea) -> baumhard::gfx_structs::mode
                 .color
                 .map(|fc| {
                     BaumhardColor::new_u8(&[
-                        (fc[0].clamp(0.0, 1.0) * 255.0) as u8,
-                        (fc[1].clamp(0.0, 1.0) * 255.0) as u8,
-                        (fc[2].clamp(0.0, 1.0) * 255.0) as u8,
-                        (fc[3].clamp(0.0, 1.0) * 255.0) as u8,
+                        (fc[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        (fc[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        (fc[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        (fc[3].clamp(0.0, 1.0) * 255.0).round() as u8,
                     ])
                 })
                 .unwrap_or_else(BaumhardColor::black);
@@ -2598,6 +2568,50 @@ fn glyph_model_from_picker_area(area: &GlyphArea) -> baumhard::gfx_structs::mode
     model
 }
 
+/// Build the color-picker overlay tree from a geometry +
+/// pre-computed layout. Mirrors what
+/// `Renderer::rebuild_color_picker_overlay_buffers_legacy` did
+/// across its static + dynamic halves, but as one
+/// `Tree<GfxElement, GfxMutator>` instead of two parallel buffer
+/// lists.
+///
+/// Tree shape (each GlyphArea has a paired GlyphModel child built
+/// by [`glyph_model_from_picker_area`] — see that function's docs
+/// for why the model child exists and how it interacts with the
+/// mutator path):
+///
+/// ```text
+/// Void (root)
+/// ├── GlyphArea title bar
+/// │   └── GlyphModel mirror
+/// ├── GlyphArea hue ring slot 0
+/// │   └── GlyphModel mirror
+/// │   ...
+/// ├── GlyphArea hue ring slot 23
+/// │   └── GlyphModel mirror
+/// ├── GlyphArea hint footer
+/// │   └── GlyphModel mirror
+/// ├── GlyphArea sat-bar cell 0..N (skipping centre)
+/// │   └── GlyphModel mirror
+/// ├── GlyphArea val-bar cell 0..N (skipping centre)
+/// │   └── GlyphModel mirror
+/// ├── GlyphArea preview glyph (࿕ at 2× font size)
+/// │   └── GlyphModel mirror
+/// ├── GlyphArea hex readout (when geometry.hex_visible)
+/// │   └── GlyphModel mirror
+/// └── GlyphArea theme chip 0..N
+///     └── GlyphModel mirror
+/// ```
+///
+/// **Performance note**: this rebuilds every glyph on every
+/// `rebuild_color_picker_overlay_buffers` call, which is the hover
+/// hot path. The legacy split skipped the hue-ring shape on hover.
+/// A follow-up will introduce a `MutatorTree`-based incremental
+/// path (per §B2 of `lib/baumhard/CONVENTIONS.md`) that mutates
+/// only the cells whose colors changed and the indicator's
+/// position, leaving the static hue ring alone. The user
+/// explicitly asked to land the migration first and address
+/// picker sluggishness afterwards.
 fn build_color_picker_overlay_tree(
     geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
     layout: &crate::application::color_picker::ColorPickerLayout,
