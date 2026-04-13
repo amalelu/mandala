@@ -2136,6 +2136,41 @@ impl Renderer {
     /// this method exists as a separate entry point at all.
     pub fn rebuild_color_picker_overlay_buffers(
         &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
+        geometry: Option<&crate::application::color_picker::ColorPickerOverlayGeometry>,
+    ) {
+        use crate::application::color_picker::compute_color_picker_layout;
+        use crate::application::scene_host::OverlayRole;
+
+        // Legacy lists go unused once the picker rides the overlay
+        // tree. Clear so a stale entry from a previous build can't
+        // double-render alongside the tree.
+        self.color_picker_static_buffers.clear();
+        self.color_picker_dynamic_buffers.clear();
+
+        let Some(g) = geometry else {
+            self.color_picker_backdrop = None;
+            app_scene.unregister_overlay(OverlayRole::ColorPicker);
+            self.rebuild_overlay_scene_buffers(app_scene);
+            return;
+        };
+
+        let layout = compute_color_picker_layout(
+            g,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+        self.color_picker_backdrop = Some(layout.backdrop);
+
+        let tree = build_color_picker_overlay_tree(g, &layout);
+        app_scene.register_overlay(OverlayRole::ColorPicker, tree, glam::Vec2::ZERO);
+        self.rebuild_overlay_scene_buffers(app_scene);
+    }
+
+    /// Legacy entrypoint kept for one cycle; see Session 4 commit.
+    #[allow(dead_code)]
+    fn rebuild_color_picker_overlay_buffers_legacy(
+        &mut self,
         geometry: Option<&crate::application::color_picker::ColorPickerOverlayGeometry>,
     ) {
         // Close path clears both halves + drops the backdrop.
@@ -3104,6 +3139,283 @@ pub struct MindMapTextBuffer {
     pub buffer: Buffer,
     pub pos: (f32, f32),
     pub bounds: (f32, f32),
+}
+
+/// Build the color-picker overlay tree from a geometry +
+/// pre-computed layout. Mirrors what
+/// `Renderer::rebuild_color_picker_overlay_buffers_legacy` did
+/// across its static + dynamic halves, but as one
+/// `Tree<GfxElement, GfxMutator>` instead of two parallel buffer
+/// lists.
+///
+/// Tree shape (flat under root, per-element ordering preserved):
+///
+/// ```text
+/// Void (root)
+/// ├── GlyphArea title bar
+/// ├── GlyphArea hue ring slot 0
+/// │   ...
+/// ├── GlyphArea hue ring slot 23
+/// ├── GlyphArea hint footer
+/// ├── GlyphArea sat-bar cell 0..N (skipping centre)
+/// ├── GlyphArea val-bar cell 0..N (skipping centre)
+/// ├── GlyphArea selected-hue indicator (cyan ring)
+/// ├── GlyphArea preview glyph (ॐ at 2× font size)
+/// ├── GlyphArea hex readout (when geometry.hex_visible)
+/// └── GlyphArea theme chip 0..N
+/// ```
+///
+/// **Performance note**: this rebuilds every glyph on every
+/// `rebuild_color_picker_overlay_buffers` call, which is the hover
+/// hot path. The legacy split skipped the hue-ring shape on hover.
+/// A follow-up will introduce a `MutatorTree`-based incremental
+/// path (per §B1 of `lib/baumhard/CONVENTIONS.md`) that mutates
+/// only the cells whose colors changed and the indicator's
+/// position, leaving the static hue ring alone. The user
+/// explicitly asked to land the migration first and address
+/// picker sluggishness afterwards.
+fn build_color_picker_overlay_tree(
+    geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+    layout: &crate::application::color_picker::ColorPickerLayout,
+) -> Tree<GfxElement, GfxMutator> {
+    use crate::application::color_picker::{
+        hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, ARM_BOTTOM_GLYPHS,
+        ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS, ARM_TOP_GLYPHS, CENTER_PREVIEW_GLYPH,
+        CROSSHAIR_CENTER_CELL, HUE_RING_GLYPHS, HUE_SLOT_COUNT, SAT_CELL_COUNT, THEME_CHIPS,
+        VAL_CELL_COUNT,
+    };
+    use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
+
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut id_counter: usize = 1;
+
+    // Local helper; mirrors the console builder's pattern.
+    fn push_area(
+        tree: &mut Tree<GfxElement, GfxMutator>,
+        id_counter: &mut usize,
+        text: &str,
+        color: cosmic_text::Color,
+        font_size: f32,
+        line_height: f32,
+        pos: (f32, f32),
+        bounds: (f32, f32),
+    ) {
+        let mut area = GlyphArea::new_with_str(
+            text,
+            font_size,
+            line_height,
+            Vec2::new(pos.0, pos.1),
+            Vec2::new(bounds.0, bounds.1),
+        );
+        let cluster_count = text.chars().count();
+        if cluster_count > 0 {
+            let rgba = [
+                color.r() as f32 / 255.0,
+                color.g() as f32 / 255.0,
+                color.b() as f32 / 255.0,
+                color.a() as f32 / 255.0,
+            ];
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                ColorFontRange::new(0, cluster_count),
+                None,
+                Some(rgba),
+            ));
+            area.regions = regions;
+        }
+        let element =
+            GfxElement::new_area_non_indexed_with_id(area, *id_counter, *id_counter);
+        *id_counter += 1;
+        let leaf = tree.arena.new_node(element);
+        tree.root.append(leaf, &mut tree.arena);
+    }
+
+    let font_size = layout.font_size;
+    let ring_font_size = layout.ring_font_size;
+    let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
+    let cell_box_w = (layout.cell_advance * 1.2).max(font_size * 1.5);
+
+    // Title
+    let title_text = format!("\u{0950} {} color", geometry.target_label);
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &title_text,
+        cosmic_text::Color::rgba(0, 229, 255, 255),
+        font_size,
+        font_size,
+        layout.title_pos,
+        (font_size * 24.0, font_size * 1.5),
+    );
+
+    // Hue ring
+    for i in 0..HUE_SLOT_COUNT {
+        let hue = hue_slot_to_degrees(i);
+        let rgb = hsv_to_rgb(hue, 1.0, 1.0);
+        let color = rgb_to_cosmic_color(rgb);
+        let pos = layout.hue_slot_positions[i];
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            HUE_RING_GLYPHS[i],
+            color,
+            ring_font_size,
+            ring_font_size,
+            (pos.0 - ring_box_w * 0.5, pos.1 - ring_font_size * 0.5),
+            (ring_box_w, ring_font_size * 1.5),
+        );
+    }
+
+    // Hint footer
+    let hint_text =
+        "Esc cancel  \u{00B7}  Enter commit  \u{00B7}  h/s/v nudge  \u{00B7}  Tab chips";
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        hint_text,
+        cosmic_text::Color::rgba(140, 140, 150, 255),
+        font_size * 0.85,
+        font_size * 0.85,
+        layout.hint_pos,
+        (font_size * 30.0, font_size * 1.5),
+    );
+
+    // Sat / val bars (skip centre cell — that's the preview glyph slot)
+    let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0))
+        .round()
+        .clamp(0.0, (SAT_CELL_COUNT - 1) as f32) as usize;
+    let current_val_cell = ((1.0 - geometry.val) * (VAL_CELL_COUNT as f32 - 1.0))
+        .round()
+        .clamp(0.0, (VAL_CELL_COUNT - 1) as f32) as usize;
+
+    for i in 0..SAT_CELL_COUNT {
+        if i == CROSSHAIR_CENTER_CELL {
+            continue;
+        }
+        let cell_sat = sat_cell_to_value(i);
+        let base_rgb = hsv_to_rgb(geometry.hue_deg, cell_sat, geometry.val);
+        let color = if i == current_sat_cell {
+            highlight_selected_cell_color(base_rgb)
+        } else {
+            rgb_to_cosmic_color(base_rgb)
+        };
+        let glyph = if i < CROSSHAIR_CENTER_CELL {
+            ARM_LEFT_GLYPHS[i]
+        } else {
+            ARM_RIGHT_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
+        };
+        let (cx, cy) = layout.sat_cell_positions[i];
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            glyph,
+            color,
+            font_size,
+            font_size,
+            (cx - cell_box_w * 0.5, cy - font_size * 0.5),
+            (cell_box_w, font_size * 1.5),
+        );
+    }
+    for i in 0..VAL_CELL_COUNT {
+        if i == CROSSHAIR_CENTER_CELL {
+            continue;
+        }
+        let cell_val = val_cell_to_value(i);
+        let base_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, cell_val);
+        let color = if i == current_val_cell {
+            highlight_selected_cell_color(base_rgb)
+        } else {
+            rgb_to_cosmic_color(base_rgb)
+        };
+        let glyph = if i < CROSSHAIR_CENTER_CELL {
+            ARM_TOP_GLYPHS[i]
+        } else {
+            ARM_BOTTOM_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
+        };
+        let (cx, cy) = layout.val_cell_positions[i];
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            glyph,
+            color,
+            font_size,
+            font_size,
+            (cx - cell_box_w * 0.5, cy - font_size * 0.5),
+            (cell_box_w, font_size * 1.5),
+        );
+    }
+
+    // Selected hue indicator (cyan outline ring)
+    let current_hue_slot = ((geometry.hue_deg.rem_euclid(360.0) / 360.0)
+        * HUE_SLOT_COUNT as f32)
+        .round() as usize
+        % HUE_SLOT_COUNT;
+    let slot_pos = layout.hue_slot_positions[current_hue_slot];
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        "\u{25EF}",
+        cosmic_text::Color::rgba(0, 229, 255, 255),
+        ring_font_size,
+        ring_font_size,
+        (slot_pos.0 - ring_box_w * 0.5, slot_pos.1 - ring_font_size * 0.5),
+        (ring_box_w, ring_font_size * 1.5),
+    );
+
+    // Centre preview glyph ॐ
+    let preview_size = layout.preview_size;
+    let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
+    let preview_color = rgb_to_cosmic_color(preview_rgb);
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        CENTER_PREVIEW_GLYPH,
+        preview_color,
+        preview_size,
+        preview_size,
+        layout.preview_pos,
+        (preview_size * 1.5, preview_size * 1.5),
+    );
+
+    // Hex readout
+    if let Some(hex_anchor) = layout.hex_pos {
+        let hex_text = hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val);
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            &hex_text,
+            cosmic_text::Color::rgba(220, 220, 220, 255),
+            font_size,
+            font_size,
+            hex_anchor,
+            (font_size * 8.0, font_size * 1.5),
+        );
+    }
+
+    // Theme chips row
+    for (i, chip) in THEME_CHIPS.iter().enumerate() {
+        let focused = geometry.chip_focus == Some(i);
+        let prefix = if focused { "\u{25B8} " } else { "  " };
+        let label = format!("{prefix}{}", chip.label);
+        let color = if focused {
+            cosmic_text::Color::rgba(0, 229, 255, 255)
+        } else {
+            cosmic_text::Color::rgba(200, 200, 200, 255)
+        };
+        let (cx, cy, cw) = layout.chip_positions[i];
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            &label,
+            color,
+            font_size,
+            font_size,
+            (cx, cy),
+            (cw, layout.chip_height),
+        );
+    }
+
+    tree
 }
 
 /// Build the console overlay tree from a geometry + pre-computed

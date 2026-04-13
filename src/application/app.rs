@@ -572,6 +572,7 @@ impl Application {
                             rebuild_color_picker_overlay(
                                 &mut color_picker_state,
                                 doc,
+                                &mut app_scene,
                                 &mut renderer,
                             );
                         }
@@ -3942,7 +3943,7 @@ fn open_color_picker(
         layout: None,
     };
 
-    rebuild_color_picker_overlay(state, doc, renderer);
+    rebuild_color_picker_overlay(state, doc, app_scene, renderer);
     rebuild_scene_only(doc, app_scene, renderer);
 }
 
@@ -4088,29 +4089,26 @@ fn compute_picker_geometry(
 fn rebuild_color_picker_overlay(
     state: &mut crate::application::color_picker::ColorPickerState,
     _doc: &MindMapDocument,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    match compute_picker_geometry(state, renderer) {
-        Some(g) => renderer.rebuild_color_picker_overlay_buffers(Some(&g)),
-        None => renderer.rebuild_color_picker_overlay_buffers(None),
-    }
+    let geometry = compute_picker_geometry(state, renderer);
+    renderer.rebuild_color_picker_overlay_buffers(app_scene, geometry.as_ref());
 }
 
-/// Dynamic-only picker overlay rebuild — just the parts whose
-/// content changes per hover (sat/val bars, preview glyph, hex
-/// readout, chip focus, selected-slot indicator ring). The static
-/// buffers (title, hint, hue ring) are left intact, which is the
-/// whole reason for the L7 split in the renderer. Used by
-/// `apply_picker_preview` and `apply_picker_chip` from the hot
-/// hover path.
+/// Hover-only picker overlay rebuild. Was the static-skipping
+/// fast path before the picker migrated to the overlay tree;
+/// today it just calls the unified rebuild. The follow-up perf
+/// work (mutator-only updates per §B1) will reintroduce a true
+/// fast path that doesn't re-shape the hue ring.
 #[cfg(not(target_arch = "wasm32"))]
 fn rebuild_color_picker_overlay_dynamic(
     state: &mut crate::application::color_picker::ColorPickerState,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    if let Some(g) = compute_picker_geometry(state, renderer) {
-        renderer.rebuild_color_picker_dynamic_buffers(&g);
-    }
+    let geometry = compute_picker_geometry(state, renderer);
+    renderer.rebuild_color_picker_overlay_buffers(app_scene, geometry.as_ref());
 }
 
 /// Cancel the picker: clear the transient document preview and
@@ -4132,7 +4130,7 @@ fn cancel_color_picker(
     }
     *state = ColorPickerState::Closed;
     doc.color_picker_preview = None;
-    renderer.rebuild_color_picker_overlay_buffers(None);
+    renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
     rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
@@ -4258,7 +4256,7 @@ fn commit_color_picker(
         }
     }
 
-    renderer.rebuild_color_picker_overlay_buffers(None);
+    renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
     rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
@@ -4312,7 +4310,7 @@ fn apply_picker_preview(
         }
     }
     rebuild_scene_only(doc, app_scene, renderer);
-    rebuild_color_picker_overlay_dynamic(state, renderer);
+    rebuild_color_picker_overlay_dynamic(state, app_scene, renderer);
 }
 
 /// Apply a theme-variable chip action to the picker's target. Used
@@ -4430,7 +4428,7 @@ fn apply_picker_chip(
     }
 
     rebuild_scene_only(doc, app_scene, renderer);
-    rebuild_color_picker_overlay_dynamic(state, renderer);
+    rebuild_color_picker_overlay_dynamic(state, app_scene, renderer);
 }
 
 /// Route a keystroke to the picker. Esc cancels, Enter commits (or
@@ -4479,7 +4477,7 @@ fn handle_color_picker_key(
             }
             // Chip focus lives in the dynamic buffer set — no need
             // to reshape the hue ring or hint.
-            rebuild_color_picker_overlay_dynamic(state, renderer);
+            rebuild_color_picker_overlay_dynamic(state, app_scene, renderer);
             return;
         }
         _ => {}
@@ -4598,7 +4596,7 @@ fn handle_color_picker_mouse_move(
         // `compute_picker_geometry` which picks up the updated
         // cursor_pos and toggles hex_visible accordingly — so even
         // Inside / Outside hits are meaningful rebuild triggers now.
-        rebuild_color_picker_overlay_dynamic(state, renderer);
+        rebuild_color_picker_overlay_dynamic(state, app_scene, renderer);
     }
 }
 
