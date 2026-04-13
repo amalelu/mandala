@@ -1256,7 +1256,6 @@ impl Application {
                         handle_console_key(
                             &key_name,
                             &logical_key,
-                            modifiers.shift_key(),
                             modifiers.control_key(),
                             &mut console_state,
                             &mut console_history,
@@ -2335,7 +2334,6 @@ const CONSOLE_KEY_CTRL_W: &str = "w";
 fn handle_console_key(
     key_name: &Option<String>,
     logical_key: &Key,
-    shift_pressed: bool,
     ctrl_pressed: bool,
     console_state: &mut ConsoleState,
     console_history: &mut Vec<String>,
@@ -2351,7 +2349,6 @@ fn handle_console_key(
         count_grapheme_clusters, delete_front_unicode, delete_grapheme_at,
         find_byte_index_of_grapheme, insert_str_at_grapheme,
     };
-    let _ = shift_pressed; // Shift+Tab no longer cycles backward; popup navigation is Up/Down.
 
     let name = match key_name.as_deref() {
         Some(n) => n,
@@ -2520,9 +2517,6 @@ fn handle_console_key(
                         renderer,
                         scene_cache,
                     );
-                    // Scope: keybinds stays mutable for future binding
-                    // commands; for now it isn't touched by execute.
-                    let _ = &keybinds;
                 }
             }
             if let Some(doc) = document.as_ref() {
@@ -2730,13 +2724,11 @@ fn recompute_console_completions(
                 hint: c.hint,
             })
             .collect();
-        // Default highlight: the last row — the one closest to the
-        // prompt line, which reads as "most likely to accept next."
-        *completion_idx = if completions.is_empty() {
-            None
-        } else {
-            Some(completions.len() - 1)
-        };
+        // Default highlight: the first row. Matches the terminal /
+        // IDE convention where the top candidate is "most likely".
+        // Users Down-arrow toward the prompt when they want a
+        // different row.
+        *completion_idx = if completions.is_empty() { None } else { Some(0) };
     }
 }
 
@@ -2759,12 +2751,17 @@ fn nav_popup(console_state: &mut ConsoleState, step: i32) -> bool {
     false
 }
 
-/// Replace the current token under the cursor with the highlighted
-/// completion's `text`, and advance the cursor past the replacement.
-/// A trailing space is appended when the replacement is a complete
-/// positional or command-name slot; when the replacement is a
-/// kv-key (ending in `=`) no space is added so the user can keep
-/// typing the value. No-op if no popup is present.
+/// Replace the current token (or kv-value slot) under the cursor
+/// with the highlighted completion's `text`, advancing the cursor
+/// past the replacement.
+///
+/// Trailing-space rule:
+/// - positional / command-name: append a space (next token starts fresh)
+/// - kv-key (text ends in `=`): no space (value follows immediately)
+/// - kv-value: no space (user may still be typing a quoted value,
+///   or wants to type an adjacent kv pair)
+///
+/// No-op if no popup is present.
 #[cfg(not(target_arch = "wasm32"))]
 fn accept_console_completion(console_state: &mut ConsoleState) {
     use baumhard::util::grapheme_chad::{count_grapheme_clusters, find_byte_index_of_grapheme};
@@ -2794,23 +2791,17 @@ fn accept_console_completion(console_state: &mut ConsoleState) {
     let cursor_byte = find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
     let before: Vec<&str> = input[..cursor_byte].graphemes(true).collect();
     let mut start_g = before.len();
-    while start_g > 0
-        && !before[start_g - 1].chars().all(|c| c.is_whitespace())
-    {
+    while start_g > 0 && !before[start_g - 1].chars().all(|c| c.is_whitespace()) {
         start_g -= 1;
     }
     // If the token contains an `=`, and we're completing a kv-value,
     // the replacement starts *after* the `=`.
     let token: String = before[start_g..].concat();
-    let replace_from = if let Some(eq_pos_in_token) = token.find('=') {
-        if eq_pos_in_token > 0 {
-            // start_g counts graphemes; the `=` is a single
-            // grapheme, so we can walk the slice directly.
-            let graph_before_eq = token[..eq_pos_in_token].graphemes(true).count();
-            start_g + graph_before_eq + 1
-        } else {
-            start_g
-        }
+    let is_kv_value_replace = matches!(token.find('='), Some(pos) if pos > 0);
+    let replace_from = if is_kv_value_replace {
+        let eq_pos = token.find('=').expect("guarded by is_kv_value_replace");
+        let graph_before_eq = token[..eq_pos].graphemes(true).count();
+        start_g + graph_before_eq + 1
     } else {
         start_g
     };
@@ -2822,13 +2813,16 @@ fn accept_console_completion(console_state: &mut ConsoleState) {
     input.replace_range(replace_from_byte..cursor_byte, &cand.text);
     *cursor = replace_from + count_grapheme_clusters(&cand.text);
 
-    // Append a trailing space unless the completion is a kv-key
-    // (ends in `=`) — the user will want to keep typing the value.
-    if !cand.text.ends_with('=') {
+    // Trailing space rule: append only when the completion closes a
+    // positional / command-name / kv-key (i.e. the next logical
+    // thing is a *new* token). A kv-value replacement never gets a
+    // trailing space — the user may still be typing a quoted value
+    // or an adjacent kv pair directly. A kv-key replacement (text
+    // ending in `=`) also gets no space — the value comes next.
+    let wants_trailing_space = !is_kv_value_replace && !cand.text.ends_with('=');
+    if wants_trailing_space {
         let cursor_byte_after =
             find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
-        // Only add a space if the next char isn't already whitespace
-        // or end-of-string — don't double-space.
         let next_is_ws = input[cursor_byte_after..]
             .chars()
             .next()
@@ -2836,10 +2830,11 @@ fn accept_console_completion(console_state: &mut ConsoleState) {
             .unwrap_or(true);
         if !next_is_ws {
             input.insert_str(cursor_byte_after, " ");
+            *cursor += 1;
         } else if cursor_byte_after == input.len() {
             input.push(' ');
+            *cursor += 1;
         }
-        *cursor += 1;
     }
 }
 
@@ -5243,5 +5238,101 @@ mod text_edit_tests {
             .map(|id| hit.as_deref() == Some(id))
             .unwrap_or(false);
         assert!(!already_editing, "guard must NOT fire when editor is closed");
+    }
+
+    // -----------------------------------------------------------------
+    // Console completion acceptance
+    // -----------------------------------------------------------------
+
+    use crate::application::console::completion::Completion;
+
+    fn open_state(input: &str, cursor: usize, candidates: &[&str]) -> ConsoleState {
+        ConsoleState::Open {
+            input: input.to_string(),
+            cursor,
+            history: Vec::new(),
+            history_idx: None,
+            scrollback: Vec::new(),
+            completions: candidates
+                .iter()
+                .map(|c| Completion {
+                    text: c.to_string(),
+                    display: c.to_string(),
+                    hint: None,
+                })
+                .collect(),
+            completion_idx: if candidates.is_empty() { None } else { Some(0) },
+        }
+    }
+
+    /// Accepting a command-name completion replaces the partial
+    /// prefix and appends a trailing space so the user can type
+    /// the next token immediately.
+    #[test]
+    fn test_accept_completion_positional_appends_space() {
+        let mut state = open_state("co", 2, &["color"]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color ");
+            assert_eq!(cursor, 6);
+        } else {
+            panic!("state closed");
+        }
+    }
+
+    /// Accepting a kv-key completion (text ends in `=`) adds no
+    /// trailing space — the value comes next.
+    #[test]
+    fn test_accept_completion_kv_key_no_trailing_space() {
+        let mut state = open_state("color b", 7, &["bg="]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color bg=");
+            assert_eq!(cursor, 9);
+        } else {
+            panic!("state closed");
+        }
+    }
+
+    /// Accepting a kv-value completion replaces only the value slot
+    /// (not the key=) and adds no trailing space.
+    #[test]
+    fn test_accept_completion_kv_value_replaces_only_value_slot() {
+        let mut state = open_state("color bg=ac", 11, &["accent"]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color bg=accent");
+            assert_eq!(cursor, 15);
+        } else {
+            panic!("state closed");
+        }
+    }
+
+    /// Accepting a kv-value with no partial typed (cursor right
+    /// after `=`) inserts at the value slot and keeps the cursor
+    /// after the value — no trailing space.
+    #[test]
+    fn test_accept_completion_kv_value_empty_partial() {
+        let mut state = open_state("color bg=", 9, &["accent"]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color bg=accent");
+            assert_eq!(cursor, 15);
+        } else {
+            panic!("state closed");
+        }
+    }
+
+    /// Accepting when the popup is empty is a no-op.
+    #[test]
+    fn test_accept_completion_no_popup_is_noop() {
+        let mut state = open_state("color bg=", 9, &[]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color bg=");
+            assert_eq!(cursor, 9);
+        } else {
+            panic!("state closed");
+        }
     }
 }

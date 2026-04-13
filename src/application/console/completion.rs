@@ -176,17 +176,6 @@ pub fn prefix_filter<S: AsRef<str>>(options: &[S], partial: &str) -> Vec<Complet
         .collect()
 }
 
-/// Back-compat alias for the callsites that still use the pre-rewrite
-/// name. The new name (`prefix_filter`) is clearer now that fuzzy is
-/// gone — nothing here is "enum"-specific, and the old name paints
-/// over the fact that a list of `&str` can be any prefix-matched
-/// vocabulary.
-#[deprecated(note = "use prefix_filter")]
-#[allow(dead_code)]
-pub fn enum_completion<S: AsRef<str>>(options: &[S], partial: &str) -> Vec<Completion> {
-    prefix_filter(options, partial)
-}
-
 /// A token is kv-form iff it contains `=` and the `=` is not the
 /// first character. Mirrors `parser::is_kv_token`.
 fn is_kv_token(t: &str) -> bool {

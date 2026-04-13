@@ -974,6 +974,34 @@ impl MindMapDocument {
         true
     }
 
+    /// Set the connection's `font_size_pt` to an absolute value,
+    /// clamped into `[min_font_size_pt, max_font_size_pt]`. Returns
+    /// `true` if the clamped value differs from the current.
+    ///
+    /// Counterpart to [`set_edge_font_size_step`] for the console's
+    /// `font size=<pt>` kv form, where callers have an absolute
+    /// target rather than a delta.
+    pub fn set_edge_font_size(&mut self, edge_ref: &EdgeRef, pt: f32) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        let new_val = pt.clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
+        if (cfg.font_size_pt - new_val).abs() < f32::EPSILON {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        cfg.font_size_pt = new_val;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
     /// Reset the connection's `font_size_pt` to the hardcoded default
     /// (12.0). Returns `true` if the value actually changed.
     pub fn reset_edge_font_size(&mut self, edge_ref: &EdgeRef) -> bool {

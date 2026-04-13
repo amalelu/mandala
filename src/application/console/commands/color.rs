@@ -35,22 +35,16 @@ pub const COMMAND: Command = Command {
 
 fn complete_color(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
     match &state.context {
-        CompletionContext::Token { index: 0 } => {
-            let mut out = prefix_filter(&["pick"], state.partial);
-            // Also surface the kv keys for first-token completion so
-            // `color b<Tab>` suggests `bg=`.
-            for k in KEYS {
-                if k.starts_with(state.partial) {
-                    out.push(Completion {
-                        text: format!("{}=", k),
-                        display: format!("{}=", k),
-                        hint: Some(kv_hint(k).to_string()),
-                    });
-                }
+        CompletionContext::Token { index } => {
+            let mut out = kv_key_completions(state.partial);
+            // `pick` is positional-only at slot 0 (the glyph-wheel
+            // handoff). Don't show it mid-command — it's a verb, not
+            // an arg.
+            if *index == 0 {
+                out.extend(prefix_filter(&["pick"], state.partial));
             }
             out
         }
-        CompletionContext::Token { .. } => kv_key_completions(state.partial),
         CompletionContext::KvValue { key } if KEYS.iter().any(|k| k == key) => {
             prefix_filter(VALUE_PRESETS, state.partial)
         }

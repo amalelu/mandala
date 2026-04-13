@@ -171,21 +171,39 @@ impl<'a> TargetView<'a> {
     }
 }
 
+/// Encode a ColorValue as the string the model field wants. `Reset`
+/// resolves to `default` — each caller has its own "natural default"
+/// string.
+fn color_as_string(c: &ColorValue, default: &str) -> String {
+    match c {
+        ColorValue::Reset => default.to_string(),
+        _ => c
+            .as_model_string()
+            .expect("non-reset ColorValue always encodes to a string"),
+    }
+}
+
+/// Encode a ColorValue for the edge color path, where `None` means
+/// "clear the override". Edges don't have a separate default string
+/// — reset means fall back to resolved config.
+fn edge_color_as_override(c: &ColorValue) -> Option<String> {
+    match c {
+        ColorValue::Reset => None,
+        _ => Some(
+            c.as_model_string()
+                .expect("non-reset ColorValue always encodes to a string"),
+        ),
+    }
+}
+
 impl<'a> HasBgColor for TargetView<'a> {
     fn set_bg_color(&mut self, c: ColorValue) -> Outcome {
         match self {
             TargetView::Node { doc, id } => {
-                let color = match &c {
-                    ColorValue::Reset => "#141414".to_string(),
-                    _ => c.as_model_string().unwrap_or_default(),
-                };
-                Outcome::applied(doc.set_node_bg_color(id, color))
+                Outcome::applied(doc.set_node_bg_color(id, color_as_string(&c, "#141414")))
             }
             TargetView::Portal { doc, pr } => {
-                let color = match &c {
-                    ColorValue::Reset => PORTAL_DEFAULT_COLOR.to_string(),
-                    _ => c.as_model_string().unwrap_or_default(),
-                };
+                let color = color_as_string(&c, PORTAL_DEFAULT_COLOR);
                 Outcome::applied(doc.set_portal_color(pr, &color))
             }
             TargetView::Edge { .. } => Outcome::NotApplicable,
@@ -197,19 +215,11 @@ impl<'a> HasTextColor for TargetView<'a> {
     fn set_text_color(&mut self, c: ColorValue) -> Outcome {
         match self {
             TargetView::Node { doc, id } => {
-                let color = match &c {
-                    ColorValue::Reset => "#ffffff".to_string(),
-                    _ => c.as_model_string().unwrap_or_default(),
-                };
-                Outcome::applied(doc.set_node_text_color(id, color))
+                Outcome::applied(doc.set_node_text_color(id, color_as_string(&c, "#ffffff")))
             }
-            TargetView::Edge { doc, er } => match &c {
-                ColorValue::Reset => Outcome::applied(doc.set_edge_color(er, None)),
-                _ => {
-                    let s = c.as_model_string().expect("non-reset encodes as a string");
-                    Outcome::applied(doc.set_edge_color(er, Some(&s)))
-                }
-            },
+            TargetView::Edge { doc, er } => Outcome::applied(
+                doc.set_edge_color(er, edge_color_as_override(&c).as_deref()),
+            ),
             TargetView::Portal { .. } => Outcome::NotApplicable,
         }
     }
@@ -218,20 +228,12 @@ impl<'a> HasTextColor for TargetView<'a> {
 impl<'a> HasBorderColor for TargetView<'a> {
     fn set_border_color(&mut self, c: ColorValue) -> Outcome {
         match self {
-            TargetView::Node { doc, id } => {
-                let color = match &c {
-                    ColorValue::Reset => "#ffffff".to_string(),
-                    _ => c.as_model_string().unwrap_or_default(),
-                };
-                Outcome::applied(doc.set_node_border_color(id, color))
-            }
-            TargetView::Edge { doc, er } => match &c {
-                ColorValue::Reset => Outcome::applied(doc.set_edge_color(er, None)),
-                _ => {
-                    let s = c.as_model_string().expect("non-reset encodes as a string");
-                    Outcome::applied(doc.set_edge_color(er, Some(&s)))
-                }
-            },
+            TargetView::Node { doc, id } => Outcome::applied(
+                doc.set_node_border_color(id, color_as_string(&c, "#ffffff")),
+            ),
+            TargetView::Edge { doc, er } => Outcome::applied(
+                doc.set_edge_color(er, edge_color_as_override(&c).as_deref()),
+            ),
             // Portals don't have a separate border from their fill.
             TargetView::Portal { .. } => Outcome::NotApplicable,
         }
@@ -241,36 +243,11 @@ impl<'a> HasBorderColor for TargetView<'a> {
 impl<'a> HasFontSize for TargetView<'a> {
     fn set_font_size(&mut self, pt: f32) -> Outcome {
         if !(pt > 0.0) {
-            return Outcome::Invalid(format!("font size must be positive; got {pt}"));
+            return Outcome::Invalid(format!("must be positive; got {pt}"));
         }
         match self {
-            TargetView::Node { doc, id } => {
-                Outcome::applied(doc.set_node_font_size(id, pt))
-            }
-            TargetView::Edge { doc, er } => {
-                // The existing edge setter is a step-by-delta
-                // (`set_edge_font_size_step`); reach for the same
-                // snapshot/clamp flow but feed it an absolute target.
-                let current = doc
-                    .mindmap
-                    .edges
-                    .iter()
-                    .find(|e| er.matches(e))
-                    .and_then(|e| e.glyph_connection.as_ref())
-                    .map(|c| c.font_size_pt)
-                    .unwrap_or_else(|| {
-                        // Fallback: resolved default. Fetching via
-                        // `GlyphConnectionConfig::resolved_for` would
-                        // double the path length without changing the
-                        // delta, so step from the default 12pt.
-                        12.0
-                    });
-                let delta = pt - current;
-                if delta.abs() < f32::EPSILON {
-                    return Outcome::Unchanged;
-                }
-                Outcome::applied(doc.set_edge_font_size_step(er, delta))
-            }
+            TargetView::Node { doc, id } => Outcome::applied(doc.set_node_font_size(id, pt)),
+            TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_font_size(er, pt)),
             TargetView::Portal { .. } => Outcome::NotApplicable,
         }
     }
@@ -279,10 +256,7 @@ impl<'a> HasFontSize for TargetView<'a> {
 impl<'a> HasLabel for TargetView<'a> {
     fn set_label(&mut self, s: Option<String>) -> Outcome {
         match self {
-            TargetView::Edge { doc, er } => match s {
-                Some(text) => Outcome::applied(doc.set_edge_label(er, Some(text))),
-                None => Outcome::applied(doc.set_edge_label(er, None)),
-            },
+            TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_label(er, s)),
             _ => Outcome::NotApplicable,
         }
     }
@@ -517,4 +491,5 @@ mod tests {
         let out = selection_targets(&SelectionState::Portal(pr));
         assert!(matches!(out.as_slice(), [TargetId::Portal(_)]));
     }
+
 }
