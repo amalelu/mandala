@@ -67,8 +67,9 @@ it should almost never mean allocating a new arena.
   for instance — never as a shortcut around the mutator pipeline.
 - **Compose mutators; do not branch into rebuild paths.** A
   conditional mutator (`GfxMutator::Instruction` with a `RepeatWhile`
-  / `SkipWhile` predicate) is cheaper than cloning a subtree, clearing
-  it, and rebuilding. If the mutator language is missing an expression
+  predicate — negate it for skip-style flow) is cheaper than cloning
+  a subtree, clearing it, and rebuilding. If the mutator language is
+  missing an expression
   you need, **extend it** — see
   `lib/baumhard/documents/mutators/mutators.md`. Extending the mutator
   language is exactly the kind of work §B0 is about.
@@ -178,10 +179,10 @@ worst target.
 - **`unsafe` is forbidden.** New `unsafe` is a roadmap-scale decision
   and needs a benchmark plus a review. `unsafe` for lifetime
   laundering, raw pointer arithmetic, or "I know better than the
-  borrow checker" is never acceptable. The single existing `unsafe`
-  block in `lib/baumhard/src/util/simd.rs` is legacy scaffolding from
-  an early SIMD experiment and is a violation to be cleaned up — not
-  a precedent.
+  borrow checker" is never acceptable. The existing `unsafe` in
+  `lib/baumhard/src/util/simd.rs` is legacy scaffolding from an early
+  SIMD experiment and is a violation to be cleaned up — not a
+  precedent.
 - **Every user-visible primitive has a criterion bench.** New
   primitives ship with a new entry in `benches/test_bench.rs`;
   removed primitives drop theirs in the same commit. The bench file

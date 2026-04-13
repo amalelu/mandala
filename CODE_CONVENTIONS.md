@@ -52,8 +52,12 @@ Baumhard. Extend it.**
     Never clone a subtree, edit it, and reinsert it to change one field.
   - **Font** through `baumhard::font::fonts`. Call `fonts::init()` once
     at app startup; read the global `FONT_SYSTEM` through its lock
-    guard. Layout goes through `create_cosmic_editor_str` — never raw
-    `cosmic_text` calls from the application crate.
+    guard. Layout goes through `create_cosmic_editor_str` — new code
+    does not reach into `cosmic_text` directly from the application
+    crate. Existing direct uses in `src/application/renderer.rs`,
+    `document.rs`, and `console/visuals.rs` predate this rule and are
+    tracked in `ROADMAP.md`'s "What needs work" list as gaps to close
+    on the way past, never extended.
   - **Geometry, color, regions** are Baumhard's:
     `baumhard::util::geometry::almost_equal_vec2`,
     `baumhard::util::color::*`, and
@@ -153,9 +157,11 @@ We want the highest quality code. No compromise. No technical debt.
   "I will fix it in the next commit" is not a contract this repository
   recognises — the next commit is for the next thing.
 - **No new technical debt.** Existing gaps (legacy `unsafe` in
-  `lib/baumhard/src/util/simd.rs`, `unwrap` in interactive paths,
-  partial doc coverage) are tracked in `ROADMAP.md`'s "What needs work"
-  list and closed on the way past, never extended.
+  `lib/baumhard/src/util/simd.rs`, `unwrap`/`expect` in interactive
+  paths, raw `cosmic_text` use in the app crate, partial doc coverage)
+  are tracked in `ROADMAP.md`'s "What needs work" list and closed on
+  the way past, never extended. See §7 for the specific posture on
+  panics.
 - **No deferred `// TODO`, no `// FIXME`, no `// HACK`.** If it needs
   doing, do it; if it does not need doing now, it does not belong in
   the codebase. Roadmap items live in the roadmap.
@@ -231,9 +237,10 @@ not edge cases to be dismissed.
   boundaries — file loaders, CLI args, the `?map=` query parameter,
   user input — and trust your own data structures past that point. The
   exception is interactive paths (see §7).
-- **Function size is a smell, not a rule.** A function the size of the
-  screen is fine if it does one thing. Split on the seam between
-  concerns, not on the line count.
+- **Split on the seam between concerns, not on the line count.** A
+  function the size of the screen is fine if it does one thing. The
+  same function becomes a problem when it mixes parsing, validation,
+  and rendering — split on the concern, not on the length.
 
 ## §7 Error handling and documentation
 
@@ -242,17 +249,24 @@ future sessions inherit the codebase without asking.
 
 - **No custom error types.** No `anyhow`, no `thiserror`, no custom
   `Error` enums. Adding one is a roadmap-scale discussion.
-- **Interactive paths must not panic.** Input handling, mutation
-  application, frame render, and document mutation never abort the
-  process. Degrade the frame, log via `log::warn!` or `log::error!`,
-  and keep running. A crash during editing is the one user-visible
-  failure this codebase cannot tolerate. Defensive `let Some(...) else
-  { return; }` checks in interactive paths are the sanctioned
-  exception to §6's "trust internal invariants."
-- **`expect("<reason>")` only at startup.** When the failure is
-  unrecoverable and the message helps a human understand what went
-  wrong (`expect("Failed to create device")`). Bare `unwrap()` outside
-  of tests is a bug.
+- **Interactive paths must not panic.** Interactive paths are
+  `Application::run` and everything reachable from it after the first
+  frame: input handling, mutation application, undo/redo, scene
+  rebuild, frame render, and document mutation. None of these may
+  abort the process. Degrade the frame, log via `log::warn!` or
+  `log::error!`, and keep running. A crash during editing is the one
+  user-visible failure this codebase cannot tolerate. Defensive `let
+  Some(...) else { return; }` checks in interactive paths are the
+  sanctioned exception to §6's "trust internal invariants."
+- **Startup paths use `expect("<reason>")`.** Startup is everything
+  before the first frame: CLI parse, `Renderer::new`, `fonts::init`,
+  the initial `loader::load_from_file`, the `?map=` query parser on
+  WASM. When the failure is unrecoverable, `expect` with a
+  human-readable message is the rule (`expect("Failed to create
+  device")`). Bare `unwrap()` outside tests is a bug. The app crate
+  contains pre-existing `unwrap` and `expect` calls in interactive
+  paths that predate this rule; they are tracked debt to be closed on
+  the way past, never extended.
 - **Every `pub` item in Baumhard carries a `///` doc comment.** State
   *purpose, inputs, costs* — note an O(n) walk, an allocation, a
   clone, a lock acquisition. `cargo doc -p baumhard --no-deps` is a
@@ -283,6 +297,11 @@ future sessions inherit the codebase without asking.
 - **`./test.sh` is green before committing.** `./test.sh --lint` is
   advisory; review its output. `./test.sh --bench` is for
   performance-conscious commits in Baumhard.
+- **`./build.sh` is green for cross-platform changes.** Anything
+  outside an explicit `cfg` guard — workspace-shared logic, anything
+  in Baumhard that is not native-gated — must build for
+  `wasm32-unknown-unknown` before commit. Native-only changes inside
+  `#[cfg(not(target_arch = "wasm32"))]` blocks are exempt.
 - **Commit messages explain *why*, not what the diff shows.** The
   diff shows what changed. The message explains why the change was
   worth making.

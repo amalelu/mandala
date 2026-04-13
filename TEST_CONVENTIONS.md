@@ -80,7 +80,8 @@ Do not "fix" the missing `#[cfg(test)]`. It is the way.
 
 Exemplars:
 - `lib/baumhard/src/util/tests/` — geometry, color, grapheme, arena,
-  primes.
+  primes (file is `primes_test.rs`; the singular suffix is a known
+  inconsistency).
 - `lib/baumhard/src/gfx_structs/tests/` — region, tree, model, area,
   walker.
 - `lib/baumhard/src/core/tests/` — primitives (ranges, color regions).
@@ -160,11 +161,14 @@ there — every mandala-side test lives inline.
   helpers default to a reasonable scale-invariant tolerance, but do
   not trust them blindly for very large or very small values.
 
-- **Panics:** `#[should_panic(expected = "...")]` is fine for
-  validation error paths where the message is load-bearing (see
-  `region_tests.rs`'s RegionParams prime-dimension tests). Otherwise
-  prefer `assert!(matches!(result, Err(_)))` or explicit
-  `assert_eq!(result.unwrap_err(), ...)`.
+- **Panics:** prefer `assert!(matches!(result, Err(_)))` or explicit
+  `assert_eq!(result.unwrap_err(), ...)` for fallible APIs. Bare
+  `#[should_panic]` is acceptable when a constructor enforces an
+  invariant by panicking (see `region_tests.rs`'s RegionParams
+  prime-dimension tests for the shape). When the panic message itself
+  is load-bearing — i.e. the test exists to verify the message — use
+  `#[should_panic(expected = "...")]` so a future reword cannot
+  silently weaken the test.
 
 ## §T6 Benchmark-reuse discipline
 
