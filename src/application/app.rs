@@ -44,11 +44,9 @@ use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::{Action, ResolvedKeybinds};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::application::console::{
-    bindings_overlay::ConsoleBindingsOverlay,
     commands::Command,
     completion::complete as complete_console,
-    parser::{parse_with_aliases, Args, ParseResult},
-    user_mutations::UserMutationsFile,
+    parser::{parse, Args, ParseResult},
     ConsoleContext, ConsoleEffects, ConsoleLine, ConsoleState, ExecResult, MAX_HISTORY,
 };
 use crate::application::renderer::Renderer;
@@ -452,25 +450,9 @@ impl Application {
         // optimisation — nothing about the model depends on it.
         let mut scene_cache = baumhard::mindmap::scene_cache::SceneConnectionCache::new();
 
-        // User-defined custom-mutations file, loaded once at startup.
-        // Merged into the registry at the lowest precedence so map +
-        // inline mutations always win on id collision.
-        let mut user_mutations_file = UserMutationsFile::load_for_desktop();
-        // Console-side state: persistent key→mutation bindings
-        // overlay + session aliases. The aliases seeded from
-        // `user_mutations_file.aliases` so hand-edited aliases land
-        // in the session map on startup.
-        let mut console_bindings_overlay = ConsoleBindingsOverlay::load_for_desktop();
-        let mut console_aliases: std::collections::HashMap<String, String> =
-            user_mutations_file.aliases.clone();
-
         match MindMapDocument::load(&self.options.mindmap_path) {
             Ok(mut doc) => {
-                // Re-resolve the registry with user mutations merged
-                // in. `MindMapDocument::load` built one without them;
-                // the console needs them visible to `mutate list` and
-                // `mutate run`.
-                doc.build_mutation_registry_with_user(&user_mutations_file.mutations);
+                doc.build_mutation_registry();
                 // Canvas background: resolve through theme
                 // variables so `"var(--bg)"` works, then hand off
                 // to the renderer as the render-pass clear color.
@@ -546,17 +528,7 @@ impl Application {
 
         // Resolve keybindings once at startup. Users can rebind any key
         // by shipping a `keybinds.json` (see `keybinds.rs` for the format).
-        // The console-owned bindings overlay is layered on top so
-        // `mutate bind` entries survive across sessions even when the
-        // main config file hasn't been touched.
         let mut keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
-        for (combo, mutation_id) in &console_bindings_overlay.bindings {
-            if let Err(e) =
-                keybinds.set_custom_mutation_binding(combo, mutation_id.clone())
-            {
-                log::warn!("skipping overlay binding '{}': {}", combo, e);
-            }
-        }
 
         self.event_loop.run(move |event, _window_target| {
             _ = (&self.window, &mut self.options);
@@ -1295,9 +1267,6 @@ impl Application {
                             &mut renderer,
                             &mut scene_cache,
                             &mut keybinds,
-                            &mut console_bindings_overlay,
-                            &mut console_aliases,
-                            &mut user_mutations_file,
                         );
                         return;
                     }
@@ -2377,9 +2346,6 @@ fn handle_console_key(
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
     keybinds: &mut ResolvedKeybinds,
-    bindings_overlay: &mut ConsoleBindingsOverlay,
-    aliases: &mut std::collections::HashMap<String, String>,
-    user_mutations_file: &mut UserMutationsFile,
 ) {
     use baumhard::util::grapheme_chad::{
         count_grapheme_clusters, delete_front_unicode, delete_grapheme_at,
@@ -2539,11 +2505,10 @@ fn handle_console_key(
                         mindmap_tree,
                         renderer,
                         scene_cache,
-                        keybinds,
-                        bindings_overlay,
-                        aliases,
-                        user_mutations_file,
                     );
+                    // Scope: keybinds stays mutable for future binding
+                    // commands; for now it isn't touched by execute.
+                    let _ = &keybinds;
                 }
             }
             if let Some(doc) = document.as_ref() {
@@ -2773,16 +2738,11 @@ fn execute_console_line(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    keybinds: &mut ResolvedKeybinds,
-    bindings_overlay: &mut ConsoleBindingsOverlay,
-    aliases: &mut std::collections::HashMap<String, String>,
-    user_mutations_file: &mut UserMutationsFile,
 ) {
     if line.trim().is_empty() {
         return;
     }
-    let parsed = parse_with_aliases(line, aliases);
-    let (cmd, args) = match parsed {
+    let (cmd, args) = match parse(line) {
         ParseResult::Ok { cmd, args } => (cmd, args),
         ParseResult::Empty => return,
         ParseResult::Unknown(ref head) => {
@@ -2799,10 +2759,6 @@ fn execute_console_line(
     let label_edit_req = effects.open_label_edit.take();
     let color_picker_req = effects.open_color_picker.take();
     let close_after = effects.close_console;
-    let run_mutation_req = effects.run_mutation.take();
-    let bind_req = effects.bind_mutation.take();
-    let unbind_req = effects.unbind_mutation.take();
-    let set_alias_req = effects.set_alias.take();
 
     // Emit the command's result lines into the scrollback.
     match result {
@@ -2816,75 +2772,6 @@ fn execute_console_line(
             for l in lines {
                 push_scrollback_output(console_state, l);
             }
-        }
-    }
-
-    // `mutate run` needs tree access.
-    if let Some(req) = run_mutation_req {
-        let mutation = doc.mutation_registry.get(&req.mutation_id).cloned();
-        if let (Some(m), Some(tree)) = (mutation, mindmap_tree.as_mut()) {
-            doc.apply_custom_mutation(&m, &req.node_id, tree);
-            push_scrollback_output(
-                console_state,
-                format!("applied {} to {}", req.mutation_id, req.node_id),
-            );
-        } else {
-            push_scrollback_error(
-                console_state,
-                format!(
-                    "mutate run {}: tree not ready or mutation vanished",
-                    req.mutation_id
-                ),
-            );
-        }
-    }
-
-    // `mutate bind` — install into live keybinds + persist overlay.
-    if let Some(req) = bind_req {
-        match keybinds.set_custom_mutation_binding(&req.combo, req.mutation_id.clone()) {
-            Ok(_) => {
-                bindings_overlay
-                    .bindings
-                    .insert(req.combo.clone(), req.mutation_id);
-                bindings_overlay.save_for_desktop();
-            }
-            Err(e) => push_scrollback_error(
-                console_state,
-                format!("mutate bind '{}': {}", req.combo, e),
-            ),
-        }
-    }
-
-    // `mutate unbind`.
-    if let Some(combo) = unbind_req {
-        match keybinds.remove_custom_mutation_binding(&combo) {
-            Ok(prev) => {
-                bindings_overlay.bindings.remove(&combo);
-                bindings_overlay.save_for_desktop();
-                if prev.is_none() {
-                    push_scrollback_output(
-                        console_state,
-                        format!("no binding for '{}'", combo),
-                    );
-                }
-            }
-            Err(e) => push_scrollback_error(
-                console_state,
-                format!("mutate unbind '{}': {}", combo, e),
-            ),
-        }
-    }
-
-    // `alias <name> <expansion> [--save]`. Session-scoped by default;
-    // `--save` also writes into the user mutations file alongside
-    // existing `aliases` entries.
-    if let Some(req) = set_alias_req {
-        aliases.insert(req.name.clone(), req.expansion.clone());
-        if req.save {
-            user_mutations_file
-                .aliases
-                .insert(req.name.clone(), req.expansion.clone());
-            save_user_mutations_file(user_mutations_file);
         }
     }
 
@@ -2903,31 +2790,6 @@ fn execute_console_line(
     } else if close_after {
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(None);
-    }
-}
-
-/// Persist the user-mutations file to
-/// `$XDG_CONFIG_HOME/mandala/mutations.json`. Best-effort — logs on
-/// failure and keeps running.
-#[cfg(not(target_arch = "wasm32"))]
-fn save_user_mutations_file(file: &UserMutationsFile) {
-    let path = match crate::application::console::user_mutations::default_desktop_path() {
-        Some(p) => p,
-        None => return,
-    };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!("user mutations mkdir {}: {}", parent.display(), e);
-            return;
-        }
-    }
-    match serde_json::to_string_pretty(file) {
-        Ok(s) => {
-            if let Err(e) = std::fs::write(&path, s) {
-                log::warn!("user mutations write {}: {}", path.display(), e);
-            }
-        }
-        Err(e) => log::warn!("user mutations serialize: {}", e),
     }
 }
 

@@ -3,16 +3,19 @@
 //! Dispatches to one of three sources depending on where the cursor
 //! sits:
 //!
-//! 1. Token 0 (command name) — fuzzy-match over [`COMMANDS`], hiding
+//! 1. Token 0 (command name) — prefix match over [`COMMANDS`], hiding
 //!    non-applicable commands.
 //! 2. Token N > 0 — hand off to the resolved command's own
 //!    [`complete`] fn, which knows the enum/id vocabulary for that
 //!    position.
 //! 3. Unknown command at token 0 with no suffix — fall through to
 //!    an empty result (nothing to complete).
+//!
+//! The full redesign (context enum, kv-key vs kv-value dispatch,
+//! live popup) lands in a follow-up commit; this one just unwires
+//! fuzzy.
 
 use super::commands::{command_by_name, Command, COMMANDS};
-use super::fuzzy::fuzzy_score;
 use super::parser::tokenize;
 use super::ConsoleContext;
 
@@ -97,24 +100,14 @@ pub fn complete(input: &str, cursor: usize, ctx: &ConsoleContext) -> Vec<Complet
 }
 
 fn complete_command_name(partial: &str, ctx: &ConsoleContext) -> Vec<Completion> {
-    // Rank applicable commands by fuzzy score against their name.
-    // Non-applicable commands are skipped entirely so the completion
-    // popup doesn't offer verbs that would immediately error.
-    let mut scored: Vec<(&'static Command, i32)> = COMMANDS
+    // Prefix match, case-insensitive. Applicable commands first;
+    // the full-redesign contextual engine lands in commit 4.
+    let partial_lc = partial.to_ascii_lowercase();
+    COMMANDS
         .iter()
         .filter(|c| (c.applicable)(ctx))
-        .filter_map(|c| {
-            if partial.is_empty() {
-                Some((c, 0))
-            } else {
-                fuzzy_score(partial, c.name).map(|s| (c, s))
-            }
-        })
-        .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
-    scored
-        .into_iter()
-        .map(|(c, _)| Completion {
+        .filter(|c| c.name.to_ascii_lowercase().starts_with(&partial_lc))
+        .map(|c| Completion {
             text: c.name.to_string(),
             display: c.name.to_string(),
             hint: Some(c.summary.to_string()),
