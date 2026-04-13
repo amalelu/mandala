@@ -146,6 +146,17 @@ pub const MAX_CONSOLE_COMPLETION_ROWS: usize = 8;
 // this module's scope via `use` from the renderer body.
 use crate::application::console::visuals::{CURSOR_GLYPH, PROMPT_GLYPH};
 
+/// How many rows of `│` belong in each side column of the console
+/// frame. The side column sits between the top border (at
+/// `y = top`, height `font_size`) and the bottom border (at
+/// `y = top + frame_height`), so it spans `frame_height - font_size`
+/// pixels at `row_height` per row. Rounded up so the column always
+/// reaches the bottom corner.
+fn side_row_count(frame_height: f32, font_size: f32, row_height: f32) -> usize {
+    let span = (frame_height - font_size).max(0.0);
+    (span / row_height).ceil() as usize
+}
+
 /// Scale alpha linearly between `min` and `max` by `t in [0, 1]`.
 /// Used to dim older scrollback rows.
 fn lerp_alpha(min: u8, max: u8, t: f32) -> u8 {
@@ -1776,16 +1787,6 @@ impl Renderer {
         // the bottom border glyph row.
         self.console_backdrop = Some(layout.backdrop_rect());
 
-        // Border: four exactly-sized cosmic-text buffers built from
-        // baumhard's rounded `BorderGlyphSet`. `cols` is the number
-        // of character cells across the frame; `rows` is the side-
-        // column count (excluding the corner rows, which belong to
-        // the top/bottom strings).
-        let cols = ((frame_width / char_width).floor() as usize).max(2);
-        let side_rows = (scrollback_rows + completion_rows + 1).max(1);
-        let (top_border, bottom_border, left_col, right_col) =
-            build_console_border_strings(cols, side_rows);
-
         // Cosmic-text's `Family::Name` doesn't own the string — we
         // have to keep the source alive for the duration of `attrs`.
         // Empty = cosmic-text default fallback chain.
@@ -1800,6 +1801,28 @@ impl Renderer {
             a
         };
         let border_attrs = mk_attrs(BORDER_COLOR, font_size);
+
+        // Measure the actual shaped advance of the horizontal border
+        // glyph in the user's configured font. The `font_size * 0.6`
+        // char_width from the layout pass is a conservative estimate
+        // — the real advance can differ by 10-20% depending on the
+        // font, and that slop shows up as a visible gap between the
+        // right side `│` column and the top-right `╮` corner. Measure
+        // once and use the measured value for all horizontal
+        // positioning below.
+        let measured_char_width =
+            measure_max_glyph_advance(&mut font_system, &["\u{2500}", "\u{2502}"], font_size);
+
+        // Border: top + bottom as single buffers sized by
+        // measured_char_width. Sides rendered as one buffer each
+        // with an explicit `row_height` line-height so the vertical
+        // stack of `│` glyphs aligns with the content rows (default
+        // line-height is `font_size`, which drifts short by 2px per
+        // row against the content's `row_height`).
+        let cols = ((frame_width / measured_char_width).floor() as usize).max(2);
+        let side_rows = side_row_count(frame_height, font_size, row_height);
+        let (top_border, bottom_border, left_col, right_col) =
+            build_console_border_strings(cols, side_rows);
 
         self.console_overlay_buffers.push(create_border_buffer(
             &mut font_system,
@@ -1817,33 +1840,40 @@ impl Renderer {
             (left, top + frame_height),
             (frame_width, font_size * 1.5),
         ));
-        self.console_overlay_buffers.push(create_border_buffer(
+        self.console_overlay_buffers.push(create_border_buffer_lh(
             &mut font_system,
             &left_col,
             &border_attrs,
             font_size,
+            row_height,
             (left, top + font_size),
-            (char_width, frame_height),
+            (measured_char_width, frame_height),
         ));
-        self.console_overlay_buffers.push(create_border_buffer(
+        // Right column sits where the top-border's last glyph
+        // (`╮`) lands: left + (cols - 1) * measured_char_width.
+        let right_col_x = left + (cols.saturating_sub(1) as f32) * measured_char_width;
+        self.console_overlay_buffers.push(create_border_buffer_lh(
             &mut font_system,
             &right_col,
             &border_attrs,
             font_size,
-            (left + frame_width - char_width, top + font_size),
-            (char_width, frame_height),
+            row_height,
+            (right_col_x, top + font_size),
+            (measured_char_width, frame_height),
         ));
 
-        // Content column: one char for gutter + inner padding, on
-        // the inside of the left border column.
-        let gutter_x = left + char_width;
-        let content_left = gutter_x + char_width + inner_padding;
-        let content_width = frame_width - inner_padding * 2.0 - char_width * 3.0;
+        // Content column: left border + gutter glyph on the inside.
+        // `gutter_x` sits immediately right of the left `│`; content
+        // starts one more cell in, with the inner padding.
+        let gutter_x = left + measured_char_width;
+        let content_left = gutter_x + measured_char_width + inner_padding;
+        let content_width =
+            right_col_x - content_left - inner_padding;
         let content_top = top + font_size + inner_padding;
         // Content measured in monospace cells, for clipping
         // wide-glyph scrollback lines against the frame. See
         // baumhard::util::grapheme_chad::truncate_to_display_width.
-        let content_cols = (content_width / char_width).floor() as usize;
+        let content_cols = (content_width / measured_char_width).floor() as usize;
 
         // Scrollback region: bottom-most N lines, rendered top → bottom.
         // Older rows (higher `i` from the top) fade toward
@@ -1950,44 +1980,38 @@ impl Renderer {
             ));
         }
 
-        // Prompt line: accented `❯`, the input buffer split at the
-        // grapheme-cluster cursor via baumhard's grapheme helpers,
-        // with the block cursor glyph inserted at the boundary.
+        // Prompt line: one rich-text buffer with two spans — the
+        // accent-colored `❯ ` followed by the text-colored input.
+        // Using spans (not two separate buffers) means cosmic-text
+        // lays out the input immediately after the prompt glyph's
+        // actual shaped advance, so there's no hard-coded gap
+        // between `❯` and the cursor `▌`.
         let prompt_attrs = mk_attrs(ACCENT_COLOR, font_size);
         let input_attrs = mk_attrs(TEXT_COLOR, font_size);
         let prompt_budget = font_size * 1.4;
         let y = layout.prompt_y();
-
-        // The `❯ ` glyph draws as its own buffer in accent color;
-        // the user input goes into a neighbouring buffer in text
-        // color. Split keeps the prompt glyph's color independent of
-        // the input chars.
-        self.console_overlay_buffers.push(create_border_buffer(
-            &mut font_system,
-            PROMPT_GLYPH,
-            &prompt_attrs,
-            font_size,
-            (content_left, y),
-            (char_width * 2.0, prompt_budget),
-        ));
         let cursor_byte = baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
             &geometry.input,
             geometry.cursor_grapheme,
         )
         .unwrap_or(geometry.input.len());
         let (pre, post) = geometry.input.split_at(cursor_byte);
-        let input_line = format!("{pre}{CURSOR_GLYPH}{post}");
-        let clipped_input = baumhard::util::grapheme_chad::truncate_to_display_width(
-            &input_line,
+        let input_with_cursor = format!("{pre}{CURSOR_GLYPH}{post}");
+        // Reserve two cells for `"❯ "` when clipping the input.
+        let input_clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+            &input_with_cursor,
             content_cols.saturating_sub(2),
         );
-        self.console_overlay_buffers.push(create_border_buffer(
+        let prompt_span_text = "\u{276F} ";
+        self.console_overlay_buffers.push(create_border_buffer_spans(
             &mut font_system,
-            clipped_input,
-            &input_attrs,
+            &[
+                (prompt_span_text, prompt_attrs),
+                (input_clipped, input_attrs),
+            ],
             font_size,
-            (content_left + char_width * 2.0, y),
-            (content_width - char_width * 2.0, prompt_budget),
+            (content_left, y),
+            (content_width, prompt_budget),
         ));
     }
 
@@ -3009,14 +3033,62 @@ fn create_border_buffer(
     pos: (f32, f32),
     bounds: (f32, f32),
 ) -> MindMapTextBuffer {
+    create_border_buffer_lh(font_system, text, attrs, font_size, font_size, pos, bounds)
+}
+
+/// Like [`create_border_buffer`] but sets an explicit line-height on
+/// the buffer metrics. Needed for multi-line console side columns,
+/// where the vertical stack of `│` glyphs has to advance at the
+/// content's `row_height` (font_size + 2px breathing room) — not the
+/// default `font_size`, which would drift the side column short by
+/// 2px per row.
+fn create_border_buffer_lh(
+    font_system: &mut FontSystem,
+    text: &str,
+    attrs: &Attrs,
+    font_size: f32,
+    line_height: f32,
+    pos: (f32, f32),
+    bounds: (f32, f32),
+) -> MindMapTextBuffer {
     let mut buf = cosmic_text::Buffer::new(
         font_system,
-        cosmic_text::Metrics::new(font_size, font_size),
+        cosmic_text::Metrics::new(font_size, line_height),
     );
     buf.set_size(font_system, Some(bounds.0), Some(bounds.1));
     buf.set_rich_text(
         font_system,
         vec![(text, attrs.clone())],
+        &Attrs::new(),
+        cosmic_text::Shaping::Advanced,
+        None,
+    );
+    buf.shape_until_scroll(font_system, false);
+    MindMapTextBuffer { buffer: buf, pos, bounds }
+}
+
+/// Multi-span variant of [`create_border_buffer`] — hands cosmic-text
+/// a sequence of `(text, attrs)` pairs in one buffer so adjacent
+/// spans with different colors (e.g. accent-colored prompt glyph +
+/// text-colored input) lay out as one line without the caller having
+/// to position them separately.
+fn create_border_buffer_spans(
+    font_system: &mut FontSystem,
+    spans: &[(&str, Attrs)],
+    font_size: f32,
+    pos: (f32, f32),
+    bounds: (f32, f32),
+) -> MindMapTextBuffer {
+    let mut buf = cosmic_text::Buffer::new(
+        font_system,
+        cosmic_text::Metrics::new(font_size, font_size),
+    );
+    buf.set_size(font_system, Some(bounds.0), Some(bounds.1));
+    let span_refs: Vec<(&str, Attrs)> =
+        spans.iter().map(|(t, a)| (*t, a.clone())).collect();
+    buf.set_rich_text(
+        font_system,
+        span_refs,
         &Attrs::new(),
         cosmic_text::Shaping::Advanced,
         None,
