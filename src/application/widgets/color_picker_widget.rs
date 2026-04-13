@@ -55,9 +55,22 @@ pub struct ColorPickerWidgetSpec {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GeometrySpec {
-    /// Base font size in pixels, before the layout fn scales it to
-    /// fit small windows.
-    pub font_size: f32,
+    /// Target wheel-diameter fraction of the screen's shorter side
+    /// at `size_scale = 1.0`. The layout fn back-solves
+    /// `font_size = target_frac * min(screen_w, screen_h) * size_scale
+    /// / wheel_side_in_fonts`, then clamps to `[font_min, font_max]`.
+    /// 0.38 keeps the picker comfortably under half the short axis at
+    /// every screen size while still big enough to aim glyphs with a
+    /// mouse on a 1080p desktop.
+    pub target_frac: f32,
+    /// Floor for the derived font_size in pixels — below this glyphs
+    /// stop being recognizable. Drives the picker's lower-bound size
+    /// on tiny phone-class viewports.
+    pub font_min: f32,
+    /// Ceiling for the derived font_size in pixels — above this the
+    /// picker stops feeling like a widget. Drives the upper-bound
+    /// size on huge desktop viewports.
+    pub font_max: f32,
     /// Ring font size as a multiple of `font_size`.
     pub hue_ring_font_scale: f32,
     /// Ring box width as a multiple of `ring_font_size`.
@@ -72,6 +85,28 @@ pub struct GeometrySpec {
     /// Font+bounds multiplier applied to the hovered cell. 1.3×
     /// reads as "this one's hot" without pushing into neighbors.
     pub hover_scale: f32,
+    /// Halo radius in pixels at `font_size = 22`. Scales linearly
+    /// with the picker's current font_size so small pickers get
+    /// proportionally smaller halos. Picker glyphs each draw N
+    /// black-halo offsets behind themselves so the colored glyph
+    /// stands out against the (now transparent) backdrop.
+    pub outline_px: f32,
+    /// Number of halo offsets drawn per glyph, evenly spaced around
+    /// `outline_px`. 8 gives a smooth round halo; 4 gives a "+"-
+    /// shaped halo at half the cost.
+    pub outline_samples: u8,
+    /// When `true`, the picker draws no backdrop fill — canvas
+    /// content shows through the gaps between glyphs. Combined with
+    /// the glyph halos this makes the picker read as a floating
+    /// widget rather than a heavy modal frame.
+    pub transparent_backdrop: bool,
+    /// Lower clamp for the user-controlled `size_scale` — the RMB
+    /// drag gesture can't shrink the picker below this multiple of
+    /// the default size.
+    pub resize_scale_min: f32,
+    /// Upper clamp for the user-controlled `size_scale` — same idea
+    /// as `resize_scale_min` but for growth.
+    pub resize_scale_max: f32,
 }
 
 /// One chip in the theme-variable quick-pick row.
@@ -129,8 +164,13 @@ mod tests {
         assert_eq!(spec.arm_right_glyphs.len(), 10);
         assert!(!spec.center_preview_glyph.is_empty());
         assert_eq!(spec.chips.len(), 5);
-        assert!(spec.geometry.font_size > 0.0);
+        assert!(spec.geometry.target_frac > 0.0 && spec.geometry.target_frac < 1.0);
+        assert!(spec.geometry.font_min > 0.0);
+        assert!(spec.geometry.font_max > spec.geometry.font_min);
         assert!(spec.geometry.hover_scale > 1.0);
+        assert!(spec.geometry.outline_samples > 0);
+        assert!(spec.geometry.resize_scale_min > 0.0);
+        assert!(spec.geometry.resize_scale_max > spec.geometry.resize_scale_min);
     }
 
     /// The bottom-arm font must be set — without it cosmic-text

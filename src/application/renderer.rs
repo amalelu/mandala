@@ -1848,7 +1848,19 @@ impl Renderer {
             self.config.width as f32,
             self.config.height as f32,
         );
-        self.color_picker_backdrop = Some(layout.backdrop);
+        // Spec-gated transparent backdrop. When enabled, the picker
+        // skips emitting an opaque rect — canvas content shows
+        // through the gaps between glyphs, and per-glyph black
+        // halos (added in `build_color_picker_overlay_tree`) keep
+        // them legible against any background. The hit-test
+        // `layout.backdrop` rectangle is the *semantic* boundary,
+        // independent of whether the rect is drawn.
+        let spec = crate::application::widgets::color_picker_widget::load_spec();
+        self.color_picker_backdrop = if spec.geometry.transparent_backdrop {
+            None
+        } else {
+            Some(layout.backdrop)
+        };
 
         let tree = build_color_picker_overlay_tree(g, &layout);
         app_scene.register_overlay(OverlayRole::ColorPicker, tree, glam::Vec2::ZERO);
@@ -2459,31 +2471,57 @@ fn build_color_picker_overlay_tree(
     use crate::application::widgets::color_picker_widget::load_spec;
     use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
 
+    // Pull the spec once — the picker reads several geometry
+    // constants (hover_scale, outline_*, font_max for halo
+    // scaling, title and hint templates) and one access keeps the
+    // JSON-touch surface small.
+    let spec = load_spec();
+
     // Scale factor applied to the font size AND bounds of the
     // currently-hovered cell. Sourced from the widget spec so the
     // ratio stays in one place (the JSON) — the layout pure-fn
     // doesn't need it, only the render path.
-    let hover_scale: f32 = load_spec().geometry.hover_scale;
+    let hover_scale: f32 = spec.geometry.hover_scale;
 
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
     let mut id_counter: usize = 1;
 
-    // Local helper; mirrors the console builder's pattern.
-    // `centered = true` shapes the text with `Align::Center` so
-    // cross-script glyphs (Devanagari / Hebrew / Tibetan in the
-    // hue ring, mixed sat/val cells) sit on the same visual radius
-    // — matches the legacy `create_centered_cell_buffer` path. Use
-    // `false` for left-aligned chrome (title, hint, hex readout,
-    // chips).
+    // Halo spec for the picker. With `transparent_backdrop = true`
+    // the picker has no opaque background — without halos the
+    // colored sacred-script glyphs would lose contrast against
+    // light canvas content. `outline_px` is the halo radius at
+    // the spec's measurement font size (effectively `font_max`);
+    // we scale it linearly by the actual layout font_size so a
+    // shrunk picker gets a proportionally smaller halo.
     //
-    // `font` pins a specific `AppFont` for this area's region span.
-    // Needed for glyphs outside the Basic Multilingual Plane — the
-    // SMP-range Egyptian hieroglyphs in particular — where
-    // cosmic-text's default fallback may pick a non-covering font
-    // and render as tofu or zero-width. Pass `None` for ordinary
-    // Latin / BMP glyphs; cosmic-text's fallback handles those
-    // fine.
-    fn push_area(
+    // Each halo emits `outline_samples` GlyphAreas at
+    // evenly-spaced offsets on a circle of radius `outline_px`
+    // around the main glyph's anchor. The halos render BEFORE
+    // the colored glyph (tree-walker order = DFS), which puts
+    // them visually behind. 8 samples ≈ smooth round halo;
+    // 4 ≈ "+"-shaped halo at half the glyph budget.
+    #[derive(Clone, Copy)]
+    struct OutlineSpec {
+        px: f32,
+        samples: u8,
+        color: cosmic_text::Color,
+    }
+    let outline = if spec.geometry.outline_px > 0.0 && spec.geometry.outline_samples > 0 {
+        Some(OutlineSpec {
+            px: spec.geometry.outline_px * (layout.font_size / spec.geometry.font_max),
+            samples: spec.geometry.outline_samples,
+            color: cosmic_text::Color::rgba(0, 0, 0, 255),
+        })
+    } else {
+        None
+    };
+
+    // Inner builder — the same shape as before, no halo logic. The
+    // outline-aware wrapper below emits N halo copies of the
+    // same area first, then calls this once for the main colored
+    // glyph. Splitting keeps the halo loop trivial and the inner
+    // builder's signature stable.
+    fn push_area_inner(
         tree: &mut Tree<GfxElement, GfxMutator>,
         id_counter: &mut usize,
         text: &str,
@@ -2526,6 +2564,62 @@ fn build_color_picker_overlay_tree(
         tree.root.append(leaf, &mut tree.arena);
     }
 
+    // Local helper; mirrors the console builder's pattern.
+    // `centered = true` shapes the text with `Align::Center` so
+    // cross-script glyphs (Devanagari / Hebrew / Tibetan in the
+    // hue ring, mixed sat/val cells) sit on the same visual radius
+    // — matches the legacy `create_centered_cell_buffer` path. Use
+    // `false` for left-aligned chrome (title, hint, hex readout,
+    // chips).
+    //
+    // `font` pins a specific `AppFont` for this area's region span.
+    // Needed for glyphs outside the Basic Multilingual Plane — the
+    // SMP-range Egyptian hieroglyphs in particular — where
+    // cosmic-text's default fallback may pick a non-covering font
+    // and render as tofu or zero-width. Pass `None` for ordinary
+    // Latin / BMP glyphs; cosmic-text's fallback handles those
+    // fine.
+    //
+    // When `outline` is `Some`, emit N halo copies first (offset
+    // around the main position on a circle of `outline.px`),
+    // then the colored glyph. The walker iterates in DFS order so
+    // halos render behind the main glyph — 5–9× the glyph cost
+    // for this area, justified by the transparent-backdrop
+    // legibility win.
+    let push_area = |tree: &mut Tree<GfxElement, GfxMutator>,
+                     id_counter: &mut usize,
+                     text: &str,
+                     color: cosmic_text::Color,
+                     font_size: f32,
+                     line_height: f32,
+                     pos: (f32, f32),
+                     bounds: (f32, f32),
+                     centered: bool,
+                     font: Option<baumhard::font::fonts::AppFont>| {
+        if let Some(o) = outline {
+            for k in 0..o.samples {
+                let angle = (k as f32 / o.samples as f32) * std::f32::consts::TAU;
+                let dx = angle.cos() * o.px;
+                let dy = angle.sin() * o.px;
+                push_area_inner(
+                    tree,
+                    id_counter,
+                    text,
+                    o.color,
+                    font_size,
+                    line_height,
+                    (pos.0 + dx, pos.1 + dy),
+                    bounds,
+                    centered,
+                    font,
+                );
+            }
+        }
+        push_area_inner(
+            tree, id_counter, text, color, font_size, line_height, pos, bounds, centered, font,
+        );
+    };
+
     let font_size = layout.font_size;
     let ring_font_size = layout.ring_font_size;
     // Widen box reservations past the base glyph so hover-grow has
@@ -2538,7 +2632,6 @@ fn build_color_picker_overlay_tree(
     // Title. In contextual mode the bound target's label substitutes
     // into the template; in standalone mode the spec's standalone
     // title renders verbatim. Both strings live in the widget JSON.
-    let spec = load_spec();
     let title_text = if geometry.target_label.is_empty() {
         spec.title_template_standalone.clone()
     } else {
@@ -3154,6 +3247,39 @@ fn walk_tree_into_buffers(
         // glyph-level wrap for over-wide single tokens, which is
         // what every consumer here actually wants.
 
+        // Pre-compute font family names per region. The walker had a
+        // long-standing bug where `region.font` was stored on the
+        // GlyphArea but never threaded into the cosmic-text `Attrs`,
+        // so SMP-range glyphs that needed an explicit face (Egyptian
+        // hieroglyphs in the color-picker bottom arm in particular)
+        // silently rendered as tofu — cosmic-text's default fallback
+        // doesn't pick the Noto Sans Egyptian Hieroglyphs face.
+        //
+        // The family lookup borrows `font_system.db()` immutably,
+        // while `set_rich_text` below needs `&mut font_system`. We
+        // collect the family strings into an owned `Vec<Option<String>>`
+        // here so the immutable borrow ends before the mutable one
+        // begins, and the owned strings outlive the spans Vec that
+        // borrows them via `Family::Name`.
+        let family_names: Vec<Option<String>> = if area.regions.num_regions() == 0 {
+            vec![None]
+        } else {
+            area.regions
+                .all_regions()
+                .iter()
+                .map(|region| {
+                    region.font.and_then(|f| {
+                        fonts::COMPILED_FONT_ID_MAP.get(&f).and_then(|ids| {
+                            font_system
+                                .db()
+                                .face(ids[0])
+                                .map(|face| face.families[0].0.clone())
+                        })
+                    })
+                })
+                .collect()
+        };
+
         let text = &area.text;
         let spans: Vec<(&str, Attrs)> = if area.regions.num_regions() == 0 {
             vec![(text.as_str(), Attrs::new())]
@@ -3161,7 +3287,8 @@ fn walk_tree_into_buffers(
             area.regions
                 .all_regions()
                 .iter()
-                .filter_map(|region| {
+                .enumerate()
+                .filter_map(|(i, region)| {
                     let start = grapheme_chad::find_byte_index_of_char(text, region.range.start)
                         .unwrap_or(text.len());
                     let end = grapheme_chad::find_byte_index_of_char(text, region.range.end)
@@ -3175,6 +3302,13 @@ fn walk_tree_into_buffers(
                         let u8c = baumhard::util::color::convert_f32_to_u8(&rgba);
                         attrs = attrs
                             .color(cosmic_text::Color::rgba(u8c[0], u8c[1], u8c[2], u8c[3]));
+                    }
+                    // Pin the per-region font when the GlyphArea
+                    // specified one. The family name is owned by
+                    // `family_names`; `Family::Name` borrows it for
+                    // the lifetime of `attrs`.
+                    if let Some(family) = family_names.get(i).and_then(|n| n.as_deref()) {
+                        attrs = attrs.family(Family::Name(family));
                     }
                     attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
                     Some((slice, attrs))

@@ -615,20 +615,30 @@ impl Application {
                     }
 
                     // Glyph-wheel color picker click handling. The
-                    // picker captures left-click: press → either
-                    // preview / commit / start drag depending on
-                    // which region was hit; release → end drag if
-                    // one is active (no-op otherwise). The
-                    // CursorMoved branch above unconditionally
-                    // early-returns while the picker is open, so
-                    // middle-button pan is suppressed for the
-                    // duration — matching the palette and
+                    // picker captures both left- and right-mouse
+                    // buttons:
+                    // - LMB on a `DragAnchor` → wheel-move gesture;
+                    //   on any other hit → preview / commit / chip
+                    //   focus.
+                    // - RMB on a `DragAnchor` → wheel-resize
+                    //   gesture (drag away to grow, toward to shrink).
+                    //   RMB elsewhere is currently a no-op — only
+                    //   the empty backdrop region acts as the resize
+                    //   handle, mirroring the LMB-move convention.
+                    // Release of either button ends any active
+                    // gesture. The CursorMoved branch above
+                    // unconditionally early-returns while the picker
+                    // is open, so middle-button pan is suppressed
+                    // for the duration — matching the palette and
                     // label-edit overlays' behavior.
-                    if color_picker_state.is_open() && button == MouseButton::Left {
+                    if color_picker_state.is_open()
+                        && matches!(button, MouseButton::Left | MouseButton::Right)
+                    {
                         if state == ElementState::Pressed {
                             if let Some(doc) = document.as_mut() {
                                 handle_color_picker_click(
                                     cursor_pos,
+                                    button,
                                     &mut color_picker_state,
                                     doc,
                                     &mut mindmap_tree,
@@ -638,8 +648,8 @@ impl Application {
                                 );
                             }
                         } else {
-                            // Release — end any active wheel drag.
-                            end_color_picker_drag(&mut color_picker_state);
+                            // Release — end any active wheel gesture.
+                            end_color_picker_gesture(&mut color_picker_state);
                         }
                         return;
                     }
@@ -3987,14 +3997,17 @@ fn open_picker_inner(
     // keeps `compute_color_picker_layout` pure. Both measurements
     // happen behind the font-system write lock, which is also what
     // the renderer's buffer builders need, so we grab it once.
-    // Base font sourced from the widget spec. Kept as the local
-    // shadow `base_font_size` so the measurement loop reads the same
-    // value as the layout does at render time.
-    let base_font_size: f32 =
-        crate::application::widgets::color_picker_widget::load_spec()
-            .geometry
-            .font_size;
-    let ring_font_size = base_font_size * hue_ring_font_scale();
+    // Measurement font size: pick the spec's `font_max` so the
+    // ratios captured here are accurate across the full
+    // `[font_min, font_max]` range the layout fn might pick. The
+    // ratios `max_cell_advance / measurement_font_size` and
+    // `max_ring_advance / (measurement_font_size * ring_scale)` are
+    // dimensionless and stable across font sizes (cosmic-text
+    // shapes proportionally), so the layout can scale them to
+    // whatever font_size it derives from the window-size formula.
+    let geom = &crate::application::widgets::color_picker_widget::load_spec().geometry;
+    let measurement_font_size: f32 = geom.font_max;
+    let ring_font_size = measurement_font_size * hue_ring_font_scale();
     let (max_cell_advance, max_ring_advance) = {
         let mut font_system = baumhard::font::fonts::FONT_SYSTEM
             .write()
@@ -4007,7 +4020,7 @@ fn open_picker_inner(
         let cell = crate::application::renderer::measure_max_glyph_advance(
             &mut font_system,
             &crosshair,
-            base_font_size,
+            measurement_font_size,
         );
         let ring_glyphs: Vec<&str> = hue_ring_glyphs().iter().copied().collect();
         let ring = crate::application::renderer::measure_max_glyph_advance(
@@ -4027,10 +4040,12 @@ fn open_picker_inner(
         last_cursor_pos: None,
         max_cell_advance,
         max_ring_advance,
+        measurement_font_size,
         commit_mode: crate::application::color_picker::CommitMode::Hsv,
         layout: None,
         center_override: None,
-        drag: None,
+        size_scale: 1.0,
+        gesture: None,
         hovered_hit: None,
         pending_error_flash: false,
     };
@@ -4108,6 +4123,8 @@ fn compute_picker_geometry(
         last_cursor_pos,
         max_cell_advance,
         max_ring_advance,
+        measurement_font_size,
+        size_scale,
         cached_backdrop,
         center_override,
         hovered_hit,
@@ -4122,8 +4139,10 @@ fn compute_picker_geometry(
             last_cursor_pos,
             max_cell_advance,
             max_ring_advance,
+            measurement_font_size,
             layout,
             center_override,
+            size_scale,
             hovered_hit,
             ..
         } => (
@@ -4140,6 +4159,8 @@ fn compute_picker_geometry(
             *last_cursor_pos,
             *max_cell_advance,
             *max_ring_advance,
+            *measurement_font_size,
+            *size_scale,
             layout.as_ref().map(|l| l.backdrop),
             *center_override,
             *hovered_hit,
@@ -4170,6 +4191,8 @@ fn compute_picker_geometry(
         hex_visible,
         max_cell_advance,
         max_ring_advance,
+        measurement_font_size,
+        size_scale,
         center_override,
         hovered_hit,
     };
@@ -4733,17 +4756,42 @@ fn handle_color_picker_mouse_move(
         *last_cursor_pos = Some(cursor);
     }
 
-    // Drag takes priority: while the wheel is being dragged, every
-    // cursor move repositions the wheel center. No hit-test, no
-    // HSV update — the drag is mutually exclusive with picking.
+    // Active gesture takes priority: while the wheel is being
+    // dragged or resized, every cursor move feeds the gesture
+    // instead of hit-testing for hover. The two gestures are
+    // mutually exclusive — `gesture` holds at most one variant.
     if let ColorPickerState::Open {
-        drag: Some(d),
+        gesture: Some(g),
         center_override,
+        size_scale,
         ..
     } = state
     {
-        let new_center = (cursor.0 + d.grab_offset.0, cursor.1 + d.grab_offset.1);
-        *center_override = Some(new_center);
+        match *g {
+            crate::application::color_picker::PickerGesture::Move { grab_offset } => {
+                let new_center = (cursor.0 + grab_offset.0, cursor.1 + grab_offset.1);
+                *center_override = Some(new_center);
+            }
+            crate::application::color_picker::PickerGesture::Resize {
+                anchor_radius,
+                anchor_scale,
+                anchor_center,
+            } => {
+                // Multiplicative scale change: new_scale =
+                // anchor_scale * (current_radius / anchor_radius),
+                // floored on the input side at the same `font * 3`
+                // anchor_radius cap so the ratio stays well-behaved
+                // throughout the gesture. Clamps from the spec.
+                let dx = cursor.0 - anchor_center.0;
+                let dy = cursor.1 - anchor_center.1;
+                let raw_r = (dx * dx + dy * dy).sqrt();
+                let r_now = raw_r.max(anchor_radius * 0.1);
+                let geom = &crate::application::widgets::color_picker_widget::load_spec()
+                    .geometry;
+                *size_scale = (anchor_scale * (r_now / anchor_radius))
+                    .clamp(geom.resize_scale_min, geom.resize_scale_max);
+            }
+        }
         *picker_dirty = true;
         return;
     }
@@ -4867,15 +4915,23 @@ fn handle_color_picker_mouse_move(
 ///   - Standalone: apply current HSV to each item in the document
 ///     selection; stay open. If the selection is empty, trigger the
 ///     error-flash animation hook.
-/// - **DragAnchor** — start a wheel drag. The mouse-up event ends
-///   the drag via `end_color_picker_drag`.
+/// - **DragAnchor** —
+///   - LMB → start a wheel-move gesture (translates `center_override`).
+///   - RMB → start a wheel-resize gesture (mutates `size_scale`).
+///   The mouse-up event ends either gesture via
+///   `end_color_picker_gesture`.
 /// - **Outside** —
 ///   - Contextual: cancel (restore original), close.
 ///   - Standalone: ignored (the persistent palette only closes via
 ///     `color picker off`).
+///
+/// `button` is `MouseButton::Left` or `MouseButton::Right`. The
+/// caller (the `WindowEvent::MouseInput` branch) filters out other
+/// buttons before reaching here.
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_color_picker_click(
     cursor_pos: (f64, f64),
+    button: MouseButton,
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
@@ -4884,7 +4940,7 @@ fn handle_color_picker_click(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        hit_test_picker, ColorPickerState, DragState, PickerHit,
+        hit_test_picker, ColorPickerState, PickerGesture, PickerHit,
     };
 
     let hit = if let ColorPickerState::Open { layout: Some(layout), .. } = state {
@@ -4892,6 +4948,15 @@ fn handle_color_picker_click(
     } else {
         return;
     };
+
+    // RMB outside the DragAnchor region is a no-op for now — only
+    // the empty backdrop area acts as a resize handle. That keeps
+    // the gesture predictable: RMB on a hue/sat/val cell or a chip
+    // doesn't accidentally resize while the user is also reading
+    // the live preview.
+    if button == MouseButton::Right && !matches!(hit, PickerHit::DragAnchor) {
+        return;
+    }
 
     let is_standalone = state.is_standalone();
 
@@ -4938,36 +5003,60 @@ fn handle_color_picker_click(
             }
         }
         PickerHit::DragAnchor => {
-            // Start a drag from anywhere inside the backdrop that's
-            // not on an interactive glyph. The grab-offset is the
-            // vector from the cursor to the current wheel center —
-            // on every subsequent CursorMoved we translate the
-            // wheel so `center = cursor + grab_offset`, preserving
-            // the "picked it up from where you grabbed" feel.
+            // Start a gesture from anywhere inside the backdrop
+            // that's not on an interactive glyph. LMB → move
+            // (translate center_override); RMB → resize (mutate
+            // size_scale). The two gestures are mutually exclusive
+            // by construction — `gesture` only holds one variant.
             if let ColorPickerState::Open {
                 layout: Some(layout),
-                drag,
+                gesture,
+                size_scale,
                 ..
             } = state
             {
-                *drag = Some(DragState {
-                    grab_offset: (
-                        layout.center.0 - cursor_pos.0 as f32,
-                        layout.center.1 - cursor_pos.1 as f32,
-                    ),
+                let cursor = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+                *gesture = Some(match button {
+                    MouseButton::Left => PickerGesture::Move {
+                        grab_offset: (
+                            layout.center.0 - cursor.0,
+                            layout.center.1 - cursor.1,
+                        ),
+                    },
+                    MouseButton::Right => {
+                        // Floor the anchor radius so a grab very
+                        // near the wheel center doesn't make a 1px
+                        // cursor move into a 100% scale change.
+                        // `font_size * 3.0` is comfortably outside
+                        // the central ॐ commit button's hit
+                        // radius (`preview_size * 0.45`), so the
+                        // floor is rarely hit in practice anyway.
+                        let dx = cursor.0 - layout.center.0;
+                        let dy = cursor.1 - layout.center.1;
+                        let raw_r = (dx * dx + dy * dy).sqrt();
+                        let anchor_radius = raw_r.max(layout.font_size * 3.0);
+                        PickerGesture::Resize {
+                            anchor_radius,
+                            anchor_scale: *size_scale,
+                            anchor_center: layout.center,
+                        }
+                    }
+                    // Other buttons can't reach here — caller
+                    // filters to Left/Right before dispatching.
+                    _ => return,
                 });
             }
         }
     }
 }
 
-/// End an active wheel drag. Called on mouse-up while the picker is
-/// open. No-op if no drag is active.
+/// End an active picker gesture. Called on mouse-up while the
+/// picker is open. No-op if no gesture is active.
 #[cfg(not(target_arch = "wasm32"))]
-fn end_color_picker_drag(state: &mut crate::application::color_picker::ColorPickerState) {
+fn end_color_picker_gesture(state: &mut crate::application::color_picker::ColorPickerState) {
     use crate::application::color_picker::ColorPickerState;
-    if let ColorPickerState::Open { drag, .. } = state {
-        *drag = None;
+    if let ColorPickerState::Open { gesture, .. } = state {
+        *gesture = None;
     }
 }
 
