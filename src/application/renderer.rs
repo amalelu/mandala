@@ -451,6 +451,18 @@ pub struct Renderer {
     /// drawn alongside the existing console/color-picker overlay
     /// buffer lists. Empty until an overlay migrates to a tree.
     overlay_scene_buffers: Vec<MindMapTextBuffer>,
+    /// Canvas-space buffers for the app's
+    /// [`AppScene`](crate::application::scene_host::AppScene)'s
+    /// canvas sub-scene (borders, connections, portals, etc.).
+    /// Populated by [`Self::rebuild_canvas_scene_buffers`]. Drawn
+    /// in the main camera-transformed pass. Empty until a canvas
+    /// component migrates to a tree.
+    canvas_scene_buffers: Vec<MindMapTextBuffer>,
+    /// Background-rect instances collected while walking the
+    /// canvas sub-scene — forwarded to the camera-transformed
+    /// rect pipeline so GlyphArea fills on migrated components
+    /// render beneath their glyphs.
+    canvas_scene_background_rects: Vec<NodeBackgroundRect>,
     /// Set whenever the camera's viewport rect changes (pan, zoom,
     /// resize) and `connection_buffers` was cleared as a result.
     /// Consumed once per frame by the event loop in `AboutToWait` to
@@ -677,6 +689,8 @@ impl Renderer {
             color_picker_backdrop: None,
             overlay_buffers: Vec::new(),
             overlay_scene_buffers: Vec::new(),
+            canvas_scene_buffers: Vec::new(),
+            canvas_scene_background_rects: Vec::new(),
             connection_viewport_dirty: false,
             connection_geometry_dirty: false,
             rect_pipeline,
@@ -1047,7 +1061,11 @@ impl Renderer {
         // Visible-range test mirrors the text-area cull below so
         // clipped-offscreen nodes don't waste vertices either.
         self.main_rect_vertices.clear();
-        for rect in &self.node_background_rects {
+        for rect in self
+            .node_background_rects
+            .iter()
+            .chain(self.canvas_scene_background_rects.iter())
+        {
             if !self.camera.is_visible(rect.position, rect.size) {
                 continue;
             }
@@ -1160,6 +1178,7 @@ impl Renderer {
             .chain(self.portal_buffers.values())
             .chain(self.edge_handle_buffers.iter())
             .chain(self.overlay_buffers.iter())
+            .chain(self.canvas_scene_buffers.iter())
             .filter_map(|tb| {
                 let canvas_pos = Vec2::new(tb.pos.0, tb.pos.1);
                 let canvas_size = Vec2::new(tb.bounds.0, tb.bounds.1);
@@ -1465,15 +1484,15 @@ impl Renderer {
         app_scene: &mut crate::application::scene_host::AppScene,
     ) {
         self.overlay_scene_buffers.clear();
-        if app_scene.scene().is_empty() {
+        if app_scene.overlay_scene().is_empty() {
             return;
         }
-        let ids = app_scene.scene_mut().ids_in_layer_order();
+        let ids = app_scene.overlay_scene_mut().ids_in_layer_order();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
         for id in ids {
-            let Some(entry) = app_scene.scene().get(id) else {
+            let Some(entry) = app_scene.overlay_scene().get(id) else {
                 continue;
             };
             if !entry.visible {
@@ -1492,6 +1511,52 @@ impl Renderer {
                     // Sessions 3 / 4 need them they can add a
                     // dedicated `overlay_scene_background_rects`
                     // field and a screen-space draw pass.
+                },
+            );
+        }
+    }
+
+    /// Rebuild the canvas-space buffer list for every tree the app
+    /// has registered into [`AppScene`]'s canvas sub-scene
+    /// (borders, connections, portals, edge handles, connection
+    /// labels — whichever have migrated). These buffers feed the
+    /// camera-transformed main pass alongside the mindmap's own
+    /// buffer map.
+    ///
+    /// # Costs
+    ///
+    /// O(sum of descendants) across every canvas tree. Allocates a
+    /// `cosmic_text::Buffer` per non-empty `GlyphArea`. Empty
+    /// sub-scenes short-circuit cheaply.
+    pub fn rebuild_canvas_scene_buffers(
+        &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
+    ) {
+        self.canvas_scene_buffers.clear();
+        self.canvas_scene_background_rects.clear();
+        if app_scene.canvas_scene().is_empty() {
+            return;
+        }
+        let ids = app_scene.canvas_scene_mut().ids_in_layer_order();
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+        for id in ids {
+            let Some(entry) = app_scene.canvas_scene().get(id) else {
+                continue;
+            };
+            if !entry.visible {
+                continue;
+            }
+            walk_tree_into_buffers(
+                &entry.tree,
+                entry.offset,
+                &mut font_system,
+                |_key, buffer| {
+                    self.canvas_scene_buffers.push(buffer);
+                },
+                |rect| {
+                    self.canvas_scene_background_rects.push(rect);
                 },
             );
         }
