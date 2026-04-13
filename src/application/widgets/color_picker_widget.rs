@@ -42,15 +42,20 @@ pub struct ColorPickerWidgetSpec {
     /// hieroglyphs. `None` to let cosmic-text pick.
     #[serde(default)]
     pub arm_bottom_font: Option<AppFont>,
-    /// Theme-variable quick-pick chips shown below the wheel.
-    pub chips: Vec<ChipSpec>,
     /// Title template for contextual mode. `{target_label}` is
     /// replaced by "edge" / "portal" / "node" at render time.
     pub title_template_contextual: String,
     /// Title shown verbatim when the picker is in standalone mode.
     pub title_template_standalone: String,
-    /// Hint footer text shown inside the backdrop.
-    pub hint_text: String,
+    /// Hint footer text shown inside the backdrop when the picker
+    /// is in contextual mode. Includes the "Esc cancel" affordance
+    /// since Esc exits a contextual picker.
+    pub hint_text_contextual: String,
+    /// Hint footer text shown inside the backdrop when the picker
+    /// is in standalone mode. Omits "Esc cancel" — Esc has no
+    /// effect on a standalone picker, which only closes via
+    /// `color picker off` from the console.
+    pub hint_text_standalone: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +78,10 @@ pub struct GeometrySpec {
     pub font_max: f32,
     /// Ring font size as a multiple of `font_size`.
     pub hue_ring_font_scale: f32,
+    /// Cell font size (crosshair arm glyphs) as a multiple of
+    /// `font_size`. Bumped above 1.0 so the cross reads as the
+    /// focal interactive surface rather than a secondary decoration.
+    pub cell_font_scale: f32,
     /// Ring box width as a multiple of `ring_font_size`.
     pub ring_box_scale: f32,
     /// Cell box width as a multiple of `cell_advance`.
@@ -85,15 +94,18 @@ pub struct GeometrySpec {
     /// Font+bounds multiplier applied to the hovered cell. 1.3×
     /// reads as "this one's hot" without pushing into neighbors.
     pub hover_scale: f32,
-    /// Halo radius in pixels at `font_size = 22`. Scales linearly
-    /// with the picker's current font_size so small pickers get
-    /// proportionally smaller halos. Picker glyphs each draw N
-    /// black-halo offsets behind themselves so the colored glyph
-    /// stands out against the (now transparent) backdrop.
+    /// Halo radius in pixels at the spec's `font_max` baseline.
+    /// Scales linearly with the picker's current font_size so small
+    /// pickers get proportionally smaller halos. Picker glyphs each
+    /// draw N black-halo offsets behind themselves so the colored
+    /// glyph stands out against the (now transparent) backdrop.
     pub outline_px: f32,
     /// Number of halo offsets drawn per glyph, evenly spaced around
-    /// `outline_px`. 8 gives a smooth round halo; 4 gives a "+"-
-    /// shaped halo at half the cost.
+    /// `outline_px`. Higher counts give smoother, fuller halos at
+    /// proportionally higher cosmic-text shape cost — 12 gives a
+    /// near-circular halo that reads cleanly on SMP glyphs
+    /// (Egyptian hieroglyphs especially); 4 gives a "+"-shaped
+    /// halo at a third of the cost.
     pub outline_samples: u8,
     /// When `true`, the picker draws no backdrop fill — canvas
     /// content shows through the gaps between glyphs. Combined with
@@ -107,29 +119,6 @@ pub struct GeometrySpec {
     /// Upper clamp for the user-controlled `size_scale` — same idea
     /// as `resize_scale_min` but for growth.
     pub resize_scale_max: f32,
-}
-
-/// One chip in the theme-variable quick-pick row.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChipSpec {
-    pub label: String,
-    pub action: ChipActionSpec,
-}
-
-/// What a chip commits when clicked. Mirrors the runtime
-/// [`crate::application::color_picker::ChipAction`] but carries
-/// `String` instead of `&'static str` because it's loaded at
-/// runtime.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ChipActionSpec {
-    /// Commit a raw `var(--name)` reference so theme-var resolution
-    /// runs at render time. `name` carries the full `var(--foo)`
-    /// literal including the parentheses.
-    Var { name: String },
-    /// Clear the target's color override (for edges), or re-seed to
-    /// a per-axis default (for nodes / portals).
-    Reset,
 }
 
 /// Parsed spec, cached for the life of the process.
@@ -163,11 +152,11 @@ mod tests {
         assert_eq!(spec.arm_left_glyphs.len(), 10);
         assert_eq!(spec.arm_right_glyphs.len(), 10);
         assert!(!spec.center_preview_glyph.is_empty());
-        assert_eq!(spec.chips.len(), 5);
         assert!(spec.geometry.target_frac > 0.0 && spec.geometry.target_frac < 1.0);
         assert!(spec.geometry.font_min > 0.0);
         assert!(spec.geometry.font_max > spec.geometry.font_min);
         assert!(spec.geometry.hover_scale > 1.0);
+        assert!(spec.geometry.cell_font_scale >= 1.0);
         assert!(spec.geometry.outline_samples > 0);
         assert!(spec.geometry.resize_scale_min > 0.0);
         assert!(spec.geometry.resize_scale_max > spec.geometry.resize_scale_min);
@@ -187,23 +176,5 @@ mod tests {
             ),
             "arm_bottom_font must be set to the Egyptian hieroglyph face"
         );
-    }
-
-    /// Chip specs must round-trip cleanly — one Var per theme
-    /// variable plus one Reset at the end. Regression guard for
-    /// schema drift in the JSON.
-    #[test]
-    fn spec_chip_shape() {
-        let spec = load_spec();
-        assert_eq!(spec.chips.len(), 5);
-        // Last chip is Reset.
-        assert!(matches!(
-            spec.chips.last().unwrap().action,
-            ChipActionSpec::Reset
-        ));
-        // First four are Var.
-        for c in &spec.chips[..4] {
-            assert!(matches!(c.action, ChipActionSpec::Var { .. }));
-        }
     }
 }

@@ -2572,10 +2572,10 @@ fn picker_glyph_areas(
     use crate::application::color_picker::{
         arm_bottom_font, arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs,
         center_preview_glyph, hue_ring_glyphs, hue_slot_to_degrees, sat_cell_to_value,
-        theme_chips, val_cell_to_value, CROSSHAIR_CENTER_CELL, PickerHit,
-        PICKER_CHANNEL_CHIP_BASE, PICKER_CHANNEL_HEX, PICKER_CHANNEL_HINT,
-        PICKER_CHANNEL_HUE_RING_BASE, PICKER_CHANNEL_PREVIEW, PICKER_CHANNEL_SAT_BASE,
-        PICKER_CHANNEL_TITLE, PICKER_CHANNEL_VAL_BASE, SAT_CELL_COUNT, VAL_CELL_COUNT,
+        val_cell_to_value, CROSSHAIR_CENTER_CELL, PickerHit, PICKER_CHANNEL_HEX,
+        PICKER_CHANNEL_HINT, PICKER_CHANNEL_HUE_RING_BASE, PICKER_CHANNEL_PREVIEW,
+        PICKER_CHANNEL_SAT_BASE, PICKER_CHANNEL_TITLE, PICKER_CHANNEL_VAL_BASE,
+        SAT_CELL_COUNT, VAL_CELL_COUNT,
     };
     use crate::application::widgets::color_picker_widget::load_spec;
     use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
@@ -2652,17 +2652,28 @@ fn picker_glyph_areas(
 
     let font_size = layout.font_size;
     let ring_font_size = layout.ring_font_size;
+    let cell_font_size = layout.cell_font_size;
     // Widen box reservations past the base glyph so hover-grow has
     // room to render at HOVER_SCALE without clipping neighbors, and
     // SMP glyphs (Egyptian hieroglyphs especially) shape without
     // hitting the right bound.
-    let ring_box_w = ring_font_size * 1.8;
-    let cell_box_w = (layout.cell_advance * 1.4).max(font_size * 1.5);
+    let ring_box_w = ring_font_size * spec.geometry.ring_box_scale;
+    let cell_box_w =
+        (layout.cell_advance * spec.geometry.cell_box_scale).max(cell_font_size * 1.5);
+
+    // Non-wheel chrome (title, hint, hex readout) tracks the
+    // picker's current HSV preview color. This means the text
+    // "carries" the selected color out of the wheel and into the
+    // surrounding copy — confirming at a glance what the user is
+    // about to commit. Halo contrast handles legibility.
+    let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
+    let preview_color = rgb_to_cosmic_color(preview_rgb);
 
     let mut out: Vec<(usize, GlyphArea)> = Vec::with_capacity(80);
 
     // Title.
-    let title_text = if geometry.target_label.is_empty() {
+    let is_standalone = geometry.target_label.is_empty();
+    let title_text = if is_standalone {
         spec.title_template_standalone.clone()
     } else {
         spec.title_template_contextual
@@ -2672,7 +2683,7 @@ fn picker_glyph_areas(
         PICKER_CHANNEL_TITLE,
         make_area(
             &title_text,
-            cosmic_text::Color::rgba(0, 229, 255, 255),
+            preview_color,
             font_size,
             font_size,
             layout.title_pos,
@@ -2713,12 +2724,21 @@ fn picker_glyph_areas(
         ));
     }
 
-    // Hint footer.
+    // Hint footer. Contextual mode includes "Esc cancel" because
+    // Esc exits the modal picker; Standalone mode omits it because
+    // the persistent palette only closes via `color picker off`
+    // from the console, and showing a dead affordance is worse
+    // than hiding it.
+    let hint_text = if is_standalone {
+        spec.hint_text_standalone.as_str()
+    } else {
+        spec.hint_text_contextual.as_str()
+    };
     out.push((
         PICKER_CHANNEL_HINT,
         make_area(
-            spec.hint_text.as_str(),
-            cosmic_text::Color::rgba(140, 140, 150, 255),
+            hint_text,
+            preview_color,
             font_size * 0.85,
             font_size * 0.85,
             layout.hint_pos,
@@ -2758,7 +2778,7 @@ fn picker_glyph_areas(
         };
         let scale = if is_hovered { hover_scale } else { 1.0 };
         let (cx, cy) = layout.sat_cell_positions[i];
-        let fs = font_size * scale;
+        let fs = cell_font_size * scale;
         let bw = cell_box_w * scale;
         out.push((
             PICKER_CHANNEL_SAT_BASE + i,
@@ -2801,7 +2821,7 @@ fn picker_glyph_areas(
         };
         let scale = if is_hovered { hover_scale } else { 1.0 };
         let (cx, cy) = layout.val_cell_positions[i];
-        let fs = font_size * scale;
+        let fs = cell_font_size * scale;
         let bw = cell_box_w * scale;
         out.push((
             PICKER_CHANNEL_VAL_BASE + i,
@@ -2819,31 +2839,36 @@ fn picker_glyph_areas(
         ));
     }
 
-    // Centre preview glyph ॐ. Acts as the commit button.
+    // Centre preview glyph ࿕ (right-facing Tibetan svasti — the
+    // spiritual "four roads meeting" symbol). Acts as the commit
+    // button; hovering brightens it.
     let preview_size = layout.preview_size;
-    let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
     let commit_hovered = matches!(geometry.hovered_hit, Some(PickerHit::Commit));
-    let preview_color = if commit_hovered {
+    let commit_color = if commit_hovered {
         highlight_hovered_cell_color(preview_rgb)
     } else {
-        rgb_to_cosmic_color(preview_rgb)
+        preview_color
     };
-    let preview_scale = if commit_hovered { hover_scale } else { 1.0 };
-    let scaled_preview = preview_size * preview_scale;
+    let preview_scale_f = if commit_hovered { hover_scale } else { 1.0 };
+    let scaled_preview = preview_size * preview_scale_f;
+    // Pin the Tibetan font for the ࿕ glyph (U+0FD5) — cosmic-text's
+    // default fallback isn't reliable for it, and we already pin
+    // specific fonts for the Egyptian arm via the same pattern.
+    let center_font = Some(baumhard::font::fonts::AppFont::NotoSerifTibetanRegular);
     out.push((
         PICKER_CHANNEL_PREVIEW,
         make_area(
             center_preview_glyph(),
-            preview_color,
+            commit_color,
             scaled_preview,
             scaled_preview,
             (
                 layout.preview_pos.0 - (scaled_preview - preview_size) * 0.4,
-                layout.preview_pos.1 - (scaled_preview - preview_size) * 0.5,
+                layout.preview_pos.1 - (scaled_preview - preview_size) * 0.65,
             ),
             (scaled_preview * 1.5, scaled_preview * 1.5),
             true,
-            None,
+            center_font,
             outline,
         ),
     ));
@@ -2863,7 +2888,7 @@ fn picker_glyph_areas(
         PICKER_CHANNEL_HEX,
         make_area(
             &hex_text,
-            cosmic_text::Color::rgba(220, 220, 220, 255),
+            preview_color,
             font_size,
             font_size,
             hex_pos,
@@ -2873,37 +2898,6 @@ fn picker_glyph_areas(
             outline,
         ),
     ));
-
-    // Theme chips row.
-    for (i, chip) in theme_chips().iter().enumerate() {
-        let focused = geometry.chip_focus == Some(i);
-        let hovered = matches!(geometry.hovered_hit, Some(PickerHit::Chip(h)) if h == i);
-        let prefix = if focused { "\u{25B8} " } else { "  " };
-        let label = format!("{prefix}{}", chip.label);
-        let color = if focused {
-            cosmic_text::Color::rgba(0, 229, 255, 255)
-        } else if hovered {
-            cosmic_text::Color::rgba(255, 255, 255, 255)
-        } else {
-            cosmic_text::Color::rgba(200, 200, 200, 255)
-        };
-        let scale = if hovered { hover_scale } else { 1.0 };
-        let (cx, cy, cw) = layout.chip_positions[i];
-        out.push((
-            PICKER_CHANNEL_CHIP_BASE + i,
-            make_area(
-                &label,
-                color,
-                font_size * scale,
-                font_size * scale,
-                (cx, cy),
-                (cw, layout.chip_height * scale),
-                false,
-                None,
-                outline,
-            ),
-        ));
-    }
 
     out
 }
@@ -4027,7 +4021,6 @@ mod tests {
             sat: 1.0,
             val: 1.0,
             preview_hex: "#ff0000".to_string(),
-            chip_focus: None,
             hex_visible: false,
             max_cell_advance: 16.0,
             max_ring_advance: 24.0,
