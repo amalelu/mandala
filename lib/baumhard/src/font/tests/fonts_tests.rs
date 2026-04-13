@@ -101,3 +101,4 @@ pub fn do_measure_glyph_ink_bounds_x_offset_from_advance_center() {
     assert!(latin.x_offset_from_advance_center().is_finite());
     assert!(svasti.x_offset_from_advance_center().is_finite());
 }
+
