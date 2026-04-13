@@ -137,6 +137,17 @@ enum TextEditState {
         /// emoji or ZWJ cluster removes the whole user-visible
         /// character — see `CODE_CONVENTIONS.md §2`/`§B2`.
         cursor_grapheme_pos: usize,
+        /// Char-range `ColorFontRegions` over `buffer` (no caret
+        /// coverage). Seeded from the node's `GlyphArea::regions` at
+        /// open time — which itself came from the model's
+        /// `text_runs` via the tree builder — and mutated alongside
+        /// `buffer` on every keystroke via Baumhard's
+        /// `shift_regions_after` / `shrink_regions_after` primitives
+        /// so per-run color and `AppFont` pins survive character
+        /// insertion and deletion. `apply_text_edit_to_tree` composes
+        /// display-text regions from this by inserting caret coverage
+        /// at `cursor_grapheme_pos`.
+        buffer_regions: baumhard::core::primitives::ColorFontRegions,
     },
 }
 
@@ -3934,21 +3945,49 @@ fn open_text_edit(
     };
     let buffer = if from_creation { String::new() } else { current_text };
     let cursor_grapheme_pos = grapheme_chad::count_grapheme_clusters(&buffer);
+    // Seed `buffer_regions` from the tree's current `area.regions`,
+    // which the tree builder populated from the node's `text_runs`.
+    // The tree is the source of truth for regions during an edit
+    // session; the model is frozen until commit. `from_creation`
+    // nodes have no prior regions, so we start from empty.
+    let buffer_regions = if from_creation {
+        baumhard::core::primitives::ColorFontRegions::new_empty()
+    } else {
+        read_node_regions(mindmap_tree.as_ref(), node_id).unwrap_or_default()
+    };
     *text_edit_state = TextEditState::Open {
         node_id: node_id.to_string(),
         buffer: buffer.clone(),
         cursor_grapheme_pos,
+        buffer_regions: buffer_regions.clone(),
     };
     // Push the initial (caret-only for creation, or "existing text +
     // caret at end" for edit) through the Baumhard mutation pipeline.
     apply_text_edit_to_tree(
         node_id,
         &buffer,
+        &buffer_regions,
         cursor_grapheme_pos,
         mindmap_tree,
         app_scene,
         renderer,
     );
+}
+
+/// Read a node's `GlyphArea::regions` off the live tree. Returns
+/// `None` when the tree or the node isn't present, or when the
+/// target element isn't a `GlyphArea` (it's a `GlyphModel` for
+/// multi-line node containers). The text-edit path uses this to
+/// seed `TextEditState::Open::buffer_regions` at open time so
+/// per-run color and `AppFont` pins survive the edit lifecycle.
+fn read_node_regions(
+    mindmap_tree: Option<&baumhard::mindmap::tree_builder::MindMapTree>,
+    node_id: &str,
+) -> Option<baumhard::core::primitives::ColorFontRegions> {
+    let tree = mindmap_tree?;
+    let nid = *tree.node_map.get(node_id)?;
+    let element = tree.tree.arena.get(nid)?.get();
+    element.glyph_area().map(|a| a.regions.clone())
 }
 
 /// Session 7A: commit or cancel the open text editor. Commit writes
@@ -3991,6 +4030,7 @@ fn close_text_edit(
 fn apply_text_edit_to_tree(
     node_id: &str,
     buffer: &str,
+    buffer_regions: &baumhard::core::primitives::ColorFontRegions,
     cursor_grapheme_pos: usize,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
@@ -3998,7 +4038,7 @@ fn apply_text_edit_to_tree(
 ) {
     use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
     use baumhard::core::primitives::{
-        Applicable, ApplyOperation, ColorFontRegion, ColorFontRegions, Range,
+        Applicable, ApplyOperation, ColorFontRegion, Range,
     };
 
     let tree = match mindmap_tree.as_mut() {
@@ -4020,35 +4060,22 @@ fn apply_text_edit_to_tree(
         None => return,
     };
 
-    // Build the display text: buffer with caret glyph inserted at
-    // the cursor's grapheme position. This is what cosmic-text will
-    // shape.
+    // Compose display-text regions from the canonical buffer regions
+    // via Baumhard's `insert_regions_at` primitive: the caret glyph
+    // is a one-char structural insertion at `cursor_grapheme_pos`
+    // that the surrounding run should absorb (so the caret inherits
+    // its color and — importantly — its `AppFont` pin, keeping
+    // per-script glyphs rendering correctly). If no region absorbs
+    // the caret (empty buffer, cursor at an uncovered position), we
+    // `set_or_insert` a blank region for it so it still renders.
     let display_text = insert_caret(buffer, cursor_grapheme_pos);
-
-    // Inherit the color of the first existing region so edited text
-    // matches the pre-edit styling. Fall back to `None` (renderer
-    // default) if there are no regions. `rebuild_buffers_from_tree`
-    // only draws characters that fall inside at least one region, so
-    // the replacement region has to span the *entire* new text —
-    // including the trailing caret glyph — or the caret and any
-    // just-typed characters past the original text length would be
-    // silently dropped by the span filter (renderer.rs:1500-1520).
-    // This was the root cause of the "double-click existing node does
-    // nothing" bug: the old regions were left in place, so the caret
-    // at char position == old_len was outside every region and never
-    // rendered.
-    let inherited_color = area
-        .regions
-        .all_regions()
-        .first()
-        .and_then(|r| r.color);
-    let display_char_count = display_text.chars().count();
-    let mut new_regions = ColorFontRegions::new_empty();
-    if display_char_count > 0 {
-        new_regions.submit_region(ColorFontRegion::new(
-            Range::new(0, display_char_count),
+    let mut display_regions = buffer_regions.clone();
+    let absorbed = display_regions.insert_regions_at(cursor_grapheme_pos, 1);
+    if !absorbed {
+        display_regions.set_or_insert(&ColorFontRegion::new(
+            Range::new(cursor_grapheme_pos, cursor_grapheme_pos + 1),
             None,
-            inherited_color,
+            None,
         ));
     }
 
@@ -4058,7 +4085,7 @@ fn apply_text_edit_to_tree(
     // area.rs:273 for text.
     let delta = DeltaGlyphArea::new(vec![
         GlyphAreaField::Text(display_text),
-        GlyphAreaField::ColorFontRegions(new_regions),
+        GlyphAreaField::ColorFontRegions(display_regions),
         GlyphAreaField::Operation(ApplyOperation::Assign),
     ]);
     delta.apply_to(area);
@@ -4089,13 +4116,13 @@ fn handle_text_edit_key(
         return;
     }
 
-    let (node_id, buffer, cursor) = match text_edit_state {
+    let (node_id, buffer, cursor, regions) = match text_edit_state {
         TextEditState::Open {
             node_id,
             buffer,
             cursor_grapheme_pos,
-            ..
-        } => (node_id, buffer, cursor_grapheme_pos),
+            buffer_regions,
+        } => (node_id, buffer, cursor_grapheme_pos, buffer_regions),
         TextEditState::Closed => return,
     };
 
@@ -4103,12 +4130,18 @@ fn handle_text_edit_key(
     match name {
         Some("backspace") => {
             if *cursor > 0 {
+                // Delete grapheme at `cursor - 1`. `shrink_regions_after`
+                // rewrites ranges so per-run color / `AppFont` pins
+                // survive the deletion — a single-char cut never
+                // collapses a straddling run, it just shrinks its end.
+                regions.shrink_regions_after(*cursor - 1, 1);
                 *cursor = delete_before_cursor(buffer, *cursor);
                 changed = true;
             }
         }
         Some("delete") => {
             if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
+                regions.shrink_regions_after(*cursor, 1);
                 *cursor = delete_at_cursor(buffer, *cursor);
                 changed = true;
             }
@@ -4154,10 +4187,12 @@ fn handle_text_edit_key(
             }
         }
         Some("enter") => {
+            regions.insert_regions_at(*cursor, 1);
             *cursor = insert_at_cursor(buffer, *cursor, '\n');
             changed = true;
         }
         Some("tab") => {
+            regions.insert_regions_at(*cursor, 1);
             *cursor = insert_at_cursor(buffer, *cursor, '\t');
             changed = true;
         }
@@ -4167,6 +4202,7 @@ fn handle_text_edit_key(
             if let Key::Character(c) = logical_key {
                 for ch in c.as_str().chars() {
                     if !ch.is_control() {
+                        regions.insert_regions_at(*cursor, 1);
                         *cursor = insert_at_cursor(buffer, *cursor, ch);
                         changed = true;
                     }
@@ -4184,10 +4220,12 @@ fn handle_text_edit_key(
         // borrow on `mindmap_tree`.
         let node_id_owned = node_id.clone();
         let buffer_owned = buffer.clone();
+        let regions_owned = regions.clone();
         let cursor_snapshot = *cursor;
         apply_text_edit_to_tree(
             &node_id_owned,
             &buffer_owned,
+            &regions_owned,
             cursor_snapshot,
             mindmap_tree,
             app_scene,
@@ -4288,8 +4326,8 @@ fn open_picker_inner(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs, hue_ring_font_scale,
-        hue_ring_glyphs, ColorPickerState,
+        arm_bottom_font, arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs,
+        center_preview_glyph, hue_ring_font_scale, hue_ring_glyphs, ColorPickerState,
     };
 
     // Measure the widest shaped advance across every crosshair-arm
@@ -4310,7 +4348,15 @@ fn open_picker_inner(
     let geom = &crate::application::widgets::color_picker_widget::load_spec().geometry;
     let measurement_font_size: f32 = geom.font_max;
     let ring_font_size = measurement_font_size * hue_ring_font_scale();
-    let (max_cell_advance, max_ring_advance) = {
+    let (
+        max_cell_advance,
+        max_ring_advance,
+        arm_top_ink_offset,
+        arm_bottom_ink_offset,
+        arm_left_ink_offset,
+        arm_right_ink_offset,
+        preview_ink_offset,
+    ) = {
         let mut font_system = baumhard::font::fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
@@ -4330,7 +4376,57 @@ fn open_picker_inner(
             &ring_glyphs,
             ring_font_size,
         );
-        (cell, ring)
+        // Per-arm worst-case ink offsets: aggregate each arm's four
+        // glyphs and compute the combined bounding box's
+        // ink-center-vs-advance-center drift. The primitive shapes
+        // each string in one pass, so joining the glyphs with no
+        // separator is accurate for "one arm's worst offset". Store
+        // as dimensionless ratios so the layout fn can scale to
+        // whatever cell-font-size it derives from the window.
+        let mut swash_cache = cosmic_text::SwashCache::new();
+        use baumhard::font::fonts::measure_glyph_ink_bounds;
+        let mut arm_ink_offset = |glyphs: &[&str], font: Option<baumhard::font::fonts::AppFont>| -> (f32, f32) {
+            // Accumulate the ink-center offset of each glyph
+            // individually, then take the worst (largest |offset|)
+            // so the picker corrects for the worst-case script in
+            // each arm. Different glyphs on the same arm can sit at
+            // different ink centres; the cell-by-cell layout lines
+            // them up on a shared visual radius, so the single
+            // correction applied uniformly to all cells in the arm
+            // has to target the worst drift.
+            let mut best_dx: f32 = 0.0;
+            let mut best_dy: f32 = 0.0;
+            for g in glyphs {
+                let b = measure_glyph_ink_bounds(&mut font_system, &mut swash_cache, font, g, measurement_font_size);
+                let dx = b.x_offset_from_advance_center() / measurement_font_size;
+                let dy = b.y_center() / measurement_font_size;
+                if dx.abs() > best_dx.abs() {
+                    best_dx = dx;
+                }
+                if dy.abs() > best_dy.abs() {
+                    best_dy = dy;
+                }
+            }
+            (best_dx, best_dy)
+        };
+        let arm_top = arm_ink_offset(arm_top_glyphs(), None);
+        let arm_bottom = arm_ink_offset(arm_bottom_glyphs(), arm_bottom_font());
+        let arm_left = arm_ink_offset(arm_left_glyphs(), None);
+        let arm_right = arm_ink_offset(arm_right_glyphs(), None);
+        // Preview ࿕ offsets are measured at the preview's own font
+        // size — the ratio is what matters.
+        let preview_bounds = measure_glyph_ink_bounds(
+            &mut font_system,
+            &mut swash_cache,
+            Some(baumhard::font::fonts::AppFont::NotoSerifTibetanRegular),
+            center_preview_glyph(),
+            measurement_font_size,
+        );
+        let preview = (
+            preview_bounds.x_offset_from_advance_center() / measurement_font_size,
+            preview_bounds.y_center() / measurement_font_size,
+        );
+        (cell, ring, arm_top, arm_bottom, arm_left, arm_right, preview)
     };
 
     *state = ColorPickerState::Open {
@@ -4342,6 +4438,11 @@ fn open_picker_inner(
         max_cell_advance,
         max_ring_advance,
         measurement_font_size,
+        arm_top_ink_offset,
+        arm_bottom_ink_offset,
+        arm_left_ink_offset,
+        arm_right_ink_offset,
+        preview_ink_offset,
         layout: None,
         center_override: None,
         size_scale: 1.0,
@@ -4427,6 +4528,11 @@ fn compute_picker_geometry(
         cached_backdrop,
         center_override,
         hovered_hit,
+        arm_top_ink_offset,
+        arm_bottom_ink_offset,
+        arm_left_ink_offset,
+        arm_right_ink_offset,
+        preview_ink_offset,
     ) = match state {
         ColorPickerState::Closed => return None,
         ColorPickerState::Open {
@@ -4442,6 +4548,11 @@ fn compute_picker_geometry(
             center_override,
             size_scale,
             hovered_hit,
+            arm_top_ink_offset,
+            arm_bottom_ink_offset,
+            arm_left_ink_offset,
+            arm_right_ink_offset,
+            preview_ink_offset,
             ..
         } => (
             match mode {
@@ -4461,6 +4572,11 @@ fn compute_picker_geometry(
             layout.as_ref().map(|l| l.backdrop),
             *center_override,
             *hovered_hit,
+            *arm_top_ink_offset,
+            *arm_bottom_ink_offset,
+            *arm_left_ink_offset,
+            *arm_right_ink_offset,
+            *preview_ink_offset,
         ),
     };
 
@@ -4489,6 +4605,11 @@ fn compute_picker_geometry(
         size_scale,
         center_override,
         hovered_hit,
+        arm_top_ink_offset,
+        arm_bottom_ink_offset,
+        arm_left_ink_offset,
+        arm_right_ink_offset,
+        preview_ink_offset,
     };
 
     // Cache the layout into the state so the mouse hit-test can use it.
@@ -5962,71 +6083,104 @@ mod text_edit_tests {
         assert_eq!(area.text, display_text);
     }
 
-    /// Regression test for the Session 7A follow-up bug: applying a
-    /// text edit delta to a GlyphArea with pre-existing
-    /// `ColorFontRegions` (i.e. an existing multi-run node) must
-    /// replace those regions with one that spans the entire new
-    /// display text — including the trailing caret glyph. Otherwise
-    /// `rebuild_buffers_from_tree` at renderer.rs:1500-1520 silently
-    /// drops any character outside the old ranges, making the caret
-    /// and newly-typed characters invisible.
+    /// A keystroke insertion in the middle of a multi-run node must
+    /// preserve run identity: per-run colors and `AppFont` pins
+    /// survive, and the caret lands inside one of the expanded runs
+    /// rather than collapsing the set to a single span. Regression
+    /// test for the glyph-alignment session's Issue 2 — the old
+    /// path discarded regions and inherited only the first region's
+    /// color, wiping pins on emoji / Tibetan / Egyptian hieroglyph
+    /// runs on the first keystroke.
     #[test]
-    fn test_text_edit_replaces_stale_regions_to_cover_caret() {
+    fn test_text_edit_preserves_multi_run_regions_on_insertion() {
         use baumhard::core::primitives::{
             Applicable, ApplyOperation, ColorFontRegion, ColorFontRegions, Range,
         };
+        use baumhard::font::fonts::AppFont;
         use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaField};
 
-        // Simulate an existing multi-run node with text "Hello" and
-        // a single region over [0, 5) colored red.
+        // Two-run buffer: "Helmo" → [0..3) red (plain font), [3..5)
+        // blue pinned to `NotoSerifTibetanRegular` (stand-in for the
+        // per-script `AppFont` pin that a sacred-script run carries).
+        let red = [1.0f32, 0.0, 0.0, 1.0];
+        let blue = [0.0f32, 0.0, 1.0, 1.0];
+        let mut buffer_regions = ColorFontRegions::new_empty();
+        buffer_regions.submit_region(ColorFontRegion::new(Range::new(0, 3), None, Some(red)));
+        buffer_regions.submit_region(ColorFontRegion::new(
+            Range::new(3, 5),
+            Some(AppFont::NotoSerifTibetanRegular),
+            Some(blue),
+        ));
+
+        // User inserts 'X' at cursor=4 (inside the blue run, between
+        // the two existing chars). `insert_regions_at` on the buffer
+        // regions extends the straddling run's end by 1.
+        buffer_regions.insert_regions_at(4, 1);
+
+        // Compose display regions by inserting caret coverage at the
+        // new cursor=5 — exactly what `apply_text_edit_to_tree` does.
+        let mut display_regions = buffer_regions.clone();
+        let absorbed = display_regions.insert_regions_at(5, 1);
+        assert!(absorbed, "caret must be absorbed into the trailing run");
+
+        // Apply the delta to a mock area the same way the production
+        // path does.
         let mut area = GlyphArea::new_with_str(
-            "Hello",
+            "Helmo\u{258C}", // placeholder, will be overwritten
             14.0,
             16.8,
             Vec2::new(0.0, 0.0),
             Vec2::new(100.0, 30.0),
         );
-        let red = [1.0f32, 0.0, 0.0, 1.0];
-        let mut initial_regions = ColorFontRegions::new_empty();
-        initial_regions.submit_region(ColorFontRegion::new(
-            Range::new(0, 5),
-            None,
-            Some(red),
-        ));
-        area.regions = initial_regions;
-        assert_eq!(area.regions.num_regions(), 1);
-
-        // Build the same delta `apply_text_edit_to_tree` produces
-        // for buffer="Hello" at cursor=5: text="Hello▌", regions =
-        // single region [0, 6) inheriting the red color.
-        let buffer = "Hello";
-        let cursor = buffer.chars().count();
-        let display_text = insert_caret(buffer, cursor);
-        let display_char_count = display_text.chars().count();
-        let inherited_color = area.regions.all_regions().first().and_then(|r| r.color);
-        let mut new_regions = ColorFontRegions::new_empty();
-        new_regions.submit_region(ColorFontRegion::new(
-            Range::new(0, display_char_count),
-            None,
-            inherited_color,
-        ));
-
         let delta = DeltaGlyphArea::new(vec![
-            GlyphAreaField::Text(display_text.clone()),
-            GlyphAreaField::ColorFontRegions(new_regions),
+            GlyphAreaField::Text("HelXmo\u{258C}".to_string()),
+            GlyphAreaField::ColorFontRegions(display_regions),
             GlyphAreaField::Operation(ApplyOperation::Assign),
         ]);
         delta.apply_to(&mut area);
 
-        // Text updated.
-        assert_eq!(area.text, "Hello\u{258C}");
-        // Exactly one region, covering char positions 0..6 (includes
-        // the caret), and inheriting the original red color.
-        assert_eq!(area.regions.num_regions(), 1);
-        let region = area.regions.all_regions()[0];
-        assert_eq!(region.range.start, 0);
-        assert_eq!(region.range.end, 6);
-        assert_eq!(region.color, Some(red));
+        // Two regions survive; colors are intact; the `AppFont` pin
+        // survives; the caret is covered.
+        assert_eq!(area.regions.num_regions(), 2);
+        let red_run = area.regions.get(Range::new(0, 3)).unwrap();
+        assert_eq!(red_run.color, Some(red));
+        assert_eq!(red_run.font, None);
+        let blue_run = area.regions.get(Range::new(3, 7)).unwrap();
+        assert_eq!(blue_run.color, Some(blue));
+        assert_eq!(blue_run.font, Some(AppFont::NotoSerifTibetanRegular));
+    }
+
+    /// Backspace inside a multi-run node shrinks the containing run
+    /// without bleeding the neighbour run's color in. Exercises the
+    /// new `shrink_regions_after` primitive through the text-edit
+    /// path's delete handler contract.
+    #[test]
+    fn test_text_edit_preserves_multi_run_regions_on_deletion() {
+        use baumhard::core::primitives::{ColorFontRegion, ColorFontRegions, Range};
+        use baumhard::font::fonts::AppFont;
+
+        let red = [1.0f32, 0.0, 0.0, 1.0];
+        let blue = [0.0f32, 0.0, 1.0, 1.0];
+        let mut regions = ColorFontRegions::new_empty();
+        regions.submit_region(ColorFontRegion::new(Range::new(0, 3), None, Some(red)));
+        regions.submit_region(ColorFontRegion::new(
+            Range::new(3, 6),
+            Some(AppFont::NotoSerifTibetanRegular),
+            Some(blue),
+        ));
+
+        // Backspace at cursor=5 deletes the char at position 4 (inside
+        // the blue run). `shrink_regions_after(4, 1)` clips the blue
+        // run's end to 5 — the red run is untouched and the
+        // `AppFont` pin survives.
+        regions.shrink_regions_after(4, 1);
+
+        assert_eq!(regions.num_regions(), 2);
+        let red_run = regions.get(Range::new(0, 3)).unwrap();
+        assert_eq!(red_run.color, Some(red));
+        let blue_run = regions.get(Range::new(3, 5)).unwrap();
+        assert_eq!(blue_run.color, Some(blue));
+        assert_eq!(blue_run.font, Some(AppFont::NotoSerifTibetanRegular));
     }
 
     // -----------------------------------------------------------------
@@ -6043,6 +6197,7 @@ mod text_edit_tests {
             node_id: "n-42".to_string(),
             buffer: "hi".to_string(),
             cursor_grapheme_pos: 2,
+            buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         assert_eq!(open.node_id(), Some("n-42"));
         assert!(open.is_open());
@@ -6195,6 +6350,7 @@ mod text_edit_tests {
             node_id: "node-A".to_string(),
             buffer: "in progress".to_string(),
             cursor_grapheme_pos: 11,
+            buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         let hit = Some("node-A".to_string());
         let already_editing = editor
@@ -6210,6 +6366,7 @@ mod text_edit_tests {
             node_id: "node-A".to_string(),
             buffer: "in progress".to_string(),
             cursor_grapheme_pos: 11,
+            buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         let hit = Some("node-B".to_string());
         let already_editing = editor

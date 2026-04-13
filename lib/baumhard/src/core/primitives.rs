@@ -89,6 +89,28 @@ impl ColorFontRegions {
         self.regions.len()
     }
 
+    /// Build a `ColorFontRegions` containing a single region that
+    /// covers `[0, char_count)` with the given `color` and `font`
+    /// pin. Returns `new_empty()` when `char_count == 0` — the guard
+    /// every caller used to write by hand. Used by app-crate
+    /// `make_area` / `mk_area` factories that build a `GlyphArea`
+    /// from one string and one color, so they don't have to
+    /// open-code `new_empty + submit_region` three places.
+    ///
+    /// Costs: one `BTreeSet::insert`; no walks, no clones.
+    pub fn single_span(char_count: usize, color: Option<FloatRgba>, font: Option<AppFont>) -> Self {
+        if char_count == 0 {
+            return Self::new_empty();
+        }
+        let mut out = Self::new_empty();
+        out.regions.insert(ColorFontRegion::new(
+            Range::new(0, char_count),
+            font,
+            color,
+        ));
+        out
+    }
+
     /// Insert a region, replacing any existing region with the same
     /// key. An inverted range (`start > end`) is dropped with a
     /// warning rather than panicking — `submit_region` is reachable
@@ -131,6 +153,23 @@ impl ColorFontRegions {
         self.regions.extend(cloned_regions);
     }
 
+    /// Shift every region whose `start > idx` right by `magnitude`.
+    /// Regions with `start <= idx` (including straddlers where
+    /// `start <= idx < end`) are left untouched — their `end` does
+    /// **not** extend to cover the inserted chars. That's the
+    /// "replace-and-shift" semantics `GlyphMatrix::copy_from` relies
+    /// on: it pairs each call with a follow-up `submit_region` for the
+    /// newly-inserted span, so the surrounding region deliberately
+    /// does not absorb the insertion.
+    ///
+    /// Callers that want the surrounding region to absorb the insertion
+    /// (the text-editor caret, user typing) need to follow up with a
+    /// `remove` + `submit_region` that widens the straddling region's
+    /// `end` by `magnitude`. See the symmetric [`Self::shrink_regions_after`]
+    /// for the delete path.
+    ///
+    /// Costs: O(n) over existing regions; one full clone of the
+    /// BTreeSet to decouple from the iterator.
     pub fn shift_regions_after(&mut self, idx: usize, magnitude: usize) {
         let mut copy_of_regions: Vec<_> = self.regions.iter().copied().collect();
         for region in &mut copy_of_regions {
@@ -141,6 +180,130 @@ impl ColorFontRegions {
         }
         self.regions.clear();
         self.regions.extend(copy_of_regions);
+    }
+
+    /// Text-edit insertion primitive: `magnitude` chars were inserted
+    /// at position `idx` in the backing text; rewrite the region ranges
+    /// to reflect that so the inserted chars inherit the surrounding
+    /// run's color / `AppFont`. Semantics, per region:
+    ///
+    /// - **Fully left** (`end < idx`, or `end == idx` with no absorption):
+    ///   unchanged.
+    /// - **Fully right** (`start >= idx`): both bounds shifted right by
+    ///   `magnitude`.
+    /// - **Straddling or left-adjacent** (`start < idx` and `end >= idx`):
+    ///   `end` grows by `magnitude` so the region absorbs the inserted
+    ///   chars. Exactly one such region is extended (the first found).
+    ///
+    /// Returns `true` if some region absorbed the insertion, `false`
+    /// if the new chars are now uncovered (e.g. inserting at `idx == 0`
+    /// into a region-less area, or at a position no region touches).
+    /// The text-editor caret path uses this return value to decide
+    /// whether to `set_or_insert` a fresh region for the caret glyph
+    /// so it renders even in an empty-buffer node.
+    ///
+    /// Contrast with [`Self::shift_regions_after`], whose "replace
+    /// and shift" semantics leave straddling regions in place — that
+    /// primitive exists for `GlyphMatrix::copy_from`, which explicitly
+    /// follows up with a `submit_region` for the inserted span.
+    ///
+    /// Costs: O(n) over existing regions; one collect + one extend in
+    /// the common case, plus a remove/submit pair when a region
+    /// absorbs the insertion.
+    pub fn insert_regions_at(&mut self, idx: usize, magnitude: usize) -> bool {
+        if magnitude == 0 {
+            return false;
+        }
+        // Shift regions whose start >= idx right by magnitude. The
+        // existing `shift_regions_after` uses strict `start > idx`, so
+        // we pass `idx - 1` for idx > 0; for idx == 0 every region
+        // shifts and we do it by hand.
+        if idx == 0 {
+            let all: Vec<_> = self.regions.iter().copied().collect();
+            self.regions.clear();
+            for mut r in all {
+                r.range.start += magnitude;
+                r.range.end += magnitude;
+                self.regions.insert(r);
+            }
+        } else {
+            self.shift_regions_after(idx - 1, magnitude);
+        }
+        // Find the straddling / left-adjacent region (unchanged by
+        // the shift, since its `start < idx`) and extend its `end`.
+        let absorber = self
+            .regions
+            .iter()
+            .find(|r| r.range.start < idx && r.range.end >= idx)
+            .copied();
+        if let Some(mut r) = absorber {
+            self.remove(&r);
+            r.range.end += magnitude;
+            self.submit_region(r);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Symmetric delete-path companion to [`Self::shift_regions_after`].
+    /// `magnitude` chars starting at position `idx` have been removed
+    /// from the backing text; rewrite the region ranges to reflect
+    /// that. Semantics, per region relative to the cut `[idx, idx+magnitude)`:
+    ///
+    /// - **Fully left** (`end <= idx`): unchanged.
+    /// - **Fully right** (`start >= idx + magnitude`): both bounds
+    ///   shifted left by `magnitude`.
+    /// - **Fully inside** (`idx <= start` and `end <= idx+magnitude`):
+    ///   collapses, removed from the set.
+    /// - **Spans the cut** (`start < idx` and `end > idx+magnitude`):
+    ///   `end` shrinks by `magnitude`; the region absorbs the deletion.
+    /// - **Left-partial** (`start < idx` and `idx < end <= idx+magnitude`):
+    ///   `end` clamps to `idx`.
+    /// - **Right-partial** (`idx <= start < idx+magnitude` and
+    ///   `end > idx+magnitude`): `start` clamps to `idx`, `end` shifts
+    ///   left by `magnitude` so the region sits flush against the
+    ///   remaining-text boundary.
+    ///
+    /// Used by the text-edit path's backspace / delete handlers
+    /// (`src/application/app.rs`) to keep per-run color and `AppFont`
+    /// pins intact across character deletion instead of rebuilding the
+    /// region set from a heuristic.
+    ///
+    /// Costs: O(n) over existing regions; one collect + one extend.
+    pub fn shrink_regions_after(&mut self, idx: usize, magnitude: usize) {
+        if magnitude == 0 {
+            return;
+        }
+        let end_of_cut = idx + magnitude;
+        let mut updated: Vec<ColorFontRegion> = Vec::with_capacity(self.regions.len());
+        for region in self.regions.iter() {
+            let mut r = *region;
+            if r.range.end <= idx {
+                updated.push(r);
+            } else if r.range.start >= end_of_cut {
+                r.range.start -= magnitude;
+                r.range.end -= magnitude;
+                updated.push(r);
+            } else if r.range.start >= idx && r.range.end <= end_of_cut {
+                // Fully inside the cut — collapse, drop.
+            } else if r.range.start < idx && r.range.end > end_of_cut {
+                // Spans the cut — absorb the deletion.
+                r.range.end -= magnitude;
+                updated.push(r);
+            } else if r.range.start < idx {
+                // Left-partial — clamp end to idx.
+                r.range.end = idx;
+                updated.push(r);
+            } else {
+                // Right-partial — clamp start to idx, shift end left.
+                r.range.start = idx;
+                r.range.end -= magnitude;
+                updated.push(r);
+            }
+        }
+        self.regions.clear();
+        self.regions.extend(updated);
     }
 
     pub fn replace_regions(&mut self, regions: &Self) {
