@@ -449,18 +449,13 @@ impl Application {
         // lifetime matches the interactive session. It is a pure view
         // optimisation — nothing about the model depends on it.
         let mut scene_cache = baumhard::mindmap::scene_cache::SceneConnectionCache::new();
-        // App-level tree host for overlay components (console, color
-        // picker). Empty today; Sessions 3 and 4 of the
-        // baumhard-unified-rendering refactor will register their
-        // trees here so the renderer can walk one scene per frame
-        // instead of chaining per-overlay rebuild functions. Kept
-        // next to `mindmap_tree` so overlays stay in sync with
-        // interactive-session lifetime.
+        // App-level scene host. Owns the canvas-space tree for
+        // borders today (registered via `update_border_tree_*`) and
+        // grows to host the console / color-picker overlays in
+        // Sessions 3 / 4 of the unified-rendering refactor. Kept
+        // next to `mindmap_tree` so all tree-shaped components
+        // share the interactive-session lifetime.
         let mut app_scene = crate::application::scene_host::AppScene::new();
-        // Silence "unused" while the overlay migrations land in
-        // follow-up sessions. Remove this line once an overlay
-        // registers a tree (Session 3 / 4).
-        let _ = &mut app_scene;
 
         match MindMapDocument::load(&self.options.mindmap_path) {
             Ok(mut doc) => {
@@ -488,7 +483,7 @@ impl Application {
                 // default-init value.
                 let scene = doc.build_scene(renderer.camera_zoom());
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
-                renderer.rebuild_border_buffers(&scene.border_elements);
+                update_border_tree_static(&doc, &mut app_scene, &mut renderer);
                 renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
                 renderer.rebuild_portal_buffers(&scene.portal_elements);
 
@@ -620,6 +615,7 @@ impl Application {
                                 &mut color_picker_state,
                                 doc,
                                 &mut mindmap_tree,
+                                &mut app_scene,
                                 &mut renderer,
                             );
                         }
@@ -644,6 +640,7 @@ impl Application {
                                         &mut hovered_node,
                                         &mut document,
                                         &mut mindmap_tree,
+                                        &mut app_scene,
                                         &mut renderer,
                                     );
                                     // Session 7A: mode-exit via target
@@ -661,6 +658,7 @@ impl Application {
                                         &mut hovered_node,
                                         &mut document,
                                         &mut mindmap_tree,
+                                        &mut app_scene,
                                         &mut renderer,
                                     );
                                     last_click = None;
@@ -721,13 +719,14 @@ impl Application {
                                             // untouched. If you ever add
                                             // more fields to the caret
                                             // delta, revisit this.
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                            rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                             open_text_edit(
                                                 &nid,
                                                 false,
                                                 doc,
                                                 &mut text_edit_state,
                                                 &mut mindmap_tree,
+                                                &mut app_scene,
                                                 &mut renderer,
                                             );
                                         }
@@ -748,13 +747,14 @@ impl Application {
                                         if allow_create {
                                             if let Some(doc) = document.as_mut() {
                                                 let new_id = doc.create_orphan_and_select(canvas_pos);
-                                                rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                                rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                                 open_text_edit(
                                                     &new_id,
                                                     true,
                                                     doc,
                                                     &mut text_edit_state,
                                                     &mut mindmap_tree,
+                                                    &mut app_scene,
                                                     &mut renderer,
                                                 );
                                             }
@@ -842,6 +842,7 @@ impl Application {
                                                     doc,
                                                     &mut text_edit_state,
                                                     &mut mindmap_tree,
+                                                    &mut app_scene,
                                                     &mut renderer,
                                                 );
                                             }
@@ -903,6 +904,7 @@ impl Application {
                                                 modifiers.shift_key(),
                                                 &mut document,
                                                 &mut mindmap_tree,
+                                                &mut app_scene,
                                                 &mut renderer,
                                             );
                                         }
@@ -930,7 +932,7 @@ impl Application {
                                             doc.dirty = true;
 
                                             // Full rebuild from model
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                            rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                         }
                                         // Drag ended — reset the throttle so the next drag
                                         // starts at n = 1 without inheriting any residual
@@ -966,7 +968,7 @@ impl Application {
                                                 });
                                                 doc.dirty = true;
                                             }
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                            rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                         }
                                         mutation_throttle.reset();
                                     }
@@ -980,7 +982,7 @@ impl Application {
                                                 1 => SelectionState::Single(hits.into_iter().next().unwrap()),
                                                 _ => SelectionState::Multi(hits),
                                             };
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                            rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                         }
                                     }
                                     DragState::Panning | DragState::None => {}
@@ -1023,6 +1025,7 @@ impl Application {
                                 &mut color_picker_state,
                                 doc,
                                 &mut mindmap_tree,
+                                &mut app_scene,
                                 &mut renderer,
                             );
                         }
@@ -1044,7 +1047,7 @@ impl Application {
                             if let Some(doc) = document.as_ref() {
                                 rebuild_all_with_mode(
                                     doc, &app_mode, hovered_node.as_deref(),
-                                    &mut mindmap_tree, &mut renderer,
+                                    &mut mindmap_tree, &mut app_scene, &mut renderer,
                                 );
                             }
                         }
@@ -1275,6 +1278,7 @@ impl Application {
                             &mut color_picker_state,
                             &mut document,
                             &mut mindmap_tree,
+                            &mut app_scene,
                             &mut renderer,
                             &mut scene_cache,
                             &mut keybinds,
@@ -1295,6 +1299,7 @@ impl Application {
                                 &mut color_picker_state,
                                 doc,
                                 &mut mindmap_tree,
+                                &mut app_scene,
                                 &mut renderer,
                             );
                         }
@@ -1313,6 +1318,7 @@ impl Application {
                                 &mut label_edit_state,
                                 doc,
                                 &mut mindmap_tree,
+                                &mut app_scene,
                                 &mut renderer,
                             );
                         }
@@ -1333,6 +1339,7 @@ impl Application {
                                 &mut text_edit_state,
                                 doc,
                                 &mut mindmap_tree,
+                                &mut app_scene,
                                 &mut renderer,
                             );
                         }
@@ -1371,7 +1378,7 @@ impl Application {
                         Some(Action::Undo) => {
                             if let Some(doc) = document.as_mut() {
                                 if doc.undo() {
-                                    rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                    rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                 }
                             }
                         }
@@ -1387,7 +1394,7 @@ impl Application {
                                 if let Some(doc) = document.as_ref() {
                                     rebuild_all_with_mode(
                                         doc, &app_mode, hovered_node.as_deref(),
-                                        &mut mindmap_tree, &mut renderer,
+                                        &mut mindmap_tree, &mut app_scene, &mut renderer,
                                     );
                                 }
                             }
@@ -1402,7 +1409,7 @@ impl Application {
                                     last_click = None;
                                     rebuild_all_with_mode(
                                         doc, &app_mode, hovered_node.as_deref(),
-                                        &mut mindmap_tree, &mut renderer,
+                                        &mut mindmap_tree, &mut app_scene, &mut renderer,
                                     );
                                 }
                             }
@@ -1415,7 +1422,7 @@ impl Application {
                                     last_click = None;
                                     rebuild_all_with_mode(
                                         doc, &app_mode, hovered_node.as_deref(),
-                                        &mut mindmap_tree, &mut renderer,
+                                        &mut mindmap_tree, &mut app_scene, &mut renderer,
                                     );
                                 }
                             }
@@ -1423,7 +1430,7 @@ impl Application {
                         Some(Action::DeleteSelection) => {
                             if let Some(doc) = document.as_mut() {
                                 if doc.apply_delete_selection() {
-                                    rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                    rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                 }
                             }
                         }
@@ -1433,13 +1440,13 @@ impl Application {
                                     cursor_pos.0 as f32, cursor_pos.1 as f32,
                                 );
                                 doc.create_orphan_and_select(canvas_pos);
-                                rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                             }
                         }
                         Some(Action::OrphanSelection) => {
                             if let Some(doc) = document.as_mut() {
                                 if doc.apply_orphan_selection_with_undo() {
-                                    rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                    rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                 }
                             }
                         }
@@ -1463,6 +1470,7 @@ impl Application {
                                         doc,
                                         &mut text_edit_state,
                                         &mut mindmap_tree,
+                                        &mut app_scene,
                                         &mut renderer,
                                     );
                                 }
@@ -1494,7 +1502,7 @@ impl Application {
                                         {
                                             doc.apply_custom_mutation(&m, &nid, tree);
                                             scene_cache.clear();
-                                            rebuild_all(doc, &mut mindmap_tree, &mut renderer);
+                                            rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                         }
                                     }
                                 }
@@ -1570,8 +1578,15 @@ impl Application {
                                         dirty_edge_keys.insert(k.clone());
                                     }
                                 }
-                                let dirty_node_ids: std::collections::HashSet<String> =
-                                    offsets.keys().cloned().collect();
+                                // Border-side dirty-node tracking
+                                // disappeared along with the legacy
+                                // `rebuild_border_buffers_keyed`
+                                // call — the tree-path border helper
+                                // takes the full `offsets` map and
+                                // rebuilds the canvas-scene tree
+                                // wholesale. Connection drag still
+                                // needs `dirty_edge_keys` for its
+                                // own incremental rebuild below.
 
                                 let scene = doc.build_scene_with_cache(
                                     &offsets,
@@ -1588,20 +1603,25 @@ impl Application {
                                         &scene.connection_elements,
                                         None,
                                     );
-                                    renderer.rebuild_border_buffers_keyed(
-                                        &scene.border_elements,
-                                        None,
-                                    );
                                 } else {
                                     renderer.rebuild_connection_buffers_keyed(
                                         &scene.connection_elements,
                                         Some(&dirty_edge_keys),
                                     );
-                                    renderer.rebuild_border_buffers_keyed(
-                                        &scene.border_elements,
-                                        Some(&dirty_node_ids),
-                                    );
                                 }
+                                // Borders go through the canvas-scene
+                                // tree path; drag offsets land on the
+                                // tree builder via this helper. The
+                                // legacy keyed border path used to
+                                // patch positions in place (cheap)
+                                // while the tree path re-shapes every
+                                // border (more expensive) — that's a
+                                // known regression to address with a
+                                // tree-side incremental cache, see the
+                                // unified-rendering plan Session 2f.
+                                update_border_tree_with_offsets(
+                                    doc, &offsets, &mut app_scene, &mut renderer,
+                                );
                                 // Labels are emitted per frame (not
                                 // cached) so their positions track the
                                 // live drag.
@@ -1877,6 +1897,11 @@ impl Application {
             cursor_pos: (f64, f64),
             pending_click: PendingClick,
             modifiers: winit::keyboard::ModifiersState,
+            /// Mirror of native's `app_scene` so the canvas-scene
+            /// tree path (borders, eventually connections/portals)
+            /// works identically on WASM. Threaded into every
+            /// `rebuild_all` / `rebuild_scene_only` call below.
+            app_scene: crate::application::scene_host::AppScene,
         }
 
         let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
@@ -1907,6 +1932,11 @@ impl Application {
             // Load mindmap through Document -> Tree + Scene -> Renderer flow
             let mut doc_opt: Option<MindMapDocument> = None;
             let mut tree_opt: Option<MindMapTree> = None;
+            // Local AppScene used only for the initial border tree
+            // build; it's then dropped, and `WasmInputState`'s own
+            // `app_scene` takes over for the live event loop.
+            let mut init_app_scene =
+                crate::application::scene_host::AppScene::new();
             if let Ok(doc) = MindMapDocument::load(&mindmap_path) {
                 let mindmap_tree = doc.build_tree();
                 renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
@@ -1914,7 +1944,7 @@ impl Application {
 
                 let scene = doc.build_scene(renderer.camera_zoom());
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
-                renderer.rebuild_border_buffers(&scene.border_elements);
+                update_border_tree_static(&doc, &mut init_app_scene, renderer);
                 renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
                 renderer.rebuild_portal_buffers(&scene.portal_elements);
                 tree_opt = Some(mindmap_tree);
@@ -1935,6 +1965,7 @@ impl Application {
                     cursor_pos: (0.0, 0.0),
                     pending_click: PendingClick::None,
                     modifiers: winit::keyboard::ModifiersState::empty(),
+                    app_scene: crate::application::scene_host::AppScene::new(),
                 });
             }
 
@@ -2034,7 +2065,7 @@ impl Application {
                     match action {
                         Some(Action::Undo) => {
                             if input.document.undo() {
-                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                             }
                         }
                         Some(Action::CreateOrphanNode) => {
@@ -2043,16 +2074,16 @@ impl Application {
                                 input.cursor_pos.1 as f32,
                             );
                             input.document.create_orphan_and_select(canvas_pos);
-                            rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                         }
                         Some(Action::OrphanSelection) => {
                             if input.document.apply_orphan_selection_with_undo() {
-                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                             }
                         }
                         Some(Action::DeleteSelection) => {
                             if input.document.apply_delete_selection() {
-                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                             }
                         }
                         Some(a @ (Action::EditSelection | Action::EditSelectionClean)) => {
@@ -2148,7 +2179,7 @@ impl Application {
                             if let Some(ref node_id) = hit_node {
                                 let nid = node_id.clone();
                                 input.document.selection = SelectionState::Single(nid.clone());
-                                rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                                 open_text_edit(
                                     &nid, false,
                                     &mut input.document,
@@ -2163,7 +2194,7 @@ impl Application {
                                 );
                                 if allow_create {
                                     let new_id = input.document.create_orphan_and_select(canvas_pos);
-                                    rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                                    rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                                     open_text_edit(
                                         &new_id, true,
                                         &mut input.document,
@@ -2234,7 +2265,7 @@ impl Application {
                         };
                         let mut renderer_borrow = renderer_for_events.borrow_mut();
                         if let Some(renderer) = renderer_borrow.as_mut() {
-                            rebuild_all(&input.document, &mut input.mindmap_tree, renderer);
+                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                         }
                     }
                 }
@@ -2260,7 +2291,7 @@ impl Application {
                         // Zoom touches scene geometry (connection glyph
                         // sample spacing, viewport cull rect) but not the
                         // node text tree — scene-only rebuild is enough.
-                        rebuild_scene_only(&input.document, renderer);
+                        rebuild_scene_only(&input.document, &mut input.app_scene, renderer);
                     }
                 }
 
@@ -2353,6 +2384,7 @@ fn handle_console_key(
     color_picker_state: &mut crate::application::color_picker::ColorPickerState,
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
     keybinds: &mut ResolvedKeybinds,
@@ -2526,6 +2558,7 @@ fn handle_console_key(
                         color_picker_state,
                         doc,
                         mindmap_tree,
+                        app_scene,
                         renderer,
                         scene_cache,
                     );
@@ -2865,6 +2898,7 @@ fn execute_console_line(
     color_picker_state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
@@ -2906,14 +2940,14 @@ fn execute_console_line(
 
     // Any successful command may have mutated the doc; rebuild.
     scene_cache.clear();
-    rebuild_all(doc, mindmap_tree, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer);
 
     if let Some(er) = label_edit_req {
         open_label_edit(&er, doc, label_edit_state, renderer);
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(None);
     } else if let Some(target) = color_picker_req {
-        open_color_picker(target, doc, color_picker_state, renderer);
+        open_color_picker(target, doc, color_picker_state, app_scene, renderer);
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(None);
     } else if close_after {
@@ -3188,6 +3222,7 @@ fn nearest_anchor_side(point: Vec2, node_pos: Vec2, node_size: Vec2) -> i32 {
 fn rebuild_all(
     doc: &MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let mut new_tree = doc.build_tree();
@@ -3200,7 +3235,7 @@ fn rebuild_all(
     );
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
-    rebuild_scene_only(doc, renderer);
+    rebuild_scene_only(doc, app_scene, renderer);
 
     *mindmap_tree = Some(new_tree);
 }
@@ -3212,13 +3247,53 @@ fn rebuild_all(
 /// color preview doesn't change node text, borders, or positions,
 /// so the tree rebuild is wasted work. Halves the hot-path cost vs
 /// `rebuild_all` on maps with many nodes.
-fn rebuild_scene_only(doc: &MindMapDocument, renderer: &mut Renderer) {
+fn rebuild_scene_only(
+    doc: &MindMapDocument,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_buffers(&scene.connection_elements);
-    renderer.rebuild_border_buffers(&scene.border_elements);
+    update_border_tree_static(doc, app_scene, renderer);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
     renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
     renderer.rebuild_portal_buffers(&scene.portal_elements);
+}
+
+/// Build the border tree from the current document (no drag
+/// offsets) and register it under [`CanvasRole::Borders`], then
+/// re-walk the canvas sub-scene into the renderer's
+/// `canvas_scene_buffers`. Replaces the legacy
+/// `Renderer::rebuild_border_buffers` path; both used to render
+/// would double-draw, so the legacy call is gone from
+/// `rebuild_scene_only` and the drag path.
+///
+/// Drag frames go through [`update_border_tree_with_offsets`]
+/// instead so `MindNode.position + ox/oy` lands on each glyph
+/// area's origin.
+fn update_border_tree_static(
+    doc: &MindMapDocument,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    update_border_tree_with_offsets(
+        doc,
+        &std::collections::HashMap::new(),
+        app_scene,
+        renderer,
+    );
+}
+
+fn update_border_tree_with_offsets(
+    doc: &MindMapDocument,
+    offsets: &std::collections::HashMap<String, (f32, f32)>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    use crate::application::scene_host::CanvasRole;
+    let tree = baumhard::mindmap::tree_builder::build_border_tree(&doc.mindmap, offsets);
+    app_scene.register_canvas(CanvasRole::Borders, tree, glam::Vec2::ZERO);
+    renderer.rebuild_canvas_scene_buffers(app_scene);
 }
 
 /// Session 6D: transition into inline label edit mode for the given
@@ -3273,16 +3348,17 @@ fn handle_label_edit_key(
     label_edit_state: &mut LabelEditState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let name = key_name.as_deref();
     match name {
         Some("escape") => {
-            close_label_edit(false, doc, label_edit_state, mindmap_tree, renderer);
+            close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer);
             return;
         }
         Some("enter") => {
-            close_label_edit(true, doc, label_edit_state, mindmap_tree, renderer);
+            close_label_edit(true, doc, label_edit_state, mindmap_tree, app_scene, renderer);
             return;
         }
         Some("backspace") => {
@@ -3338,6 +3414,7 @@ fn close_label_edit(
     doc: &mut MindMapDocument,
     label_edit_state: &mut LabelEditState,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let (edge_ref, buffer, original) = match std::mem::replace(label_edit_state, LabelEditState::Closed) {
@@ -3355,7 +3432,7 @@ fn close_label_edit(
     }
     // Rebuild so the label reflects the model state (or vanishes if
     // the buffer was empty + original was None).
-    rebuild_all(doc, mindmap_tree, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
 // =====================================================================
@@ -3378,6 +3455,7 @@ fn open_text_edit(
     doc: &mut MindMapDocument,
     text_edit_state: &mut TextEditState,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let current_text = match doc.mindmap.nodes.get(node_id) {
@@ -3398,6 +3476,7 @@ fn open_text_edit(
         &buffer,
         cursor_grapheme_pos,
         mindmap_tree,
+        app_scene,
         renderer,
     );
 }
@@ -3414,6 +3493,7 @@ fn close_text_edit(
     doc: &mut MindMapDocument,
     text_edit_state: &mut TextEditState,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let (node_id, buffer) = match std::mem::replace(text_edit_state, TextEditState::Closed) {
@@ -3427,7 +3507,7 @@ fn close_text_edit(
     }
     // Full rebuild pulls the tree back to the model — any transient
     // caret-bearing mutations on the live tree are discarded.
-    rebuild_all(doc, mindmap_tree, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
 /// Session 7A: push the current (`buffer`, `cursor`) state into the
@@ -3443,6 +3523,7 @@ fn apply_text_edit_to_tree(
     buffer: &str,
     cursor_grapheme_pos: usize,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
@@ -3529,11 +3610,12 @@ fn handle_text_edit_key(
     text_edit_state: &mut TextEditState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let name = key_name.as_deref();
     if name == Some("escape") {
-        close_text_edit(false, doc, text_edit_state, mindmap_tree, renderer);
+        close_text_edit(false, doc, text_edit_state, mindmap_tree, app_scene, renderer);
         return;
     }
 
@@ -3638,6 +3720,7 @@ fn handle_text_edit_key(
             &buffer_owned,
             cursor_snapshot,
             mindmap_tree,
+            app_scene,
             renderer,
         );
     }
@@ -3659,6 +3742,7 @@ fn open_color_picker(
     target: crate::application::color_picker::ColorTarget,
     doc: &mut MindMapDocument,
     state: &mut crate::application::color_picker::ColorPickerState,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
@@ -3738,7 +3822,7 @@ fn open_color_picker(
     };
 
     rebuild_color_picker_overlay(state, doc, renderer);
-    rebuild_scene_only(doc, renderer);
+    rebuild_scene_only(doc, app_scene, renderer);
 }
 
 /// Helper: write the initial HSV into `doc.color_picker_preview` on
@@ -3917,6 +4001,7 @@ fn cancel_color_picker(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::ColorPickerState;
@@ -3927,7 +4012,7 @@ fn cancel_color_picker(
     *state = ColorPickerState::Closed;
     doc.color_picker_preview = None;
     renderer.rebuild_color_picker_overlay_buffers(None);
-    rebuild_all(doc, mindmap_tree, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
 /// Commit the picker's currently-previewed color via the regular
@@ -3948,6 +4033,7 @@ fn commit_color_picker(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
@@ -4052,7 +4138,7 @@ fn commit_color_picker(
     }
 
     renderer.rebuild_color_picker_overlay_buffers(None);
-    rebuild_all(doc, mindmap_tree, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
 /// Apply the current picker HSV to the document's transient color
@@ -4066,6 +4152,7 @@ fn apply_picker_preview(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     _mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{ColorPickerState, CommitMode, PickerHandle};
@@ -4103,7 +4190,7 @@ fn apply_picker_preview(
             // scene pipeline — not yet wired. Commit-only for v1.
         }
     }
-    rebuild_scene_only(doc, renderer);
+    rebuild_scene_only(doc, app_scene, renderer);
     rebuild_color_picker_overlay_dynamic(state, renderer);
 }
 
@@ -4121,6 +4208,7 @@ fn apply_picker_chip(
     chip_idx: usize,
     doc: &mut MindMapDocument,
     _mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
@@ -4220,7 +4308,7 @@ fn apply_picker_chip(
         }
     }
 
-    rebuild_scene_only(doc, renderer);
+    rebuild_scene_only(doc, app_scene, renderer);
     rebuild_color_picker_overlay_dynamic(state, renderer);
 }
 
@@ -4234,6 +4322,7 @@ fn handle_color_picker_key(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{ColorPickerState, THEME_CHIPS};
@@ -4241,7 +4330,7 @@ fn handle_color_picker_key(
     let name = key_name.as_deref();
     match name {
         Some("escape") => {
-            cancel_color_picker(state, doc, mindmap_tree, renderer);
+            cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
             return;
         }
         Some("enter") => {
@@ -4253,9 +4342,9 @@ fn handle_color_picker_key(
                 None
             };
             if let Some(idx) = focus {
-                apply_picker_chip(state, idx, doc, mindmap_tree, renderer);
+                apply_picker_chip(state, idx, doc, mindmap_tree, app_scene, renderer);
             }
-            commit_color_picker(state, doc, mindmap_tree, renderer);
+            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
             return;
         }
         Some("tab") => {
@@ -4309,7 +4398,7 @@ fn handle_color_picker_key(
             }
         }
         if changed {
-            apply_picker_preview(state, doc, mindmap_tree, renderer);
+            apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
         }
     }
 }
@@ -4323,6 +4412,7 @@ fn handle_color_picker_mouse_move(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
@@ -4380,7 +4470,7 @@ fn handle_color_picker_mouse_move(
     }
 
     if hsv_changed {
-        apply_picker_preview(state, doc, mindmap_tree, renderer);
+        apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
     } else {
         // Only chip focus moved, or we're hovering inert padding /
         // outside the backdrop entirely. The dynamic rebuild re-runs
@@ -4400,6 +4490,7 @@ fn handle_color_picker_click(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
@@ -4418,7 +4509,7 @@ fn handle_color_picker_click(
             // Click outside the backdrop entirely — close as cancel,
             // matching the palette modal's "click outside dismisses"
             // gesture.
-            cancel_color_picker(state, doc, mindmap_tree, renderer);
+            cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
         PickerHit::Inside => {
             // Click inside the backdrop but not on any glyph (e.g.
@@ -4430,26 +4521,26 @@ fn handle_color_picker_click(
             if let ColorPickerState::Open { hue_deg, .. } = state {
                 *hue_deg = hue_slot_to_degrees(slot);
             }
-            apply_picker_preview(state, doc, mindmap_tree, renderer);
-            commit_color_picker(state, doc, mindmap_tree, renderer);
+            apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
+            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
         PickerHit::SatCell(i) => {
             if let ColorPickerState::Open { sat, .. } = state {
                 *sat = sat_cell_to_value(i);
             }
-            apply_picker_preview(state, doc, mindmap_tree, renderer);
-            commit_color_picker(state, doc, mindmap_tree, renderer);
+            apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
+            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
         PickerHit::ValCell(i) => {
             if let ColorPickerState::Open { val, .. } = state {
                 *val = val_cell_to_value(i);
             }
-            apply_picker_preview(state, doc, mindmap_tree, renderer);
-            commit_color_picker(state, doc, mindmap_tree, renderer);
+            apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
+            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
         PickerHit::Chip(i) => {
-            apply_picker_chip(state, i, doc, mindmap_tree, renderer);
-            commit_color_picker(state, doc, mindmap_tree, renderer);
+            apply_picker_chip(state, i, doc, mindmap_tree, app_scene, renderer);
+            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
     }
 }
@@ -4467,6 +4558,7 @@ fn handle_click(
     shift_pressed: bool,
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let doc = match document.as_mut() {
@@ -4563,7 +4655,7 @@ fn handle_click(
     }
 
     // Rebuild tree with selection highlight applied
-    rebuild_all(doc, mindmap_tree, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
 /// Rebuild tree, connections, and borders like `rebuild_all`, but additionally
@@ -4576,6 +4668,7 @@ fn rebuild_all_with_mode(
     app_mode: &AppMode,
     hovered_node: Option<&str>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let mut new_tree = doc.build_tree();
@@ -4620,7 +4713,7 @@ fn rebuild_all_with_mode(
 
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_buffers(&scene.connection_elements);
-    renderer.rebuild_border_buffers(&scene.border_elements);
+    update_border_tree_static(doc, app_scene, renderer);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
     renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
     renderer.rebuild_portal_buffers(&scene.portal_elements);
@@ -4640,6 +4733,7 @@ fn handle_connect_target_click(
     hovered_node: &mut Option<String>,
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let source = match std::mem::replace(app_mode, AppMode::Normal) {
@@ -4670,7 +4764,7 @@ fn handle_connect_target_click(
         }
         // Full rebuild regardless — exiting the mode requires clearing
         // orange/green highlights.
-        rebuild_all(doc, mindmap_tree, renderer);
+        rebuild_all(doc, mindmap_tree, app_scene, renderer);
     }
 }
 
@@ -4684,6 +4778,7 @@ fn handle_reparent_target_click(
     hovered_node: &mut Option<String>,
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let sources = match std::mem::replace(app_mode, AppMode::Normal) {
@@ -4711,7 +4806,7 @@ fn handle_reparent_target_click(
         }
         // Full rebuild: tree structure changed even if a no-op, the mode exit
         // requires clearing the orange/green highlights.
-        rebuild_all(doc, mindmap_tree, renderer);
+        rebuild_all(doc, mindmap_tree, app_scene, renderer);
     }
 }
 
