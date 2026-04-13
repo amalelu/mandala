@@ -1,34 +1,56 @@
-//! `anchor set <from|to> <auto|top|right|bottom|left>` — edge anchor
-//! side setter. Collapses the ten per-side palette actions into a
-//! single command with two enum args.
+//! `anchor from=top to=auto` — edge anchor side setter.
+//!
+//! Component-specific (edge only); the anchor concept doesn't
+//! generalize to nodes or portals, so this bypasses the trait layer
+//! and calls `set_edge_anchor` directly.
 
 use super::Command;
-use crate::application::console::completion::{enum_completion, Completion, CompletionState};
+use crate::application::console::completion::{prefix_filter, Completion, CompletionContext, CompletionState};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 use crate::application::document::SelectionState;
 
 pub const SIDES: &[&str] = &["auto", "top", "right", "bottom", "left"];
-pub const ENDPOINTS: &[&str] = &["from", "to"];
+pub const KEYS: &[&str] = &["from", "to"];
 
 pub const COMMAND: Command = Command {
     name: "anchor",
     aliases: &[],
     summary: "Set the from/to anchor side of the selected edge",
-    usage: "anchor set <from|to> <auto|top|right|bottom|left>",
-    tags: &["edge", "anchor", "side", "connection"],
+    usage: "anchor from=<side> to=<side>   (side: auto|top|right|bottom|left)",
+    tags: &["edge", "anchor", "side"],
     applicable: edge_selected,
     complete: complete_anchor,
     execute: execute_anchor,
 };
 
 fn complete_anchor(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match state.cursor_token {
-        1 => enum_completion(&["set"], state.partial),
-        2 => enum_completion(ENDPOINTS, state.partial),
-        3 => enum_completion(SIDES, state.partial),
+    match &state.context {
+        CompletionContext::Token { .. } => KEYS
+            .iter()
+            .filter(|k| k.starts_with(state.partial))
+            .map(|k| Completion {
+                text: format!("{}=", k),
+                display: format!("{}=", k),
+                hint: None,
+            })
+            .collect(),
+        CompletionContext::KvValue { key } if KEYS.iter().any(|k| k == key) => {
+            prefix_filter(SIDES, state.partial)
+        }
         _ => Vec::new(),
+    }
+}
+
+fn side_value(name: &str) -> Option<i32> {
+    match name {
+        "auto" => Some(0),
+        "top" => Some(1),
+        "right" => Some(2),
+        "bottom" => Some(3),
+        "left" => Some(4),
+        _ => None,
     }
 }
 
@@ -37,47 +59,41 @@ fn execute_anchor(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         SelectionState::Edge(e) => e.clone(),
         _ => return ExecResult::err("no edge selected"),
     };
-
-    let sub = match args.positional(0) {
-        Some(s) => s,
-        None => return ExecResult::err("usage: anchor set <from|to> <side>"),
-    };
-    if !sub.eq_ignore_ascii_case("set") {
-        return ExecResult::err(format!("unknown subcommand '{}'; expected 'set'", sub));
+    let kvs: Vec<(String, String)> = args
+        .kvs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    if kvs.is_empty() {
+        return ExecResult::err("usage: anchor from=<side> to=<side>");
     }
 
-    let endpoint = match args.positional(1) {
-        Some(e) => e.to_ascii_lowercase(),
-        None => return ExecResult::err("usage: anchor set <from|to> <side>"),
-    };
-    let is_from = match endpoint.as_str() {
-        "from" => true,
-        "to" => false,
-        other => return ExecResult::err(format!("endpoint '{}' must be 'from' or 'to'", other)),
-    };
-
-    let side = match args.positional(2) {
-        Some(s) => s.to_ascii_lowercase(),
-        None => return ExecResult::err("usage: anchor set <from|to> <side>"),
-    };
-    let value: i32 = match side.as_str() {
-        "auto" => 0,
-        "top" => 1,
-        "right" => 2,
-        "bottom" => 3,
-        "left" => 4,
-        other => {
-            return ExecResult::err(format!(
-                "side '{}' must be one of auto|top|right|bottom|left",
-                other
-            ))
+    let mut messages: Vec<String> = Vec::new();
+    let mut any_applied = false;
+    for (k, v) in kvs {
+        let is_from = match k.as_str() {
+            "from" => true,
+            "to" => false,
+            other => {
+                messages.push(format!("unknown key '{}'", other));
+                continue;
+            }
+        };
+        let Some(val) = side_value(&v) else {
+            messages.push(format!("'{}': expected auto|top|right|bottom|left", v));
+            continue;
+        };
+        let changed = eff.document.set_edge_anchor(&er, is_from, val);
+        if changed {
+            any_applied = true;
+        } else {
+            messages.push(format!("{} already {}", k, v));
         }
-    };
-
-    let changed = eff.document.set_edge_anchor(&er, is_from, value);
-    if changed {
-        ExecResult::ok_msg(format!("anchor {} set to {}", endpoint, side))
-    } else {
-        ExecResult::ok_msg(format!("anchor {} already {}", endpoint, side))
     }
+    if !messages.is_empty() {
+        if !any_applied {
+            return ExecResult::err(messages.join("; "));
+        }
+        return ExecResult::Lines(messages);
+    }
+    ExecResult::ok_msg("anchor applied")
 }

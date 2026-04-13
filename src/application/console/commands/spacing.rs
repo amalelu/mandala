@@ -1,32 +1,45 @@
-//! `spacing <tight|normal|wide>` — set the glyph-spacing preset for
-//! the selected edge's connection path.
+//! `spacing value=4.0` or `spacing value=tight` — glyph-spacing
+//! setter for the selected edge. Accepts named presets
+//! (tight / normal / wide) or a raw float in the preset's unit.
 
 use super::Command;
-use crate::application::console::completion::{enum_completion, Completion, CompletionState};
+use crate::application::console::completion::{prefix_filter, Completion, CompletionContext, CompletionState};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 use crate::application::document::SelectionState;
 
 pub const PRESETS: &[(&str, f32)] = &[("tight", 0.0), ("normal", 2.0), ("wide", 6.0)];
-pub const NAMES: &[&str] = &["tight", "normal", "wide"];
+pub const VALUE_PRESETS: &[&str] = &["tight", "normal", "wide"];
+pub const KEYS: &[&str] = &["value"];
 
 pub const COMMAND: Command = Command {
     name: "spacing",
     aliases: &[],
     summary: "Set the glyph spacing of the selected edge",
-    usage: "spacing <tight|normal|wide>",
-    tags: &["edge", "spacing", "tight", "wide", "dense", "airy"],
+    usage: "spacing value=<tight|normal|wide | <float>>",
+    tags: &["edge", "spacing", "tight", "wide"],
     applicable: edge_selected,
     complete: complete_spacing,
     execute: execute_spacing,
 };
 
 fn complete_spacing(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    if state.cursor_token != 1 {
-        return Vec::new();
+    match &state.context {
+        CompletionContext::Token { .. } => KEYS
+            .iter()
+            .filter(|k| k.starts_with(state.partial))
+            .map(|k| Completion {
+                text: format!("{}=", k),
+                display: format!("{}=", k),
+                hint: None,
+            })
+            .collect(),
+        CompletionContext::KvValue { key } if key == "value" => {
+            prefix_filter(VALUE_PRESETS, state.partial)
+        }
+        _ => Vec::new(),
     }
-    enum_completion(NAMES, state.partial)
 }
 
 fn execute_spacing(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
@@ -34,23 +47,27 @@ fn execute_spacing(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         SelectionState::Edge(e) => e.clone(),
         _ => return ExecResult::err("no edge selected"),
     };
-    let name = match args.positional(0) {
-        Some(n) => n.to_ascii_lowercase(),
-        None => return ExecResult::err("usage: spacing <tight|normal|wide>"),
+    let v = match args.kv("value") {
+        Some(v) => v,
+        None => return ExecResult::err("usage: spacing value=<tight|normal|wide | <float>>"),
     };
-    let value = match PRESETS.iter().find(|(n, _)| *n == name) {
-        Some((_, v)) => *v,
-        None => {
-            return ExecResult::err(format!(
-                "spacing '{}' must be one of tight|normal|wide",
-                name
-            ))
+    let value = if let Some((_, preset)) = PRESETS.iter().find(|(n, _)| *n == v) {
+        *preset
+    } else {
+        match v.parse::<f32>() {
+            Ok(x) => x,
+            Err(_) => {
+                return ExecResult::err(format!(
+                    "'{}' must be a preset (tight|normal|wide) or a float",
+                    v
+                ))
+            }
         }
     };
     let changed = eff.document.set_edge_spacing(&er, value);
     if changed {
-        ExecResult::ok_msg(format!("spacing set to {}", name))
+        ExecResult::ok_msg(format!("spacing set to {}", v))
     } else {
-        ExecResult::ok_msg(format!("spacing already {}", name))
+        ExecResult::ok_msg(format!("spacing already {}", v))
     }
 }

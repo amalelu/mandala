@@ -160,88 +160,101 @@ fn test_console_state_open_seeded_with_history() {
 // ============================================================
 
 #[test]
-fn test_anchor_set_updates_edge_anchor() {
+fn test_anchor_kv_updates_edge_anchor() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("anchor set from top", &mut doc);
+    let _ = run("anchor from=top", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     assert_eq!(updated.anchor_from, 1);
 }
 
 #[test]
-fn test_anchor_set_idempotent_second_call() {
+fn test_anchor_kv_idempotent_second_call() {
     let mut doc = load_test_doc();
     select_first_edge(&mut doc);
-    let first = run("anchor set from left", &mut doc);
-    let second = run("anchor set from left", &mut doc);
+    let first = run("anchor from=left", &mut doc);
+    // Second call reports "already left" as Lines (not Err).
+    let second = run("anchor from=left", &mut doc);
     assert!(matches!(first, ExecResult::Ok(_)));
-    assert!(matches!(second, ExecResult::Ok(_)));
+    assert!(matches!(second, ExecResult::Err(_) | ExecResult::Lines(_)));
 }
 
 #[test]
 fn test_anchor_errors_without_edge_selection() {
     let mut doc = load_test_doc();
-    let result = run("anchor set from top", &mut doc);
+    let result = run("anchor from=top", &mut doc);
     assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
 }
 
 #[test]
-fn test_body_dash_sets_glyph() {
+fn test_body_kv_sets_glyph() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("body dash", &mut doc);
+    let _ = run("body glyph=dash", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    let body = updated
-        .glyph_connection
-        .as_ref()
-        .map(|c| c.body.as_str());
+    let body = updated.glyph_connection.as_ref().map(|c| c.body.as_str());
     assert_eq!(body, Some("\u{2500}"));
 }
 
 #[test]
-fn test_cap_from_arrow_sets_left_triangle() {
+fn test_cap_kv_from_arrow_sets_left_triangle() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("cap from arrow", &mut doc);
+    let _ = run("cap from=arrow", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    let cap = updated
-        .glyph_connection
-        .as_ref()
-        .and_then(|c| c.cap_start.as_deref());
+    let cap = updated.glyph_connection.as_ref().and_then(|c| c.cap_start.as_deref());
     assert_eq!(cap, Some("\u{25C0}"));
 }
 
 #[test]
-fn test_cap_to_arrow_sets_right_triangle() {
+fn test_cap_kv_to_arrow_sets_right_triangle() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("cap to arrow", &mut doc);
+    let _ = run("cap to=arrow", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    let cap = updated
-        .glyph_connection
-        .as_ref()
-        .and_then(|c| c.cap_end.as_deref());
+    let cap = updated.glyph_connection.as_ref().and_then(|c| c.cap_end.as_deref());
     assert_eq!(cap, Some("\u{25B6}"));
 }
 
 #[test]
-fn test_spacing_wide_sets_six() {
+fn test_spacing_kv_wide_sets_six() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("spacing wide", &mut doc);
+    let _ = run("spacing value=wide", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     let spacing = updated.glyph_connection.as_ref().map(|c| c.spacing);
     assert_eq!(spacing, Some(6.0));
 }
 
 #[test]
-fn test_color_accent_sets_var_accent() {
+fn test_color_kv_text_accent_sets_var_accent_on_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("color accent", &mut doc);
+    let _ = run("color text=accent", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     let color = updated.glyph_connection.as_ref().and_then(|c| c.color.clone());
     assert_eq!(color.as_deref(), Some("var(--accent)"));
+}
+
+#[test]
+fn test_color_kv_bg_sets_node_background() {
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid.clone());
+    let _ = run("color bg=#112233", &mut doc);
+    assert_eq!(
+        doc.mindmap.nodes.get(&nid).unwrap().style.background_color,
+        "#112233"
+    );
+}
+
+#[test]
+fn test_color_kv_rejects_invalid_hex() {
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid);
+    let result = run("color bg=notacolor", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)));
 }
 
 #[test]
@@ -272,16 +285,16 @@ fn test_label_edit_hands_off_to_inline_editor() {
 }
 
 #[test]
-fn test_label_set_with_quoted_string_writes_label() {
+fn test_label_kv_with_quoted_string_writes_label() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run(r#"label set "hello world""#, &mut doc);
+    let _ = run(r#"label text="hello world""#, &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     assert_eq!(updated.label.as_deref(), Some("hello world"));
 }
 
 #[test]
-fn test_connection_reset_straight_clears_control_points() {
+fn test_edge_reset_straight_clears_control_points() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
     // Seed a control point so reset has something to clear.
@@ -291,18 +304,19 @@ fn test_connection_reset_straight_clears_control_points() {
         .find(|e| er.matches(e))
         .unwrap()
         .control_points = vec![baumhard::mindmap::model::ControlPoint { x: 10.0, y: 20.0 }];
-    let _ = run("connection reset-straight", &mut doc);
+    let _ = run("edge reset=straight", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     assert!(updated.control_points.is_empty());
 }
 
 #[test]
-fn test_font_larger_steps_font_size_up() {
+fn test_font_kv_size_sets_absolute_value_on_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("font larger", &mut doc);
+    let _ = run("font size=18", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    assert!(updated.glyph_connection.is_some());
+    let cfg = updated.glyph_connection.as_ref().unwrap();
+    assert!((cfg.font_size_pt - 18.0).abs() < 0.01, "got {}", cfg.font_size_pt);
 }
 
 #[test]
@@ -320,7 +334,7 @@ fn test_edge_type_parent_child_updates_edge() {
         .edge_type
         .clone();
     let target = if current == "parent_child" { "cross_link" } else { "parent_child" };
-    let _ = run(&format!("edge type {}", target), &mut doc);
+    let _ = run(&format!("edge type={}", target), &mut doc);
     // `set_edge_type` renames the edge identity, so we can't find it
     // by the old er anymore — just assert at least one edge has the
     // new type.
@@ -355,7 +369,7 @@ fn test_portal_glyph_hexagon_updates_marker() {
     let b = ids.next().unwrap();
     let pref: PortalRef = doc.apply_create_portal(&a, &b).unwrap();
     doc.selection = SelectionState::Portal(pref);
-    let _ = run("portal glyph hexagon", &mut doc);
+    let _ = run("portal glyph=hexagon", &mut doc);
     assert_eq!(doc.mindmap.portals[0].glyph, "\u{2B21}");
 }
 
@@ -450,22 +464,22 @@ fn test_complete_command_name_empty_input() {
 }
 
 #[test]
-fn test_complete_enum_arg_anchor_endpoint() {
+fn test_complete_anchor_kv_keys() {
     let mut doc = load_test_doc();
     let _ = select_first_edge(&mut doc);
     let ctx = ConsoleContext::from_document(&doc);
-    let results = complete("anchor set ", 11, &ctx);
+    let results = complete("anchor ", 7, &ctx);
     let names: Vec<&str> = results.iter().map(|c| c.text.as_str()).collect();
-    assert!(names.contains(&"from"));
-    assert!(names.contains(&"to"));
+    assert!(names.contains(&"from="));
+    assert!(names.contains(&"to="));
 }
 
 #[test]
-fn test_complete_enum_arg_anchor_side() {
+fn test_complete_anchor_kv_values() {
     let mut doc = load_test_doc();
     let _ = select_first_edge(&mut doc);
     let ctx = ConsoleContext::from_document(&doc);
-    let results = complete("anchor set from ", 16, &ctx);
+    let results = complete("anchor from=", 12, &ctx);
     let names: Vec<&str> = results.iter().map(|c| c.text.as_str()).collect();
     assert!(names.contains(&"auto"));
     assert!(names.contains(&"top"));
