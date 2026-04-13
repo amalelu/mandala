@@ -778,6 +778,20 @@ pub fn compute_color_picker_layout(
         (geometry.max_ring_advance / (g.font_max * ring_scale)).max(0.6)
     };
 
+    // Preview-clearance floor on the per-font cell advance. The
+    // centre preview glyph has radius `preview_size_scale * 0.5`
+    // font-units; the first arm cell on each side sits exactly one
+    // `cell_advance` from centre. If `cell_advance` is smaller than
+    // the preview's radius plus a small padding, the preview's ink
+    // overlaps cell[9] / cell[11] (the nearest arm glyphs). Floor
+    // `cell_factor` at that clearance so every downstream derivation
+    // — `inner_per_font`, `ring_r`, `wheel_side_in_fonts`, the
+    // rendered `cell_advance` in step 4 — respects the clearance
+    // uniformly and the widget grows proportionally when
+    // `preview_size_scale` dominates.
+    let preview_clearance_per_font = g.preview_size_scale * 0.5 + g.bar_to_preview_padding_scale;
+    let cell_factor = cell_factor.max(preview_clearance_per_font);
+
     // Step 2: wheel_side_in_fonts. ring_r per font equals the bigger
     // of `CROSSHAIR_CENTER_CELL * cell_factor + bar_to_ring_padding`
     // (crosshair fits inside the ring) and
@@ -1455,6 +1469,44 @@ mod tests {
             "preview x center {} differs from wheel center {}", cx, layout.center.0);
         assert!((cy - layout.center.1).abs() < 1.0,
             "preview y center {} differs from wheel center {}", cy, layout.center.1);
+    }
+
+    /// Regression guard for the "࿕ overlaps the first arm letter"
+    /// bug. With `preview_size_scale = 3.0` and the sacred-script
+    /// `cell_factor ≈ 1.0`, the nearest arm cell (index
+    /// `CROSSHAIR_CENTER_CELL ± 1`) would sit at `cell_advance` from
+    /// centre while the preview reaches `preview_size / 2 =
+    /// 1.5 × font_size` — the preview ink ended up covering that
+    /// cell. `compute_color_picker_layout` now floors `cell_factor`
+    /// at `preview_size_scale * 0.5 + bar_to_preview_padding_scale`,
+    /// so cell[9] / cell[11] (and their sat-bar twins) always sit at
+    /// least `preview_size / 2 + padding_px` from centre.
+    #[test]
+    fn layout_keeps_preview_clear_of_adjacent_arm_cells() {
+        let padding_scale = load_spec().geometry.bar_to_preview_padding_scale;
+        let g = sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let preview_radius = layout.preview_size * 0.5;
+        let min_clearance = preview_radius + layout.font_size * padding_scale;
+
+        let center = layout.center;
+        let neighbours = [
+            ("val[CENTER - 1]", layout.val_cell_positions[CROSSHAIR_CENTER_CELL - 1]),
+            ("val[CENTER + 1]", layout.val_cell_positions[CROSSHAIR_CENTER_CELL + 1]),
+            ("sat[CENTER - 1]", layout.sat_cell_positions[CROSSHAIR_CENTER_CELL - 1]),
+            ("sat[CENTER + 1]", layout.sat_cell_positions[CROSSHAIR_CENTER_CELL + 1]),
+        ];
+        // 0.5 px slack for rounding / ink-offset drift.
+        let slack = 0.5;
+        for (label, (px, py)) in neighbours {
+            let dx = px - center.0;
+            let dy = py - center.1;
+            let dist = (dx * dx + dy * dy).sqrt();
+            assert!(
+                dist + slack >= min_clearance,
+                "{label} at ({px:.1}, {py:.1}) is {dist:.1} px from centre — below preview clearance {min_clearance:.1}",
+            );
+        }
     }
 
     /// Hue wrap: degrees_to_hue_slot must wrap correctly across the
