@@ -13,7 +13,7 @@
     "bar_to_ring_padding_scale": 1.1,
     "hover_scale": 1.3,
     "outline_px": 3.0,
-    "outline_samples": 8,
+    "outline_samples": 4,
     "transparent_backdrop": true,
     "resize_scale_min": 0.4,
     "resize_scale_max": 2.0
