@@ -150,6 +150,14 @@ pub struct GlyphArea {
     /// rendering reads it during `rebuild_buffers_from_tree`.
     #[serde(default)]
     pub background_color: Option<[u8; 4]>,
+    /// When `true`, the renderer shapes this area's text with
+    /// `cosmic_text::Align::Center` so cross-script glyphs whose
+    /// per-glyph advance varies (e.g. the picker's Devanagari /
+    /// Hebrew / Tibetan hue-ring cells) sit centred in their
+    /// box. Default `false` — text starts at the box's left edge,
+    /// matching ordinary mindmap node text.
+    #[serde(default)]
+    pub align_center: bool,
     #[derivative(PartialEq = "ignore")]
     pub hitbox: HitBox,
 }
@@ -165,6 +173,7 @@ impl Hash for GlyphArea {
         self.render_bounds.y().to_bits().hash(state);
         self.regions.hash(state);
         self.background_color.hash(state);
+        self.align_center.hash(state);
     }
 }
 
@@ -178,6 +187,7 @@ impl GlyphArea {
             render_bounds: OrderedVec2::from_vec2(bounds),
             regions: ColorFontRegions::default(),
             background_color: None,
+            align_center: false,
             hitbox: HitBox::new(),
         }
     }
@@ -196,6 +206,7 @@ impl GlyphArea {
             render_bounds: OrderedVec2::from_vec2(bounds),
             regions: ColorFontRegions::default(),
             background_color: None,
+            align_center: false,
             hitbox: HitBox::new(),
         }
     }

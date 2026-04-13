@@ -538,6 +538,16 @@ impl Application {
         // The throttle is reset at drag end so a fresh drag starts
         // with n = 1.
         let mut mutation_throttle = MutationFrequencyThrottle::with_default_budget();
+        // Picker hover gate: every cursor-move into the picker
+        // updates `state.{hue_deg,sat,val}` + `doc.color_picker_preview`
+        // synchronously (cheap, no shaping), but the actual scene
+        // + overlay rebuild is deferred to the `AboutToWait`
+        // drain so it runs at most once per display frame and
+        // self-throttles further if it falls behind. Same
+        // pattern as the drag path's `mutation_throttle` /
+        // `pending_delta` pair.
+        let mut picker_throttle = MutationFrequencyThrottle::with_default_budget();
+        let mut picker_dirty: bool = false;
 
         // Resolve keybindings once at startup. Users can rebind any key
         // by shipping a `keybinds.json` (see `keybinds.rs` for the format).
@@ -622,6 +632,7 @@ impl Application {
                                 &mut color_picker_state,
                                 doc,
                                 &mut mindmap_tree,
+                                &mut picker_dirty,
                                 &mut app_scene,
                                 &mut renderer,
                             );
@@ -1032,9 +1043,7 @@ impl Application {
                                 cursor_pos,
                                 &mut color_picker_state,
                                 doc,
-                                &mut mindmap_tree,
-                                &mut app_scene,
-                                &mut renderer,
+                                &mut picker_dirty,
                             );
                         }
                         return;
@@ -1307,6 +1316,7 @@ impl Application {
                                 &mut color_picker_state,
                                 doc,
                                 &mut mindmap_tree,
+                                &mut picker_dirty,
                                 &mut app_scene,
                                 &mut renderer,
                             );
@@ -1787,6 +1797,35 @@ impl Application {
                             // positions until the next full rebuild.
                             update_edge_handle_tree(&scene, &mut app_scene);
                             flush_canvas_scene_buffers(&mut app_scene, &mut renderer);
+                        }
+                    }
+
+                    // Picker hover / chip drain. Mouse-move and
+                    // chip-focus handlers set `picker_dirty`
+                    // whenever HSV state changes; this gate runs
+                    // the actual rebuild at most once per
+                    // refresh budget. `picker_throttle` self-
+                    // tunes via the moving-average mechanism so
+                    // a heavy map (where rebuild_scene_only is
+                    // expensive) gets fewer drains per second
+                    // rather than dropping frames.
+                    if picker_dirty && picker_throttle.should_drain() {
+                        if let (Some(doc), true) =
+                            (document.as_mut(), color_picker_state.is_open())
+                        {
+                            let work_start = std::time::Instant::now();
+                            rebuild_scene_only(doc, &mut app_scene, &mut renderer);
+                            rebuild_color_picker_overlay(
+                                &mut color_picker_state,
+                                doc,
+                                &mut app_scene,
+                                &mut renderer,
+                            );
+                            picker_dirty = false;
+                            picker_throttle.record_work_duration(work_start.elapsed());
+                        } else {
+                            // Picker closed between event and drain — drop the dirty flag.
+                            picker_dirty = false;
                         }
                     }
 
@@ -4073,21 +4112,6 @@ fn rebuild_color_picker_overlay(
     renderer.rebuild_color_picker_overlay_buffers(app_scene, geometry.as_ref());
 }
 
-/// Hover-only picker overlay rebuild. Was the static-skipping
-/// fast path before the picker migrated to the overlay tree;
-/// today it just calls the unified rebuild. The follow-up perf
-/// work (mutator-only updates per §B1) will reintroduce a true
-/// fast path that doesn't re-shape the hue ring.
-#[cfg(not(target_arch = "wasm32"))]
-fn rebuild_color_picker_overlay_dynamic(
-    state: &mut crate::application::color_picker::ColorPickerState,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-) {
-    let geometry = compute_picker_geometry(state, renderer);
-    renderer.rebuild_color_picker_overlay_buffers(app_scene, geometry.as_ref());
-}
-
 /// Cancel the picker: clear the transient document preview and
 /// close the modal. The committed model is untouched because the
 /// new preview path never writes to it — the entire hover / cancel
@@ -4247,9 +4271,7 @@ fn commit_color_picker(
 fn apply_picker_preview(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
-    _mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    picker_dirty: &mut bool,
 ) {
     use crate::application::color_picker::{ColorPickerState, CommitMode, PickerHandle};
     use crate::application::document::ColorPickerPreview;
@@ -4286,8 +4308,15 @@ fn apply_picker_preview(
             // scene pipeline — not yet wired. Commit-only for v1.
         }
     }
-    rebuild_scene_only(doc, app_scene, renderer);
-    rebuild_color_picker_overlay_dynamic(state, app_scene, renderer);
+    // Scene + picker rebuilds are deferred to the `AboutToWait`
+    // drain via `picker_dirty`. Mouse moves come in at ~120Hz on
+    // modern hardware; without this gate every event would
+    // re-shape every border / connection / portal on the map
+    // plus the picker overlay. The drain is gated by
+    // `picker_throttle` (the same `MutationFrequencyThrottle`
+    // type the drag path uses), which self-tunes to keep the
+    // per-frame work under the refresh budget.
+    *picker_dirty = true;
 }
 
 /// Apply a theme-variable chip action to the picker's target. Used
@@ -4303,9 +4332,7 @@ fn apply_picker_chip(
     state: &mut crate::application::color_picker::ColorPickerState,
     chip_idx: usize,
     doc: &mut MindMapDocument,
-    _mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    picker_dirty: &mut bool,
 ) {
     use crate::application::color_picker::{
         ChipAction, ColorPickerState, CommitMode, PickerHandle, THEME_CHIPS,
@@ -4404,8 +4431,10 @@ fn apply_picker_chip(
         }
     }
 
-    rebuild_scene_only(doc, app_scene, renderer);
-    rebuild_color_picker_overlay_dynamic(state, app_scene, renderer);
+    // Defer the rebuild — see `apply_picker_preview` for the
+    // throttle rationale.
+    let _ = handle;
+    *picker_dirty = true;
 }
 
 /// Route a keystroke to the picker. Esc cancels, Enter commits (or
@@ -4418,6 +4447,7 @@ fn handle_color_picker_key(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    picker_dirty: &mut bool,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
@@ -4438,7 +4468,7 @@ fn handle_color_picker_key(
                 None
             };
             if let Some(idx) = focus {
-                apply_picker_chip(state, idx, doc, mindmap_tree, app_scene, renderer);
+                apply_picker_chip(state, idx, doc, picker_dirty);
             }
             commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
             return;
@@ -4452,9 +4482,8 @@ fn handle_color_picker_key(
                     Some(i) => Some(i + 1),
                 };
             }
-            // Chip focus lives in the dynamic buffer set — no need
-            // to reshape the hue ring or hint.
-            rebuild_color_picker_overlay_dynamic(state, app_scene, renderer);
+            // Chip focus → throttled rebuild (same drain).
+            *picker_dirty = true;
             return;
         }
         _ => {}
@@ -4494,7 +4523,7 @@ fn handle_color_picker_key(
             }
         }
         if changed {
-            apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
+            apply_picker_preview(state, doc, picker_dirty);
         }
     }
 }
@@ -4507,9 +4536,7 @@ fn handle_color_picker_mouse_move(
     cursor_pos: (f64, f64),
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
-    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    picker_dirty: &mut bool,
 ) {
     use crate::application::color_picker::{
         hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value,
@@ -4565,16 +4592,15 @@ fn handle_color_picker_mouse_move(
         }
     }
 
-    if hsv_changed {
-        apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
-    } else {
-        // Only chip focus moved, or we're hovering inert padding /
-        // outside the backdrop entirely. The dynamic rebuild re-runs
-        // `compute_picker_geometry` which picks up the updated
-        // cursor_pos and toggles hex_visible accordingly — so even
-        // Inside / Outside hits are meaningful rebuild triggers now.
-        rebuild_color_picker_overlay_dynamic(state, app_scene, renderer);
-    }
+    // Both branches just mark the picker as dirty — the
+    // throttled drain in `AboutToWait` does the actual rebuild.
+    // For Inside / Outside hits the dirty flag is still
+    // meaningful: `compute_picker_geometry` reads `last_cursor_pos`
+    // (already updated above) to toggle the hex readout's
+    // visibility, so a backdrop-boundary cross still wants a
+    // rebuild even without HSV / chip change.
+    let _ = hsv_changed;
+    *picker_dirty = true;
 }
 
 /// Click handler for the picker. Out-of-frame clicks cancel; in-frame
@@ -4586,6 +4612,7 @@ fn handle_color_picker_click(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    picker_dirty: &mut bool,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
@@ -4617,25 +4644,25 @@ fn handle_color_picker_click(
             if let ColorPickerState::Open { hue_deg, .. } = state {
                 *hue_deg = hue_slot_to_degrees(slot);
             }
-            apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
+            apply_picker_preview(state, doc, picker_dirty);
             commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
         PickerHit::SatCell(i) => {
             if let ColorPickerState::Open { sat, .. } = state {
                 *sat = sat_cell_to_value(i);
             }
-            apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
+            apply_picker_preview(state, doc, picker_dirty);
             commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
         PickerHit::ValCell(i) => {
             if let ColorPickerState::Open { val, .. } = state {
                 *val = val_cell_to_value(i);
             }
-            apply_picker_preview(state, doc, mindmap_tree, app_scene, renderer);
+            apply_picker_preview(state, doc, picker_dirty);
             commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
         PickerHit::Chip(i) => {
-            apply_picker_chip(state, i, doc, mindmap_tree, app_scene, renderer);
+            apply_picker_chip(state, i, doc, picker_dirty);
             commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
     }
