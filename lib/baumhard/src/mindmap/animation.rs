@@ -1,15 +1,13 @@
-//! Timing envelope, easing curves, lerp helpers, and tick logic
-//! for animated `CustomMutation`s. Any custom mutation with
+//! Timing envelope, easing curves, and lerp helpers for animated
+//! `CustomMutation`s. Any custom mutation with
 //! `timing: Some(AnimationTiming { ... })` is started as an
-//! `AnimationInstance` instead of applied instantly; each tick
-//! evaluates the easing curve and emits a blended snapshot the
-//! existing `rebuild_all` path repaints.
+//! animation instance by the app layer instead of applied
+//! instantly; each tick evaluates the easing curve and writes a
+//! blended snapshot the existing `rebuild_all` path repaints.
 //!
 //! This module deliberately replaces the dormant
-//! [`crate::core::animation`] skeleton (left untouched per the
-//! roadmap note in `DEPRECATED_ROADMAP.md` — "would cost more to
-//! adapt than to replace"). The dormant types are generic over
-//! `T: Mutable` and don't fit Mandala's
+//! [`crate::core::animation`] skeleton. The dormant types are
+//! generic over `T: Mutable` and don't fit Mandala's
 //! `MindMap` model + `MutatorTree` shape.
 //!
 //! # Architecture
@@ -17,12 +15,13 @@
 //! - [`AnimationTiming`] is a serializable envelope on
 //!   `CustomMutation` carrying `duration_ms`, `delay_ms`,
 //!   [`Easing`] curve, and an optional [`Followup`].
-//! - [`AnimationInstance`] is the per-active-mutation runtime
-//!   record: snapshot of from/to states, current phase, elapsed
-//!   time. The application owns `Vec<AnimationInstance>` on the
-//!   document and ticks each instance once per frame in
-//!   `AboutToWait` (with `ControlFlow::WaitUntil` while any
-//!   instance is active).
+//! - The per-active-mutation runtime record (snapshot of from/to
+//!   states, elapsed time, completion path) lives in the app
+//!   layer — `mandala::application::document::AnimationInstance`
+//!   — because the snapshot type (`MindNode`) and the
+//!   completion commit (`apply_custom_mutation`) both live
+//!   there. This module stays pure baumhard: serializable types
+//!   and stateless helpers, no `MindNode` or document coupling.
 //! - [`lerp_f32`], [`lerp_vec2`], [`lerp_color`] are the
 //!   per-field interpolators. Position, scale, and color fields
 //!   blend continuously; structural changes (text replacement,
@@ -30,12 +29,13 @@
 //!
 //! # Composition with the §B2 mutator path
 //!
-//! Each tick produces a `MutatorTree<GfxMutator>` (the
-//! interpolated state) that lands on the live tree through the
-//! same `Applicable::apply_to` discipline the rest of this
-//! crate respects. Animation never touches the model — that's
-//! the boundary commit. Drag, edit, and animation all share the
-//! "tree-only previews, model-only commits" invariant.
+//! Each tick produces a blended snapshot that the app's
+//! `rebuild_all` translates into the same tree-walk path drag,
+//! edit, and selection share. Animation never writes to the
+//! model mid-flight; the model commit happens at the animation
+//! boundary via the standard `apply_custom_mutation` path.
+//! Drag, edit, and animation all share the "tree-only previews,
+//! model-only commits" invariant.
 
 use serde::{Deserialize, Serialize};
 
