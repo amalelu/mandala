@@ -297,6 +297,19 @@ pub enum UndoAction {
         before_text: String,
         before_runs: Vec<TextRun>,
     },
+    /// A node's visual style was edited in place (bg / border / text
+    /// color / font size). Captures the pre-edit `NodeStyle` plus the
+    /// `text_runs` snapshot, since `set_node_text_color` and
+    /// `set_node_font_size` may rewrite run colors / sizes on top of
+    /// the style change. Undo restores both fields. Separate from
+    /// `EditNodeText` because the round-trip contract is different
+    /// (text is untouched; runs are touched only on text-color /
+    /// font-size edits).
+    EditNodeStyle {
+        node_id: String,
+        before_style: NodeStyle,
+        before_runs: Vec<TextRun>,
+    },
     /// Snapshot of the entire `Canvas` taken before a document action
     /// (theme switch, etc.) mutated it. The canvas is small and cloning
     /// the whole thing is cheaper than tracking field-level diffs, and
@@ -961,6 +974,34 @@ impl MindMapDocument {
         true
     }
 
+    /// Set the connection's `font_size_pt` to an absolute value,
+    /// clamped into `[min_font_size_pt, max_font_size_pt]`. Returns
+    /// `true` if the clamped value differs from the current.
+    ///
+    /// Counterpart to [`set_edge_font_size_step`] for the console's
+    /// `font size=<pt>` kv form, where callers have an absolute
+    /// target rather than a delta.
+    pub fn set_edge_font_size(&mut self, edge_ref: &EdgeRef, pt: f32) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        let new_val = pt.clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
+        if (cfg.font_size_pt - new_val).abs() < f32::EPSILON {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        cfg.font_size_pt = new_val;
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
     /// Reset the connection's `font_size_pt` to the hardcoded default
     /// (12.0). Returns `true` if the value actually changed.
     pub fn reset_edge_font_size(&mut self, edge_ref: &EdgeRef) -> bool {
@@ -1266,6 +1307,115 @@ impl MindMapDocument {
         self.undo_stack.push(UndoAction::EditNodeText {
             node_id: node_id.to_string(),
             before_text,
+            before_runs,
+        });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the background color on a node's `style.background_color`.
+    /// Returns `true` if the value actually changed. Pushes one
+    /// `UndoAction::EditNodeStyle` entry so undo restores both the
+    /// `NodeStyle` *and* the `text_runs` (unchanged for this setter,
+    /// but the variant always carries both so the undo arm has a
+    /// single shape).
+    ///
+    /// No-op on missing node id, matching the `EditEdge` pattern.
+    pub fn set_node_bg_color(&mut self, node_id: &str, color: String) -> bool {
+        set_node_style_field(self, node_id, |s| {
+            if s.background_color == color {
+                return false;
+            }
+            s.background_color = color;
+            true
+        })
+    }
+
+    /// Set the frame (border) color on a node's `style.frame_color`.
+    /// Returns `true` on change.
+    pub fn set_node_border_color(&mut self, node_id: &str, color: String) -> bool {
+        set_node_style_field(self, node_id, |s| {
+            if s.frame_color == color {
+                return false;
+            }
+            s.frame_color = color;
+            true
+        })
+    }
+
+    /// Set the *default* text color on a node. Writes
+    /// `style.text_color` directly, and for every `TextRun` whose
+    /// `color` matches the pre-edit default, rewrites that run's
+    /// `color` to the new value — so a node whose runs all inherited
+    /// the default gets visually recolored, while runs the user
+    /// explicitly colored by hand keep their per-span override.
+    ///
+    /// The match is byte-exact on the pre-edit `style.text_color`
+    /// string. This is deliberately strict: if the user wrote
+    /// `"#FFFFFF"` (uppercase) as the default but an authored run
+    /// carries `"#ffffff"`, the run is *not* considered
+    /// default-following and keeps its lowercase override. Matches the
+    /// convention in `baumhard::util::color::hex_to_rgba_safe` —
+    /// colors are strings in the model and comparisons are literal.
+    pub fn set_node_text_color(&mut self, node_id: &str, color: String) -> bool {
+        let node = match self.mindmap.nodes.get(node_id) {
+            Some(n) => n,
+            None => return false,
+        };
+        let old_default = node.style.text_color.clone();
+        let any_run_changes = node
+            .text_runs
+            .iter()
+            .any(|r| r.color == old_default && r.color != color);
+        if old_default == color && !any_run_changes {
+            return false;
+        }
+        let before_style = node.style.clone();
+        let before_runs = node.text_runs.clone();
+        let node = self.mindmap.nodes.get_mut(node_id).expect("just checked");
+        node.style.text_color = color.clone();
+        for run in node.text_runs.iter_mut() {
+            if run.color == old_default {
+                run.color = color.clone();
+            }
+        }
+        self.undo_stack.push(UndoAction::EditNodeStyle {
+            node_id: node_id.to_string(),
+            before_style,
+            before_runs,
+        });
+        self.dirty = true;
+        true
+    }
+
+    /// Set the *default* font size on a node. Rewrites every
+    /// `TextRun.size_pt` to `size_pt` — the node's runs all track
+    /// the same size-in-points; unlike text color, there is no
+    /// natural "keep per-run override" rule here (authored multi-
+    /// size runs would already have been flattened by the text
+    /// editor's collapse step in `set_node_text`).
+    ///
+    /// `size_pt` is rounded to the nearest positive integer; values
+    /// below 1 clamp to 1.
+    pub fn set_node_font_size(&mut self, node_id: &str, size_pt: f32) -> bool {
+        let size_u = size_pt.round().max(1.0) as u32;
+        let node = match self.mindmap.nodes.get(node_id) {
+            Some(n) => n,
+            None => return false,
+        };
+        let already = node.text_runs.iter().all(|r| r.size_pt == size_u);
+        if already {
+            return false;
+        }
+        let before_style = node.style.clone();
+        let before_runs = node.text_runs.clone();
+        let node = self.mindmap.nodes.get_mut(node_id).expect("just checked");
+        for run in node.text_runs.iter_mut() {
+            run.size_pt = size_u;
+        }
+        self.undo_stack.push(UndoAction::EditNodeStyle {
+            node_id: node_id.to_string(),
+            before_style,
             before_runs,
         });
         self.dirty = true;
@@ -1705,6 +1855,13 @@ impl MindMapDocument {
                         node.text_runs = before_runs;
                     }
                 }
+                UndoAction::EditNodeStyle { node_id, before_style, before_runs } => {
+                    // Same clamp-on-missing rule as EditNodeText.
+                    if let Some(node) = self.mindmap.nodes.get_mut(&node_id) {
+                        node.style = before_style;
+                        node.text_runs = before_runs;
+                    }
+                }
                 UndoAction::CanvasSnapshot { canvas } => {
                     self.mindmap.canvas = canvas;
                 }
@@ -2050,6 +2207,33 @@ impl MindMapDocument {
             model_node.position.y = area.position.y.0 as f64;
         }
     }
+}
+
+/// Shared body of the node-style setters that touch a single field on
+/// `NodeStyle` and nothing else. `mutate` returns `true` when it
+/// actually changed something; on `false` no undo is pushed and the
+/// style is left untouched. Keeps the trait-facing setters terse.
+fn set_node_style_field(
+    doc: &mut MindMapDocument,
+    node_id: &str,
+    mutate: impl FnOnce(&mut NodeStyle) -> bool,
+) -> bool {
+    let node = match doc.mindmap.nodes.get_mut(node_id) {
+        Some(n) => n,
+        None => return false,
+    };
+    let before_style = node.style.clone();
+    let before_runs = node.text_runs.clone();
+    if !mutate(&mut node.style) {
+        return false;
+    }
+    doc.undo_stack.push(UndoAction::EditNodeStyle {
+        node_id: node_id.to_string(),
+        before_style,
+        before_runs,
+    });
+    doc.dirty = true;
+    true
 }
 
 /// Hit test: find the node at the given canvas position.
@@ -4834,5 +5018,161 @@ mod tests {
         assert!(run.bold);
         assert_eq!(run.color, "#abcdef");
         assert_eq!(run.size_pt, 33);
+    }
+
+    // -----------------------------------------------------------------
+    // Node style setters (bg / border / text color, font size)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_set_node_bg_color_round_trips_through_undo() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let before = doc.mindmap.nodes.get(&nid).unwrap().style.background_color.clone();
+        assert!(doc.set_node_bg_color(&nid, "#123456".to_string()));
+        assert_eq!(doc.mindmap.nodes.get(&nid).unwrap().style.background_color, "#123456");
+        assert!(matches!(
+            doc.undo_stack.last(),
+            Some(UndoAction::EditNodeStyle { .. })
+        ));
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.nodes.get(&nid).unwrap().style.background_color, before);
+    }
+
+    #[test]
+    fn test_set_node_bg_color_unchanged_is_noop() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let current = doc.mindmap.nodes.get(&nid).unwrap().style.background_color.clone();
+        doc.undo_stack.clear();
+        doc.dirty = false;
+        assert!(!doc.set_node_bg_color(&nid, current));
+        assert!(doc.undo_stack.is_empty());
+        assert!(!doc.dirty);
+    }
+
+    #[test]
+    fn test_set_node_border_color_writes_frame_color() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        assert!(doc.set_node_border_color(&nid, "#ff00ff".to_string()));
+        assert_eq!(doc.mindmap.nodes.get(&nid).unwrap().style.frame_color, "#ff00ff");
+    }
+
+    /// Setting text color rewrites `style.text_color` and every run
+    /// whose color matched the pre-edit default. A run the user
+    /// colored by hand (mismatched) keeps its override.
+    #[test]
+    fn test_set_node_text_color_preserves_per_run_overrides() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        // Seed the node with a known default and two runs: one
+        // matching the default, one hand-colored.
+        {
+            let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+            node.style.text_color = "#dddddd".into();
+            node.text_runs = vec![
+                TextRun {
+                    start: 0, end: 3,
+                    bold: false, italic: false, underline: false,
+                    font: "LiberationSans".into(), size_pt: 24,
+                    color: "#dddddd".into(), // matches default
+                    hyperlink: None,
+                },
+                TextRun {
+                    start: 3, end: 6,
+                    bold: false, italic: false, underline: false,
+                    font: "LiberationSans".into(), size_pt: 24,
+                    color: "#abcdef".into(), // user override
+                    hyperlink: None,
+                },
+            ];
+        }
+        assert!(doc.set_node_text_color(&nid, "#111111".into()));
+        let node = doc.mindmap.nodes.get(&nid).unwrap();
+        assert_eq!(node.style.text_color, "#111111");
+        assert_eq!(node.text_runs[0].color, "#111111", "default-following run should update");
+        assert_eq!(node.text_runs[1].color, "#abcdef", "per-run override should be preserved");
+    }
+
+    #[test]
+    fn test_set_node_text_color_round_trips_through_undo() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        {
+            let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+            node.style.text_color = "#dddddd".into();
+            for run in node.text_runs.iter_mut() {
+                run.color = "#dddddd".into();
+            }
+        }
+        let before_default = doc.mindmap.nodes.get(&nid).unwrap().style.text_color.clone();
+        let before_run_colors: Vec<String> = doc
+            .mindmap
+            .nodes
+            .get(&nid)
+            .unwrap()
+            .text_runs
+            .iter()
+            .map(|r| r.color.clone())
+            .collect();
+        assert!(doc.set_node_text_color(&nid, "#222222".into()));
+        assert!(doc.undo());
+        let restored = doc.mindmap.nodes.get(&nid).unwrap();
+        assert_eq!(restored.style.text_color, before_default);
+        let restored_colors: Vec<String> =
+            restored.text_runs.iter().map(|r| r.color.clone()).collect();
+        assert_eq!(restored_colors, before_run_colors);
+    }
+
+    #[test]
+    fn test_set_node_font_size_writes_all_runs_and_round_trips() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        let before_sizes: Vec<u32> = doc
+            .mindmap
+            .nodes
+            .get(&nid)
+            .unwrap()
+            .text_runs
+            .iter()
+            .map(|r| r.size_pt)
+            .collect();
+        assert!(doc.set_node_font_size(&nid, 48.0));
+        let node = doc.mindmap.nodes.get(&nid).unwrap();
+        assert!(node.text_runs.iter().all(|r| r.size_pt == 48));
+        assert!(doc.undo());
+        let after_sizes: Vec<u32> = doc
+            .mindmap
+            .nodes
+            .get(&nid)
+            .unwrap()
+            .text_runs
+            .iter()
+            .map(|r| r.size_pt)
+            .collect();
+        assert_eq!(after_sizes, before_sizes);
+    }
+
+    #[test]
+    fn test_set_node_font_size_clamps_below_one() {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        assert!(doc.set_node_font_size(&nid, 0.5));
+        let node = doc.mindmap.nodes.get(&nid).unwrap();
+        assert!(node.text_runs.iter().all(|r| r.size_pt == 1));
+    }
+
+    #[test]
+    fn test_set_node_style_unknown_id_returns_false() {
+        let mut doc = load_test_doc();
+        doc.undo_stack.clear();
+        doc.dirty = false;
+        assert!(!doc.set_node_bg_color("nope", "#000".into()));
+        assert!(!doc.set_node_border_color("nope", "#000".into()));
+        assert!(!doc.set_node_text_color("nope", "#000".into()));
+        assert!(!doc.set_node_font_size("nope", 10.0));
+        assert!(doc.undo_stack.is_empty());
+        assert!(!doc.dirty);
     }
 }

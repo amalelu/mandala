@@ -3,8 +3,9 @@ use lazy_static::lazy_static;
 use crate::util::grapheme_chad::{
    count_grapheme_clusters, count_number_lines, delete_back_unicode, delete_front_unicode,
    delete_grapheme_at, find_byte_index_of_grapheme, find_nth_line_byte_range,
-   find_nth_line_grapheme_range, insert_new_lines, insert_str_at_grapheme, push_spaces,
-   replace_graphemes_until_newline, slice_to_newline, split_off_graphemes,
+   find_nth_line_grapheme_range, grapheme_display_width, insert_new_lines,
+   insert_str_at_grapheme, push_spaces, replace_graphemes_until_newline, scalar_display_width,
+   slice_to_newline, split_off_graphemes, truncate_to_display_width,
 };
 
 lazy_static! {
@@ -378,6 +379,76 @@ pub fn do_insert_str_at_grapheme() {
    let mut s = String::from("ab🧑‍🚀cd");
    insert_str_at_grapheme(&mut s, 3, "Z");
    assert_eq!(s, "ab🧑‍🚀Zcd");
+}
+
+#[test]
+pub fn test_grapheme_display_width() {
+   do_grapheme_display_width();
+}
+
+pub fn do_grapheme_display_width() {
+   // ASCII → one cell each.
+   assert_eq!(grapheme_display_width(""), 0);
+   assert_eq!(grapheme_display_width("abcd"), 4);
+   assert_eq!(grapheme_display_width("❯ color"), 7);
+
+   // Box-drawing characters (U+2500..) are ambiguous-width in Unicode
+   // but render at one cell in the app's monospace chain. The table
+   // deliberately keeps them at 1.
+   assert_eq!(grapheme_display_width("╭─╮"), 3);
+   assert_eq!(grapheme_display_width("│ │"), 3);
+
+   // East-Asian-Wide: each CJK ideograph counts as two cells.
+   assert_eq!(grapheme_display_width("日"), 2);
+   assert_eq!(grapheme_display_width("日本語"), 6);
+
+   // Hiragana / Katakana / Hangul.
+   assert_eq!(grapheme_display_width("あい"), 4);
+   assert_eq!(grapheme_display_width("가나"), 4);
+
+   // Combining marks fold into their base: "café" as NFD (e + ´) is
+   // still 4 cells because the combining acute is zero-width.
+   assert_eq!(grapheme_display_width("cafe\u{0301}"), 4);
+
+   // ZWJ emoji cluster (`🧑‍🚀`) has base 🧑 — outside the table's
+   // wide ranges, so we return 1. This is a known under-measure for
+   // terminal emoji; the app uses cosmic-text which renders the whole
+   // ZWJ cluster at its own advance anyway, so the border-alignment
+   // use-case is unaffected.
+   assert_eq!(grapheme_display_width("🧑‍🚀"), 1);
+
+   // Scalar-level spot checks.
+   assert_eq!(scalar_display_width('a'), 1);
+   assert_eq!(scalar_display_width('日'), 2);
+   assert_eq!(scalar_display_width('\u{0301}'), 0); // combining acute
+   assert_eq!(scalar_display_width('\u{200D}'), 0); // ZWJ
+}
+
+#[test]
+pub fn test_truncate_to_display_width() {
+   do_truncate_to_display_width();
+}
+
+pub fn do_truncate_to_display_width() {
+   // ASCII: exact cell match.
+   assert_eq!(truncate_to_display_width("abcdef", 3), "abc");
+   assert_eq!(truncate_to_display_width("abcdef", 0), "");
+   assert_eq!(truncate_to_display_width("abcdef", 100), "abcdef");
+
+   // CJK: each char is 2 cells; an odd max cuts cleanly on the
+   // grapheme boundary rather than mid-glyph.
+   assert_eq!(truncate_to_display_width("日本語", 3), "日"); // 2+2>3 after "日"
+   assert_eq!(truncate_to_display_width("日本語", 4), "日本");
+   assert_eq!(truncate_to_display_width("日本語", 2), "日");
+   assert_eq!(truncate_to_display_width("日本語", 0), "");
+
+   // Mix: 3 ASCII + 1 CJK = 5 cells; trim to 4 drops the CJK.
+   assert_eq!(truncate_to_display_width("abc日", 4), "abc");
+   assert_eq!(truncate_to_display_width("abc日", 5), "abc日");
+
+   // Combining marks: NFD "café" is 4 cells, e+́ folds into one cell.
+   assert_eq!(truncate_to_display_width("cafe\u{0301}", 3), "caf");
+   assert_eq!(truncate_to_display_width("cafe\u{0301}", 4), "cafe\u{0301}");
 }
 
 #[test]

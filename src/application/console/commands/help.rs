@@ -1,7 +1,7 @@
-//! `help [command]` — list commands or print full usage.
+//! `help [command | all]` — list commands or print full usage.
 //!
 //! With no args: show every *applicable* command for the current
-//! selection with its summary. `help --all` shows everything.
+//! selection with its summary. `help all` shows everything.
 //!
 //! With one arg: print usage + summary for that command. Unknown
 //! names are reported as an `Err` result so the line shows up in the
@@ -17,7 +17,7 @@ pub const COMMAND: Command = Command {
     name: "help",
     aliases: &["?", "h"],
     summary: "List commands or print usage for one",
-    usage: "help [command] [--all]",
+    usage: "help [command | all]",
     tags: &["list", "usage", "commands"],
     applicable: always,
     complete: complete_help,
@@ -44,8 +44,9 @@ fn complete_help(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completi
 fn execute_help(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     let ctx = ConsoleContext::from_document(eff.document);
     match args.positional(0) {
+        Some("all") => help_listing(&ctx, true),
         Some(name) => help_for(name, &ctx),
-        None => help_listing(&ctx, args.has_flag("all")),
+        None => help_listing(&ctx, false),
     }
 }
 
@@ -70,7 +71,7 @@ fn help_listing(ctx: &ConsoleContext, show_all: bool) -> ExecResult {
     lines.push(if show_all {
         "all commands:".to_string()
     } else {
-        "commands (use `help --all` to see non-applicable ones):".to_string()
+        "commands (use `help all` to see non-applicable ones):".to_string()
     });
     for cmd in COMMANDS {
         if !show_all && !(cmd.applicable)(ctx) {
@@ -92,11 +93,13 @@ mod tests {
 
     #[test]
     fn test_complete_help_takes_one_arg() {
+        use crate::application::console::completion::CompletionContext;
         let toks: Vec<String> = args_from("help a");
         let state = CompletionState {
             tokens: &toks,
             cursor_token: 1,
             partial: "a",
+            context: CompletionContext::Token { index: 0 },
         };
         assert_eq!(state.cursor_token, 1);
     }

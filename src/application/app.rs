@@ -44,11 +44,9 @@ use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::{Action, ResolvedKeybinds};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::application::console::{
-    bindings_overlay::ConsoleBindingsOverlay,
     commands::Command,
     completion::complete as complete_console,
-    parser::{parse_with_aliases, Args, ParseResult},
-    user_mutations::UserMutationsFile,
+    parser::{parse, Args, ParseResult},
     ConsoleContext, ConsoleEffects, ConsoleLine, ConsoleState, ExecResult, MAX_HISTORY,
 };
 use crate::application::renderer::Renderer;
@@ -452,25 +450,9 @@ impl Application {
         // optimisation — nothing about the model depends on it.
         let mut scene_cache = baumhard::mindmap::scene_cache::SceneConnectionCache::new();
 
-        // User-defined custom-mutations file, loaded once at startup.
-        // Merged into the registry at the lowest precedence so map +
-        // inline mutations always win on id collision.
-        let mut user_mutations_file = UserMutationsFile::load_for_desktop();
-        // Console-side state: persistent key→mutation bindings
-        // overlay + session aliases. The aliases seeded from
-        // `user_mutations_file.aliases` so hand-edited aliases land
-        // in the session map on startup.
-        let mut console_bindings_overlay = ConsoleBindingsOverlay::load_for_desktop();
-        let mut console_aliases: std::collections::HashMap<String, String> =
-            user_mutations_file.aliases.clone();
-
         match MindMapDocument::load(&self.options.mindmap_path) {
             Ok(mut doc) => {
-                // Re-resolve the registry with user mutations merged
-                // in. `MindMapDocument::load` built one without them;
-                // the console needs them visible to `mutate list` and
-                // `mutate run`.
-                doc.build_mutation_registry_with_user(&user_mutations_file.mutations);
+                doc.build_mutation_registry();
                 // Canvas background: resolve through theme
                 // variables so `"var(--bg)"` works, then hand off
                 // to the renderer as the render-pass clear color.
@@ -546,17 +528,7 @@ impl Application {
 
         // Resolve keybindings once at startup. Users can rebind any key
         // by shipping a `keybinds.json` (see `keybinds.rs` for the format).
-        // The console-owned bindings overlay is layered on top so
-        // `mutate bind` entries survive across sessions even when the
-        // main config file hasn't been touched.
         let mut keybinds: ResolvedKeybinds = self.options.keybind_config.resolve();
-        for (combo, mutation_id) in &console_bindings_overlay.bindings {
-            if let Err(e) =
-                keybinds.set_custom_mutation_binding(combo, mutation_id.clone())
-            {
-                log::warn!("skipping overlay binding '{}': {}", combo, e);
-            }
-        }
 
         self.event_loop.run(move |event, _window_target| {
             _ = (&self.window, &mut self.options);
@@ -1284,7 +1256,6 @@ impl Application {
                         handle_console_key(
                             &key_name,
                             &logical_key,
-                            modifiers.shift_key(),
                             modifiers.control_key(),
                             &mut console_state,
                             &mut console_history,
@@ -1295,9 +1266,6 @@ impl Application {
                             &mut renderer,
                             &mut scene_cache,
                             &mut keybinds,
-                            &mut console_bindings_overlay,
-                            &mut console_aliases,
-                            &mut user_mutations_file,
                         );
                         return;
                     }
@@ -2366,7 +2334,6 @@ const CONSOLE_KEY_CTRL_W: &str = "w";
 fn handle_console_key(
     key_name: &Option<String>,
     logical_key: &Key,
-    shift_pressed: bool,
     ctrl_pressed: bool,
     console_state: &mut ConsoleState,
     console_history: &mut Vec<String>,
@@ -2377,9 +2344,6 @@ fn handle_console_key(
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
     keybinds: &mut ResolvedKeybinds,
-    bindings_overlay: &mut ConsoleBindingsOverlay,
-    aliases: &mut std::collections::HashMap<String, String>,
-    user_mutations_file: &mut UserMutationsFile,
 ) {
     use baumhard::util::grapheme_chad::{
         count_grapheme_clusters, delete_front_unicode, delete_grapheme_at,
@@ -2397,13 +2361,12 @@ fn handle_console_key(
             CONSOLE_KEY_CTRL_C => {
                 // Clear input without closing — same as the shell
                 // muscle-memory: Ctrl+C abandons the current line.
-                if let ConsoleState::Open { input, cursor, completions, completion_idx, history_idx, .. } = console_state {
+                if let ConsoleState::Open { input, cursor, history_idx, .. } = console_state {
                     input.clear();
                     *cursor = 0;
-                    completions.clear();
-                    *completion_idx = None;
                     *history_idx = None;
                 }
+                recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
@@ -2430,12 +2393,11 @@ fn handle_console_key(
             CONSOLE_KEY_CTRL_U => {
                 // Kill to start of line — drop the first `cursor`
                 // grapheme clusters via `delete_front_unicode`.
-                if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+                if let ConsoleState::Open { input, cursor, .. } = console_state {
                     delete_front_unicode(input, *cursor);
                     *cursor = 0;
-                    completions.clear();
-                    *completion_idx = None;
                 }
+                recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
@@ -2446,7 +2408,7 @@ fn handle_console_key(
                 // Walk back through grapheme clusters, first skipping
                 // trailing whitespace, then the word — everything is
                 // kept grapheme-indexed.
-                if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+                if let ConsoleState::Open { input, cursor, .. } = console_state {
                     let end_g = *cursor;
                     // Collect graphemes up to `end_g` so we can walk
                     // them backwards without re-parsing.
@@ -2465,16 +2427,12 @@ fn handle_console_key(
                     {
                         start_g -= 1;
                     }
-                    // Drop `end_g - start_g` graphemes starting at
-                    // `start_g` by deleting them one at a time from
-                    // the back forward.
                     for _ in 0..(end_g - start_g) {
                         delete_grapheme_at(input, start_g);
                     }
                     *cursor = start_g;
-                    completions.clear();
-                    *completion_idx = None;
                 }
+                recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
@@ -2485,9 +2443,28 @@ fn handle_console_key(
     }
     match name {
         CONSOLE_KEY_ESCAPE => {
-            save_console_history(console_history);
-            *console_state = ConsoleState::Closed;
-            renderer.rebuild_console_overlay_buffers(None);
+            // Two-tier Esc: if the completion popup is open, first
+            // press dismisses it; second press (with no popup)
+            // closes the console entirely. Matches the
+            // "temporary-UI-first" muscle memory from vim and
+            // browser address bars.
+            let had_popup = matches!(
+                console_state,
+                ConsoleState::Open { completions, .. } if !completions.is_empty()
+            );
+            if had_popup {
+                if let ConsoleState::Open { completions, completion_idx, .. } = console_state {
+                    completions.clear();
+                    *completion_idx = None;
+                }
+                if let Some(doc) = document.as_ref() {
+                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                }
+            } else {
+                save_console_history(console_history);
+                *console_state = ConsoleState::Closed;
+                renderer.rebuild_console_overlay_buffers(None);
+            }
         }
         CONSOLE_KEY_ENTER => {
             // Snapshot input, reset state, then parse + execute.
@@ -2539,10 +2516,6 @@ fn handle_console_key(
                         mindmap_tree,
                         renderer,
                         scene_cache,
-                        keybinds,
-                        bindings_overlay,
-                        aliases,
-                        user_mutations_file,
                     );
                 }
             }
@@ -2551,80 +2524,63 @@ fn handle_console_key(
             }
         }
         CONSOLE_KEY_TAB => {
-            // Cycle completions. First Tab: compute + select first.
-            // Subsequent Tabs: advance (or reverse on Shift+Tab).
-            // The completion engine takes a byte cursor; translate
-            // from grapheme index via `find_byte_index_of_grapheme`.
-            let (has_completions, advance) = match console_state {
-                ConsoleState::Open { completions, completion_idx, input, cursor, .. } => {
-                    if completions.is_empty() {
-                        if let Some(doc) = document.as_ref() {
-                            let byte_cursor = find_byte_index_of_grapheme(input, *cursor)
-                                .unwrap_or(input.len());
-                            let ctx = ConsoleContext::from_document(doc);
-                            let new = complete_console(input, byte_cursor, &ctx);
-                            *completions = new
-                                .into_iter()
-                                .map(|c| crate::application::console::completion::Completion {
-                                    text: c.text,
-                                    display: c.display,
-                                    hint: c.hint,
-                                })
-                                .collect();
-                            *completion_idx = if completions.is_empty() { None } else { Some(0) };
-                        }
-                        (false, 0i32)
-                    } else {
-                        (true, if shift_pressed { -1 } else { 1 })
-                    }
-                }
-                _ => (false, 0),
-            };
-            if has_completions {
-                if let ConsoleState::Open { completions, completion_idx, .. } = console_state {
-                    let len = completions.len() as i32;
-                    let cur = completion_idx.map(|i| i as i32).unwrap_or(-1);
-                    let next = ((cur + advance).rem_euclid(len)) as usize;
-                    *completion_idx = Some(next);
-                }
-            }
+            // Tab accepts the highlighted completion (or index 0 if
+            // somehow no row is highlighted). The popup is live —
+            // it's already populated by the per-keystroke recompute
+            // that the character-input arms run below, so Tab has
+            // no "first-press compute" branch anymore.
+            accept_console_completion(console_state);
+            recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         CONSOLE_KEY_ARROW_UP | CONSOLE_KEY_UP => {
-            if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
-                if !history.is_empty() {
-                    let next = match history_idx {
-                        None => history.len() - 1,
-                        Some(0) => 0,
-                        Some(i) => *i - 1,
-                    };
-                    *history_idx = Some(next);
-                    *input = history[next].clone();
-                    *cursor = count_grapheme_clusters(input);
+            // If the popup is open, Up moves the selection toward
+            // the top of the list; otherwise it walks history
+            // backwards.
+            let moved_in_popup = nav_popup(console_state, -1);
+            if !moved_in_popup {
+                if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
+                    if !history.is_empty() {
+                        let next = match history_idx {
+                            None => history.len() - 1,
+                            Some(0) => 0,
+                            Some(i) => *i - 1,
+                        };
+                        *history_idx = Some(next);
+                        *input = history[next].clone();
+                        *cursor = count_grapheme_clusters(input);
+                    }
                 }
+                recompute_console_completions(console_state, document.as_ref());
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         CONSOLE_KEY_ARROW_DOWN | CONSOLE_KEY_DOWN => {
-            if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
-                match history_idx {
-                    Some(i) if *i + 1 < history.len() => {
-                        let next = *i + 1;
-                        *history_idx = Some(next);
-                        *input = history[next].clone();
-                        *cursor = count_grapheme_clusters(input);
+            // Down moves the selection toward the prompt (the row
+            // closest to the input line). Same branch logic as Up.
+            let moved_in_popup = nav_popup(console_state, 1);
+            if !moved_in_popup {
+                if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
+                    match history_idx {
+                        Some(i) if *i + 1 < history.len() => {
+                            let next = *i + 1;
+                            *history_idx = Some(next);
+                            *input = history[next].clone();
+                            *cursor = count_grapheme_clusters(input);
+                        }
+                        Some(_) => {
+                            *history_idx = None;
+                            input.clear();
+                            *cursor = 0;
+                        }
+                        None => {}
                     }
-                    Some(_) => {
-                        *history_idx = None;
-                        input.clear();
-                        *cursor = 0;
-                    }
-                    None => {}
                 }
+                recompute_console_completions(console_state, document.as_ref());
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
@@ -2668,26 +2624,24 @@ fn handle_console_key(
             }
         }
         CONSOLE_KEY_BACKSPACE => {
-            if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+            if let ConsoleState::Open { input, cursor, .. } = console_state {
                 if *cursor > 0 {
                     *cursor -= 1;
                     delete_grapheme_at(input, *cursor);
-                    completions.clear();
-                    *completion_idx = None;
                 }
             }
+            recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         CONSOLE_KEY_DELETE => {
-            if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+            if let ConsoleState::Open { input, cursor, .. } = console_state {
                 if *cursor < count_grapheme_clusters(input) {
                     delete_grapheme_at(input, *cursor);
-                    completions.clear();
-                    *completion_idx = None;
                 }
             }
+            recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
@@ -2697,42 +2651,27 @@ fn handle_console_key(
             // rather than a `Key::Character(" ")`, so the `_` arm below
             // (which only handles `Key::Character`) would drop it. Insert
             // a literal space here instead.
-            if let ConsoleState::Open {
-                input,
-                cursor,
-                completions,
-                completion_idx,
-                history_idx,
-                ..
-            } = console_state
-            {
+            if let ConsoleState::Open { input, cursor, history_idx, .. } = console_state {
                 insert_str_at_grapheme(input, *cursor, " ");
                 *cursor += 1;
-                completions.clear();
-                *completion_idx = None;
                 *history_idx = None;
             }
+            recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         _ => {
             // Character input: insert at cursor, one grapheme at a
-            // time. Filter control chars to match
-            // `handle_text_edit_key` at app.rs:3386 — dead keys / IME
-            // can occasionally ship control payloads via
+            // time. Filter control chars — dead keys / IME can
+            // occasionally ship control payloads via
             // `Key::Character` and those must not land in the input
             // buffer as literal glyphs. Inserts go through
             // `insert_str_at_grapheme` so the cursor stays a
             // grapheme index.
             if let Key::Character(c) = logical_key {
                 if let ConsoleState::Open {
-                    input,
-                    cursor,
-                    completions,
-                    completion_idx,
-                    history_idx,
-                    ..
+                    input, cursor, history_idx, ..
                 } = console_state
                 {
                     for ch in c.as_str().chars() {
@@ -2744,14 +2683,157 @@ fn handle_console_key(
                         insert_str_at_grapheme(input, *cursor, encoded);
                         *cursor += 1;
                     }
-                    completions.clear();
-                    *completion_idx = None;
                     *history_idx = None;
                 }
+                recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
             }
+        }
+    }
+}
+
+/// Re-run the completion engine against the current input and
+/// cursor, populating `completions` and defaulting `completion_idx`
+/// to the bottom row (row closest to the prompt — which is what
+/// Down-then-Tab muscle memory expects to land on first).
+#[cfg(not(target_arch = "wasm32"))]
+fn recompute_console_completions(
+    console_state: &mut ConsoleState,
+    document: Option<&MindMapDocument>,
+) {
+    use baumhard::util::grapheme_chad::find_byte_index_of_grapheme;
+    let Some(doc) = document else { return };
+    if let ConsoleState::Open {
+        input,
+        cursor,
+        completions,
+        completion_idx,
+        ..
+    } = console_state
+    {
+        let byte_cursor = find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
+        let ctx = ConsoleContext::from_document(doc);
+        let new = complete_console(input, byte_cursor, &ctx);
+        *completions = new
+            .into_iter()
+            .map(|c| crate::application::console::completion::Completion {
+                text: c.text,
+                display: c.display,
+                hint: c.hint,
+            })
+            .collect();
+        // Default highlight: the first row. Matches the terminal /
+        // IDE convention where the top candidate is "most likely".
+        // Users Down-arrow toward the prompt when they want a
+        // different row.
+        *completion_idx = if completions.is_empty() { None } else { Some(0) };
+    }
+}
+
+/// Move the completion highlight by `step` (-1 for Up, +1 for Down).
+/// Returns `true` if a popup was present and the move was consumed;
+/// `false` when there's no popup, letting the caller fall through
+/// to history navigation.
+#[cfg(not(target_arch = "wasm32"))]
+fn nav_popup(console_state: &mut ConsoleState, step: i32) -> bool {
+    if let ConsoleState::Open { completions, completion_idx, .. } = console_state {
+        if completions.is_empty() {
+            return false;
+        }
+        let len = completions.len() as i32;
+        let cur = completion_idx.map(|i| i as i32).unwrap_or(-1);
+        let next = ((cur + step).rem_euclid(len)) as usize;
+        *completion_idx = Some(next);
+        return true;
+    }
+    false
+}
+
+/// Replace the current token (or kv-value slot) under the cursor
+/// with the highlighted completion's `text`, advancing the cursor
+/// past the replacement.
+///
+/// Trailing-space rule:
+/// - positional / command-name: append a space (next token starts fresh)
+/// - kv-key (text ends in `=`): no space (value follows immediately)
+/// - kv-value: no space (user may still be typing a quoted value,
+///   or wants to type an adjacent kv pair)
+///
+/// No-op if no popup is present.
+#[cfg(not(target_arch = "wasm32"))]
+fn accept_console_completion(console_state: &mut ConsoleState) {
+    use baumhard::util::grapheme_chad::{count_grapheme_clusters, find_byte_index_of_grapheme};
+    use unicode_segmentation::UnicodeSegmentation;
+    let ConsoleState::Open {
+        input,
+        cursor,
+        completions,
+        completion_idx,
+        ..
+    } = console_state
+    else {
+        return;
+    };
+    if completions.is_empty() {
+        return;
+    }
+    let idx = completion_idx.unwrap_or(completions.len() - 1);
+    let Some(cand) = completions.get(idx).cloned() else {
+        return;
+    };
+
+    // Find the start of the token under the cursor: walk back from
+    // the cursor position past non-whitespace grapheme clusters,
+    // treating `key=value` as one token (so a kv-value completion
+    // replaces only the value portion).
+    let cursor_byte = find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
+    let before: Vec<&str> = input[..cursor_byte].graphemes(true).collect();
+    let mut start_g = before.len();
+    while start_g > 0 && !before[start_g - 1].chars().all(|c| c.is_whitespace()) {
+        start_g -= 1;
+    }
+    // If the token contains an `=`, and we're completing a kv-value,
+    // the replacement starts *after* the `=`.
+    let token: String = before[start_g..].concat();
+    let is_kv_value_replace = matches!(token.find('='), Some(pos) if pos > 0);
+    let replace_from = if is_kv_value_replace {
+        let eq_pos = token.find('=').expect("guarded by is_kv_value_replace");
+        let graph_before_eq = token[..eq_pos].graphemes(true).count();
+        start_g + graph_before_eq + 1
+    } else {
+        start_g
+    };
+
+    // Delete graphemes from replace_from..cursor, then insert the
+    // candidate text at replace_from.
+    let replace_from_byte =
+        find_byte_index_of_grapheme(input, replace_from).unwrap_or(input.len());
+    input.replace_range(replace_from_byte..cursor_byte, &cand.text);
+    *cursor = replace_from + count_grapheme_clusters(&cand.text);
+
+    // Trailing space rule: append only when the completion closes a
+    // positional / command-name / kv-key (i.e. the next logical
+    // thing is a *new* token). A kv-value replacement never gets a
+    // trailing space — the user may still be typing a quoted value
+    // or an adjacent kv pair directly. A kv-key replacement (text
+    // ending in `=`) also gets no space — the value comes next.
+    let wants_trailing_space = !is_kv_value_replace && !cand.text.ends_with('=');
+    if wants_trailing_space {
+        let cursor_byte_after =
+            find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
+        let next_is_ws = input[cursor_byte_after..]
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(true);
+        if !next_is_ws {
+            input.insert_str(cursor_byte_after, " ");
+            *cursor += 1;
+        } else if cursor_byte_after == input.len() {
+            input.push(' ');
+            *cursor += 1;
         }
     }
 }
@@ -2773,16 +2855,11 @@ fn execute_console_line(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    keybinds: &mut ResolvedKeybinds,
-    bindings_overlay: &mut ConsoleBindingsOverlay,
-    aliases: &mut std::collections::HashMap<String, String>,
-    user_mutations_file: &mut UserMutationsFile,
 ) {
     if line.trim().is_empty() {
         return;
     }
-    let parsed = parse_with_aliases(line, aliases);
-    let (cmd, args) = match parsed {
+    let (cmd, args) = match parse(line) {
         ParseResult::Ok { cmd, args } => (cmd, args),
         ParseResult::Empty => return,
         ParseResult::Unknown(ref head) => {
@@ -2799,10 +2876,6 @@ fn execute_console_line(
     let label_edit_req = effects.open_label_edit.take();
     let color_picker_req = effects.open_color_picker.take();
     let close_after = effects.close_console;
-    let run_mutation_req = effects.run_mutation.take();
-    let bind_req = effects.bind_mutation.take();
-    let unbind_req = effects.unbind_mutation.take();
-    let set_alias_req = effects.set_alias.take();
 
     // Emit the command's result lines into the scrollback.
     match result {
@@ -2816,75 +2889,6 @@ fn execute_console_line(
             for l in lines {
                 push_scrollback_output(console_state, l);
             }
-        }
-    }
-
-    // `mutate run` needs tree access.
-    if let Some(req) = run_mutation_req {
-        let mutation = doc.mutation_registry.get(&req.mutation_id).cloned();
-        if let (Some(m), Some(tree)) = (mutation, mindmap_tree.as_mut()) {
-            doc.apply_custom_mutation(&m, &req.node_id, tree);
-            push_scrollback_output(
-                console_state,
-                format!("applied {} to {}", req.mutation_id, req.node_id),
-            );
-        } else {
-            push_scrollback_error(
-                console_state,
-                format!(
-                    "mutate run {}: tree not ready or mutation vanished",
-                    req.mutation_id
-                ),
-            );
-        }
-    }
-
-    // `mutate bind` — install into live keybinds + persist overlay.
-    if let Some(req) = bind_req {
-        match keybinds.set_custom_mutation_binding(&req.combo, req.mutation_id.clone()) {
-            Ok(_) => {
-                bindings_overlay
-                    .bindings
-                    .insert(req.combo.clone(), req.mutation_id);
-                bindings_overlay.save_for_desktop();
-            }
-            Err(e) => push_scrollback_error(
-                console_state,
-                format!("mutate bind '{}': {}", req.combo, e),
-            ),
-        }
-    }
-
-    // `mutate unbind`.
-    if let Some(combo) = unbind_req {
-        match keybinds.remove_custom_mutation_binding(&combo) {
-            Ok(prev) => {
-                bindings_overlay.bindings.remove(&combo);
-                bindings_overlay.save_for_desktop();
-                if prev.is_none() {
-                    push_scrollback_output(
-                        console_state,
-                        format!("no binding for '{}'", combo),
-                    );
-                }
-            }
-            Err(e) => push_scrollback_error(
-                console_state,
-                format!("mutate unbind '{}': {}", combo, e),
-            ),
-        }
-    }
-
-    // `alias <name> <expansion> [--save]`. Session-scoped by default;
-    // `--save` also writes into the user mutations file alongside
-    // existing `aliases` entries.
-    if let Some(req) = set_alias_req {
-        aliases.insert(req.name.clone(), req.expansion.clone());
-        if req.save {
-            user_mutations_file
-                .aliases
-                .insert(req.name.clone(), req.expansion.clone());
-            save_user_mutations_file(user_mutations_file);
         }
     }
 
@@ -2903,31 +2907,6 @@ fn execute_console_line(
     } else if close_after {
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(None);
-    }
-}
-
-/// Persist the user-mutations file to
-/// `$XDG_CONFIG_HOME/mandala/mutations.json`. Best-effort — logs on
-/// failure and keeps running.
-#[cfg(not(target_arch = "wasm32"))]
-fn save_user_mutations_file(file: &UserMutationsFile) {
-    let path = match crate::application::console::user_mutations::default_desktop_path() {
-        Some(p) => p,
-        None => return,
-    };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!("user mutations mkdir {}: {}", parent.display(), e);
-            return;
-        }
-    }
-    match serde_json::to_string_pretty(file) {
-        Ok(s) => {
-            if let Err(e) = std::fs::write(&path, s) {
-                log::warn!("user mutations write {}: {}", path.display(), e);
-            }
-        }
-        Err(e) => log::warn!("user mutations serialize: {}", e),
     }
 }
 
@@ -3003,7 +2982,6 @@ fn rebuild_console_overlay(
         scrollback: scrollback_lines,
         completions: completion_geo,
         selected_completion,
-        border_unit: keybinds.console_border.clone(),
         font_family: keybinds.console_font.clone(),
         font_size: keybinds.console_font_size,
     };
@@ -5260,5 +5238,101 @@ mod text_edit_tests {
             .map(|id| hit.as_deref() == Some(id))
             .unwrap_or(false);
         assert!(!already_editing, "guard must NOT fire when editor is closed");
+    }
+
+    // -----------------------------------------------------------------
+    // Console completion acceptance
+    // -----------------------------------------------------------------
+
+    use crate::application::console::completion::Completion;
+
+    fn open_state(input: &str, cursor: usize, candidates: &[&str]) -> ConsoleState {
+        ConsoleState::Open {
+            input: input.to_string(),
+            cursor,
+            history: Vec::new(),
+            history_idx: None,
+            scrollback: Vec::new(),
+            completions: candidates
+                .iter()
+                .map(|c| Completion {
+                    text: c.to_string(),
+                    display: c.to_string(),
+                    hint: None,
+                })
+                .collect(),
+            completion_idx: if candidates.is_empty() { None } else { Some(0) },
+        }
+    }
+
+    /// Accepting a command-name completion replaces the partial
+    /// prefix and appends a trailing space so the user can type
+    /// the next token immediately.
+    #[test]
+    fn test_accept_completion_positional_appends_space() {
+        let mut state = open_state("co", 2, &["color"]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color ");
+            assert_eq!(cursor, 6);
+        } else {
+            panic!("state closed");
+        }
+    }
+
+    /// Accepting a kv-key completion (text ends in `=`) adds no
+    /// trailing space — the value comes next.
+    #[test]
+    fn test_accept_completion_kv_key_no_trailing_space() {
+        let mut state = open_state("color b", 7, &["bg="]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color bg=");
+            assert_eq!(cursor, 9);
+        } else {
+            panic!("state closed");
+        }
+    }
+
+    /// Accepting a kv-value completion replaces only the value slot
+    /// (not the key=) and adds no trailing space.
+    #[test]
+    fn test_accept_completion_kv_value_replaces_only_value_slot() {
+        let mut state = open_state("color bg=ac", 11, &["accent"]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color bg=accent");
+            assert_eq!(cursor, 15);
+        } else {
+            panic!("state closed");
+        }
+    }
+
+    /// Accepting a kv-value with no partial typed (cursor right
+    /// after `=`) inserts at the value slot and keeps the cursor
+    /// after the value — no trailing space.
+    #[test]
+    fn test_accept_completion_kv_value_empty_partial() {
+        let mut state = open_state("color bg=", 9, &["accent"]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color bg=accent");
+            assert_eq!(cursor, 15);
+        } else {
+            panic!("state closed");
+        }
+    }
+
+    /// Accepting when the popup is empty is a no-op.
+    #[test]
+    fn test_accept_completion_no_popup_is_noop() {
+        let mut state = open_state("color bg=", 9, &[]);
+        accept_console_completion(&mut state);
+        if let ConsoleState::Open { input, cursor, .. } = state {
+            assert_eq!(input, "color bg=");
+            assert_eq!(cursor, 9);
+        } else {
+            panic!("state closed");
+        }
     }
 }

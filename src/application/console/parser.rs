@@ -1,10 +1,10 @@
 //! Shell-style tokenizer and command resolver for the console.
 //!
 //! The surface is small — whitespace splits, `"quoted strings"` keep
-//! spaces inside, and `--flag=value` / `--flag value` both parse. No
-//! variable expansion, no pipes, no escaping beyond `\"` and `\\`
-//! inside quotes. Anything more elaborate is out of scope: this is a
-//! command console, not a shell.
+//! spaces inside, and `\"` / `\\` escape inside quotes. No variable
+//! expansion, no pipes, no `--flag` machinery. `key=value` tokens
+//! arrive as a single token and are split post-tokenize by
+//! [`Args::kvs`]; this keeps the tokenizer byte-thin.
 //!
 //! Two entry points:
 //!
@@ -15,7 +15,6 @@
 //!   the concrete command + remaining args.
 
 use super::commands::{command_by_name, Command};
-use std::collections::HashMap;
 
 /// Split `input` into tokens. Returns an empty `Vec` for empty /
 /// whitespace-only input. A trailing unterminated quote is tolerated
@@ -82,57 +81,10 @@ pub enum ParseResult {
 /// return the parse result. No applicability checks happen here — the
 /// caller decides whether to execute.
 pub fn parse(input: &str) -> ParseResult {
-    parse_with_aliases(input, &HashMap::new())
-}
-
-/// Variant that also expands `alias <name> <expansion>` entries at
-/// parse time. If the first token matches a key in `aliases`, the
-/// alias's expansion replaces the first token *as raw text* before
-/// the tokenize-and-resolve step runs, so an alias that expands to
-/// a multi-token command works transparently.
-pub fn parse_with_aliases(input: &str, aliases: &HashMap<String, String>) -> ParseResult {
     let tokens = tokenize(input);
-    if tokens.is_empty() {
+    let Some((head, rest)) = tokens.split_first() else {
         return ParseResult::Empty;
-    }
-    let (head, rest) = tokens.split_first().unwrap();
-    if let Some(expansion) = aliases.get(head) {
-        // Re-tokenize the expansion + the remaining args. Building a
-        // single input string keeps the expansion semantics shell-
-        // like: `alias g "foo bar"` + `g baz` → `foo bar baz`.
-        let mut merged = String::with_capacity(expansion.len() + 1);
-        merged.push_str(expansion);
-        for tok in rest {
-            merged.push(' ');
-            // Re-quote tokens containing whitespace so they survive
-            // the second tokenize pass.
-            if tok.contains(char::is_whitespace) {
-                merged.push('"');
-                merged.push_str(&tok.replace('\\', "\\\\").replace('"', "\\\""));
-                merged.push('"');
-            } else {
-                merged.push_str(tok);
-            }
-        }
-        // Guard against `alias a a` infinite loops — if the head of
-        // the expansion is the same alias name, fall through to the
-        // command lookup without re-expanding.
-        let expanded_tokens = tokenize(&merged);
-        if let Some(new_head) = expanded_tokens.first() {
-            if new_head == head {
-                match command_by_name(new_head) {
-                    Some(cmd) => {
-                        return ParseResult::Ok {
-                            cmd,
-                            args: expanded_tokens[1..].to_vec(),
-                        }
-                    }
-                    None => return ParseResult::Unknown(new_head.clone()),
-                }
-            }
-        }
-        return parse_with_aliases(&merged, aliases);
-    }
+    };
     match command_by_name(head) {
         Some(cmd) => ParseResult::Ok {
             cmd,
@@ -143,8 +95,8 @@ pub fn parse_with_aliases(input: &str, aliases: &HashMap<String, String>) -> Par
 }
 
 /// Thin wrapper over a slice of tokens (everything after the command
-/// name). Lets commands grab positionals and flags without each one
-/// reimplementing the same indexing.
+/// name). Exposes two views: positional tokens (anything without
+/// `=`) and key-value pairs (anything containing `=`).
 pub struct Args<'a> {
     tokens: &'a [String],
 }
@@ -166,59 +118,56 @@ impl<'a> Args<'a> {
         self.tokens
     }
 
-    /// Positional args skip any `--flag` / `--flag=value` / `--flag
-    /// value` tokens. Useful for commands where flags can appear in
-    /// any position.
+    /// Positional tokens skip any `key=value` token. A token is "kv"
+    /// iff it contains `'='` and does not *start* with `'='` — so
+    /// `=foo` is treated as a positional, which is the escape hatch
+    /// for a literal value beginning with `=`.
     pub fn positional(&self, idx: usize) -> Option<&str> {
-        let mut seen = 0usize;
-        let mut i = 0usize;
-        while i < self.tokens.len() {
-            let t = &self.tokens[i];
-            if t.starts_with("--") {
-                if !t.contains('=') && i + 1 < self.tokens.len() {
-                    // consume next token as value
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-                continue;
-            }
-            if seen == idx {
-                return Some(t);
-            }
-            seen += 1;
-            i += 1;
-        }
-        None
+        self.positionals().nth(idx)
     }
 
-    /// Bare-flag presence check. Does NOT match `--flag=value` or
-    /// `--flag value`.
-    pub fn has_flag(&self, name: &str) -> bool {
-        let needle = format!("--{}", name);
-        self.tokens.iter().any(|t| t == &needle)
+    /// Iterator over positional tokens — skips kv tokens.
+    pub fn positionals(&self) -> impl Iterator<Item = &str> {
+        self.tokens
+            .iter()
+            .filter(|t| !is_kv_token(t))
+            .map(|s| s.as_str())
     }
 
-    /// Read the value for `--flag=<value>` or `--flag <value>`. Prefers
-    /// the `=` form when both are present (so `--scope=self --scope
-    /// children` yields `self`).
-    pub fn flag_value(&self, name: &str) -> Option<&str> {
-        let prefix = format!("--{}=", name);
-        let bare = format!("--{}", name);
-        for (i, t) in self.tokens.iter().enumerate() {
-            if let Some(v) = t.strip_prefix(&prefix) {
-                return Some(v);
-            }
-            if t == &bare {
-                if let Some(next) = self.tokens.get(i + 1) {
-                    if !next.starts_with("--") {
-                        return Some(next.as_str());
-                    }
-                }
+    /// Iterator over `(key, value)` pairs. A kv token splits on the
+    /// *first* `=`, so `color=var(--x)` yields `("color", "var(--x)")`.
+    pub fn kvs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.tokens.iter().filter_map(|t| split_kv(t))
+    }
+
+    /// Fetch the value for a given key; returns the last occurrence
+    /// if the key appears more than once in the token list.
+    pub fn kv(&self, key: &str) -> Option<&str> {
+        let mut last = None;
+        for (k, v) in self.kvs() {
+            if k == key {
+                last = Some(v);
             }
         }
-        None
+        last
     }
+}
+
+/// A token is a kv iff it contains `=` and the `=` is not the first
+/// character.
+fn is_kv_token(t: &str) -> bool {
+    match t.find('=') {
+        Some(0) | None => false,
+        Some(_) => true,
+    }
+}
+
+fn split_kv(t: &str) -> Option<(&str, &str)> {
+    let eq = t.find('=')?;
+    if eq == 0 {
+        return None;
+    }
+    Some((&t[..eq], &t[eq + 1..]))
 }
 
 #[cfg(test)]
@@ -233,14 +182,17 @@ mod tests {
 
     #[test]
     fn test_tokenize_splits_on_whitespace() {
-        assert_eq!(tokenize("anchor set from auto"), vec!["anchor", "set", "from", "auto"]);
+        assert_eq!(
+            tokenize("color bg=#123 text=accent"),
+            vec!["color", "bg=#123", "text=accent"]
+        );
     }
 
     #[test]
     fn test_tokenize_preserves_quoted_spaces() {
         assert_eq!(
-            tokenize(r#"label set "hello world""#),
-            vec!["label", "set", "hello world"]
+            tokenize(r#"label text="hello world""#),
+            vec!["label", "text=hello world"]
         );
     }
 
@@ -287,23 +239,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_resolves_command_with_args() {
-        let result = parse("anchor set from auto");
-        match result {
-            ParseResult::Ok { cmd, args } => {
-                assert_eq!(cmd.name, "anchor");
-                assert_eq!(args, vec!["set", "from", "auto"]);
-            }
-            _ => panic!("expected Ok"),
-        }
-    }
-
-    #[test]
-    fn test_args_positional_skips_flags() {
-        let toks: Vec<String> = vec!["--scope", "self", "my-id".into(), "extra".into()]
-            .into_iter()
-            .map(Into::into)
-            .collect();
+    fn test_args_positional_skips_kv_tokens() {
+        let toks: Vec<String> =
+            vec!["bg=#123".into(), "my-id".into(), "text=accent".into(), "extra".into()];
         let args = Args::new(&toks);
         assert_eq!(args.positional(0), Some("my-id"));
         assert_eq!(args.positional(1), Some("extra"));
@@ -311,77 +249,39 @@ mod tests {
     }
 
     #[test]
-    fn test_args_flag_value_equals_form() {
-        let toks: Vec<String> = vec!["--scope=children".into()];
+    fn test_args_leading_equals_token_is_positional() {
+        // Escape hatch: a value literally starting with '=' isn't
+        // parsed as a kv pair.
+        let toks: Vec<String> = vec!["=raw".into()];
         let args = Args::new(&toks);
-        assert_eq!(args.flag_value("scope"), Some("children"));
+        assert_eq!(args.positional(0), Some("=raw"));
+        assert_eq!(args.kvs().count(), 0);
     }
 
     #[test]
-    fn test_args_flag_value_space_form() {
-        let toks: Vec<String> = vec!["--scope".into(), "parent".into()];
+    fn test_args_kvs_iterates_key_value_pairs() {
+        let toks: Vec<String> = vec!["bg=#123".into(), "positional".into(), "text=accent".into()];
         let args = Args::new(&toks);
-        assert_eq!(args.flag_value("scope"), Some("parent"));
+        let pairs: Vec<(&str, &str)> = args.kvs().collect();
+        assert_eq!(pairs, vec![("bg", "#123"), ("text", "accent")]);
     }
 
     #[test]
-    fn test_args_flag_value_missing() {
-        let toks: Vec<String> = vec!["foo".into()];
+    fn test_args_kv_splits_on_first_equals_only() {
+        // Value with `=` inside (e.g. a data-url) keeps its remaining
+        // equals intact. Relevant for `var(--x)` and future URL-ish
+        // values.
+        let toks: Vec<String> = vec!["color=var(--x)".into()];
         let args = Args::new(&toks);
-        assert_eq!(args.flag_value("scope"), None);
+        assert_eq!(args.kv("color"), Some("var(--x)"));
     }
 
     #[test]
-    fn test_parse_with_aliases_expands_first_token() {
-        let mut aliases = HashMap::new();
-        aliases.insert("a".to_string(), "anchor set from auto".to_string());
-        match parse_with_aliases("a", &aliases) {
-            ParseResult::Ok { cmd, args } => {
-                assert_eq!(cmd.name, "anchor");
-                assert_eq!(args, vec!["set", "from", "auto"]);
-            }
-            _ => panic!("expected alias expansion to resolve"),
-        }
-    }
-
-    #[test]
-    fn test_parse_with_aliases_merges_remaining_args() {
-        let mut aliases = HashMap::new();
-        aliases.insert("b".to_string(), "body".to_string());
-        match parse_with_aliases("b dash", &aliases) {
-            ParseResult::Ok { cmd, args } => {
-                assert_eq!(cmd.name, "body");
-                assert_eq!(args, vec!["dash"]);
-            }
-            _ => panic!("expected expansion to merge trailing args"),
-        }
-    }
-
-    #[test]
-    fn test_parse_with_aliases_self_reference_falls_through_without_loop() {
-        // An alias pointing at its own name should resolve once,
-        // not infinitely.
-        let mut aliases = HashMap::new();
-        aliases.insert("help".to_string(), "help".to_string());
-        match parse_with_aliases("help", &aliases) {
-            ParseResult::Ok { cmd, .. } => assert_eq!(cmd.name, "help"),
-            other => panic!("expected Ok, got {:?}", matches!(other, ParseResult::Empty)),
-        }
-    }
-
-    #[test]
-    fn test_parse_without_aliases_passes_through() {
-        match parse("help") {
-            ParseResult::Ok { cmd, .. } => assert_eq!(cmd.name, "help"),
-            _ => panic!("expected bare parse to still work"),
-        }
-    }
-
-    #[test]
-    fn test_args_has_flag_bare() {
-        let toks: Vec<String> = vec!["--all".into()];
+    fn test_args_kv_last_occurrence_wins() {
+        // Users repeating a key override earlier value — matches the
+        // shell-intuition "last one sticks".
+        let toks: Vec<String> = vec!["bg=#111".into(), "bg=#222".into()];
         let args = Args::new(&toks);
-        assert!(args.has_flag("all"));
-        assert!(!args.has_flag("nope"));
+        assert_eq!(args.kv("bg"), Some("#222"));
     }
 }

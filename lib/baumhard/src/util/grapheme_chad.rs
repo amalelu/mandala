@@ -243,6 +243,111 @@ pub fn count_grapheme_clusters(s: &str) -> usize {
     s.graphemes(true).count()
 }
 
+/// Monospace display width of `s` in terminal-cell units, counting
+/// East-Asian-Wide / Fullwidth graphemes as 2, zero-width / combining
+/// marks as 0, and everything else as 1.
+///
+/// Why this exists: cosmic-text's box-drawing glyphs render at ~1 cell
+/// wide in the app's monospace fallback stack, but CJK / fullwidth code
+/// points render at ~2 cells. Counting `.chars().count()` or even
+/// `count_grapheme_clusters` under-measures a line with `日本語` in it
+/// and the right-side console border drifts left. Callers that are
+/// laying out a fixed-width frame around a line need the *display*
+/// width.
+///
+/// Cost: O(n) grapheme walk; each grapheme dispatches to a handful of
+/// range checks. No allocation.
+///
+/// The inline range table covers the common East-Asian-Wide blocks
+/// (Hangul Jamo, CJK Symbols & Punctuation, Hiragana, Katakana, CJK
+/// Unified Ideographs, Yi, Hangul Syllables, CJK Compatibility
+/// Ideographs, Vertical Forms, Halfwidth/Fullwidth, CJK Extensions).
+/// It is deliberately *not* the full Unicode `East_Asian_Width=W` set
+/// — that would be a ~1.5 KB table pulled from `unicode-width`; we
+/// keep the crate-dep-free version until a concrete test case proves
+/// a gap.
+pub fn grapheme_display_width(s: &str) -> usize {
+    let mut width = 0usize;
+    for g in s.graphemes(true) {
+        // A grapheme's display width is the width of its *base*
+        // character; combining marks that make up the rest of the
+        // cluster add 0. The base is the first scalar.
+        let Some(base) = g.chars().next() else { continue };
+        width += scalar_display_width(base);
+    }
+    width
+}
+
+/// Truncate `s` to at most `max_width` terminal cells of display
+/// width, cutting cleanly on grapheme-cluster boundaries. A cluster
+/// whose base is width-2 will not be included if it would push past
+/// `max_width`.
+///
+/// Returns the truncated borrowed slice — no allocation. Useful for
+/// clipping scrollback lines to a fixed-width console frame without
+/// ever landing mid-grapheme (or splitting a wide CJK glyph across
+/// the border).
+///
+/// Cost: O(n) grapheme walk; stops as soon as it would exceed
+/// `max_width`.
+pub fn truncate_to_display_width(s: &str, max_width: usize) -> &str {
+    let mut byte_end = 0usize;
+    let mut used = 0usize;
+    for g in s.graphemes(true) {
+        let base = match g.chars().next() {
+            Some(c) => c,
+            None => continue,
+        };
+        let w = scalar_display_width(base);
+        if used + w > max_width {
+            break;
+        }
+        used += w;
+        byte_end += g.len();
+    }
+    &s[..byte_end]
+}
+
+/// Display width of a single scalar. Exposed for tests; call sites
+/// that have a string should use [`grapheme_display_width`] instead so
+/// combining marks fold into their base cluster.
+pub fn scalar_display_width(c: char) -> usize {
+    let cp = c as u32;
+    // Zero-width controls, zero-width space, ZWJ, ZWNJ, BOM, and the
+    // combining-mark blocks. These never advance the cursor.
+    if cp == 0
+        || (0x0300..=0x036F).contains(&cp)   // Combining Diacritical Marks
+        || (0x1AB0..=0x1AFF).contains(&cp)   // Combining Diacritical Marks Extended
+        || (0x1DC0..=0x1DFF).contains(&cp)   // Combining Diacritical Marks Supplement
+        || (0x20D0..=0x20FF).contains(&cp)   // Combining Diacritical Marks for Symbols
+        || (0xFE20..=0xFE2F).contains(&cp)   // Combining Half Marks
+        || cp == 0x200B                       // Zero Width Space
+        || cp == 0x200C                       // Zero Width Non-Joiner
+        || cp == 0x200D                       // Zero Width Joiner
+        || cp == 0xFEFF                       // BOM / Zero Width No-Break Space
+    {
+        return 0;
+    }
+    // East Asian Wide / Fullwidth.
+    if (0x1100..=0x115F).contains(&cp)         // Hangul Jamo
+        || (0x2E80..=0x303E).contains(&cp)     // CJK Radicals Supplement, Kangxi, CJK Symbols & Punctuation
+        || (0x3041..=0x33FF).contains(&cp)     // Hiragana, Katakana, Bopomofo, CJK Strokes, Enclosed CJK
+        || (0x3400..=0x4DBF).contains(&cp)     // CJK Unified Ideographs Extension A
+        || (0x4E00..=0x9FFF).contains(&cp)     // CJK Unified Ideographs
+        || (0xA000..=0xA4CF).contains(&cp)     // Yi Syllables, Yi Radicals
+        || (0xAC00..=0xD7A3).contains(&cp)     // Hangul Syllables
+        || (0xF900..=0xFAFF).contains(&cp)     // CJK Compatibility Ideographs
+        || (0xFE30..=0xFE4F).contains(&cp)     // CJK Compatibility Forms
+        || (0xFF00..=0xFF60).contains(&cp)     // Fullwidth Forms (pre-halfwidth)
+        || (0xFFE0..=0xFFE6).contains(&cp)     // Fullwidth signs
+        || (0x20000..=0x2FFFD).contains(&cp)   // CJK Extensions B–F, Compat Supplement
+        || (0x30000..=0x3FFFD).contains(&cp)   // CJK Extension G+
+    {
+        return 2;
+    }
+    1
+}
+
 pub fn delete_back_unicode(s: &mut String, n: usize) {
     let mut char_count = 0;
     let mut grapheme_count = 0;

@@ -1,40 +1,47 @@
-//! CLI-style console for Mandala — the successor to the Session 6C
-//! command palette.
+//! CLI-style console for Mandala.
 //!
-//! The console is the lowest-level, most-powerful keyboard surface:
-//! every former palette action is a command, plus new verbs that the
-//! palette couldn't express (help, selection navigation, mutate
-//! list/run/bind, aliases, history).
+//! Input is tokenized shell-style — whitespace splits, `"quoted
+//! strings"` preserve spaces, and `key=value` tokens are first-class.
+//! Generic commands (`color` / `font` / `label`) dispatch through
+//! the [`traits`] capability traits and fan out over the current
+//! selection via [`traits::TargetView`]; component-specific commands
+//! (`anchor` / `body` / `cap` / `spacing` / `edge` / `portal`) call
+//! their own `MindMapDocument` setters directly.
 //!
-//! Input is tokenized shell-style: whitespace splits, `"quoted
-//! strings"` preserve spaces, `--flag=value` / `--flag value` parse.
-//! Completion is contextual — tab expands a partial command name at
-//! position 0, enum args inside known commands, or known ids.
+//! Completion is contextual and prefix-matched only — no fuzzy
+//! scoring and no Tab-to-cycle. The popup recomputes on every
+//! keystroke, `↑`/`↓` move the highlight (falling back to command
+//! history when the popup is empty), `Tab` accepts the highlighted
+//! row, `Esc` dismisses the popup first and closes the console on a
+//! second press.
 //!
-//! The command registry is `const COMMANDS: &[Command]`, matching the
-//! zero-cost-startup property the palette had.
+//! Visuals live in [`visuals`] — palette, glyphs, and scrollback
+//! dimming constants. The renderer composes the border from
+//! `baumhard::mindmap::border::BorderGlyphSet::box_drawing_rounded`
+//! and clips content through
+//! `baumhard::util::grapheme_chad::truncate_to_display_width` so
+//! wide-char input never drifts past the right edge.
 //!
 //! Module layout:
 //!
-//! - [`fuzzy`] — the subsequence scoring algorithm (verbatim move).
-//! - [`parser`] — `tokenize`, `parse`, `Args`.
+//! - [`parser`] — `tokenize`, `parse`, `Args` (incl. `kvs()` / `kv()`).
 //! - [`predicates`] — applicability helpers (selection-shape queries).
+//! - [`traits`] — `ColorValue`, the capability traits, `TargetView`,
+//!   and the `apply_kvs` dispatcher.
 //! - [`commands`] — the `COMMANDS` slice and per-command exec logic.
-//! - [`completion`] — tab-completion engine.
+//! - [`completion`] — contextual completion engine.
+//! - [`visuals`] — palette and glyph constants.
 
 use crate::application::color_picker::ColorTarget;
 use crate::application::document::{EdgeRef, MindMapDocument};
-use baumhard::mindmap::custom_mutation::CustomMutation;
-use std::collections::HashMap;
 
-pub mod bindings_overlay;
 pub mod commands;
 pub mod completion;
 pub mod constants;
-pub mod fuzzy;
 pub mod parser;
 pub mod predicates;
-pub mod user_mutations;
+pub mod traits;
+pub mod visuals;
 
 #[cfg(test)]
 mod tests;
@@ -43,36 +50,24 @@ mod tests;
 // surfaced. The rest stays reachable via the submodule path for
 // grep-ability.
 #[allow(unused_imports)]
-pub use fuzzy::fuzzy_score;
-#[allow(unused_imports)]
 pub use parser::{parse, tokenize, Args, ParseResult};
 
 /// Read-only view of app state for applicability checks, completion,
-/// and informational commands (`help`, `mutate list`).
+/// and informational commands (e.g. `help`).
 pub struct ConsoleContext<'a> {
     pub document: &'a MindMapDocument,
-    /// The merged mutation registry (user + map + inline). Passed in
-    /// as a reference rather than re-deriving from the document so
-    /// tests can construct synthetic registries without a full map.
-    /// In normal use this is `&document.mutation_registry`.
-    pub mutation_registry: &'a HashMap<String, CustomMutation>,
 }
 
 impl<'a> ConsoleContext<'a> {
-    /// Convenience constructor that pulls the registry straight off
-    /// the document — the shape the app event loop uses.
+    /// Convenience constructor — the shape the app event loop uses.
     pub fn from_document(document: &'a MindMapDocument) -> Self {
-        Self {
-            document,
-            mutation_registry: &document.mutation_registry,
-        }
+        Self { document }
     }
 }
 
-/// Mutable handles handed to `execute`. Superset of the former
-/// `PaletteEffects` — keeps the two modal-handoff fields the palette
-/// already used, plus `run_mutation` for `mutate run` (needs tree
-/// access that only the event-loop dispatcher has).
+/// Mutable handles handed to `execute`. Keeps the two modal-handoff
+/// fields the palette already used; everything else is a direct
+/// `MindMapDocument` mutation.
 pub struct ConsoleEffects<'a> {
     pub document: &'a mut MindMapDocument,
     /// If set when `execute` returns, the dispatcher transitions to
@@ -85,43 +80,6 @@ pub struct ConsoleEffects<'a> {
     /// console even on a successful command (e.g. `quit`, or after a
     /// modal handoff).
     pub close_console: bool,
-    /// If set when `execute` returns, the dispatcher calls
-    /// `MindMapDocument::apply_custom_mutation` with these
-    /// arguments. Exposed as a deferred request because
-    /// `apply_custom_mutation` needs `&mut MindMapTree`, which the
-    /// command fn doesn't have access to (it only holds the
-    /// document).
-    pub run_mutation: Option<RunMutationRequest>,
-    /// If set, the dispatcher installs the binding into
-    /// `ResolvedKeybinds` at runtime and persists to the bindings
-    /// overlay file.
-    pub bind_mutation: Option<BindMutationRequest>,
-    /// If set, the dispatcher removes the binding at runtime and
-    /// updates the overlay file.
-    pub unbind_mutation: Option<String>,
-    /// If set, the dispatcher installs the alias into the session
-    /// map and, when `save` is true, writes it to the user
-    /// mutations file.
-    pub set_alias: Option<SetAliasRequest>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RunMutationRequest {
-    pub mutation_id: String,
-    pub node_id: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct BindMutationRequest {
-    pub combo: String,
-    pub mutation_id: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct SetAliasRequest {
-    pub name: String,
-    pub expansion: String,
-    pub save: bool,
 }
 
 impl<'a> ConsoleEffects<'a> {
@@ -131,10 +89,6 @@ impl<'a> ConsoleEffects<'a> {
             open_label_edit: None,
             open_color_picker: None,
             close_console: false,
-            run_mutation: None,
-            bind_mutation: None,
-            unbind_mutation: None,
-            set_alias: None,
         }
     }
 }

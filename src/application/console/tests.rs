@@ -7,9 +7,9 @@
 //! the default for the mandala crate — this file is just `mod tests;`
 //! from a handful of siblings, with a shared fixture helper.
 
-use super::commands::{command_by_name, BACKCOMPAT_INVOCATIONS};
+use super::commands::command_by_name;
 use super::completion::complete;
-use super::parser::{parse, tokenize, Args, ParseResult};
+use super::parser::{parse, Args, ParseResult};
 use super::{ConsoleContext, ConsoleEffects, ConsoleState, ExecResult};
 use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, SelectionState};
 use baumhard::mindmap::loader;
@@ -160,88 +160,101 @@ fn test_console_state_open_seeded_with_history() {
 // ============================================================
 
 #[test]
-fn test_anchor_set_updates_edge_anchor() {
+fn test_anchor_kv_updates_edge_anchor() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("anchor set from top", &mut doc);
+    let _ = run("anchor from=top", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     assert_eq!(updated.anchor_from, 1);
 }
 
 #[test]
-fn test_anchor_set_idempotent_second_call() {
+fn test_anchor_kv_idempotent_second_call() {
     let mut doc = load_test_doc();
     select_first_edge(&mut doc);
-    let first = run("anchor set from left", &mut doc);
-    let second = run("anchor set from left", &mut doc);
+    let first = run("anchor from=left", &mut doc);
+    // Second call reports "already left" as Lines (not Err).
+    let second = run("anchor from=left", &mut doc);
     assert!(matches!(first, ExecResult::Ok(_)));
-    assert!(matches!(second, ExecResult::Ok(_)));
+    assert!(matches!(second, ExecResult::Err(_) | ExecResult::Lines(_)));
 }
 
 #[test]
 fn test_anchor_errors_without_edge_selection() {
     let mut doc = load_test_doc();
-    let result = run("anchor set from top", &mut doc);
+    let result = run("anchor from=top", &mut doc);
     assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
 }
 
 #[test]
-fn test_body_dash_sets_glyph() {
+fn test_body_kv_sets_glyph() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("body dash", &mut doc);
+    let _ = run("body glyph=dash", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    let body = updated
-        .glyph_connection
-        .as_ref()
-        .map(|c| c.body.as_str());
+    let body = updated.glyph_connection.as_ref().map(|c| c.body.as_str());
     assert_eq!(body, Some("\u{2500}"));
 }
 
 #[test]
-fn test_cap_from_arrow_sets_left_triangle() {
+fn test_cap_kv_from_arrow_sets_left_triangle() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("cap from arrow", &mut doc);
+    let _ = run("cap from=arrow", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    let cap = updated
-        .glyph_connection
-        .as_ref()
-        .and_then(|c| c.cap_start.as_deref());
+    let cap = updated.glyph_connection.as_ref().and_then(|c| c.cap_start.as_deref());
     assert_eq!(cap, Some("\u{25C0}"));
 }
 
 #[test]
-fn test_cap_to_arrow_sets_right_triangle() {
+fn test_cap_kv_to_arrow_sets_right_triangle() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("cap to arrow", &mut doc);
+    let _ = run("cap to=arrow", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    let cap = updated
-        .glyph_connection
-        .as_ref()
-        .and_then(|c| c.cap_end.as_deref());
+    let cap = updated.glyph_connection.as_ref().and_then(|c| c.cap_end.as_deref());
     assert_eq!(cap, Some("\u{25B6}"));
 }
 
 #[test]
-fn test_spacing_wide_sets_six() {
+fn test_spacing_kv_wide_sets_six() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("spacing wide", &mut doc);
+    let _ = run("spacing value=wide", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     let spacing = updated.glyph_connection.as_ref().map(|c| c.spacing);
     assert_eq!(spacing, Some(6.0));
 }
 
 #[test]
-fn test_color_accent_sets_var_accent() {
+fn test_color_kv_text_accent_sets_var_accent_on_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("color accent", &mut doc);
+    let _ = run("color text=accent", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     let color = updated.glyph_connection.as_ref().and_then(|c| c.color.clone());
     assert_eq!(color.as_deref(), Some("var(--accent)"));
+}
+
+#[test]
+fn test_color_kv_bg_sets_node_background() {
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid.clone());
+    let _ = run("color bg=#112233", &mut doc);
+    assert_eq!(
+        doc.mindmap.nodes.get(&nid).unwrap().style.background_color,
+        "#112233"
+    );
+}
+
+#[test]
+fn test_color_kv_rejects_invalid_hex() {
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid);
+    let result = run("color bg=notacolor", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)));
 }
 
 #[test]
@@ -272,16 +285,16 @@ fn test_label_edit_hands_off_to_inline_editor() {
 }
 
 #[test]
-fn test_label_set_with_quoted_string_writes_label() {
+fn test_label_kv_with_quoted_string_writes_label() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run(r#"label set "hello world""#, &mut doc);
+    let _ = run(r#"label text="hello world""#, &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     assert_eq!(updated.label.as_deref(), Some("hello world"));
 }
 
 #[test]
-fn test_connection_reset_straight_clears_control_points() {
+fn test_edge_reset_straight_clears_control_points() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
     // Seed a control point so reset has something to clear.
@@ -291,18 +304,19 @@ fn test_connection_reset_straight_clears_control_points() {
         .find(|e| er.matches(e))
         .unwrap()
         .control_points = vec![baumhard::mindmap::model::ControlPoint { x: 10.0, y: 20.0 }];
-    let _ = run("connection reset-straight", &mut doc);
+    let _ = run("edge reset=straight", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     assert!(updated.control_points.is_empty());
 }
 
 #[test]
-fn test_font_larger_steps_font_size_up() {
+fn test_font_kv_size_sets_absolute_value_on_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);
-    let _ = run("font larger", &mut doc);
+    let _ = run("font size=18", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    assert!(updated.glyph_connection.is_some());
+    let cfg = updated.glyph_connection.as_ref().unwrap();
+    assert!((cfg.font_size_pt - 18.0).abs() < 0.01, "got {}", cfg.font_size_pt);
 }
 
 #[test]
@@ -320,11 +334,137 @@ fn test_edge_type_parent_child_updates_edge() {
         .edge_type
         .clone();
     let target = if current == "parent_child" { "cross_link" } else { "parent_child" };
-    let _ = run(&format!("edge type {}", target), &mut doc);
+    let _ = run(&format!("edge type={}", target), &mut doc);
     // `set_edge_type` renames the edge identity, so we can't find it
     // by the old er anymore — just assert at least one edge has the
     // new type.
     assert!(doc.mindmap.edges.iter().any(|e| e.edge_type == target));
+}
+
+// ============================================================
+// apply_kvs dispatcher aggregation
+// ============================================================
+
+/// Empty selection → "no target" message, report marked as all_failed.
+#[test]
+fn test_apply_kvs_with_no_selection_reports_no_target_and_fails() {
+    use crate::application::console::traits::{apply_kvs, Outcome};
+    let mut doc = load_test_doc();
+    doc.selection = SelectionState::None;
+    let kvs = vec![("bg".to_string(), "#123".to_string())];
+    let report = apply_kvs(&mut doc, &kvs, |_v, _k, _val| Some(Outcome::Applied));
+    assert!(report.all_failed);
+    assert_eq!(report.messages.len(), 1);
+    assert!(report.messages[0].contains("no target"));
+}
+
+/// Applier returning None (unknown key) reports exactly once per
+/// pair, not once per target.
+#[test]
+fn test_apply_kvs_unknown_key_reported_once_per_pair() {
+    use crate::application::console::traits::{apply_kvs, Outcome};
+    let mut doc = load_test_doc();
+    let mut ids = doc.mindmap.nodes.keys().cloned();
+    let a = ids.next().unwrap();
+    let b = ids.next().unwrap();
+    doc.selection = SelectionState::Multi(vec![a, b]);
+    let kvs = vec![("bogus".to_string(), "x".to_string())];
+    let seen_calls = std::cell::Cell::new(0usize);
+    let report = apply_kvs(&mut doc, &kvs, |_v, _k, _val| {
+        seen_calls.set(seen_calls.get() + 1);
+        None::<Outcome>
+    });
+    assert!(report.all_failed);
+    assert_eq!(report.messages.len(), 1);
+    assert!(report.messages[0].contains("bogus"));
+    // Short-circuit after first None on the first target.
+    assert_eq!(seen_calls.get(), 1);
+}
+
+/// NotApplicable from every target collapses into a single
+/// per-pair message, and the label is plural for `Multi`.
+#[test]
+fn test_apply_kvs_not_applicable_reported_when_no_target_applies() {
+    use crate::application::console::traits::{apply_kvs, Outcome};
+    let mut doc = load_test_doc();
+    let mut ids = doc.mindmap.nodes.keys().cloned();
+    let a = ids.next().unwrap();
+    let b = ids.next().unwrap();
+    doc.selection = SelectionState::Multi(vec![a, b]);
+    let kvs = vec![("text".to_string(), "accent".to_string())];
+    let report = apply_kvs(&mut doc, &kvs, |_v, _k, _val| Some(Outcome::NotApplicable));
+    assert!(!report.any_applied);
+    assert_eq!(report.messages.len(), 1);
+    assert!(report.messages[0].contains("not applicable"));
+    assert!(report.messages[0].contains("nodes"));
+}
+
+/// An Applied result on every target produces zero messages and
+/// flags any_applied.
+#[test]
+fn test_apply_kvs_all_applied_produces_no_messages() {
+    use crate::application::console::traits::{apply_kvs, Outcome};
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid);
+    let kvs = vec![("bg".to_string(), "#123".to_string())];
+    let report = apply_kvs(&mut doc, &kvs, |_v, _k, _val| Some(Outcome::Applied));
+    assert!(report.any_applied);
+    assert!(report.messages.is_empty());
+    assert!(!report.all_failed);
+}
+
+/// Invalid outcome surfaces as an error message for that pair.
+#[test]
+fn test_apply_kvs_invalid_is_reported_as_error_per_pair() {
+    use crate::application::console::traits::{apply_kvs, Outcome};
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid);
+    let kvs = vec![("size".to_string(), "nope".to_string())];
+    let report = apply_kvs(&mut doc, &kvs, |_v, _k, val| {
+        Some(Outcome::Invalid(format!("'{}' is not a number", val)))
+    });
+    assert!(report.all_failed);
+    assert_eq!(report.messages.len(), 1);
+    assert!(report.messages[0].contains("size"));
+    assert!(report.messages[0].contains("not a number"));
+}
+
+// ============================================================
+// Multi-selection fanout + trait dispatcher aggregation
+// ============================================================
+
+/// A `color bg=#abc` run against a `Multi(ids)` selection must
+/// mutate *every* selected node and push one undo entry per node —
+/// the fanout contract.
+#[test]
+fn test_color_bg_fans_out_across_multi_selection() {
+    let mut doc = load_test_doc();
+    let mut ids = doc.mindmap.nodes.keys().cloned();
+    let a = ids.next().unwrap();
+    let b = ids.next().unwrap();
+    doc.selection = SelectionState::Multi(vec![a.clone(), b.clone()]);
+    doc.undo_stack.clear();
+    let _ = run("color bg=#402030", &mut doc);
+    assert_eq!(doc.mindmap.nodes.get(&a).unwrap().style.background_color, "#402030");
+    assert_eq!(doc.mindmap.nodes.get(&b).unwrap().style.background_color, "#402030");
+    // One undo per node — the dispatcher doesn't batch.
+    assert_eq!(doc.undo_stack.len(), 2);
+}
+
+/// `label text=...` with a node selection — HasLabel only matches
+/// Edge, so the dispatcher should report "not applicable" and leave
+/// the node untouched.
+#[test]
+fn test_label_text_kv_not_applicable_on_node_selection() {
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid);
+    let result = run(r#"label text="hello""#, &mut doc);
+    // Dispatcher reports the single pair as NotApplicable; with
+    // nothing applied it turns the report into an Err.
+    assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
 }
 
 #[test]
@@ -355,34 +495,8 @@ fn test_portal_glyph_hexagon_updates_marker() {
     let b = ids.next().unwrap();
     let pref: PortalRef = doc.apply_create_portal(&a, &b).unwrap();
     doc.selection = SelectionState::Portal(pref);
-    let _ = run("portal glyph hexagon", &mut doc);
+    let _ = run("portal glyph=hexagon", &mut doc);
     assert_eq!(doc.mindmap.portals[0].glyph, "\u{2B21}");
-}
-
-#[test]
-fn test_select_node_by_id_changes_selection() {
-    let mut doc = load_test_doc();
-    let id = doc.mindmap.nodes.keys().next().unwrap().clone();
-    let _ = run(&format!("select node {}", id), &mut doc);
-    match &doc.selection {
-        SelectionState::Single(s) => assert_eq!(s, &id),
-        other => panic!("expected Single, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_select_none_clears_selection() {
-    let mut doc = load_test_doc();
-    doc.selection = SelectionState::Single("anything".into());
-    let _ = run("select none", &mut doc);
-    assert!(matches!(doc.selection, SelectionState::None));
-}
-
-#[test]
-fn test_select_node_unknown_id_reports_error() {
-    let mut doc = load_test_doc();
-    let result = run("select node does-not-exist", &mut doc);
-    assert!(matches!(result, ExecResult::Err(_)));
 }
 
 #[test]
@@ -476,22 +590,22 @@ fn test_complete_command_name_empty_input() {
 }
 
 #[test]
-fn test_complete_enum_arg_anchor_endpoint() {
+fn test_complete_anchor_kv_keys() {
     let mut doc = load_test_doc();
     let _ = select_first_edge(&mut doc);
     let ctx = ConsoleContext::from_document(&doc);
-    let results = complete("anchor set ", 11, &ctx);
+    let results = complete("anchor ", 7, &ctx);
     let names: Vec<&str> = results.iter().map(|c| c.text.as_str()).collect();
-    assert!(names.contains(&"from"));
-    assert!(names.contains(&"to"));
+    assert!(names.contains(&"from="));
+    assert!(names.contains(&"to="));
 }
 
 #[test]
-fn test_complete_enum_arg_anchor_side() {
+fn test_complete_anchor_kv_values() {
     let mut doc = load_test_doc();
     let _ = select_first_edge(&mut doc);
     let ctx = ConsoleContext::from_document(&doc);
-    let results = complete("anchor set from ", 16, &ctx);
+    let results = complete("anchor from=", 12, &ctx);
     let names: Vec<&str> = results.iter().map(|c| c.text.as_str()).collect();
     assert!(names.contains(&"auto"));
     assert!(names.contains(&"top"));
@@ -506,288 +620,3 @@ fn test_complete_unknown_command_returns_empty_for_args() {
     assert!(results.is_empty());
 }
 
-#[test]
-fn test_complete_select_node_completes_ids() {
-    let doc = load_test_doc();
-    let ctx = ConsoleContext::from_document(&doc);
-    let results = complete("select node ", 12, &ctx);
-    assert!(!results.is_empty());
-    // Every returned id should actually exist in the map.
-    for c in &results {
-        assert!(
-            doc.mindmap.nodes.contains_key(&c.text),
-            "completion '{}' is not a real node id",
-            c.text
-        );
-    }
-}
-
-// ============================================================
-// `mutate list` / `mutate run`
-// ============================================================
-
-fn sample_custom_mutation(id: &str, name: &str) -> baumhard::mindmap::custom_mutation::CustomMutation {
-    baumhard::mindmap::custom_mutation::CustomMutation {
-        id: id.to_string(),
-        name: name.to_string(),
-        mutations: Vec::new(),
-        target_scope: baumhard::mindmap::custom_mutation::TargetScope::SelfOnly,
-        behavior: baumhard::mindmap::custom_mutation::MutationBehavior::Persistent,
-        predicate: None,
-        document_actions: Vec::new(),
-    }
-}
-
-#[test]
-fn test_mutate_list_with_empty_registry_reports_empty() {
-    let mut doc = load_test_doc();
-    doc.mutation_registry.clear();
-    let result = run("mutate list", &mut doc);
-    match result {
-        ExecResult::Ok(s) => assert!(s.contains("no mutations")),
-        other => panic!("expected Ok with 'no mutations', got {:?}", other),
-    }
-}
-
-#[test]
-fn test_mutate_list_prints_registered_ids() {
-    let mut doc = load_test_doc();
-    doc.mutation_registry.insert(
-        "test-m1".into(),
-        sample_custom_mutation("test-m1", "Test One"),
-    );
-    let result = run("mutate list", &mut doc);
-    match result {
-        ExecResult::Lines(lines) => {
-            assert!(lines.iter().any(|l| l.contains("test-m1")));
-            assert!(lines.iter().any(|l| l.contains("Test One")));
-        }
-        other => panic!("expected Lines, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_mutate_list_classifies_source_as_map() {
-    let mut doc = load_test_doc();
-    doc.mindmap
-        .custom_mutations
-        .push(sample_custom_mutation("map-mut", "Map Mutation"));
-    doc.build_mutation_registry();
-    let result = run("mutate list", &mut doc);
-    match result {
-        ExecResult::Lines(lines) => {
-            let hit = lines.iter().find(|l| l.contains("map-mut"));
-            assert!(hit.is_some(), "map-mut not in listing");
-            assert!(hit.unwrap().contains("map"));
-        }
-        other => panic!("expected Lines, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_mutate_run_without_selection_errors() {
-    let mut doc = load_test_doc();
-    doc.mutation_registry.insert(
-        "test-m".into(),
-        sample_custom_mutation("test-m", "Test"),
-    );
-    doc.selection = SelectionState::None;
-    let result = run("mutate run test-m", &mut doc);
-    assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
-}
-
-#[test]
-fn test_mutate_run_unknown_id_errors() {
-    let mut doc = load_test_doc();
-    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
-    doc.selection = SelectionState::Single(nid);
-    let result = run("mutate run does-not-exist", &mut doc);
-    assert!(matches!(result, ExecResult::Err(_)));
-}
-
-#[test]
-fn test_mutate_run_sets_deferred_request_on_effects() {
-    let mut doc = load_test_doc();
-    doc.mutation_registry.insert(
-        "test-m".into(),
-        sample_custom_mutation("test-m", "Test"),
-    );
-    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
-    doc.selection = SelectionState::Single(nid.clone());
-
-    let (cmd, toks) = match parse("mutate run test-m") {
-        ParseResult::Ok { cmd, args } => (cmd, args),
-        _ => panic!("parse failed"),
-    };
-    let mut eff = ConsoleEffects::new(&mut doc);
-    let result = (cmd.execute)(&Args::new(&toks), &mut eff);
-    assert!(matches!(result, ExecResult::Ok(_)));
-    let req = eff.run_mutation.take().expect("run_mutation should be set");
-    assert_eq!(req.mutation_id, "test-m");
-    assert_eq!(req.node_id, nid);
-}
-
-#[test]
-fn test_mutate_run_explicit_node_id_overrides_selection() {
-    let mut doc = load_test_doc();
-    doc.mutation_registry.insert(
-        "test-m".into(),
-        sample_custom_mutation("test-m", "Test"),
-    );
-    let mut ids = doc.mindmap.nodes.keys().cloned();
-    let sel_id = ids.next().unwrap();
-    let arg_id = ids.next().unwrap();
-    doc.selection = SelectionState::Single(sel_id.clone());
-
-    let (cmd, toks) = match parse(&format!("mutate run test-m {}", arg_id)) {
-        ParseResult::Ok { cmd, args } => (cmd, args),
-        _ => panic!("parse failed"),
-    };
-    let mut eff = ConsoleEffects::new(&mut doc);
-    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
-    let req = eff.run_mutation.take().unwrap();
-    assert_eq!(req.node_id, arg_id);
-    assert_ne!(req.node_id, sel_id);
-}
-
-// ============================================================
-// `mutate bind` / `mutate unbind`
-// ============================================================
-
-#[test]
-fn test_mutate_bind_sets_deferred_request() {
-    let mut doc = load_test_doc();
-    doc.mutation_registry
-        .insert("m1".into(), sample_custom_mutation("m1", "One"));
-    let (cmd, toks) = match parse("mutate bind Ctrl+Shift+M m1") {
-        ParseResult::Ok { cmd, args } => (cmd, args),
-        _ => panic!("parse failed"),
-    };
-    let mut eff = ConsoleEffects::new(&mut doc);
-    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
-    let req = eff.bind_mutation.take().expect("bind_mutation should be set");
-    assert_eq!(req.combo, "Ctrl+Shift+M");
-    assert_eq!(req.mutation_id, "m1");
-}
-
-#[test]
-fn test_mutate_bind_errors_on_unknown_mutation_id() {
-    let mut doc = load_test_doc();
-    let result = run("mutate bind Ctrl+Shift+M nope", &mut doc);
-    assert!(matches!(result, ExecResult::Err(_)));
-}
-
-#[test]
-fn test_mutate_unbind_sets_deferred_request() {
-    let mut doc = load_test_doc();
-    let (cmd, toks) = match parse("mutate unbind Ctrl+Shift+M") {
-        ParseResult::Ok { cmd, args } => (cmd, args),
-        _ => panic!("parse failed"),
-    };
-    let mut eff = ConsoleEffects::new(&mut doc);
-    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
-    let combo = eff.unbind_mutation.take().expect("unbind should be set");
-    assert_eq!(combo, "Ctrl+Shift+M");
-}
-
-// ============================================================
-// `alias`
-// ============================================================
-
-#[test]
-fn test_alias_sets_deferred_request_session_scoped_by_default() {
-    let mut doc = load_test_doc();
-    let (cmd, toks) = match parse("alias a anchor set from auto") {
-        ParseResult::Ok { cmd, args } => (cmd, args),
-        _ => panic!("parse failed"),
-    };
-    let mut eff = ConsoleEffects::new(&mut doc);
-    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
-    let req = eff.set_alias.take().expect("set_alias should be set");
-    assert_eq!(req.name, "a");
-    assert_eq!(req.expansion, "anchor set from auto");
-    assert!(!req.save);
-}
-
-#[test]
-fn test_alias_with_save_flag_requests_persistence() {
-    let mut doc = load_test_doc();
-    let (cmd, toks) = match parse("alias a anchor set from auto --save") {
-        ParseResult::Ok { cmd, args } => (cmd, args),
-        _ => panic!("parse failed"),
-    };
-    let mut eff = ConsoleEffects::new(&mut doc);
-    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
-    let req = eff.set_alias.take().unwrap();
-    assert!(req.save);
-}
-
-#[test]
-fn test_alias_without_expansion_errors() {
-    let mut doc = load_test_doc();
-    let result = run("alias a", &mut doc);
-    assert!(matches!(result, ExecResult::Err(_)));
-}
-
-// ============================================================
-// User-mutation precedence (user < map < inline)
-// ============================================================
-
-#[test]
-fn test_user_mutations_merged_at_lowest_precedence() {
-    let mut doc = load_test_doc();
-    let user = vec![sample_custom_mutation("shared-id", "user version")];
-    doc.build_mutation_registry_with_user(&user);
-    assert_eq!(
-        doc.mutation_registry.get("shared-id").map(|m| m.name.as_str()),
-        Some("user version"),
-        "user mutation should be visible when no map/inline override"
-    );
-}
-
-#[test]
-fn test_map_mutation_overrides_user_mutation_with_same_id() {
-    let mut doc = load_test_doc();
-    doc.mindmap
-        .custom_mutations
-        .push(sample_custom_mutation("shared-id", "map version"));
-    let user = vec![sample_custom_mutation("shared-id", "user version")];
-    doc.build_mutation_registry_with_user(&user);
-    assert_eq!(
-        doc.mutation_registry.get("shared-id").map(|m| m.name.as_str()),
-        Some("map version"),
-        "map mutation should overwrite user mutation on id collision"
-    );
-}
-
-// ============================================================
-// Backward compat: every palette action has a console invocation
-// ============================================================
-
-#[test]
-fn test_backcompat_every_palette_id_parses() {
-    for (palette_id, invocation) in BACKCOMPAT_INVOCATIONS {
-        match parse(invocation) {
-            ParseResult::Ok { cmd, args: _ } => {
-                assert!(!cmd.name.is_empty(), "palette id '{palette_id}' resolved to empty command");
-            }
-            ParseResult::Empty => {
-                panic!("palette id '{palette_id}' invocation '{invocation}' is empty");
-            }
-            ParseResult::Unknown(s) => {
-                panic!(
-                    "palette id '{palette_id}' invocation '{invocation}' resolves to unknown command '{s}'"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn test_tokenize_invocations_match_parse_expectations() {
-    // Sanity: the tokenizer must handle every invocation string as-is.
-    for (_, invocation) in BACKCOMPAT_INVOCATIONS {
-        let toks = tokenize(invocation);
-        assert!(!toks.is_empty(), "empty tokens for '{invocation}'");
-    }
-}

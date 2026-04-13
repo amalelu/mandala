@@ -109,6 +109,43 @@ impl BorderGlyphSet {
     pub fn right_char(&self) -> char {
         self.right
     }
+
+    /// Generates a vertical side column of `rows` rows, using
+    /// `self.left` as the glyph. Rows are separated by `'\n'`, and
+    /// the returned string ends without a trailing newline — one
+    /// glyph per line cell, `rows` lines total.
+    ///
+    /// Callers that want the right side can either use this same
+    /// string (since the rounded/light presets have `left == right`)
+    /// or call `right_side_border` below for an explicit right column.
+    ///
+    /// Cost: O(rows) push operations, one allocation sized to
+    /// `rows * (left.len_utf8() + 1)`.
+    pub fn side_border(&self, rows: usize) -> String {
+        build_side_column(self.left, rows)
+    }
+
+    /// Like [`side_border`] but uses `self.right`. Presets where
+    /// `left == right` can call either — this exists so callers
+    /// never need to know which preset they have.
+    pub fn right_side_border(&self, rows: usize) -> String {
+        build_side_column(self.right, rows)
+    }
+}
+
+fn build_side_column(glyph: char, rows: usize) -> String {
+    if rows == 0 {
+        return String::new();
+    }
+    let glyph_len = glyph.len_utf8();
+    let mut s = String::with_capacity(rows * (glyph_len + 1) - 1);
+    for i in 0..rows {
+        s.push(glyph);
+        if i + 1 < rows {
+            s.push('\n');
+        }
+    }
+    s
 }
 
 /// Configuration for how a node's border should be rendered.
@@ -238,6 +275,36 @@ mod tests {
         let chars: Vec<char> = border.chars().collect();
         assert_eq!(chars[0], glyphs.top_left);
         assert_eq!(chars[9_999], glyphs.top_right);
+    }
+
+    /// `side_border(rows)` emits exactly `rows` glyphs separated by
+    /// newlines — one glyph per logical row. Guards against an
+    /// off-by-one on the trailing newline.
+    #[test]
+    fn test_side_border_exact_row_count() {
+        let glyphs = BorderGlyphSet::box_drawing_rounded();
+        assert_eq!(glyphs.side_border(0), "");
+        assert_eq!(glyphs.side_border(1), "│");
+        assert_eq!(glyphs.side_border(3), "│\n│\n│");
+        // Each of the 3 rows is exactly the `left` char, no more.
+        let border = glyphs.side_border(5);
+        assert_eq!(border.lines().count(), 5);
+        for line in border.lines() {
+            assert_eq!(line.chars().count(), 1);
+            assert_eq!(line.chars().next().unwrap(), glyphs.left);
+        }
+    }
+
+    /// Right-side helper uses `self.right`; for the rounded preset
+    /// that's the same as `left`, but the API keeps them distinct so
+    /// callers don't have to know.
+    #[test]
+    fn test_right_side_border_uses_right_glyph() {
+        let glyphs = BorderGlyphSet::box_drawing_rounded();
+        let border = glyphs.right_side_border(4);
+        for line in border.lines() {
+            assert_eq!(line.chars().next().unwrap(), glyphs.right);
+        }
     }
 
     /// `BorderStyle::default_with_color` is what the scene builder

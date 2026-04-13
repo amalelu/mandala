@@ -10,7 +10,6 @@
   "orphan_selection": ["Ctrl+O"],
   "open_console": ["/"],
 
-  "console_border": "#",
   "console_font": "",
   "console_font_size": 16.0,
 
