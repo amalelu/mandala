@@ -3936,7 +3936,7 @@ fn open_text_edit(
     doc: &mut MindMapDocument,
     text_edit_state: &mut TextEditState,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
+    _app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let current_text = match doc.mindmap.nodes.get(node_id) {
@@ -3969,7 +3969,6 @@ fn open_text_edit(
         &buffer_regions,
         cursor_grapheme_pos,
         mindmap_tree,
-        app_scene,
         renderer,
     );
 }
@@ -4033,7 +4032,6 @@ fn apply_text_edit_to_tree(
     buffer_regions: &baumhard::core::primitives::ColorFontRegions,
     cursor_grapheme_pos: usize,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
@@ -4228,7 +4226,6 @@ fn handle_text_edit_key(
             &regions_owned,
             cursor_snapshot,
             mindmap_tree,
-            app_scene,
             renderer,
         );
     }
@@ -4376,45 +4373,38 @@ fn open_picker_inner(
             &ring_glyphs,
             ring_font_size,
         );
-        // Per-arm worst-case ink offsets: aggregate each arm's four
-        // glyphs and compute the combined bounding box's
-        // ink-center-vs-advance-center drift. The primitive shapes
-        // each string in one pass, so joining the glyphs with no
-        // separator is accurate for "one arm's worst offset". Store
-        // as dimensionless ratios so the layout fn can scale to
-        // whatever cell-font-size it derives from the window.
+        // Per-arm worst-case ink-center-vs-advance-center offset.
+        // Only the horizontal axis is corrected here: the issue
+        // names `Align::Center` centering the em-box (the per-script
+        // advance rectangle) as the source of drift, which is a
+        // purely horizontal problem. The vertical-axis drift is a
+        // separate concern (baseline placement inside the
+        // `fs * 1.5`-tall box depends on the font's ascent /
+        // descent) that would need the primitive to return
+        // `line_y` too; that's deferred. `y` stays zero so the
+        // layout's y-correction step is a no-op.
         let mut swash_cache = cosmic_text::SwashCache::new();
         use baumhard::font::fonts::measure_glyph_ink_bounds;
         let mut arm_ink_offset = |glyphs: &[&str], font: Option<baumhard::font::fonts::AppFont>| -> (f32, f32) {
-            // Accumulate the ink-center offset of each glyph
-            // individually, then take the worst (largest |offset|)
-            // so the picker corrects for the worst-case script in
-            // each arm. Different glyphs on the same arm can sit at
-            // different ink centres; the cell-by-cell layout lines
-            // them up on a shared visual radius, so the single
-            // correction applied uniformly to all cells in the arm
-            // has to target the worst drift.
+            // Accumulate the ink-center-x offset per glyph and keep
+            // the worst (largest |offset|) so a single correction
+            // applied uniformly to every cell on the arm targets
+            // the worst-drifting glyph.
             let mut best_dx: f32 = 0.0;
-            let mut best_dy: f32 = 0.0;
             for g in glyphs {
                 let b = measure_glyph_ink_bounds(&mut font_system, &mut swash_cache, font, g, measurement_font_size);
                 let dx = b.x_offset_from_advance_center() / measurement_font_size;
-                let dy = b.y_center() / measurement_font_size;
                 if dx.abs() > best_dx.abs() {
                     best_dx = dx;
                 }
-                if dy.abs() > best_dy.abs() {
-                    best_dy = dy;
-                }
             }
-            (best_dx, best_dy)
+            (best_dx, 0.0)
         };
         let arm_top = arm_ink_offset(arm_top_glyphs(), None);
         let arm_bottom = arm_ink_offset(arm_bottom_glyphs(), arm_bottom_font());
         let arm_left = arm_ink_offset(arm_left_glyphs(), None);
         let arm_right = arm_ink_offset(arm_right_glyphs(), None);
-        // Preview ࿕ offsets are measured at the preview's own font
-        // size — the ratio is what matters.
+        // Preview ࿕ — only horizontal correction, same reasoning.
         let preview_bounds = measure_glyph_ink_bounds(
             &mut font_system,
             &mut swash_cache,
@@ -4424,7 +4414,7 @@ fn open_picker_inner(
         );
         let preview = (
             preview_bounds.x_offset_from_advance_center() / measurement_font_size,
-            preview_bounds.y_center() / measurement_font_size,
+            0.0,
         );
         (cell, ring, arm_top, arm_bottom, arm_left, arm_right, preview)
     };

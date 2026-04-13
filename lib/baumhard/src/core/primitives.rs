@@ -214,36 +214,25 @@ impl ColorFontRegions {
         if magnitude == 0 {
             return false;
         }
-        // Shift regions whose start >= idx right by magnitude. The
-        // existing `shift_regions_after` uses strict `start > idx`, so
-        // we pass `idx - 1` for idx > 0; for idx == 0 every region
-        // shifts and we do it by hand.
-        if idx == 0 {
-            let all: Vec<_> = self.regions.iter().copied().collect();
-            self.regions.clear();
-            for mut r in all {
+        let mut updated: Vec<ColorFontRegion> = Vec::with_capacity(self.regions.len());
+        let mut absorbed = false;
+        for region in self.regions.iter() {
+            let mut r = *region;
+            if r.range.start >= idx {
+                // Fully right of the insertion — shift both bounds.
                 r.range.start += magnitude;
                 r.range.end += magnitude;
-                self.regions.insert(r);
+            } else if !absorbed && r.range.end >= idx {
+                // First straddling / left-adjacent region — absorb.
+                r.range.end += magnitude;
+                absorbed = true;
             }
-        } else {
-            self.shift_regions_after(idx - 1, magnitude);
+            // else: fully left of the insertion, unchanged.
+            updated.push(r);
         }
-        // Find the straddling / left-adjacent region (unchanged by
-        // the shift, since its `start < idx`) and extend its `end`.
-        let absorber = self
-            .regions
-            .iter()
-            .find(|r| r.range.start < idx && r.range.end >= idx)
-            .copied();
-        if let Some(mut r) = absorber {
-            self.remove(&r);
-            r.range.end += magnitude;
-            self.submit_region(r);
-            true
-        } else {
-            false
-        }
+        self.regions.clear();
+        self.regions.extend(updated);
+        absorbed
     }
 
     /// Symmetric delete-path companion to [`Self::shift_regions_after`].

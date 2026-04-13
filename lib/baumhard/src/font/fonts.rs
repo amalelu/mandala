@@ -193,11 +193,19 @@ impl InkBounds {
 /// the color picker open path in `src/application/app.rs`, which
 /// measures advances and ink in the same lock scope).
 ///
-/// Costs: shapes a one-line buffer (`O(1)` lookup into the shape
-/// cache after the first call per glyph) and rasterizes each glyph
-/// via `SwashCache::get_image_uncached` (no caching — callers that
-/// need repeated access should hold their own cache). Allocates a
-/// scratch `Buffer`. Call-once-at-picker-open, not frame-hot.
+/// **Y-axis caveat**: `y_min` / `y_max` are baseline-relative. To
+/// compute a "box-center-vs-ink-center" y-offset a caller also
+/// needs to know where the baseline lands inside its rendering box
+/// — which depends on the font's ascent / descent metrics and the
+/// buffer's `line_height`. This primitive does not yet return that,
+/// so consumers today use only [`InkBounds::x_offset_from_advance_center`]
+/// for the named sidebearing fix; the vertical correction is
+/// deferred until the primitive grows to return `line_y` too.
+///
+/// Costs: allocates a scratch `Buffer`, shapes one line, rasterizes
+/// each glyph through `SwashCache::get_image_uncached` (no caching
+/// — callers needing repeated access should hold their own cache).
+/// Call-once-at-picker-open, not frame-hot.
 pub fn measure_glyph_ink_bounds(
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut SwashCache,
