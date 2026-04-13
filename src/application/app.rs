@@ -484,8 +484,13 @@ impl Application {
                 let scene = doc.build_scene(renderer.camera_zoom());
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 update_border_tree_static(&doc, &mut app_scene, &mut renderer);
+                update_portal_tree(
+                    &doc,
+                    &std::collections::HashMap::new(),
+                    &mut app_scene,
+                    &mut renderer,
+                );
                 renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
-                renderer.rebuild_portal_buffers(&scene.portal_elements);
 
                 mindmap_tree = Some(tree);
                 document = Some(doc);
@@ -891,6 +896,7 @@ impl Application {
                                                         &er_clone,
                                                         doc,
                                                         &mut label_edit_state,
+                                                        &mut app_scene,
                                                         &mut renderer,
                                                     );
                                                     entered_label_edit = true;
@@ -1629,7 +1635,9 @@ impl Application {
                                     &scene.connection_label_elements,
                                 );
                                 // Portal markers also track the live drag.
-                                renderer.rebuild_portal_buffers(&scene.portal_elements);
+                                update_portal_tree(
+                                    doc, &offsets, &mut app_scene, &mut renderer,
+                                );
                                 // Edge handles (anchor / midpoint /
                                 // control-point ◆ glyphs on a selected
                                 // edge) must also track the live drag.
@@ -1698,7 +1706,12 @@ impl Application {
                                 renderer.rebuild_connection_label_buffers(
                                     &scene.connection_label_elements,
                                 );
-                                renderer.rebuild_portal_buffers(&scene.portal_elements);
+                                update_portal_tree(
+                                    doc,
+                                    &std::collections::HashMap::new(),
+                                    &mut app_scene,
+                                    &mut renderer,
+                                );
                             }
                             *pending_delta = Vec2::ZERO;
                             mutation_throttle.record_work_duration(work_start.elapsed());
@@ -1777,7 +1790,12 @@ impl Application {
                             renderer.rebuild_connection_label_buffers(
                                 &scene.connection_label_elements,
                             );
-                            renderer.rebuild_portal_buffers(&scene.portal_elements);
+                            update_portal_tree(
+                                doc,
+                                &HashMap::new(),
+                                &mut app_scene,
+                                &mut renderer,
+                            );
                             // Edge handles (if an edge is selected) must
                             // also follow camera changes — scroll-wheel
                             // zoom with a selected edge used to leave
@@ -1945,8 +1963,13 @@ impl Application {
                 let scene = doc.build_scene(renderer.camera_zoom());
                 renderer.rebuild_connection_buffers(&scene.connection_elements);
                 update_border_tree_static(&doc, &mut init_app_scene, renderer);
+                update_portal_tree(
+                    &doc,
+                    &std::collections::HashMap::new(),
+                    &mut init_app_scene,
+                    renderer,
+                );
                 renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
-                renderer.rebuild_portal_buffers(&scene.portal_elements);
                 tree_opt = Some(mindmap_tree);
                 doc_opt = Some(doc);
             }
@@ -2943,7 +2966,7 @@ fn execute_console_line(
     rebuild_all(doc, mindmap_tree, app_scene, renderer);
 
     if let Some(er) = label_edit_req {
-        open_label_edit(&er, doc, label_edit_state, renderer);
+        open_label_edit(&er, doc, label_edit_state, app_scene, renderer);
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(None);
     } else if let Some(target) = color_picker_req {
@@ -3255,9 +3278,9 @@ fn rebuild_scene_only(
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_buffers(&scene.connection_elements);
     update_border_tree_static(doc, app_scene, renderer);
+    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
     renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
-    renderer.rebuild_portal_buffers(&scene.portal_elements);
 }
 
 /// Build the border tree from the current document (no drag
@@ -3296,6 +3319,56 @@ fn update_border_tree_with_offsets(
     renderer.rebuild_canvas_scene_buffers(app_scene);
 }
 
+/// Rebuild the portal tree and register it under
+/// [`CanvasRole::Portals`]. Replaces
+/// `Renderer::rebuild_portal_buffers` for canvas-space rendering.
+/// The portal markers' AABB-keyed hitbox map is still threaded
+/// into the renderer's `portal_hitboxes` so the legacy
+/// `Renderer::hit_test_portal` continues to work until Session 5
+/// migrates portal hit-testing to `Scene::component_at`.
+///
+/// `selected_portal` and `color_preview` are forwarded so the
+/// selection-cyan and live HSV preview rules from the legacy
+/// `scene_builder::build_scene` apply identically.
+fn update_portal_tree(
+    doc: &MindMapDocument,
+    offsets: &std::collections::HashMap<String, (f32, f32)>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    use crate::application::document::ColorPickerPreview;
+    use crate::application::scene_host::CanvasRole;
+    use baumhard::mindmap::tree_builder::{PortalColorPreviewRef, SelectedPortalRef};
+
+    // Selection: only `SelectionState::Portal` produces a portal
+    // selection ref; mirror the lookup the scene builder does.
+    let selected_owned = doc
+        .selection
+        .selected_portal()
+        .map(|p| (p.label.clone(), p.endpoint_a.clone(), p.endpoint_b.clone()));
+    let selected: Option<SelectedPortalRef> = selected_owned
+        .as_ref()
+        .map(|(l, a, b)| (l.as_str(), a.as_str(), b.as_str()));
+
+    // Color preview comes off the document's `color_picker_preview`
+    // when the picker is open and pointing at a portal.
+    let preview: Option<PortalColorPreviewRef> = match &doc.color_picker_preview {
+        Some(ColorPickerPreview::Portal { key, color }) => Some(PortalColorPreviewRef {
+            label: key.label.as_str(),
+            endpoint_a: key.endpoint_a.as_str(),
+            endpoint_b: key.endpoint_b.as_str(),
+            color: color.as_str(),
+        }),
+        _ => None,
+    };
+
+    let result =
+        baumhard::mindmap::tree_builder::build_portal_tree(&doc.mindmap, offsets, selected, preview);
+    renderer.set_portal_hitboxes(result.hitboxes);
+    app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
+    renderer.rebuild_canvas_scene_buffers(app_scene);
+}
+
 /// Session 6D: transition into inline label edit mode for the given
 /// edge. Seeds the buffer from the edge's current label (or the
 /// empty string) and installs a preview override on the renderer so
@@ -3307,6 +3380,7 @@ fn open_label_edit(
     edge_ref: &crate::application::document::EdgeRef,
     doc: &mut MindMapDocument,
     label_edit_state: &mut LabelEditState,
+    app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     let edge = match doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)) {
@@ -3333,7 +3407,7 @@ fn open_label_edit(
     // already ran `rebuild_all` before this, so the scene is fresh.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
-    renderer.rebuild_portal_buffers(&scene.portal_elements);
+    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
 }
 
 /// Session 6D: route a keystroke to the inline label editor. Escape
@@ -3399,7 +3473,7 @@ fn handle_label_edit_key(
         doc.label_edit_preview = Some((edge_key, buffer.clone()));
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
         renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
-        renderer.rebuild_portal_buffers(&scene.portal_elements);
+        update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
     }
 }
 
@@ -4714,9 +4788,9 @@ fn rebuild_all_with_mode(
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     renderer.rebuild_connection_buffers(&scene.connection_elements);
     update_border_tree_static(doc, app_scene, renderer);
+    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
     renderer.rebuild_edge_handle_buffers(&scene.edge_handles);
     renderer.rebuild_connection_label_buffers(&scene.connection_label_elements);
-    renderer.rebuild_portal_buffers(&scene.portal_elements);
 
     *mindmap_tree = Some(new_tree);
 }

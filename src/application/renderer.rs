@@ -2722,6 +2722,35 @@ impl Renderer {
         }
     }
 
+    /// Replace the portal-hitbox map wholesale.
+    ///
+    /// Used by the `update_portal_tree` helper in `app.rs` once
+    /// portal rendering migrated to the canvas-scene tree path:
+    /// the tree builder owns geometry computation and emits both
+    /// the tree and the AABBs, then hands the AABBs over via
+    /// this setter so [`Self::hit_test_portal`] keeps working.
+    /// Will go away in Session 5 when portal hit-testing routes
+    /// through `Scene::component_at`.
+    pub fn set_portal_hitboxes(
+        &mut self,
+        hitboxes: std::collections::HashMap<
+            (
+                (String, String, String),
+                String,
+            ),
+            (Vec2, Vec2),
+        >,
+    ) {
+        self.portal_hitboxes.clear();
+        for (((label, endpoint_a, endpoint_b), endpoint_node_id), bbox) in hitboxes {
+            let key = (
+                PortalRefKey::new(label, endpoint_a, endpoint_b),
+                endpoint_node_id,
+            );
+            self.portal_hitboxes.insert(key, bbox);
+        }
+    }
+
     /// Session 6E: hit-test portal markers at `canvas_pos`. Returns
     /// the `PortalRefKey` of the first marker whose AABB contains
     /// the point, or `None` if no marker is hit.
