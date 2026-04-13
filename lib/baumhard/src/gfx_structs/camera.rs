@@ -16,6 +16,57 @@ pub struct Camera2D {
     pub viewport_size: (u32, u32),
 }
 
+/// A single camera-state delta — the mutation vocabulary for
+/// pan / zoom inputs, theme camera-fits, and the Phase-4
+/// animation timeline. Built so input handlers, programmatic
+/// fits, and tween instances all funnel through one
+/// [`Camera2D::apply_mutation`] entry point — the same shape
+/// every other mutation in the codebase respects.
+///
+/// Variants are *intent*, not raw field writes:
+/// - `Pan` shifts the canvas-center by a screen-pixel delta,
+///   accounting for current zoom (mouse-drag pan).
+/// - `ZoomAt` scales by `factor` while pinning `screen_focus`
+///   (cursor-anchored wheel zoom).
+/// - `ZoomCenter` scales by `factor` around the viewport
+///   center (keyboard zoom, fit-to-bounds tween).
+/// - `SetPosition` / `SetZoom` are idempotent assignments,
+///   used by fit-to-bounds and animation snapshots.
+///
+/// Variants compose: an animation timeline emits one
+/// `CameraMutation` per tick, and the receiver applies it
+/// without caring whether it came from input, a tween, or a
+/// scripted gesture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CameraMutation {
+    /// Pan by a delta in screen pixels (drag gesture). Mouse-
+    /// right means view-right means camera-position-left.
+    Pan { screen_delta: Vec2 },
+    /// Multiplicative zoom while pinning `screen_focus`. `factor
+    /// > 1.0` zooms in, `< 1.0` zooms out. Clamped to
+    /// `Camera2D::MIN_ZOOM..=MAX_ZOOM`.
+    ZoomAt { screen_focus: Vec2, factor: f32 },
+    /// Multiplicative zoom around the viewport centre. Same
+    /// clamp as `ZoomAt`.
+    ZoomCenter { factor: f32 },
+    /// Idempotent assignment of the canvas-space camera centre.
+    /// Used by fit-to-bounds and animation snapshots; bypasses
+    /// the relative-delta math.
+    SetPosition { canvas_pos: Vec2 },
+    /// Idempotent assignment of the zoom factor. Clamped to
+    /// `MIN_ZOOM..=MAX_ZOOM`.
+    SetZoom { factor: f32 },
+    /// Recentre and rescale the camera so the canvas-space AABB
+    /// `[min, max]` fits inside the viewport, with
+    /// `padding_fraction` of the viewport held back as margin on
+    /// each side (0.05 = 5% padding). Used by the load-a-mindmap
+    /// path and any fit-to-selection gesture. Equivalent to the
+    /// existing [`Camera2D::fit_to_bounds`] imperative call —
+    /// expressed as a mutation so every camera change has one
+    /// dispatch point.
+    FitToBounds { min: Vec2, max: Vec2, padding_fraction: f32 },
+}
+
 impl Camera2D {
     pub const MIN_ZOOM: f32 = 0.05;
     pub const MAX_ZOOM: f32 = 5.0;
@@ -102,6 +153,34 @@ impl Camera2D {
         }
     }
 
+    /// Apply one [`CameraMutation`]. Single dispatch point so
+    /// every camera mover — input handlers, fit-to-bounds, and
+    /// the Phase-4 animation timeline — funnels through the
+    /// same path. Each variant maps to one of the existing
+    /// imperative helpers (`pan`, `zoom_at`, `zoom_center`) or
+    /// a clamped field assignment.
+    pub fn apply_mutation(&mut self, mutation: &CameraMutation) {
+        match *mutation {
+            CameraMutation::Pan { screen_delta } => self.pan(screen_delta),
+            CameraMutation::ZoomAt {
+                screen_focus,
+                factor,
+            } => self.zoom_at(screen_focus, factor),
+            CameraMutation::ZoomCenter { factor } => self.zoom_center(factor),
+            CameraMutation::SetPosition { canvas_pos } => {
+                self.position = canvas_pos;
+            }
+            CameraMutation::SetZoom { factor } => {
+                self.zoom = factor.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+            }
+            CameraMutation::FitToBounds {
+                min,
+                max,
+                padding_fraction,
+            } => self.fit_to_bounds(min, max, padding_fraction),
+        }
+    }
+
     /// Check if a canvas-space axis-aligned rectangle is visible in the viewport.
     /// Used for culling off-screen nodes.
     #[inline]
@@ -178,5 +257,82 @@ mod tests {
         assert!(cam.is_visible(Vec2::new(-50.0, -50.0), Vec2::new(100.0, 100.0)));
         // Node far off-screen should not
         assert!(!cam.is_visible(Vec2::new(5000.0, 5000.0), Vec2::new(10.0, 10.0)));
+    }
+
+    /// `apply_mutation(Pan { screen_delta })` produces the same
+    /// post-state as the imperative `pan(screen_delta)` — pins
+    /// the contract that the mutation API is just a re-entry
+    /// point, not a new code path with subtly different math.
+    #[test]
+    fn test_apply_mutation_pan_matches_imperative_pan() {
+        let mut imperative = Camera2D::new(800, 600);
+        let mut via_mutation = Camera2D::new(800, 600);
+        let delta = Vec2::new(15.0, -22.5);
+        imperative.pan(delta);
+        via_mutation.apply_mutation(&CameraMutation::Pan { screen_delta: delta });
+        assert_eq!(imperative.position, via_mutation.position);
+        assert_eq!(imperative.zoom, via_mutation.zoom);
+    }
+
+    /// `apply_mutation(ZoomAt)` matches the imperative
+    /// `zoom_at` round-trip including the focus-pinning math.
+    #[test]
+    fn test_apply_mutation_zoom_at_matches_imperative_zoom_at() {
+        let mut imperative = Camera2D::new(800, 600);
+        let mut via_mutation = Camera2D::new(800, 600);
+        let focus = Vec2::new(220.0, 180.0);
+        imperative.zoom_at(focus, 1.5);
+        via_mutation.apply_mutation(&CameraMutation::ZoomAt {
+            screen_focus: focus,
+            factor: 1.5,
+        });
+        assert_eq!(imperative.position, via_mutation.position);
+        assert_eq!(imperative.zoom, via_mutation.zoom);
+    }
+
+    /// `SetZoom` clamps to `MIN_ZOOM..=MAX_ZOOM` so an animation
+    /// tween that overshoots the bounds doesn't produce a
+    /// degenerate camera state. Pins the clamp regression that
+    /// would otherwise let an `EaseOut` curve land at zoom = 0.
+    #[test]
+    fn test_apply_mutation_set_zoom_clamps_to_bounds() {
+        let mut cam = Camera2D::new(800, 600);
+        cam.apply_mutation(&CameraMutation::SetZoom { factor: 100.0 });
+        assert_eq!(cam.zoom, Camera2D::MAX_ZOOM);
+        cam.apply_mutation(&CameraMutation::SetZoom { factor: 0.0001 });
+        assert_eq!(cam.zoom, Camera2D::MIN_ZOOM);
+    }
+
+    /// `apply_mutation(FitToBounds { ... })` matches the
+    /// imperative `fit_to_bounds` round-trip. Load-a-mindmap and
+    /// fit-to-selection both land on this, so the identity with
+    /// the imperative call is what keeps the single-dispatch
+    /// invariant honest.
+    #[test]
+    fn test_apply_mutation_fit_to_bounds_matches_imperative() {
+        let mut imperative = Camera2D::new(800, 600);
+        let mut via_mutation = Camera2D::new(800, 600);
+        let min = Vec2::new(-500.0, -400.0);
+        let max = Vec2::new(500.0, 400.0);
+        imperative.fit_to_bounds(min, max, 0.05);
+        via_mutation.apply_mutation(&CameraMutation::FitToBounds {
+            min,
+            max,
+            padding_fraction: 0.05,
+        });
+        assert_eq!(imperative.position, via_mutation.position);
+        assert_eq!(imperative.zoom, via_mutation.zoom);
+    }
+
+    /// `SetPosition` is a clean assignment, no clamping or
+    /// transform — used by fit-to-bounds and animation snapshot
+    /// restore. Negative canvas coordinates are valid (the
+    /// canvas is unbounded).
+    #[test]
+    fn test_apply_mutation_set_position_assigns_directly() {
+        let mut cam = Camera2D::new(800, 600);
+        let target = Vec2::new(-150.0, 425.5);
+        cam.apply_mutation(&CameraMutation::SetPosition { canvas_pos: target });
+        assert_eq!(cam.position, target);
     }
 }

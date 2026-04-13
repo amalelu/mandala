@@ -75,6 +75,14 @@ const EDGE_HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
 /// input line). Mutually exclusive with `ConsoleState::Open` — the
 /// console check runs first, so opening the console while editing a
 /// label is a no-op.
+///
+/// Mirrors [`TextEditState`] in shape (buffer + grapheme cursor),
+/// per CODE_CONVENTIONS §1: every keystroke routes through
+/// `grapheme_chad` so backspace over an emoji removes the whole
+/// cluster, not a stray byte. The buffer is threaded into the
+/// scene_builder via [`MindMapDocument::label_edit_preview`]; the
+/// connection-label tree's §B2 mutator path (Phase 1.3) picks up
+/// the new text + caret without rebuilding the arena.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 enum LabelEditState {
@@ -84,6 +92,14 @@ enum LabelEditState {
         /// The in-progress buffer. Committed to
         /// `MindEdge.label` on Enter; discarded on Escape.
         buffer: String,
+        /// Cursor position as a grapheme-cluster index into
+        /// `buffer`. Valid range
+        /// `[0, count_grapheme_clusters(buffer)]`. Stored in
+        /// graphemes (not chars or bytes) so backspace over an
+        /// emoji or ZWJ cluster removes the whole user-visible
+        /// character — same invariant as
+        /// [`TextEditState::Open::cursor_grapheme_pos`].
+        cursor_grapheme_pos: usize,
         /// The edge's label value at the moment edit mode opened.
         /// Used to restore state on Escape so the cancel is clean.
         original: Option<String>,
@@ -286,6 +302,87 @@ fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
     let col = cursor - line_start;
     let next_line_len = next_line_end - next_line_start;
     next_line_start + col.min(next_line_len)
+}
+
+/// Pure router for the label-edit key loop. Given the winit
+/// key-name lowercased (`"backspace"`, `"arrowleft"`, ...) and
+/// the optional character payload from `Key::Character` (IME /
+/// dead-key sequences can carry multiple chars), mutates
+/// `(buffer, cursor)` in place through the same
+/// `grapheme_chad` helpers `handle_text_edit_key` uses and
+/// returns `true` iff any state changed. Separated out so the
+/// routing logic is testable without standing up a winit event
+/// loop; `handle_label_edit_key` is the thin shell that routes
+/// scene / renderer plumbing around this.
+#[cfg(not(target_arch = "wasm32"))]
+fn route_label_edit_key(
+    name: Option<&str>,
+    typed: Option<&str>,
+    buffer: &mut String,
+    cursor: &mut usize,
+) -> bool {
+    match name {
+        Some("backspace") => {
+            if *cursor > 0 {
+                *cursor = delete_before_cursor(buffer, *cursor);
+                return true;
+            }
+            false
+        }
+        Some("delete") => {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
+                *cursor = delete_at_cursor(buffer, *cursor);
+                return true;
+            }
+            false
+        }
+        Some("arrowleft") => {
+            if *cursor > 0 {
+                *cursor -= 1;
+                return true;
+            }
+            false
+        }
+        Some("arrowright") => {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
+                *cursor += 1;
+                return true;
+            }
+            false
+        }
+        Some("home") => {
+            if *cursor != 0 {
+                *cursor = 0;
+                return true;
+            }
+            false
+        }
+        Some("end") => {
+            let end = grapheme_chad::count_grapheme_clusters(buffer);
+            if *cursor != end {
+                *cursor = end;
+                return true;
+            }
+            false
+        }
+        _ => {
+            // Printable character: accept each non-control char.
+            // Mirrors `handle_text_edit_key` — winit's
+            // `Key::Character` can carry IME / dead-key
+            // sequences, so iterate.
+            let Some(typed) = typed else {
+                return false;
+            };
+            let mut changed = false;
+            for ch in typed.chars() {
+                if !ch.is_control() {
+                    *cursor = insert_at_cursor(buffer, *cursor, ch);
+                    changed = true;
+                }
+            }
+            changed
+        }
+    }
 }
 
 /// Build the display text for the edited node by inserting the caret
@@ -1432,6 +1529,16 @@ impl Application {
                         }
                         Some(Action::Undo) => {
                             if let Some(doc) = document.as_mut() {
+                                // Ctrl+Z during an animation
+                                // fast-forwards to completion so the
+                                // animation's own undo entry lands on
+                                // the stack before we pop — Ctrl+Z
+                                // reverses the animation's effect in
+                                // one keystroke, matching the
+                                // post-completion Ctrl+Z behaviour.
+                                if doc.has_active_animations() {
+                                    doc.fast_forward_animations(mindmap_tree.as_mut());
+                                }
                                 if doc.undo() {
                                     rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                 }
@@ -1863,6 +1970,26 @@ impl Application {
                         } else {
                             // Picker closed between event and drain — drop the dirty flag.
                             picker_dirty = false;
+                        }
+                    }
+
+                    // Phase 4: tick any active animations. Each
+                    // tick lerps the from / to snapshots into the
+                    // model and (on completion) routes the final
+                    // state through `apply_custom_mutation` so the
+                    // standard model-sync + undo-push runs once.
+                    // Drives `rebuild_all` only when something
+                    // actually advanced — sleeping in Poll mode
+                    // when no animations are active is automatic.
+                    let animation_advanced = match document.as_mut() {
+                        Some(doc) if doc.has_active_animations() => {
+                            doc.tick_animations(now_ms() as u64, mindmap_tree.as_mut())
+                        }
+                        _ => false,
+                    };
+                    if animation_advanced {
+                        if let Some(doc) = document.as_ref() {
+                            rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                         }
                     }
 
@@ -3394,12 +3521,25 @@ fn update_border_tree_with_offsets(
     app_scene.register_canvas(CanvasRole::Borders, tree, glam::Vec2::ZERO);
 }
 
-/// Build the portal tree and register it under
+/// Build or in-place update the portal tree under
 /// [`CanvasRole::Portals`]. Selection-cyan and color-preview
 /// override rules mirror `scene_builder::build_scene`. Hands the
 /// AABB-keyed hitbox map back to the renderer so the legacy
 /// `Renderer::hit_test_portal` keeps working until hit-test
 /// routing migrates to [`Scene::component_at`].
+///
+/// **§B2 dispatch.** Drag, color-preview, and selection toggle
+/// all leave the visible-portal *identity sequence* unchanged —
+/// the same pairs in the same order, only their positions /
+/// colors / regions move. For those continuous interactions we
+/// take the in-place mutator path
+/// (`build_portal_mutator_tree_from_pairs` →
+/// `apply_canvas_mutator`), which reuses the existing tree arena
+/// instead of allocating a new one each frame. When portals are
+/// added, removed, or a fold reveals/hides an endpoint, the
+/// identity sequence shifts and we fall back to a full rebuild.
+/// Mirrors the canonical pattern from the picker (commit
+/// `ceaeeb4`), now applied to a nested-channel tree.
 fn update_portal_tree(
     doc: &MindMapDocument,
     offsets: &std::collections::HashMap<String, (f32, f32)>,
@@ -3407,8 +3547,11 @@ fn update_portal_tree(
     renderer: &mut Renderer,
 ) {
     use crate::application::document::ColorPickerPreview;
-    use crate::application::scene_host::CanvasRole;
-    use baumhard::mindmap::tree_builder::{PortalColorPreviewRef, SelectedPortalRef};
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
+    use baumhard::mindmap::tree_builder::{
+        build_portal_mutator_tree_from_pairs, build_portal_tree_from_pairs,
+        portal_identity_sequence, portal_pair_data, PortalColorPreviewRef, SelectedPortalRef,
+    };
 
     let selected_owned = doc
         .selection
@@ -3428,50 +3571,140 @@ fn update_portal_tree(
         _ => None,
     };
 
-    let result =
-        baumhard::mindmap::tree_builder::build_portal_tree(&doc.mindmap, offsets, selected, preview);
-    renderer.set_portal_hitboxes(result.hitboxes);
-    app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
+    let pairs = portal_pair_data(&doc.mindmap, offsets, selected, preview);
+    let signature = hash_canvas_signature(&portal_identity_sequence(&pairs));
+
+    match app_scene.canvas_dispatch(CanvasRole::Portals, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let result = build_portal_mutator_tree_from_pairs(&pairs);
+            renderer.set_portal_hitboxes(result.hitboxes);
+            app_scene.apply_canvas_mutator(CanvasRole::Portals, &result.mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let result = build_portal_tree_from_pairs(&pairs);
+            renderer.set_portal_hitboxes(result.hitboxes);
+            app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
+            app_scene.set_canvas_signature(CanvasRole::Portals, signature);
+        }
+    }
 }
 
-/// Convert a freshly-built `RenderScene`'s connection_elements
-/// into a baumhard tree and register it under
+/// Build or in-place update the connection tree under
 /// [`CanvasRole::Connections`].
+///
+/// **§B2 dispatch.** Selection toggle, color preview, and theme
+/// switches change only per-glyph fields (color regions, body
+/// glyph) without altering the per-edge structural shape (cap
+/// presence, body-glyph count). For those calls we take the
+/// in-place mutator path. Endpoint drag resamples the path and
+/// the body-glyph count typically shifts every few pixels — the
+/// identity sequence drops the equality and we fall back to a
+/// full rebuild. The dispatcher hashes
+/// `connection_identity_sequence` to make the choice.
 fn update_connection_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
 ) {
-    use crate::application::scene_host::CanvasRole;
-    let tree = baumhard::mindmap::tree_builder::build_connection_tree(&scene.connection_elements);
-    app_scene.register_canvas(CanvasRole::Connections, tree, glam::Vec2::ZERO);
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
+    use baumhard::mindmap::tree_builder::{
+        build_connection_mutator_tree, build_connection_tree, connection_identity_sequence,
+    };
+
+    let signature =
+        hash_canvas_signature(&connection_identity_sequence(&scene.connection_elements));
+    match app_scene.canvas_dispatch(CanvasRole::Connections, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let mutator = build_connection_mutator_tree(&scene.connection_elements);
+            app_scene.apply_canvas_mutator(CanvasRole::Connections, &mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let tree = build_connection_tree(&scene.connection_elements);
+            app_scene.register_canvas(CanvasRole::Connections, tree, glam::Vec2::ZERO);
+            app_scene.set_canvas_signature(CanvasRole::Connections, signature);
+        }
+    }
 }
 
-/// Reshape connection labels into the canvas-scene tree path.
-/// Threads the per-edge AABB hitbox map back to the renderer so
-/// `hit_test_edge_label` keeps working.
+/// Build or in-place update the connection-label tree under
+/// [`CanvasRole::ConnectionLabels`]. Threads the per-edge AABB
+/// hitbox map back to the renderer so `hit_test_edge_label`
+/// keeps working.
+///
+/// **§B2 dispatch.** Inline label edits (Phase 2.1's hot path),
+/// color changes, and label movement keep the structural identity
+/// (the per-edge `EdgeKey` sequence) stable; the in-place mutator
+/// path runs and the arena is reused. Adding or removing a label,
+/// or selection-edge reorderings, change the identity and
+/// trigger a full rebuild.
 fn update_connection_label_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    use crate::application::scene_host::CanvasRole;
-    let result = baumhard::mindmap::tree_builder::build_connection_label_tree(
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
+    use baumhard::mindmap::tree_builder::{
+        build_connection_label_mutator_tree, build_connection_label_tree,
+        connection_label_identity_sequence,
+    };
+
+    let signature = hash_canvas_signature(&connection_label_identity_sequence(
         &scene.connection_label_elements,
-    );
-    renderer.set_connection_label_hitboxes(result.hitboxes);
-    app_scene.register_canvas(CanvasRole::ConnectionLabels, result.tree, glam::Vec2::ZERO);
+    ));
+    match app_scene.canvas_dispatch(CanvasRole::ConnectionLabels, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let result = build_connection_label_mutator_tree(&scene.connection_label_elements);
+            renderer.set_connection_label_hitboxes(result.hitboxes);
+            app_scene.apply_canvas_mutator(CanvasRole::ConnectionLabels, &result.mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let result = build_connection_label_tree(&scene.connection_label_elements);
+            renderer.set_connection_label_hitboxes(result.hitboxes);
+            app_scene.register_canvas(
+                CanvasRole::ConnectionLabels,
+                result.tree,
+                glam::Vec2::ZERO,
+            );
+            app_scene.set_canvas_signature(CanvasRole::ConnectionLabels, signature);
+        }
+    }
 }
 
-/// Reshape edge handles into the canvas-scene tree path. The
-/// handle set is small (≤ 5 per selected edge) so a fresh build
-/// per call is fine.
+/// Build or in-place update the edge-handle tree under
+/// [`CanvasRole::EdgeHandles`].
+///
+/// **§B2 dispatch.** Dragging a handle moves only its position;
+/// the handle set's *identity sequence* (the
+/// kind-derived channels emitted by
+/// [`baumhard::mindmap::tree_builder::edge_handle_identity_sequence`])
+/// stays constant for the duration of one drag. We take the in-place
+/// mutator path under that condition, reusing the existing arena
+/// instead of allocating a fresh one each frame. When the handle
+/// set's structure shifts — selection moves to a different edge
+/// shape, or a midpoint drag spawns a control point — the identity
+/// sequence changes and we fall back to a full rebuild. Mirrors the
+/// dispatch shape used in `update_portal_tree`.
 fn update_edge_handle_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
 ) {
-    use crate::application::scene_host::CanvasRole;
-    let tree = baumhard::mindmap::tree_builder::build_edge_handle_tree(&scene.edge_handles);
-    app_scene.register_canvas(CanvasRole::EdgeHandles, tree, glam::Vec2::ZERO);
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
+    use baumhard::mindmap::tree_builder::{
+        build_edge_handle_mutator_tree, build_edge_handle_tree,
+        edge_handle_identity_sequence,
+    };
+
+    let signature = hash_canvas_signature(&edge_handle_identity_sequence(&scene.edge_handles));
+    match app_scene.canvas_dispatch(CanvasRole::EdgeHandles, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let mutator = build_edge_handle_mutator_tree(&scene.edge_handles);
+            app_scene.apply_canvas_mutator(CanvasRole::EdgeHandles, &mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let tree = build_edge_handle_tree(&scene.edge_handles);
+            app_scene.register_canvas(CanvasRole::EdgeHandles, tree, glam::Vec2::ZERO);
+            app_scene.set_canvas_signature(CanvasRole::EdgeHandles, signature);
+        }
+    }
 }
 
 /// Walk every canvas-scene tree once and rebuild the renderer's
@@ -3506,9 +3739,13 @@ fn open_label_edit(
     };
     let original = edge.label.clone();
     let buffer = original.clone().unwrap_or_default();
+    // Cursor lands at the end of the existing label, matching the
+    // `TextEditState` open-on-existing-text behaviour.
+    let cursor_grapheme_pos = grapheme_chad::count_grapheme_clusters(&buffer);
     *label_edit_state = LabelEditState::Open {
         edge_ref: edge_ref.clone(),
         buffer: buffer.clone(),
+        cursor_grapheme_pos,
         original,
     };
     // Store the preview on the document so every subsequent
@@ -3519,7 +3756,7 @@ fn open_label_edit(
         &edge_ref.to_id,
         &edge_ref.edge_type,
     );
-    doc.label_edit_preview = Some((edge_key, buffer));
+    doc.label_edit_preview = Some((edge_key, insert_caret(&buffer, cursor_grapheme_pos)));
     // Rebuild labels so the caret is visible immediately. The caller
     // already ran `rebuild_all` before this, so the scene is fresh.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
@@ -3527,11 +3764,16 @@ fn open_label_edit(
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
 }
 
-/// Session 6D: route a keystroke to the inline label editor. Escape
-/// discards, Enter commits, Backspace pops the last grapheme,
-/// character keys append. Mirrors the `handle_palette_key` pattern.
-/// Updates the renderer's preview override on every keystroke so the
-/// caret and the edited text render live.
+/// Session 6D + Phase 2.1: route a keystroke to the inline label
+/// editor. Escape discards, Enter commits, navigation keys move the
+/// grapheme cursor, Backspace/Delete remove a grapheme cluster
+/// (never a stray byte), printable characters insert at the cursor.
+///
+/// Mirrors [`handle_text_edit_key`] in shape: every text mutation
+/// goes through `grapheme_chad` so emoji and ZWJ clusters survive
+/// edits intact (CODE_CONVENTIONS §1). Multi-line is intentionally
+/// out of scope — labels are short, single-line; Enter commits, not
+/// inserts. Cursor navigation is constrained to the one row.
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_label_edit_key(
     key_name: &Option<String>,
@@ -3543,51 +3785,52 @@ fn handle_label_edit_key(
     renderer: &mut Renderer,
 ) {
     let name = key_name.as_deref();
-    match name {
-        Some("escape") => {
-            close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer);
-            return;
-        }
-        Some("enter") => {
-            close_label_edit(true, doc, label_edit_state, mindmap_tree, app_scene, renderer);
-            return;
-        }
-        Some("backspace") => {
-            if let LabelEditState::Open { buffer, .. } = label_edit_state {
-                buffer.pop();
-            }
-        }
-        _ => {
-            // Append a single-character printable keystroke. Ignore
-            // modifier keys, arrow keys, etc. — cursor navigation is
-            // deferred to a future session.
-            if let Key::Character(c) = logical_key {
-                // winit's `Key::Character` may report multi-char
-                // sequences on dead keys / IME; accept anything that
-                // isn't a control character.
-                for ch in c.as_str().chars() {
-                    if !ch.is_control() {
-                        if let LabelEditState::Open { buffer, .. } = label_edit_state {
-                            buffer.push(ch);
-                        }
-                    }
-                }
-            } else {
-                return;
-            }
-        }
+    if name == Some("escape") {
+        close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer);
+        return;
+    }
+    if name == Some("enter") {
+        close_label_edit(true, doc, label_edit_state, mindmap_tree, app_scene, renderer);
+        return;
+    }
+
+    let Some((buffer, cursor)) = (match label_edit_state {
+        LabelEditState::Open {
+            buffer,
+            cursor_grapheme_pos,
+            ..
+        } => Some((buffer, cursor_grapheme_pos)),
+        LabelEditState::Closed => None,
+    }) else {
+        return;
+    };
+
+    let typed = match logical_key {
+        Key::Character(c) => Some(c.as_str()),
+        _ => None,
+    };
+    if !route_label_edit_key(name, typed, buffer, cursor) {
+        return;
     }
 
     // Refresh the preview on the document so the caret + edited text
-    // render on the next frame. Cheap: one scene rebuild. The scene
-    // builder picks up the new buffer through `doc.label_edit_preview`.
-    if let LabelEditState::Open { edge_ref, buffer, .. } = label_edit_state {
+    // render on the next frame. The connection-label tree's §B2
+    // mutator path (Phase 1.3) picks up the new text without
+    // rebuilding the arena because the per-edge identity sequence
+    // stays constant during a label edit.
+    if let LabelEditState::Open {
+        edge_ref,
+        buffer,
+        cursor_grapheme_pos,
+        ..
+    } = label_edit_state
+    {
         let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
             &edge_ref.from_id,
             &edge_ref.to_id,
             &edge_ref.edge_type,
         );
-        doc.label_edit_preview = Some((edge_key, buffer.clone()));
+        doc.label_edit_preview = Some((edge_key, insert_caret(buffer, *cursor_grapheme_pos)));
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
         update_connection_label_tree(&scene, app_scene, renderer);
         update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
@@ -3609,7 +3852,7 @@ fn close_label_edit(
     renderer: &mut Renderer,
 ) {
     let (edge_ref, buffer, original) = match std::mem::replace(label_edit_state, LabelEditState::Closed) {
-        LabelEditState::Open { edge_ref, buffer, original } => (edge_ref, buffer, original),
+        LabelEditState::Open { edge_ref, buffer, original, .. } => (edge_ref, buffer, original),
         LabelEditState::Closed => return,
     };
     doc.label_edit_preview = None;
@@ -5009,7 +5252,12 @@ fn handle_click(
             // `find_triggered_mutations` returned cloned CustomMutations so
             // we can iterate without holding an immutable borrow on doc.
             for cm in triggered {
-                if let Some(tree) = mindmap_tree.as_mut() {
+                if cm.timing.as_ref().is_some_and(|t| t.duration_ms > 0) {
+                    // Animated: snapshot from/to and start an
+                    // instance. The AboutToWait tick interpolates
+                    // and commits the final mutation at completion.
+                    doc.start_animation(&cm, id, now_ms() as u64);
+                } else if let Some(tree) = mindmap_tree.as_mut() {
                     doc.apply_custom_mutation(&cm, id, tree);
                 }
                 doc.apply_document_actions(&cm);
@@ -5337,6 +5585,127 @@ mod text_edit_tests {
         let cursor = delete_at_cursor(&mut s, 1);
         assert_eq!(s, "acd");
         assert_eq!(cursor, 1);
+    }
+
+    // Label-edit key routing (Phase 2.1 surface introduced by the
+    // label-edit grapheme-cursor commit). The routing-to-operation
+    // layer was previously untested — these pin backspace / delete
+    // / arrow / home / end / printable-char behaviour without
+    // needing a winit event loop.
+
+    #[test]
+    fn test_route_label_edit_backspace_deletes_grapheme_before_cursor() {
+        let mut buf = String::from("café");
+        // 4 graphemes: c a f é. Cursor at end; backspace removes é.
+        let mut cursor = 4;
+        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "caf");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_backspace_at_zero_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        assert!(!changed);
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn test_route_label_edit_delete_at_end_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 3;
+        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        assert!(!changed);
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_delete_removes_grapheme_at_cursor() {
+        let mut buf = String::from("abc");
+        let mut cursor = 1;
+        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "ac");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn test_route_label_edit_arrow_left_right_walks_graphemes() {
+        let mut buf = String::from("café");
+        let mut cursor = 4;
+        // Left past é, f, a — landing on the c boundary.
+        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 3);
+        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 2);
+        // Right brings us back.
+        assert!(route_label_edit_key(Some("arrowright"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_arrow_left_at_zero_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 0;
+        assert!(!route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn test_route_label_edit_home_end_jump_to_ends() {
+        let mut buf = String::from("café");
+        let mut cursor = 2;
+        assert!(route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+        // Home again is a no-op.
+        assert!(!route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+        assert!(route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 4);
+        // End again is a no-op.
+        assert!(!route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn test_route_label_edit_printable_inserts_and_advances() {
+        let mut buf = String::from("ab");
+        let mut cursor = 1;
+        let changed = route_label_edit_key(None, Some("X"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "aXb");
+        assert_eq!(cursor, 2);
+    }
+
+    /// IME / dead-key sequences can arrive as multi-char strings.
+    /// Each non-control char inserts in order and the cursor
+    /// advances past them.
+    #[test]
+    fn test_route_label_edit_multichar_typed_payload() {
+        let mut buf = String::from("");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(None, Some("né"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "né");
+        assert_eq!(cursor, 2);
+    }
+
+    /// Control characters in a typed payload are filtered out.
+    /// Pins the regression where an IME sequence like `"a\t"`
+    /// would otherwise insert a literal tab.
+    #[test]
+    fn test_route_label_edit_typed_control_chars_are_skipped() {
+        let mut buf = String::from("");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(None, Some("a\tb"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "ab");
+        assert_eq!(cursor, 2);
     }
 
     #[test]

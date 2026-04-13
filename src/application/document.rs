@@ -7,6 +7,7 @@ use baumhard::gfx_structs::area::GlyphAreaCommand;
 use baumhard::gfx_structs::mutator::{GfxMutator, Mutation};
 use baumhard::gfx_structs::tree::MutatorTree;
 use baumhard::gfx_structs::tree_walker::walk_tree_from;
+use baumhard::mindmap::animation::{lerp_f32, AnimationTiming};
 use baumhard::mindmap::custom_mutation::{
     CustomMutation, DocumentAction, MutationBehavior, TargetScope, Trigger,
     PlatformContext, apply_mutations_to_element,
@@ -22,6 +23,92 @@ use baumhard::mindmap::tree_builder::{self, MindMapTree};
 
 /// Selection highlight color: bright cyan [R, G, B, A]
 pub const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
+
+/// Per-active-mutation runtime record for the Phase-4 animation
+/// system. Carries the from/to `MindNode` snapshot and the
+/// driving `CustomMutation`; the dispatcher in
+/// [`MindMapDocument::tick_animations`] interpolates per-frame
+/// and writes the blended state back into `mindmap.nodes`.
+///
+/// `cm` is the single source of truth — `mutation_id()` and
+/// `timing()` project out the fields the dispatcher needs, so
+/// there is no way for a mutation_id / timing copy to drift out
+/// of sync with the underlying `CustomMutation`.
+#[derive(Debug, Clone)]
+pub struct AnimationInstance {
+    /// Node id this animation targets.
+    pub target_id: String,
+    /// Pre-mutation snapshot of the target node. Stored whole so
+    /// any future per-field interpolator can pull the source.
+    pub from_node: MindNode,
+    /// Post-mutation snapshot of the target node, computed once
+    /// at start by applying the mutation to a scratch copy.
+    pub to_node: MindNode,
+    /// Wall-clock timestamp (ms) when the animation started.
+    pub start_ms: u64,
+    /// The `CustomMutation` driving the animation. Carries the
+    /// id (for re-trigger detection), the `timing` envelope (for
+    /// the tick loop), and the full mutation list (for the
+    /// `apply_custom_mutation` commit at completion).
+    pub cm: CustomMutation,
+}
+
+impl AnimationInstance {
+    /// `CustomMutation.id` of the mutation being animated.
+    /// Combined with `target_id`, identifies the instance for
+    /// re-trigger no-op detection in `start_animation`.
+    pub fn mutation_id(&self) -> &str {
+        &self.cm.id
+    }
+
+    /// The timing envelope. Unwraps `cm.timing` — animations are
+    /// only constructed through `start_animation`, which checks
+    /// `cm.timing.is_some() && duration_ms > 0` before pushing,
+    /// so this projection is always safe by construction.
+    pub fn timing(&self) -> &AnimationTiming {
+        self.cm
+            .timing
+            .as_ref()
+            .expect("AnimationInstance invariant: cm.timing is always Some")
+    }
+}
+
+/// Apply position-bearing `Mutation`s to a `MindNode` to derive
+/// the `to` snapshot for an animation. Mirrors the GlyphArea
+/// command vocabulary of the existing tree mutator path so that
+/// "what does this mutation do" has only one definition,
+/// regardless of whether it lands instantly or via tween. v1
+/// only handles `NudgeLeft` / `NudgeRight` / `NudgeUp` /
+/// `NudgeDown`; other commands are no-ops on the model snapshot
+/// (their tree-side effect still runs at completion via
+/// `apply_custom_mutation`).
+fn apply_position_mutations_to_node(
+    mutations: &[Mutation],
+    node: &mut MindNode,
+) {
+    for mutation in mutations {
+        if let Mutation::AreaCommand(cmd) = mutation {
+            match cmd.as_ref() {
+                GlyphAreaCommand::NudgeLeft(dx) => {
+                    node.position.x -= *dx as f64;
+                }
+                GlyphAreaCommand::NudgeRight(dx) => {
+                    node.position.x += *dx as f64;
+                }
+                GlyphAreaCommand::NudgeUp(dy) => {
+                    node.position.y -= *dy as f64;
+                }
+                GlyphAreaCommand::NudgeDown(dy) => {
+                    node.position.y += *dy as f64;
+                }
+                // Other commands don't move the node — their
+                // visible effect lands at completion via
+                // `apply_custom_mutation`.
+                _ => {}
+            }
+        }
+    }
+}
 
 /// Reparent-mode source color: orange, used for nodes currently being reparented.
 pub const REPARENT_SOURCE_COLOR: [f32; 4] = [1.0, 0.55, 0.0, 1.0];
@@ -357,6 +444,16 @@ pub struct MindMapDocument {
     pub mutation_registry: HashMap<String, CustomMutation>,
     /// Tracks active toggle mutations per node: (node_id, mutation_id).
     pub active_toggles: HashSet<(String, String)>,
+    /// Currently-running animations. Each instance carries the
+    /// from/to snapshot of its target node and the timing
+    /// envelope; [`Self::tick_animations`] interpolates and
+    /// writes the blended state back to `mindmap.nodes` until
+    /// `t = 1`. Empty when no animations are active — the event
+    /// loop checks [`Self::has_active_animations`] to decide
+    /// whether to keep ticking. See
+    /// `lib/baumhard/src/mindmap/animation.rs` for the timing /
+    /// easing / lerp primitives this uses.
+    pub active_animations: Vec<AnimationInstance>,
     /// Transient label edit preview. When `Some((edge_key, buffer))`,
     /// scene-building substitutes `buffer` (plus a trailing caret) for
     /// the matching edge's `ConnectionLabelElement.text` — the inline
@@ -476,6 +573,7 @@ impl MindMapDocument {
                     active_toggles: HashSet::new(),
                     label_edit_preview: None,
                     color_picker_preview: None,
+                    active_animations: Vec::new(),
                 };
                 doc.build_mutation_registry();
                 Ok(doc)
@@ -1982,6 +2080,226 @@ impl MindMapDocument {
         results
     }
 
+    // ---- Animation lifecycle (Phase 4.2) ----
+    //
+    // Animations are an *envelope* on `apply_custom_mutation` — when
+    // a `CustomMutation` carries `timing: Some(AnimationTiming { ... })`
+    // with a non-zero `duration_ms`, the dispatcher routes it through
+    // `start_animation` instead of applying instantly. Each tick
+    // computes a blended `MindNode` snapshot and writes it back into
+    // `mindmap.nodes` so the existing `rebuild_all` path sees the
+    // in-progress state and repaints. The tree never sees the from
+    // state mid-flight; the render pipeline reads model → builds tree
+    // → walks → shapes, so the model write is the single source of
+    // truth for the animated frame.
+    //
+    // The architecture mirrors the dragging / editing invariant: the
+    // *tree* (or in this case, the model — drag and edit work
+    // tree-only because they're transient previews) carries the
+    // in-progress state, the model is the boundary commit. For
+    // animations we write to the model directly because the
+    // animation IS the commit — `apply_custom_mutation` would have
+    // produced the same final state anyway, just in one step
+    // instead of many. The undo entry is pushed once at completion.
+    //
+    // Per the original Phase 4 plan: position / size / color
+    // interpolate; structural changes (text replacement, region
+    // count shifts) snap at the boundary. v1 only interpolates
+    // `position` because every other interpolated field needs
+    // careful per-mutation snapshot logic that adds more lines than
+    // the foundation justifies. Subsequent commits expand the
+    // interpolated-field set as concrete consumers arrive.
+
+    /// Start an animation for `cm` targeting `target_id`. Snapshots
+    /// the current node state, applies the mutation to a scratch
+    /// copy to derive the `to` snapshot, and pushes an
+    /// [`AnimationInstance`] onto [`Self::active_animations`]. The
+    /// caller has already verified
+    /// `cm.timing.as_ref().is_some_and(|t| t.duration_ms > 0)`.
+    ///
+    /// **v1 restrictions** (lifted as concrete consumers arrive):
+    /// only `TargetScope::SelfOnly` interpolates per-frame; other
+    /// scopes apply at the boundary. Only `position` is lerped
+    /// continuously; text / regions / structural fields snap at
+    /// completion. `Followup` variants (`Reverse`, `Chain`, `Loop`)
+    /// are recorded on the instance but not yet enacted.
+    pub fn start_animation(
+        &mut self,
+        cm: &CustomMutation,
+        target_id: &str,
+        now_ms: u64,
+    ) {
+        // Invariant check the `AnimationInstance::timing()`
+        // projection relies on: `cm.timing` must be Some with a
+        // non-zero duration, else the caller should have taken
+        // the instant-mutation path.
+        if !cm
+            .timing
+            .as_ref()
+            .is_some_and(|t| t.duration_ms > 0)
+        {
+            return;
+        }
+
+        // Re-trigger the same (mutation_id, node_id) mid-flight is a
+        // silent no-op — same semantics as the original Phase 4 plan.
+        if self
+            .active_animations
+            .iter()
+            .any(|a| a.mutation_id() == cm.id && a.target_id == target_id)
+        {
+            return;
+        }
+
+        // Snapshot the from state.
+        let Some(from_node) = self.mindmap.nodes.get(target_id).cloned() else {
+            return;
+        };
+
+        // Compute the to state by applying the mutation to a scratch
+        // copy of the document. The scratch path uses the existing
+        // GlyphArea command vocabulary so animation receives the same
+        // final state instant-mode would have landed on — there's
+        // only one source of truth for "what does this mutation do".
+        let mut scratch = from_node.clone();
+        apply_position_mutations_to_node(&cm.mutations, &mut scratch);
+        let to_node = scratch;
+
+        self.active_animations.push(AnimationInstance {
+            target_id: target_id.to_string(),
+            from_node,
+            to_node,
+            start_ms: now_ms,
+            cm: cm.clone(),
+        });
+    }
+
+    /// Tick every active animation against the wall clock at
+    /// `now_ms`. For each instance, lerp position from `from_node`
+    /// to `to_node` according to the easing curve and write the
+    /// blended state back into `mindmap.nodes`. Returns `true` iff
+    /// any animation advanced (so the caller knows to trigger a
+    /// scene rebuild).
+    ///
+    /// Animations whose elapsed time has reached `duration_ms +
+    /// delay_ms` complete: their final state is committed via
+    /// `apply_custom_mutation` (so the standard
+    /// model-sync + undo-push path runs exactly once), then the
+    /// instance is dropped. Drain order is back-to-front so
+    /// `swap_remove` is safe.
+    pub fn tick_animations(
+        &mut self,
+        now_ms: u64,
+        mut tree: Option<&mut MindMapTree>,
+    ) -> bool {
+        if self.active_animations.is_empty() {
+            return false;
+        }
+
+        let mut completed_indices: Vec<usize> = Vec::new();
+        let mut any_advanced = false;
+
+        for (idx, anim) in self.active_animations.iter().enumerate() {
+            let timing = anim.timing();
+            let elapsed = now_ms.saturating_sub(anim.start_ms);
+            let total = timing.delay_ms as u64 + timing.duration_ms as u64;
+            if elapsed >= total {
+                completed_indices.push(idx);
+                continue;
+            }
+            // Skip the delay phase — node stays at `from` until the
+            // delay elapses.
+            if elapsed < timing.delay_ms as u64 {
+                continue;
+            }
+            let progress =
+                (elapsed - timing.delay_ms as u64) as f32 / timing.duration_ms as f32;
+            let t = timing.easing.evaluate(progress);
+
+            let node = match self.mindmap.nodes.get_mut(&anim.target_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            node.position.x = lerp_f32(
+                anim.from_node.position.x as f32,
+                anim.to_node.position.x as f32,
+                t,
+            ) as f64;
+            node.position.y = lerp_f32(
+                anim.from_node.position.y as f32,
+                anim.to_node.position.y as f32,
+                t,
+            ) as f64;
+            any_advanced = true;
+        }
+
+        if !completed_indices.is_empty() {
+            // Drain completed animations. Apply each one's final
+            // state through `apply_custom_mutation` — that's the
+            // single path that handles model-sync + undo-push for
+            // both Persistent and Toggle behaviour, so the tree
+            // animation's commit is indistinguishable from the
+            // instant-mode equivalent.
+            for idx in completed_indices.into_iter().rev() {
+                let anim = self.active_animations.swap_remove(idx);
+                if let Some(tree) = tree.as_deref_mut() {
+                    self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+                } else {
+                    // No tree available — at minimum restore the
+                    // model to the `to` snapshot so the next
+                    // rebuild_all sees the post-animation state.
+                    if let Some(node) = self.mindmap.nodes.get_mut(&anim.target_id) {
+                        node.position = anim.to_node.position.clone();
+                    }
+                }
+                any_advanced = true;
+            }
+        }
+
+        any_advanced
+    }
+
+    /// `true` while one or more animations are still ticking.
+    /// Used by the event loop to decide whether to keep emitting
+    /// `AboutToWait` work and rebuilding the scene.
+    pub fn has_active_animations(&self) -> bool {
+        !self.active_animations.is_empty()
+    }
+
+    /// Fast-forward every active animation to its `to` state and
+    /// commit it through `apply_custom_mutation` (which pushes
+    /// one undo entry per completed animation). Called by the
+    /// Ctrl+Z handler before `undo()` so mid-animation Ctrl+Z
+    /// has predictable semantics: the animation snaps to
+    /// completion, the undo entry it would have pushed at the
+    /// natural boundary is pushed immediately, and the
+    /// subsequent `undo()` pops that entry — so Ctrl+Z during
+    /// an animated transition reverses the animation's effect
+    /// in one keystroke, same as Ctrl+Z after the animation
+    /// completed naturally.
+    ///
+    /// Drains `active_animations` wholesale. Order within the
+    /// drain doesn't matter because each instance commits
+    /// independently and pushes its own undo entry.
+    pub fn fast_forward_animations(&mut self, tree: Option<&mut MindMapTree>) {
+        if self.active_animations.is_empty() {
+            return;
+        }
+        let drained = std::mem::take(&mut self.active_animations);
+        let mut tree = tree;
+        for anim in drained {
+            if let Some(tree) = tree.as_deref_mut() {
+                self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+            } else if let Some(node) = self.mindmap.nodes.get_mut(&anim.target_id) {
+                // No tree available — restore the model to the
+                // `to` snapshot directly. Undo path is then the
+                // caller's responsibility, matching what
+                // `tick_animations` does on its no-tree path.
+                node.position = anim.to_node.position.clone();
+            }
+        }
+    }
+
     /// Apply a custom mutation to the tree and optionally sync to the model.
     /// For Persistent mutations, snapshots affected nodes for undo and sets dirty flag.
     /// For Toggle mutations, tracks active state without model sync.
@@ -2481,6 +2799,7 @@ mod tests {
             active_toggles: HashSet::new(),
             label_edit_preview: None,
             color_picker_preview: None,
+            active_animations: Vec::new(),
         };
         doc.build_mutation_registry();
         doc
@@ -2711,6 +3030,213 @@ mod tests {
         // (the original was stored before the move, but we didn't save it in this test)
     }
 
+    /// `start_animation` records an instance, snapshots from/to,
+    /// and `has_active_animations` flips true. The mutation never
+    /// touches the model — that's the boundary commit at completion.
+    #[test]
+    fn test_start_animation_records_instance_without_committing() {
+        use baumhard::mindmap::animation::{AnimationTiming, Easing};
+
+        let mut doc = load_test_doc();
+        let node_id = "348068464".to_string();
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        let cm = make_test_mutation_with_timing(
+            "nudge-anim",
+            TS::SelfOnly,
+            Some(AnimationTiming {
+                duration_ms: 200,
+                delay_ms: 0,
+                easing: Easing::Linear,
+                then: None,
+            }),
+        );
+        doc.mutation_registry.insert(cm.id.clone(), cm.clone());
+        assert!(!doc.has_active_animations());
+        doc.start_animation(&cm, &node_id, 1_000);
+        assert!(doc.has_active_animations());
+        assert_eq!(doc.active_animations.len(), 1);
+
+        // Model untouched at start.
+        let pos_now = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        assert!((pos_now - orig_x).abs() < 1e-6);
+
+        // From / to snapshots reflect the nudge (test mutation is
+        // NudgeRight(10.0)).
+        let inst = &doc.active_animations[0];
+        assert!((inst.from_node.position.x - orig_x).abs() < 1e-6);
+        assert!((inst.to_node.position.x - orig_x - 10.0).abs() < 1e-6);
+    }
+
+    /// `tick_animations` at the linear midpoint writes the mean of
+    /// from / to into `mindmap.nodes`. Pins the per-tick blend
+    /// math against the canonical `lerp_f32` helper.
+    #[test]
+    fn test_tick_animations_linear_midpoint_blend() {
+        use baumhard::mindmap::animation::{AnimationTiming, Easing};
+
+        let mut doc = load_test_doc();
+        let node_id = "348068464".to_string();
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        let cm = make_test_mutation_with_timing(
+            "nudge-anim",
+            TS::SelfOnly,
+            Some(AnimationTiming {
+                duration_ms: 200,
+                delay_ms: 0,
+                easing: Easing::Linear,
+                then: None,
+            }),
+        );
+        doc.mutation_registry.insert(cm.id.clone(), cm.clone());
+        doc.start_animation(&cm, &node_id, 1_000);
+
+        // Tick at the midpoint (start + 100ms of 200ms duration).
+        let advanced = doc.tick_animations(1_100, None);
+        assert!(advanced);
+        let mid_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        // NudgeRight(10.0) at t=0.5 → +5.0 from origin.
+        assert!((mid_x - orig_x - 5.0).abs() < 1e-3, "midpoint x = {mid_x}, expected {}", orig_x + 5.0);
+
+        // Animation still active mid-flight.
+        assert!(doc.has_active_animations());
+    }
+
+    /// At `t >= 1.0` the animation completes: the final state is
+    /// applied (matching the instant-mode result), the instance
+    /// is dropped, and `has_active_animations` flips back to false.
+    #[test]
+    fn test_tick_animations_completes_and_clears() {
+        use baumhard::mindmap::animation::{AnimationTiming, Easing};
+
+        let mut doc = load_test_doc();
+        let node_id = "348068464".to_string();
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        let cm = make_test_mutation_with_timing(
+            "nudge-anim",
+            TS::SelfOnly,
+            Some(AnimationTiming {
+                duration_ms: 100,
+                delay_ms: 0,
+                easing: Easing::Linear,
+                then: None,
+            }),
+        );
+        doc.mutation_registry.insert(cm.id.clone(), cm.clone());
+        doc.start_animation(&cm, &node_id, 0);
+
+        // Tick past the duration. Without a tree, the model is set
+        // to the `to` snapshot directly.
+        let advanced = doc.tick_animations(150, None);
+        assert!(advanced);
+        assert!(!doc.has_active_animations());
+        let final_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        // Default test-mutation `NudgeRight(10.0)` lands at +10.
+        assert!((final_x - orig_x - 10.0).abs() < 1e-3);
+    }
+
+    /// Ctrl+Z mid-animation fast-forwards to the completion
+    /// state, pushes the animation's undo entry, and then the
+    /// undo pops it — net effect is that Ctrl+Z during an
+    /// animated transition reverses the animation in one
+    /// keystroke, same as Ctrl+Z after natural completion. Pins
+    /// the §4 "no half-features" contract the review called
+    /// out: without this, Ctrl+Z during an animation pops the
+    /// *previous* action, a silent user-visible regression.
+    #[test]
+    fn test_fast_forward_then_undo_reverses_animation() {
+        use baumhard::mindmap::animation::{AnimationTiming, Easing};
+
+        let mut doc = load_test_doc();
+        let node_id = "348068464".to_string();
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        let cm = make_test_mutation_with_timing(
+            "nudge-anim",
+            TS::SelfOnly,
+            Some(AnimationTiming {
+                duration_ms: 1_000,
+                delay_ms: 0,
+                easing: Easing::Linear,
+                then: None,
+            }),
+        );
+        doc.mutation_registry.insert(cm.id.clone(), cm.clone());
+        doc.start_animation(&cm, &node_id, 0);
+
+        // Fast-forward (simulating Ctrl+Z entry in the event
+        // loop). A tree is required because
+        // `apply_custom_mutation` routes through it.
+        let mut tree = doc.build_tree();
+        doc.fast_forward_animations(Some(&mut tree));
+        assert!(!doc.has_active_animations());
+        let after_ff = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        assert!(
+            (after_ff - orig_x - 10.0).abs() < 1e-3,
+            "post fast-forward x = {after_ff}, expected {}",
+            orig_x + 10.0
+        );
+
+        // Undo pops the entry fast-forward pushed. Position
+        // returns to the original.
+        let popped = doc.undo();
+        assert!(popped, "undo must pop the fast-forward's entry");
+        let after_undo = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        assert!(
+            (after_undo - orig_x).abs() < 1e-3,
+            "post undo x = {after_undo}, expected {orig_x}"
+        );
+    }
+
+    /// Re-triggering the same `(mutation_id, node_id)` mid-flight
+    /// is a silent no-op — same semantics as the original Phase 4
+    /// roadmap entry. Otherwise, a held button could spawn dozens
+    /// of overlapping instances and the blend would overshoot.
+    #[test]
+    fn test_start_animation_re_trigger_mid_flight_is_noop() {
+        use baumhard::mindmap::animation::{AnimationTiming, Easing};
+
+        let mut doc = load_test_doc();
+        let node_id = "348068464".to_string();
+        let cm = make_test_mutation_with_timing(
+            "nudge-anim",
+            TS::SelfOnly,
+            Some(AnimationTiming {
+                duration_ms: 200,
+                delay_ms: 0,
+                easing: Easing::Linear,
+                then: None,
+            }),
+        );
+        doc.mutation_registry.insert(cm.id.clone(), cm.clone());
+
+        doc.start_animation(&cm, &node_id, 1_000);
+        doc.start_animation(&cm, &node_id, 1_050);
+        doc.start_animation(&cm, &node_id, 1_100);
+
+        assert_eq!(doc.active_animations.len(), 1);
+        assert_eq!(doc.active_animations[0].start_ms, 1_000);
+    }
+
+    fn make_test_mutation_with_timing(
+        id: &str,
+        scope: TS,
+        timing: Option<baumhard::mindmap::animation::AnimationTiming>,
+    ) -> CM {
+        CM {
+            id: id.to_string(),
+            name: id.to_string(),
+            mutations: vec![Mutation::area_command(GlyphAreaCommand::NudgeRight(10.0))],
+            target_scope: scope,
+            behavior: MB::Persistent,
+            predicate: None,
+            document_actions: vec![],
+            timing,
+        }
+    }
+
     #[test]
     fn test_move_returns_original_positions() {
         let mut doc = load_test_doc();
@@ -2873,6 +3399,7 @@ mod tests {
             behavior: MB::Persistent,
             predicate: None,
             document_actions: vec![],
+            timing: None,
         }
     }
 
@@ -2892,6 +3419,7 @@ mod tests {
             behavior: MB::Persistent,
             predicate: None,
             document_actions: vec![DocumentAction::SetThemeVariables(vars)],
+            timing: None,
         }
     }
 

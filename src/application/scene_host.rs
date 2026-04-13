@@ -21,6 +21,8 @@
 //! migration step and the cleanest to defer until the overlays
 //! are proven working in the new shape (see ROADMAP).
 
+use std::collections::HashMap;
+
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::scene::{Scene, SceneTreeId};
@@ -63,6 +65,43 @@ pub enum CanvasRole {
     EdgeHandles,
     /// Labels attached to labeled edges.
     ConnectionLabels,
+}
+
+/// Two arms of the §B2 canvas-tree dispatch: apply a mutator to the
+/// existing arena, or rebuild wholesale and re-register. Returned
+/// from [`AppScene::canvas_dispatch`] so the caller can route
+/// side-effects (hitbox updates, renderer state) through the
+/// matching arm without re-implementing the check.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum CanvasDispatch {
+    /// Signature matched the registered tree — apply the mutator.
+    InPlaceMutator,
+    /// Signature mismatch (or nothing registered) — rebuild + re-register.
+    FullRebuild,
+}
+
+/// Two arms of the §B2 overlay-tree dispatch — mirrors
+/// [`CanvasDispatch`] for the screen-space sub-scene. Returned by
+/// [`AppScene::overlay_dispatch`] so the console / color-picker
+/// rebuild paths can choose between the mutator and full-rebuild
+/// arms using the same idiom as the canvas-side dispatchers.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum OverlayDispatch {
+    /// Signature matched the registered tree — apply the mutator.
+    InPlaceMutator,
+    /// Signature mismatch (or nothing registered) — rebuild + re-register.
+    FullRebuild,
+}
+
+/// Hash an arbitrary structural identity into the 64-bit signature
+/// [`AppScene::canvas_signature`] tracks. Shared by every canvas-role
+/// dispatcher — one DefaultHasher incantation instead of four.
+pub fn hash_canvas_signature<T: std::hash::Hash>(identity: &T) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    identity.hash(&mut h);
+    h.finish()
 }
 
 /// Conventional layer integers used when inserting trees into the
@@ -126,6 +165,22 @@ pub struct AppScene {
     portals: Option<SceneTreeId>,
     edge_handles: Option<SceneTreeId>,
     connection_labels: Option<SceneTreeId>,
+    /// Opaque per-role hash describing the **structural shape** of
+    /// the registered canvas tree (not its variable-field state). A
+    /// caller that wants to dispatch between full-rebuild and §B2
+    /// in-place mutator paths records the structural hash alongside
+    /// the registration; the next call hashes the new state and uses
+    /// equality to decide. Cleared on `unregister_canvas`. The
+    /// definition of "structure" is the caller's — for portals, it's
+    /// the visible-pair identity sequence; for edge handles, it's the
+    /// selected-edge identity; etc.
+    canvas_signatures: HashMap<CanvasRole, u64>,
+    /// Same as `canvas_signatures`, for the overlay sub-scene. The
+    /// console overlay uses `(scrollback_rows, completion_rows)` as
+    /// its structural signature; color-picker uses none yet (its
+    /// cell count is a compile-time constant). Cleared on
+    /// `unregister_overlay`.
+    overlay_signatures: HashMap<OverlayRole, u64>,
 }
 
 impl Default for AppScene {
@@ -147,6 +202,8 @@ impl AppScene {
             portals: None,
             edge_handles: None,
             connection_labels: None,
+            canvas_signatures: HashMap::new(),
+            overlay_signatures: HashMap::new(),
         }
     }
 
@@ -188,10 +245,48 @@ impl AppScene {
         id
     }
 
-    /// Remove a canvas role's tree, if registered.
+    /// Remove a canvas role's tree, if registered. Also clears any
+    /// recorded structural signature — a future re-register starts
+    /// from a clean slate, forcing a full rebuild before the in-place
+    /// mutator path can run again.
     pub fn unregister_canvas(&mut self, role: CanvasRole) {
         if let Some(id) = self.canvas_role_slot_mut(role).take() {
             self.canvas.remove(id);
+        }
+        self.canvas_signatures.remove(&role);
+    }
+
+    /// Record the structural signature of the tree currently
+    /// registered for `role`. Pair with [`Self::canvas_signature`] to
+    /// dispatch between full-rebuild and in-place mutator paths.
+    /// Hash space is the caller's; pass the same hash function on
+    /// both sides.
+    pub fn set_canvas_signature(&mut self, role: CanvasRole, signature: u64) {
+        self.canvas_signatures.insert(role, signature);
+    }
+
+    /// Last recorded structural signature for a canvas role, if any.
+    /// `None` when no tree is registered or the signature was never
+    /// set — the caller treats that as "force full rebuild".
+    pub fn canvas_signature(&self, role: CanvasRole) -> Option<u64> {
+        self.canvas_signatures.get(&role).copied()
+    }
+
+    /// Decide which §B2 arm to take for a canvas role at the given
+    /// structural signature: [`CanvasDispatch::InPlaceMutator`] if a
+    /// tree is registered and its signature matches, else
+    /// [`CanvasDispatch::FullRebuild`]. The caller then runs the
+    /// matching build path and calls either `apply_canvas_mutator`
+    /// or `register_canvas` + `set_canvas_signature`.
+    ///
+    /// Exists so every role's dispatcher has the same "if registered
+    /// and signature matches" single source of truth, not four
+    /// inlined copies of the check.
+    pub fn canvas_dispatch(&self, role: CanvasRole, signature: u64) -> CanvasDispatch {
+        if self.canvas_id(role).is_some() && self.canvas_signature(role) == Some(signature) {
+            CanvasDispatch::InPlaceMutator
+        } else {
+            CanvasDispatch::FullRebuild
         }
     }
 
@@ -257,10 +352,43 @@ impl AppScene {
         id
     }
 
-    /// Remove an overlay's tree if registered.
+    /// Remove an overlay's tree if registered. Also clears any
+    /// recorded structural signature — a future re-register starts
+    /// from a clean slate, forcing a full rebuild before the
+    /// in-place mutator path can run again. Mirrors
+    /// [`Self::unregister_canvas`].
     pub fn unregister_overlay(&mut self, role: OverlayRole) {
         if let Some(id) = self.overlay_role_slot_mut(role).take() {
             self.overlay.remove(id);
+        }
+        self.overlay_signatures.remove(&role);
+    }
+
+    /// Record the structural signature of the tree currently
+    /// registered for `role`. Pair with
+    /// [`Self::overlay_signature`] to dispatch between
+    /// full-rebuild and in-place mutator paths. Mirrors
+    /// [`Self::set_canvas_signature`].
+    pub fn set_overlay_signature(&mut self, role: OverlayRole, signature: u64) {
+        self.overlay_signatures.insert(role, signature);
+    }
+
+    /// Last recorded structural signature for an overlay role, if
+    /// any. `None` when no tree is registered or the signature was
+    /// never set — the caller treats that as "force full rebuild".
+    /// Mirrors [`Self::canvas_signature`].
+    pub fn overlay_signature(&self, role: OverlayRole) -> Option<u64> {
+        self.overlay_signatures.get(&role).copied()
+    }
+
+    /// Decide which §B2 arm to take for an overlay role at the
+    /// given structural signature. Mirrors
+    /// [`Self::canvas_dispatch`] for the screen-space sub-scene.
+    pub fn overlay_dispatch(&self, role: OverlayRole, signature: u64) -> OverlayDispatch {
+        if self.overlay_id(role).is_some() && self.overlay_signature(role) == Some(signature) {
+            OverlayDispatch::InPlaceMutator
+        } else {
+            OverlayDispatch::FullRebuild
         }
     }
 
@@ -408,5 +536,33 @@ mod tests {
 
         let hit = app.overlay_at(Vec2::new(10.0, 10.0));
         assert_eq!(hit, Some((OverlayRole::Console, console_leaf)));
+    }
+
+    /// `canvas_signature` is `None` for an unregistered role and
+    /// any role whose signature was never set. Pins the contract
+    /// that `update_portal_tree` (and the Phase 1.2 / 1.3 sites
+    /// that follow) rely on to dispatch into a full rebuild on
+    /// the first frame after open.
+    #[test]
+    fn canvas_signature_is_none_when_unset_or_unregistered() {
+        let app = AppScene::new();
+        assert_eq!(app.canvas_signature(CanvasRole::Portals), None);
+        assert_eq!(app.canvas_signature(CanvasRole::Borders), None);
+    }
+
+    /// `set_canvas_signature` records a value the next
+    /// `canvas_signature` returns; `unregister_canvas` drops it so
+    /// a subsequent reopen forces a full rebuild before the
+    /// in-place mutator path can run again.
+    #[test]
+    fn canvas_signature_round_trips_and_clears_on_unregister() {
+        let mut app = AppScene::new();
+        let (tree, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        app.register_canvas(CanvasRole::Portals, tree, Vec2::ZERO);
+        app.set_canvas_signature(CanvasRole::Portals, 0xDEADBEEF);
+        assert_eq!(app.canvas_signature(CanvasRole::Portals), Some(0xDEADBEEF));
+
+        app.unregister_canvas(CanvasRole::Portals);
+        assert_eq!(app.canvas_signature(CanvasRole::Portals), None);
     }
 }

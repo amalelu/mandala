@@ -1408,10 +1408,12 @@ impl Renderer {
             max_x = max_x.max(x + w);
             max_y = max_y.max(y + h);
         }
-        self.camera.fit_to_bounds(
-            Vec2::new(min_x, min_y),
-            Vec2::new(max_x, max_y),
-            0.05,
+        self.camera.apply_mutation(
+            &baumhard::gfx_structs::camera::CameraMutation::FitToBounds {
+                min: Vec2::new(min_x, min_y),
+                max: Vec2::new(max_x, max_y),
+                padding_fraction: 0.05,
+            },
         );
     }
 
@@ -1778,11 +1780,14 @@ impl Renderer {
         app_scene: &mut crate::application::scene_host::AppScene,
         geometry: Option<&ConsoleOverlayGeometry>,
     ) {
-        use crate::application::scene_host::OverlayRole;
+        use crate::application::scene_host::{OverlayDispatch, OverlayRole};
 
         let Some(geometry) = geometry else {
             // Closed: drop the backdrop, drop the tree, refresh
-            // overlay buffers so the console disappears.
+            // overlay buffers so the console disappears. The
+            // structural-signature cache lives on `AppScene` and
+            // is cleared inside `unregister_overlay`, so the next
+            // reopen starts from a clean slate.
             self.console_backdrop = None;
             app_scene.unregister_overlay(OverlayRole::Console);
             self.rebuild_overlay_scene_buffers(app_scene);
@@ -1795,18 +1800,41 @@ impl Renderer {
             self.config.height as f32,
         );
         self.console_backdrop = Some(layout.backdrop_rect());
+        let signature = console_overlay_signature(&layout);
 
-        // Build the tree under the FONT_SYSTEM lock — we need it
-        // for `measure_max_glyph_advance` only. Tree construction
-        // itself doesn't shape; that happens during the overlay-
-        // scene walk below.
-        let tree = {
-            let mut font_system = fonts::FONT_SYSTEM
-                .write()
-                .expect("Failed to acquire font_system lock");
-            build_console_overlay_tree(geometry, &layout, &mut font_system)
-        };
-        app_scene.register_overlay(OverlayRole::Console, tree, glam::Vec2::ZERO);
+        // §B2 dispatch: if the structural signature
+        // (`scrollback_rows` × `completion_rows`) hasn't changed
+        // since the last build, the existing tree's slot count
+        // still matches and we apply an in-place mutator that
+        // overwrites every slot's variable fields. Window resize
+        // is the only typical event that shifts the signature, so
+        // the mutator path covers every keystroke / scrollback-
+        // grow / completion-update / Tab-cycle frame.
+        match app_scene.overlay_dispatch(OverlayRole::Console, signature) {
+            OverlayDispatch::InPlaceMutator => {
+                let mutator = {
+                    let mut font_system = fonts::FONT_SYSTEM
+                        .write()
+                        .expect("Failed to acquire font_system lock");
+                    build_console_overlay_mutator(geometry, &layout, &mut font_system)
+                };
+                app_scene.apply_overlay_mutator(OverlayRole::Console, &mutator);
+            }
+            OverlayDispatch::FullRebuild => {
+                // Build the tree under the FONT_SYSTEM lock — we
+                // need it for `measure_max_glyph_advance` only.
+                // Tree construction itself doesn't shape; that
+                // happens during the overlay-scene walk below.
+                let tree = {
+                    let mut font_system = fonts::FONT_SYSTEM
+                        .write()
+                        .expect("Failed to acquire font_system lock");
+                    build_console_overlay_tree(geometry, &layout, &mut font_system)
+                };
+                app_scene.register_overlay(OverlayRole::Console, tree, glam::Vec2::ZERO);
+                app_scene.set_overlay_signature(OverlayRole::Console, signature);
+            }
+        }
         self.rebuild_overlay_scene_buffers(app_scene);
     }
 
@@ -2220,10 +2248,12 @@ impl Renderer {
             found_any = true;
         }
         if found_any {
-            self.camera.fit_to_bounds(
-                Vec2::new(min_x, min_y),
-                Vec2::new(max_x, max_y),
-                0.05,
+            self.camera.apply_mutation(
+                &baumhard::gfx_structs::camera::CameraMutation::FitToBounds {
+                    min: Vec2::new(min_x, min_y),
+                    max: Vec2::new(max_x, max_y),
+                    padding_fraction: 0.05,
+                },
             );
             // The fit typically changes both pan and zoom. Today this
             // is only called from `load_mindmap`, which follows up
@@ -2344,7 +2374,11 @@ impl Renderer {
                 self.update_buffer_cache();
             }
             RenderDecree::CameraPan(dx, dy) => {
-                self.camera.pan(Vec2::new(dx, dy));
+                self.camera.apply_mutation(
+                    &baumhard::gfx_structs::camera::CameraMutation::Pan {
+                        screen_delta: Vec2::new(dx, dy),
+                    },
+                );
                 // Phase A's off-screen glyph cull is a function of the
                 // camera, so moving the camera invalidates the cached
                 // per-edge visible-glyph layout. Clear the renderer-side
@@ -2358,7 +2392,12 @@ impl Renderer {
                 self.connection_viewport_dirty = true;
             }
             RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
-                self.camera.zoom_at(Vec2::new(screen_x, screen_y), factor);
+                self.camera.apply_mutation(
+                    &baumhard::gfx_structs::camera::CameraMutation::ZoomAt {
+                        screen_focus: Vec2::new(screen_x, screen_y),
+                        factor,
+                    },
+                );
                 // Zoom invalidates both the renderer-side cull cache
                 // (viewport-dirty) AND the document-side sample cache
                 // (geometry-dirty), because the effective font size —
@@ -2901,24 +2940,61 @@ fn picker_glyph_areas(
     out
 }
 
-/// Build the console overlay tree from a geometry + pre-computed
-/// layout. One Void root with one GlyphArea per visible element:
-/// 4 borders, gutter glyphs, scrollback rows, completion rows,
-/// and the prompt line. Used by
-/// [`Renderer::rebuild_console_overlay_buffers`] which then
-/// registers the tree under
-/// [`crate::application::scene_host::OverlayRole::Console`] and
-/// walks it through the standard overlay-scene pipeline.
+// =============================================================
+// Stable channel scheme for the console overlay tree
+// =============================================================
+//
+// Mirrors the picker's stable-channel discipline (commit
+// `ceaeeb4`): every console GlyphArea sits at a deterministic
+// channel so the §B2 in-place mutator path can target it across
+// keystrokes. Bands are wide enough to add new sub-rows without
+// renumbering. **Order matters** — the values must be strictly
+// ascending in tree-insertion order, otherwise Baumhard's
+// `align_child_walks` breaks alignment and the mutator path
+// silently misses elements.
+//
+// Layout-wise: 4 borders → `scrollback_rows` × (gutter + text)
+// always-emitted slots → `completion_rows` always-emitted slots
+// → prompt line. Slots beyond what the geometry currently
+// populates carry empty `""` text, which the walker shapes as
+// nothing — a stable element set even when scrollback is short.
+
+const CONSOLE_CHANNEL_TOP_BORDER: usize = 1;
+const CONSOLE_CHANNEL_BOTTOM_BORDER: usize = 2;
+const CONSOLE_CHANNEL_LEFT_COL: usize = 3;
+const CONSOLE_CHANNEL_RIGHT_COL: usize = 4;
+const CONSOLE_CHANNEL_SCROLLBACK_GUTTER_BASE: usize = 100;
+const CONSOLE_CHANNEL_SCROLLBACK_TEXT_BASE: usize = 1_000;
+const CONSOLE_CHANNEL_COMPLETION_BASE: usize = 10_000;
+const CONSOLE_CHANNEL_PROMPT: usize = 100_000;
+
+/// Single source of truth for the console overlay's GlyphArea
+/// content, keyed by stable channel. Both
+/// [`build_console_overlay_tree`] (the initial-build path) and
+/// [`build_console_overlay_mutator`] (the in-place §B2 update path)
+/// consume this so the two paths cannot drift.
 ///
-/// `font_system` is needed only for `measure_max_glyph_advance` —
-/// no shaping happens here. The returned tree's GlyphArea
-/// positions are absolute screen coordinates so the walker's
-/// per-tree offset can be `Vec2::ZERO`.
-fn build_console_overlay_tree(
+/// Emits `4 + scrollback_rows * 2 + completion_rows + 1` leaves:
+/// the 4 border areas, a `(gutter, text)` pair per scrollback row,
+/// one area per completion row, and one prompt. `scrollback_rows`
+/// and `completion_rows` are the layout's capped counts — they
+/// scale with the underlying geometry, so a count change
+/// (scrollback-grow, a Tab firing a new completion list, window
+/// resize that enlarges the frame) shifts the structural
+/// signature and forces a full rebuild. The mutator path runs
+/// whenever the signature is unchanged, which covers keystroke
+/// input, completion-highlight cycling, and scrollback-alpha
+/// changes as the visible window slides.
+///
+/// **Channel ordering invariant**: returned in strictly ascending
+/// channel order — the constants above are deliberately spaced so
+/// that strict order is preserved even when the per-row counts
+/// grow.
+fn console_overlay_areas(
     geometry: &ConsoleOverlayGeometry,
     layout: &ConsoleFrameLayout,
     font_system: &mut FontSystem,
-) -> Tree<GfxElement, GfxMutator> {
+) -> Vec<(usize, GlyphArea)> {
     use crate::application::console::visuals::{
         ACCENT_COLOR, BORDER_COLOR, ERROR_COLOR, GUTTER_GLYPH, INPUT_ECHO_COLOR,
         SCROLLBACK_MIN_ALPHA, SELECTED_COMPLETION_MARKER, TEXT_COLOR,
@@ -2938,16 +3014,13 @@ fn build_console_overlay_tree(
         completion_rows,
     } = layout;
 
-    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut id_counter: usize = 1;
-    let push_area = |tree: &mut Tree<GfxElement, GfxMutator>,
-                     id_counter: &mut usize,
-                     text: &str,
-                     color: cosmic_text::Color,
-                     font_size: f32,
-                     line_height: f32,
-                     pos: (f32, f32),
-                     bounds: (f32, f32)| {
+    let mk_area = |text: &str,
+                   color: cosmic_text::Color,
+                   font_size: f32,
+                   line_height: f32,
+                   pos: (f32, f32),
+                   bounds: (f32, f32)|
+     -> GlyphArea {
         let mut area = GlyphArea::new_with_str(
             text,
             font_size,
@@ -2971,15 +3044,9 @@ fn build_console_overlay_tree(
             ));
             area.regions = regions;
         }
-        let element =
-            GfxElement::new_area_non_indexed_with_id(area, *id_counter, *id_counter);
-        *id_counter += 1;
-        let leaf = tree.arena.new_node(element);
-        tree.root.append(leaf, &mut tree.arena);
+        area
     };
 
-    // Border glyph advance — measured rather than estimated so the
-    // top-right `╮` lands flush with the right side `│` column.
     let measured_char_width =
         measure_max_glyph_advance(font_system, &["\u{2500}", "\u{2502}"], font_size);
     let cols = ((frame_width / measured_char_width).floor() as usize).max(2);
@@ -2987,161 +3054,185 @@ fn build_console_overlay_tree(
     let (top_border, bottom_border, left_col, right_col) =
         build_console_border_strings(cols, side_rows);
 
-    // Borders
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        &top_border,
-        BORDER_COLOR,
-        font_size,
-        font_size,
-        (left, top),
-        (frame_width, font_size * 1.5),
-    );
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        &bottom_border,
-        BORDER_COLOR,
-        font_size,
-        font_size,
-        (left, top + frame_height),
-        (frame_width, font_size * 1.5),
-    );
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        &left_col,
-        BORDER_COLOR,
-        font_size,
-        row_height,
-        (left, top + font_size),
-        (measured_char_width, frame_height),
-    );
-    let right_col_x = left + (cols.saturating_sub(1) as f32) * measured_char_width;
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        &right_col,
-        BORDER_COLOR,
-        font_size,
-        row_height,
-        (right_col_x, top + font_size),
-        (measured_char_width, frame_height),
-    );
+    let mut out: Vec<(usize, GlyphArea)> = Vec::new();
 
-    // Scrollback rows (oldest → newest, with alpha dimming)
+    // Borders (always present).
+    out.push((
+        CONSOLE_CHANNEL_TOP_BORDER,
+        mk_area(
+            &top_border,
+            BORDER_COLOR,
+            font_size,
+            font_size,
+            (left, top),
+            (frame_width, font_size * 1.5),
+        ),
+    ));
+    out.push((
+        CONSOLE_CHANNEL_BOTTOM_BORDER,
+        mk_area(
+            &bottom_border,
+            BORDER_COLOR,
+            font_size,
+            font_size,
+            (left, top + frame_height),
+            (frame_width, font_size * 1.5),
+        ),
+    ));
+    out.push((
+        CONSOLE_CHANNEL_LEFT_COL,
+        mk_area(
+            &left_col,
+            BORDER_COLOR,
+            font_size,
+            row_height,
+            (left, top + font_size),
+            (measured_char_width, frame_height),
+        ),
+    ));
+    let right_col_x = left + (cols.saturating_sub(1) as f32) * measured_char_width;
+    out.push((
+        CONSOLE_CHANNEL_RIGHT_COL,
+        mk_area(
+            &right_col,
+            BORDER_COLOR,
+            font_size,
+            row_height,
+            (right_col_x, top + font_size),
+            (measured_char_width, frame_height),
+        ),
+    ));
+
+    // Scrollback rows: always emit `scrollback_rows` slots,
+    // padding with empty text when the geometry has fewer items.
+    // Stable structure is what lets the §B2 mutator path target
+    // the same channel across calls when the visible count
+    // shifts under it.
     let gutter_x = left + measured_char_width;
     let content_left = gutter_x + measured_char_width + inner_padding;
     let content_width = right_col_x - content_left - inner_padding;
     let content_top = top + font_size + inner_padding;
     let content_cols = (content_width / measured_char_width).floor() as usize;
 
+    // `scrollback_rows` is `min(scrollback.len(), MAX)`, so every
+    // `slot in 0..scrollback_rows` maps to a populated entry via
+    // `skip + slot`. Signature dispatch (`(scrollback_rows,
+    // completion_rows)`) folds count changes into a structural
+    // shift that takes the full-rebuild path; the in-place mutator
+    // path therefore only runs when the count is unchanged, and
+    // every slot inside the loop is `Some`.
     let skip = geometry.scrollback.len().saturating_sub(scrollback_rows);
     let visible_count = scrollback_rows.max(1);
-    for (i, line) in geometry
-        .scrollback
-        .iter()
-        .skip(skip)
-        .take(scrollback_rows)
-        .enumerate()
-    {
-        let newness = if visible_count <= 1 {
-            1.0
-        } else {
-            i as f32 / (visible_count - 1) as f32
+    for slot in 0..scrollback_rows {
+        let line = geometry
+            .scrollback
+            .get(skip + slot)
+            .expect("slot index derived from scrollback_rows is always in-bounds");
+        let y = content_top + row_height * slot as f32;
+        let (gutter_text, gutter_color, text_str, text_color) = {
+            let newness = if visible_count <= 1 {
+                1.0
+            } else {
+                slot as f32 / (visible_count - 1) as f32
+            };
+            let alpha = lerp_alpha(SCROLLBACK_MIN_ALPHA, 0xff, newness);
+            let (text_color, gutter_color, gutter_glyph) = match line.kind {
+                ConsoleOverlayLineKind::Input => (
+                    with_alpha(INPUT_ECHO_COLOR, alpha),
+                    with_alpha(INPUT_ECHO_COLOR, alpha),
+                    " ",
+                ),
+                ConsoleOverlayLineKind::Output => (
+                    with_alpha(TEXT_COLOR, alpha),
+                    with_alpha(ACCENT_COLOR, alpha),
+                    GUTTER_GLYPH,
+                ),
+                ConsoleOverlayLineKind::Error => (
+                    with_alpha(ERROR_COLOR, alpha),
+                    with_alpha(ERROR_COLOR, alpha),
+                    GUTTER_GLYPH,
+                ),
+            };
+            let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+                &line.text,
+                content_cols,
+            );
+            let gutter = if gutter_glyph == " " {
+                String::new()
+            } else {
+                gutter_glyph.to_string()
+            };
+            (gutter, gutter_color, clipped.to_string(), text_color)
         };
-        let alpha = lerp_alpha(SCROLLBACK_MIN_ALPHA, 0xff, newness);
-        let (text_color, gutter_color, gutter_glyph) = match line.kind {
-            ConsoleOverlayLineKind::Input => (
-                with_alpha(INPUT_ECHO_COLOR, alpha),
-                with_alpha(INPUT_ECHO_COLOR, alpha),
-                " ",
-            ),
-            ConsoleOverlayLineKind::Output => (
-                with_alpha(TEXT_COLOR, alpha),
-                with_alpha(ACCENT_COLOR, alpha),
-                GUTTER_GLYPH,
-            ),
-            ConsoleOverlayLineKind::Error => (
-                with_alpha(ERROR_COLOR, alpha),
-                with_alpha(ERROR_COLOR, alpha),
-                GUTTER_GLYPH,
-            ),
-        };
-        let y = content_top + row_height * i as f32;
-        if gutter_glyph != " " {
-            push_area(
-                &mut tree,
-                &mut id_counter,
-                gutter_glyph,
+        out.push((
+            CONSOLE_CHANNEL_SCROLLBACK_GUTTER_BASE + slot,
+            mk_area(
+                &gutter_text,
                 gutter_color,
                 font_size,
                 row_height,
                 (gutter_x, y),
                 (char_width, row_height),
-            );
-        }
-        let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
-            &line.text,
-            content_cols,
-        );
-        push_area(
-            &mut tree,
-            &mut id_counter,
-            clipped,
-            text_color,
-            font_size,
-            row_height,
-            (content_left, y),
-            (content_width, row_height),
-        );
+            ),
+        ));
+        out.push((
+            CONSOLE_CHANNEL_SCROLLBACK_TEXT_BASE + slot,
+            mk_area(
+                &text_str,
+                text_color,
+                font_size,
+                row_height,
+                (content_left, y),
+                (content_width, row_height),
+            ),
+        ));
     }
 
-    // Completion popup rows
+    // Completion popup rows: same guarantee as scrollback —
+    // `completion_rows = min(completions.len(), MAX)`, so every
+    // slot index is `Some`.
     let completion_top = content_top + row_height * scrollback_rows as f32;
-    for (i, c) in geometry
-        .completions
-        .iter()
-        .take(completion_rows)
-        .enumerate()
-    {
-        let is_selected = geometry.selected_completion == Some(i);
-        let color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
-        let prefix = if is_selected {
-            SELECTED_COMPLETION_MARKER
-        } else {
-            UNSELECTED_COMPLETION_MARKER
+    for slot in 0..completion_rows {
+        let c = geometry
+            .completions
+            .get(slot)
+            .expect("slot index derived from completion_rows is always in-bounds");
+        let y = completion_top + row_height * slot as f32;
+        let (text_str, color) = {
+            let is_selected = geometry.selected_completion == Some(slot);
+            let color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+            let prefix = if is_selected {
+                SELECTED_COMPLETION_MARKER
+            } else {
+                UNSELECTED_COMPLETION_MARKER
+            };
+            let line = match &c.hint {
+                Some(hint) => format!("{prefix}{}    {}", c.text, hint),
+                None => format!("{prefix}{}", c.text),
+            };
+            let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+                &line,
+                content_cols,
+            );
+            (clipped.to_string(), color)
         };
-        let line = match &c.hint {
-            Some(hint) => format!("{prefix}{}    {}", c.text, hint),
-            None => format!("{prefix}{}", c.text),
-        };
-        let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
-            &line,
-            content_cols,
-        );
-        let y = completion_top + row_height * i as f32;
-        push_area(
-            &mut tree,
-            &mut id_counter,
-            clipped,
-            color,
-            font_size,
-            row_height,
-            (content_left, y),
-            (content_width, row_height),
-        );
+        out.push((
+            CONSOLE_CHANNEL_COMPLETION_BASE + slot,
+            mk_area(
+                &text_str,
+                color,
+                font_size,
+                row_height,
+                (content_left, y),
+                (content_width, row_height),
+            ),
+        ));
     }
 
     // Prompt line — single GlyphArea with two ColorFontRegions so
-    // cosmic-text shapes "❯ " and the input as one run, and the
+    // the prompt and the input share one shaped run, and the
     // input's first glyph lands at the prompt's actual shaped
-    // advance. The legacy `create_border_buffer_spans` path used
-    // the same trick; an earlier draft of this builder split into
-    // two GlyphAreas with a `measured_char_width * 2.0` gap
-    // estimate that visibly drifted on fonts where `❯ ` and
-    // `─/│` advance differently.
+    // advance.
     let prompt_budget = font_size * 1.4;
     let y = layout.prompt_y();
     let cursor_byte = baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
@@ -3189,13 +3280,102 @@ fn build_console_overlay_tree(
         ));
     }
     prompt_area.regions = regions;
-    let prompt_element =
-        GfxElement::new_area_non_indexed_with_id(prompt_area, id_counter, id_counter);
-    id_counter += 1;
-    let prompt_leaf = tree.arena.new_node(prompt_element);
-    tree.root.append(prompt_leaf, &mut tree.arena);
+    out.push((CONSOLE_CHANNEL_PROMPT, prompt_area));
 
+    out
+}
+
+/// Build the console overlay tree from a geometry + pre-computed
+/// layout. One Void root with one GlyphArea per stable-channel
+/// slot: 4 borders, `scrollback_rows × 2` scrollback slots,
+/// `completion_rows` completion slots, and 1 prompt line.
+/// Empty slots carry empty text so the structure is constant
+/// across keystrokes — the prerequisite for the in-place
+/// [`build_console_overlay_mutator`] path.
+///
+/// Used by [`Renderer::rebuild_console_overlay_buffers`] which
+/// then registers the tree under
+/// [`crate::application::scene_host::OverlayRole::Console`] and
+/// walks it through the standard overlay-scene pipeline.
+///
+/// `font_system` is needed only for `measure_max_glyph_advance` —
+/// no shaping happens here. The returned tree's GlyphArea
+/// positions are absolute screen coordinates so the walker's
+/// per-tree offset can be `Vec2::ZERO`.
+fn build_console_overlay_tree(
+    geometry: &ConsoleOverlayGeometry,
+    layout: &ConsoleFrameLayout,
+    font_system: &mut FontSystem,
+) -> Tree<GfxElement, GfxMutator> {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    for (channel, area) in console_overlay_areas(geometry, layout, font_system) {
+        let element = GfxElement::new_area_non_indexed_with_id(area, channel, channel);
+        let leaf = tree.arena.new_node(element);
+        tree.root.append(leaf, &mut tree.arena);
+    }
     tree
+}
+
+/// Build a [`MutatorTree`] that updates an already-registered
+/// console overlay tree to the current `(geometry, layout)` state
+/// without rebuilding the arena. Pairs with
+/// [`build_console_overlay_tree`] — both consume
+/// [`console_overlay_areas`] so channels and slot counts match.
+///
+/// Use this for the keystroke hot path: input mutation moves only
+/// the prompt line's text and cursor region; the borders /
+/// scrollback / completion slots stay stable in shape, the
+/// mutator overwrites their fields with the same values, and the
+/// arena is reused. Open / close still use the full rebuild path
+/// because the arena needs to be created or torn down. A change
+/// in `scrollback_rows` or `completion_rows` (window resize)
+/// shifts the structural signature and the dispatcher in
+/// [`Renderer::rebuild_console_overlay_buffers`] falls back to a
+/// rebuild.
+fn build_console_overlay_mutator(
+    geometry: &ConsoleOverlayGeometry,
+    layout: &ConsoleFrameLayout,
+    font_system: &mut FontSystem,
+) -> baumhard::gfx_structs::tree::MutatorTree<GfxMutator> {
+    use baumhard::core::primitives::ApplyOperation;
+    use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::gfx_structs::tree::MutatorTree;
+
+    let mut mt = MutatorTree::new_with(GfxMutator::new_void(0));
+    for (channel, area) in console_overlay_areas(geometry, layout, font_system) {
+        let delta = DeltaGlyphArea::new(vec![
+            GlyphAreaField::Text(area.text),
+            GlyphAreaField::position(area.position.x.0, area.position.y.0),
+            GlyphAreaField::bounds(area.render_bounds.x.0, area.render_bounds.y.0),
+            GlyphAreaField::scale(area.scale.0),
+            GlyphAreaField::line_height(area.line_height.0),
+            GlyphAreaField::ColorFontRegions(area.regions),
+            GlyphAreaField::Outline(area.outline),
+            GlyphAreaField::Operation(ApplyOperation::Assign),
+        ]);
+        let mutator = GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), channel);
+        let id = mt.arena.new_node(mutator);
+        mt.root.append(id, &mut mt.arena);
+    }
+    mt
+}
+
+/// Structural signature for the console overlay tree.
+/// `(scrollback_rows, completion_rows)` from the layout. Two
+/// calls share a signature iff the slot counts match — the
+/// precondition for the in-place
+/// [`build_console_overlay_mutator`] path. Window resize is the
+/// only typical event that shifts these, so the signature stays
+/// stable across keystroke / scrollback-grow / completion-update
+/// frames and the §B2 path runs on those.
+fn console_overlay_signature(layout: &ConsoleFrameLayout) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    layout.scrollback_rows.hash(&mut h);
+    layout.completion_rows.hash(&mut h);
+    h.finish()
 }
 
 /// Shared tree → cosmic-text buffer walker.
@@ -4087,6 +4267,112 @@ mod tests {
             .find(|(c, _)| *c == crate::application::color_picker::PICKER_CHANNEL_HEX)
             .expect("hex channel present");
         assert!(hex_visible.1.text.starts_with('#'));
+    }
+
+    /// Console round-trip: applying the mutator to a tree built
+    /// at state A leaves it byte-identical (per variable field) to
+    /// a fresh `build_console_overlay_tree(B)`. Pins the §B2
+    /// in-place update path for the keystroke hot path: the
+    /// dispatcher in `rebuild_console_overlay_buffers` takes this
+    /// branch on every input change frame.
+    #[test]
+    fn console_mutator_round_trips_to_fresh_build() {
+        use baumhard::core::primitives::Applicable;
+        use baumhard::gfx_structs::tree::BranchChannel;
+        baumhard::font::fonts::init();
+
+        let mut g_a = sample_console_geometry();
+        g_a.input = "anchor".into();
+        g_a.cursor_grapheme = 6;
+        let layout_a = compute_console_frame_layout(&g_a, 1280.0, 720.0);
+
+        let mut g_b = sample_console_geometry();
+        g_b.input = "anchor set".into();
+        g_b.cursor_grapheme = 10;
+        let layout_b = compute_console_frame_layout(&g_b, 1280.0, 720.0);
+
+        // Same scrollback_rows / completion_rows means the
+        // structural signature matches and the mutator is sound.
+        assert_eq!(layout_a.scrollback_rows, layout_b.scrollback_rows);
+        assert_eq!(layout_a.completion_rows, layout_b.completion_rows);
+
+        let mut tree = {
+            let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+            build_console_overlay_tree(&g_a, &layout_a, &mut fs)
+        };
+        let mutator = {
+            let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+            build_console_overlay_mutator(&g_b, &layout_b, &mut fs)
+        };
+        mutator.apply_to(&mut tree);
+
+        let expected = {
+            let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+            console_overlay_areas(&g_b, &layout_b, &mut fs)
+        };
+
+        let mut got: Vec<(usize, GlyphArea)> = Vec::new();
+        for descendant_id in tree.root().descendants(&tree.arena) {
+            let node = tree.arena.get(descendant_id).expect("arena node");
+            let element = node.get();
+            if let Some(area) = element.glyph_area() {
+                got.push((element.channel(), area.clone()));
+            }
+        }
+
+        assert_eq!(got.len(), expected.len(), "post-mutation element count");
+        for ((c_got, a_got), (c_exp, a_exp)) in got.iter().zip(expected.iter()) {
+            assert_eq!(c_got, c_exp, "channel mismatch");
+            assert_eq!(a_got.text, a_exp.text, "text on ch {c_got}");
+            assert_eq!(a_got.position, a_exp.position, "position on ch {c_got}");
+            assert_eq!(a_got.regions, a_exp.regions, "regions on ch {c_got}");
+        }
+
+        // The signature itself must agree across the two layouts
+        // (otherwise the dispatcher wouldn't take the mutator
+        // branch in the first place).
+        assert_eq!(
+            console_overlay_signature(&layout_a),
+            console_overlay_signature(&layout_b)
+        );
+    }
+
+    /// Scrollback-grow shifts the structural signature — the
+    /// dispatcher must take the full-rebuild path, not the
+    /// in-place mutator path. Without this, a mutator computed
+    /// from N+1 scrollback entries applied to a tree built from
+    /// N would walk off the end and silently drop content. Pins
+    /// the structural-signature contract the dispatcher relies
+    /// on in `rebuild_console_overlay_buffers`.
+    #[test]
+    fn console_signature_shifts_on_scrollback_grow() {
+        baumhard::font::fonts::init();
+
+        let mut g_one = sample_console_geometry();
+        g_one.scrollback = vec![ConsoleOverlayLine {
+            text: "> help".into(),
+            kind: ConsoleOverlayLineKind::Input,
+        }];
+        let layout_one = compute_console_frame_layout(&g_one, 1280.0, 720.0);
+
+        let mut g_two = sample_console_geometry();
+        g_two.scrollback = vec![
+            ConsoleOverlayLine {
+                text: "> help".into(),
+                kind: ConsoleOverlayLineKind::Input,
+            },
+            ConsoleOverlayLine {
+                text: "new output line".into(),
+                kind: ConsoleOverlayLineKind::Output,
+            },
+        ];
+        let layout_two = compute_console_frame_layout(&g_two, 1280.0, 720.0);
+
+        assert_ne!(layout_one.scrollback_rows, layout_two.scrollback_rows);
+        assert_ne!(
+            console_overlay_signature(&layout_one),
+            console_overlay_signature(&layout_two)
+        );
     }
 
     /// Round-trip: applying the mutator to a freshly-built tree

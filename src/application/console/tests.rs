@@ -38,6 +38,7 @@ fn load_test_doc() -> MindMapDocument {
         active_toggles: HashSet::new(),
         label_edit_preview: None,
         color_picker_preview: None,
+        active_animations: Vec::new(),
     };
     doc.build_mutation_registry();
     doc
