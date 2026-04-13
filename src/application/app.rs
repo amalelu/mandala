@@ -4210,9 +4210,21 @@ fn compute_picker_geometry(
     Some(geometry)
 }
 
-/// Full picker overlay rebuild — static + dynamic. Called by
-/// `open_color_picker`, the `Resized` handler, and `cancel` /
-/// `commit` on close (via `None`).
+/// Picker overlay update entry point. Dispatches between the
+/// initial-build path and the §B2-compliant in-place mutator path:
+///
+/// - **Closed** (`compute_picker_geometry` returns `None`): unregister
+///   the overlay tree by passing `None` to the buffer rebuild.
+/// - **First open** (no tree registered): build a fresh tree via
+///   [`Renderer::rebuild_color_picker_overlay_buffers`].
+/// - **Already open** (tree exists in `AppScene`): apply a
+///   `MutatorTree<GfxMutator>` of `Assign`-style `DeltaGlyphArea`s
+///   keyed by stable channel, mutating the existing arena in place.
+///   This is the §B2 "mutation, not rebuild" path — it still
+///   re-shapes every cell through cosmic-text (the §B1 perf gap
+///   tracked in `ROADMAP.md` as the hash-keyed shape cache
+///   follow-up), but the picker's tree arena is no longer
+///   re-allocated per hover.
 #[cfg(not(target_arch = "wasm32"))]
 fn rebuild_color_picker_overlay(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -4220,8 +4232,16 @@ fn rebuild_color_picker_overlay(
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    let geometry = compute_picker_geometry(state, renderer);
-    renderer.rebuild_color_picker_overlay_buffers(app_scene, geometry.as_ref());
+    use crate::application::scene_host::OverlayRole;
+    let Some(geometry) = compute_picker_geometry(state, renderer) else {
+        renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
+        return;
+    };
+    if app_scene.overlay_id(OverlayRole::ColorPicker).is_some() {
+        renderer.apply_color_picker_overlay_mutator(app_scene, &geometry);
+    } else {
+        renderer.rebuild_color_picker_overlay_buffers(app_scene, Some(&geometry));
+    }
 }
 
 /// Cancel the picker: clear the transient document preview and

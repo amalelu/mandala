@@ -42,6 +42,37 @@ use crate::application::widgets::color_picker_widget::{load_spec, ChipActionSpec
 /// glyph has a comfortable hit target.
 pub const HUE_SLOT_COUNT: usize = 24;
 
+// =============================================================
+// Stable channel scheme for the picker tree
+// =============================================================
+//
+// Every picker `GlyphArea` is appended to the tree at a deterministic
+// channel — same channel across every rebuild for the same logical
+// cell. Stable channels are what let the `MutatorTree` path target
+// "the hue ring slot at index 7" without re-deriving an index from
+// tree position. Without stability, swapping the picker's full
+// rebuild for a mutator-driven update would silently misalign
+// (Baumhard's `align_child_walks` pairs mutator children with target
+// children by ascending channel — see `tree_walker.rs:226`).
+//
+// The constants below define the picker's channel space. Bands are
+// 100 wide so a future addition (e.g. an extra ring of glyphs) can
+// slot in without renumbering. **Order matters**: the values must be
+// strictly ascending in tree-insertion order, otherwise the walker
+// breaks out of its alignment loop.
+//
+// Layout-wise: title → hue ring → hint → sat bar → val bar → ॐ
+// preview → hex readout → chip row.
+
+pub const PICKER_CHANNEL_TITLE: usize = 1;
+pub const PICKER_CHANNEL_HUE_RING_BASE: usize = 100; // +0..23
+pub const PICKER_CHANNEL_HINT: usize = 200;
+pub const PICKER_CHANNEL_SAT_BASE: usize = 300; // +0..20 (skipping +10)
+pub const PICKER_CHANNEL_VAL_BASE: usize = 400; // +0..20 (skipping +10)
+pub const PICKER_CHANNEL_PREVIEW: usize = 500;
+pub const PICKER_CHANNEL_HEX: usize = 600;
+pub const PICKER_CHANNEL_CHIP_BASE: usize = 700; // +0..N (chips.len)
+
 /// Number of cells on each crosshair bar. Odd so the center cell sits
 /// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 10 is the
 /// wheel center where ॐ lives — it's counted in the HSV quantization
@@ -1746,6 +1777,40 @@ mod tests {
         assert!(left >= 0.0 && top >= 0.0);
         assert!(left + bw <= 250.5);
         assert!(top + bh <= 200.5);
+    }
+
+    /// Picker channel constants must be strictly ascending in
+    /// tree-insertion order, otherwise Baumhard's
+    /// `align_child_walks` (which pairs mutator children with
+    /// target children by ascending channel) breaks alignment and
+    /// the §B2 mutator path silently misses elements.
+    ///
+    /// Insertion order: title → hue ring (24 slots) → hint →
+    /// sat bar (21 cells, channels also stride through the
+    /// skipped center) → val bar (same) → preview → hex → chips.
+    #[test]
+    fn picker_channels_are_strictly_ascending() {
+        let chips_count = theme_chips().len();
+        let bands: &[(&str, usize, usize)] = &[
+            ("title", PICKER_CHANNEL_TITLE, 1),
+            ("hue ring", PICKER_CHANNEL_HUE_RING_BASE, HUE_SLOT_COUNT),
+            ("hint", PICKER_CHANNEL_HINT, 1),
+            ("sat bar", PICKER_CHANNEL_SAT_BASE, SAT_CELL_COUNT),
+            ("val bar", PICKER_CHANNEL_VAL_BASE, VAL_CELL_COUNT),
+            ("preview", PICKER_CHANNEL_PREVIEW, 1),
+            ("hex", PICKER_CHANNEL_HEX, 1),
+            ("chips", PICKER_CHANNEL_CHIP_BASE, chips_count),
+        ];
+        let mut prev_band_max: usize = 0;
+        for (name, base, count) in bands {
+            let band_min = *base;
+            let band_max = *base + count - 1;
+            assert!(
+                band_min > prev_band_max,
+                "{name} band starts at {band_min} but previous band ended at {prev_band_max}"
+            );
+            prev_band_max = band_max;
+        }
     }
 
     /// `PickerGesture::Resize` must compute the new scale
