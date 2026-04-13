@@ -445,6 +445,12 @@ pub struct Renderer {
     color_picker_backdrop: Option<(f32, f32, f32, f32)>,
     /// Temporary overlay buffers (e.g., selection rectangle). Camera-transformed.
     overlay_buffers: Vec<MindMapTextBuffer>,
+    /// Screen-space buffers produced by walking the app's
+    /// [`AppScene`](crate::application::scene_host::AppScene).
+    /// Populated by [`Self::rebuild_overlay_scene_buffers`] and
+    /// drawn alongside the existing console/color-picker overlay
+    /// buffer lists. Empty until an overlay migrates to a tree.
+    overlay_scene_buffers: Vec<MindMapTextBuffer>,
     /// Set whenever the camera's viewport rect changes (pan, zoom,
     /// resize) and `connection_buffers` was cleared as a result.
     /// Consumed once per frame by the event loop in `AboutToWait` to
@@ -670,6 +676,7 @@ impl Renderer {
             color_picker_dynamic_buffers: Vec::new(),
             color_picker_backdrop: None,
             overlay_buffers: Vec::new(),
+            overlay_scene_buffers: Vec::new(),
             connection_viewport_dirty: false,
             connection_geometry_dirty: false,
             rect_pipeline,
@@ -1198,6 +1205,7 @@ impl Renderer {
         let palette_text_areas: Vec<TextArea> = self.console_overlay_buffers.iter()
             .chain(self.color_picker_static_buffers.iter())
             .chain(self.color_picker_dynamic_buffers.iter())
+            .chain(self.overlay_scene_buffers.iter())
             .map(|tb| TextArea {
                 buffer: &tb.buffer,
                 left: tb.pos.0,
@@ -1427,86 +1435,65 @@ impl Renderer {
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
+        walk_tree_into_buffers(
+            tree,
+            Vec2::ZERO,
+            &mut font_system,
+            |key, buffer| {
+                self.mindmap_buffers.insert(key, buffer);
+            },
+            |rect| self.node_background_rects.push(rect),
+        );
+    }
 
-        for descendant_id in tree.root().descendants(&tree.arena) {
-            let node = match tree.arena.get(descendant_id) {
-                Some(n) => n,
-                None => continue,
+    /// Rebuild the screen-space buffer list for every tree the app
+    /// has registered into [`AppScene`]. Walks the scene in layer
+    /// order and produces one flat list; callers do not need to
+    /// know about individual overlays. The renderer composites the
+    /// result into the palette pass alongside the per-overlay
+    /// buffer stores that predate this refactor — once every
+    /// overlay has migrated to a tree, those per-overlay stores go
+    /// away (see Session 5 in the unified-rendering plan).
+    ///
+    /// # Costs
+    ///
+    /// O(sum of descendants) across every tree in the scene.
+    /// Allocates a `cosmic_text::Buffer` per `GlyphArea` with
+    /// non-empty text. Empty scenes short-circuit cheaply.
+    pub fn rebuild_overlay_scene_buffers(
+        &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
+    ) {
+        self.overlay_scene_buffers.clear();
+        if app_scene.scene().is_empty() {
+            return;
+        }
+        let ids = app_scene.scene_mut().ids_in_layer_order();
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+        for id in ids {
+            let Some(entry) = app_scene.scene().get(id) else {
+                continue;
             };
-            let element = node.get();
-            let area = match element.glyph_area() {
-                Some(a) => a,
-                None => continue, // Skip Void and GlyphModel nodes
-            };
-
-            // Background rects live on the GlyphArea itself. Even
-            // text-empty elements can have a background (a blank
-            // colored pad), so collect the rect before the text
-            // skip below. Mutations on the tree can mutate this
-            // directly via `glyph_area_mut().background_color`.
-            if let Some(color) = area.background_color {
-                self.node_background_rects.push(NodeBackgroundRect {
-                    position: Vec2::new(area.position.x.0, area.position.y.0),
-                    size: Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
-                    color,
-                });
-            }
-
-            if area.text.is_empty() {
+            if !entry.visible {
                 continue;
             }
-
-            let scale = area.scale.0;
-            let line_height = area.line_height.0;
-            let bound_x = area.render_bounds.x.0;
-            let bound_y = area.render_bounds.y.0;
-
-            let mut buffer = cosmic_text::Buffer::new(
+            walk_tree_into_buffers(
+                &entry.tree,
+                entry.offset,
                 &mut font_system,
-                cosmic_text::Metrics::new(scale, line_height),
+                |_key, buffer| {
+                    self.overlay_scene_buffers.push(buffer);
+                },
+                |_rect| {
+                    // Overlay-tree background fills aren't wired to
+                    // a screen-space rect pipeline yet. When
+                    // Sessions 3 / 4 need them they can add a
+                    // dedicated `overlay_scene_background_rects`
+                    // field and a screen-space draw pass.
+                },
             );
-            buffer.set_size(&mut font_system, Some(bound_x), Some(bound_y));
-            buffer.set_wrap(&mut font_system, cosmic_text::Wrap::Word);
-
-            // Build spans from ColorFontRegions
-            let text = &area.text;
-            let spans: Vec<(&str, Attrs)> = if area.regions.num_regions() == 0 {
-                vec![(text.as_str(), Attrs::new())]
-            } else {
-                area.regions.all_regions().iter().filter_map(|region| {
-                    let start = grapheme_chad::find_byte_index_of_char(text, region.range.start)
-                        .unwrap_or(text.len());
-                    let end = grapheme_chad::find_byte_index_of_char(text, region.range.end)
-                        .unwrap_or(text.len());
-                    if start >= end {
-                        return None;
-                    }
-                    let slice = &text[start..end];
-                    let mut attrs = Attrs::new();
-                    if let Some(rgba) = region.color {
-                        let u8c = baumhard::util::color::convert_f32_to_u8(&rgba);
-                        attrs = attrs.color(cosmic_text::Color::rgba(u8c[0], u8c[1], u8c[2], u8c[3]));
-                    }
-                    attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
-                    Some((slice, attrs))
-                }).collect()
-            };
-
-            buffer.set_rich_text(
-                &mut font_system,
-                spans,
-                &Attrs::new(),
-                cosmic_text::Shaping::Advanced,
-                None,
-            );
-            buffer.shape_until_scroll(&mut font_system, false);
-
-            let text_buffer = MindMapTextBuffer {
-                buffer,
-                pos: (area.position.x.0, area.position.y.0),
-                bounds: (bound_x, bound_y),
-            };
-            self.mindmap_buffers.insert(element.unique_id().to_string(), text_buffer);
         }
     }
 
@@ -2951,6 +2938,111 @@ pub struct MindMapTextBuffer {
     pub buffer: Buffer,
     pub pos: (f32, f32),
     pub bounds: (f32, f32),
+}
+
+/// Shared tree → cosmic-text buffer walker.
+///
+/// Iterates every `GlyphArea` descendant of `tree`, shapes a
+/// `cosmic_text::Buffer` for each one, and hands the result to
+/// `yield_buffer`. Background fills (if any) are forwarded to
+/// `yield_background` before the buffer is built so rects attached
+/// to text-empty areas still land. The `offset` is added to every
+/// `position` — callers pass `Vec2::ZERO` for canvas-space trees
+/// (the mindmap) and the scene-tree's registered offset for
+/// screen-space overlays.
+///
+/// # Costs
+///
+/// O(descendants). One `cosmic_text::Buffer` allocated per
+/// non-empty-text area; background rect yields are trivial. Holds
+/// the provided `font_system` write guard for the duration of the
+/// walk — keep the call site's own guard scope tight.
+fn walk_tree_into_buffers(
+    tree: &Tree<GfxElement, GfxMutator>,
+    offset: Vec2,
+    font_system: &mut FontSystem,
+    mut yield_buffer: impl FnMut(String, MindMapTextBuffer),
+    mut yield_background: impl FnMut(NodeBackgroundRect),
+) {
+    for descendant_id in tree.root().descendants(&tree.arena) {
+        let node = match tree.arena.get(descendant_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        let element = node.get();
+        let area = match element.glyph_area() {
+            Some(a) => a,
+            None => continue, // Void and GlyphModel nodes carry no text.
+        };
+
+        if let Some(color) = area.background_color {
+            yield_background(NodeBackgroundRect {
+                position: Vec2::new(area.position.x.0, area.position.y.0) + offset,
+                size: Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
+                color,
+            });
+        }
+
+        if area.text.is_empty() {
+            continue;
+        }
+
+        let scale = area.scale.0;
+        let line_height = area.line_height.0;
+        let bound_x = area.render_bounds.x.0;
+        let bound_y = area.render_bounds.y.0;
+
+        let mut buffer = cosmic_text::Buffer::new(
+            font_system,
+            cosmic_text::Metrics::new(scale, line_height),
+        );
+        buffer.set_size(font_system, Some(bound_x), Some(bound_y));
+        buffer.set_wrap(font_system, cosmic_text::Wrap::Word);
+
+        let text = &area.text;
+        let spans: Vec<(&str, Attrs)> = if area.regions.num_regions() == 0 {
+            vec![(text.as_str(), Attrs::new())]
+        } else {
+            area.regions
+                .all_regions()
+                .iter()
+                .filter_map(|region| {
+                    let start = grapheme_chad::find_byte_index_of_char(text, region.range.start)
+                        .unwrap_or(text.len());
+                    let end = grapheme_chad::find_byte_index_of_char(text, region.range.end)
+                        .unwrap_or(text.len());
+                    if start >= end {
+                        return None;
+                    }
+                    let slice = &text[start..end];
+                    let mut attrs = Attrs::new();
+                    if let Some(rgba) = region.color {
+                        let u8c = baumhard::util::color::convert_f32_to_u8(&rgba);
+                        attrs = attrs
+                            .color(cosmic_text::Color::rgba(u8c[0], u8c[1], u8c[2], u8c[3]));
+                    }
+                    attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
+                    Some((slice, attrs))
+                })
+                .collect()
+        };
+
+        buffer.set_rich_text(
+            font_system,
+            spans,
+            &Attrs::new(),
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(font_system, false);
+
+        let text_buffer = MindMapTextBuffer {
+            buffer,
+            pos: (area.position.x.0 + offset.x, area.position.y.0 + offset.y),
+            bounds: (bound_x, bound_y),
+        };
+        yield_buffer(element.unique_id().to_string(), text_buffer);
+    }
 }
 
 /// Convert a normalized `[0, 1]` RGB triple into an opaque
