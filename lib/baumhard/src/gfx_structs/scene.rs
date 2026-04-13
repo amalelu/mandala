@@ -32,33 +32,52 @@ use slab::Slab;
 pub struct SceneTreeId(usize);
 
 impl SceneTreeId {
-    /// Internal accessor for tests and benches.
-    pub fn raw(&self) -> usize {
+    /// Crate-internal accessor for tests and benches.
+    pub(crate) fn raw(&self) -> usize {
         self.0
     }
 }
 
 /// One tree in a scene, plus its layering and compositing metadata.
+///
+/// All fields are private so the parent [`Scene`]'s invariants
+/// (layer-order cache freshness, role-slot consistency in
+/// downstream wrappers) can't be silently violated by direct field
+/// assignment. Read via the accessors; mutate via [`Scene`]'s
+/// `set_layer` / `set_offset` / `set_visible` / `apply_mutator`.
 pub struct SceneEntry {
-    /// The owned tree. Mutate via [`Scene::apply_mutator`] (preferred,
-    /// per §B1 "mutation, not rebuild") or borrow with [`Scene::tree_mut`]
-    /// for builder phases.
-    pub tree: Tree<GfxElement, GfxMutator>,
-    /// Higher layers draw on top. Equal layers break ties by insertion
-    /// order (older entries draw first).
-    pub layer: i32,
-    /// Screen-space offset added to every `GlyphArea` position before
-    /// rendering and hit-testing. A scene-level offset means the tree
-    /// itself can lay out relative to its own origin and be composited
-    /// anywhere.
-    pub offset: Vec2,
-    /// Skip rendering and hit-testing when `false`. Keeping the tree
-    /// allocated is cheaper than tearing it down and rebuilding on
-    /// every toggle (e.g. console show/hide).
-    pub visible: bool,
+    tree: Tree<GfxElement, GfxMutator>,
+    layer: i32,
+    offset: Vec2,
+    visible: bool,
 }
 
 impl SceneEntry {
+    /// Immutable borrow of the registered tree. Used by the
+    /// renderer's per-tree buffer walker.
+    pub fn tree(&self) -> &Tree<GfxElement, GfxMutator> {
+        &self.tree
+    }
+
+    /// Higher layers draw on top. Equal layers break ties by
+    /// insertion order (older entries draw first).
+    pub fn layer(&self) -> i32 {
+        self.layer
+    }
+
+    /// Coordinate-space offset added to every `GlyphArea` position
+    /// before rendering and hit-testing. The space (canvas vs
+    /// screen) is a property of the consuming render pass, not of
+    /// the scene itself.
+    pub fn offset(&self) -> Vec2 {
+        self.offset
+    }
+
+    /// Whether this entry participates in render + hit-test.
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
+
     fn contains(&self, point: Vec2) -> bool {
         if !self.visible {
             return false;
@@ -147,22 +166,19 @@ impl Scene {
         Some(self.trees.remove(id.0))
     }
 
-    /// Immutable access to a tree entry.
+    /// Immutable access to a tree entry. Use the accessors on
+    /// [`SceneEntry`] (`tree()`, `layer()`, `offset()`, `visible()`)
+    /// to inspect.
     pub fn get(&self, id: SceneTreeId) -> Option<&SceneEntry> {
         self.trees.get(id.0)
     }
 
-    /// Mutable access to a tree entry. Prefer [`Self::apply_mutator`]
-    /// for state changes so the mutator invariant (§B1) is upheld;
-    /// this escape hatch exists for builder phases (tree
-    /// construction, bulk reinit).
-    pub fn get_mut(&mut self, id: SceneTreeId) -> Option<&mut SceneEntry> {
-        self.trees.get_mut(id.0)
-    }
-
-    /// Mutable borrow of just the tree. Convenience over
-    /// [`Self::get_mut`] when the caller doesn't care about offset or
-    /// layer.
+    /// Mutable borrow of just the tree. Builder-phase escape hatch.
+    /// Mutations via the returned reference that touch GlyphArea
+    /// position or bounds **must** call
+    /// [`Tree::invalidate_aabb_cache`] or the scene's hit-test
+    /// memo will drift; prefer [`Self::apply_mutator`] which
+    /// handles invalidation automatically.
     pub fn tree_mut(&mut self, id: SceneTreeId) -> Option<&mut Tree<GfxElement, GfxMutator>> {
         self.trees.get_mut(id.0).map(|e| &mut e.tree)
     }
@@ -208,20 +224,11 @@ impl Scene {
         }
     }
 
-    /// Iterate trees in draw order, lowest layer first. Same order
-    /// the renderer should use to composite; [`Self::component_at`]
-    /// walks the reverse of this.
-    pub fn iter_in_layer_order(&mut self) -> impl Iterator<Item = (SceneTreeId, &SceneEntry)> {
-        self.ensure_layer_order();
-        self.layer_order
-            .iter()
-            .copied()
-            .filter_map(|id| self.trees.get(id.0).map(|e| (id, e)))
-    }
-
     /// Handles in draw order, lowest layer first. Returned as a
     /// vector so callers can hold `&mut` to the scene's trees one
-    /// at a time without fighting the borrow checker.
+    /// at a time without fighting the borrow checker. Same order
+    /// the renderer should use to composite; [`Self::component_at`]
+    /// walks the reverse of this.
     pub fn ids_in_layer_order(&mut self) -> Vec<SceneTreeId> {
         self.ensure_layer_order();
         self.layer_order.clone()
@@ -229,14 +236,19 @@ impl Scene {
 
     /// Top-down hit-test. Walks trees in reverse draw order and
     /// returns the first one whose AABB contains `point`, together
-    /// with the best-matching descendant [`NodeId`] inside that tree.
+    /// with the best-matching descendant [`NodeId`] inside that
+    /// tree.
     ///
     /// # Costs
     ///
-    /// O(trees) for the outer scan; O(descendants) inside the
-    /// matched tree via [`Tree::descendant_at`]. The scene keeps no
-    /// per-node spatial index — that's the tree's responsibility if
-    /// one is ever wired up (see the unimplemented
+    /// O(trees) outer scan + a memoised AABB check per tree
+    /// (O(1) when warm, O(descendants) once after each mutator).
+    /// On a hit, one additional O(descendants) walk inside the
+    /// matched tree via [`Tree::descendant_at`]. Misses cost only
+    /// the bbox check — they don't trigger the inner walk. No
+    /// allocation. The scene keeps no per-node spatial index —
+    /// that's the tree's responsibility if one is ever wired up
+    /// (see the unimplemented
     /// [`crate::gfx_structs::util::regions::RegionIndexer`]).
     pub fn component_at(&mut self, point: Vec2) -> Option<(SceneTreeId, NodeId)> {
         self.ensure_layer_order();
@@ -244,6 +256,9 @@ impl Scene {
             let Some(entry) = self.trees.get(id.0) else {
                 continue;
             };
+            // Cheap reject: the bbox check takes O(1) when the
+            // memo is warm, so misses are linear in tree count
+            // not in node count.
             if !entry.contains(point) {
                 continue;
             }

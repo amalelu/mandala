@@ -108,7 +108,10 @@ fn criterion_benchmark(c: &mut Criterion) {
     // scene + hit-test //
     c.bench_function("descendant_at_hits_single_area", |b| b.iter(|| do_descendant_at_hits_single_area()));
     c.bench_function("descendant_at_prefers_smallest", |b| b.iter(|| do_descendant_at_prefers_smallest()));
+    c.bench_function("descendant_near_grants_slack", |b| b.iter(|| do_descendant_near_grants_slack()));
     c.bench_function("descendants_aabb", |b| b.iter(|| do_descendants_aabb_covers_all_areas()));
+    c.bench_function("descendants_aabb_invalidated_by_mutator", |b| b.iter(|| do_descendants_aabb_cache_invalidated_by_mutator()));
+    c.bench_function("invalidate_aabb_cache", |b| b.iter(|| do_invalidate_aabb_cache_clears_memo()));
     c.bench_function("scene_component_at", |b| b.iter(|| do_scene_insert_and_component_at()));
     c.bench_function("scene_layer_order_hit_priority", |b| b.iter(|| do_scene_layer_order_controls_hit_priority()));
     c.bench_function("scene_offset_hit_test", |b| b.iter(|| do_scene_offset_is_applied_to_hit_test()));

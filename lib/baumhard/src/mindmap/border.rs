@@ -1,5 +1,21 @@
 use serde::{Deserialize, Serialize};
 
+/// Fraction of `font_size` by which a border's top/bottom runs
+/// are pulled inward so their glyph visible extents overlap with
+/// the vertical columns. Empirically chosen for LiberationSans at
+/// typical border font sizes; larger values visibly encroach on
+/// the node content, smaller values leave gaps. Shared by the
+/// renderer and `tree_builder::build_border_tree` so the two
+/// paths can't drift.
+pub const BORDER_CORNER_OVERLAP_FRAC: f32 = 0.35;
+
+/// Multiplier estimating the advance of one border glyph as a
+/// fraction of `font_size`. `0.6` matches LiberationSans box-
+/// drawing characters at typical border sizes; both the renderer's
+/// keyed border-buffer rebuild and the border-tree builder rely on
+/// this to position corner glyphs consistently.
+pub const BORDER_APPROX_CHAR_WIDTH_FRAC: f32 = 0.6;
+
 /// Defines which glyphs to use for rendering a node's border.
 /// Each field is a single character (glyph) from the selected font.
 /// The border is rendered as positioned text elements around the node content.

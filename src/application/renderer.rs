@@ -1458,8 +1458,14 @@ impl Renderer {
             tree,
             Vec2::ZERO,
             &mut font_system,
-            |key, buffer| {
-                self.mindmap_buffers.insert(key, buffer);
+            |unique_id, buffer| {
+                // Mindmap is the only buffer store that needs
+                // string keys (its `FxHashMap<String, _>` is shared
+                // with the legacy edit / undo paths). Stringifying
+                // here keeps the allocation off the helper's
+                // critical path so overlay / canvas-scene callers
+                // never pay it.
+                self.mindmap_buffers.insert(unique_id.to_string(), buffer);
             },
             |rect| self.node_background_rects.push(rect),
         );
@@ -1484,10 +1490,10 @@ impl Renderer {
         app_scene: &mut crate::application::scene_host::AppScene,
     ) {
         self.overlay_scene_buffers.clear();
-        if app_scene.overlay_scene().is_empty() {
+        let ids = app_scene.overlay_ids_in_layer_order();
+        if ids.is_empty() {
             return;
         }
-        let ids = app_scene.overlay_scene_mut().ids_in_layer_order();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
@@ -1495,14 +1501,14 @@ impl Renderer {
             let Some(entry) = app_scene.overlay_scene().get(id) else {
                 continue;
             };
-            if !entry.visible {
+            if !entry.visible() {
                 continue;
             }
             walk_tree_into_buffers(
-                &entry.tree,
-                entry.offset,
+                entry.tree(),
+                entry.offset(),
                 &mut font_system,
-                |_key, buffer| {
+                |_unique_id, buffer| {
                     self.overlay_scene_buffers.push(buffer);
                 },
                 |_rect| {
@@ -1534,10 +1540,10 @@ impl Renderer {
     ) {
         self.canvas_scene_buffers.clear();
         self.canvas_scene_background_rects.clear();
-        if app_scene.canvas_scene().is_empty() {
+        let ids = app_scene.canvas_ids_in_layer_order();
+        if ids.is_empty() {
             return;
         }
-        let ids = app_scene.canvas_scene_mut().ids_in_layer_order();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
@@ -1545,14 +1551,14 @@ impl Renderer {
             let Some(entry) = app_scene.canvas_scene().get(id) else {
                 continue;
             };
-            if !entry.visible {
+            if !entry.visible() {
                 continue;
             }
             walk_tree_into_buffers(
-                &entry.tree,
-                entry.offset,
+                entry.tree(),
+                entry.offset(),
                 &mut font_system,
-                |_key, buffer| {
+                |_unique_id, buffer| {
                     self.canvas_scene_buffers.push(buffer);
                 },
                 |rect| {
@@ -1607,12 +1613,13 @@ impl Renderer {
         border_elements: &[BorderElement],
         dirty_node_ids: Option<&std::collections::HashSet<String>>,
     ) {
-        /// How far the top/bottom border line boxes are pulled inward (toward
-        /// the node content) so their glyph visible extents overlap with the
-        /// vertical columns' glyph visible extents. Empirically chosen for
-        /// LiberationSans at typical border font sizes; larger values visibly
-        /// encroach on the node content, smaller values leave gaps.
-        const CORNER_OVERLAP_FRAC: f32 = 0.35;
+        // Layout constants live on `baumhard::mindmap::border` so
+        // this path and `tree_builder::build_border_tree` can't
+        // drift on geometry. See the doc on the constants for the
+        // empirical rationale.
+        use baumhard::mindmap::border::{
+            BORDER_APPROX_CHAR_WIDTH_FRAC, BORDER_CORNER_OVERLAP_FRAC,
+        };
 
         let mut font_system = fonts::FONT_SYSTEM
             .write()
@@ -1632,13 +1639,13 @@ impl Renderer {
             let (nw, nh) = elem.node_size;
 
             // --- Horizontal math (identical to the classic path) ---
-            let approx_char_width = font_size * 0.6;
+            let approx_char_width = font_size * BORDER_APPROX_CHAR_WIDTH_FRAC;
             let char_count = ((nw / approx_char_width) + 2.0)
                 .ceil()
                 .max(3.0) as usize;
             let right_corner_x =
                 nx - approx_char_width + (char_count - 1) as f32 * approx_char_width;
-            let corner_overlap = font_size * CORNER_OVERLAP_FRAC;
+            let corner_overlap = font_size * BORDER_CORNER_OVERLAP_FRAC;
             let top_y = ny - font_size + corner_overlap;
             let bottom_y = ny + nh - corner_overlap;
 
@@ -3009,24 +3016,32 @@ pub struct MindMapTextBuffer {
 ///
 /// Iterates every `GlyphArea` descendant of `tree`, shapes a
 /// `cosmic_text::Buffer` for each one, and hands the result to
-/// `yield_buffer`. Background fills (if any) are forwarded to
-/// `yield_background` before the buffer is built so rects attached
-/// to text-empty areas still land. The `offset` is added to every
-/// `position` — callers pass `Vec2::ZERO` for canvas-space trees
-/// (the mindmap) and the scene-tree's registered offset for
-/// screen-space overlays.
+/// `yield_buffer` together with the element's `unique_id` (raw
+/// `usize`, not stringified — keying is the caller's choice).
+/// Background fills (if any) are forwarded to `yield_background`
+/// before the buffer is built so rects attached to text-empty
+/// areas still land.
+///
+/// `offset` is added to every `position` — callers pass
+/// `Vec2::ZERO` whenever the tree's areas are already in the
+/// destination coordinate space (e.g. the mindmap, whose nodes
+/// hold canvas-space positions); pass the registered tree offset
+/// for scene trees that lay out in their own local frame.
 ///
 /// # Costs
 ///
 /// O(descendants). One `cosmic_text::Buffer` allocated per
-/// non-empty-text area; background rect yields are trivial. Holds
-/// the provided `font_system` write guard for the duration of the
-/// walk — keep the call site's own guard scope tight.
+/// non-empty-text area; background rect yields are trivial. No
+/// per-area `String` allocation — the `unique_id` flows as a raw
+/// integer and only the mindmap closure stringifies it for its
+/// `FxHashMap` key. Holds the provided `font_system` write guard
+/// for the duration of the walk — keep the call site's own guard
+/// scope tight.
 fn walk_tree_into_buffers(
     tree: &Tree<GfxElement, GfxMutator>,
     offset: Vec2,
     font_system: &mut FontSystem,
-    mut yield_buffer: impl FnMut(String, MindMapTextBuffer),
+    mut yield_buffer: impl FnMut(usize, MindMapTextBuffer),
     mut yield_background: impl FnMut(NodeBackgroundRect),
 ) {
     for descendant_id in tree.root().descendants(&tree.arena) {
@@ -3106,7 +3121,7 @@ fn walk_tree_into_buffers(
             pos: (area.position.x.0 + offset.x, area.position.y.0 + offset.y),
             bounds: (bound_x, bound_y),
         };
-        yield_buffer(element.unique_id().to_string(), text_buffer);
+        yield_buffer(element.unique_id(), text_buffer);
     }
 }
 

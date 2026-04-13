@@ -158,10 +158,12 @@ impl AppScene {
         &self.canvas
     }
 
-    /// Mutable access to the canvas-space sub-scene — for the
-    /// renderer's buffer walker which needs to sort ids by layer.
-    pub fn canvas_scene_mut(&mut self) -> &mut Scene {
-        &mut self.canvas
+    /// Layer-ordered handles into the canvas sub-scene. Returned
+    /// as a vector so the renderer can iterate without holding a
+    /// `&mut Scene` (which would let a caller bypass `AppScene`
+    /// role tracking by removing trees directly).
+    pub fn canvas_ids_in_layer_order(&mut self) -> Vec<SceneTreeId> {
+        self.canvas.ids_in_layer_order()
     }
 
     /// Register (or replace) a canvas-space role tree.
@@ -224,6 +226,22 @@ impl AppScene {
         }
     }
 
+    /// Toggle visibility of a canvas role's tree without removing.
+    pub fn set_canvas_visible(&mut self, role: CanvasRole, visible: bool) {
+        if let Some(id) = self.canvas_id(role) {
+            self.canvas.set_visible(id, visible);
+        }
+    }
+
+    /// Move a canvas role's tree to a new canvas-space offset.
+    /// Used by drag previews that want to translate a whole
+    /// component without rebuilding it.
+    pub fn set_canvas_offset(&mut self, role: CanvasRole, offset: Vec2) {
+        if let Some(id) = self.canvas_id(role) {
+            self.canvas.set_offset(id, offset);
+        }
+    }
+
     // --- Screen-space sub-scene -------------------------------
 
     /// Read-only view of the overlay sub-scene. Used by the
@@ -232,9 +250,10 @@ impl AppScene {
         &self.overlay
     }
 
-    /// Mutable access to the overlay sub-scene.
-    pub fn overlay_scene_mut(&mut self) -> &mut Scene {
-        &mut self.overlay
+    /// Layer-ordered handles into the overlay sub-scene. Same
+    /// rationale as [`Self::canvas_ids_in_layer_order`].
+    pub fn overlay_ids_in_layer_order(&mut self) -> Vec<SceneTreeId> {
+        self.overlay.ids_in_layer_order()
     }
 
     /// Register (or replace) the tree backing a named overlay role.

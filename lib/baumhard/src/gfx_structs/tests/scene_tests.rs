@@ -7,12 +7,14 @@
 use glam::Vec2;
 use indextree::NodeId;
 
+use crate::core::primitives::Applicable;
 use crate::font::fonts;
-use crate::gfx_structs::area::GlyphArea;
+use crate::gfx_structs::area::{GlyphArea, GlyphAreaField};
 use crate::gfx_structs::element::GfxElement;
-use crate::gfx_structs::mutator::GfxMutator;
+use crate::gfx_structs::mutator::{GfxMutator, Mutation};
 use crate::gfx_structs::scene::{Scene, SceneTreeId};
-use crate::gfx_structs::tree::Tree;
+use crate::gfx_structs::tree::{MutatorTree, Tree};
+use crate::util::ordered_vec2::OrderedVec2;
 
 /// Build a small tree with one `GlyphArea` of the given AABB,
 /// returning the tree and the id of the single leaf we can hit-test
@@ -237,4 +239,94 @@ pub fn do_scene_ids_in_layer_order_is_stable_by_insertion() {
     // b has lowest layer → first. a and c share layer 5 → a before c
     // because a was inserted first.
     assert_eq!(order, vec![b, a, c]);
+}
+
+// =====================================================================
+// AABB cache invalidation
+// =====================================================================
+
+#[test]
+pub fn test_descendants_aabb_cache_invalidated_by_mutator() {
+    do_descendants_aabb_cache_invalidated_by_mutator();
+}
+
+pub fn do_descendants_aabb_cache_invalidated_by_mutator() {
+    // Channel 1 lets the leaf accept a mutator that travels through
+    // the void root (channel 0) and matches on the child.
+    let (mut tree, _leaf) = tree_with_area(Vec2::new(10.0, 10.0), Vec2::new(50.0, 50.0), 1);
+
+    // Warm the bbox cache.
+    let initial = tree
+        .descendants_aabb()
+        .expect("seeded tree has one visible area");
+    assert!((initial.0.x - 10.0).abs() < 1e-3);
+
+    // Mutator: void parent + child that overwrites the area's
+    // position to (100, 100). Bounds and size unchanged.
+    let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new();
+    let area_delta =
+        crate::gfx_structs::area::DeltaGlyphArea::new(vec![
+            GlyphAreaField::position(100.0, 100.0),
+            GlyphAreaField::Operation(crate::core::primitives::ApplyOperation::Assign),
+        ]);
+    let mutator_node = mutator
+        .arena
+        .new_node(GfxMutator::new(Mutation::area_delta(area_delta), 1));
+    mutator.root.append(mutator_node, &mut mutator.arena);
+
+    mutator.apply_to(&mut tree);
+
+    let after = tree
+        .descendants_aabb()
+        .expect("post-mutation tree still has the area");
+    assert!(
+        (after.0.x - 100.0).abs() < 1e-3,
+        "expected position.x to track the mutator (was {}, expected 100)",
+        after.0.x
+    );
+}
+
+#[test]
+pub fn test_invalidate_aabb_cache_clears_memo() {
+    do_invalidate_aabb_cache_clears_memo();
+}
+
+pub fn do_invalidate_aabb_cache_clears_memo() {
+    let (mut tree, leaf) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(20.0, 20.0), 0);
+    // Warm.
+    let _ = tree.descendants_aabb();
+    // Bypass the mutator pipeline to mutate position directly.
+    {
+        let element = tree.arena.get_mut(leaf).unwrap().get_mut();
+        if let Some(area) = element.glyph_area_mut() {
+            area.position = OrderedVec2::new_f32(50.0, 50.0);
+        }
+    }
+    // Without an invalidation call the memo is stale.
+    let stale = tree.descendants_aabb().expect("area present");
+    assert!((stale.0.x - 0.0).abs() < 1e-3, "memo is intentionally stale");
+
+    // After explicit invalidation the recompute picks up the new
+    // position.
+    tree.invalidate_aabb_cache();
+    let fresh = tree.descendants_aabb().expect("area present");
+    assert!((fresh.0.x - 50.0).abs() < 1e-3);
+}
+
+// =====================================================================
+// Slack hit-test (descendant_near)
+// =====================================================================
+
+#[test]
+pub fn test_descendant_near_grants_slack() {
+    do_descendant_near_grants_slack();
+}
+
+pub fn do_descendant_near_grants_slack() {
+    let (tree, leaf) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0), 0);
+    // Just outside the AABB on the right.
+    let pt = Vec2::new(15.0, 5.0);
+    assert_eq!(tree.descendant_at(pt), None);
+    assert_eq!(tree.descendant_near(pt, 6.0), Some(leaf));
+    assert_eq!(tree.descendant_near(pt, 4.0), None);
 }

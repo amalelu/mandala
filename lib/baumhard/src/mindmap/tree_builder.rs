@@ -150,21 +150,13 @@ fn mindnode_to_glyph_area(node: &MindNode, vars: &HashMap<String, String>) -> Gl
 // per framed node that the legacy `scene_builder::BorderElement` +
 // `renderer::rebuild_border_buffers_keyed` pair produces.
 //
-// The layout constants (CORNER_OVERLAP_FRAC, approx_char_width factor)
-// are duplicated from the renderer path — they're geometric constants
-// rather than renderer internals. Keeping them in sync is a test
-// surface (see `test_border_tree_matches_scene_border_elements` below).
+// Layout constants (`BORDER_CORNER_OVERLAP_FRAC`,
+// `BORDER_APPROX_CHAR_WIDTH_FRAC`) live on `crate::mindmap::border`
+// so the renderer's keyed-buffer rebuild and this builder share one
+// source of truth.
 // =====================================================================
 
-/// Fraction of `font_size` by which the top/bottom border runs are
-/// pulled inward so their glyph visible extents overlap with the
-/// vertical columns. Kept in sync with the legacy renderer's
-/// `rebuild_border_buffers_keyed`.
-const BORDER_CORNER_OVERLAP_FRAC: f32 = 0.35;
-/// Multiplier estimating the advance of one border glyph as a
-/// fraction of `font_size`. 0.6 matches LiberationSans at typical
-/// border sizes; see the renderer path for the history.
-const BORDER_APPROX_CHAR_WIDTH_FRAC: f32 = 0.6;
+use crate::mindmap::border::{BORDER_APPROX_CHAR_WIDTH_FRAC, BORDER_CORNER_OVERLAP_FRAC};
 
 /// Build a baumhard tree representing every framed node's border
 /// glyphs. The tree's shape is:
@@ -184,12 +176,19 @@ const BORDER_APPROX_CHAR_WIDTH_FRAC: f32 = 0.6;
 /// but it gives mutator trees a natural target for whole-node
 /// border changes (e.g. color change across all four runs).
 ///
+/// Iteration order is the lexicographic order of `MindNode.id` —
+/// stable across runs so per-node Void parents always land in the
+/// same arena slot. Without this, `MindMap.nodes` (a `HashMap`)
+/// would yield nondeterministic order, making mutator-tree
+/// authoring against "the third framed node" unreliable.
+///
 /// # Costs
 ///
-/// O(visible framed nodes). Allocates the arena arena's storage,
-/// plus one `String` per run. Uses the same `BorderStyle` defaults
-/// as `scene_builder::build_scene` so the two paths can't drift on
-/// style choices.
+/// O(N log N) where N is the visible framed-node count (the sort
+/// dominates for large maps). Allocates one tree arena, one
+/// `Vec<&str>` for the sort, and one `String` per run. Uses the
+/// same `BorderStyle` defaults as `scene_builder::build_scene` so
+/// the two paths can't drift on style choices.
 pub fn build_border_tree(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
@@ -200,7 +199,13 @@ pub fn build_border_tree(
     let vars = &map.canvas.theme_variables;
     let mut id_counter: usize = 1;
 
-    for node in map.nodes.values() {
+    let mut sorted_ids: Vec<&String> = map.nodes.keys().collect();
+    sorted_ids.sort();
+
+    for node_id in sorted_ids {
+        let Some(node) = map.nodes.get(node_id) else {
+            continue;
+        };
         if map.is_hidden_by_fold(node) {
             continue;
         }
