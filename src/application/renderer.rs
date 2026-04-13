@@ -2382,7 +2382,11 @@ impl Renderer {
                 self.update_buffer_cache();
             }
             RenderDecree::CameraPan(dx, dy) => {
-                self.camera.pan(Vec2::new(dx, dy));
+                self.camera.apply_mutation(
+                    &baumhard::gfx_structs::camera::CameraMutation::Pan {
+                        screen_delta: Vec2::new(dx, dy),
+                    },
+                );
                 // Phase A's off-screen glyph cull is a function of the
                 // camera, so moving the camera invalidates the cached
                 // per-edge visible-glyph layout. Clear the renderer-side
@@ -2396,7 +2400,12 @@ impl Renderer {
                 self.connection_viewport_dirty = true;
             }
             RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
-                self.camera.zoom_at(Vec2::new(screen_x, screen_y), factor);
+                self.camera.apply_mutation(
+                    &baumhard::gfx_structs::camera::CameraMutation::ZoomAt {
+                        screen_focus: Vec2::new(screen_x, screen_y),
+                        factor,
+                    },
+                );
                 // Zoom invalidates both the renderer-side cull cache
                 // (viewport-dirty) AND the document-side sample cache
                 // (geometry-dirty), because the effective font size —
