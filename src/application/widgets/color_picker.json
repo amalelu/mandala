@@ -1,19 +1,20 @@
 {
-  "_comment": "Widget spec for the glyph-wheel color picker. Loaded once at startup via `include_str!` so WASM can read it. First step toward user-authored widgets — everything that defines the picker's *appearance* (glyphs, proportions, chip list, copy) lives here; the pure-function layout math stays in Rust because it depends on measured shaped-glyph advances and screen dimensions that JSON can't express.",
+  "_comment": "Widget spec for the glyph-wheel color picker. Loaded once at startup via `include_str!` so WASM can read it. First step toward user-authored widgets — everything that defines the picker's *appearance* (glyphs, proportions, copy) lives here; the pure-function layout math stays in Rust because it depends on measured shaped-glyph advances and screen dimensions that JSON can't express.",
 
   "geometry": {
-    "_comment": "Size constants shared by the layout and render paths. The picker is now sized as a *widget* — its base font size is derived from the screen's shorter side (`target_frac * short_axis * size_scale / wheel_side_in_fonts`), then clamped to [`font_min`, `font_max`]. `size_scale` defaults to 1.0 and is mutated by the right-mouse-button drag-to-resize gesture; it lives on the picker state and resets each open. Glyph halos (`outline_*`) keep the cells legible against a transparent backdrop. `transparent_backdrop` skips the opaque rect underneath so canvas content shows through.",
+    "_comment": "Size constants shared by the layout and render paths. The picker is sized as a *widget* — its base font size is derived from the screen's shorter side (`target_frac * short_axis * size_scale / wheel_side_in_fonts`), then clamped to [`font_min`, `font_max`]. `size_scale` defaults to 1.0 and is mutated by the right-mouse-button drag-to-resize gesture; it lives on the picker state and resets each open. Glyph halos (`outline_*`) keep the cells legible against a transparent backdrop. `transparent_backdrop` skips the opaque rect underneath so canvas content shows through.",
     "target_frac": 0.38,
     "font_min": 7.0,
     "font_max": 28.0,
-    "hue_ring_font_scale": 1.7,
+    "hue_ring_font_scale": 2.0,
+    "cell_font_scale": 1.3,
     "ring_box_scale": 1.8,
-    "cell_box_scale": 1.4,
+    "cell_box_scale": 1.6,
     "preview_size_scale": 2.5,
     "bar_to_ring_padding_scale": 1.1,
     "hover_scale": 1.3,
-    "outline_px": 3.0,
-    "outline_samples": 4,
+    "outline_px": 7.0,
+    "outline_samples": 12,
     "transparent_backdrop": true,
     "resize_scale_min": 0.4,
     "resize_scale_max": 2.0
@@ -41,19 +42,12 @@
     "ט", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ"
   ],
 
-  "center_preview_glyph": "ॐ",
+  "center_preview_glyph": "࿕",
 
   "arm_bottom_font": "NotoSansEgyptianHieroglyphsRegular",
 
-  "chips": [
-    { "label": "--accent", "action": { "kind": "var", "name": "var(--accent)" } },
-    { "label": "--bg",     "action": { "kind": "var", "name": "var(--bg)" } },
-    { "label": "--fg",     "action": { "kind": "var", "name": "var(--fg)" } },
-    { "label": "--edge",   "action": { "kind": "var", "name": "var(--edge)" } },
-    { "label": "reset",    "action": { "kind": "reset" } }
-  ],
-
-  "title_template_contextual": "ॐ {target_label} color",
-  "title_template_standalone": "ॐ color palette",
-  "hint_text": "Esc cancel  ·  ॐ commit  ·  click previews  ·  drag to move"
+  "title_template_contextual": "࿕ {target_label} color",
+  "title_template_standalone": "࿕ color palette",
+  "hint_text_contextual": "Esc cancel  ·  ࿕ commit  ·  drag to move  ·  RMB resize",
+  "hint_text_standalone": "࿕ commit  ·  drag to move  ·  RMB resize"
 }

@@ -35,7 +35,7 @@ use std::sync::OnceLock;
 use baumhard::util::color::{hex_to_hsv_safe, resolve_var};
 
 use crate::application::document::{EdgeRef, MindMapDocument, PortalRef};
-use crate::application::widgets::color_picker_widget::{load_spec, ChipActionSpec};
+use crate::application::widgets::color_picker_widget::load_spec;
 
 /// Number of hue slots on the outer ring. 24 slots = 15° per step. Fine
 /// enough that adjacent slots feel continuous, coarse enough that each
@@ -71,7 +71,6 @@ pub const PICKER_CHANNEL_SAT_BASE: usize = 300; // +0..20 (skipping +10)
 pub const PICKER_CHANNEL_VAL_BASE: usize = 400; // +0..20 (skipping +10)
 pub const PICKER_CHANNEL_PREVIEW: usize = 500;
 pub const PICKER_CHANNEL_HEX: usize = 600;
-pub const PICKER_CHANNEL_CHIP_BASE: usize = 700; // +0..N (chips.len)
 
 /// Number of cells on each crosshair bar. Odd so the center cell sits
 /// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 10 is the
@@ -167,52 +166,6 @@ pub fn center_preview_glyph() -> &'static str {
 /// case cosmic-text's default fallback picks a face.
 pub fn arm_bottom_font() -> Option<baumhard::font::fonts::AppFont> {
     load_spec().arm_bottom_font
-}
-
-/// What a theme-variable quick-pick chip commits when clicked or
-/// Enter-activated with focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChipAction {
-    /// Store the given `var(--name)` reference on the target so the
-    /// canvas theme map resolves the color at render time.
-    Var(&'static str),
-    /// Clear the target's color override, falling back to whatever
-    /// the canvas-level default is (the `reset` chip).
-    Reset,
-}
-
-/// One theme-variable chip shown below the wheel.
-#[derive(Debug, Clone, Copy)]
-pub struct ThemeChip {
-    pub label: &'static str,
-    pub action: ChipAction,
-}
-
-/// Theme-variable quick-pick chips shown below the wheel.
-///
-/// Backed by [`color_picker.json`](../widgets/color_picker.json). The
-/// JSON chip specs are translated into `ThemeChip` once at first
-/// access — labels and `ChipAction::Var` names are leaked to
-/// `&'static str` so this function's return type stays a thin
-/// reference and call-sites don't need lifetime gymnastics.
-pub fn theme_chips() -> &'static [ThemeChip] {
-    static CACHE: OnceLock<&'static [ThemeChip]> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        let chips: Vec<ThemeChip> = load_spec()
-            .chips
-            .iter()
-            .map(|c| ThemeChip {
-                label: Box::leak(c.label.clone().into_boxed_str()),
-                action: match &c.action {
-                    ChipActionSpec::Var { name } => {
-                        ChipAction::Var(Box::leak(name.clone().into_boxed_str()))
-                    }
-                    ChipActionSpec::Reset => ChipAction::Reset,
-                },
-            })
-            .collect();
-        Box::leak(chips.into_boxed_slice())
-    })
 }
 
 // =============================================================
@@ -476,10 +429,6 @@ pub enum ColorPickerState {
         sat: f32,
         /// Current preview value/lightness, `[0, 1]`.
         val: f32,
-        /// Index of the focused theme chip, or `None` while picking
-        /// HSV. Tab cycles through chips; Enter on a focused chip
-        /// commits the chip's raw color string instead of the HSV hex.
-        chip_focus: Option<usize>,
         /// Last cursor position seen by `handle_color_picker_mouse_move`,
         /// in window-space pixels. `None` before the first mouse event
         /// after open. Threaded into geometry so `compute_picker_geometry`
@@ -502,15 +451,6 @@ pub enum ColorPickerState {
         /// recover dimensionless ratios that scale with whatever
         /// font_size the canonical sizing formula picks.
         measurement_font_size: f32,
-        /// Tracks what the commit should do. `Hsv` → commit the
-        /// current HSV hex as a per-edge/portal override. `Var(raw)`
-        /// → commit the `var(--...)` string so theme-var resolution
-        /// runs at render time. `ResetToInherited` → clear the edge
-        /// override (cfg.color = None) for edges, or re-seed to the
-        /// --accent fallback for portals. Set by `apply_picker_chip`;
-        /// HSV nudges and mouse hover on the wheel reset it back to
-        /// `Hsv`.
-        commit_mode: CommitMode,
         /// Cached layout from the last rebuild. `None` between `Open`
         /// construction and the first `rebuild_color_picker_overlay`
         /// call (a narrow window — the rebuild is the very next line
@@ -544,28 +484,15 @@ pub enum ColorPickerState {
         /// rebuilds.
         hovered_hit: Option<PickerHit>,
         /// Pending error-flash animation request. Set when the user
-        /// attempts an action that can't complete (e.g. clicking ॐ
-        /// in Standalone mode with no selection). Today this is a
-        /// plain boolean stub — the animation system isn't wired yet,
-        /// so the renderer ignores it. When that lands, this becomes
-        /// the hook point: flip it on, the renderer reads and clears
-        /// it, the tree gets a red-tint mutation for ~250ms. See
-        /// [`request_error_flash`].
+        /// attempts an action that can't complete (e.g. clicking the
+        /// center commit button in Standalone mode with no
+        /// selection). Today this is a plain boolean stub — the
+        /// animation system isn't wired yet, so the renderer ignores
+        /// it. When that lands, this becomes the hook point: flip it
+        /// on, the renderer reads and clears it, the tree gets a
+        /// red-tint mutation for ~250 ms. See [`request_error_flash`].
         pending_error_flash: bool,
     },
-}
-
-/// What the picker will commit to the model on Enter / click-commit.
-#[derive(Debug, Clone)]
-pub enum CommitMode {
-    /// Commit the current HSV value as a concrete hex.
-    Hsv,
-    /// Commit a raw `var(--name)` reference. Set by a theme chip.
-    Var(String),
-    /// Commit a "clear override" — `set_edge_color(None)` for edges;
-    /// re-seed to `--accent` for portals (which have a non-optional
-    /// color field).
-    ResetToInherited,
 }
 
 impl ColorPickerState {
@@ -646,12 +573,11 @@ pub struct ColorPickerOverlayGeometry {
     pub sat: f32,
     pub val: f32,
     pub preview_hex: String,
-    pub chip_focus: Option<usize>,
-    /// Whether the hex readout should render this frame. `true` when
-    /// the cursor is inside the backdrop OR a chip is focused; `false`
-    /// otherwise. The readout was previously always-on and collided
-    /// with the lower val bar cells — now it appears only when the
-    /// user is actively engaging with the picker.
+    /// Whether the hex readout should render this frame. `true`
+    /// when the cursor is inside the backdrop; `false` otherwise.
+    /// The readout appears only when the user is actively engaging
+    /// with the picker so it doesn't collide with the lower val bar
+    /// cells.
     pub hex_visible: bool,
     /// Widest shaped advance across the 40 crosshair-arm glyphs,
     /// measured by the renderer via cosmic-text at picker open. The
@@ -707,14 +633,19 @@ pub struct ColorPickerLayout {
     /// `geometry.max_cell_advance`). Exposed so the hit-test can use
     /// the same tolerance the renderer uses.
     pub cell_advance: f32,
+    /// Cell font size (crosshair glyphs) actually used —
+    /// `font_size * cell_font_scale`. Exposed so the renderer and
+    /// the hit test use the same value.
+    pub cell_font_size: f32,
     /// Ring font size actually used (`font_size * HUE_RING_FONT_SCALE`).
     /// Exposed so the renderer and hit test stay in sync.
     pub ring_font_size: f32,
     /// 24 hue ring positions, ordered clockwise from 12-o'clock.
     pub hue_slot_positions: [(f32, f32); HUE_SLOT_COUNT],
     /// 21 sat-bar cell centers, left → right. Cell 10 is the wheel
-    /// center — NOT rendered (ॐ shows through), but still used by
-    /// hit-testing so a click at the exact center resolves to it.
+    /// center — NOT rendered (center glyph shows through), but still
+    /// used by hit-testing so a click at the exact center resolves
+    /// to it.
     pub sat_cell_positions: [(f32, f32); SAT_CELL_COUNT],
     /// 21 val-bar cell centers, top → bottom (top = brightest). Cell
     /// 10 is the wheel center — same skip rule as sat.
@@ -723,12 +654,9 @@ pub struct ColorPickerLayout {
     /// glyph box, computed so the glyph visually centers on the wheel
     /// center given `preview_size`.
     pub preview_pos: (f32, f32),
-    /// Font size for the central ॐ preview glyph. 2× the base
-    /// `font_size` so the preview reads as a focal point.
+    /// Font size for the central preview glyph. A multiple of the
+    /// base `font_size` per `spec.geometry.preview_size_scale`.
     pub preview_size: f32,
-    /// One `(x, y, width)` per chip, ordered as `THEME_CHIPS`.
-    pub chip_positions: Vec<(f32, f32, f32)>,
-    pub chip_height: f32,
     /// `(left, top, width, height)` of the opaque backdrop rect that
     /// the renderer draws under the overlay text pass.
     pub backdrop: (f32, f32, f32, f32),
@@ -739,7 +667,7 @@ pub struct ColorPickerLayout {
     /// `Some((x, y))` top-left anchor for the hex readout when it
     /// should render this frame, `None` otherwise. Derived from
     /// `geometry.hex_visible`. When `Some`, the readout is anchored
-    /// below the chip row, horizontally centered on `center.0`.
+    /// below the wheel, horizontally centered on `center.0`.
     pub hex_pos: Option<(f32, f32)>,
 }
 
@@ -925,34 +853,10 @@ pub fn compute_color_picker_layout(
     let preview_size = font_size * g.preview_size_scale;
     let preview_pos = (
         center.0 - preview_size * 0.4,
-        center.1 - preview_size * 0.5,
+        center.1 - preview_size * 0.65,
     );
 
-    // ---- Theme chips row ----
-    let chips = theme_chips();
-    let chip_row_y = center.1 + outer_radius + font_size * 1.5;
-    let chip_height = font_size * 1.4;
-    let mut chip_positions: Vec<(f32, f32, f32)> = Vec::with_capacity(chips.len());
-    let total_chip_width: f32 = chips
-        .iter()
-        .map(|c| (c.label.chars().count() + 4) as f32 * char_width)
-        .sum::<f32>()
-        + (chips.len().saturating_sub(1)) as f32 * 6.0;
-    let mut x = center.0 - total_chip_width * 0.5;
-    for chip in chips {
-        let w = (chip.label.chars().count() + 4) as f32 * char_width;
-        chip_positions.push((x, chip_row_y, w));
-        x += w + 6.0;
-    }
-
     // ---- Backdrop, title, hint ----
-    // Backdrop width is the max of the wheel-enclosing square
-    // (`side`) and the chip row width + padding, then clamped to
-    // the window. This keeps chips inside the backdrop even when
-    // the hue ring is tight (small window, or small
-    // `desired_ring_r`). Height stays derived from `side` so the
-    // wheel's vertical proportions don't distort.
-    //
     // Title and hint are anchored RELATIVE to the backdrop's left
     // edge, not the window center. On small windows the frame
     // shrinks; a window-centered anchor would push the hint text
@@ -962,12 +866,9 @@ pub fn compute_color_picker_layout(
     // correct behavior for a text-too-long situation.
     //
     // Backdrop height leaves room for title (1 font_size above the
-    // wheel) + wheel diameter + chip row (1.5 font_size) + chip row
-    // height + hex readout row (1.5 font_size) + hint footer (1.5
-    // font_size).
-    let backdrop_width = side
-        .max(total_chip_width + font_size * 2.0)
-        .min((screen_w - font_size * 2.0).max(0.0));
+    // wheel) + wheel diameter + hex readout row (1.5 font_size) +
+    // hint footer (1.5 font_size) + bottom padding (3 font_size).
+    let backdrop_width = side.min((screen_w - font_size * 2.0).max(0.0));
     let backdrop_left = center.0 - backdrop_width * 0.5;
     let backdrop_top = center.1 - side * 0.5 - font_size;
     let backdrop_height = side + font_size * 7.0;
@@ -981,12 +882,12 @@ pub fn compute_color_picker_layout(
     // ---- Hex readout position ----
     // The hex readout is hidden by default; `geometry.hex_visible`
     // gates whether it renders this frame. When visible, anchor it
-    // below the chip row (between the chips and the hint footer),
+    // below the wheel (between the wheel and the hint footer),
     // horizontally centered on `center.0`. "#rrggbb" is 7 chars wide,
     // so the top-left anchor is `center.x - 3.5 * char_width`.
     let hex_pos = if geometry.hex_visible {
         let hex_width = char_width * 7.0;
-        let hex_y = chip_row_y + chip_height + font_size * 0.25;
+        let hex_y = center.1 + outer_radius + font_size * 1.5;
         Some((center.0 - hex_width * 0.5, hex_y))
     } else {
         None
@@ -998,14 +899,13 @@ pub fn compute_color_picker_layout(
         font_size,
         char_width,
         cell_advance: step,
+        cell_font_size: font_size * g.cell_font_scale,
         ring_font_size,
         hue_slot_positions,
         sat_cell_positions,
         val_cell_positions,
         preview_pos,
         preview_size,
-        chip_positions,
-        chip_height,
         backdrop,
         title_pos,
         hint_pos,
@@ -1026,9 +926,7 @@ pub enum PickerHit {
     SatCell(usize),
     /// Index into `val_cell_positions`.
     ValCell(usize),
-    /// Index into `chip_positions`.
-    Chip(usize),
-    /// The center ॐ glyph — clicking commits the current HSV
+    /// The center preview glyph — clicking commits the current HSV
     /// (Contextual: to the bound handle; Standalone: to the
     /// current document selection).
     Commit,
@@ -1042,21 +940,14 @@ pub enum PickerHit {
 }
 
 /// Hit-test a screen position against the cached picker layout. The
-/// search order matches the visual layering: chips → val bar → sat bar
-/// → hue ring → center ॐ (commit). Inside-the-backdrop-but-not-on-
-/// any-glyph is the drag anchor for the wheel. Returns `Outside`
-/// if the cursor is past the backdrop bounds.
+/// search order matches the visual layering: val bar → sat bar →
+/// hue ring → center preview glyph (commit). Inside-the-backdrop-
+/// but-not-on-any-glyph is the drag anchor for the wheel. Returns
+/// `Outside` if the cursor is past the backdrop bounds.
 pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit {
     let (bl, bt, bw, bh) = layout.backdrop;
     if x < bl || x > bl + bw || y < bt || y > bt + bh {
         return PickerHit::Outside;
-    }
-
-    // Chips first — they sit below the wheel.
-    for (i, (cx, cy, cw)) in layout.chip_positions.iter().enumerate() {
-        if x >= *cx && x <= *cx + *cw && y >= *cy && y <= *cy + layout.chip_height {
-            return PickerHit::Chip(i);
-        }
     }
 
     // Sat/val bars: pick the closer of the two if the cursor is inside
@@ -1162,7 +1053,6 @@ mod tests {
             sat: 1.0,
             val: 1.0,
             preview_hex: "#ff0000".to_string(),
-            chip_focus: None,
             hex_visible: false,
             max_cell_advance: 16.0,
             max_ring_advance: 24.0,
@@ -1229,13 +1119,6 @@ mod tests {
             assert!(w[1].1 > w[0].1, "val cells must increase in y");
             assert!((w[0].0 - w[1].0).abs() < 0.1, "val cells share x");
         }
-    }
-
-    #[test]
-    fn layout_includes_one_chip_per_theme_entry() {
-        let g = sample_geometry();
-        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
-        assert_eq!(layout.chip_positions.len(), theme_chips().len());
     }
 
     #[test]
@@ -1349,18 +1232,6 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_hits_chip_row() {
-        let g = sample_geometry();
-        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
-        let (cx, cy, cw) = layout.chip_positions[0];
-        // Hit the middle of the chip rect.
-        assert_eq!(
-            hit_test_picker(&layout, cx + cw * 0.5, cy + layout.chip_height * 0.5),
-            PickerHit::Chip(0)
-        );
-    }
-
-    #[test]
     fn hue_slot_to_degrees_round_trip() {
         for slot in 0..HUE_SLOT_COUNT {
             let deg = hue_slot_to_degrees(slot);
@@ -1399,7 +1270,11 @@ mod tests {
     }
 
     /// Preview glyph must center on the geometric wheel center given
-    /// the layout-emitted preview_size. Regression guard for the
+    /// the layout-emitted preview_size. The offset factors (0.4 for
+    /// x, 0.65 for y) account for the center glyph having built-in
+    /// whitespace around its visible mark — the box covers more than
+    /// the glyph does, so the glyph's visible center lands off-box-
+    /// center by a script-specific bias. Regression guard for the
     /// "preview was anchored low-right of center" bug.
     #[test]
     fn layout_preview_centered_on_wheel_center() {
@@ -1407,7 +1282,7 @@ mod tests {
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
         let (px, py) = layout.preview_pos;
         let cx = px + layout.preview_size * 0.4;
-        let cy = py + layout.preview_size * 0.5;
+        let cy = py + layout.preview_size * 0.65;
         // The preview's visible center should be within ~1 px of the
         // wheel center on each axis.
         assert!((cx - layout.center.0).abs() < 1.0,
@@ -1787,10 +1662,9 @@ mod tests {
     ///
     /// Insertion order: title → hue ring (24 slots) → hint →
     /// sat bar (21 cells, channels also stride through the
-    /// skipped center) → val bar (same) → preview → hex → chips.
+    /// skipped center) → val bar (same) → preview → hex.
     #[test]
     fn picker_channels_are_strictly_ascending() {
-        let chips_count = theme_chips().len();
         let bands: &[(&str, usize, usize)] = &[
             ("title", PICKER_CHANNEL_TITLE, 1),
             ("hue ring", PICKER_CHANNEL_HUE_RING_BASE, HUE_SLOT_COUNT),
@@ -1799,7 +1673,6 @@ mod tests {
             ("val bar", PICKER_CHANNEL_VAL_BASE, VAL_CELL_COUNT),
             ("preview", PICKER_CHANNEL_PREVIEW, 1),
             ("hex", PICKER_CHANNEL_HEX, 1),
-            ("chips", PICKER_CHANNEL_CHIP_BASE, chips_count),
         ];
         let mut prev_band_max: usize = 0;
         for (name, base, count) in bands {
