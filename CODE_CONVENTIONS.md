@@ -148,9 +148,11 @@ decision that belongs in `ROADMAP.md` before it belongs in code.
   [`TEST_CONVENTIONS.md`](./TEST_CONVENTIONS.md) §T9) and what keeps
   the WASM input path catchable without a browser.
 
-## §4 The quality bar
+## §4 Everything is canonical
 
 We want the highest quality code. No compromise. No technical debt.
+The code in this repo should be (eventually) serve as a canonical reference
+for the users who will be extending it.
 
 - **Every commit is a state we would ship.** Tests green, code formatted,
   no broken paths, no half-finished features behind a feature flag.
