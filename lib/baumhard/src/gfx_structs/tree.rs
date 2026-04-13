@@ -7,6 +7,7 @@ use crate::util::arena_utils;
 use crossbeam_channel::Sender;
 use glam::Vec2;
 use indextree::{Arena, Children, Descendants, Node, NodeId};
+use std::cell::Cell;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -54,6 +55,10 @@ impl <T: TreeNode + Clone> MutatorTree<T> {
 
 impl Applicable<Tree<GfxElement, GfxMutator>> for MutatorTree<GfxMutator> {
     fn apply_to(&self, target: &mut Tree<GfxElement, GfxMutator>) {
+        // Any mutator may touch GlyphArea position or bounds; the
+        // safe default is to drop the bbox memo and let the next
+        // `descendants_aabb` call recompute. Cheap (one Cell write).
+        target.aabb_cache.set(None);
         walk_tree_from(target, &self, target.root, self.root)
     }
 }
@@ -72,6 +77,15 @@ pub struct Tree<T: Clone, M: Applicable<T>> {
     /// We want this to be Rc eventually
     region_params: Option<Arc<RegionParams>>,
     region_index: Option<Rc<RegionIndexer>>,
+    /// Memoised result of [`Tree::descendants_aabb`].
+    /// `None` = not yet computed (or invalidated by a mutation);
+    /// `Some(None)` = computed and the tree has no visible areas;
+    /// `Some(Some(_))` = computed, valid bbox.
+    /// `Cell` (not `RefCell`) is fine because the inner type is
+    /// `Copy` and we only ever swap whole values.
+    /// Invalidated by [`MutatorTree::apply_to`] (and any
+    /// `&mut self` op that touches GlyphArea positions or bounds).
+    aabb_cache: Cell<Option<Option<(Vec2, Vec2)>>>,
 }
 
 impl Tree<GfxElement, GfxMutator> {
@@ -90,6 +104,7 @@ impl Tree<GfxElement, GfxMutator> {
             pending_mutations: vec![],
             region_params: Some(region_params),
             region_index: Some(Rc::new(RegionIndexer::default())),
+            aabb_cache: Cell::new(None),
         }
     }
 
@@ -110,6 +125,7 @@ impl Tree<GfxElement, GfxMutator> {
             pending_mutations: vec![],
             region_params: Some(region_params),
             region_index: Some(Rc::new(RegionIndexer::default())),
+            aabb_cache: Cell::new(None),
         }
     }
 
@@ -125,6 +141,7 @@ impl Tree<GfxElement, GfxMutator> {
             pending_mutations: vec![],
             region_params: None,
             region_index: None,
+            aabb_cache: Cell::new(None),
         }
     }
 
@@ -141,6 +158,7 @@ impl Tree<GfxElement, GfxMutator> {
             pending_mutations: vec![],
             region_params: None,
             region_index: None,
+            aabb_cache: Cell::new(None),
         }
     }
 
@@ -171,44 +189,165 @@ impl Tree<GfxElement, GfxMutator> {
     fn import_arena(&mut self, target: &Arena<GfxElement>, target_root: NodeId) {
         arena_utils::clone_subtree(target, target_root, &mut self.arena, self.root);
     }
-}
 
-impl<T: Flaggable + Clone, M: Applicable<T>> Tree<T, M> {
-    /// # Arguments
-    /// * `point` - The point from which to look for an element to flag
-    /// * `depth` - The "depth" at which to look, if there's several elements in the same area
-    /// * `slack` - How far around the `point` we'll look for elements
+    /// Walks the arena looking for the smallest-AABB `GlyphArea`
+    /// descendant whose rectangle contains `point`. Returns its
+    /// [`NodeId`], or [`None`] if nothing matches.
     ///
-    /// # Returns
-    /// * [Some]\([NodeId]) - if an element was flagged, containing the elements node ID
-    /// * [None] - if no element was flagged
+    /// Equivalent to `descendant_near(point, 0.0)` — the legacy
+    /// app-side `hit_test` had no slack, and most renderer call
+    /// sites don't want any.
     ///
-    /// # Example
+    /// # Costs
     ///
-    /// ```
-    /// use std::sync::Arc;
-    /// use crossbeam_channel::{unbounded, Sender};
-    /// use glam::Vec2;
-    /// use baumhard::gfx_structs::element::GfxElement;
-    /// use baumhard::gfx_structs::tree::Tree;
-    /// use baumhard::core::primitives::Flag;
-    /// use baumhard::gfx_structs::mutator::GfxMutator;
-    /// use baumhard::gfx_structs::util::regions::{RegionIndexer, RegionParams};
-    /// let (this_sender, this_receiver) = unbounded();
-    /// let mut tree: Tree<GfxElement, GfxMutator> = Tree::new(Arc::new(RegionParams::new(10, (1000,1000))), this_sender);
-    /// tree.flag_near(Flag::Focused, Vec2::new(50.0, 50.0), 0, 10);
+    /// O(n) over the descendants of [`Self::root`]. No allocation.
+    /// [`GfxElement::GlyphModel`] and [`GfxElement::Void`] nodes are
+    /// skipped (they don't expose an AABB on `GlyphArea`). When
+    /// multiple areas contain the point, the smallest by area wins —
+    /// mirrors the "innermost first" convention used by the app-side
+    /// `hit_test` helpers this method replaces.
+    ///
+    /// Intended for use by [`crate::gfx_structs::scene::Scene`] after
+    /// it has identified which tree covers the hit; each tree then
+    /// drills down to the concrete target using this method.
+    pub fn descendant_at(&self, point: Vec2) -> Option<NodeId> {
+        self.descendant_near(point, 0.0)
+    }
+
+    /// Variant of [`Self::descendant_at`] that expands every
+    /// `GlyphArea`'s AABB by `slack` pixels on each side before
+    /// the containment test. Use for fuzzy hit-tests where the
+    /// caller wants to forgive a stylus or fat-finger near-miss
+    /// (e.g. edge handles, console close-buttons).
+    pub fn descendant_near(&self, point: Vec2, slack: f32) -> Option<NodeId> {
+        let mut best: Option<(NodeId, f32)> = None;
+        for node_id in self.root.descendants(&self.arena) {
+            let Some(node) = self.arena.get(node_id) else {
+                continue;
+            };
+            let Some(area) = node.get().glyph_area() else {
+                continue;
+            };
+            let pos = area.position.to_vec2();
+            let bounds = area.render_bounds.to_vec2();
+            if bounds.x <= 0.0 || bounds.y <= 0.0 {
+                continue;
+            }
+            let min_x = pos.x - slack;
+            let min_y = pos.y - slack;
+            let max_x = pos.x + bounds.x + slack;
+            let max_y = pos.y + bounds.y + slack;
+            if point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y {
+                // Tie-break by *original* (un-slacked) area so a
+                // physically smaller element still wins when both
+                // would qualify after slack.
+                let size = bounds.x * bounds.y;
+                match best {
+                    Some((_, best_size)) if best_size <= size => {}
+                    _ => best = Some((node_id, size)),
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// Conservative AABB covering every `GlyphArea` descendant of
+    /// [`Self::root`]. Returns `(top_left, bottom_right)` or `None`
+    /// if the tree has no visible areas.
+    ///
+    /// # Costs
+    ///
+    /// O(n) on the first call after the tree mutates; O(1) on
+    /// repeated calls thanks to a per-tree memo. The memo is
+    /// cleared by [`MutatorTree::apply_to`] — any other mutating
+    /// caller that bypasses the mutator pipeline must call
+    /// [`Self::invalidate_aabb_cache`] itself or the bbox will
+    /// drift.
+    pub fn descendants_aabb(&self) -> Option<(Vec2, Vec2)> {
+        if let Some(cached) = self.aabb_cache.get() {
+            return cached;
+        }
+        let computed = self.compute_descendants_aabb();
+        self.aabb_cache.set(Some(computed));
+        computed
+    }
+
+    /// Drop the memoised bbox so the next [`Self::descendants_aabb`]
+    /// recomputes. Call this from any custom mutating path that
+    /// touches `GlyphArea::position` / `render_bounds` outside of
+    /// [`MutatorTree::apply_to`].
+    pub fn invalidate_aabb_cache(&self) {
+        self.aabb_cache.set(None);
+    }
+
+    fn compute_descendants_aabb(&self) -> Option<(Vec2, Vec2)> {
+        let mut min = Vec2::new(f32::INFINITY, f32::INFINITY);
+        let mut max = Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let mut any = false;
+        for node_id in self.root.descendants(&self.arena) {
+            let Some(node) = self.arena.get(node_id) else {
+                continue;
+            };
+            let Some(area) = node.get().glyph_area() else {
+                continue;
+            };
+            let bounds = area.render_bounds.to_vec2();
+            if bounds.x <= 0.0 || bounds.y <= 0.0 {
+                continue;
+            }
+            let pos = area.position.to_vec2();
+            any = true;
+            if pos.x < min.x {
+                min.x = pos.x;
+            }
+            if pos.y < min.y {
+                min.y = pos.y;
+            }
+            let mx = pos.x + bounds.x;
+            let my = pos.y + bounds.y;
+            if mx > max.x {
+                max.x = mx;
+            }
+            if my > max.y {
+                max.y = my;
+            }
+        }
+        if any {
+            Some((min, max))
+        } else {
+            None
+        }
+    }
+
+    /// Sets `flag` on the `GlyphArea` descendant closest to `point`,
+    /// expanding each AABB by `slack` pixels on every side before
+    /// the test. `depth` is reserved for a future overlapping-
+    /// element disambiguator; today it is ignored. Returns the
+    /// flagged node's [`NodeId`], or [`None`].
+    ///
+    /// # Costs
+    ///
+    /// O(n) over the descendants of [`Self::root`]; see
+    /// [`Self::descendant_near`] for the underlying walk.
     pub fn flag_near(
         &mut self,
         flag: Flag,
         point: Vec2,
-        depth: usize,
+        _depth: usize,
         slack: usize,
     ) -> Option<NodeId> {
-        // Find all elements that intersect with the point, or the area if there's any slack
-        //
-        None
+        let node_id = self.descendant_near(point, slack as f32)?;
+        if let Some(node) = self.arena.get_mut(node_id) {
+            node.get_mut().set_flag(flag);
+        }
+        Some(node_id)
     }
+}
 
-    pub fn do_for_all_flagged(&mut self, flag: Flag, mutator: Tree<T, M>) {}
+impl<T: Flaggable + Clone, M: Applicable<T>> Tree<T, M> {
+    /// Placeholder for a future "apply a mutator to every flagged
+    /// descendant" helper. No implementation yet; documented here so
+    /// a call site can be trivially grepped when the feature lands.
+    pub fn do_for_all_flagged(&mut self, _flag: Flag, _mutator: Tree<T, M>) {}
 }
 

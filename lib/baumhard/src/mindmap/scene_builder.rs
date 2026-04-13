@@ -483,7 +483,7 @@ pub fn build_scene_with_cache(
         let (clip_pos, clip_size) = if node.style.show_frame {
             let border_style = BorderStyle::default_with_color(frame_color);
             let bf = border_style.font_size_pt;
-            let bcw = bf * 0.6;
+            let bcw = bf * crate::mindmap::border::BORDER_APPROX_CHAR_WIDTH_FRAC;
             (
                 Vec2::new(pos_x - bcw, pos_y - bf),
                 Vec2::new(size_x + 2.0 * bcw, size_y + 2.0 * bf),

@@ -445,6 +445,24 @@ pub struct Renderer {
     color_picker_backdrop: Option<(f32, f32, f32, f32)>,
     /// Temporary overlay buffers (e.g., selection rectangle). Camera-transformed.
     overlay_buffers: Vec<MindMapTextBuffer>,
+    /// Screen-space buffers produced by walking the app's
+    /// [`AppScene`](crate::application::scene_host::AppScene).
+    /// Populated by [`Self::rebuild_overlay_scene_buffers`] and
+    /// drawn alongside the existing console/color-picker overlay
+    /// buffer lists. Empty until an overlay migrates to a tree.
+    overlay_scene_buffers: Vec<MindMapTextBuffer>,
+    /// Canvas-space buffers for the app's
+    /// [`AppScene`](crate::application::scene_host::AppScene)'s
+    /// canvas sub-scene (borders, connections, portals, etc.).
+    /// Populated by [`Self::rebuild_canvas_scene_buffers`]. Drawn
+    /// in the main camera-transformed pass. Empty until a canvas
+    /// component migrates to a tree.
+    canvas_scene_buffers: Vec<MindMapTextBuffer>,
+    /// Background-rect instances collected while walking the
+    /// canvas sub-scene — forwarded to the camera-transformed
+    /// rect pipeline so GlyphArea fills on migrated components
+    /// render beneath their glyphs.
+    canvas_scene_background_rects: Vec<NodeBackgroundRect>,
     /// Set whenever the camera's viewport rect changes (pan, zoom,
     /// resize) and `connection_buffers` was cleared as a result.
     /// Consumed once per frame by the event loop in `AboutToWait` to
@@ -670,6 +688,9 @@ impl Renderer {
             color_picker_dynamic_buffers: Vec::new(),
             color_picker_backdrop: None,
             overlay_buffers: Vec::new(),
+            overlay_scene_buffers: Vec::new(),
+            canvas_scene_buffers: Vec::new(),
+            canvas_scene_background_rects: Vec::new(),
             connection_viewport_dirty: false,
             connection_geometry_dirty: false,
             rect_pipeline,
@@ -1040,7 +1061,11 @@ impl Renderer {
         // Visible-range test mirrors the text-area cull below so
         // clipped-offscreen nodes don't waste vertices either.
         self.main_rect_vertices.clear();
-        for rect in &self.node_background_rects {
+        for rect in self
+            .node_background_rects
+            .iter()
+            .chain(self.canvas_scene_background_rects.iter())
+        {
             if !self.camera.is_visible(rect.position, rect.size) {
                 continue;
             }
@@ -1153,6 +1178,7 @@ impl Renderer {
             .chain(self.portal_buffers.values())
             .chain(self.edge_handle_buffers.iter())
             .chain(self.overlay_buffers.iter())
+            .chain(self.canvas_scene_buffers.iter())
             .filter_map(|tb| {
                 let canvas_pos = Vec2::new(tb.pos.0, tb.pos.1);
                 let canvas_size = Vec2::new(tb.bounds.0, tb.bounds.1);
@@ -1198,6 +1224,7 @@ impl Renderer {
         let palette_text_areas: Vec<TextArea> = self.console_overlay_buffers.iter()
             .chain(self.color_picker_static_buffers.iter())
             .chain(self.color_picker_dynamic_buffers.iter())
+            .chain(self.overlay_scene_buffers.iter())
             .map(|tb| TextArea {
                 buffer: &tb.buffer,
                 left: tb.pos.0,
@@ -1427,86 +1454,117 @@ impl Renderer {
         let mut font_system = fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
+        walk_tree_into_buffers(
+            tree,
+            Vec2::ZERO,
+            &mut font_system,
+            |unique_id, buffer| {
+                // Mindmap is the only buffer store that needs
+                // string keys (its `FxHashMap<String, _>` is shared
+                // with the legacy edit / undo paths). Stringifying
+                // here keeps the allocation off the helper's
+                // critical path so overlay / canvas-scene callers
+                // never pay it.
+                self.mindmap_buffers.insert(unique_id.to_string(), buffer);
+            },
+            |rect| self.node_background_rects.push(rect),
+        );
+    }
 
-        for descendant_id in tree.root().descendants(&tree.arena) {
-            let node = match tree.arena.get(descendant_id) {
-                Some(n) => n,
-                None => continue,
+    /// Rebuild the screen-space buffer list for every tree the app
+    /// has registered into [`AppScene`]. Walks the scene in layer
+    /// order and produces one flat list; callers do not need to
+    /// know about individual overlays. The renderer composites the
+    /// result into the palette pass alongside the per-overlay
+    /// buffer stores that predate this refactor — once every
+    /// overlay has migrated to a tree, those per-overlay stores go
+    /// away (see Session 5 in the unified-rendering plan).
+    ///
+    /// # Costs
+    ///
+    /// O(sum of descendants) across every tree in the scene.
+    /// Allocates a `cosmic_text::Buffer` per `GlyphArea` with
+    /// non-empty text. Empty scenes short-circuit cheaply.
+    pub fn rebuild_overlay_scene_buffers(
+        &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
+    ) {
+        self.overlay_scene_buffers.clear();
+        let ids = app_scene.overlay_ids_in_layer_order();
+        if ids.is_empty() {
+            return;
+        }
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+        for id in ids {
+            let Some(entry) = app_scene.overlay_scene().get(id) else {
+                continue;
             };
-            let element = node.get();
-            let area = match element.glyph_area() {
-                Some(a) => a,
-                None => continue, // Skip Void and GlyphModel nodes
-            };
-
-            // Background rects live on the GlyphArea itself. Even
-            // text-empty elements can have a background (a blank
-            // colored pad), so collect the rect before the text
-            // skip below. Mutations on the tree can mutate this
-            // directly via `glyph_area_mut().background_color`.
-            if let Some(color) = area.background_color {
-                self.node_background_rects.push(NodeBackgroundRect {
-                    position: Vec2::new(area.position.x.0, area.position.y.0),
-                    size: Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
-                    color,
-                });
-            }
-
-            if area.text.is_empty() {
+            if !entry.visible() {
                 continue;
             }
-
-            let scale = area.scale.0;
-            let line_height = area.line_height.0;
-            let bound_x = area.render_bounds.x.0;
-            let bound_y = area.render_bounds.y.0;
-
-            let mut buffer = cosmic_text::Buffer::new(
+            walk_tree_into_buffers(
+                entry.tree(),
+                entry.offset(),
                 &mut font_system,
-                cosmic_text::Metrics::new(scale, line_height),
+                |_unique_id, buffer| {
+                    self.overlay_scene_buffers.push(buffer);
+                },
+                |_rect| {
+                    // Overlay-tree background fills aren't wired to
+                    // a screen-space rect pipeline yet. When
+                    // Sessions 3 / 4 need them they can add a
+                    // dedicated `overlay_scene_background_rects`
+                    // field and a screen-space draw pass.
+                },
             );
-            buffer.set_size(&mut font_system, Some(bound_x), Some(bound_y));
-            buffer.set_wrap(&mut font_system, cosmic_text::Wrap::Word);
+        }
+    }
 
-            // Build spans from ColorFontRegions
-            let text = &area.text;
-            let spans: Vec<(&str, Attrs)> = if area.regions.num_regions() == 0 {
-                vec![(text.as_str(), Attrs::new())]
-            } else {
-                area.regions.all_regions().iter().filter_map(|region| {
-                    let start = grapheme_chad::find_byte_index_of_char(text, region.range.start)
-                        .unwrap_or(text.len());
-                    let end = grapheme_chad::find_byte_index_of_char(text, region.range.end)
-                        .unwrap_or(text.len());
-                    if start >= end {
-                        return None;
-                    }
-                    let slice = &text[start..end];
-                    let mut attrs = Attrs::new();
-                    if let Some(rgba) = region.color {
-                        let u8c = baumhard::util::color::convert_f32_to_u8(&rgba);
-                        attrs = attrs.color(cosmic_text::Color::rgba(u8c[0], u8c[1], u8c[2], u8c[3]));
-                    }
-                    attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
-                    Some((slice, attrs))
-                }).collect()
+    /// Rebuild the canvas-space buffer list for every tree the app
+    /// has registered into [`AppScene`]'s canvas sub-scene
+    /// (borders, connections, portals, edge handles, connection
+    /// labels — whichever have migrated). These buffers feed the
+    /// camera-transformed main pass alongside the mindmap's own
+    /// buffer map.
+    ///
+    /// # Costs
+    ///
+    /// O(sum of descendants) across every canvas tree. Allocates a
+    /// `cosmic_text::Buffer` per non-empty `GlyphArea`. Empty
+    /// sub-scenes short-circuit cheaply.
+    pub fn rebuild_canvas_scene_buffers(
+        &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
+    ) {
+        self.canvas_scene_buffers.clear();
+        self.canvas_scene_background_rects.clear();
+        let ids = app_scene.canvas_ids_in_layer_order();
+        if ids.is_empty() {
+            return;
+        }
+        let mut font_system = fonts::FONT_SYSTEM
+            .write()
+            .expect("Failed to acquire font_system lock");
+        for id in ids {
+            let Some(entry) = app_scene.canvas_scene().get(id) else {
+                continue;
             };
-
-            buffer.set_rich_text(
+            if !entry.visible() {
+                continue;
+            }
+            walk_tree_into_buffers(
+                entry.tree(),
+                entry.offset(),
                 &mut font_system,
-                spans,
-                &Attrs::new(),
-                cosmic_text::Shaping::Advanced,
-                None,
+                |_unique_id, buffer| {
+                    self.canvas_scene_buffers.push(buffer);
+                },
+                |rect| {
+                    self.canvas_scene_background_rects.push(rect);
+                },
             );
-            buffer.shape_until_scroll(&mut font_system, false);
-
-            let text_buffer = MindMapTextBuffer {
-                buffer,
-                pos: (area.position.x.0, area.position.y.0),
-                bounds: (bound_x, bound_y),
-            };
-            self.mindmap_buffers.insert(element.unique_id().to_string(), text_buffer);
         }
     }
 
@@ -1555,12 +1613,13 @@ impl Renderer {
         border_elements: &[BorderElement],
         dirty_node_ids: Option<&std::collections::HashSet<String>>,
     ) {
-        /// How far the top/bottom border line boxes are pulled inward (toward
-        /// the node content) so their glyph visible extents overlap with the
-        /// vertical columns' glyph visible extents. Empirically chosen for
-        /// LiberationSans at typical border font sizes; larger values visibly
-        /// encroach on the node content, smaller values leave gaps.
-        const CORNER_OVERLAP_FRAC: f32 = 0.35;
+        // Layout constants live on `baumhard::mindmap::border` so
+        // this path and `tree_builder::build_border_tree` can't
+        // drift on geometry. See the doc on the constants for the
+        // empirical rationale.
+        use baumhard::mindmap::border::{
+            BORDER_APPROX_CHAR_WIDTH_FRAC, BORDER_CORNER_OVERLAP_FRAC,
+        };
 
         let mut font_system = fonts::FONT_SYSTEM
             .write()
@@ -1580,13 +1639,13 @@ impl Renderer {
             let (nw, nh) = elem.node_size;
 
             // --- Horizontal math (identical to the classic path) ---
-            let approx_char_width = font_size * 0.6;
+            let approx_char_width = font_size * BORDER_APPROX_CHAR_WIDTH_FRAC;
             let char_count = ((nw / approx_char_width) + 2.0)
                 .ceil()
                 .max(3.0) as usize;
             let right_corner_x =
                 nx - approx_char_width + (char_count - 1) as f32 * approx_char_width;
-            let corner_overlap = font_size * CORNER_OVERLAP_FRAC;
+            let corner_overlap = font_size * BORDER_CORNER_OVERLAP_FRAC;
             let top_y = ny - font_size + corner_overlap;
             let bottom_y = ny + nh - corner_overlap;
 
@@ -2951,6 +3010,119 @@ pub struct MindMapTextBuffer {
     pub buffer: Buffer,
     pub pos: (f32, f32),
     pub bounds: (f32, f32),
+}
+
+/// Shared tree → cosmic-text buffer walker.
+///
+/// Iterates every `GlyphArea` descendant of `tree`, shapes a
+/// `cosmic_text::Buffer` for each one, and hands the result to
+/// `yield_buffer` together with the element's `unique_id` (raw
+/// `usize`, not stringified — keying is the caller's choice).
+/// Background fills (if any) are forwarded to `yield_background`
+/// before the buffer is built so rects attached to text-empty
+/// areas still land.
+///
+/// `offset` is added to every `position` — callers pass
+/// `Vec2::ZERO` whenever the tree's areas are already in the
+/// destination coordinate space (e.g. the mindmap, whose nodes
+/// hold canvas-space positions); pass the registered tree offset
+/// for scene trees that lay out in their own local frame.
+///
+/// # Costs
+///
+/// O(descendants). One `cosmic_text::Buffer` allocated per
+/// non-empty-text area; background rect yields are trivial. No
+/// per-area `String` allocation — the `unique_id` flows as a raw
+/// integer and only the mindmap closure stringifies it for its
+/// `FxHashMap` key. Holds the provided `font_system` write guard
+/// for the duration of the walk — keep the call site's own guard
+/// scope tight.
+fn walk_tree_into_buffers(
+    tree: &Tree<GfxElement, GfxMutator>,
+    offset: Vec2,
+    font_system: &mut FontSystem,
+    mut yield_buffer: impl FnMut(usize, MindMapTextBuffer),
+    mut yield_background: impl FnMut(NodeBackgroundRect),
+) {
+    for descendant_id in tree.root().descendants(&tree.arena) {
+        let node = match tree.arena.get(descendant_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        let element = node.get();
+        let area = match element.glyph_area() {
+            Some(a) => a,
+            None => continue, // Void and GlyphModel nodes carry no text.
+        };
+
+        if let Some(color) = area.background_color {
+            yield_background(NodeBackgroundRect {
+                position: Vec2::new(area.position.x.0, area.position.y.0) + offset,
+                size: Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
+                color,
+            });
+        }
+
+        if area.text.is_empty() {
+            continue;
+        }
+
+        let scale = area.scale.0;
+        let line_height = area.line_height.0;
+        let bound_x = area.render_bounds.x.0;
+        let bound_y = area.render_bounds.y.0;
+
+        let mut buffer = cosmic_text::Buffer::new(
+            font_system,
+            cosmic_text::Metrics::new(scale, line_height),
+        );
+        buffer.set_size(font_system, Some(bound_x), Some(bound_y));
+        buffer.set_wrap(font_system, cosmic_text::Wrap::Word);
+
+        let text = &area.text;
+        let spans: Vec<(&str, Attrs)> = if area.regions.num_regions() == 0 {
+            vec![(text.as_str(), Attrs::new())]
+        } else {
+            area.regions
+                .all_regions()
+                .iter()
+                .filter_map(|region| {
+                    let start = grapheme_chad::find_byte_index_of_char(text, region.range.start)
+                        .unwrap_or(text.len());
+                    let end = grapheme_chad::find_byte_index_of_char(text, region.range.end)
+                        .unwrap_or(text.len());
+                    if start >= end {
+                        return None;
+                    }
+                    let slice = &text[start..end];
+                    let mut attrs = Attrs::new();
+                    if let Some(rgba) = region.color {
+                        let u8c = baumhard::util::color::convert_f32_to_u8(&rgba);
+                        attrs = attrs
+                            .color(cosmic_text::Color::rgba(u8c[0], u8c[1], u8c[2], u8c[3]));
+                    }
+                    attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
+                    Some((slice, attrs))
+                })
+                .collect()
+        };
+
+        buffer.set_rich_text(
+            font_system,
+            spans,
+            &Attrs::new(),
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(font_system, false);
+
+        let text_buffer = MindMapTextBuffer {
+            buffer,
+            pos: (area.position.x.0 + offset.x, area.position.y.0 + offset.y),
+            bounds: (bound_x, bound_y),
+        };
+        yield_buffer(element.unique_id(), text_buffer);
+    }
 }
 
 /// Convert a normalized `[0, 1]` RGB triple into an opaque

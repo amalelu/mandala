@@ -449,6 +449,18 @@ impl Application {
         // lifetime matches the interactive session. It is a pure view
         // optimisation — nothing about the model depends on it.
         let mut scene_cache = baumhard::mindmap::scene_cache::SceneConnectionCache::new();
+        // App-level tree host for overlay components (console, color
+        // picker). Empty today; Sessions 3 and 4 of the
+        // baumhard-unified-rendering refactor will register their
+        // trees here so the renderer can walk one scene per frame
+        // instead of chaining per-overlay rebuild functions. Kept
+        // next to `mindmap_tree` so overlays stay in sync with
+        // interactive-session lifetime.
+        let mut app_scene = crate::application::scene_host::AppScene::new();
+        // Silence "unused" while the overlay migrations land in
+        // follow-up sessions. Remove this line once an overlay
+        // registers a tree (Session 3 / 4).
+        let _ = &mut app_scene;
 
         match MindMapDocument::load(&self.options.mindmap_path) {
             Ok(mut doc) => {

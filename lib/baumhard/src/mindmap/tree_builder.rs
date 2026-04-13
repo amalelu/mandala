@@ -142,6 +142,238 @@ fn mindnode_to_glyph_area(node: &MindNode, vars: &HashMap<String, String>) -> Gl
     area
 }
 
+// =====================================================================
+// Border tree builder
+//
+// Emits one baumhard `Tree<GfxElement, GfxMutator>` that, when walked
+// into cosmic-text buffers, reproduces the same four box-drawing runs
+// per framed node that the legacy `scene_builder::BorderElement` +
+// `renderer::rebuild_border_buffers_keyed` pair produces.
+//
+// Layout constants (`BORDER_CORNER_OVERLAP_FRAC`,
+// `BORDER_APPROX_CHAR_WIDTH_FRAC`) live on `crate::mindmap::border`
+// so the renderer's keyed-buffer rebuild and this builder share one
+// source of truth.
+// =====================================================================
+
+use crate::mindmap::border::{BORDER_APPROX_CHAR_WIDTH_FRAC, BORDER_CORNER_OVERLAP_FRAC};
+
+/// Build a baumhard tree representing every framed node's border
+/// glyphs. The tree's shape is:
+///
+/// ```text
+/// Void (root)
+/// ├── Void (per node — channel = id_counter)
+/// │   ├── GlyphArea (top run, channel = 1)
+/// │   ├── GlyphArea (bottom run, channel = 2)
+/// │   ├── GlyphArea (left column, channel = 3)
+/// │   └── GlyphArea (right column, channel = 4)
+/// ├── Void (next node)
+/// │   └── ...
+/// ```
+///
+/// The per-node Void parent is not strictly necessary for rendering
+/// but it gives mutator trees a natural target for whole-node
+/// border changes (e.g. color change across all four runs).
+///
+/// Iteration order is the lexicographic order of `MindNode.id` —
+/// stable across runs so per-node Void parents always land in the
+/// same arena slot. Without this, `MindMap.nodes` (a `HashMap`)
+/// would yield nondeterministic order, making mutator-tree
+/// authoring against "the third framed node" unreliable.
+///
+/// # Costs
+///
+/// O(N log N) where N is the visible framed-node count (the sort
+/// dominates for large maps). Allocates one tree arena, one
+/// `Vec<&str>` for the sort, and one `String` per run. Uses the
+/// same `BorderStyle` defaults as `scene_builder::build_scene` so
+/// the two paths can't drift on style choices.
+pub fn build_border_tree(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+) -> Tree<GfxElement, GfxMutator> {
+    use crate::mindmap::border::BorderStyle;
+
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let vars = &map.canvas.theme_variables;
+    let mut id_counter: usize = 1;
+
+    let mut sorted_ids: Vec<&String> = map.nodes.keys().collect();
+    sorted_ids.sort();
+
+    for node_id in sorted_ids {
+        let Some(node) = map.nodes.get(node_id) else {
+            continue;
+        };
+        if map.is_hidden_by_fold(node) {
+            continue;
+        }
+        if !node.style.show_frame {
+            continue;
+        }
+
+        let (ox, oy) = offsets.get(&node.id).copied().unwrap_or((0.0, 0.0));
+        let pos_x = node.position.x as f32 + ox;
+        let pos_y = node.position.y as f32 + oy;
+        let size_x = node.size.width as f32;
+        let size_y = node.size.height as f32;
+
+        let frame_color_hex = color::resolve_var(&node.style.frame_color, vars);
+        let border_style = BorderStyle::default_with_color(frame_color_hex);
+        let color_rgba = color::hex_to_rgba_safe(&border_style.color, [1.0, 1.0, 1.0, 1.0]);
+
+        append_border_sub_tree(
+            &mut tree,
+            &border_style,
+            color_rgba,
+            pos_x,
+            pos_y,
+            size_x,
+            size_y,
+            &mut id_counter,
+        );
+    }
+
+    tree
+}
+
+/// Build one per-node sub-tree (Void parent + 4 GlyphArea runs) and
+/// append it under `tree.root`. Kept as a private helper so
+/// `build_border_tree` stays readable.
+fn append_border_sub_tree(
+    tree: &mut Tree<GfxElement, GfxMutator>,
+    border_style: &crate::mindmap::border::BorderStyle,
+    color_rgba: [f32; 4],
+    pos_x: f32,
+    pos_y: f32,
+    size_x: f32,
+    size_y: f32,
+    id_counter: &mut usize,
+) {
+    let font_size = border_style.font_size_pt;
+    let approx_char_width = font_size * BORDER_APPROX_CHAR_WIDTH_FRAC;
+    let char_count = ((size_x / approx_char_width) + 2.0).ceil().max(3.0) as usize;
+    let right_corner_x =
+        pos_x - approx_char_width + (char_count - 1) as f32 * approx_char_width;
+    let corner_overlap = font_size * BORDER_CORNER_OVERLAP_FRAC;
+    let top_y = pos_y - font_size + corner_overlap;
+    let bottom_y = pos_y + size_y - corner_overlap;
+    let h_width = (char_count as f32 + 1.0) * approx_char_width;
+    let v_width = approx_char_width * 2.0;
+    let row_count = (size_y / font_size).round().max(1.0) as usize;
+
+    let glyph_set = &border_style.glyph_set;
+    let top_text = glyph_set.top_border(char_count);
+    let bottom_text = glyph_set.bottom_border(char_count);
+    let left_text: String =
+        std::iter::repeat_n(format!("{}\n", glyph_set.left_char()), row_count).collect();
+    let right_text: String =
+        std::iter::repeat_n(format!("{}\n", glyph_set.right_char()), row_count).collect();
+
+    // Per-node Void parent — groups the four runs for targeted
+    // mutation. The parent's channel is the counter so distinct
+    // nodes never collide.
+    let parent_channel = *id_counter;
+    let parent_id = tree
+        .arena
+        .new_node(GfxElement::new_void_with_id(parent_channel, parent_channel));
+    tree.root.append(parent_id, &mut tree.arena);
+    *id_counter += 1;
+
+    // Stable channels 1..=4 inside each border sub-tree. The
+    // per-node Void parent already disambiguates across nodes.
+    append_border_run(
+        tree,
+        parent_id,
+        1,
+        *id_counter,
+        &top_text,
+        font_size,
+        (pos_x - approx_char_width, top_y),
+        (h_width, font_size * 1.5),
+        color_rgba,
+    );
+    *id_counter += 1;
+    append_border_run(
+        tree,
+        parent_id,
+        2,
+        *id_counter,
+        &bottom_text,
+        font_size,
+        (pos_x - approx_char_width, bottom_y),
+        (h_width, font_size * 1.5),
+        color_rgba,
+    );
+    *id_counter += 1;
+    append_border_run(
+        tree,
+        parent_id,
+        3,
+        *id_counter,
+        &left_text,
+        font_size,
+        (pos_x - approx_char_width, pos_y),
+        (v_width, size_y),
+        color_rgba,
+    );
+    *id_counter += 1;
+    append_border_run(
+        tree,
+        parent_id,
+        4,
+        *id_counter,
+        &right_text,
+        font_size,
+        (right_corner_x, pos_y),
+        (v_width, size_y),
+        color_rgba,
+    );
+    *id_counter += 1;
+}
+
+fn append_border_run(
+    tree: &mut Tree<GfxElement, GfxMutator>,
+    parent_id: NodeId,
+    channel: usize,
+    unique_id: usize,
+    text: &str,
+    font_size: f32,
+    position: (f32, f32),
+    bounds: (f32, f32),
+    color_rgba: [f32; 4],
+) {
+    let mut area = GlyphArea::new_with_str(
+        text,
+        font_size,
+        font_size,
+        Vec2::new(position.0, position.1),
+        Vec2::new(bounds.0, bounds.1),
+    );
+
+    // Single ColorFontRegion covering the whole run — the renderer
+    // walker translates this into a cosmic-text `Attrs::color`
+    // span. Grapheme cluster count matches `chars().count()` here
+    // because box-drawing glyphs are all single-scalar ASCII-range
+    // codepoints, but using the grapheme counter is cheap and
+    // future-proof.
+    let cluster_count = text.chars().count();
+    if cluster_count > 0 {
+        let mut regions = ColorFontRegions::new_empty();
+        regions.submit_region(ColorFontRegion::new(
+            Range::new(0, cluster_count),
+            None,
+            Some(color_rgba),
+        ));
+        area.regions = regions;
+    }
+
+    let element = GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
+    let node = tree.arena.new_node(element);
+    parent_id.append(node, &mut tree.arena);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +780,144 @@ mod tests {
         let result = build_mindmap_tree(&map);
         let area = glyph_area_of(&result.tree, *result.node_map.get("n").unwrap());
         assert_eq!(area.background_color, Some([0, 0, 0, 255]));
+    }
+
+    // -----------------------------------------------------------------
+    // Border tree builder
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn border_tree_has_one_void_parent_per_framed_node() {
+        let map = synthetic_map(
+            vec![
+                synthetic_node("a", None, 0, 0.0, 0.0),
+                synthetic_node("b", None, 1, 200.0, 0.0),
+            ],
+            vec![],
+        );
+        let tree = build_border_tree(&map, &HashMap::new());
+        // Two framed nodes → two per-node Void parents under root.
+        let parents: Vec<NodeId> = tree.root.children(&tree.arena).collect();
+        assert_eq!(parents.len(), 2);
+        for parent in parents {
+            let element = tree.arena.get(parent).unwrap().get();
+            assert!(element.glyph_area().is_none(), "per-node parent is Void");
+            // Every parent has exactly 4 GlyphArea run children.
+            let runs: Vec<NodeId> = parent.children(&tree.arena).collect();
+            assert_eq!(runs.len(), 4);
+            for run_id in runs {
+                let run = tree.arena.get(run_id).unwrap().get();
+                assert!(run.glyph_area().is_some(), "run is a GlyphArea");
+            }
+        }
+    }
+
+    #[test]
+    fn border_tree_skips_nodes_with_show_frame_false() {
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("a", None, 0, 0.0, 0.0),
+                synthetic_node("b", None, 1, 200.0, 0.0),
+            ],
+            vec![],
+        );
+        map.nodes.get_mut("a").unwrap().style.show_frame = false;
+        let tree = build_border_tree(&map, &HashMap::new());
+        // Only `b` is framed → one per-node parent.
+        let parents: Vec<NodeId> = tree.root.children(&tree.arena).collect();
+        assert_eq!(parents.len(), 1);
+    }
+
+    #[test]
+    fn border_tree_skips_folded_nodes() {
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("parent", None, 0, 0.0, 0.0),
+                synthetic_node("child", Some("parent"), 0, 0.0, 100.0),
+            ],
+            vec![],
+        );
+        map.nodes.get_mut("parent").unwrap().folded = true;
+        let tree = build_border_tree(&map, &HashMap::new());
+        // Parent itself still frames; child is hidden.
+        let parents: Vec<NodeId> = tree.root.children(&tree.arena).collect();
+        assert_eq!(parents.len(), 1);
+    }
+
+    #[test]
+    fn border_tree_applies_drag_offset() {
+        let map = synthetic_map(vec![synthetic_node("a", None, 0, 0.0, 0.0)], vec![]);
+        let mut offsets: HashMap<String, (f32, f32)> = HashMap::new();
+        offsets.insert("a".into(), (50.0, 25.0));
+        let tree = build_border_tree(&map, &offsets);
+        // Drag offset must show up on the *top* run's position.x
+        // (which is `pos_x - approx_char_width`).
+        let parent = tree.root.children(&tree.arena).next().unwrap();
+        let top_run = parent.children(&tree.arena).next().unwrap();
+        let area = tree
+            .arena
+            .get(top_run)
+            .unwrap()
+            .get()
+            .glyph_area()
+            .unwrap();
+        // pos_x + offset = 0 + 50 = 50, then shifted by
+        // -approx_char_width (0.6 * font_size).
+        let font_size = 14.0_f32;
+        let approx_char_width = font_size * BORDER_APPROX_CHAR_WIDTH_FRAC;
+        let expected_x = 50.0 - approx_char_width;
+        assert!(
+            (area.position.x.0 - expected_x).abs() < 0.001,
+            "top-run x ({}) should match drag-applied layout ({})",
+            area.position.x.0,
+            expected_x
+        );
+        // y follows pos_y + offset - font_size + corner_overlap.
+        let corner_overlap = font_size * BORDER_CORNER_OVERLAP_FRAC;
+        let expected_y = 25.0 - font_size + corner_overlap;
+        assert!((area.position.y.0 - expected_y).abs() < 0.001);
+    }
+
+    #[test]
+    fn border_tree_resolves_frame_color_through_theme_vars() {
+        let mut map = synthetic_map(vec![synthetic_node("a", None, 0, 0.0, 0.0)], vec![]);
+        // Theme variable keys include the leading `--`, matching
+        // the CSS-ish `var(--name)` syntax used in mindmap JSON.
+        map.canvas
+            .theme_variables
+            .insert("--my-frame".into(), "#ff0000".into());
+        map.nodes.get_mut("a").unwrap().style.frame_color = "var(--my-frame)".into();
+        let tree = build_border_tree(&map, &HashMap::new());
+        let parent = tree.root.children(&tree.arena).next().unwrap();
+        let top_run = parent.children(&tree.arena).next().unwrap();
+        let area = tree
+            .arena
+            .get(top_run)
+            .unwrap()
+            .get()
+            .glyph_area()
+            .unwrap();
+        let region = area.regions.all_regions()[0];
+        let c = region.color.unwrap();
+        // #ff0000 → red channel 1.0, green/blue 0.0.
+        assert!((c[0] - 1.0).abs() < 0.01);
+        assert!(c[1] < 0.01);
+        assert!(c[2] < 0.01);
+    }
+
+    #[test]
+    fn border_tree_run_channels_are_stable_1_to_4() {
+        // Top=1, Bottom=2, Left=3, Right=4. Stability matters
+        // because mutator trees target runs by channel.
+        use crate::gfx_structs::tree::BranchChannel;
+        let map = synthetic_map(vec![synthetic_node("a", None, 0, 0.0, 0.0)], vec![]);
+        let tree = build_border_tree(&map, &HashMap::new());
+        let parent = tree.root.children(&tree.arena).next().unwrap();
+        let runs: Vec<_> = parent.children(&tree.arena).collect();
+        let channels: Vec<usize> = runs
+            .iter()
+            .map(|id| tree.arena.get(*id).unwrap().get().channel())
+            .collect();
+        assert_eq!(channels, vec![1, 2, 3, 4]);
     }
 }
