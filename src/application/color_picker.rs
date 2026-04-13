@@ -110,20 +110,21 @@ pub const ARM_TOP_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
 ];
 
 /// Val bar bottom arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
-/// mid → darkest). Hebrew letters beyond the ring's first 8 — script
-/// contrast with the Devanagari top arm across the wheel's vertical
-/// axis.
+/// mid → darkest). Egyptian hieroglyphs — sacred-sign set chosen for
+/// their visual weight and iconic recognizability (Eye of Horus, Ankh,
+/// Djed, …). Contrasts with the Devanagari top arm across the wheel's
+/// vertical axis so the cross reads as a four-script compass.
 pub const ARM_BOTTOM_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{05D8}", // ט TET
-    "\u{05D9}", // י YOD
-    "\u{05DB}", // כ KAF
-    "\u{05DC}", // ל LAMED
-    "\u{05DE}", // מ MEM
-    "\u{05E0}", // נ NUN
-    "\u{05E1}", // ס SAMEKH
-    "\u{05E2}", // ע AYIN
-    "\u{05E4}", // פ PE
-    "\u{05E6}", // צ TSADE
+    "\u{13080}", // 𓂀 — Eye of Horus (wedjat)
+    "\u{132F9}", // 𓋹 — ankh
+    "\u{132BD}", // 𓊽 — djed pillar
+    "\u{1308D}", // 𓂍 — arm holding stick
+    "\u{1328A}", // 𓊊 — boat / bark
+    "\u{132C0}", // 𓋀 — west sign
+    "\u{13180}", // 𓆀 — serpent
+    "\u{1320C}", // 𓈌 — akhet (horizon)
+    "\u{1313F}", // 𓄿 — Egyptian vulture (A)
+    "\u{13099}", // 𓂙 — finger
 ];
 
 /// Sat bar left arm (cells 0..CROSSHAIR_CENTER_CELL, desaturated →
@@ -143,21 +144,20 @@ pub const ARM_LEFT_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
 ];
 
 /// Sat bar right arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
-/// mid → saturated). Egyptian Hieroglyph narrow uniliterals from
-/// Gardiner's alphabet — the hieroglyphic "alphabet" of single-
-/// consonant signs, picked to match the visual weight of the other
-/// three arms (no wide biliterals / triliterals).
+/// mid → saturated). Hebrew letters beyond the ring's first 8 — script
+/// contrast with the Tibetan left arm across the wheel's horizontal
+/// axis.
 pub const ARM_RIGHT_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{131CB}", // 𓇋 i — reed flower
-    "\u{13171}", // 𓅱 w — quail chick
-    "\u{130C0}", // 𓃀 b — leg
-    "\u{132AA}", // 𓊪 p — stool
-    "\u{13191}", // 𓆑 f — horned viper
-    "\u{13216}", // 𓈖 n — water ripple
-    "\u{1308B}", // 𓂋 r — mouth
-    "\u{13254}", // 𓉔 h — reed shelter
-    "\u{132F4}", // 𓋴 s — folded cloth
-    "\u{133CF}", // 𓏏 t — bread loaf
+    "\u{05D8}", // ט TET
+    "\u{05D9}", // י YOD
+    "\u{05DB}", // כ KAF
+    "\u{05DC}", // ל LAMED
+    "\u{05DE}", // מ MEM
+    "\u{05E0}", // נ NUN
+    "\u{05E1}", // ס SAMEKH
+    "\u{05E2}", // ע AYIN
+    "\u{05E4}", // פ PE
+    "\u{05E6}", // צ TSADE
 ];
 
 /// Center wheel preview glyph — ॐ (U+0950, Devanagari Om). Replaces
