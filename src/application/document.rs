@@ -26,24 +26,18 @@ pub const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
 
 /// Per-active-mutation runtime record for the Phase-4 animation
 /// system. Carries the from/to `MindNode` snapshot and the
-/// timing envelope; the dispatcher in
+/// driving `CustomMutation`; the dispatcher in
 /// [`MindMapDocument::tick_animations`] interpolates per-frame
 /// and writes the blended state back into `mindmap.nodes`.
 ///
-/// The full `CustomMutation` is held on the instance so that
-/// completion can fire it through `apply_custom_mutation` —
-/// reusing the standard model-sync + undo-push path so an
-/// animated commit is indistinguishable from an instant one.
+/// `cm` is the single source of truth — `mutation_id()` and
+/// `timing()` project out the fields the dispatcher needs, so
+/// there is no way for a mutation_id / timing copy to drift out
+/// of sync with the underlying `CustomMutation`.
 #[derive(Debug, Clone)]
 pub struct AnimationInstance {
-    /// `CustomMutation.id` of the mutation being animated.
-    /// Combined with `target_id`, identifies the instance for
-    /// re-trigger no-op detection.
-    pub mutation_id: String,
     /// Node id this animation targets.
     pub target_id: String,
-    /// Timing envelope (delay, duration, easing, followup).
-    pub timing: AnimationTiming,
     /// Pre-mutation snapshot of the target node. Stored whole so
     /// any future per-field interpolator can pull the source.
     pub from_node: MindNode,
@@ -52,10 +46,31 @@ pub struct AnimationInstance {
     pub to_node: MindNode,
     /// Wall-clock timestamp (ms) when the animation started.
     pub start_ms: u64,
-    /// The full `CustomMutation` definition, held so completion
-    /// can fire `apply_custom_mutation` through the standard
-    /// model-sync + undo-push path.
+    /// The `CustomMutation` driving the animation. Carries the
+    /// id (for re-trigger detection), the `timing` envelope (for
+    /// the tick loop), and the full mutation list (for the
+    /// `apply_custom_mutation` commit at completion).
     pub cm: CustomMutation,
+}
+
+impl AnimationInstance {
+    /// `CustomMutation.id` of the mutation being animated.
+    /// Combined with `target_id`, identifies the instance for
+    /// re-trigger no-op detection in `start_animation`.
+    pub fn mutation_id(&self) -> &str {
+        &self.cm.id
+    }
+
+    /// The timing envelope. Unwraps `cm.timing` — animations are
+    /// only constructed through `start_animation`, which checks
+    /// `cm.timing.is_some() && duration_ms > 0` before pushing,
+    /// so this projection is always safe by construction.
+    pub fn timing(&self) -> &AnimationTiming {
+        self.cm
+            .timing
+            .as_ref()
+            .expect("AnimationInstance invariant: cm.timing is always Some")
+    }
 }
 
 /// Apply position-bearing `Mutation`s to a `MindNode` to derive
@@ -2114,25 +2129,31 @@ impl MindMapDocument {
         target_id: &str,
         now_ms: u64,
     ) {
-        let timing = match cm.timing.as_ref() {
-            Some(t) if t.duration_ms > 0 => t.clone(),
-            _ => return, // caller error: instant-mutation path should have been taken
-        };
+        // Invariant check the `AnimationInstance::timing()`
+        // projection relies on: `cm.timing` must be Some with a
+        // non-zero duration, else the caller should have taken
+        // the instant-mutation path.
+        if !cm
+            .timing
+            .as_ref()
+            .is_some_and(|t| t.duration_ms > 0)
+        {
+            return;
+        }
 
         // Re-trigger the same (mutation_id, node_id) mid-flight is a
         // silent no-op — same semantics as the original Phase 4 plan.
         if self
             .active_animations
             .iter()
-            .any(|a| a.mutation_id == cm.id && a.target_id == target_id)
+            .any(|a| a.mutation_id() == cm.id && a.target_id == target_id)
         {
             return;
         }
 
         // Snapshot the from state.
-        let from_node = match self.mindmap.nodes.get(target_id) {
-            Some(n) => n.clone(),
-            None => return,
+        let Some(from_node) = self.mindmap.nodes.get(target_id).cloned() else {
+            return;
         };
 
         // Compute the to state by applying the mutation to a scratch
@@ -2145,9 +2166,7 @@ impl MindMapDocument {
         let to_node = scratch;
 
         self.active_animations.push(AnimationInstance {
-            mutation_id: cm.id.clone(),
             target_id: target_id.to_string(),
-            timing,
             from_node,
             to_node,
             start_ms: now_ms,
@@ -2181,20 +2200,21 @@ impl MindMapDocument {
         let mut any_advanced = false;
 
         for (idx, anim) in self.active_animations.iter().enumerate() {
+            let timing = anim.timing();
             let elapsed = now_ms.saturating_sub(anim.start_ms);
-            let total = anim.timing.delay_ms as u64 + anim.timing.duration_ms as u64;
+            let total = timing.delay_ms as u64 + timing.duration_ms as u64;
             if elapsed >= total {
                 completed_indices.push(idx);
                 continue;
             }
             // Skip the delay phase — node stays at `from` until the
             // delay elapses.
-            if elapsed < anim.timing.delay_ms as u64 {
+            if elapsed < timing.delay_ms as u64 {
                 continue;
             }
-            let progress = (elapsed - anim.timing.delay_ms as u64) as f32
-                / anim.timing.duration_ms as f32;
-            let t = anim.timing.easing.evaluate(progress);
+            let progress =
+                (elapsed - timing.delay_ms as u64) as f32 / timing.duration_ms as f32;
+            let t = timing.easing.evaluate(progress);
 
             let node = match self.mindmap.nodes.get_mut(&anim.target_id) {
                 Some(n) => n,
