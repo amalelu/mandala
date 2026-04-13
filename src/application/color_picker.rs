@@ -110,10 +110,8 @@ pub const ARM_TOP_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
 ];
 
 /// Val bar bottom arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
-/// mid → darkest). Egyptian hieroglyphs — sacred-sign set chosen for
-/// their visual weight and iconic recognizability (Eye of Horus, Ankh,
-/// Djed, …). Contrasts with the Devanagari top arm across the wheel's
-/// vertical axis so the cross reads as a four-script compass.
+/// mid → darkest). Egyptian hieroglyphs — script contrast with the
+/// Devanagari top arm across the wheel's vertical axis.
 pub const ARM_BOTTOM_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
     "\u{13080}", // 𓂀 — Eye of Horus (wedjat)
     "\u{132F9}", // 𓋹 — ankh
@@ -1174,6 +1172,49 @@ mod tests {
             assert!(
                 (0x0F00..=0x0FFF).contains(&cp),
                 "slot {i} codepoint U+{cp:04X} not in Tibetan",
+            );
+        }
+    }
+
+    /// Each crosshair arm must be grouped by its own script. Codepoint-
+    /// range check — not the identity of individual glyphs — so
+    /// swapping letters within the same script doesn't break the test,
+    /// while an accidental swap between arms will.
+    #[test]
+    fn arm_glyphs_are_grouped_by_script() {
+        fn first_cp(s: &str) -> u32 {
+            s.chars().next().expect("glyph string non-empty") as u32
+        }
+        // Top arm: Devanagari (U+0900–U+097F)
+        for (i, g) in ARM_TOP_GLYPHS.iter().enumerate() {
+            let cp = first_cp(g);
+            assert!(
+                (0x0900..=0x097F).contains(&cp),
+                "top arm cell {i} codepoint U+{cp:04X} not in Devanagari",
+            );
+        }
+        // Bottom arm: Egyptian Hieroglyphs (U+13000–U+1342F)
+        for (i, g) in ARM_BOTTOM_GLYPHS.iter().enumerate() {
+            let cp = first_cp(g);
+            assert!(
+                (0x13000..=0x1342F).contains(&cp),
+                "bottom arm cell {i} codepoint U+{cp:05X} not in Egyptian Hieroglyphs",
+            );
+        }
+        // Left arm: Tibetan (U+0F00–U+0FFF)
+        for (i, g) in ARM_LEFT_GLYPHS.iter().enumerate() {
+            let cp = first_cp(g);
+            assert!(
+                (0x0F00..=0x0FFF).contains(&cp),
+                "left arm cell {i} codepoint U+{cp:04X} not in Tibetan",
+            );
+        }
+        // Right arm: Hebrew (U+0590–U+05FF)
+        for (i, g) in ARM_RIGHT_GLYPHS.iter().enumerate() {
+            let cp = first_cp(g);
+            assert!(
+                (0x0590..=0x05FF).contains(&cp),
+                "right arm cell {i} codepoint U+{cp:04X} not in Hebrew",
             );
         }
     }
