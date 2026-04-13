@@ -207,7 +207,7 @@ What we *do* test from the renderer is the pure layout math — cull
 rects, palette frame sizing, palette scroll windows, sacred-border
 layout, backdrop alignment. See `application::renderer::tests` for the
 exemplar. If a bug requires a live wgpu device to reproduce, note it
-in `ROADMAP.md`'s "What needs work" list rather than building a
+in `TODO.md`'s "What needs work" list rather than building a
 headless harness to chase it.
 
 ## §T9 Mobile and WASM
