@@ -4973,10 +4973,16 @@ fn end_color_picker_drag(state: &mut crate::application::color_picker::ColorPick
 
 /// Commit the picker's current HSV to every colorable item in the
 /// document's current selection. Standalone mode's core gesture.
-/// Multi-select applies in a single pass (one undo entry per item —
-/// grouped undo is a future refinement when `UndoAction::Group` lands
-/// in the document layer). Empty selection → fire the error-flash
-/// animation hook and do nothing.
+///
+/// Dispatches through the [`AcceptsWheelColor`] trait: each component
+/// type declares its own default color channel (nodes → bg, edges →
+/// their single color field). The picker doesn't decide — the
+/// component does. Empty selection → fire the error-flash animation
+/// hook and do nothing.
+///
+/// Multi-select applies in a single pass — one undo entry per item
+/// (grouped undo is a future refinement when `UndoAction::Group`
+/// lands in the document layer).
 #[cfg(not(target_arch = "wasm32"))]
 fn commit_color_picker_to_selection(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -4986,7 +4992,9 @@ fn commit_color_picker_to_selection(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{request_error_flash, ColorPickerState, FlashKind};
-    use crate::application::document::SelectionState;
+    use crate::application::console::traits::{
+        selection_targets, view_for, AcceptsWheelColor, ColorValue, Outcome,
+    };
     use baumhard::util::color::hsv_to_hex;
 
     let (hue_deg, sat, val) = match state {
@@ -4995,43 +5003,30 @@ fn commit_color_picker_to_selection(
         } => (*hue_deg, *sat, *val),
         ColorPickerState::Closed => return,
     };
-    let hex = hsv_to_hex(hue_deg, sat, val);
+    let color = ColorValue::Hex(hsv_to_hex(hue_deg, sat, val));
 
-    // Snapshot the selection so we're not holding an immutable
-    // borrow on `doc` across setter calls.
-    let selection = doc.selection.clone();
+    let targets = selection_targets(&doc.selection);
+    if targets.is_empty() {
+        // The user pressed ॐ with nothing selected. Fire the
+        // animation hook (no-op stub today; picks up when the
+        // animation pipeline lands) so the wheel flashes red.
+        request_error_flash(state, FlashKind::Error);
+        return;
+    }
 
-    let mut applied_any = false;
-    match selection {
-        SelectionState::None => {
-            // Empty selection — the user pressed ॐ with nothing
-            // targeted. Fire the animation hook so the wheel flashes
-            // (today a no-op stub; wires up automatically when the
-            // animation system lands).
-            request_error_flash(state, FlashKind::Error);
-            return;
-        }
-        SelectionState::Single(id) => {
-            doc.set_node_bg_color(&id, hex.clone());
-            applied_any = true;
-        }
-        SelectionState::Multi(ids) => {
-            for id in ids {
-                doc.set_node_bg_color(&id, hex.clone());
-                applied_any = true;
-            }
-        }
-        SelectionState::Edge(er) => {
-            doc.set_edge_color(&er, Some(&hex));
-            applied_any = true;
-        }
-        SelectionState::Portal(pr) => {
-            doc.set_portal_color(&pr, &hex);
-            applied_any = true;
+    // Fan out across the selection, letting each component decide
+    // which channel the wheel color lands on. A fresh `TargetView`
+    // per iteration so no two views alias the doc borrow.
+    let mut any_accepted = false;
+    for tid in &targets {
+        let mut view = view_for(doc, tid);
+        match view.apply_wheel_color(color.clone()) {
+            Outcome::Applied | Outcome::Unchanged => any_accepted = true,
+            Outcome::NotApplicable | Outcome::Invalid(_) => {}
         }
     }
 
-    if applied_any {
+    if any_accepted {
         // Rebuild the whole scene so the newly-colored items repaint
         // next frame. The picker itself stays open — no state change
         // needed on `state`.

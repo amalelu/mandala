@@ -148,6 +148,26 @@ pub trait HasLabel {
     fn set_label(&mut self, s: Option<String>) -> Outcome;
 }
 
+/// Target supports receiving a color from the **standalone color
+/// wheel** (the `color picker on` persistent palette). The wheel
+/// doesn't pick an axis — it pushes one color at the selection and
+/// asks each component type to decide which channel that color
+/// belongs on. Nodes take it on `Bg`; edges take it on their single
+/// color field (routed through `set_border_color`, which is the same
+/// sink as `set_text_color` for edges). Portals haven't been ported
+/// to Baumhard yet — they return `NotApplicable` today and will
+/// switch to their fill channel once the port lands.
+///
+/// Separate trait from `HasBgColor` / `HasTextColor` / `HasBorderColor`
+/// by design: the `Has*` axis traits answer "can you accept a color
+/// on channel X?"; `AcceptsWheelColor` answers the narrower question
+/// "if someone hands you one color without specifying a channel,
+/// where does it go?". The default-channel choice belongs with the
+/// component implementation, not with every caller.
+pub trait AcceptsWheelColor {
+    fn apply_wheel_color(&mut self, c: ColorValue) -> Outcome;
+}
+
 // --- target view -----------------------------------------------------
 
 /// A mutable view into one selected component, holding the doc ref
@@ -248,6 +268,32 @@ impl<'a> HasFontSize for TargetView<'a> {
         match self {
             TargetView::Node { doc, id } => Outcome::applied(doc.set_node_font_size(id, pt)),
             TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_font_size(er, pt)),
+            TargetView::Portal { .. } => Outcome::NotApplicable,
+        }
+    }
+}
+
+impl<'a> AcceptsWheelColor for TargetView<'a> {
+    fn apply_wheel_color(&mut self, c: ColorValue) -> Outcome {
+        match self {
+            // Node default: background fill. Matches the `color bg`
+            // console verb when no axis is specified, and reads as
+            // "paint the node" visually — the bg is the dominant
+            // surface of a node glyph-frame, so colouring it is the
+            // most noticeable response to a wheel commit.
+            TargetView::Node { .. } => self.set_bg_color(c),
+            // Edge default: the one color field, routed through
+            // `set_border_color` (which is the same sink as
+            // `set_text_color` on edges — `MindEdge.color` drives
+            // both the line and the label; there is no separate
+            // bg / text / border on an edge). Picking `border` as
+            // the name reads more honestly than `text`: the edge
+            // *is* the line.
+            TargetView::Edge { .. } => self.set_border_color(c),
+            // Portals aren't Baumhard-native yet — holding on this
+            // arm until they are. When portals migrate, this
+            // becomes `self.set_bg_color(c)` (portals have a single
+            // color field that behaves as a fill).
             TargetView::Portal { .. } => Outcome::NotApplicable,
         }
     }
