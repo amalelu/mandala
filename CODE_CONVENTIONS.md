@@ -151,7 +151,7 @@ decision that belongs in `ROADMAP.md` before it belongs in code.
 ## §4 Everything is canonical
 
 We want the highest quality code. No compromise. No technical debt.
-The code in this repo should be (eventually) serve as a canonical reference
+The code in this repo should (eventually) serve as a canonical reference
 for the users who will be extending it.
 
 - **Every commit is a state we would ship.** Tests green, code formatted,
