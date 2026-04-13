@@ -1448,6 +1448,16 @@ impl Application {
                         }
                         Some(Action::Undo) => {
                             if let Some(doc) = document.as_mut() {
+                                // Ctrl+Z during an animation
+                                // fast-forwards to completion so the
+                                // animation's own undo entry lands on
+                                // the stack before we pop — Ctrl+Z
+                                // reverses the animation's effect in
+                                // one keystroke, matching the
+                                // post-completion Ctrl+Z behaviour.
+                                if doc.has_active_animations() {
+                                    doc.fast_forward_animations(mindmap_tree.as_mut());
+                                }
                                 if doc.undo() {
                                     rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                 }

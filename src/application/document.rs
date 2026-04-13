@@ -2246,6 +2246,40 @@ impl MindMapDocument {
         !self.active_animations.is_empty()
     }
 
+    /// Fast-forward every active animation to its `to` state and
+    /// commit it through `apply_custom_mutation` (which pushes
+    /// one undo entry per completed animation). Called by the
+    /// Ctrl+Z handler before `undo()` so mid-animation Ctrl+Z
+    /// has predictable semantics: the animation snaps to
+    /// completion, the undo entry it would have pushed at the
+    /// natural boundary is pushed immediately, and the
+    /// subsequent `undo()` pops that entry — so Ctrl+Z during
+    /// an animated transition reverses the animation's effect
+    /// in one keystroke, same as Ctrl+Z after the animation
+    /// completed naturally.
+    ///
+    /// Drains `active_animations` wholesale. Order within the
+    /// drain doesn't matter because each instance commits
+    /// independently and pushes its own undo entry.
+    pub fn fast_forward_animations(&mut self, tree: Option<&mut MindMapTree>) {
+        if self.active_animations.is_empty() {
+            return;
+        }
+        let drained = std::mem::take(&mut self.active_animations);
+        let mut tree = tree;
+        for anim in drained {
+            if let Some(tree) = tree.as_deref_mut() {
+                self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+            } else if let Some(node) = self.mindmap.nodes.get_mut(&anim.target_id) {
+                // No tree available — restore the model to the
+                // `to` snapshot directly. Undo path is then the
+                // caller's responsibility, matching what
+                // `tick_animations` does on its no-tree path.
+                node.position = anim.to_node.position.clone();
+            }
+        }
+    }
+
     /// Apply a custom mutation to the tree and optionally sync to the model.
     /// For Persistent mutations, snapshots affected nodes for undo and sets dirty flag.
     /// For Toggle mutations, tracks active state without model sync.
@@ -3081,6 +3115,59 @@ mod tests {
         let final_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
         // Default test-mutation `NudgeRight(10.0)` lands at +10.
         assert!((final_x - orig_x - 10.0).abs() < 1e-3);
+    }
+
+    /// Ctrl+Z mid-animation fast-forwards to the completion
+    /// state, pushes the animation's undo entry, and then the
+    /// undo pops it — net effect is that Ctrl+Z during an
+    /// animated transition reverses the animation in one
+    /// keystroke, same as Ctrl+Z after natural completion. Pins
+    /// the §4 "no half-features" contract the review called
+    /// out: without this, Ctrl+Z during an animation pops the
+    /// *previous* action, a silent user-visible regression.
+    #[test]
+    fn test_fast_forward_then_undo_reverses_animation() {
+        use baumhard::mindmap::animation::{AnimationTiming, Easing};
+
+        let mut doc = load_test_doc();
+        let node_id = "348068464".to_string();
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        let cm = make_test_mutation_with_timing(
+            "nudge-anim",
+            TS::SelfOnly,
+            Some(AnimationTiming {
+                duration_ms: 1_000,
+                delay_ms: 0,
+                easing: Easing::Linear,
+                then: None,
+            }),
+        );
+        doc.mutation_registry.insert(cm.id.clone(), cm.clone());
+        doc.start_animation(&cm, &node_id, 0);
+
+        // Fast-forward (simulating Ctrl+Z entry in the event
+        // loop). A tree is required because
+        // `apply_custom_mutation` routes through it.
+        let mut tree = doc.build_tree();
+        doc.fast_forward_animations(Some(&mut tree));
+        assert!(!doc.has_active_animations());
+        let after_ff = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        assert!(
+            (after_ff - orig_x - 10.0).abs() < 1e-3,
+            "post fast-forward x = {after_ff}, expected {}",
+            orig_x + 10.0
+        );
+
+        // Undo pops the entry fast-forward pushed. Position
+        // returns to the original.
+        let popped = doc.undo();
+        assert!(popped, "undo must pop the fast-forward's entry");
+        let after_undo = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        assert!(
+            (after_undo - orig_x).abs() < 1e-3,
+            "post undo x = {after_undo}, expected {orig_x}"
+        );
     }
 
     /// Re-triggering the same `(mutation_id, node_id)` mid-flight
