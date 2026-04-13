@@ -3497,16 +3497,51 @@ fn update_connection_label_tree(
     app_scene.register_canvas(CanvasRole::ConnectionLabels, result.tree, glam::Vec2::ZERO);
 }
 
-/// Reshape edge handles into the canvas-scene tree path. The
-/// handle set is small (≤ 5 per selected edge) so a fresh build
-/// per call is fine.
+/// Build or in-place update the edge-handle tree under
+/// [`CanvasRole::EdgeHandles`].
+///
+/// **§B2 dispatch.** Dragging a handle moves only its position;
+/// the handle set's *identity sequence* (the
+/// kind-derived channels emitted by
+/// [`baumhard::mindmap::tree_builder::edge_handle_identity_sequence`])
+/// stays constant for the duration of one drag. We take the in-place
+/// mutator path under that condition, reusing the existing arena
+/// instead of allocating a fresh one each frame. When the handle
+/// set's structure shifts — selection moves to a different edge
+/// shape, or a midpoint drag spawns a control point — the identity
+/// sequence changes and we fall back to a full rebuild. Mirrors the
+/// dispatch shape used in `update_portal_tree`.
 fn update_edge_handle_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
 ) {
     use crate::application::scene_host::CanvasRole;
-    let tree = baumhard::mindmap::tree_builder::build_edge_handle_tree(&scene.edge_handles);
-    app_scene.register_canvas(CanvasRole::EdgeHandles, tree, glam::Vec2::ZERO);
+    use baumhard::mindmap::tree_builder::{
+        build_edge_handle_mutator_tree, build_edge_handle_tree,
+        edge_handle_identity_sequence,
+    };
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let identity = edge_handle_identity_sequence(&scene.edge_handles);
+    let signature = {
+        let mut h = DefaultHasher::new();
+        identity.hash(&mut h);
+        h.finish()
+    };
+
+    let already_registered = app_scene.canvas_id(CanvasRole::EdgeHandles).is_some();
+    let signature_matches =
+        app_scene.canvas_signature(CanvasRole::EdgeHandles) == Some(signature);
+
+    if already_registered && signature_matches {
+        let mutator = build_edge_handle_mutator_tree(&scene.edge_handles);
+        app_scene.apply_canvas_mutator(CanvasRole::EdgeHandles, &mutator);
+    } else {
+        let tree = build_edge_handle_tree(&scene.edge_handles);
+        app_scene.register_canvas(CanvasRole::EdgeHandles, tree, glam::Vec2::ZERO);
+        app_scene.set_canvas_signature(CanvasRole::EdgeHandles, signature);
+    }
 }
 
 /// Walk every canvas-scene tree once and rebuild the renderer's
