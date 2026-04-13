@@ -2669,22 +2669,13 @@ fn picker_glyph_areas(
         );
         area.align_center = centered;
         area.outline = outline;
-        let cluster_count = text.chars().count();
-        if cluster_count > 0 {
-            let rgba = [
-                color.r() as f32 / 255.0,
-                color.g() as f32 / 255.0,
-                color.b() as f32 / 255.0,
-                color.a() as f32 / 255.0,
-            ];
-            let mut regions = ColorFontRegions::new_empty();
-            regions.submit_region(ColorFontRegion::new(
-                ColorFontRange::new(0, cluster_count),
-                font,
-                Some(rgba),
-            ));
-            area.regions = regions;
-        }
+        let rgba = [
+            color.r() as f32 / 255.0,
+            color.g() as f32 / 255.0,
+            color.b() as f32 / 255.0,
+            color.a() as f32 / 255.0,
+        ];
+        area.regions = ColorFontRegions::single_span(text.chars().count(), Some(rgba), font);
         area
     }
 
@@ -3028,22 +3019,13 @@ fn console_overlay_areas(
             Vec2::new(pos.0, pos.1),
             Vec2::new(bounds.0, bounds.1),
         );
-        let cluster_count = text.chars().count();
-        if cluster_count > 0 {
-            let rgba = [
-                color.r() as f32 / 255.0,
-                color.g() as f32 / 255.0,
-                color.b() as f32 / 255.0,
-                color.a() as f32 / 255.0,
-            ];
-            let mut regions = ColorFontRegions::new_empty();
-            regions.submit_region(ColorFontRegion::new(
-                ColorFontRange::new(0, cluster_count),
-                None,
-                Some(rgba),
-            ));
-            area.regions = regions;
-        }
+        let rgba = [
+            color.r() as f32 / 255.0,
+            color.g() as f32 / 255.0,
+            color.b() as f32 / 255.0,
+            color.a() as f32 / 255.0,
+        ];
+        area.regions = ColorFontRegions::single_span(text.chars().count(), Some(rgba), None);
         area
     };
 
@@ -4203,6 +4185,11 @@ mod tests {
             size_scale: 1.0,
             center_override: None,
             hovered_hit: None,
+            arm_top_ink_offset: (0.0, 0.0),
+            arm_bottom_ink_offset: (0.0, 0.0),
+            arm_left_ink_offset: (0.0, 0.0),
+            arm_right_ink_offset: (0.0, 0.0),
+            preview_ink_offset: (0.0, 0.0),
         }
     }
 

@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use baumhard::core::tests::primitives_tests::*;
+use baumhard::font::tests::fonts_tests::*;
 use baumhard::gfx_structs::tests::area_tests::*;
 use baumhard::gfx_structs::tests::model_tests::*;
 use baumhard::gfx_structs::tests::region_tests::*;
@@ -111,6 +112,61 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("split_and_separate_2", |b| b.iter(|| do_split_and_separate_2()));
     c.bench_function("submit_region_drops_inverted_range", |b| {
         b.iter(|| do_submit_region_drops_inverted_range())
+    });
+    c.bench_function("single_span_empty_is_empty", |b| {
+        b.iter(|| do_single_span_empty_is_empty())
+    });
+    c.bench_function("single_span_non_empty_covers_range", |b| {
+        b.iter(|| do_single_span_non_empty_covers_range())
+    });
+    c.bench_function("single_span_none_color_none_font", |b| {
+        b.iter(|| do_single_span_none_color_none_font())
+    });
+    c.bench_function("shrink_regions_after_fully_right_shifts_left", |b| {
+        b.iter(|| do_shrink_regions_after_fully_right_shifts_left())
+    });
+    c.bench_function("shrink_regions_after_spanning_region_absorbs", |b| {
+        b.iter(|| do_shrink_regions_after_spanning_region_absorbs())
+    });
+    c.bench_function("shrink_regions_after_fully_inside_collapses", |b| {
+        b.iter(|| do_shrink_regions_after_fully_inside_collapses())
+    });
+    c.bench_function("shrink_regions_after_left_partial_clamps", |b| {
+        b.iter(|| do_shrink_regions_after_left_partial_clamps())
+    });
+    c.bench_function("shrink_regions_after_right_partial_clamps", |b| {
+        b.iter(|| do_shrink_regions_after_right_partial_clamps())
+    });
+    c.bench_function("shrink_regions_after_zero_magnitude_is_noop", |b| {
+        b.iter(|| do_shrink_regions_after_zero_magnitude_is_noop())
+    });
+    c.bench_function("insert_regions_at_straddling_region_absorbs", |b| {
+        b.iter(|| do_insert_regions_at_straddling_region_absorbs())
+    });
+    c.bench_function("insert_regions_at_left_adjacent_region_absorbs", |b| {
+        b.iter(|| do_insert_regions_at_left_adjacent_region_absorbs())
+    });
+    c.bench_function("insert_regions_at_shifts_right_regions", |b| {
+        b.iter(|| do_insert_regions_at_shifts_right_regions())
+    });
+    c.bench_function("insert_regions_at_zero_position_shifts_all", |b| {
+        b.iter(|| do_insert_regions_at_zero_position_shifts_all())
+    });
+    c.bench_function("insert_regions_at_empty_returns_false", |b| {
+        b.iter(|| do_insert_regions_at_empty_returns_false())
+    });
+    // font / ink-bounds //
+    c.bench_function("measure_glyph_ink_bounds_latin_has_positive_advance", |b| {
+        b.iter(|| do_measure_glyph_ink_bounds_latin_has_positive_advance())
+    });
+    c.bench_function("measure_glyph_ink_bounds_tibetan_svasti_has_sidebearing", |b| {
+        b.iter(|| do_measure_glyph_ink_bounds_tibetan_svasti_has_sidebearing())
+    });
+    c.bench_function("measure_glyph_ink_bounds_empty_string_is_zero", |b| {
+        b.iter(|| do_measure_glyph_ink_bounds_empty_string_is_zero())
+    });
+    c.bench_function("measure_glyph_ink_bounds_x_offset_from_advance_center", |b| {
+        b.iter(|| do_measure_glyph_ink_bounds_x_offset_from_advance_center())
     });
     // scene + hit-test //
     c.bench_function("descendant_at_hits_single_area", |b| b.iter(|| do_descendant_at_hits_single_area()));

@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use cosmic_text::fontdb::ID;
-use cosmic_text::{Attrs, AttrsList, Buffer, BufferRef, Color, Edit, Editor, Family, Metrics, Stretch, Style, Weight, Wrap};
+use cosmic_text::{Attrs, AttrsList, Buffer, BufferRef, Color, Edit, Editor, Family, Metrics, Shaping, Stretch, Style, SwashCache, Weight, Wrap};
 use cosmic_text::fontdb::Source;
 use cosmic_text::FontSystem;
 use lazy_static::lazy_static;
@@ -127,4 +127,153 @@ pub fn adjust_buffer_metrics(buffer: &mut Buffer, metrics: Metrics) {
     debug!("Waiting for font-system write lock");
     let mut font_system = FONT_SYSTEM.write().expect("FontSystem lock was poisoned");
     buffer.set_metrics(&mut font_system, metrics);
+}
+
+/// Ink bounding box of a shaped glyph string, measured at a specific
+/// font size. Sibling of the `measure_max_glyph_advance` scalar
+/// measurement (currently in `src/application/renderer.rs` as
+/// pre-existing debt per CODE_CONVENTIONS.md §1; tracked to move
+/// here on the way past) — where advance measures just how wide the
+/// glyph pushes the pen, ink bounds measure where the visible
+/// pixels actually land.
+///
+/// Consumers — today the color picker's crosshair arms and central
+/// preview glyph — use this to compute ink-center-vs-advance-center
+/// offsets so they can re-anchor positions that `Align::Center`
+/// would otherwise center on the em-box. Without this correction
+/// four scripts with four different sidebearings drift four
+/// different directions off a shared visual center.
+///
+/// Coordinates:
+/// - `x_min` / `x_max`: pen-relative pixels. `0.0` is the pen
+///   origin; `advance` is the pen-end for the shaped string.
+///   Sidebearings cause `x_min > 0.0` (left sidebearing) and
+///   `x_max < advance` (right sidebearing).
+/// - `y_min` / `y_max`: baseline-relative pixels, y-axis pointing
+///   down (cosmic-text convention). Negative values sit above the
+///   baseline; positive values (descenders) sit below.
+/// - `advance`: sum of glyph advances across the shaped string.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InkBounds {
+    pub x_min: f32,
+    pub y_min: f32,
+    pub x_max: f32,
+    pub y_max: f32,
+    pub advance: f32,
+}
+
+impl InkBounds {
+    /// Horizontal ink center (pen-relative, in pixels).
+    pub fn x_center(&self) -> f32 {
+        (self.x_min + self.x_max) * 0.5
+    }
+
+    /// Vertical ink center (baseline-relative, in pixels).
+    pub fn y_center(&self) -> f32 {
+        (self.y_min + self.y_max) * 0.5
+    }
+
+    /// Horizontal offset of the ink center from the advance center.
+    /// Positive means the ink sits right-of the advance center;
+    /// negative means left-of. A caller rendering with
+    /// `Align::Center` and wanting the ink (not the em-box) to land
+    /// at a target x must subtract this from that target.
+    pub fn x_offset_from_advance_center(&self) -> f32 {
+        self.x_center() - self.advance * 0.5
+    }
+}
+
+/// Shape `glyph` through cosmic-text at `font_size` (pinning
+/// `font` when `Some`) and return the [`InkBounds`] of the result.
+/// Empty / all-whitespace / tofu input yields a zero bounding box.
+///
+/// `font_system` and `swash_cache` are passed in rather than taken
+/// from the global [`FONT_SYSTEM`] so the primitive composes with
+/// existing call sites that already hold the write guard (notably
+/// the color picker open path in `src/application/app.rs`, which
+/// measures advances and ink in the same lock scope).
+///
+/// **Y-axis caveat**: `y_min` / `y_max` are baseline-relative. To
+/// compute a "box-center-vs-ink-center" y-offset a caller also
+/// needs to know where the baseline lands inside its rendering box
+/// — which depends on the font's ascent / descent metrics and the
+/// buffer's `line_height`. This primitive does not yet return that,
+/// so consumers today use only [`InkBounds::x_offset_from_advance_center`]
+/// for the named sidebearing fix; the vertical correction is
+/// deferred until the primitive grows to return `line_y` too.
+///
+/// Costs: allocates a scratch `Buffer`, shapes one line, rasterizes
+/// each glyph through `SwashCache::get_image_uncached` (no caching
+/// — callers needing repeated access should hold their own cache).
+/// Call-once-at-picker-open, not frame-hot.
+pub fn measure_glyph_ink_bounds(
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut SwashCache,
+    font: Option<AppFont>,
+    glyph: &str,
+    font_size: f32,
+) -> InkBounds {
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, font_size));
+
+    // Pin the requested AppFont family (if any) so sacred-script
+    // glyphs shape against the intended face instead of cosmic-text's
+    // default fallback. The family name string must outlive `attrs`,
+    // so we hold it in a local binding.
+    let family_name: Option<String> = font.and_then(|app_font| {
+        let ids = COMPILED_FONT_ID_MAP.get(&app_font)?;
+        let face = font_system.db().face(ids[0])?;
+        Some(face.families.first()?.0.clone())
+    });
+    let attrs = match family_name.as_deref() {
+        Some(name) => Attrs::new().family(Family::Name(name)),
+        None => Attrs::new(),
+    };
+
+    buffer.set_text(font_system, glyph, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
+
+    let mut out = InkBounds::default();
+    let mut any_ink = false;
+    let mut advance_total = 0.0f32;
+
+    for run in buffer.layout_runs() {
+        for layout_glyph in run.glyphs.iter() {
+            advance_total += layout_glyph.w;
+            // `physical` bakes the sub-pixel position into `cache_key`
+            // so the rasterized placement reflects the same x
+            // fractional as the layout. We only use `cache_key` for
+            // the swash lookup; ink-bounds math runs against
+            // `layout_glyph.x` directly (pen-relative in pixels).
+            let physical = layout_glyph.physical((0.0, 0.0), 1.0);
+            if let Some(image) = swash_cache.get_image_uncached(font_system, physical.cache_key) {
+                if image.placement.width == 0 || image.placement.height == 0 {
+                    continue;
+                }
+                let pen_x = layout_glyph.x;
+                let ink_left = pen_x + image.placement.left as f32;
+                let ink_right = ink_left + image.placement.width as f32;
+                // `placement.top` is positive for ink above baseline;
+                // we flip sign so y grows downward (cosmic-text
+                // convention) and ink-above-baseline sits at negative
+                // y.
+                let ink_top = -(image.placement.top as f32);
+                let ink_bottom = ink_top + image.placement.height as f32;
+                if !any_ink {
+                    out.x_min = ink_left;
+                    out.x_max = ink_right;
+                    out.y_min = ink_top;
+                    out.y_max = ink_bottom;
+                    any_ink = true;
+                } else {
+                    out.x_min = out.x_min.min(ink_left);
+                    out.x_max = out.x_max.max(ink_right);
+                    out.y_min = out.y_min.min(ink_top);
+                    out.y_max = out.y_max.max(ink_bottom);
+                }
+            }
+        }
+    }
+
+    out.advance = advance_total;
+    out
 }

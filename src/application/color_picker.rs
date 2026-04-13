@@ -451,6 +451,21 @@ pub enum ColorPickerState {
         /// recover dimensionless ratios that scale with whatever
         /// font_size the canonical sizing formula picks.
         measurement_font_size: f32,
+        /// Per-arm ink-center-vs-em-box-center offsets (dimensionless
+        /// — pixels at `measurement_font_size` divided by
+        /// `measurement_font_size`), measured once at open via
+        /// `baumhard::font::fonts::measure_glyph_ink_bounds`. Used by
+        /// `compute_color_picker_layout` to re-anchor each arm's
+        /// cell position on the ink centre rather than the em-box
+        /// centre. Each arm uses a different script so the four
+        /// offsets differ — the primitive is the only honest way to
+        /// keep the crosshair visually symmetric across scripts.
+        arm_top_ink_offset: (f32, f32),
+        arm_bottom_ink_offset: (f32, f32),
+        arm_left_ink_offset: (f32, f32),
+        arm_right_ink_offset: (f32, f32),
+        /// Same, for the central preview glyph (Tibetan ࿕).
+        preview_ink_offset: (f32, f32),
         /// Cached layout from the last rebuild. `None` between `Open`
         /// construction and the first `rebuild_color_picker_overlay`
         /// call (a narrow window — the rebuild is the very next line
@@ -591,6 +606,31 @@ pub struct ColorPickerOverlayGeometry {
     /// `measurement_font_size` it gives the ring's tangential
     /// slot-spacing ratio that scales with font_size.
     pub max_ring_advance: f32,
+    /// Per-arm worst-case ink-center offset from the
+    /// advance/em-box center, measured via Baumhard's
+    /// `measure_glyph_ink_bounds` primitive at picker open. Each
+    /// arm's four glyphs use a different script (Devanagari top,
+    /// Egyptian hieroglyphs bottom, Tibetan left, Hebrew right), so
+    /// cosmic-text's `Align::Center` centers the em-box, not the
+    /// ink — yielding per-script drift off the crosshair center.
+    /// `compute_color_picker_layout` subtracts the scaled offset
+    /// from each arm's cell position so the ink lands on the
+    /// intended visual radius.
+    ///
+    /// Dimensionless ratios: multiply by the layout's chosen
+    /// cell font size to get pixels. Stored as `(dx, dy)` in the
+    /// measurement font's pixel units divided by
+    /// `measurement_font_size`.
+    pub arm_top_ink_offset: (f32, f32),
+    pub arm_bottom_ink_offset: (f32, f32),
+    pub arm_left_ink_offset: (f32, f32),
+    pub arm_right_ink_offset: (f32, f32),
+    /// Same, for the central preview glyph (Tibetan ࿕ U+0FD5).
+    /// Applied at the `preview_size` scale rather than the cell
+    /// scale so a large ࿕ drifts proportionally more pixels than
+    /// the arm glyphs would — the ink-center drift is a constant
+    /// fraction of the glyph's font size.
+    pub preview_ink_offset: (f32, f32),
     /// The font_size both `max_cell_advance` and (after dividing by
     /// `hue_ring_font_scale`) `max_ring_advance` were measured at.
     /// Used to recover dimensionless advance ratios so the layout
@@ -832,26 +872,75 @@ pub fn compute_color_picker_layout(
     };
     let step = actual_cell_advance;
     let bar_span = step * (SAT_CELL_COUNT as f32 - 1.0);
+
+    // Per-arm ink offsets in layout pixels. The geometry carries
+    // dimensionless ratios (ink offset divided by
+    // `measurement_font_size`); scale by the current cell font size
+    // so the correction tracks the actual glyph size the picker is
+    // rendering at. `compute_color_picker_layout` subtracts these
+    // from each arm's cell center so the ink — not the em-box —
+    // lands on the crosshair radius.
+    let cell_fs = font_size * g.cell_font_scale;
+    let arm_left_ink = (
+        geometry.arm_left_ink_offset.0 * cell_fs,
+        geometry.arm_left_ink_offset.1 * cell_fs,
+    );
+    let arm_right_ink = (
+        geometry.arm_right_ink_offset.0 * cell_fs,
+        geometry.arm_right_ink_offset.1 * cell_fs,
+    );
+    let arm_top_ink = (
+        geometry.arm_top_ink_offset.0 * cell_fs,
+        geometry.arm_top_ink_offset.1 * cell_fs,
+    );
+    let arm_bottom_ink = (
+        geometry.arm_bottom_ink_offset.0 * cell_fs,
+        geometry.arm_bottom_ink_offset.1 * cell_fs,
+    );
+
     let mut sat_cell_positions = [(0.0_f32, 0.0_f32); SAT_CELL_COUNT];
     let mut val_cell_positions = [(0.0_f32, 0.0_f32); VAL_CELL_COUNT];
     for i in 0..SAT_CELL_COUNT {
-        sat_cell_positions[i] = (center.0 - bar_span * 0.5 + i as f32 * step, center.1);
+        let base_x = center.0 - bar_span * 0.5 + i as f32 * step;
+        let base_y = center.1;
+        let ink = if i < CROSSHAIR_CENTER_CELL {
+            arm_left_ink
+        } else if i > CROSSHAIR_CENTER_CELL {
+            arm_right_ink
+        } else {
+            (0.0, 0.0)
+        };
+        sat_cell_positions[i] = (base_x - ink.0, base_y - ink.1);
     }
     for i in 0..VAL_CELL_COUNT {
-        val_cell_positions[i] = (center.0, center.1 - bar_span * 0.5 + i as f32 * step);
+        let base_x = center.0;
+        let base_y = center.1 - bar_span * 0.5 + i as f32 * step;
+        let ink = if i < CROSSHAIR_CENTER_CELL {
+            arm_top_ink
+        } else if i > CROSSHAIR_CENTER_CELL {
+            arm_bottom_ink
+        } else {
+            (0.0, 0.0)
+        };
+        val_cell_positions[i] = (base_x - ink.0, base_y - ink.1);
     }
 
     // Center preview ࿕ at the bar intersection. The glyph is the
-    // Tibetan svasti (U+0FD5) — a roughly-square ideograph whose ink
-    // sits centered in its em box, so the canonical half-size offset
-    // in each direction lands the visible mark on the geometric
-    // wheel center. Earlier revisions used asymmetric factors (0.4,
-    // 0.65) calibrated for ॐ, whose top-heavy anusvara biased its
-    // visible center off the box center; those don't apply here.
+    // Tibetan svasti (U+0FD5) — it has a non-trivial left-sidebearing
+    // that `Align::Center` would otherwise leave uncorrected. The
+    // `preview_ink_offset` carried on geometry is the dimensionless
+    // ink-center-vs-advance-center drift measured at open time;
+    // scaling by `preview_size` and subtracting moves the
+    // glyph-box anchor left/up just enough for the ink to land on
+    // the geometric wheel center.
     let preview_size = font_size * g.preview_size_scale;
+    let preview_ink_px = (
+        geometry.preview_ink_offset.0 * preview_size,
+        geometry.preview_ink_offset.1 * preview_size,
+    );
     let preview_pos = (
-        center.0 - preview_size * 0.5,
-        center.1 - preview_size * 0.5,
+        center.0 - preview_size * 0.5 - preview_ink_px.0,
+        center.1 - preview_size * 0.5 - preview_ink_px.1,
     );
 
     // ---- Backdrop, title, hint ----
@@ -1044,7 +1133,9 @@ mod tests {
         // baseline. cell ratio = 1.0 (worst-case sacred-script-ish),
         // ring ratio = 0.7 (typical at ring_scale = 1.7). The
         // pure-function layout only cares that the numbers are
-        // non-zero and self-consistent.
+        // non-zero and self-consistent. Ink offsets default to zero
+        // so the layout tests see the classic em-box centering
+        // unless a test explicitly overrides them.
         ColorPickerOverlayGeometry {
             target_label: "edge",
             hue_deg: 0.0,
@@ -1058,6 +1149,11 @@ mod tests {
             size_scale: 1.0,
             center_override: None,
             hovered_hit: None,
+            arm_top_ink_offset: (0.0, 0.0),
+            arm_bottom_ink_offset: (0.0, 0.0),
+            arm_left_ink_offset: (0.0, 0.0),
+            arm_right_ink_offset: (0.0, 0.0),
+            preview_ink_offset: (0.0, 0.0),
         }
     }
 
@@ -1065,6 +1161,78 @@ mod tests {
         let mut g = sample_geometry();
         g.hex_visible = true;
         g
+    }
+
+    /// The arm and preview ink offsets carried on geometry are
+    /// subtracted from the corresponding cell / preview-anchor
+    /// positions at layout time. Comparing a zero-offset baseline
+    /// against one with non-zero per-arm ink offsets verifies each
+    /// axis is shifted by the expected scaled amount without
+    /// cross-contamination: top-arm ink only affects val cells
+    /// above centre, bottom-arm only below, left only sat below
+    /// centre, right only sat above, preview only the preview
+    /// anchor.
+    #[test]
+    fn layout_subtracts_ink_offsets_for_arms_and_preview() {
+        let baseline = compute_color_picker_layout(&sample_geometry(), 1280.0, 720.0);
+        let mut g = sample_geometry();
+        // Unit offsets per arm so the expected delta is
+        // `cell_fs * 1.0` (for arms) and `preview_size * 1.0`
+        // (for preview).
+        g.arm_top_ink_offset = (0.1, -0.2);
+        g.arm_bottom_ink_offset = (-0.1, 0.2);
+        g.arm_left_ink_offset = (0.15, 0.0);
+        g.arm_right_ink_offset = (-0.15, 0.0);
+        g.preview_ink_offset = (0.25, -0.3);
+        let shifted = compute_color_picker_layout(&g, 1280.0, 720.0);
+
+        let cell_fs = baseline.cell_font_size;
+        let preview_size = baseline.preview_size;
+
+        // Val bar: top arm cells (index < center) shift by
+        // (-0.1*cell_fs, +0.2*cell_fs); bottom arm by
+        // (+0.1*cell_fs, -0.2*cell_fs). Center cell at
+        // CROSSHAIR_CENTER_CELL is untouched.
+        for i in 0..VAL_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                let dx = shifted.val_cell_positions[i].0 - baseline.val_cell_positions[i].0;
+                let dy = shifted.val_cell_positions[i].1 - baseline.val_cell_positions[i].1;
+                assert!((dx).abs() < 0.001 && (dy).abs() < 0.001);
+                continue;
+            }
+            let (expect_dx, expect_dy) = if i < CROSSHAIR_CENTER_CELL {
+                (-0.1 * cell_fs, 0.2 * cell_fs)
+            } else {
+                (0.1 * cell_fs, -0.2 * cell_fs)
+            };
+            let dx = shifted.val_cell_positions[i].0 - baseline.val_cell_positions[i].0;
+            let dy = shifted.val_cell_positions[i].1 - baseline.val_cell_positions[i].1;
+            assert!((dx - expect_dx).abs() < 0.001, "val[{i}].dx {dx} vs {expect_dx}");
+            assert!((dy - expect_dy).abs() < 0.001, "val[{i}].dy {dy} vs {expect_dy}");
+        }
+
+        // Sat bar: left arm cells (index < center) shift by
+        // -0.15*cell_fs in x; right arm by +0.15*cell_fs.
+        for i in 0..SAT_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
+            let expect_dx = if i < CROSSHAIR_CENTER_CELL {
+                -0.15 * cell_fs
+            } else {
+                0.15 * cell_fs
+            };
+            let dx = shifted.sat_cell_positions[i].0 - baseline.sat_cell_positions[i].0;
+            let dy = shifted.sat_cell_positions[i].1 - baseline.sat_cell_positions[i].1;
+            assert!((dx - expect_dx).abs() < 0.001, "sat[{i}].dx {dx} vs {expect_dx}");
+            assert!((dy).abs() < 0.001, "sat[{i}] unexpected y drift {dy}");
+        }
+
+        // Preview glyph anchor shifts by (-0.25*preview_size, +0.3*preview_size).
+        let dx = shifted.preview_pos.0 - baseline.preview_pos.0;
+        let dy = shifted.preview_pos.1 - baseline.preview_pos.1;
+        assert!((dx - (-0.25 * preview_size)).abs() < 0.001);
+        assert!((dy - (0.3 * preview_size)).abs() < 0.001);
     }
 
     #[test]

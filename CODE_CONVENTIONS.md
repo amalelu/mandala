@@ -61,8 +61,17 @@ Baumhard. Extend it.**
   - **Geometry, color, regions** are Baumhard's:
     `baumhard::util::geometry::almost_equal_vec2`,
     `baumhard::util::color::*`, and
-    `baumhard::gfx_structs::util::regions::RegionIndexer`. Do not
-    redefine them in the app crate.
+    `baumhard::core::primitives::ColorFontRegions` (character-range
+    runs carrying colour and `AppFont` pins — the mutation surface
+    for text editing via `shift_regions_after`,
+    `insert_regions_at`, `shrink_regions_after`, `set_or_insert`,
+    `single_span`). `baumhard::gfx_structs::util::regions::RegionIndexer`
+    is a related but *distinct* primitive: it's a spatial index for
+    hit-testing, not a character-range region manager — reach for it
+    when you need "which GfxElements occupy this screen bucket",
+    reach for `ColorFontRegions` when you need "which runs cover
+    this character range". Do not redefine any of the above in the
+    app crate.
 
 - **Missing primitives are added to Baumhard, not to `src/application/`.**
   If application code is about to grow a second implementation of
