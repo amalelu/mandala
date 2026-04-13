@@ -91,6 +91,16 @@ pub struct GeometrySpec {
     /// Bar-tip to ring-edge padding as a multiple of
     /// `ring_font_size`.
     pub bar_to_ring_padding_scale: f32,
+    /// Minimum clearance between the centre preview glyph and the
+    /// nearest arm cell, expressed as a multiple of `font_size`.
+    /// `compute_color_picker_layout` floors `cell_advance` at
+    /// `preview_size / 2 + font_size * bar_to_preview_padding_scale`
+    /// so the preview's bounding radius never covers cell[9] /
+    /// cell[11]. Without this floor, a `preview_size_scale` much
+    /// larger than the per-script cell-advance ratio (3.0 vs ~1.0 in
+    /// the default spec) produces visible overlap between the ࿕ and
+    /// the first arm glyph in each direction.
+    pub bar_to_preview_padding_scale: f32,
     /// Font+bounds multiplier applied to the hovered cell. 1.3×
     /// reads as "this one's hot" without pushing into neighbors.
     pub hover_scale: f32,
