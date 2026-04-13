@@ -49,9 +49,9 @@ use std::path::Path;
 /// scrollback shows the most recent N output lines; the completion
 /// popup is empty unless the user pressed Tab.
 ///
-/// Styling (`border_unit`, `font_family`, `font_size`) is threaded
-/// in from the user config. The renderer stays dumb about where
-/// those values came from — it just draws what the geometry says.
+/// Styling (`font_family`, `font_size`) is threaded in from the
+/// user config. The renderer stays dumb about where those values
+/// came from — it just draws what the geometry says.
 #[derive(Clone, Debug)]
 pub struct ConsoleOverlayGeometry {
     /// Input buffer text, rendered after the `❯ ` prompt glyph.
@@ -71,10 +71,6 @@ pub struct ConsoleOverlayGeometry {
     /// Which completion is highlighted. `None` when `completions` is
     /// empty. Index into `completions` otherwise.
     pub selected_completion: Option<usize>,
-    /// Border unit string. Repeated horizontally on the top and
-    /// bottom rows; characters stacked vertically (one per line) on
-    /// the left and right columns. Default `"#"` in the stock config.
-    pub border_unit: String,
     /// Font family name passed to cosmic-text via
     /// `Attrs::new().family(Family::Name(..))`. Empty string means
     /// "use cosmic-text's default family", which lets cosmic-text's
@@ -145,15 +141,25 @@ pub const MAX_CONSOLE_SCROLLBACK_ROWS: usize = 12;
 /// the prompt.
 pub const MAX_CONSOLE_COMPLETION_ROWS: usize = 8;
 
-/// Leading character on every console input line (the `❯` glyph).
-const PROMPT_GLYPH: &str = "\u{276F}";
-/// The block cursor (`▌`) drawn at the current cursor position.
-const CURSOR_GLYPH: &str = "\u{258C}";
-/// Prefix attached to the currently-selected completion row (`▸ `).
-const SELECTED_COMPLETION_MARKER: &str = "\u{25B8} ";
-/// Padding for unselected completion rows so the list stays
-/// vertically aligned with the selected row's marker.
-const UNSELECTED_COMPLETION_MARKER: &str = "  ";
+// Prompt / cursor / completion-marker glyphs live in
+// `console::visuals` with the rest of the palette. Bring them into
+// this module's scope via `use` from the renderer body.
+use crate::application::console::visuals::{CURSOR_GLYPH, PROMPT_GLYPH};
+
+/// Scale alpha linearly between `min` and `max` by `t in [0, 1]`.
+/// Used to dim older scrollback rows.
+fn lerp_alpha(min: u8, max: u8, t: f32) -> u8 {
+    let t = t.clamp(0.0, 1.0);
+    let v = min as f32 + (max as f32 - min as f32) * t;
+    v.round().clamp(0.0, 255.0) as u8
+}
+
+/// Rebuild a `cosmic_text::Color` with a new alpha byte, keeping
+/// RGB. Cosmic-text's `Color` is `[R, G, B, A]` packed into a u32,
+/// so we unpack via the getter accessors and re-pack.
+fn with_alpha(c: cosmic_text::Color, a: u8) -> cosmic_text::Color {
+    cosmic_text::Color::rgba(c.r(), c.g(), c.b(), a)
+}
 
 impl ConsoleFrameLayout {
     /// Screen-space rectangle covered by the opaque backdrop. Matches
@@ -183,52 +189,26 @@ impl ConsoleFrameLayout {
 }
 
 /// Build the four border strings (top, bottom, left_column,
-/// right_column) for the console frame from a single user-supplied
-/// unit string. The top and bottom rows are `unit` repeated
-/// horizontally; the left and right columns are `unit`'s characters
-/// stacked vertically (one per line), repeating to fill the frame
-/// height — i.e. the unit "rotated" onto the vertical axis.
+/// right_column) for the console frame using the rounded
+/// `BorderGlyphSet` preset: `╭─...─╮`, `│` stacked, `╰─...─╯`.
 ///
-/// An empty `unit` falls back to `"#"` so the frame always has a
-/// visible border. Small over/underfill is cosmetically fine because
-/// the opaque backdrop rect masks any overshoot.
+/// `cols` is the total width of the top/bottom rows in monospace
+/// character cells, including both corners — so `cols >= 2` is
+/// required for the corners to render. `rows` is the height of each
+/// side column in rows, exclusive of the corner rows (which belong
+/// to the top/bottom border strings).
 ///
-/// Returns `(top, bottom, left, right)`. Left and right columns are
-/// identical strings; the caller places them at different x
-/// positions.
+/// Returns `(top, bottom, left, right)`. The box-drawing presets
+/// have `left == right`, so both side strings are the same — the
+/// caller positions them at different x offsets.
 pub fn build_console_border_strings(
-    unit: &str,
-    inner_width_px: f32,
-    inner_height_px: f32,
-    font_size: f32,
+    cols: usize,
+    rows: usize,
 ) -> (String, String, String, String) {
-    let unit = if unit.is_empty() { "#" } else { unit };
-    // Narrow per-glyph estimate so skinny ASCII units (`#`, `.`, `-`)
-    // still fill the horizontal span. Over-fill is fine — cosmic-text
-    // clips anything that runs past the buffer width, and the opaque
-    // backdrop masks the clipped glyph. Under-fill is the actual
-    // hazard (leaves a visible gap on the right), so we intentionally
-    // bias toward too many repetitions.
-    let avg_glyph_width = (font_size * 0.45).max(1.0);
-    let unit_char_count = unit.chars().count().max(1) as f32;
-
-    let horiz_reps = ((inner_width_px / (avg_glyph_width * unit_char_count)).ceil() as usize + 1).max(1);
-    let top = unit.repeat(horiz_reps);
-    let bottom = top.clone();
-
-    // Side column: each character of `unit` becomes its own line,
-    // and the whole stack is repeated vertically. `font_size` maps
-    // one grapheme to one line-height cell.
-    let lines_needed = ((inner_height_px / font_size).ceil() as usize).max(1);
-    let unit_char_count_usize = unit.chars().count().max(1);
-    let vert_reps = lines_needed.div_ceil(unit_char_count_usize);
-    let mut side = String::with_capacity(unit.len() * vert_reps + vert_reps * unit_char_count_usize);
-    for _ in 0..vert_reps {
-        for c in unit.chars() {
-            side.push(c);
-            side.push('\n');
-        }
-    }
+    let glyphs = baumhard::mindmap::border::BorderGlyphSet::box_drawing_rounded();
+    let top = glyphs.top_border(cols);
+    let bottom = glyphs.bottom_border(cols);
+    let side = glyphs.side_border(rows);
     (top, bottom, side.clone(), side)
 }
 
@@ -249,15 +229,15 @@ pub fn compute_console_frame_layout(
     screen_width: f32,
     screen_height: f32,
 ) -> ConsoleFrameLayout {
-    // Layout constants derive from the configured font size so the
-    // whole overlay scales cleanly when users bump the setting. The
-    // inner padding stays a fixed pixel value — it's visual breathing
-    // room, not a function of glyph size.
     let font_size = geometry.font_size.max(4.0);
+    // `0.6` is a conservative monospace advance — cosmic-text's
+    // fallback chain lands on a proportional font by default, but the
+    // characters we render (`╭ ─ ╮ │ ╰ ╯ ❯ ▌ ▸ ▏`) all advance by
+    // roughly font_size * 0.6. Tweaking this value visibly shifts
+    // the column count; keep it in sync with the real advance if
+    // you swap the default font.
     let char_width = font_size * 0.6;
     let inner_padding: f32 = 8.0;
-    // One row of 16px glyphs + 2px of vertical breathing room so
-    // consecutive rows don't visually merge.
     let row_height = font_size + 2.0;
 
     let scrollback_rows = geometry
@@ -269,55 +249,22 @@ pub fn compute_console_frame_layout(
         .len()
         .min(MAX_CONSOLE_COMPLETION_ROWS);
 
-    // Prompt line gets slightly extra vertical budget so the cursor
-    // glyph sits clear of the bottom border.
     let prompt_budget = font_size * 1.4;
-    // Frame vertical budget:
-    //   top border (font_size) + inner_padding (top)
-    //     + scrollback rows + completion rows + prompt row
-    //     + inner_padding (bottom)
-    // The bottom border sits *outside* `frame_height` — see
-    // `backdrop_rect`, which stretches by one extra `font_size`.
+    // Frame vertical budget: top border + inner pad + scrollback +
+    // completions + prompt row + inner pad. Bottom border sits
+    // outside `frame_height`; see `backdrop_rect`.
     let frame_height = font_size
         + inner_padding * 2.0
         + row_height * scrollback_rows as f32
         + row_height * completion_rows as f32
         + prompt_budget;
 
-    // Width: adapt to the longest visible line, clamped so a short
-    // prompt doesn't produce a postage stamp and a stray long
-    // scrollback line doesn't blow the frame across the whole
-    // window.
-    let prompt_chars = geometry.input.chars().count() + 3; // "❯ " + cursor
-    let longest_scrollback = geometry
-        .scrollback
-        .iter()
-        .rev()
-        .take(scrollback_rows)
-        .map(|l| l.text.chars().count())
-        .max()
-        .unwrap_or(0);
-    let longest_completion = geometry
-        .completions
-        .iter()
-        .take(completion_rows)
-        .map(|c| {
-            let hint_len = c.hint.as_deref().map(|s| s.chars().count() + 4).unwrap_or(0);
-            c.text.chars().count() + 2 + hint_len
-        })
-        .max()
-        .unwrap_or(0);
-    let content_chars = prompt_chars
-        .max(longest_scrollback)
-        .max(longest_completion);
-    let frame_width = ((content_chars as f32 + 2.0) * char_width
-        + inner_padding * 2.0
-        + char_width * 2.0)
-        .clamp(360.0, 960.0);
-
-    // Horizontal: center. Vertical: anchor to the bottom of the
-    // window, with a small pad so the border doesn't kiss the edge.
-    let left = ((screen_width - frame_width) * 0.5).max(0.0);
+    // Full-width strip at the bottom of the window. No horizontal
+    // clamp: the overlay tracks the window width. An inner margin
+    // keeps the border from kissing the screen edge.
+    let horizontal_margin = char_width;
+    let frame_width = (screen_width - horizontal_margin * 2.0).max(char_width * 4.0);
+    let left = horizontal_margin;
     let top = (screen_height - frame_height - inner_padding - font_size)
         .max(inner_padding);
 
@@ -1817,26 +1764,27 @@ impl Renderer {
             completion_rows,
         } = layout;
 
-        let border_color = cosmic_text::Color::rgba(0, 229, 255, 255); // cyan
-        let text_color = cosmic_text::Color::rgba(235, 235, 235, 255);
-        let error_color = cosmic_text::Color::rgba(255, 110, 110, 255);
-        let input_echo_color = cosmic_text::Color::rgba(120, 200, 255, 255);
-        let selected_color = cosmic_text::Color::rgba(0, 229, 255, 255);
+        // Palette sourced from `console::visuals` so the whole
+        // console look lives in one grep.
+        use crate::application::console::visuals::{
+            ACCENT_COLOR, BORDER_COLOR, ERROR_COLOR, GUTTER_GLYPH, INPUT_ECHO_COLOR,
+            SCROLLBACK_MIN_ALPHA, SELECTED_COMPLETION_MARKER, TEXT_COLOR,
+            UNSELECTED_COMPLETION_MARKER,
+        };
 
         // Backdrop spans exactly from the top border glyph row to
         // the bottom border glyph row.
         self.console_backdrop = Some(layout.backdrop_rect());
 
-        // Border: single user-supplied unit string (default "#")
-        // repeated horizontally on top/bottom and stacked vertically
-        // on the left/right sides. See
-        // `build_console_border_strings`.
-        let (top_border, bottom_border, left_col, right_col) = build_console_border_strings(
-            &geometry.border_unit,
-            frame_width - char_width * 2.0,
-            frame_height,
-            font_size,
-        );
+        // Border: four exactly-sized cosmic-text buffers built from
+        // baumhard's rounded `BorderGlyphSet`. `cols` is the number
+        // of character cells across the frame; `rows` is the side-
+        // column count (excluding the corner rows, which belong to
+        // the top/bottom strings).
+        let cols = ((frame_width / char_width).floor() as usize).max(2);
+        let side_rows = (scrollback_rows + completion_rows + 1).max(1);
+        let (top_border, bottom_border, left_col, right_col) =
+            build_console_border_strings(cols, side_rows);
 
         // Cosmic-text's `Family::Name` doesn't own the string — we
         // have to keep the source alive for the duration of `attrs`.
@@ -1851,7 +1799,7 @@ impl Renderer {
             }
             a
         };
-        let border_attrs = mk_attrs(border_color, font_size);
+        let border_attrs = mk_attrs(BORDER_COLOR, font_size);
 
         self.console_overlay_buffers.push(create_border_buffer(
             &mut font_system,
@@ -1886,15 +1834,23 @@ impl Renderer {
             (char_width, frame_height),
         ));
 
-        // Content column: inner-padded, avoiding the left/right
-        // border columns.
-        let content_left = left + inner_padding + char_width;
-        let content_width = frame_width - inner_padding * 2.0 - char_width * 2.0;
+        // Content column: one char for gutter + inner padding, on
+        // the inside of the left border column.
+        let gutter_x = left + char_width;
+        let content_left = gutter_x + char_width + inner_padding;
+        let content_width = frame_width - inner_padding * 2.0 - char_width * 3.0;
         let content_top = top + font_size + inner_padding;
+        // Content measured in monospace cells, for clipping
+        // wide-glyph scrollback lines against the frame. See
+        // baumhard::util::grapheme_chad::truncate_to_display_width.
+        let content_cols = (content_width / char_width).floor() as usize;
 
         // Scrollback region: bottom-most N lines, rendered top → bottom.
-        // Row y in the order they're drawn = content_top + i * row_height.
+        // Older rows (higher `i` from the top) fade toward
+        // SCROLLBACK_MIN_ALPHA so freshly-printed output reads as
+        // "live" and older output as "context".
         let skip = geometry.scrollback.len().saturating_sub(scrollback_rows);
+        let visible_count = scrollback_rows.max(1);
         for (i, line) in geometry
             .scrollback
             .iter()
@@ -1902,16 +1858,56 @@ impl Renderer {
             .take(scrollback_rows)
             .enumerate()
         {
-            let color = match line.kind {
-                ConsoleOverlayLineKind::Input => input_echo_color,
-                ConsoleOverlayLineKind::Output => text_color,
-                ConsoleOverlayLineKind::Error => error_color,
+            // i=0 is the oldest visible row; i=last is newest.
+            let newness = if visible_count <= 1 {
+                1.0
+            } else {
+                i as f32 / (visible_count - 1) as f32
             };
-            let attrs = mk_attrs(color, font_size);
+            let alpha = lerp_alpha(SCROLLBACK_MIN_ALPHA, 0xff, newness);
+            let (text_color, gutter_color, gutter_glyph) = match line.kind {
+                ConsoleOverlayLineKind::Input => (
+                    with_alpha(INPUT_ECHO_COLOR, alpha),
+                    with_alpha(INPUT_ECHO_COLOR, alpha),
+                    " ",
+                ),
+                ConsoleOverlayLineKind::Output => (
+                    with_alpha(TEXT_COLOR, alpha),
+                    with_alpha(ACCENT_COLOR, alpha),
+                    GUTTER_GLYPH,
+                ),
+                ConsoleOverlayLineKind::Error => (
+                    with_alpha(ERROR_COLOR, alpha),
+                    with_alpha(ERROR_COLOR, alpha),
+                    GUTTER_GLYPH,
+                ),
+            };
             let y = content_top + row_height * i as f32;
+
+            // Gutter glyph sits one char-cell right of the left
+            // border, colored by the line kind.
+            if gutter_glyph != " " {
+                let gutter_attrs = mk_attrs(gutter_color, font_size);
+                self.console_overlay_buffers.push(create_border_buffer(
+                    &mut font_system,
+                    gutter_glyph,
+                    &gutter_attrs,
+                    font_size,
+                    (gutter_x, y),
+                    (char_width, row_height),
+                ));
+            }
+
+            // Scrollback text — clipped to content_cols so a wide
+            // CJK line can't push into the right border.
+            let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+                &line.text,
+                content_cols,
+            );
+            let attrs = mk_attrs(text_color, font_size);
             self.console_overlay_buffers.push(create_border_buffer(
                 &mut font_system,
-                &line.text,
+                clipped,
                 &attrs,
                 font_size,
                 (content_left, y),
@@ -1920,8 +1916,7 @@ impl Renderer {
         }
 
         // Completion popup: sits directly above the prompt line.
-        let completion_top =
-            content_top + row_height * scrollback_rows as f32;
+        let completion_top = content_top + row_height * scrollback_rows as f32;
         for (i, c) in geometry
             .completions
             .iter()
@@ -1929,7 +1924,7 @@ impl Renderer {
             .enumerate()
         {
             let is_selected = geometry.selected_completion == Some(i);
-            let color = if is_selected { selected_color } else { text_color };
+            let color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
             let attrs = mk_attrs(color, font_size);
             let prefix = if is_selected {
                 SELECTED_COMPLETION_MARKER
@@ -1940,10 +1935,14 @@ impl Renderer {
                 Some(hint) => format!("{prefix}{}    {}", c.text, hint),
                 None => format!("{prefix}{}", c.text),
             };
+            let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+                &line,
+                content_cols,
+            );
             let y = completion_top + row_height * i as f32;
             self.console_overlay_buffers.push(create_border_buffer(
                 &mut font_system,
-                &line,
+                clipped,
                 &attrs,
                 font_size,
                 (content_left, y),
@@ -1951,32 +1950,45 @@ impl Renderer {
             ));
         }
 
-        // Prompt line: `PROMPT_GLYPH + input_before_cursor +
-        // CURSOR_GLYPH + input_after_cursor`. The cursor is a
-        // grapheme-cluster index; we translate to a byte offset via
-        // `find_byte_index_of_grapheme` so the split lands on a
-        // valid grapheme boundary even for ZWJ emoji / combining
-        // marks (CODE_CONVENTIONS §2).
-        let prompt_attrs = mk_attrs(text_color, font_size);
+        // Prompt line: accented `❯`, the input buffer split at the
+        // grapheme-cluster cursor via baumhard's grapheme helpers,
+        // with the block cursor glyph inserted at the boundary.
+        let prompt_attrs = mk_attrs(ACCENT_COLOR, font_size);
+        let input_attrs = mk_attrs(TEXT_COLOR, font_size);
         let prompt_budget = font_size * 1.4;
-        let cursor_byte =
-            baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
-                &geometry.input,
-                geometry.cursor_grapheme,
-            )
-            .unwrap_or(geometry.input.len());
-        let (pre, post) = geometry.input.split_at(cursor_byte);
-        let prompt_line = format!("{PROMPT_GLYPH} {}{CURSOR_GLYPH}{}", pre, post);
         let y = layout.prompt_y();
+
+        // The `❯ ` glyph draws as its own buffer in accent color;
+        // the user input goes into a neighbouring buffer in text
+        // color. Split keeps the prompt glyph's color independent of
+        // the input chars.
         self.console_overlay_buffers.push(create_border_buffer(
             &mut font_system,
-            &prompt_line,
+            PROMPT_GLYPH,
             &prompt_attrs,
             font_size,
             (content_left, y),
-            (content_width, prompt_budget),
+            (char_width * 2.0, prompt_budget),
         ));
-
+        let cursor_byte = baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
+            &geometry.input,
+            geometry.cursor_grapheme,
+        )
+        .unwrap_or(geometry.input.len());
+        let (pre, post) = geometry.input.split_at(cursor_byte);
+        let input_line = format!("{pre}{CURSOR_GLYPH}{post}");
+        let clipped_input = baumhard::util::grapheme_chad::truncate_to_display_width(
+            &input_line,
+            content_cols.saturating_sub(2),
+        );
+        self.console_overlay_buffers.push(create_border_buffer(
+            &mut font_system,
+            clipped_input,
+            &input_attrs,
+            font_size,
+            (content_left + char_width * 2.0, y),
+            (content_width - char_width * 2.0, prompt_budget),
+        ));
     }
 
     /// Rebuild the glyph-wheel color picker's full overlay —
@@ -3167,7 +3179,6 @@ mod tests {
             scrollback: Vec::new(),
             completions: Vec::new(),
             selected_completion: None,
-            border_unit: "#".to_string(),
             font_family: String::new(),
             font_size: 16.0,
         }
@@ -3194,7 +3205,6 @@ mod tests {
                 },
             ],
             selected_completion: Some(0),
-            border_unit: "#".to_string(),
             font_family: String::new(),
             font_size: 16.0,
         }
@@ -3285,80 +3295,94 @@ mod tests {
     }
 
     #[test]
-    fn test_console_frame_width_clamped() {
-        let min = compute_console_frame_layout(&empty_console_geometry(), 1920.0, 1080.0);
-        assert!(min.frame_width >= 360.0);
+    fn test_console_frame_is_full_window_width() {
+        // The console is a bottom-anchored full-width strip with a
+        // small horizontal margin on each side. Frame width + 2 ×
+        // margin should sum to roughly the screen width.
+        let layout = compute_console_frame_layout(&empty_console_geometry(), 1920.0, 1080.0);
+        let total = layout.left * 2.0 + layout.frame_width;
+        assert!((total - 1920.0).abs() < 1.0, "frame doesn't span full width");
+    }
 
+    #[test]
+    fn test_console_frame_width_independent_of_scrollback_len() {
+        // With the full-width layout, a long scrollback line cannot
+        // push the frame wider — it's clipped by the content area.
+        let short = compute_console_frame_layout(&empty_console_geometry(), 1920.0, 1080.0).frame_width;
         let mut huge = empty_console_geometry();
         huge.scrollback.push(ConsoleOverlayLine {
             text: "x".repeat(500),
             kind: ConsoleOverlayLineKind::Output,
         });
-        let max = compute_console_frame_layout(&huge, 1920.0, 1080.0);
-        assert!(max.frame_width <= 960.0);
+        let long = compute_console_frame_layout(&huge, 1920.0, 1080.0).frame_width;
+        assert_eq!(short, long);
     }
 
     #[test]
-    fn test_console_frame_centers_horizontally() {
-        let geometry = sample_console_geometry();
-        let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
-        let right_margin = 1920.0 - (layout.left + layout.frame_width);
-        assert!((layout.left - right_margin).abs() < 0.5);
+    fn test_console_frame_width_stable_for_wide_char_scrollback() {
+        // Backdrop-vs-border alignment with a wide-char line — the
+        // content is truncated by baumhard's `truncate_to_display_width`
+        // so it can't blow past the right border, and the frame
+        // itself is still the full window width.
+        let mut g = empty_console_geometry();
+        g.scrollback.push(ConsoleOverlayLine {
+            text: "日本語".repeat(200),
+            kind: ConsoleOverlayLineKind::Output,
+        });
+        let layout = compute_console_frame_layout(&g, 1920.0, 1080.0);
+        let (bd_left, _, bd_w, _) = layout.backdrop_rect();
+        assert_eq!(bd_left, layout.left);
+        assert_eq!(bd_w, layout.frame_width);
     }
 
     // -----------------------------------------------------------------
     // Console border source-string tests
     //
-    // Assertions only check the *source strings* produced by the
-    // helper, never the shaped glyph output. The default unit is
-    // "#"; users can override via `console_border` in their config.
+    // The border draw uses baumhard's `BorderGlyphSet::box_drawing_rounded`
+    // via `build_console_border_strings(cols, rows)`.
     // -----------------------------------------------------------------
 
     #[test]
-    fn test_console_border_default_unit_produces_hashes() {
-        let (top, bottom, left, right) =
-            build_console_border_strings("#", 400.0, 320.0, 16.0);
-        assert!(top.chars().all(|c| c == '#'));
-        assert!(bottom.chars().all(|c| c == '#'));
-        for c in left.chars().chain(right.chars()) {
-            assert!(c == '#' || c == '\n', "unexpected side char: {c:?}");
-        }
-    }
-
-    #[test]
-    fn test_console_border_empty_unit_falls_back_to_hash() {
-        let (top, _, _, _) = build_console_border_strings("", 400.0, 320.0, 16.0);
-        assert!(top.contains('#'));
-    }
-
-    #[test]
-    fn test_console_border_multichar_unit_tiles_and_rotates() {
-        // A unit like "=#" should tile horizontally on top/bottom
-        // and stack vertically on the sides — one char per line.
-        let (top, _, left, _) =
-            build_console_border_strings("=#", 200.0, 100.0, 16.0);
-        // Every pair of consecutive chars in `top` is the unit.
+    fn test_console_border_uses_rounded_corners() {
+        let (top, bottom, _, _) = build_console_border_strings(10, 4);
         let top_chars: Vec<char> = top.chars().collect();
-        for pair in top_chars.chunks_exact(2) {
-            assert_eq!(pair, &['=', '#']);
-        }
-        // Side column: alternating `=`, `\n`, `#`, `\n`, `=`, `\n`, ...
-        let side_chars: Vec<char> = left.chars().collect();
-        for quad in side_chars.chunks_exact(4) {
-            assert_eq!(quad, &['=', '\n', '#', '\n']);
+        let bot_chars: Vec<char> = bottom.chars().collect();
+        assert_eq!(top_chars[0], '\u{256D}'); // ╭
+        assert_eq!(*top_chars.last().unwrap(), '\u{256E}'); // ╮
+        assert_eq!(bot_chars[0], '\u{2570}'); // ╰
+        assert_eq!(*bot_chars.last().unwrap(), '\u{256F}'); // ╯
+        // Middle chars of the top border are `─`.
+        for c in &top_chars[1..top_chars.len() - 1] {
+            assert_eq!(*c, '\u{2500}');
         }
     }
 
     #[test]
-    fn test_console_border_scales_with_width_and_height() {
-        let (top_narrow, _, left_short, _) =
-            build_console_border_strings("#", 100.0, 100.0, 16.0);
-        let (top_wide, _, left_tall, _) =
-            build_console_border_strings("#", 800.0, 400.0, 16.0);
+    fn test_console_border_top_row_length_matches_cols() {
+        // `cols` = total border length including both corners.
+        let (top, bottom, _, _) = build_console_border_strings(20, 4);
+        assert_eq!(top.chars().count(), 20);
+        assert_eq!(bottom.chars().count(), 20);
+    }
+
+    #[test]
+    fn test_console_border_sides_one_char_per_line() {
+        let (_, _, left, right) = build_console_border_strings(10, 5);
+        // One `│` per line, newline-separated; 5 lines total.
+        assert_eq!(left.lines().count(), 5);
+        assert_eq!(right.lines().count(), 5);
+        for line in left.lines() {
+            assert_eq!(line.chars().count(), 1);
+            assert_eq!(line.chars().next().unwrap(), '\u{2502}');
+        }
+    }
+
+    #[test]
+    fn test_console_border_scales_with_cols_and_rows() {
+        let (top_narrow, _, left_short, _) = build_console_border_strings(10, 3);
+        let (top_wide, _, left_tall, _) = build_console_border_strings(40, 10);
         assert!(top_wide.chars().count() > top_narrow.chars().count());
-        let short_lines = left_short.chars().filter(|c| *c == '\n').count();
-        let tall_lines = left_tall.chars().filter(|c| *c == '\n').count();
-        assert!(tall_lines > short_lines);
+        assert!(left_tall.lines().count() > left_short.lines().count());
     }
 
     #[test]
@@ -3413,26 +3437,16 @@ mod tests {
     }
 
     #[test]
-    fn test_console_border_horizontally_fills_frame_for_hash_unit() {
-        // Narrow-glyph regression guard: the top border must produce
-        // enough repetitions that cosmic-text lays down at least one
-        // glyph per char-width cell across the full inner width.
+    fn test_console_border_fills_full_frame_cols() {
+        // The renderer picks `cols = floor(frame_width / char_width)`
+        // and calls `build_console_border_strings(cols, rows)`, so
+        // the top string always has exactly `cols` glyphs — one per
+        // char-width cell.
         let geometry = sample_console_geometry();
         let layout = compute_console_frame_layout(&geometry, 1920.0, 1080.0);
-        let (top, _, _, _) = build_console_border_strings(
-            "#",
-            layout.frame_width - layout.char_width * 2.0,
-            layout.frame_height,
-            layout.font_size,
-        );
-        let inner_chars_needed =
-            ((layout.frame_width - layout.char_width * 2.0) / layout.char_width) as usize;
-        assert!(
-            top.chars().count() >= inner_chars_needed,
-            "top border ({} glyphs) undercovers inner width ({} char cells)",
-            top.chars().count(),
-            inner_chars_needed
-        );
+        let cols = (layout.frame_width / layout.char_width).floor() as usize;
+        let (top, _, _, _) = build_console_border_strings(cols, 4);
+        assert_eq!(top.chars().count(), cols);
     }
 
     #[test]

@@ -2865,7 +2865,6 @@ fn rebuild_console_overlay(
         scrollback: scrollback_lines,
         completions: completion_geo,
         selected_completion,
-        border_unit: keybinds.console_border.clone(),
         font_family: keybinds.console_font.clone(),
         font_size: keybinds.console_font_size,
     };

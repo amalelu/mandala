@@ -23,6 +23,7 @@ pub mod constants;
 pub mod parser;
 pub mod predicates;
 pub mod traits;
+pub mod visuals;
 
 #[cfg(test)]
 mod tests;

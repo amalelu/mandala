@@ -5,7 +5,7 @@ use crate::util::grapheme_chad::{
    delete_grapheme_at, find_byte_index_of_grapheme, find_nth_line_byte_range,
    find_nth_line_grapheme_range, grapheme_display_width, insert_new_lines,
    insert_str_at_grapheme, push_spaces, replace_graphemes_until_newline, scalar_display_width,
-   slice_to_newline, split_off_graphemes,
+   slice_to_newline, split_off_graphemes, truncate_to_display_width,
 };
 
 lazy_static! {
@@ -422,6 +422,33 @@ pub fn do_grapheme_display_width() {
    assert_eq!(scalar_display_width('日'), 2);
    assert_eq!(scalar_display_width('\u{0301}'), 0); // combining acute
    assert_eq!(scalar_display_width('\u{200D}'), 0); // ZWJ
+}
+
+#[test]
+pub fn test_truncate_to_display_width() {
+   do_truncate_to_display_width();
+}
+
+pub fn do_truncate_to_display_width() {
+   // ASCII: exact cell match.
+   assert_eq!(truncate_to_display_width("abcdef", 3), "abc");
+   assert_eq!(truncate_to_display_width("abcdef", 0), "");
+   assert_eq!(truncate_to_display_width("abcdef", 100), "abcdef");
+
+   // CJK: each char is 2 cells; an odd max cuts cleanly on the
+   // grapheme boundary rather than mid-glyph.
+   assert_eq!(truncate_to_display_width("日本語", 3), "日"); // 2+2>3 after "日"
+   assert_eq!(truncate_to_display_width("日本語", 4), "日本");
+   assert_eq!(truncate_to_display_width("日本語", 2), "日");
+   assert_eq!(truncate_to_display_width("日本語", 0), "");
+
+   // Mix: 3 ASCII + 1 CJK = 5 cells; trim to 4 drops the CJK.
+   assert_eq!(truncate_to_display_width("abc日", 4), "abc");
+   assert_eq!(truncate_to_display_width("abc日", 5), "abc日");
+
+   // Combining marks: NFD "café" is 4 cells, e+́ folds into one cell.
+   assert_eq!(truncate_to_display_width("cafe\u{0301}", 3), "caf");
+   assert_eq!(truncate_to_display_width("cafe\u{0301}", 4), "cafe\u{0301}");
 }
 
 #[test]

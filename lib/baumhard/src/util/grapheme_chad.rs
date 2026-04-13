@@ -278,6 +278,36 @@ pub fn grapheme_display_width(s: &str) -> usize {
     width
 }
 
+/// Truncate `s` to at most `max_width` terminal cells of display
+/// width, cutting cleanly on grapheme-cluster boundaries. A cluster
+/// whose base is width-2 will not be included if it would push past
+/// `max_width`.
+///
+/// Returns the truncated borrowed slice — no allocation. Useful for
+/// clipping scrollback lines to a fixed-width console frame without
+/// ever landing mid-grapheme (or splitting a wide CJK glyph across
+/// the border).
+///
+/// Cost: O(n) grapheme walk; stops as soon as it would exceed
+/// `max_width`.
+pub fn truncate_to_display_width(s: &str, max_width: usize) -> &str {
+    let mut byte_end = 0usize;
+    let mut used = 0usize;
+    for g in s.graphemes(true) {
+        let base = match g.chars().next() {
+            Some(c) => c,
+            None => continue,
+        };
+        let w = scalar_display_width(base);
+        if used + w > max_width {
+            break;
+        }
+        used += w;
+        byte_end += g.len();
+    }
+    &s[..byte_end]
+}
+
 /// Display width of a single scalar. Exposed for tests; call sites
 /// that have a string should use [`grapheme_display_width`] instead so
 /// combining marks fold into their base cluster.
