@@ -2884,6 +2884,22 @@ fn picker_glyph_areas(
     // default fallback isn't reliable for it, and we already pin
     // specific fonts for the Egyptian arm via the same pattern.
     let center_font = Some(baumhard::font::fonts::AppFont::NotoSerifTibetanRegular);
+    // `layout.preview_pos` is the top-left of a `preview_size ×
+    // preview_size` box whose centre is the wheel intersection
+    // (already ink-corrected). The render box is `scaled_preview *
+    // 1.5` to give hover-grow and sub-pixel slack; centre it
+    // symmetrically on that same point so `Align::Center` lands the
+    // glyph's advance-centre exactly where the layout intended.
+    // Previous revision positioned the 1.5× box as if it were 1.0×,
+    // extending 0.5× to the right only and drifting the ࿕ right of
+    // centre by `preview_size/4` — ~15 px at the spec's 3× preview
+    // scale.
+    let preview_glyph_center = (
+        layout.preview_pos.0 + preview_size * 0.5,
+        layout.preview_pos.1 + preview_size * 0.5,
+    );
+    let preview_box_w = scaled_preview * 1.5;
+    let preview_box_h = scaled_preview * 1.5;
     out.push((
         PICKER_CHANNEL_PREVIEW,
         make_area(
@@ -2892,10 +2908,10 @@ fn picker_glyph_areas(
             scaled_preview,
             scaled_preview,
             (
-                layout.preview_pos.0 - (scaled_preview - preview_size) * 0.5,
-                layout.preview_pos.1 - (scaled_preview - preview_size) * 0.5,
+                preview_glyph_center.0 - preview_box_w * 0.5,
+                preview_glyph_center.1 - preview_box_h * 0.5,
             ),
-            (scaled_preview * 1.5, scaled_preview * 1.5),
+            (preview_box_w, preview_box_h),
             true,
             center_font,
             outline,
@@ -4199,6 +4215,53 @@ mod tests {
         use crate::application::color_picker::compute_color_picker_layout;
         let layout = compute_color_picker_layout(geometry, 1280.0, 720.0);
         super::picker_glyph_areas(geometry, &layout)
+    }
+
+    /// Regression for the visible-glyph-off-centre bug the glyph
+    /// alignment session surfaced: the ࿕ preview box is rendered
+    /// with `scaled_preview * 1.5` bounds for hover-grow slack, but
+    /// it must be **centred symmetrically** on the layout's
+    /// intended point. Previously the box was positioned as if
+    /// bounds were `preview_size × preview_size`, extending the
+    /// extra 0.5× only to the right — drifting the ࿕ right of the
+    /// wheel centre by `preview_size / 4` (~15 px at the spec's 3×
+    /// preview scale). With `Align::Center` the glyph advance lands
+    /// at the box centre; so `pos + bounds/2` must equal the
+    /// layout's intended preview centre within rounding slack.
+    #[test]
+    fn picker_preview_box_centered_symmetrically_on_wheel() {
+        use crate::application::color_picker::{
+            compute_color_picker_layout, PICKER_CHANNEL_PREVIEW,
+        };
+        use crate::application::widgets::color_picker_widget::load_spec;
+        let g = picker_sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let preview_size = layout.font_size * load_spec().geometry.preview_size_scale;
+        let intended = (
+            layout.preview_pos.0 + preview_size * 0.5,
+            layout.preview_pos.1 + preview_size * 0.5,
+        );
+        let areas = picker_glyph_areas_for(&g);
+        let (_, preview_area) = areas
+            .iter()
+            .find(|(channel, _)| *channel == PICKER_CHANNEL_PREVIEW)
+            .expect("preview area must be emitted");
+        let box_center = (
+            preview_area.position.x.0 + preview_area.render_bounds.x.0 * 0.5,
+            preview_area.position.y.0 + preview_area.render_bounds.y.0 * 0.5,
+        );
+        assert!(
+            (box_center.0 - intended.0).abs() < 0.01,
+            "preview box-centre x {} drifts from intended {}",
+            box_center.0,
+            intended.0,
+        );
+        assert!(
+            (box_center.1 - intended.1).abs() < 0.01,
+            "preview box-centre y {} drifts from intended {}",
+            box_center.1,
+            intended.1,
+        );
     }
 
     /// `picker_glyph_areas` must emit channels in strictly
