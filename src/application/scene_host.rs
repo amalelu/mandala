@@ -80,6 +80,19 @@ pub enum CanvasDispatch {
     FullRebuild,
 }
 
+/// Two arms of the §B2 overlay-tree dispatch — mirrors
+/// [`CanvasDispatch`] for the screen-space sub-scene. Returned by
+/// [`AppScene::overlay_dispatch`] so the console / color-picker
+/// rebuild paths can choose between the mutator and full-rebuild
+/// arms using the same idiom as the canvas-side dispatchers.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum OverlayDispatch {
+    /// Signature matched the registered tree — apply the mutator.
+    InPlaceMutator,
+    /// Signature mismatch (or nothing registered) — rebuild + re-register.
+    FullRebuild,
+}
+
 /// Hash an arbitrary structural identity into the 64-bit signature
 /// [`AppScene::canvas_signature`] tracks. Shared by every canvas-role
 /// dispatcher — one DefaultHasher incantation instead of four.
@@ -162,6 +175,12 @@ pub struct AppScene {
     /// the visible-pair identity sequence; for edge handles, it's the
     /// selected-edge identity; etc.
     canvas_signatures: HashMap<CanvasRole, u64>,
+    /// Same as `canvas_signatures`, for the overlay sub-scene. The
+    /// console overlay uses `(scrollback_rows, completion_rows)` as
+    /// its structural signature; color-picker uses none yet (its
+    /// cell count is a compile-time constant). Cleared on
+    /// `unregister_overlay`.
+    overlay_signatures: HashMap<OverlayRole, u64>,
 }
 
 impl Default for AppScene {
@@ -184,6 +203,7 @@ impl AppScene {
             edge_handles: None,
             connection_labels: None,
             canvas_signatures: HashMap::new(),
+            overlay_signatures: HashMap::new(),
         }
     }
 
@@ -332,10 +352,43 @@ impl AppScene {
         id
     }
 
-    /// Remove an overlay's tree if registered.
+    /// Remove an overlay's tree if registered. Also clears any
+    /// recorded structural signature — a future re-register starts
+    /// from a clean slate, forcing a full rebuild before the
+    /// in-place mutator path can run again. Mirrors
+    /// [`Self::unregister_canvas`].
     pub fn unregister_overlay(&mut self, role: OverlayRole) {
         if let Some(id) = self.overlay_role_slot_mut(role).take() {
             self.overlay.remove(id);
+        }
+        self.overlay_signatures.remove(&role);
+    }
+
+    /// Record the structural signature of the tree currently
+    /// registered for `role`. Pair with
+    /// [`Self::overlay_signature`] to dispatch between
+    /// full-rebuild and in-place mutator paths. Mirrors
+    /// [`Self::set_canvas_signature`].
+    pub fn set_overlay_signature(&mut self, role: OverlayRole, signature: u64) {
+        self.overlay_signatures.insert(role, signature);
+    }
+
+    /// Last recorded structural signature for an overlay role, if
+    /// any. `None` when no tree is registered or the signature was
+    /// never set — the caller treats that as "force full rebuild".
+    /// Mirrors [`Self::canvas_signature`].
+    pub fn overlay_signature(&self, role: OverlayRole) -> Option<u64> {
+        self.overlay_signatures.get(&role).copied()
+    }
+
+    /// Decide which §B2 arm to take for an overlay role at the
+    /// given structural signature. Mirrors
+    /// [`Self::canvas_dispatch`] for the screen-space sub-scene.
+    pub fn overlay_dispatch(&self, role: OverlayRole, signature: u64) -> OverlayDispatch {
+        if self.overlay_id(role).is_some() && self.overlay_signature(role) == Some(signature) {
+            OverlayDispatch::InPlaceMutator
+        } else {
+            OverlayDispatch::FullRebuild
         }
     }
 

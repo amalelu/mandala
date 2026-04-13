@@ -521,18 +521,6 @@ pub struct Renderer {
     /// current viewport size without re-running the layout.
     /// `None` whenever the palette is closed.
     console_backdrop: Option<(f32, f32, f32, f32)>, // (left, top, width, height)
-    /// Cached structural signature of the console overlay tree
-    /// last registered under `OverlayRole::Console`. `None` when
-    /// no console tree is registered or the signature was never
-    /// set — both cases force the next
-    /// `rebuild_console_overlay_buffers` call onto the
-    /// full-rebuild path. Set after a successful build, cleared
-    /// on close. Pairs with [`console_overlay_signature`] to
-    /// dispatch between full rebuild and the §B2 in-place mutator
-    /// path; mirrors the canvas-side
-    /// `AppScene::canvas_signature` plumbing introduced by the
-    /// portal refactor (`refactor(portals): ...`).
-    console_signature: Option<u64>,
     /// Clear color for the render pass, driven by the map's
     /// `Canvas.background_color`. Starts as opaque black so the
     /// app looks sensible before a map loads; the event loop
@@ -702,7 +690,6 @@ impl Renderer {
             color_picker_static_buffers: Vec::new(),
             color_picker_dynamic_buffers: Vec::new(),
             color_picker_backdrop: None,
-            console_signature: None,
             overlay_buffers: Vec::new(),
             overlay_scene_buffers: Vec::new(),
             canvas_scene_buffers: Vec::new(),
@@ -1791,17 +1778,16 @@ impl Renderer {
         app_scene: &mut crate::application::scene_host::AppScene,
         geometry: Option<&ConsoleOverlayGeometry>,
     ) {
-        use crate::application::scene_host::OverlayRole;
+        use crate::application::scene_host::{OverlayDispatch, OverlayRole};
 
         let Some(geometry) = geometry else {
             // Closed: drop the backdrop, drop the tree, refresh
-            // overlay buffers so the console disappears. Reset the
-            // structural-signature cache so the next reopen forces
-            // a full rebuild before the in-place mutator path can
-            // run.
+            // overlay buffers so the console disappears. The
+            // structural-signature cache lives on `AppScene` and
+            // is cleared inside `unregister_overlay`, so the next
+            // reopen starts from a clean slate.
             self.console_backdrop = None;
             app_scene.unregister_overlay(OverlayRole::Console);
-            self.console_signature = None;
             self.rebuild_overlay_scene_buffers(app_scene);
             return;
         };
@@ -1822,28 +1808,30 @@ impl Renderer {
         // is the only typical event that shifts the signature, so
         // the mutator path covers every keystroke / scrollback-
         // grow / completion-update / Tab-cycle frame.
-        let already_registered = app_scene.overlay_id(OverlayRole::Console).is_some();
-        if already_registered && self.console_signature == Some(signature) {
-            let mutator = {
-                let mut font_system = fonts::FONT_SYSTEM
-                    .write()
-                    .expect("Failed to acquire font_system lock");
-                build_console_overlay_mutator(geometry, &layout, &mut font_system)
-            };
-            app_scene.apply_overlay_mutator(OverlayRole::Console, &mutator);
-        } else {
-            // Build the tree under the FONT_SYSTEM lock — we need
-            // it for `measure_max_glyph_advance` only. Tree
-            // construction itself doesn't shape; that happens
-            // during the overlay-scene walk below.
-            let tree = {
-                let mut font_system = fonts::FONT_SYSTEM
-                    .write()
-                    .expect("Failed to acquire font_system lock");
-                build_console_overlay_tree(geometry, &layout, &mut font_system)
-            };
-            app_scene.register_overlay(OverlayRole::Console, tree, glam::Vec2::ZERO);
-            self.console_signature = Some(signature);
+        match app_scene.overlay_dispatch(OverlayRole::Console, signature) {
+            OverlayDispatch::InPlaceMutator => {
+                let mutator = {
+                    let mut font_system = fonts::FONT_SYSTEM
+                        .write()
+                        .expect("Failed to acquire font_system lock");
+                    build_console_overlay_mutator(geometry, &layout, &mut font_system)
+                };
+                app_scene.apply_overlay_mutator(OverlayRole::Console, &mutator);
+            }
+            OverlayDispatch::FullRebuild => {
+                // Build the tree under the FONT_SYSTEM lock — we
+                // need it for `measure_max_glyph_advance` only.
+                // Tree construction itself doesn't shape; that
+                // happens during the overlay-scene walk below.
+                let tree = {
+                    let mut font_system = fonts::FONT_SYSTEM
+                        .write()
+                        .expect("Failed to acquire font_system lock");
+                    build_console_overlay_tree(geometry, &layout, &mut font_system)
+                };
+                app_scene.register_overlay(OverlayRole::Console, tree, glam::Vec2::ZERO);
+                app_scene.set_overlay_signature(OverlayRole::Console, signature);
+            }
         }
         self.rebuild_overlay_scene_buffers(app_scene);
     }
