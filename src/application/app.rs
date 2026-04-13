@@ -3975,7 +3975,7 @@ fn open_color_picker_contextual(
 }
 
 /// Open the color picker in standalone mode — a persistent palette
-/// that applies the current HSV to the document's selection on ॐ
+/// that applies the current HSV to the document's selection on ࿕
 /// click and stays open until dismissed via `color picker off`.
 #[cfg(not(target_arch = "wasm32"))]
 fn open_color_picker_standalone(
@@ -4736,7 +4736,7 @@ fn handle_color_picker_mouse_move(
         *picker_dirty = true;
         // Preview the updated HSV onto the (possibly contextual)
         // target so the map reflects the hover color live. No-op
-        // in Standalone mode — no bound target — but the ॐ glyph
+        // in Standalone mode — no bound target — but the ࿕ glyph
         // in the wheel still shows the current HSV so the user
         // gets immediate color feedback on the wheel itself.
         apply_picker_preview(state, doc, picker_dirty);
@@ -4752,7 +4752,7 @@ fn handle_color_picker_mouse_move(
 ///   user affirming the current selection. Clicks here **do not**
 ///   commit and **do not** close the wheel — users can click around
 ///   freely and watch the preview update.
-/// - **Commit** (ॐ) —
+/// - **Commit** (࿕) —
 ///   - Contextual: commit current HSV to the bound target, close.
 ///   - Standalone: apply current HSV to each item in the document
 ///     selection; stay open. If the selection is empty, trigger the
@@ -4870,7 +4870,7 @@ fn handle_color_picker_click(
                         // near the wheel center doesn't make a 1px
                         // cursor move into a 100% scale change.
                         // `font_size * 3.0` is comfortably outside
-                        // the central ॐ commit button's hit
+                        // the central ࿕ commit button's hit
                         // radius (`preview_size * 0.45`), so the
                         // floor is rarely hit in practice anyway.
                         let dx = cursor.0 - layout.center.0;
@@ -4948,7 +4948,7 @@ fn commit_color_picker_to_selection(
 
     let targets = selection_targets(&doc.selection);
     if targets.is_empty() {
-        // The user pressed ॐ with nothing selected. Fire the
+        // The user pressed ࿕ with nothing selected. Fire the
         // animation hook (no-op stub today; picks up when the
         // animation pipeline lands) so the wheel flashes red.
         request_error_flash(state, FlashKind::Error);

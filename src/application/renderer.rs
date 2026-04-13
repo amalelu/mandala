@@ -2475,7 +2475,7 @@ pub struct MindMapTextBuffer {
 /// ├── GlyphArea sat-bar cell 0..N (skipping centre)
 /// ├── GlyphArea val-bar cell 0..N (skipping centre)
 /// ├── GlyphArea selected-hue indicator (cyan ring)
-/// ├── GlyphArea preview glyph (ॐ at 2× font size)
+/// ├── GlyphArea preview glyph (࿕ at 2× font size)
 /// ├── GlyphArea hex readout (when geometry.hex_visible)
 /// └── GlyphArea theme chip 0..N
 /// ```
