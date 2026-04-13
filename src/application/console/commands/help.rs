@@ -93,11 +93,13 @@ mod tests {
 
     #[test]
     fn test_complete_help_takes_one_arg() {
+        use crate::application::console::completion::CompletionContext;
         let toks: Vec<String> = args_from("help a");
         let state = CompletionState {
             tokens: &toks,
             cursor_token: 1,
             partial: "a",
+            context: CompletionContext::Token { index: 0 },
         };
         assert_eq!(state.cursor_token, 1);
     }
