@@ -615,27 +615,31 @@ impl Application {
                     }
 
                     // Glyph-wheel color picker click handling. The
-                    // picker captures left-click for in-frame hits
-                    // (commit at hit position) and out-of-backdrop
-                    // clicks (cancel). The CursorMoved branch above
-                    // unconditionally early-returns while the picker
-                    // is open, so middle-button pan is suppressed
-                    // for the duration of the modal — matching the
-                    // palette and label-edit modals' behavior.
-                    if color_picker_state.is_open()
-                        && state == ElementState::Pressed
-                        && button == MouseButton::Left
-                    {
-                        if let Some(doc) = document.as_mut() {
-                            handle_color_picker_click(
-                                cursor_pos,
-                                &mut color_picker_state,
-                                doc,
-                                &mut mindmap_tree,
-                                &mut picker_dirty,
-                                &mut app_scene,
-                                &mut renderer,
-                            );
+                    // picker captures left-click: press → either
+                    // preview / commit / start drag depending on
+                    // which region was hit; release → end drag if
+                    // one is active (no-op otherwise). The
+                    // CursorMoved branch above unconditionally
+                    // early-returns while the picker is open, so
+                    // middle-button pan is suppressed for the
+                    // duration — matching the palette and
+                    // label-edit overlays' behavior.
+                    if color_picker_state.is_open() && button == MouseButton::Left {
+                        if state == ElementState::Pressed {
+                            if let Some(doc) = document.as_mut() {
+                                handle_color_picker_click(
+                                    cursor_pos,
+                                    &mut color_picker_state,
+                                    doc,
+                                    &mut mindmap_tree,
+                                    &mut picker_dirty,
+                                    &mut app_scene,
+                                    &mut renderer,
+                                );
+                            }
+                        } else {
+                            // Release — end any active wheel drag.
+                            end_color_picker_drag(&mut color_picker_state);
                         }
                         return;
                     }
@@ -2969,6 +2973,8 @@ fn execute_console_line(
     let result = (cmd.execute)(&Args::new(&args), &mut effects);
     let label_edit_req = effects.open_label_edit.take();
     let color_picker_req = effects.open_color_picker.take();
+    let color_picker_standalone_req = effects.open_color_picker_standalone;
+    let color_picker_close_req = effects.close_color_picker;
     let close_after = effects.close_console;
 
     // Emit the command's result lines into the scrollback.
@@ -2995,7 +3001,21 @@ fn execute_console_line(
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(app_scene, None);
     } else if let Some(target) = color_picker_req {
-        open_color_picker(target, doc, color_picker_state, app_scene, renderer);
+        open_color_picker_contextual(target, doc, color_picker_state, app_scene, renderer);
+        *console_state = ConsoleState::Closed;
+        renderer.rebuild_console_overlay_buffers(app_scene, None);
+    } else if color_picker_standalone_req {
+        open_color_picker_standalone(doc, color_picker_state, app_scene, renderer);
+        *console_state = ConsoleState::Closed;
+        renderer.rebuild_console_overlay_buffers(app_scene, None);
+    } else if color_picker_close_req {
+        close_color_picker_standalone(
+            color_picker_state,
+            doc,
+            mindmap_tree,
+            app_scene,
+            renderer,
+        );
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(app_scene, None);
     } else if close_after {
@@ -3868,31 +3888,28 @@ fn handle_text_edit_key(
 // Glyph-wheel color picker handlers
 // =====================================================================
 
-/// Open the color picker on the given target. Resolves the target ref
-/// to a concrete `(kind, index)` pair, captures a pre-picker `UndoAction`
-/// snapshot so cancel can restore in place and commit can push a single
-/// undo entry, and seeds the picker HSV from the target's currently-
-/// displayed color. Mirrors the snapshot pattern in
-/// `apply_edge_handle_drag` (line ~520) where in-place mutation during
-/// interaction commits with one undo on release.
+/// Open the color picker in contextual mode, bound to the given
+/// target. Resolves the target ref to a concrete handle, seeds HSV
+/// from the target's currently-displayed color, and shows the
+/// modal-style wheel. Commit writes to the bound target; Esc and
+/// outside-click cancel (restore the original). See
+/// [`open_color_picker_standalone`] for the persistent-palette flavor
+/// that writes to the document's current selection.
 #[cfg(not(target_arch = "wasm32"))]
-fn open_color_picker(
+fn open_color_picker_contextual(
     target: crate::application::color_picker::ColorTarget,
     doc: &mut MindMapDocument,
     state: &mut crate::application::color_picker::ColorPickerState,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::{
-        current_hsv_at, ARM_BOTTOM_GLYPHS, ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS,
-        ARM_TOP_GLYPHS, ColorPickerState, HUE_RING_FONT_SCALE, HUE_RING_GLYPHS,
-    };
+    use crate::application::color_picker::{current_hsv_at, PickerMode};
 
     // Resolve the target to a picker handle up front. If the
     // edge / portal / node was deleted between the open trigger
-    // and Enter being pressed, warn and bail — the modal never
-    // opens. Should never happen because the modal holds the event
-    // loop, but defensive.
+    // and Enter being pressed, warn and bail — the picker never
+    // opens. Should never happen because the dispatcher runs
+    // synchronously, but defensive.
     let handle = match target.resolve(doc) {
         Some(h) => h,
         None => {
@@ -3903,7 +3920,65 @@ fn open_color_picker(
 
     // Seed HSV from the currently-displayed (possibly theme-resolved)
     // color so the picker opens right where the user already is.
-    let (hue_deg, sat, val) = current_hsv_at(doc, &handle);
+    let hsv = current_hsv_at(doc, &handle);
+
+    // Seed the document preview so the initial render already shows
+    // the same HSV the picker opened at. Overwritten on the next
+    // hover frame, but this avoids a one-frame flash of the original
+    // color when the picker opens. Nodes don't have a scene-builder
+    // preview path yet (commit-only for the first version of the
+    // `color bg/text/border` picker flow), so the helper is a no-op
+    // for the Node arm.
+    seed_initial_preview(doc, &handle, hsv.0, hsv.1, hsv.2);
+
+    open_picker_inner(
+        PickerMode::Contextual { handle },
+        hsv,
+        doc,
+        state,
+        app_scene,
+        renderer,
+    );
+}
+
+/// Open the color picker in standalone mode — a persistent palette
+/// that applies the current HSV to the document's selection on ॐ
+/// click and stays open until dismissed via `color picker off`.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_color_picker_standalone(
+    doc: &mut MindMapDocument,
+    state: &mut crate::application::color_picker::ColorPickerState,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    use crate::application::color_picker::PickerMode;
+
+    // Seed to a plausible starting color (red, full saturation, full
+    // value). The user will nudge within seconds, so the exact seed
+    // doesn't matter much — red-at-the-top matches the hue ring's
+    // 12-o'clock slot so the wheel opens with the ring's "start" cell
+    // highlighted.
+    let hsv = (0.0_f32, 1.0_f32, 1.0_f32);
+    open_picker_inner(PickerMode::Standalone, hsv, doc, state, app_scene, renderer);
+}
+
+/// Shared picker-open core: measures glyph advances (one font-system
+/// lock per open, amortized across the whole session) and writes the
+/// `Open` state. Split out so Contextual and Standalone modes share a
+/// single measurement pass and state-init shape.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_picker_inner(
+    mode: crate::application::color_picker::PickerMode,
+    (hue_deg, sat, val): (f32, f32, f32),
+    doc: &mut MindMapDocument,
+    state: &mut crate::application::color_picker::ColorPickerState,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    use crate::application::color_picker::{
+        arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs, hue_ring_font_scale,
+        hue_ring_glyphs, ColorPickerState,
+    };
 
     // Measure the widest shaped advance across every crosshair-arm
     // glyph and every hue-ring glyph. These become the spacing units
@@ -3912,23 +3987,29 @@ fn open_color_picker(
     // keeps `compute_color_picker_layout` pure. Both measurements
     // happen behind the font-system write lock, which is also what
     // the renderer's buffer builders need, so we grab it once.
-    let base_font_size: f32 = 16.0;
-    let ring_font_size = base_font_size * HUE_RING_FONT_SCALE;
+    // Base font sourced from the widget spec. Kept as the local
+    // shadow `base_font_size` so the measurement loop reads the same
+    // value as the layout does at render time.
+    let base_font_size: f32 =
+        crate::application::widgets::color_picker_widget::load_spec()
+            .geometry
+            .font_size;
+    let ring_font_size = base_font_size * hue_ring_font_scale();
     let (max_cell_advance, max_ring_advance) = {
         let mut font_system = baumhard::font::fonts::FONT_SYSTEM
             .write()
             .expect("Failed to acquire font_system lock");
         let mut crosshair: Vec<&str> = Vec::with_capacity(40);
-        crosshair.extend(ARM_TOP_GLYPHS.iter().copied());
-        crosshair.extend(ARM_BOTTOM_GLYPHS.iter().copied());
-        crosshair.extend(ARM_LEFT_GLYPHS.iter().copied());
-        crosshair.extend(ARM_RIGHT_GLYPHS.iter().copied());
+        crosshair.extend(arm_top_glyphs().iter().copied());
+        crosshair.extend(arm_bottom_glyphs().iter().copied());
+        crosshair.extend(arm_left_glyphs().iter().copied());
+        crosshair.extend(arm_right_glyphs().iter().copied());
         let cell = crate::application::renderer::measure_max_glyph_advance(
             &mut font_system,
             &crosshair,
             base_font_size,
         );
-        let ring_glyphs: Vec<&str> = HUE_RING_GLYPHS.iter().copied().collect();
+        let ring_glyphs: Vec<&str> = hue_ring_glyphs().iter().copied().collect();
         let ring = crate::application::renderer::measure_max_glyph_advance(
             &mut font_system,
             &ring_glyphs,
@@ -3937,17 +4018,8 @@ fn open_color_picker(
         (cell, ring)
     };
 
-    // Seed the document preview so the initial render already shows
-    // the same HSV the picker opened at. Overwritten on the next
-    // hover frame, but this avoids a one-frame flash of the original
-    // color when the modal opens. Nodes don't have a scene-builder
-    // preview path yet (commit-only for the first version of the
-    // `color bg/text/border` picker flow), so the helper is a no-op
-    // for the Node arm.
-    seed_initial_preview(doc, &handle, hue_deg, sat, val);
-
     *state = ColorPickerState::Open {
-        handle,
+        mode,
         hue_deg,
         sat,
         val,
@@ -3957,6 +4029,10 @@ fn open_color_picker(
         max_ring_advance,
         commit_mode: crate::application::color_picker::CommitMode::Hsv,
         layout: None,
+        center_override: None,
+        drag: None,
+        hovered_hit: None,
+        pending_error_flash: false,
     };
 
     rebuild_color_picker_overlay(state, doc, app_scene, renderer);
@@ -4033,10 +4109,12 @@ fn compute_picker_geometry(
         max_cell_advance,
         max_ring_advance,
         cached_backdrop,
+        center_override,
+        hovered_hit,
     ) = match state {
         ColorPickerState::Closed => return None,
         ColorPickerState::Open {
-            handle,
+            mode,
             hue_deg,
             sat,
             val,
@@ -4045,9 +4123,16 @@ fn compute_picker_geometry(
             max_cell_advance,
             max_ring_advance,
             layout,
+            center_override,
+            hovered_hit,
             ..
         } => (
-            handle.label(),
+            match mode {
+                crate::application::color_picker::PickerMode::Contextual { handle } => {
+                    handle.label()
+                }
+                crate::application::color_picker::PickerMode::Standalone => "",
+            },
             *hue_deg,
             *sat,
             *val,
@@ -4056,6 +4141,8 @@ fn compute_picker_geometry(
             *max_cell_advance,
             *max_ring_advance,
             layout.as_ref().map(|l| l.backdrop),
+            *center_override,
+            *hovered_hit,
         ),
     };
 
@@ -4083,6 +4170,8 @@ fn compute_picker_geometry(
         hex_visible,
         max_cell_advance,
         max_ring_advance,
+        center_override,
+        hovered_hit,
     };
 
     // Cache the layout into the state so the mouse hit-test can use it.
@@ -4135,6 +4224,23 @@ fn cancel_color_picker(
     rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
+/// Close the standalone color picker without committing. Called by
+/// the `color picker off` console command. Functionally identical to
+/// `cancel_color_picker` — both close the picker and clear the
+/// transient preview — but named distinctly because Standalone mode
+/// has no "original" to cancel back to; the function exists so
+/// call-sites read clearly.
+#[cfg(not(target_arch = "wasm32"))]
+fn close_color_picker_standalone(
+    state: &mut crate::application::color_picker::ColorPickerState,
+    doc: &mut MindMapDocument,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
+}
+
 /// Commit the picker's currently-previewed color via the regular
 /// `set_edge_color` / `set_portal_color` path — a single undo entry
 /// is pushed and `ensure_glyph_connection` runs its fork-on-first-
@@ -4163,7 +4269,12 @@ fn commit_color_picker(
 
     let (handle, hue_deg, sat, val, commit_mode) = match state {
         ColorPickerState::Open {
-            handle, hue_deg, sat, val, commit_mode, ..
+            mode: crate::application::color_picker::PickerMode::Contextual { handle },
+            hue_deg,
+            sat,
+            val,
+            commit_mode,
+            ..
         } => (
             handle.clone(),
             *hue_deg,
@@ -4171,6 +4282,17 @@ fn commit_color_picker(
             *val,
             commit_mode.clone(),
         ),
+        // Standalone mode has no bound target — commit is handled by
+        // `commit_color_picker_to_selection` instead; this function
+        // is Contextual-only. Being reached in Standalone mode means
+        // the caller picked the wrong commit path.
+        ColorPickerState::Open { .. } => {
+            log::warn!(
+                "commit_color_picker called in non-contextual mode; \
+                 use commit_color_picker_to_selection for Standalone mode"
+            );
+            return;
+        }
         ColorPickerState::Closed => return,
     };
 
@@ -4279,33 +4401,53 @@ fn apply_picker_preview(
 
     let (handle, hue_deg, sat, val) = match state {
         ColorPickerState::Open {
-            handle, hue_deg, sat, val, commit_mode, ..
+            mode,
+            hue_deg,
+            sat,
+            val,
+            commit_mode,
+            ..
         } => {
             // Any HSV movement implicitly cancels a prior chip
             // selection (Var/Reset) — the user moved the wheel, so
             // the commit mode goes back to Hsv.
             *commit_mode = CommitMode::Hsv;
-            (handle.clone(), *hue_deg, *sat, *val)
+            let handle = match mode {
+                crate::application::color_picker::PickerMode::Contextual { handle } => {
+                    Some(handle.clone())
+                }
+                // Standalone mode has no bound target — nothing to
+                // preview on the scene. The ॐ glyph in the wheel
+                // still shows the current HSV (rendered by the picker
+                // overlay itself), so the user gets immediate
+                // feedback without needing doc.color_picker_preview.
+                crate::application::color_picker::PickerMode::Standalone => None,
+            };
+            (handle, *hue_deg, *sat, *val)
         }
         ColorPickerState::Closed => return,
     };
     let hex = hsv_to_hex(hue_deg, sat, val);
-    match handle {
-        PickerHandle::Edge(index) => {
-            if let Some(edge) = doc.mindmap.edges.get(index) {
-                let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
-                doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: hex });
+    if let Some(handle) = handle {
+        match handle {
+            PickerHandle::Edge(index) => {
+                if let Some(edge) = doc.mindmap.edges.get(index) {
+                    let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+                    doc.color_picker_preview =
+                        Some(ColorPickerPreview::Edge { key, color: hex });
+                }
             }
-        }
-        PickerHandle::Portal(index) => {
-            if let Some(portal) = doc.mindmap.portals.get(index) {
-                let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
-                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: hex });
+            PickerHandle::Portal(index) => {
+                if let Some(portal) = doc.mindmap.portals.get(index) {
+                    let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
+                    doc.color_picker_preview =
+                        Some(ColorPickerPreview::Portal { key, color: hex });
+                }
             }
-        }
-        PickerHandle::Node { .. } => {
-            // Node preview lives on the tree pipeline, not the
-            // scene pipeline — not yet wired. Commit-only for v1.
+            PickerHandle::Node { .. } => {
+                // Node preview lives on the tree pipeline, not the
+                // scene pipeline — not yet wired. Commit-only for v1.
+            }
         }
     }
     // Scene + picker rebuilds are deferred to the `AboutToWait`
@@ -4335,16 +4477,26 @@ fn apply_picker_chip(
     picker_dirty: &mut bool,
 ) {
     use crate::application::color_picker::{
-        ChipAction, ColorPickerState, CommitMode, PickerHandle, THEME_CHIPS,
+        theme_chips, ChipAction, ColorPickerState, CommitMode, PickerHandle,
     };
     use crate::application::document::ColorPickerPreview;
 
-    let chip = match THEME_CHIPS.get(chip_idx) {
+    let chip = match theme_chips().get(chip_idx) {
         Some(c) => *c,
         None => return,
     };
     let handle = match state {
-        ColorPickerState::Open { handle, .. } => handle.clone(),
+        ColorPickerState::Open {
+            mode: crate::application::color_picker::PickerMode::Contextual { handle },
+            ..
+        } => handle.clone(),
+        // Standalone mode has no bound handle; chips update
+        // `commit_mode` but without a target to preview against, the
+        // full chip-resolution pipeline below is meaningless. Chips
+        // in Standalone mode are still useful for seeding the HSV
+        // via theme variables — handle that simpler flow directly
+        // in the click arm instead.
+        ColorPickerState::Open { .. } => return,
         ColorPickerState::Closed => return,
     };
 
@@ -4451,17 +4603,37 @@ fn handle_color_picker_key(
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::{ColorPickerState, THEME_CHIPS};
+    use crate::application::color_picker::{theme_chips, ColorPickerState};
 
     let name = key_name.as_deref();
+    let is_standalone = state.is_standalone();
     match name {
         Some("escape") => {
+            if is_standalone {
+                // Standalone mode ignores Escape — the persistent
+                // palette only closes via `color picker off`.
+                return;
+            }
             cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
             return;
         }
         Some("enter") => {
-            // If a chip is focused, apply it as the final commit;
-            // otherwise commit the current HSV preview.
+            if is_standalone {
+                // Standalone: Enter behaves like clicking ॐ —
+                // applies the current HSV to the document
+                // selection, stays open.
+                commit_color_picker_to_selection(
+                    state,
+                    doc,
+                    mindmap_tree,
+                    app_scene,
+                    renderer,
+                );
+                return;
+            }
+            // Contextual: if a chip is focused, apply it as the
+            // final commit; otherwise commit the current HSV
+            // preview.
             let focus = if let ColorPickerState::Open { chip_focus, .. } = state {
                 *chip_focus
             } else {
@@ -4475,7 +4647,7 @@ fn handle_color_picker_key(
         }
         Some("tab") => {
             if let ColorPickerState::Open { chip_focus, .. } = state {
-                let n = THEME_CHIPS.len();
+                let n = theme_chips().len();
                 *chip_focus = match *chip_focus {
                     None => Some(0),
                     Some(i) if i + 1 >= n => None,
@@ -4528,9 +4700,16 @@ fn handle_color_picker_key(
     }
 }
 
-/// Mouse-move handler for the picker. Hit-tests the cursor against the
-/// cached layout and updates the picker HSV / chip focus to match the
-/// hovered element, then live-previews the new color on the target.
+/// Mouse-move handler for the picker. Branches on active-drag vs
+/// hover:
+///
+/// - **Drag active**: translate the wheel so
+///   `center = cursor + grab_offset`. Every layout position (ring,
+///   bars, chips, backdrop) rebuilds against the new center via
+///   `center_override`.
+/// - **Hover**: hit-test the cursor, update HSV / chip focus to match
+///   the hovered glyph (live preview), and record
+///   `hovered_hit` for the renderer's hover-grow effect.
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_color_picker_mouse_move(
     cursor_pos: (f64, f64),
@@ -4554,6 +4733,21 @@ fn handle_color_picker_mouse_move(
         *last_cursor_pos = Some(cursor);
     }
 
+    // Drag takes priority: while the wheel is being dragged, every
+    // cursor move repositions the wheel center. No hit-test, no
+    // HSV update — the drag is mutually exclusive with picking.
+    if let ColorPickerState::Open {
+        drag: Some(d),
+        center_override,
+        ..
+    } = state
+    {
+        let new_center = (cursor.0 + d.grab_offset.0, cursor.1 + d.grab_offset.1);
+        *center_override = Some(new_center);
+        *picker_dirty = true;
+        return;
+    }
+
     let hit = if let ColorPickerState::Open { layout: Some(layout), .. } = state {
         hit_test_picker(layout, cursor.0, cursor.1)
     } else {
@@ -4574,7 +4768,34 @@ fn handle_color_picker_mouse_move(
     // wheel because cells are smaller (more boundary crossings
     // per visit).
     let mut state_changed = false;
-    if let ColorPickerState::Open { hue_deg, sat, val, chip_focus, .. } = state {
+    if let ColorPickerState::Open {
+        hue_deg,
+        sat,
+        val,
+        chip_focus,
+        hovered_hit,
+        ..
+    } = state
+    {
+        // Track hover changes for hover-grow. Any change in the
+        // hit region (e.g. moving from hue slot 3 to slot 4, or
+        // from a ring glyph onto the empty backdrop) flips the
+        // hovered_hit and triggers a rebuild.
+        let new_hover = match hit {
+            PickerHit::Hue(_)
+            | PickerHit::SatCell(_)
+            | PickerHit::ValCell(_)
+            | PickerHit::Chip(_)
+            | PickerHit::Commit => Some(hit),
+            // DragAnchor / Outside are not hoverable targets —
+            // they don't grow on hover.
+            PickerHit::DragAnchor | PickerHit::Outside => None,
+        };
+        if *hovered_hit != new_hover {
+            *hovered_hit = new_hover;
+            state_changed = true;
+        }
+
         match hit {
             PickerHit::Hue(slot) => {
                 let new_hue = hue_slot_to_degrees(slot);
@@ -4606,7 +4827,7 @@ fn handle_color_picker_mouse_move(
                     state_changed = true;
                 }
             }
-            PickerHit::Inside | PickerHit::Outside => {
+            PickerHit::Commit | PickerHit::DragAnchor | PickerHit::Outside => {
                 if chip_focus.is_some() {
                     *chip_focus = None;
                     state_changed = true;
@@ -4624,12 +4845,34 @@ fn handle_color_picker_mouse_move(
     // current value.
     if state_changed {
         *picker_dirty = true;
+        // Preview the updated HSV onto the (possibly contextual)
+        // target so the map reflects the hover color live. No-op
+        // in Standalone mode — no bound target — but the ॐ glyph
+        // in the wheel still shows the current HSV so the user
+        // gets immediate color feedback on the wheel itself.
+        apply_picker_preview(state, doc, picker_dirty);
     }
 }
 
-/// Click handler for the picker. Out-of-frame clicks cancel; in-frame
-/// hits commit at the click location (chip clicks apply the chip's
-/// color and commit in one gesture).
+/// Click handler for the picker. Semantics:
+///
+/// - **Hue / SatCell / ValCell / Chip** — preview only. The
+///   mouse-move handler already updated HSV on hover, so a click on
+///   a glyph is effectively a no-op at the model layer; it's the
+///   user affirming the current selection. Clicks here **do not**
+///   commit and **do not** close the wheel — users can click around
+///   freely and watch the preview update.
+/// - **Commit** (ॐ) —
+///   - Contextual: commit current HSV to the bound target, close.
+///   - Standalone: apply current HSV to each item in the document
+///     selection; stay open. If the selection is empty, trigger the
+///     error-flash animation hook.
+/// - **DragAnchor** — start a wheel drag. The mouse-up event ends
+///   the drag via `end_color_picker_drag`.
+/// - **Outside** —
+///   - Contextual: cancel (restore original), close.
+///   - Standalone: ignored (the persistent palette only closes via
+///     `color picker off`).
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_color_picker_click(
     cursor_pos: (f64, f64),
@@ -4641,8 +4884,7 @@ fn handle_color_picker_click(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value,
-        ColorPickerState, PickerHit,
+        hit_test_picker, ColorPickerState, DragState, PickerHit,
     };
 
     let hit = if let ColorPickerState::Open { layout: Some(layout), .. } = state {
@@ -4651,44 +4893,144 @@ fn handle_color_picker_click(
         return;
     };
 
+    let is_standalone = state.is_standalone();
+
     match hit {
         PickerHit::Outside => {
-            // Click outside the backdrop entirely — close as cancel,
-            // matching the palette modal's "click outside dismisses"
-            // gesture.
-            cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
-        }
-        PickerHit::Inside => {
-            // Click inside the backdrop but not on any glyph (e.g.
-            // the empty space inside the mandala ring between the
-            // crosshair arms). Stay open — the user is aiming and
-            // missed; cancelling would feel surprising.
-        }
-        PickerHit::Hue(slot) => {
-            if let ColorPickerState::Open { hue_deg, .. } = state {
-                *hue_deg = hue_slot_to_degrees(slot);
+            if is_standalone {
+                // Standalone mode ignores outside-click — the
+                // persistent palette only closes via `color picker
+                // off`.
+            } else {
+                // Contextual mode: click outside cancels.
+                cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
             }
-            apply_picker_preview(state, doc, picker_dirty);
-            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
-        PickerHit::SatCell(i) => {
-            if let ColorPickerState::Open { sat, .. } = state {
-                *sat = sat_cell_to_value(i);
-            }
-            apply_picker_preview(state, doc, picker_dirty);
-            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
-        }
-        PickerHit::ValCell(i) => {
-            if let ColorPickerState::Open { val, .. } = state {
-                *val = val_cell_to_value(i);
-            }
-            apply_picker_preview(state, doc, picker_dirty);
-            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
+        PickerHit::Hue(_) | PickerHit::SatCell(_) | PickerHit::ValCell(_) => {
+            // Preview-only: the mouse-move handler already updated
+            // HSV as the cursor moved over the glyph, so clicking is
+            // a no-op at the model layer. Users can click freely to
+            // experiment without the picker closing.
         }
         PickerHit::Chip(i) => {
+            // Chips are more than a preview — they carry a
+            // `ChipAction` (theme var or reset) that the HSV-only
+            // hover path can't express. Apply the chip's action so
+            // the wheel's commit_mode reflects the chip. Still no
+            // commit; the user must press ॐ / Enter to finalize.
             apply_picker_chip(state, i, doc, picker_dirty);
-            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
+        PickerHit::Commit => {
+            if is_standalone {
+                // Standalone mode: apply the current HSV to each
+                // item in the selection. Stay open.
+                commit_color_picker_to_selection(
+                    state,
+                    doc,
+                    mindmap_tree,
+                    app_scene,
+                    renderer,
+                );
+            } else {
+                // Contextual mode: commit to the bound target,
+                // close.
+                commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
+            }
+        }
+        PickerHit::DragAnchor => {
+            // Start a drag from anywhere inside the backdrop that's
+            // not on an interactive glyph. The grab-offset is the
+            // vector from the cursor to the current wheel center —
+            // on every subsequent CursorMoved we translate the
+            // wheel so `center = cursor + grab_offset`, preserving
+            // the "picked it up from where you grabbed" feel.
+            if let ColorPickerState::Open {
+                layout: Some(layout),
+                drag,
+                ..
+            } = state
+            {
+                *drag = Some(DragState {
+                    grab_offset: (
+                        layout.center.0 - cursor_pos.0 as f32,
+                        layout.center.1 - cursor_pos.1 as f32,
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// End an active wheel drag. Called on mouse-up while the picker is
+/// open. No-op if no drag is active.
+#[cfg(not(target_arch = "wasm32"))]
+fn end_color_picker_drag(state: &mut crate::application::color_picker::ColorPickerState) {
+    use crate::application::color_picker::ColorPickerState;
+    if let ColorPickerState::Open { drag, .. } = state {
+        *drag = None;
+    }
+}
+
+/// Commit the picker's current HSV to every colorable item in the
+/// document's current selection. Standalone mode's core gesture.
+///
+/// Dispatches through the [`AcceptsWheelColor`] trait: each component
+/// type declares its own default color channel (nodes → bg, edges →
+/// their single color field). The picker doesn't decide — the
+/// component does. Empty selection → fire the error-flash animation
+/// hook and do nothing.
+///
+/// Multi-select applies in a single pass — one undo entry per item
+/// (grouped undo is a future refinement when `UndoAction::Group`
+/// lands in the document layer).
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_color_picker_to_selection(
+    state: &mut crate::application::color_picker::ColorPickerState,
+    doc: &mut MindMapDocument,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    use crate::application::color_picker::{request_error_flash, ColorPickerState, FlashKind};
+    use crate::application::console::traits::{
+        selection_targets, view_for, AcceptsWheelColor, ColorValue, Outcome,
+    };
+    use baumhard::util::color::hsv_to_hex;
+
+    let (hue_deg, sat, val) = match state {
+        ColorPickerState::Open {
+            hue_deg, sat, val, ..
+        } => (*hue_deg, *sat, *val),
+        ColorPickerState::Closed => return,
+    };
+    let color = ColorValue::Hex(hsv_to_hex(hue_deg, sat, val));
+
+    let targets = selection_targets(&doc.selection);
+    if targets.is_empty() {
+        // The user pressed ॐ with nothing selected. Fire the
+        // animation hook (no-op stub today; picks up when the
+        // animation pipeline lands) so the wheel flashes red.
+        request_error_flash(state, FlashKind::Error);
+        return;
+    }
+
+    // Fan out across the selection, letting each component decide
+    // which channel the wheel color lands on. A fresh `TargetView`
+    // per iteration so no two views alias the doc borrow.
+    let mut any_accepted = false;
+    for tid in &targets {
+        let mut view = view_for(doc, tid);
+        match view.apply_wheel_color(color.clone()) {
+            Outcome::Applied | Outcome::Unchanged => any_accepted = true,
+            Outcome::NotApplicable | Outcome::Invalid(_) => {}
+        }
+    }
+
+    if any_accepted {
+        // Rebuild the whole scene so the newly-colored items repaint
+        // next frame. The picker itself stays open — no state change
+        // needed on `state`.
+        rebuild_all(doc, mindmap_tree, app_scene, renderer);
     }
 }
 

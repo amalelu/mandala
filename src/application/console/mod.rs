@@ -74,8 +74,21 @@ pub struct ConsoleEffects<'a> {
     /// the inline label editor on the given edge.
     pub open_label_edit: Option<EdgeRef>,
     /// If set when `execute` returns, the dispatcher transitions to
-    /// the glyph-wheel color picker on the given target.
+    /// the glyph-wheel color picker in **contextual** mode on the
+    /// given target. Commit writes to that target and closes; Esc /
+    /// outside-click cancel.
     pub open_color_picker: Option<ColorTarget>,
+    /// If set when `execute` returns, the dispatcher transitions to
+    /// the glyph-wheel color picker in **standalone** mode — a
+    /// persistent palette with no bound target. Commit applies the
+    /// current HSV to the document's current selection; the palette
+    /// stays open until `close_color_picker` is requested. Set by
+    /// `color picker on`.
+    pub open_color_picker_standalone: bool,
+    /// If set when `execute` returns, the dispatcher closes any open
+    /// color picker (contextual or standalone) without committing.
+    /// Set by `color picker off`.
+    pub close_color_picker: bool,
     /// If set when `execute` returns, the dispatcher closes the
     /// console even on a successful command (e.g. `quit`, or after a
     /// modal handoff).
@@ -88,6 +101,8 @@ impl<'a> ConsoleEffects<'a> {
             document,
             open_label_edit: None,
             open_color_picker: None,
+            open_color_picker_standalone: false,
+            close_color_picker: false,
             close_console: false,
         }
     }

@@ -30,10 +30,12 @@
 //! input gap tracked in the roadmap.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
+use std::sync::OnceLock;
 
 use baumhard::util::color::{hex_to_hsv_safe, resolve_var};
 
 use crate::application::document::{EdgeRef, MindMapDocument, PortalRef};
+use crate::application::widgets::color_picker_widget::{load_spec, ChipActionSpec};
 
 /// Number of hue slots on the outer ring. 24 slots = 15° per step. Fine
 /// enough that adjacent slots feel continuous, coarse enough that each
@@ -52,116 +54,89 @@ pub const VAL_CELL_COUNT: usize = 21;
 /// shows through cleanly; still counted in sat/val quantization.
 pub const CROSSHAIR_CENTER_CELL: usize = 10;
 
-/// Hue ring font size multiplier over the picker's base font_size. The
-/// ring is the dominant visual element of the mandala-shaped picker, so
-/// it renders larger than the bars, chips, and title. 1.5× strikes a
-/// balance: visibly ornate without overflowing the backdrop on a
-/// normally-sized window.
-pub const HUE_RING_FONT_SCALE: f32 = 1.5;
+/// Hue ring font size multiplier over the picker's base font_size.
+///
+/// Backed by [`color_picker.json`](../widgets/color_picker.json).
+/// The function form replaces the old `pub const HUE_RING_FONT_SCALE:
+/// f32 = 1.7` — moving the value into the widget spec was the first
+/// step of the "widget appearance lives in JSON" migration.
+pub fn hue_ring_font_scale() -> f32 {
+    load_spec().geometry.hue_ring_font_scale
+}
 
-/// Hue ring sacred-script glyphs, clockwise from 12 o'clock. Three
-/// 8-glyph arcs: Devanagari (top-right), Hebrew (bottom-right), Tibetan
-/// (bottom-left → top-left). Each glyph indexes directly into
-/// `hue_slot_positions[i]`.
-pub const HUE_RING_GLYPHS: [&str; HUE_SLOT_COUNT] = [
-    // Slots 0-7 — Devanagari consonants
-    "\u{0915}", // क KA
-    "\u{0916}", // ख KHA
-    "\u{0917}", // ग GA
-    "\u{0918}", // घ GHA
-    "\u{091A}", // च CA
-    "\u{091C}", // ज JA
-    "\u{091F}", // ट TTA
-    "\u{0921}", // ड DDA
-    // Slots 8-15 — Hebrew alefbet (first 8 letters)
-    "\u{05D0}", // א ALEF
-    "\u{05D1}", // ב BET
-    "\u{05D2}", // ג GIMEL
-    "\u{05D3}", // ד DALET
-    "\u{05D4}", // ה HE
-    "\u{05D5}", // ו VAV
-    "\u{05D6}", // ז ZAYIN
-    "\u{05D7}", // ח HET
-    // Slots 16-23 — Tibetan consonants
-    "\u{0F40}", // ཀ KA
-    "\u{0F41}", // ཁ KHA
-    "\u{0F42}", // ག GA
-    "\u{0F44}", // ང NGA
-    "\u{0F45}", // ཅ CA
-    "\u{0F4F}", // ཏ TA
-    "\u{0F54}", // པ PA
-    "\u{0F58}", // མ MA
-];
+// =============================================================
+// Glyph accessors — all read from the JSON widget spec
+// =============================================================
+//
+// The old `pub const HUE_RING_GLYPHS: [&str; 24]` (and its four
+// crosshair-arm siblings) moved into `color_picker.json`. Runtime
+// callers go through these accessors, which read from the spec and
+// cache a leaked `&'static [&'static str]` so the existing
+// `[&str]`-shaped call-sites keep working unchanged.
 
-/// Val bar top arm (cells 0..CROSSHAIR_CENTER_CELL, brightest → mid).
-/// Devanagari independent vowels — the script sits on the top arm so
-/// the cross reads as a typographic compass with one script per arm.
-pub const ARM_TOP_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{0905}", // अ A
-    "\u{0906}", // आ AA
-    "\u{0907}", // इ I
-    "\u{0908}", // ई II
-    "\u{0909}", // उ U
-    "\u{090A}", // ऊ UU
-    "\u{090B}", // ऋ R-VOCALIC
-    "\u{090F}", // ए E
-    "\u{0910}", // ऐ AI
-    "\u{0913}", // ओ O
-];
+/// Cached `&'static [&'static str]` derived from a Vec<String> in the
+/// spec. The spec is itself cached; leaking the per-glyph strings
+/// costs one allocation per glyph per process, which is trivial
+/// (~40 glyphs total) and avoids spreading `String` ownership
+/// through the render hot path.
+fn leak_glyphs(v: &[String]) -> &'static [&'static str] {
+    let slice: Vec<&'static str> = v
+        .iter()
+        .map(|s| &*Box::leak(s.clone().into_boxed_str()))
+        .collect();
+    Box::leak(slice.into_boxed_slice())
+}
 
-/// Val bar bottom arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
-/// mid → darkest). Egyptian hieroglyphs — script contrast with the
-/// Devanagari top arm across the wheel's vertical axis.
-pub const ARM_BOTTOM_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{13080}", // 𓂀 — Eye of Horus (wedjat)
-    "\u{132F9}", // 𓋹 — ankh
-    "\u{132BD}", // 𓊽 — djed pillar
-    "\u{1308D}", // 𓂍 — arm holding stick
-    "\u{1328A}", // 𓊊 — boat / bark
-    "\u{132C0}", // 𓋀 — west sign
-    "\u{13180}", // 𓆀 — serpent
-    "\u{1320C}", // 𓈌 — akhet (horizon)
-    "\u{1313F}", // 𓄿 — Egyptian vulture (A)
-    "\u{13099}", // 𓂙 — finger
-];
+/// Hue ring sacred-script glyphs, clockwise from 12 o'clock.
+/// Backed by `color_picker.json`'s `hue_ring_glyphs`. Three 8-glyph
+/// arcs today: Devanagari (top-right), Hebrew (bottom-right),
+/// Tibetan (bottom-left → top-left). Each glyph indexes directly
+/// into `hue_slot_positions[i]`.
+pub fn hue_ring_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().hue_ring_glyphs))
+}
 
-/// Sat bar left arm (cells 0..CROSSHAIR_CENTER_CELL, desaturated →
-/// mid). Tibetan consonants not used in the hue ring — gives the
-/// left-of-center arm its own distinct script.
-pub const ARM_LEFT_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{0F49}", // ཉ NYA
-    "\u{0F50}", // ཐ THA
-    "\u{0F51}", // ད DA
-    "\u{0F53}", // ན NA
-    "\u{0F55}", // ཕ PHA
-    "\u{0F56}", // བ BA
-    "\u{0F59}", // ཙ TSA
-    "\u{0F5E}", // ཞ ZHA
-    "\u{0F62}", // ར RA
-    "\u{0F66}", // ས SA
-];
+/// Val bar top arm glyphs (brightest → mid).
+pub fn arm_top_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_top_glyphs))
+}
 
-/// Sat bar right arm (cells CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT,
-/// mid → saturated). Hebrew letters beyond the ring's first 8 — script
-/// contrast with the Tibetan left arm across the wheel's horizontal
-/// axis.
-pub const ARM_RIGHT_GLYPHS: [&str; CROSSHAIR_CENTER_CELL] = [
-    "\u{05D8}", // ט TET
-    "\u{05D9}", // י YOD
-    "\u{05DB}", // כ KAF
-    "\u{05DC}", // ל LAMED
-    "\u{05DE}", // מ MEM
-    "\u{05E0}", // נ NUN
-    "\u{05E1}", // ס SAMEKH
-    "\u{05E2}", // ע AYIN
-    "\u{05E4}", // פ PE
-    "\u{05E6}", // צ TSADE
-];
+/// Val bar bottom arm glyphs (mid → darkest). Typically Egyptian
+/// hieroglyphs; cosmic-text needs an explicit font hint for these —
+/// see [`arm_bottom_font`].
+pub fn arm_bottom_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_bottom_glyphs))
+}
 
-/// Center wheel preview glyph — ॐ (U+0950, Devanagari Om). Replaces
-/// the earlier ✦ dingbat as the focal point of the mandala-shaped
-/// picker. Rendered at `layout.preview_size = font_size * 2.0`.
-pub const CENTER_PREVIEW_GLYPH: &str = "\u{0950}";
+/// Sat bar left arm glyphs (desaturated → mid).
+pub fn arm_left_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_left_glyphs))
+}
+
+/// Sat bar right arm glyphs (mid → saturated).
+pub fn arm_right_glyphs() -> &'static [&'static str] {
+    static CACHE: OnceLock<&'static [&'static str]> = OnceLock::new();
+    CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_right_glyphs))
+}
+
+/// Central preview glyph — doubles as the commit button on the ॐ.
+pub fn center_preview_glyph() -> &'static str {
+    static CACHE: OnceLock<&'static str> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Box::leak(load_spec().center_preview_glyph.clone().into_boxed_str())
+    })
+}
+
+/// Explicit font family the renderer should pin when shaping
+/// `arm_bottom_glyphs`. `None` if the spec didn't set one — in which
+/// case cosmic-text's default fallback picks a face.
+pub fn arm_bottom_font() -> Option<baumhard::font::fonts::AppFont> {
+    load_spec().arm_bottom_font
+}
 
 /// What a theme-variable quick-pick chip commits when clicked or
 /// Enter-activated with focus.
@@ -182,17 +157,32 @@ pub struct ThemeChip {
     pub action: ChipAction,
 }
 
-/// Theme-variable quick-pick chips shown below the wheel. Replaces the
-/// prior `(&str, &str)` tuple where an empty string was a stringly-typed
-/// "reset" sentinel — `ChipAction` makes the intent explicit at the
-/// type level.
-pub const THEME_CHIPS: &[ThemeChip] = &[
-    ThemeChip { label: "--accent", action: ChipAction::Var("var(--accent)") },
-    ThemeChip { label: "--bg", action: ChipAction::Var("var(--bg)") },
-    ThemeChip { label: "--fg", action: ChipAction::Var("var(--fg)") },
-    ThemeChip { label: "--edge", action: ChipAction::Var("var(--edge)") },
-    ThemeChip { label: "reset", action: ChipAction::Reset },
-];
+/// Theme-variable quick-pick chips shown below the wheel.
+///
+/// Backed by [`color_picker.json`](../widgets/color_picker.json). The
+/// JSON chip specs are translated into `ThemeChip` once at first
+/// access — labels and `ChipAction::Var` names are leaked to
+/// `&'static str` so this function's return type stays a thin
+/// reference and call-sites don't need lifetime gymnastics.
+pub fn theme_chips() -> &'static [ThemeChip] {
+    static CACHE: OnceLock<&'static [ThemeChip]> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let chips: Vec<ThemeChip> = load_spec()
+            .chips
+            .iter()
+            .map(|c| ThemeChip {
+                label: Box::leak(c.label.clone().into_boxed_str()),
+                action: match &c.action {
+                    ChipActionSpec::Var { name } => {
+                        ChipAction::Var(Box::leak(name.clone().into_boxed_str()))
+                    }
+                    ChipActionSpec::Reset => ChipAction::Reset,
+                },
+            })
+            .collect();
+        Box::leak(chips.into_boxed_slice())
+    })
+}
 
 // =============================================================
 // Target abstraction
@@ -356,6 +346,43 @@ pub fn current_hsv_at(
 // State machine
 // =============================================================
 
+/// Which of the two picker modes is active.
+///
+/// - **Contextual**: summoned with a specific target (e.g.
+///   `color pick edge`, `color bg` on a node). Clicking the center ॐ
+///   glyph commits the current HSV to that bound target and closes
+///   the wheel. Esc cancels (restores the original color) and closes.
+///   A click outside the backdrop also cancels. The pre-existing
+///   single-target picker flow lives here.
+/// - **Standalone**: summoned as a persistent palette
+///   (`color picker on`). No target bound at open time. Clicking ॐ
+///   applies the current HSV to every colorable item in the
+///   document's current selection (supports multi-select), then
+///   stays open. Esc and outside-clicks are ignored. The only way to
+///   dismiss it is `color picker off`. The wheel can also be
+///   dragged around the screen like a floating node.
+#[derive(Debug, Clone)]
+pub enum PickerMode {
+    /// Target-bound picker. Commit writes to this handle and closes.
+    Contextual { handle: PickerHandle },
+    /// Persistent palette. Commit writes to the document's current
+    /// selection (zero, one, or many items); the wheel stays open.
+    Standalone,
+}
+
+/// Active-drag bookkeeping. Set when the user mouses down on a
+/// `PickerHit::DragAnchor` region; cleared on mouse-up. While set,
+/// mouse-move updates `ColorPickerState::Open.center_override` so
+/// the layout recomputes with the wheel translated.
+#[derive(Debug, Clone, Copy)]
+pub struct DragState {
+    /// Screen-space offset from the current cursor position to the
+    /// wheel center at grab time. Preserves the "pick it up from
+    /// where you grabbed" feel — the wheel doesn't snap to the
+    /// cursor on first move.
+    pub grab_offset: (f32, f32),
+}
+
 /// Modal state for the glyph-wheel color picker.
 ///
 /// The previous revision of this struct also stored a
@@ -368,20 +395,17 @@ pub fn current_hsv_at(
 /// is untouched during hover and the fork-on-first-edit semantics
 /// of `ensure_glyph_connection` only fire on commit.
 ///
-/// Hot path design: `kind` and `target_index` are captured at open
-/// time so the hover handler can push `(target_index, hex)` into
-/// the document preview without re-resolving any `EdgeRef` /
-/// `PortalRef`.
+/// Hot path design: the target handle (when present) is captured at
+/// open time inside [`PickerMode::Contextual`] so the hover handler
+/// can push `(target_index, hex)` into the document preview without
+/// re-resolving any `EdgeRef` / `PortalRef`.
 #[derive(Debug, Clone)]
 pub enum ColorPickerState {
     Closed,
     Open {
-        /// Handle to the target being edited — index into
-        /// `doc.mindmap.edges` / `doc.mindmap.portals` for edges and
-        /// portals, or `(id, axis)` for nodes. Captured at open time;
-        /// stable for the picker's lifetime because the modal
-        /// suppresses all other document edits.
-        handle: PickerHandle,
+        /// Which of the two picker modes is active. Contextual carries
+        /// the bound target; Standalone has none.
+        mode: PickerMode,
         /// Current preview hue in degrees, `[0, 360)`.
         hue_deg: f32,
         /// Current preview saturation, `[0, 1]`.
@@ -423,6 +447,32 @@ pub enum ColorPickerState {
         /// in `open_color_picker`, but `Option` makes the invariant
         /// explicit rather than relying on a placeholder).
         layout: Option<ColorPickerLayout>,
+        /// Screen-space translation of the wheel center, applied by
+        /// `compute_color_picker_layout` in place of the default
+        /// `(screen_w/2, screen_h/2)`. Updated while a drag is active;
+        /// retained after drag-release so the wheel stays where the
+        /// user left it until the picker closes.
+        center_override: Option<(f32, f32)>,
+        /// Active-drag bookkeeping. `Some` between mouse-down on a
+        /// [`PickerHit::DragAnchor`] and the following mouse-up;
+        /// `None` at all other times.
+        drag: Option<DragState>,
+        /// Which interactive element the cursor is currently over,
+        /// or `None` if it's over the backdrop or outside. Used by
+        /// the builder to apply the hover-grow scale to the matching
+        /// cell. Updated by `handle_color_picker_mouse_move` and
+        /// diffed against the previous value to avoid redundant
+        /// rebuilds.
+        hovered_hit: Option<PickerHit>,
+        /// Pending error-flash animation request. Set when the user
+        /// attempts an action that can't complete (e.g. clicking ॐ
+        /// in Standalone mode with no selection). Today this is a
+        /// plain boolean stub — the animation system isn't wired yet,
+        /// so the renderer ignores it. When that lands, this becomes
+        /// the hook point: flip it on, the renderer reads and clears
+        /// it, the tree gets a red-tint mutation for ~250ms. See
+        /// [`request_error_flash`].
+        pending_error_flash: bool,
     },
 }
 
@@ -443,6 +493,61 @@ impl ColorPickerState {
     pub fn is_open(&self) -> bool {
         matches!(self, ColorPickerState::Open { .. })
     }
+
+    /// The bound contextual handle if this picker is open in Contextual
+    /// mode. Returns `None` when the picker is closed OR when it's
+    /// open in Standalone mode (where commits target the document's
+    /// current selection instead of a pre-bound handle).
+    pub fn contextual_handle(&self) -> Option<&PickerHandle> {
+        match self {
+            ColorPickerState::Open {
+                mode: PickerMode::Contextual { handle },
+                ..
+            } => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// True if the picker is open in Standalone mode.
+    pub fn is_standalone(&self) -> bool {
+        matches!(
+            self,
+            ColorPickerState::Open {
+                mode: PickerMode::Standalone,
+                ..
+            }
+        )
+    }
+}
+
+/// Error-flash animation categories. Today only `Error` is defined —
+/// the enum exists so the call-sites have a stable vocabulary and the
+/// future animation system can branch on kind without another API
+/// change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashKind {
+    /// The user tried something that can't complete right now (e.g.
+    /// committing in Standalone mode with an empty selection). Flash
+    /// the wheel briefly red.
+    Error,
+}
+
+/// Request a brief animation flash on the picker. Hook point for the
+/// animation system: today this is a no-op stub that just flips
+/// `pending_error_flash` so callers can exercise the branch, but once
+/// the animation pipeline lands the renderer will pick the flag up on
+/// the next frame, enqueue a timed red-tint mutation over the tree,
+/// and clear the flag. The current `_kind` argument will fan out to
+/// per-kind mutation recipes at that point; today every kind is the
+/// same no-op.
+pub fn request_error_flash(state: &mut ColorPickerState, _kind: FlashKind) {
+    if let ColorPickerState::Open {
+        pending_error_flash,
+        ..
+    } = state
+    {
+        *pending_error_flash = true;
+    }
 }
 
 // =============================================================
@@ -452,9 +557,11 @@ impl ColorPickerState {
 /// Pre-render geometry pushed from the app to the renderer. Plain data,
 /// no rendering primitives — mirrors `PaletteOverlayGeometry`.
 pub struct ColorPickerOverlayGeometry {
-    /// Static label ("edge" / "portal") — held as a `&'static str` so
-    /// the picker render path doesn't allocate a fresh `String` per
-    /// rebuild.
+    /// Static label ("edge" / "portal" / "node") — held as a
+    /// `&'static str` so the picker render path doesn't allocate a
+    /// fresh `String` per rebuild. Empty string `""` signals
+    /// Standalone mode: the builder renders a generic "palette"
+    /// title instead of "ॐ {label} color".
     pub target_label: &'static str,
     pub hue_deg: f32,
     pub sat: f32,
@@ -478,6 +585,19 @@ pub struct ColorPickerOverlayGeometry {
     /// tangential slot-spacing baseline so slots never overlap at the
     /// new larger font size.
     pub max_ring_advance: f32,
+    /// Wheel center override in screen-space pixels, set by the drag
+    /// handler. When `None`, the layout centers the wheel at
+    /// `(screen_w/2, screen_h/2)` (today's behavior). When `Some`,
+    /// every position in the layout — hue slots, bar cells, chips,
+    /// title, hint, backdrop, everything — is translated so the
+    /// geometric wheel center lands on the override.
+    pub center_override: Option<(f32, f32)>,
+    /// Which interactive element the cursor is currently over, if
+    /// any. Threaded into the builder so the matching glyph renders
+    /// with hover-grow scale + brighter color. Diffed by
+    /// `handle_color_picker_mouse_move` so only a change triggers a
+    /// rebuild.
+    pub hovered_hit: Option<PickerHit>,
 }
 
 /// Pure-function output of the color-picker layout pass. All positions
@@ -548,9 +668,17 @@ pub fn compute_color_picker_layout(
     screen_w: f32,
     screen_h: f32,
 ) -> ColorPickerLayout {
-    let font_size: f32 = 16.0;
+    // Base font size: 22 pt on comfortably-sized windows (was 16
+    // pt). Bump makes every picker glyph — hue ring, crosshair
+    // arms, chips, hex readout — easier to aim at on modern
+    // high-DPI desktops. On very small windows we scale down so the
+    // backdrop still fits vertically (a screen that can't host
+    // 12×font_size of vertical budget would clip the chip row and
+    // hint footer otherwise). Floor at 8 pt so the glyphs remain
+    // legible even in extreme cases.
+    let font_size: f32 = 22.0_f32.min(screen_h / 12.0).max(8.0);
     let char_width = font_size * 0.6;
-    let ring_font_size = font_size * HUE_RING_FONT_SCALE;
+    let ring_font_size = font_size * hue_ring_font_scale();
 
     // Cell-advance units from geometry, with floor fallbacks so the
     // layout still produces sane numbers when called with a stubbed
@@ -573,7 +701,7 @@ pub fn compute_color_picker_layout(
     // the minimum tangential spacing. Grow `ring_r` to whichever
     // constraint dominates, plus a small padding between the bar tip
     // and the ring glyphs so they don't touch.
-    let bar_to_ring_padding = ring_font_size * 0.8;
+    let bar_to_ring_padding = ring_font_size * 1.1;
     let desired_ring_r = (inner_extent + bar_to_ring_padding).max(min_ring_r);
 
     // Derive the backdrop extent from the actual ring (plus padding
@@ -607,7 +735,13 @@ pub fn compute_color_picker_layout(
     // (chip_row_y placement, backdrop math) get a sane value.
     let outer_radius = (side * 0.5 - font_size).max(0.0);
     let ring_r = (outer_radius - ring_font_size * 0.5).max(0.0);
-    let center = (screen_w * 0.5, screen_h * 0.5);
+    // Wheel center: honor the drag-override if the user has moved
+    // the wheel, else sit at the window center. The override is in
+    // screen-space pixels (not world/model space) because the picker
+    // overlay is screen-space by design.
+    let center = geometry
+        .center_override
+        .unwrap_or((screen_w * 0.5, screen_h * 0.5));
 
     // ---- Hue ring (24 slots, clockwise from 12 o'clock) ----
     let mut hue_slot_positions = [(0.0_f32, 0.0_f32); HUE_SLOT_COUNT];
@@ -650,29 +784,37 @@ pub fn compute_color_picker_layout(
     // width is ~0.6 of its font size; we use 0.4 horizontally because
     // the ॐ glyph (like the earlier ✦) has whitespace around it that
     // the box includes but the visible mark does not.
-    let preview_size = font_size * 2.0;
+    let preview_size = font_size * 2.5;
     let preview_pos = (
         center.0 - preview_size * 0.4,
         center.1 - preview_size * 0.5,
     );
 
     // ---- Theme chips row ----
+    let chips = theme_chips();
     let chip_row_y = center.1 + outer_radius + font_size * 1.5;
     let chip_height = font_size * 1.4;
-    let mut chip_positions: Vec<(f32, f32, f32)> = Vec::with_capacity(THEME_CHIPS.len());
-    let total_chip_width: f32 = THEME_CHIPS
+    let mut chip_positions: Vec<(f32, f32, f32)> = Vec::with_capacity(chips.len());
+    let total_chip_width: f32 = chips
         .iter()
         .map(|c| (c.label.chars().count() + 4) as f32 * char_width)
         .sum::<f32>()
-        + (THEME_CHIPS.len().saturating_sub(1)) as f32 * 6.0;
+        + (chips.len().saturating_sub(1)) as f32 * 6.0;
     let mut x = center.0 - total_chip_width * 0.5;
-    for chip in THEME_CHIPS {
+    for chip in chips {
         let w = (chip.label.chars().count() + 4) as f32 * char_width;
         chip_positions.push((x, chip_row_y, w));
         x += w + 6.0;
     }
 
     // ---- Backdrop, title, hint ----
+    // Backdrop width is the max of the wheel-enclosing square
+    // (`side`) and the chip row width + padding, then clamped to
+    // the window. This keeps chips inside the backdrop even when
+    // the hue ring is tight (small window, or small
+    // `desired_ring_r`). Height stays derived from `side` so the
+    // wheel's vertical proportions don't distort.
+    //
     // Title and hint are anchored RELATIVE to the backdrop's left
     // edge, not the window center. On small windows the frame
     // shrinks; a window-centered anchor would push the hint text
@@ -685,10 +827,13 @@ pub fn compute_color_picker_layout(
     // wheel) + wheel diameter + chip row (1.5 font_size) + chip row
     // height + hex readout row (1.5 font_size) + hint footer (1.5
     // font_size).
-    let backdrop_left = center.0 - side * 0.5;
+    let backdrop_width = side
+        .max(total_chip_width + font_size * 2.0)
+        .min((screen_w - font_size * 2.0).max(0.0));
+    let backdrop_left = center.0 - backdrop_width * 0.5;
     let backdrop_top = center.1 - side * 0.5 - font_size;
     let backdrop_height = side + font_size * 7.0;
-    let backdrop = (backdrop_left, backdrop_top, side, backdrop_height);
+    let backdrop = (backdrop_left, backdrop_top, backdrop_width, backdrop_height);
     let title_pos = (backdrop_left + font_size * 0.5, backdrop_top + font_size * 0.5);
     let hint_pos = (
         backdrop_left + font_size * 0.5,
@@ -745,17 +890,24 @@ pub enum PickerHit {
     ValCell(usize),
     /// Index into `chip_positions`.
     Chip(usize),
+    /// The center ॐ glyph — clicking commits the current HSV
+    /// (Contextual: to the bound handle; Standalone: to the
+    /// current document selection).
+    Commit,
     /// Inside the backdrop but not on any interactive element.
-    Inside,
+    /// Mouse-down here starts a wheel drag; drag ends on mouse-up.
+    /// Replaces the older `Inside` fallback — every inside-but-
+    /// not-glyph region is now a drag anchor by design.
+    DragAnchor,
     /// Outside the backdrop entirely.
     Outside,
 }
 
 /// Hit-test a screen position against the cached picker layout. The
 /// search order matches the visual layering: chips → val bar → sat bar
-/// → hue ring (innermost interactive element wins ties). Returns
-/// `Outside` if the cursor is past the backdrop bounds, `Inside` if it's
-/// in the backdrop padding but not on any element.
+/// → hue ring → center ॐ (commit). Inside-the-backdrop-but-not-on-
+/// any-glyph is the drag anchor for the wheel. Returns `Outside`
+/// if the cursor is past the backdrop bounds.
 pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit {
     let (bl, bt, bw, bh) = layout.backdrop;
     if x < bl || x > bl + bw || y < bt || y > bt + bh {
@@ -777,8 +929,7 @@ pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit 
 
     // Sat (horizontal) bar — only consider when cursor is vertically
     // close to the bar line. Skip the center cell so a click at the
-    // wheel center falls through to the hue ring (or stays Inside) —
-    // the center cell is visually occupied by ॐ, not by a bar glyph.
+    // wheel center resolves to `Commit` (the ॐ button) below.
     if (y - layout.center.1).abs() <= cell_half {
         for (i, (cx, _)) in layout.sat_cell_positions.iter().enumerate() {
             if i == CROSSHAIR_CENTER_CELL {
@@ -813,7 +964,21 @@ pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit 
         }
     }
 
-    PickerHit::Inside
+    // Center ॐ — the commit button. Circular hit of radius
+    // `preview_size * 0.45` (slightly smaller than the glyph box so
+    // users who click in the padding between the ॐ and the crosshair
+    // arm glyphs don't accidentally commit).
+    let commit_radius = layout.preview_size * 0.45;
+    let dx = x - layout.center.0;
+    let dy = y - layout.center.1;
+    if dx * dx + dy * dy <= commit_radius * commit_radius {
+        return PickerHit::Commit;
+    }
+
+    // Hex readout occupies a thin band below the chips; treat a click
+    // there as `DragAnchor` too — it's a display element, not
+    // interactive, so dragging from it just moves the wheel.
+    PickerHit::DragAnchor
 }
 
 /// Convert a hue-ring slot index to its degrees value (0..360).
@@ -864,6 +1029,8 @@ mod tests {
             // non-zero and self-consistent.
             max_cell_advance: 16.0,
             max_ring_advance: 24.0,
+            center_override: None,
+            hovered_hit: None,
         }
     }
 
@@ -929,7 +1096,7 @@ mod tests {
     fn layout_includes_one_chip_per_theme_entry() {
         let g = sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
-        assert_eq!(layout.chip_positions.len(), THEME_CHIPS.len());
+        assert_eq!(layout.chip_positions.len(), theme_chips().len());
     }
 
     #[test]
@@ -938,6 +1105,89 @@ mod tests {
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
         assert_eq!(hit_test_picker(&layout, -10.0, -10.0), PickerHit::Outside);
         assert_eq!(hit_test_picker(&layout, 5000.0, 5000.0), PickerHit::Outside);
+    }
+
+    /// A click at the exact wheel center — where the central ॐ glyph
+    /// lives — must resolve to `Commit`. This is the gesture that
+    /// commits the current HSV (Contextual) or applies it to the
+    /// document selection (Standalone). The center used to be
+    /// inert (`Inside`); the new picker makes it the commit button.
+    #[test]
+    fn hit_test_hits_commit_on_center() {
+        let g = sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let (cx, cy) = layout.center;
+        assert_eq!(hit_test_picker(&layout, cx, cy), PickerHit::Commit);
+    }
+
+    /// A click just inside the backdrop but outside every
+    /// interactive glyph must resolve to `DragAnchor` — the
+    /// anywhere-you-can-grab-the-wheel zone. Picks a point far from
+    /// the center (outside the commit radius), well outside any
+    /// bar cell, and not inside the hue ring annulus. The backdrop
+    /// corner is a reliable "nothing here but drag anchor" pick.
+    #[test]
+    fn hit_test_drag_anchor_when_inside_backdrop_not_on_glyph() {
+        let g = sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let (bl, bt, _bw, _bh) = layout.backdrop;
+        // 4 px inside the backdrop's top-left corner — far from the
+        // ring (which is centered on the wheel), the chips (bottom),
+        // the ॐ (center), and the crosshair arms (central cross).
+        let x = bl + 4.0;
+        let y = bt + 4.0;
+        assert_eq!(hit_test_picker(&layout, x, y), PickerHit::DragAnchor);
+    }
+
+    /// With `center_override` set, every position in the layout
+    /// (hue slots, bar cells, chips, preview, backdrop) must
+    /// translate by the offset between the override and the default
+    /// window center. Regression guard for drag repositioning the
+    /// wheel — if any one component forgot to read the override, the
+    /// test catches it.
+    #[test]
+    fn center_override_translates_all_positions() {
+        let screen_w = 1280.0;
+        let screen_h = 720.0;
+        let mut g = sample_geometry();
+        let baseline = compute_color_picker_layout(&g, screen_w, screen_h);
+        let offset = (200.0_f32, -80.0_f32);
+        g.center_override = Some((
+            screen_w * 0.5 + offset.0,
+            screen_h * 0.5 + offset.1,
+        ));
+        let shifted = compute_color_picker_layout(&g, screen_w, screen_h);
+        // Center itself.
+        assert!((shifted.center.0 - baseline.center.0 - offset.0).abs() < 1e-3);
+        assert!((shifted.center.1 - baseline.center.1 - offset.1).abs() < 1e-3);
+        // Hue slot 0.
+        assert!((shifted.hue_slot_positions[0].0 - baseline.hue_slot_positions[0].0 - offset.0).abs() < 1e-3);
+        assert!((shifted.hue_slot_positions[0].1 - baseline.hue_slot_positions[0].1 - offset.1).abs() < 1e-3);
+        // First sat cell.
+        assert!((shifted.sat_cell_positions[0].0 - baseline.sat_cell_positions[0].0 - offset.0).abs() < 1e-3);
+        // Backdrop top-left.
+        let (bl0, bt0, _, _) = baseline.backdrop;
+        let (bl1, bt1, _, _) = shifted.backdrop;
+        assert!((bl1 - bl0 - offset.0).abs() < 1e-3);
+        assert!((bt1 - bt0 - offset.1).abs() < 1e-3);
+    }
+
+    /// Hover-hit diffing: a layout computed with no hover should
+    /// not differ structurally from one computed with a Hue hover
+    /// — the builder applies the scale bump, but the pure layout
+    /// positions don't shift. This locks in that `hovered_hit`
+    /// stays out of `compute_color_picker_layout`'s output.
+    #[test]
+    fn hovered_hit_does_not_alter_layout_positions() {
+        let mut g = sample_geometry();
+        let baseline = compute_color_picker_layout(&g, 1280.0, 720.0);
+        g.hovered_hit = Some(PickerHit::Hue(0));
+        let hovered = compute_color_picker_layout(&g, 1280.0, 720.0);
+        assert_eq!(
+            baseline.hue_slot_positions[0], hovered.hue_slot_positions[0],
+            "hovered_hit must not alter hue slot positions"
+        );
+        assert_eq!(baseline.backdrop, hovered.backdrop);
     }
 
     #[test]
@@ -1157,19 +1407,19 @@ mod tests {
         assert!((vcy - layout.center.1).abs() < 0.1);
         // Left arm = 10 cells (0..CROSSHAIR_CENTER_CELL).
         assert_eq!(CROSSHAIR_CENTER_CELL, 10);
-        assert_eq!(ARM_LEFT_GLYPHS.len(), 10);
+        assert_eq!(arm_left_glyphs().len(), 10);
         // Right arm = 10 cells (CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT).
         assert_eq!(SAT_CELL_COUNT - CROSSHAIR_CENTER_CELL - 1, 10);
-        assert_eq!(ARM_RIGHT_GLYPHS.len(), 10);
+        assert_eq!(arm_right_glyphs().len(), 10);
         // Top arm = 10 cells, bottom arm = 10 cells.
-        assert_eq!(ARM_TOP_GLYPHS.len(), 10);
-        assert_eq!(ARM_BOTTOM_GLYPHS.len(), 10);
+        assert_eq!(arm_top_glyphs().len(), 10);
+        assert_eq!(arm_bottom_glyphs().len(), 10);
         // Four arms × 10 glyphs = 40 total.
         assert_eq!(
-            ARM_TOP_GLYPHS.len()
-                + ARM_BOTTOM_GLYPHS.len()
-                + ARM_LEFT_GLYPHS.len()
-                + ARM_RIGHT_GLYPHS.len(),
+            arm_top_glyphs().len()
+                + arm_bottom_glyphs().len()
+                + arm_left_glyphs().len()
+                + arm_right_glyphs().len(),
             40,
         );
     }
@@ -1208,7 +1458,7 @@ mod tests {
         }
         // Slots 0-7 Devanagari
         for i in 0..8 {
-            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            let cp = first_cp(hue_ring_glyphs()[i]);
             assert!(
                 (0x0900..=0x097F).contains(&cp),
                 "slot {i} codepoint U+{cp:04X} not in Devanagari",
@@ -1216,7 +1466,7 @@ mod tests {
         }
         // Slots 8-15 Hebrew
         for i in 8..16 {
-            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            let cp = first_cp(hue_ring_glyphs()[i]);
             assert!(
                 (0x0590..=0x05FF).contains(&cp),
                 "slot {i} codepoint U+{cp:04X} not in Hebrew",
@@ -1224,7 +1474,7 @@ mod tests {
         }
         // Slots 16-23 Tibetan
         for i in 16..24 {
-            let cp = first_cp(HUE_RING_GLYPHS[i]);
+            let cp = first_cp(hue_ring_glyphs()[i]);
             assert!(
                 (0x0F00..=0x0FFF).contains(&cp),
                 "slot {i} codepoint U+{cp:04X} not in Tibetan",
@@ -1242,7 +1492,7 @@ mod tests {
             s.chars().next().expect("glyph string non-empty") as u32
         }
         // Top arm: Devanagari (U+0900–U+097F)
-        for (i, g) in ARM_TOP_GLYPHS.iter().enumerate() {
+        for (i, g) in arm_top_glyphs().iter().enumerate() {
             let cp = first_cp(g);
             assert!(
                 (0x0900..=0x097F).contains(&cp),
@@ -1250,7 +1500,7 @@ mod tests {
             );
         }
         // Bottom arm: Egyptian Hieroglyphs (U+13000–U+1342F)
-        for (i, g) in ARM_BOTTOM_GLYPHS.iter().enumerate() {
+        for (i, g) in arm_bottom_glyphs().iter().enumerate() {
             let cp = first_cp(g);
             assert!(
                 (0x13000..=0x1342F).contains(&cp),
@@ -1258,7 +1508,7 @@ mod tests {
             );
         }
         // Left arm: Tibetan (U+0F00–U+0FFF)
-        for (i, g) in ARM_LEFT_GLYPHS.iter().enumerate() {
+        for (i, g) in arm_left_glyphs().iter().enumerate() {
             let cp = first_cp(g);
             assert!(
                 (0x0F00..=0x0FFF).contains(&cp),
@@ -1266,7 +1516,7 @@ mod tests {
             );
         }
         // Right arm: Hebrew (U+0590–U+05FF)
-        for (i, g) in ARM_RIGHT_GLYPHS.iter().enumerate() {
+        for (i, g) in arm_right_glyphs().iter().enumerate() {
             let cp = first_cp(g);
             assert!(
                 (0x0590..=0x05FF).contains(&cp),

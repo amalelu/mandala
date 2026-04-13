@@ -7,3 +7,4 @@ pub(crate) mod frame_throttle;
 pub(crate) mod keybinds;
 pub mod renderer;
 pub(crate) mod scene_host;
+pub(crate) mod widgets;
