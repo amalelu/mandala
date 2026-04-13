@@ -3466,13 +3466,11 @@ fn update_portal_tree(
     renderer: &mut Renderer,
 ) {
     use crate::application::document::ColorPickerPreview;
-    use crate::application::scene_host::CanvasRole;
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
     use baumhard::mindmap::tree_builder::{
         build_portal_mutator_tree_from_pairs, build_portal_tree_from_pairs,
         portal_identity_sequence, portal_pair_data, PortalColorPreviewRef, SelectedPortalRef,
     };
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
 
     let selected_owned = doc
         .selection
@@ -3493,25 +3491,20 @@ fn update_portal_tree(
     };
 
     let pairs = portal_pair_data(&doc.mindmap, offsets, selected, preview);
-    let identity = portal_identity_sequence(&pairs);
-    let signature = {
-        let mut h = DefaultHasher::new();
-        identity.hash(&mut h);
-        h.finish()
-    };
+    let signature = hash_canvas_signature(&portal_identity_sequence(&pairs));
 
-    let already_registered = app_scene.canvas_id(CanvasRole::Portals).is_some();
-    let signature_matches = app_scene.canvas_signature(CanvasRole::Portals) == Some(signature);
-
-    if already_registered && signature_matches {
-        let result = build_portal_mutator_tree_from_pairs(&pairs);
-        renderer.set_portal_hitboxes(result.hitboxes);
-        app_scene.apply_canvas_mutator(CanvasRole::Portals, &result.mutator);
-    } else {
-        let result = build_portal_tree_from_pairs(&pairs);
-        renderer.set_portal_hitboxes(result.hitboxes);
-        app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
-        app_scene.set_canvas_signature(CanvasRole::Portals, signature);
+    match app_scene.canvas_dispatch(CanvasRole::Portals, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let result = build_portal_mutator_tree_from_pairs(&pairs);
+            renderer.set_portal_hitboxes(result.hitboxes);
+            app_scene.apply_canvas_mutator(CanvasRole::Portals, &result.mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let result = build_portal_tree_from_pairs(&pairs);
+            renderer.set_portal_hitboxes(result.hitboxes);
+            app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
+            app_scene.set_canvas_signature(CanvasRole::Portals, signature);
+        }
     }
 }
 
@@ -3531,31 +3524,23 @@ fn update_connection_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
 ) {
-    use crate::application::scene_host::CanvasRole;
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
     use baumhard::mindmap::tree_builder::{
         build_connection_mutator_tree, build_connection_tree, connection_identity_sequence,
     };
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
 
-    let identity = connection_identity_sequence(&scene.connection_elements);
-    let signature = {
-        let mut h = DefaultHasher::new();
-        identity.hash(&mut h);
-        h.finish()
-    };
-
-    let already_registered = app_scene.canvas_id(CanvasRole::Connections).is_some();
-    let signature_matches =
-        app_scene.canvas_signature(CanvasRole::Connections) == Some(signature);
-
-    if already_registered && signature_matches {
-        let mutator = build_connection_mutator_tree(&scene.connection_elements);
-        app_scene.apply_canvas_mutator(CanvasRole::Connections, &mutator);
-    } else {
-        let tree = build_connection_tree(&scene.connection_elements);
-        app_scene.register_canvas(CanvasRole::Connections, tree, glam::Vec2::ZERO);
-        app_scene.set_canvas_signature(CanvasRole::Connections, signature);
+    let signature =
+        hash_canvas_signature(&connection_identity_sequence(&scene.connection_elements));
+    match app_scene.canvas_dispatch(CanvasRole::Connections, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let mutator = build_connection_mutator_tree(&scene.connection_elements);
+            app_scene.apply_canvas_mutator(CanvasRole::Connections, &mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let tree = build_connection_tree(&scene.connection_elements);
+            app_scene.register_canvas(CanvasRole::Connections, tree, glam::Vec2::ZERO);
+            app_scene.set_canvas_signature(CanvasRole::Connections, signature);
+        }
     }
 }
 
@@ -3575,38 +3560,31 @@ fn update_connection_label_tree(
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    use crate::application::scene_host::CanvasRole;
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
     use baumhard::mindmap::tree_builder::{
         build_connection_label_mutator_tree, build_connection_label_tree,
         connection_label_identity_sequence,
     };
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
 
-    let identity = connection_label_identity_sequence(&scene.connection_label_elements);
-    let signature = {
-        let mut h = DefaultHasher::new();
-        identity.hash(&mut h);
-        h.finish()
-    };
-
-    let already_registered = app_scene.canvas_id(CanvasRole::ConnectionLabels).is_some();
-    let signature_matches =
-        app_scene.canvas_signature(CanvasRole::ConnectionLabels) == Some(signature);
-
-    if already_registered && signature_matches {
-        let result = build_connection_label_mutator_tree(&scene.connection_label_elements);
-        renderer.set_connection_label_hitboxes(result.hitboxes);
-        app_scene.apply_canvas_mutator(CanvasRole::ConnectionLabels, &result.mutator);
-    } else {
-        let result = build_connection_label_tree(&scene.connection_label_elements);
-        renderer.set_connection_label_hitboxes(result.hitboxes);
-        app_scene.register_canvas(
-            CanvasRole::ConnectionLabels,
-            result.tree,
-            glam::Vec2::ZERO,
-        );
-        app_scene.set_canvas_signature(CanvasRole::ConnectionLabels, signature);
+    let signature = hash_canvas_signature(&connection_label_identity_sequence(
+        &scene.connection_label_elements,
+    ));
+    match app_scene.canvas_dispatch(CanvasRole::ConnectionLabels, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let result = build_connection_label_mutator_tree(&scene.connection_label_elements);
+            renderer.set_connection_label_hitboxes(result.hitboxes);
+            app_scene.apply_canvas_mutator(CanvasRole::ConnectionLabels, &result.mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let result = build_connection_label_tree(&scene.connection_label_elements);
+            renderer.set_connection_label_hitboxes(result.hitboxes);
+            app_scene.register_canvas(
+                CanvasRole::ConnectionLabels,
+                result.tree,
+                glam::Vec2::ZERO,
+            );
+            app_scene.set_canvas_signature(CanvasRole::ConnectionLabels, signature);
+        }
     }
 }
 
@@ -3628,32 +3606,23 @@ fn update_edge_handle_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
 ) {
-    use crate::application::scene_host::CanvasRole;
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
     use baumhard::mindmap::tree_builder::{
         build_edge_handle_mutator_tree, build_edge_handle_tree,
         edge_handle_identity_sequence,
     };
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
 
-    let identity = edge_handle_identity_sequence(&scene.edge_handles);
-    let signature = {
-        let mut h = DefaultHasher::new();
-        identity.hash(&mut h);
-        h.finish()
-    };
-
-    let already_registered = app_scene.canvas_id(CanvasRole::EdgeHandles).is_some();
-    let signature_matches =
-        app_scene.canvas_signature(CanvasRole::EdgeHandles) == Some(signature);
-
-    if already_registered && signature_matches {
-        let mutator = build_edge_handle_mutator_tree(&scene.edge_handles);
-        app_scene.apply_canvas_mutator(CanvasRole::EdgeHandles, &mutator);
-    } else {
-        let tree = build_edge_handle_tree(&scene.edge_handles);
-        app_scene.register_canvas(CanvasRole::EdgeHandles, tree, glam::Vec2::ZERO);
-        app_scene.set_canvas_signature(CanvasRole::EdgeHandles, signature);
+    let signature = hash_canvas_signature(&edge_handle_identity_sequence(&scene.edge_handles));
+    match app_scene.canvas_dispatch(CanvasRole::EdgeHandles, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let mutator = build_edge_handle_mutator_tree(&scene.edge_handles);
+            app_scene.apply_canvas_mutator(CanvasRole::EdgeHandles, &mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let tree = build_edge_handle_tree(&scene.edge_handles);
+            app_scene.register_canvas(CanvasRole::EdgeHandles, tree, glam::Vec2::ZERO);
+            app_scene.set_canvas_signature(CanvasRole::EdgeHandles, signature);
+        }
     }
 }
 

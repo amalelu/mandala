@@ -67,6 +67,30 @@ pub enum CanvasRole {
     ConnectionLabels,
 }
 
+/// Two arms of the §B2 canvas-tree dispatch: apply a mutator to the
+/// existing arena, or rebuild wholesale and re-register. Returned
+/// from [`AppScene::canvas_dispatch`] so the caller can route
+/// side-effects (hitbox updates, renderer state) through the
+/// matching arm without re-implementing the check.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum CanvasDispatch {
+    /// Signature matched the registered tree — apply the mutator.
+    InPlaceMutator,
+    /// Signature mismatch (or nothing registered) — rebuild + re-register.
+    FullRebuild,
+}
+
+/// Hash an arbitrary structural identity into the 64-bit signature
+/// [`AppScene::canvas_signature`] tracks. Shared by every canvas-role
+/// dispatcher — one DefaultHasher incantation instead of four.
+pub fn hash_canvas_signature<T: std::hash::Hash>(identity: &T) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    identity.hash(&mut h);
+    h.finish()
+}
+
 /// Conventional layer integers used when inserting trees into the
 /// appropriate `AppScene` sub-scene. Higher layers draw (and
 /// hit-test) on top inside their own sub-scene; cross-sub-scene
@@ -226,6 +250,24 @@ impl AppScene {
     /// set — the caller treats that as "force full rebuild".
     pub fn canvas_signature(&self, role: CanvasRole) -> Option<u64> {
         self.canvas_signatures.get(&role).copied()
+    }
+
+    /// Decide which §B2 arm to take for a canvas role at the given
+    /// structural signature: [`CanvasDispatch::InPlaceMutator`] if a
+    /// tree is registered and its signature matches, else
+    /// [`CanvasDispatch::FullRebuild`]. The caller then runs the
+    /// matching build path and calls either `apply_canvas_mutator`
+    /// or `register_canvas` + `set_canvas_signature`.
+    ///
+    /// Exists so every role's dispatcher has the same "if registered
+    /// and signature matches" single source of truth, not four
+    /// inlined copies of the check.
+    pub fn canvas_dispatch(&self, role: CanvasRole, signature: u64) -> CanvasDispatch {
+        if self.canvas_id(role).is_some() && self.canvas_signature(role) == Some(signature) {
+            CanvasDispatch::InPlaceMutator
+        } else {
+            CanvasDispatch::FullRebuild
+        }
     }
 
     /// Handle for a canvas role, if registered.
