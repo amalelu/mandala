@@ -2873,6 +2873,7 @@ mod tests {
             behavior: MB::Persistent,
             predicate: None,
             document_actions: vec![],
+            timing: None,
         }
     }
 
@@ -2892,6 +2893,7 @@ mod tests {
             behavior: MB::Persistent,
             predicate: None,
             document_actions: vec![DocumentAction::SetThemeVariables(vars)],
+            timing: None,
         }
     }
 

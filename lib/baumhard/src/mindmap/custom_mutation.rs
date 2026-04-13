@@ -31,6 +31,17 @@ pub struct CustomMutation {
     /// the node mutation path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub document_actions: Vec<DocumentAction>,
+    /// Optional timing envelope. When `Some(timing)` with non-zero
+    /// `duration_ms`, the trigger dispatcher starts an
+    /// `AnimationInstance` instead of applying the mutation
+    /// instantly — each tick produces an interpolated `MutatorTree`
+    /// that lands on the live tree until the boundary commit.
+    /// `None` (or `Some` with `duration_ms == 0`) means apply
+    /// instantly, matching pre-Phase-4 behaviour. Serde-default so
+    /// `.mindmap.json` files saved before the field existed still
+    /// load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<crate::mindmap::animation::AnimationTiming>,
 }
 
 /// An action that operates on the map/document state rather than any
@@ -194,6 +205,7 @@ mod tests {
             behavior: MutationBehavior::Persistent,
             predicate: None,
             document_actions: vec![],
+            timing: None,
         };
 
         let json = serde_json::to_string(&custom).unwrap();
@@ -259,6 +271,7 @@ mod tests {
             behavior: MutationBehavior::Toggle,
             predicate: None,
             document_actions: vec![],
+            timing: None,
         };
 
         let json = serde_json::to_string(&custom).unwrap();
@@ -297,6 +310,7 @@ mod tests {
             document_actions: vec![
                 DocumentAction::SetThemeVariant("dark".to_string()),
             ],
+            timing: None,
         };
         let json = serde_json::to_string(&custom).unwrap();
         let back: CustomMutation = serde_json::from_str(&json).unwrap();
