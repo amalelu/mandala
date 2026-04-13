@@ -75,6 +75,14 @@ const EDGE_HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
 /// input line). Mutually exclusive with `ConsoleState::Open` — the
 /// console check runs first, so opening the console while editing a
 /// label is a no-op.
+///
+/// Mirrors [`TextEditState`] in shape (buffer + grapheme cursor),
+/// per CODE_CONVENTIONS §1: every keystroke routes through
+/// `grapheme_chad` so backspace over an emoji removes the whole
+/// cluster, not a stray byte. The buffer is threaded into the
+/// scene_builder via [`MindMapDocument::label_edit_preview`]; the
+/// connection-label tree's §B2 mutator path (Phase 1.3) picks up
+/// the new text + caret without rebuilding the arena.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 enum LabelEditState {
@@ -84,6 +92,14 @@ enum LabelEditState {
         /// The in-progress buffer. Committed to
         /// `MindEdge.label` on Enter; discarded on Escape.
         buffer: String,
+        /// Cursor position as a grapheme-cluster index into
+        /// `buffer`. Valid range
+        /// `[0, count_grapheme_clusters(buffer)]`. Stored in
+        /// graphemes (not chars or bytes) so backspace over an
+        /// emoji or ZWJ cluster removes the whole user-visible
+        /// character — same invariant as
+        /// [`TextEditState::Open::cursor_grapheme_pos`].
+        cursor_grapheme_pos: usize,
         /// The edge's label value at the moment edit mode opened.
         /// Used to restore state on Escape so the cancel is clean.
         original: Option<String>,
@@ -3643,9 +3659,13 @@ fn open_label_edit(
     };
     let original = edge.label.clone();
     let buffer = original.clone().unwrap_or_default();
+    // Cursor lands at the end of the existing label, matching the
+    // `TextEditState` open-on-existing-text behaviour.
+    let cursor_grapheme_pos = grapheme_chad::count_grapheme_clusters(&buffer);
     *label_edit_state = LabelEditState::Open {
         edge_ref: edge_ref.clone(),
         buffer: buffer.clone(),
+        cursor_grapheme_pos,
         original,
     };
     // Store the preview on the document so every subsequent
@@ -3656,7 +3676,7 @@ fn open_label_edit(
         &edge_ref.to_id,
         &edge_ref.edge_type,
     );
-    doc.label_edit_preview = Some((edge_key, buffer));
+    doc.label_edit_preview = Some((edge_key, insert_caret(&buffer, cursor_grapheme_pos)));
     // Rebuild labels so the caret is visible immediately. The caller
     // already ran `rebuild_all` before this, so the scene is fresh.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
@@ -3664,11 +3684,16 @@ fn open_label_edit(
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
 }
 
-/// Session 6D: route a keystroke to the inline label editor. Escape
-/// discards, Enter commits, Backspace pops the last grapheme,
-/// character keys append. Mirrors the `handle_palette_key` pattern.
-/// Updates the renderer's preview override on every keystroke so the
-/// caret and the edited text render live.
+/// Session 6D + Phase 2.1: route a keystroke to the inline label
+/// editor. Escape discards, Enter commits, navigation keys move the
+/// grapheme cursor, Backspace/Delete remove a grapheme cluster
+/// (never a stray byte), printable characters insert at the cursor.
+///
+/// Mirrors [`handle_text_edit_key`] in shape: every text mutation
+/// goes through `grapheme_chad` so emoji and ZWJ clusters survive
+/// edits intact (CODE_CONVENTIONS §1). Multi-line is intentionally
+/// out of scope — labels are short, single-line; Enter commits, not
+/// inserts. Cursor navigation is constrained to the one row.
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_label_edit_key(
     key_name: &Option<String>,
@@ -3680,51 +3705,101 @@ fn handle_label_edit_key(
     renderer: &mut Renderer,
 ) {
     let name = key_name.as_deref();
+    if name == Some("escape") {
+        close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer);
+        return;
+    }
+    if name == Some("enter") {
+        close_label_edit(true, doc, label_edit_state, mindmap_tree, app_scene, renderer);
+        return;
+    }
+
+    let (buffer, cursor) = match label_edit_state {
+        LabelEditState::Open {
+            buffer,
+            cursor_grapheme_pos,
+            ..
+        } => (buffer, cursor_grapheme_pos),
+        LabelEditState::Closed => return,
+    };
+
+    let mut changed = false;
     match name {
-        Some("escape") => {
-            close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer);
-            return;
-        }
-        Some("enter") => {
-            close_label_edit(true, doc, label_edit_state, mindmap_tree, app_scene, renderer);
-            return;
-        }
         Some("backspace") => {
-            if let LabelEditState::Open { buffer, .. } = label_edit_state {
-                buffer.pop();
+            if *cursor > 0 {
+                *cursor = delete_before_cursor(buffer, *cursor);
+                changed = true;
+            }
+        }
+        Some("delete") => {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
+                *cursor = delete_at_cursor(buffer, *cursor);
+                changed = true;
+            }
+        }
+        Some("arrowleft") => {
+            if *cursor > 0 {
+                *cursor -= 1;
+                changed = true;
+            }
+        }
+        Some("arrowright") => {
+            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
+                *cursor += 1;
+                changed = true;
+            }
+        }
+        Some("home") => {
+            if *cursor != 0 {
+                *cursor = 0;
+                changed = true;
+            }
+        }
+        Some("end") => {
+            let end = grapheme_chad::count_grapheme_clusters(buffer);
+            if *cursor != end {
+                *cursor = end;
+                changed = true;
             }
         }
         _ => {
-            // Append a single-character printable keystroke. Ignore
-            // modifier keys, arrow keys, etc. — cursor navigation is
-            // deferred to a future session.
+            // Printable character: accept each non-control char.
+            // Mirrors `handle_text_edit_key` — winit's
+            // `Key::Character` can carry IME / dead-key sequences,
+            // so iterate.
             if let Key::Character(c) = logical_key {
-                // winit's `Key::Character` may report multi-char
-                // sequences on dead keys / IME; accept anything that
-                // isn't a control character.
                 for ch in c.as_str().chars() {
                     if !ch.is_control() {
-                        if let LabelEditState::Open { buffer, .. } = label_edit_state {
-                            buffer.push(ch);
-                        }
+                        *cursor = insert_at_cursor(buffer, *cursor, ch);
+                        changed = true;
                     }
                 }
-            } else {
-                return;
             }
         }
     }
 
+    if !changed {
+        return;
+    }
+
     // Refresh the preview on the document so the caret + edited text
-    // render on the next frame. Cheap: one scene rebuild. The scene
-    // builder picks up the new buffer through `doc.label_edit_preview`.
-    if let LabelEditState::Open { edge_ref, buffer, .. } = label_edit_state {
+    // render on the next frame. The connection-label tree's §B2
+    // mutator path (Phase 1.3) picks up the new text without
+    // rebuilding the arena because the per-edge identity sequence
+    // stays constant during a label edit.
+    if let LabelEditState::Open {
+        edge_ref,
+        buffer,
+        cursor_grapheme_pos,
+        ..
+    } = label_edit_state
+    {
         let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
             &edge_ref.from_id,
             &edge_ref.to_id,
             &edge_ref.edge_type,
         );
-        doc.label_edit_preview = Some((edge_key, buffer.clone()));
+        doc.label_edit_preview = Some((edge_key, insert_caret(buffer, *cursor_grapheme_pos)));
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
         update_connection_label_tree(&scene, app_scene, renderer);
         update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
@@ -3746,7 +3821,7 @@ fn close_label_edit(
     renderer: &mut Renderer,
 ) {
     let (edge_ref, buffer, original) = match std::mem::replace(label_edit_state, LabelEditState::Closed) {
-        LabelEditState::Open { edge_ref, buffer, original } => (edge_ref, buffer, original),
+        LabelEditState::Open { edge_ref, buffer, original, .. } => (edge_ref, buffer, original),
         LabelEditState::Closed => return,
     };
     doc.label_edit_preview = None;
