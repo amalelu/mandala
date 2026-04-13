@@ -27,7 +27,7 @@ use baumhard::core::primitives::{
     ColorFontRegion, ColorFontRegions, Range as ColorFontRange,
 };
 use baumhard::gfx_structs::element::GfxElement;
-use baumhard::gfx_structs::area::GlyphArea;
+use baumhard::gfx_structs::area::{GlyphArea, OutlineStyle};
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
@@ -1848,10 +1848,53 @@ impl Renderer {
             self.config.width as f32,
             self.config.height as f32,
         );
-        self.color_picker_backdrop = Some(layout.backdrop);
+        // Spec-gated transparent backdrop. When enabled, the picker
+        // skips emitting an opaque rect — canvas content shows
+        // through the gaps between glyphs, and per-glyph black
+        // halos (added in `build_color_picker_overlay_tree`) keep
+        // them legible against any background. The hit-test
+        // `layout.backdrop` rectangle is the *semantic* boundary,
+        // independent of whether the rect is drawn.
+        let spec = crate::application::widgets::color_picker_widget::load_spec();
+        self.color_picker_backdrop = if spec.geometry.transparent_backdrop {
+            None
+        } else {
+            Some(layout.backdrop)
+        };
 
         let tree = build_color_picker_overlay_tree(g, &layout);
         app_scene.register_overlay(OverlayRole::ColorPicker, tree, glam::Vec2::ZERO);
+        self.rebuild_overlay_scene_buffers(app_scene);
+    }
+
+    /// §B2 mutation path — apply an in-place delta to the picker
+    /// overlay tree without rebuilding it. Pairs with
+    /// [`build_color_picker_overlay_mutator`]: every variable
+    /// field on every picker GlyphArea is overwritten via an
+    /// `Assign` `DeltaGlyphArea` keyed by stable channel.
+    ///
+    /// Use this for hover, HSV, chip-focus, and drag-Move /
+    /// drag-Resize updates (anything that doesn't change the
+    /// picker's element set). Open / close still use
+    /// [`Self::rebuild_color_picker_overlay_buffers`] because the
+    /// arena needs to be created or torn down. Calls
+    /// `rebuild_overlay_scene_buffers` afterward to refresh the
+    /// shaped buffers — the cosmic-text shape pass is still per-
+    /// element, which is the §B1 perf gap tracked in `ROADMAP.md`.
+    pub fn apply_color_picker_overlay_mutator(
+        &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
+        geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+    ) {
+        use crate::application::color_picker::compute_color_picker_layout;
+        use crate::application::scene_host::OverlayRole;
+        let layout = compute_color_picker_layout(
+            geometry,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+        let mutator = build_color_picker_overlay_mutator(geometry, &layout);
+        app_scene.apply_overlay_mutator(OverlayRole::ColorPicker, &mutator);
         self.rebuild_overlay_scene_buffers(app_scene);
     }
 
@@ -2450,42 +2493,125 @@ fn build_color_picker_overlay_tree(
     geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
     layout: &crate::application::color_picker::ColorPickerLayout,
 ) -> Tree<GfxElement, GfxMutator> {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    for (channel, area) in picker_glyph_areas(geometry, layout) {
+        let element = GfxElement::new_area_non_indexed_with_id(area, channel, channel);
+        let leaf = tree.arena.new_node(element);
+        tree.root.append(leaf, &mut tree.arena);
+    }
+    tree
+}
+
+/// Build a [`MutatorTree`] that updates an already-registered picker
+/// tree to the current `(geometry, layout)` state without rebuilding
+/// the arena. Pairs with [`build_color_picker_overlay_tree`] —
+/// channels are stable across both, so the walker's
+/// `align_child_walks` matches each mutator child against the
+/// existing GlyphArea at the same channel.
+///
+/// Every entry is an `Assign` `DeltaGlyphArea` carrying the full set
+/// of variable fields (text, position, bounds, scale, line_height,
+/// regions, outline). `align_center` stays at whatever the initial
+/// tree build set; it's never mutated through this path because the
+/// picker's per-element alignment is constant.
+///
+/// This is the §B2 "mutation, not rebuild" path for picker hover /
+/// HSV / chip / drag updates. The arena is reused; only field values
+/// change. The walker still re-shapes every cell — that's the
+/// remaining §B1 perf gap, tracked in `ROADMAP.md` as the
+/// hash-keyed shape cache follow-up.
+fn build_color_picker_overlay_mutator(
+    geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+    layout: &crate::application::color_picker::ColorPickerLayout,
+) -> baumhard::gfx_structs::tree::MutatorTree<GfxMutator> {
+    use baumhard::core::primitives::ApplyOperation;
+    use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::gfx_structs::tree::MutatorTree;
+
+    let mut mt = MutatorTree::new_with(GfxMutator::new_void(0));
+    for (channel, area) in picker_glyph_areas(geometry, layout) {
+        let delta = DeltaGlyphArea::new(vec![
+            GlyphAreaField::Text(area.text),
+            GlyphAreaField::position(area.position.x.0, area.position.y.0),
+            GlyphAreaField::bounds(area.render_bounds.x.0, area.render_bounds.y.0),
+            GlyphAreaField::scale(area.scale.0),
+            GlyphAreaField::line_height(area.line_height.0),
+            GlyphAreaField::ColorFontRegions(area.regions),
+            GlyphAreaField::Outline(area.outline),
+            GlyphAreaField::Operation(ApplyOperation::Assign),
+        ]);
+        let mutator = GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), channel);
+        let id = mt.arena.new_node(mutator);
+        mt.root.append(id, &mut mt.arena);
+    }
+    mt
+}
+
+/// Single source of truth for the picker's GlyphArea content, keyed
+/// by stable channels. Both [`build_color_picker_overlay_tree`] (the
+/// initial-build path) and [`build_color_picker_overlay_mutator`]
+/// (the in-place update path) consume this so they can never drift.
+///
+/// **Channel ordering invariant**: the returned vec must be sorted
+/// by ascending channel — Baumhard's `align_child_walks` pairs
+/// mutator children against target children by ascending channel
+/// and breaks alignment if the order is violated. The constants in
+/// `color_picker.rs` (PICKER_CHANNEL_*) are already chosen to
+/// preserve this invariant in the natural insertion order
+/// (title → hue ring → hint → sat → val → preview → hex → chips).
+///
+/// **Stable element count**: hex is always emitted (with empty
+/// text when invisible) so the channel set doesn't shift when the
+/// cursor crosses the backdrop boundary. Empty-text areas are
+/// skipped by the walker without shaping.
+fn picker_glyph_areas(
+    geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+    layout: &crate::application::color_picker::ColorPickerLayout,
+) -> Vec<(usize, GlyphArea)> {
     use crate::application::color_picker::{
         arm_bottom_font, arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs,
         center_preview_glyph, hue_ring_glyphs, hue_slot_to_degrees, sat_cell_to_value,
-        theme_chips, val_cell_to_value, CROSSHAIR_CENTER_CELL, PickerHit, SAT_CELL_COUNT,
-        VAL_CELL_COUNT,
+        theme_chips, val_cell_to_value, CROSSHAIR_CENTER_CELL, PickerHit,
+        PICKER_CHANNEL_CHIP_BASE, PICKER_CHANNEL_HEX, PICKER_CHANNEL_HINT,
+        PICKER_CHANNEL_HUE_RING_BASE, PICKER_CHANNEL_PREVIEW, PICKER_CHANNEL_SAT_BASE,
+        PICKER_CHANNEL_TITLE, PICKER_CHANNEL_VAL_BASE, SAT_CELL_COUNT, VAL_CELL_COUNT,
     };
     use crate::application::widgets::color_picker_widget::load_spec;
     use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
 
-    // Scale factor applied to the font size AND bounds of the
-    // currently-hovered cell. Sourced from the widget spec so the
-    // ratio stays in one place (the JSON) — the layout pure-fn
-    // doesn't need it, only the render path.
-    let hover_scale: f32 = load_spec().geometry.hover_scale;
+    let spec = load_spec();
+    let hover_scale: f32 = spec.geometry.hover_scale;
 
-    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut id_counter: usize = 1;
+    // Halo style for every picker glyph. Sized at the spec's
+    // `font_max` baseline and scaled linearly to the actual layout
+    // `font_size` so a shrunk picker gets a proportionally smaller
+    // halo. The walker (`walk_tree_into_buffers`) reads
+    // `area.outline` and emits the halo buffers — each halo costs
+    // an extra cosmic-text shape, hence the `outline_samples`
+    // tunable in the spec.
+    let outline = if spec.geometry.outline_px > 0.0 && spec.geometry.outline_samples > 0 {
+        Some(OutlineStyle {
+            color: [0, 0, 0, 255],
+            px: spec.geometry.outline_px * (layout.font_size / spec.geometry.font_max),
+            samples: spec.geometry.outline_samples,
+        })
+    } else {
+        None
+    };
 
-    // Local helper; mirrors the console builder's pattern.
-    // `centered = true` shapes the text with `Align::Center` so
-    // cross-script glyphs (Devanagari / Hebrew / Tibetan in the
-    // hue ring, mixed sat/val cells) sit on the same visual radius
-    // — matches the legacy `create_centered_cell_buffer` path. Use
-    // `false` for left-aligned chrome (title, hint, hex readout,
-    // chips).
+    // Local `make_area` helper — equivalent to the prior `push_area`
+    // but returns the GlyphArea rather than appending to a tree, so
+    // both the tree- and mutator-building paths can route the same
+    // value through their respective wrappers. `centered = true`
+    // shapes the text with `Align::Center` so cross-script glyphs
+    // (Devanagari / Hebrew / Tibetan in the hue ring, mixed sat/val
+    // cells) sit on the same visual radius.
     //
-    // `font` pins a specific `AppFont` for this area's region span.
-    // Needed for glyphs outside the Basic Multilingual Plane — the
-    // SMP-range Egyptian hieroglyphs in particular — where
-    // cosmic-text's default fallback may pick a non-covering font
-    // and render as tofu or zero-width. Pass `None` for ordinary
-    // Latin / BMP glyphs; cosmic-text's fallback handles those
-    // fine.
-    fn push_area(
-        tree: &mut Tree<GfxElement, GfxMutator>,
-        id_counter: &mut usize,
+    // `font` pins a specific `AppFont` for this area's region span
+    // when cosmic-text's default fallback won't pick a covering
+    // face — the SMP-range Egyptian hieroglyphs in particular.
+    fn make_area(
         text: &str,
         color: cosmic_text::Color,
         font_size: f32,
@@ -2494,7 +2620,8 @@ fn build_color_picker_overlay_tree(
         bounds: (f32, f32),
         centered: bool,
         font: Option<baumhard::font::fonts::AppFont>,
-    ) {
+        outline: Option<OutlineStyle>,
+    ) -> GlyphArea {
         let mut area = GlyphArea::new_with_str(
             text,
             font_size,
@@ -2503,6 +2630,7 @@ fn build_color_picker_overlay_tree(
             Vec2::new(bounds.0, bounds.1),
         );
         area.align_center = centered;
+        area.outline = outline;
         let cluster_count = text.chars().count();
         if cluster_count > 0 {
             let rgba = [
@@ -2519,11 +2647,7 @@ fn build_color_picker_overlay_tree(
             ));
             area.regions = regions;
         }
-        let element =
-            GfxElement::new_area_non_indexed_with_id(area, *id_counter, *id_counter);
-        *id_counter += 1;
-        let leaf = tree.arena.new_node(element);
-        tree.root.append(leaf, &mut tree.arena);
+        area
     }
 
     let font_size = layout.font_size;
@@ -2535,33 +2659,31 @@ fn build_color_picker_overlay_tree(
     let ring_box_w = ring_font_size * 1.8;
     let cell_box_w = (layout.cell_advance * 1.4).max(font_size * 1.5);
 
-    // Title. In contextual mode the bound target's label substitutes
-    // into the template; in standalone mode the spec's standalone
-    // title renders verbatim. Both strings live in the widget JSON.
-    let spec = load_spec();
+    let mut out: Vec<(usize, GlyphArea)> = Vec::with_capacity(80);
+
+    // Title.
     let title_text = if geometry.target_label.is_empty() {
         spec.title_template_standalone.clone()
     } else {
         spec.title_template_contextual
             .replace("{target_label}", geometry.target_label)
     };
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        &title_text,
-        cosmic_text::Color::rgba(0, 229, 255, 255),
-        font_size,
-        font_size,
-        layout.title_pos,
-        (font_size * 24.0, font_size * 1.5),
-        false,
-        None,
-    );
+    out.push((
+        PICKER_CHANNEL_TITLE,
+        make_area(
+            &title_text,
+            cosmic_text::Color::rgba(0, 229, 255, 255),
+            font_size,
+            font_size,
+            layout.title_pos,
+            (font_size * 24.0, font_size * 1.5),
+            false,
+            None,
+            outline,
+        ),
+    ));
 
-    // Hue ring. Each slot carries a fixed glyph and a hue derived
-    // from its angular position on the ring. The hovered slot (if
-    // any) draws at HOVER_SCALE and brighter; the cyan selection
-    // ring was removed in favor of this hover-grow cue.
+    // Hue ring.
     for (i, &ring_glyph) in hue_ring_glyphs().iter().enumerate() {
         let hue = hue_slot_to_degrees(i);
         let rgb = hsv_to_rgb(hue, 1.0, 1.0);
@@ -2575,39 +2697,39 @@ fn build_color_picker_overlay_tree(
         let pos = layout.hue_slot_positions[i];
         let fs = ring_font_size * scale;
         let bw = ring_box_w * scale;
-        push_area(
-            &mut tree,
-            &mut id_counter,
-            ring_glyph,
-            color,
-            fs,
-            fs,
-            (pos.0 - bw * 0.5, pos.1 - fs * 0.5),
-            (bw, fs * 1.5),
-            true,
-            None,
-        );
+        out.push((
+            PICKER_CHANNEL_HUE_RING_BASE + i,
+            make_area(
+                ring_glyph,
+                color,
+                fs,
+                fs,
+                (pos.0 - bw * 0.5, pos.1 - fs * 0.5),
+                (bw, fs * 1.5),
+                true,
+                None,
+                outline,
+            ),
+        ));
     }
 
-    // Hint footer — sourced from the widget spec so the gestures
-    // copy lives next to the rest of the widget definition.
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        spec.hint_text.as_str(),
-        cosmic_text::Color::rgba(140, 140, 150, 255),
-        font_size * 0.85,
-        font_size * 0.85,
-        layout.hint_pos,
-        (font_size * 30.0, font_size * 1.5),
-        false,
-        None,
-    );
+    // Hint footer.
+    out.push((
+        PICKER_CHANNEL_HINT,
+        make_area(
+            spec.hint_text.as_str(),
+            cosmic_text::Color::rgba(140, 140, 150, 255),
+            font_size * 0.85,
+            font_size * 0.85,
+            layout.hint_pos,
+            (font_size * 30.0, font_size * 1.5),
+            false,
+            None,
+            outline,
+        ),
+    ));
 
     // Sat / val bars (skip centre cell — that's the preview glyph slot).
-    // The "selected" cell (derived from current HSV) gets a subtle
-    // brighten; the hovered cell gets the same brighten plus
-    // HOVER_SCALE font/bounds growth.
     let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0))
         .round()
         .clamp(0.0, (SAT_CELL_COUNT - 1) as f32) as usize;
@@ -2638,18 +2760,20 @@ fn build_color_picker_overlay_tree(
         let (cx, cy) = layout.sat_cell_positions[i];
         let fs = font_size * scale;
         let bw = cell_box_w * scale;
-        push_area(
-            &mut tree,
-            &mut id_counter,
-            glyph,
-            color,
-            fs,
-            fs,
-            (cx - bw * 0.5, cy - fs * 0.5),
-            (bw, fs * 1.5),
-            true,
-            None,
-        );
+        out.push((
+            PICKER_CHANNEL_SAT_BASE + i,
+            make_area(
+                glyph,
+                color,
+                fs,
+                fs,
+                (cx - bw * 0.5, cy - fs * 0.5),
+                (bw, fs * 1.5),
+                true,
+                None,
+                outline,
+            ),
+        ));
     }
     for i in 0..VAL_CELL_COUNT {
         if i == CROSSHAIR_CENTER_CELL {
@@ -2665,14 +2789,8 @@ fn build_color_picker_overlay_tree(
         } else {
             rgb_to_cosmic_color(base_rgb)
         };
-        // Pin the Egyptian hieroglyph font explicitly on the bottom
-        // arm — cosmic-text's fallback pipeline sometimes picks a
-        // non-covering font for SMP-range codepoints, which renders
-        // hieroglyphs as tofu. Routing through the compiled font id
-        // map guarantees shaping hits Noto Sans Egyptian Hieroglyphs
-        // (loaded at startup; see `lib/baumhard/src/font/fonts.rs`).
-        // The exact font is sourced from the widget spec
-        // (`arm_bottom_font`).
+        // Pin Egyptian hieroglyph font on the bottom arm — see the
+        // walker's family-name fix for context.
         let (glyph, font) = if i < CROSSHAIR_CENTER_CELL {
             (arm_top_glyphs()[i], None)
         } else {
@@ -2685,24 +2803,23 @@ fn build_color_picker_overlay_tree(
         let (cx, cy) = layout.val_cell_positions[i];
         let fs = font_size * scale;
         let bw = cell_box_w * scale;
-        push_area(
-            &mut tree,
-            &mut id_counter,
-            glyph,
-            color,
-            fs,
-            fs,
-            (cx - bw * 0.5, cy - fs * 0.5),
-            (bw, fs * 1.5),
-            true,
-            font,
-        );
+        out.push((
+            PICKER_CHANNEL_VAL_BASE + i,
+            make_area(
+                glyph,
+                color,
+                fs,
+                fs,
+                (cx - bw * 0.5, cy - fs * 0.5),
+                (bw, fs * 1.5),
+                true,
+                font,
+                outline,
+            ),
+        ));
     }
 
-    // Centre preview glyph ॐ. Acts as the commit button — hovering
-    // it grows it (makes the affordance visible). The color is the
-    // current HSV preview; hover just brightens slightly toward
-    // white so the focal point reads as "pressable".
+    // Centre preview glyph ॐ. Acts as the commit button.
     let preview_size = layout.preview_size;
     let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
     let commit_hovered = matches!(geometry.hovered_hit, Some(PickerHit::Commit));
@@ -2713,43 +2830,51 @@ fn build_color_picker_overlay_tree(
     };
     let preview_scale = if commit_hovered { hover_scale } else { 1.0 };
     let scaled_preview = preview_size * preview_scale;
-    push_area(
-        &mut tree,
-        &mut id_counter,
-        center_preview_glyph(),
-        preview_color,
-        scaled_preview,
-        scaled_preview,
-        (
-            layout.preview_pos.0 - (scaled_preview - preview_size) * 0.4,
-            layout.preview_pos.1 - (scaled_preview - preview_size) * 0.5,
+    out.push((
+        PICKER_CHANNEL_PREVIEW,
+        make_area(
+            center_preview_glyph(),
+            preview_color,
+            scaled_preview,
+            scaled_preview,
+            (
+                layout.preview_pos.0 - (scaled_preview - preview_size) * 0.4,
+                layout.preview_pos.1 - (scaled_preview - preview_size) * 0.5,
+            ),
+            (scaled_preview * 1.5, scaled_preview * 1.5),
+            true,
+            None,
+            outline,
         ),
-        (scaled_preview * 1.5, scaled_preview * 1.5),
-        true,
-        None,
-    );
+    ));
 
-    // Hex readout
-    if let Some(hex_anchor) = layout.hex_pos {
-        let hex_text = hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val);
-        push_area(
-            &mut tree,
-            &mut id_counter,
+    // Hex readout — always emitted at a stable channel so the
+    // mutator path doesn't have to handle a flickering element.
+    // Empty text when invisible; the walker shapes nothing.
+    let (hex_text, hex_pos, hex_bounds) = match layout.hex_pos {
+        Some(anchor) => (
+            hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val),
+            anchor,
+            (font_size * 8.0, font_size * 1.5),
+        ),
+        None => (String::new(), (0.0, 0.0), (0.0, 0.0)),
+    };
+    out.push((
+        PICKER_CHANNEL_HEX,
+        make_area(
             &hex_text,
             cosmic_text::Color::rgba(220, 220, 220, 255),
             font_size,
             font_size,
-            hex_anchor,
-            (font_size * 8.0, font_size * 1.5),
+            hex_pos,
+            hex_bounds,
             false,
             None,
-        );
-    }
+            outline,
+        ),
+    ));
 
-    // Theme chips row — hover applies the "brighter + grow" cue;
-    // focus (driven by Tab-cycling through chips) uses the existing
-    // caret + cyan color so keyboard and mouse users get distinct
-    // affordances.
+    // Theme chips row.
     for (i, chip) in theme_chips().iter().enumerate() {
         let focused = geometry.chip_focus == Some(i);
         let hovered = matches!(geometry.hovered_hit, Some(PickerHit::Chip(h)) if h == i);
@@ -2764,21 +2889,23 @@ fn build_color_picker_overlay_tree(
         };
         let scale = if hovered { hover_scale } else { 1.0 };
         let (cx, cy, cw) = layout.chip_positions[i];
-        push_area(
-            &mut tree,
-            &mut id_counter,
-            &label,
-            color,
-            font_size * scale,
-            font_size * scale,
-            (cx, cy),
-            (cw, layout.chip_height * scale),
-            false,
-            None,
-        );
+        out.push((
+            PICKER_CHANNEL_CHIP_BASE + i,
+            make_area(
+                &label,
+                color,
+                font_size * scale,
+                font_size * scale,
+                (cx, cy),
+                (cw, layout.chip_height * scale),
+                false,
+                None,
+                outline,
+            ),
+        ));
     }
 
-    tree
+    out
 }
 
 /// Build the console overlay tree from a geometry + pre-computed
@@ -3138,70 +3265,162 @@ fn walk_tree_into_buffers(
         let bound_x = area.render_bounds.x.0;
         let bound_y = area.render_bounds.y.0;
 
-        let mut buffer = cosmic_text::Buffer::new(
-            font_system,
-            cosmic_text::Metrics::new(scale, line_height),
-        );
-        buffer.set_size(font_system, Some(bound_x), Some(bound_y));
-        // Leave wrap at cosmic-text's default `Wrap::WordOrGlyph`.
-        // The legacy mindmap path explicitly set `Wrap::Word`,
-        // but `Word` mode pushes a glyph that doesn't fit
-        // horizontally onto a "next line" that gets clipped by
-        // the cell's vertical bounds — which silently dropped
-        // single supplementary-plane glyphs (e.g. the picker's
-        // Egyptian hieroglyph cells) when their shaped advance
-        // exceeded `cell_box_w`. `WordOrGlyph` falls back to
-        // glyph-level wrap for over-wide single tokens, which is
-        // what every consumer here actually wants.
-
-        let text = &area.text;
-        let spans: Vec<(&str, Attrs)> = if area.regions.num_regions() == 0 {
-            vec![(text.as_str(), Attrs::new())]
+        // Pre-compute font family names per region. The walker had a
+        // long-standing bug where `region.font` was stored on the
+        // GlyphArea but never threaded into the cosmic-text `Attrs`,
+        // so SMP-range glyphs that needed an explicit face (Egyptian
+        // hieroglyphs in the color-picker bottom arm in particular)
+        // silently rendered as tofu — cosmic-text's default fallback
+        // doesn't pick the Noto Sans Egyptian Hieroglyphs face.
+        //
+        // The family lookup borrows `font_system.db()` immutably,
+        // while `set_rich_text` below needs `&mut font_system`. We
+        // collect the family strings into an owned `Vec<Option<String>>`
+        // here so the immutable borrow ends before the mutable one
+        // begins, and the owned strings outlive each spans Vec that
+        // borrows them via `Family::Name`. The same names are reused
+        // across the main buffer and every halo copy.
+        let family_names: Vec<Option<String>> = if area.regions.num_regions() == 0 {
+            vec![None]
         } else {
             area.regions
                 .all_regions()
                 .iter()
-                .filter_map(|region| {
-                    let start = grapheme_chad::find_byte_index_of_char(text, region.range.start)
-                        .unwrap_or(text.len());
-                    let end = grapheme_chad::find_byte_index_of_char(text, region.range.end)
-                        .unwrap_or(text.len());
-                    if start >= end {
-                        return None;
-                    }
-                    let slice = &text[start..end];
-                    let mut attrs = Attrs::new();
-                    if let Some(rgba) = region.color {
-                        let u8c = baumhard::util::color::convert_f32_to_u8(&rgba);
-                        attrs = attrs
-                            .color(cosmic_text::Color::rgba(u8c[0], u8c[1], u8c[2], u8c[3]));
-                    }
-                    attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
-                    Some((slice, attrs))
+                .map(|region| {
+                    region.font.and_then(|f| {
+                        fonts::COMPILED_FONT_ID_MAP.get(&f).and_then(|ids| {
+                            font_system
+                                .db()
+                                .face(ids[0])
+                                .map(|face| face.families[0].0.clone())
+                        })
+                    })
                 })
                 .collect()
         };
 
+        let text = &area.text;
         let alignment = if area.align_center {
             Some(cosmic_text::Align::Center)
         } else {
             None
         };
-        buffer.set_rich_text(
-            font_system,
-            spans,
-            &Attrs::new(),
-            cosmic_text::Shaping::Advanced,
-            alignment,
-        );
-        buffer.shape_until_scroll(font_system, false);
 
-        let text_buffer = MindMapTextBuffer {
-            buffer,
-            pos: (area.position.x.0 + offset.x, area.position.y.0 + offset.y),
-            bounds: (bound_x, bound_y),
+        // Build a `Vec<(&str, Attrs)>` for shaping, with an optional
+        // color override that recolors *every* span to the given
+        // color (used by the halo loop below). `None` keeps each
+        // region's own color. Per-region font pinning is preserved
+        // either way, so a halo behind an Egyptian hieroglyph still
+        // shapes through the Noto Egyptian Hieroglyphs face.
+        let build_spans = |color_override: Option<cosmic_text::Color>| -> Vec<(&str, Attrs)> {
+            if area.regions.num_regions() == 0 {
+                let mut attrs = Attrs::new();
+                if let Some(c) = color_override {
+                    attrs = attrs.color(c);
+                }
+                attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
+                vec![(text.as_str(), attrs)]
+            } else {
+                area.regions
+                    .all_regions()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, region)| {
+                        let start =
+                            grapheme_chad::find_byte_index_of_char(text, region.range.start)
+                                .unwrap_or(text.len());
+                        let end = grapheme_chad::find_byte_index_of_char(text, region.range.end)
+                            .unwrap_or(text.len());
+                        if start >= end {
+                            return None;
+                        }
+                        let slice = &text[start..end];
+                        let mut attrs = Attrs::new();
+                        let color = color_override.or_else(|| {
+                            region.color.map(|rgba| {
+                                let u8c = baumhard::util::color::convert_f32_to_u8(&rgba);
+                                cosmic_text::Color::rgba(u8c[0], u8c[1], u8c[2], u8c[3])
+                            })
+                        });
+                        if let Some(c) = color {
+                            attrs = attrs.color(c);
+                        }
+                        // Pin the per-region font when the GlyphArea
+                        // specified one. The family name is owned by
+                        // `family_names`; `Family::Name` borrows it
+                        // for the lifetime of `attrs`. Iterators have
+                        // identical length by construction (both run
+                        // over `area.regions.all_regions()`), so
+                        // direct indexing is safe.
+                        if let Some(family) = family_names[i].as_deref() {
+                            attrs = attrs.family(Family::Name(family));
+                        }
+                        attrs = attrs.metrics(cosmic_text::Metrics::new(scale, line_height));
+                        Some((slice, attrs))
+                    })
+                    .collect()
+            }
         };
-        yield_buffer(element.unique_id(), text_buffer);
+
+        // Helper to shape one buffer at an offset and yield it. The
+        // wrap mode stays at cosmic-text's default `Wrap::WordOrGlyph`
+        // — `Word` mode silently dropped supplementary-plane glyphs
+        // (e.g. picker Egyptian hieroglyphs) whose shaped advance
+        // exceeded the cell box.
+        let mut shape_and_yield =
+            |spans: Vec<(&str, Attrs)>, x_off: f32, y_off: f32, fs: &mut FontSystem| {
+                let mut buffer = cosmic_text::Buffer::new(
+                    fs,
+                    cosmic_text::Metrics::new(scale, line_height),
+                );
+                buffer.set_size(fs, Some(bound_x), Some(bound_y));
+                buffer.set_rich_text(
+                    fs,
+                    spans,
+                    &Attrs::new(),
+                    cosmic_text::Shaping::Advanced,
+                    alignment,
+                );
+                buffer.shape_until_scroll(fs, false);
+                let text_buffer = MindMapTextBuffer {
+                    buffer,
+                    pos: (
+                        area.position.x.0 + x_off + offset.x,
+                        area.position.y.0 + y_off + offset.y,
+                    ),
+                    bounds: (bound_x, bound_y),
+                };
+                yield_buffer(element.unique_id(), text_buffer);
+            };
+
+        // Halos first — DFS yield order means later buffers render on
+        // top, so emitting halos before the main glyph puts them
+        // visually behind. Each halo recolors every span to
+        // `outline.color` and offsets the position on a circle of
+        // radius `outline.px` around the main anchor.
+        if let Some(outline) = area.outline {
+            if outline.samples > 0 && outline.px > 0.0 {
+                let halo_color = cosmic_text::Color::rgba(
+                    outline.color[0],
+                    outline.color[1],
+                    outline.color[2],
+                    outline.color[3],
+                );
+                let n = outline.samples as f32;
+                for k in 0..outline.samples {
+                    let angle = (k as f32 / n) * std::f32::consts::TAU;
+                    let dx = angle.cos() * outline.px;
+                    let dy = angle.sin() * outline.px;
+                    let halo_spans = build_spans(Some(halo_color));
+                    shape_and_yield(halo_spans, dx, dy, font_system);
+                }
+            }
+        }
+
+        // Main glyph. Always emitted last so it sits on top of any
+        // halos.
+        let main_spans = build_spans(None);
+        shape_and_yield(main_spans, 0.0, 0.0, font_system);
     }
 }
 
@@ -3797,5 +4016,176 @@ mod tests {
         assert!(large.font_size > small.font_size);
         assert!(large.row_height > small.row_height);
         assert!(large.frame_height > small.frame_height);
+    }
+
+    /// Helpers for the picker mutator tests below.
+    fn picker_sample_geometry(
+    ) -> crate::application::color_picker::ColorPickerOverlayGeometry {
+        crate::application::color_picker::ColorPickerOverlayGeometry {
+            target_label: "edge",
+            hue_deg: 0.0,
+            sat: 1.0,
+            val: 1.0,
+            preview_hex: "#ff0000".to_string(),
+            chip_focus: None,
+            hex_visible: false,
+            max_cell_advance: 16.0,
+            max_ring_advance: 24.0,
+            measurement_font_size: 16.0,
+            size_scale: 1.0,
+            center_override: None,
+            hovered_hit: None,
+        }
+    }
+
+    fn picker_glyph_areas_for(
+        geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+    ) -> Vec<(usize, GlyphArea)> {
+        use crate::application::color_picker::compute_color_picker_layout;
+        let layout = compute_color_picker_layout(geometry, 1280.0, 720.0);
+        super::picker_glyph_areas(geometry, &layout)
+    }
+
+    /// `picker_glyph_areas` must emit channels in strictly
+    /// ascending order — Baumhard's `align_child_walks` relies on
+    /// this for the §B2 mutator path. Regression guard for any
+    /// future band reordering or skipped insertion.
+    #[test]
+    fn picker_glyph_areas_ascending_channels() {
+        let g = picker_sample_geometry();
+        let areas = picker_glyph_areas_for(&g);
+        for window in areas.windows(2) {
+            assert!(
+                window[1].0 > window[0].0,
+                "channel {} should follow {} strictly, got {} → {}",
+                window[0].0,
+                window[0].0,
+                window[0].0,
+                window[1].0,
+            );
+        }
+    }
+
+    /// Hex visibility flips on cursor enter/exit of the backdrop.
+    /// The element set must stay stable across that flip — same
+    /// channels, same count — so the mutator path can keep using
+    /// the same registered tree without unregistering / rebuilding.
+    /// When invisible, the hex emits empty text (walker shapes
+    /// nothing).
+    #[test]
+    fn picker_glyph_areas_hex_channel_stable_when_visibility_flips() {
+        let mut g = picker_sample_geometry();
+        g.hex_visible = false;
+        let invisible = picker_glyph_areas_for(&g);
+        g.hex_visible = true;
+        let visible = picker_glyph_areas_for(&g);
+        assert_eq!(
+            invisible.len(),
+            visible.len(),
+            "element count must stay stable across hex visibility"
+        );
+        let invisible_channels: Vec<usize> =
+            invisible.iter().map(|(c, _)| *c).collect();
+        let visible_channels: Vec<usize> = visible.iter().map(|(c, _)| *c).collect();
+        assert_eq!(invisible_channels, visible_channels);
+        // Hex itself: invisible → empty text, visible → hex string.
+        let hex_invisible = invisible
+            .iter()
+            .find(|(c, _)| *c == crate::application::color_picker::PICKER_CHANNEL_HEX)
+            .expect("hex channel present");
+        assert!(hex_invisible.1.text.is_empty());
+        let hex_visible = visible
+            .iter()
+            .find(|(c, _)| *c == crate::application::color_picker::PICKER_CHANNEL_HEX)
+            .expect("hex channel present");
+        assert!(hex_visible.1.text.starts_with('#'));
+    }
+
+    /// Round-trip: applying the mutator to a freshly-built tree
+    /// should leave every GlyphArea's variable state matching what
+    /// a fresh `picker_glyph_areas` call would emit. Pins the
+    /// promise that the §B2 in-place update path produces the same
+    /// observable state as a from-scratch rebuild.
+    ///
+    /// Strategy: build a tree with state A, build a mutator from
+    /// state B, apply the mutator, then verify the tree's
+    /// per-channel GlyphAreas equal what `picker_glyph_areas(B)`
+    /// would have produced.
+    #[test]
+    fn picker_mutator_round_trips_to_fresh_build() {
+        use crate::application::color_picker::{compute_color_picker_layout, PickerHit};
+        use baumhard::core::primitives::Applicable;
+        use baumhard::gfx_structs::tree::BranchChannel;
+
+        let g_a = picker_sample_geometry();
+        let mut g_b = picker_sample_geometry();
+        g_b.hue_deg = 120.0;
+        g_b.sat = 0.5;
+        g_b.val = 0.7;
+        g_b.hovered_hit = Some(PickerHit::Hue(3));
+
+        let layout_a = compute_color_picker_layout(&g_a, 1280.0, 720.0);
+        let layout_b = compute_color_picker_layout(&g_b, 1280.0, 720.0);
+
+        // Build the picker tree at state A, then apply the mutator
+        // computed from state B.
+        let mut tree = build_color_picker_overlay_tree(&g_a, &layout_a);
+        let mutator = build_color_picker_overlay_mutator(&g_b, &layout_b);
+        mutator.apply_to(&mut tree);
+
+        // Fresh build at state B, for comparison.
+        let expected = picker_glyph_areas(&g_b, &layout_b);
+
+        // Walk the mutated tree, gather (channel, area) pairs, and
+        // compare to `expected`. Since the mutator uses Assign on
+        // every variable field, the pairs should match.
+        let mut got: Vec<(usize, GlyphArea)> = Vec::new();
+        for descendant_id in tree.root().descendants(&tree.arena) {
+            let node = tree.arena.get(descendant_id).expect("arena node");
+            let element = node.get();
+            if let Some(area) = element.glyph_area() {
+                got.push((element.channel(), area.clone()));
+            }
+        }
+
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "post-mutation tree element count mismatch"
+        );
+        for ((c_got, a_got), (c_exp, a_exp)) in got.iter().zip(expected.iter()) {
+            assert_eq!(c_got, c_exp, "channel mismatch");
+            assert_eq!(
+                a_got.text, a_exp.text,
+                "text mismatch on channel {c_got}"
+            );
+            assert_eq!(
+                a_got.position, a_exp.position,
+                "position mismatch on channel {c_got}"
+            );
+            assert_eq!(
+                a_got.render_bounds, a_exp.render_bounds,
+                "bounds mismatch on channel {c_got}"
+            );
+            assert_eq!(
+                a_got.scale, a_exp.scale,
+                "scale mismatch on channel {c_got}"
+            );
+            assert_eq!(
+                a_got.line_height, a_exp.line_height,
+                "line_height mismatch on channel {c_got}"
+            );
+            assert_eq!(
+                a_got.outline, a_exp.outline,
+                "outline mismatch on channel {c_got}"
+            );
+            // Regions equality compares the inner Vec — a single
+            // mismatch on any region field (range, font, color)
+            // surfaces here.
+            assert_eq!(
+                a_got.regions, a_exp.regions,
+                "regions mismatch on channel {c_got}"
+            );
+        }
     }
 }

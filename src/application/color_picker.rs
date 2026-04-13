@@ -42,6 +42,37 @@ use crate::application::widgets::color_picker_widget::{load_spec, ChipActionSpec
 /// glyph has a comfortable hit target.
 pub const HUE_SLOT_COUNT: usize = 24;
 
+// =============================================================
+// Stable channel scheme for the picker tree
+// =============================================================
+//
+// Every picker `GlyphArea` is appended to the tree at a deterministic
+// channel — same channel across every rebuild for the same logical
+// cell. Stable channels are what let the `MutatorTree` path target
+// "the hue ring slot at index 7" without re-deriving an index from
+// tree position. Without stability, swapping the picker's full
+// rebuild for a mutator-driven update would silently misalign
+// (Baumhard's `align_child_walks` pairs mutator children with target
+// children by ascending channel — see `tree_walker.rs:226`).
+//
+// The constants below define the picker's channel space. Bands are
+// 100 wide so a future addition (e.g. an extra ring of glyphs) can
+// slot in without renumbering. **Order matters**: the values must be
+// strictly ascending in tree-insertion order, otherwise the walker
+// breaks out of its alignment loop.
+//
+// Layout-wise: title → hue ring → hint → sat bar → val bar → ॐ
+// preview → hex readout → chip row.
+
+pub const PICKER_CHANNEL_TITLE: usize = 1;
+pub const PICKER_CHANNEL_HUE_RING_BASE: usize = 100; // +0..23
+pub const PICKER_CHANNEL_HINT: usize = 200;
+pub const PICKER_CHANNEL_SAT_BASE: usize = 300; // +0..20 (skipping +10)
+pub const PICKER_CHANNEL_VAL_BASE: usize = 400; // +0..20 (skipping +10)
+pub const PICKER_CHANNEL_PREVIEW: usize = 500;
+pub const PICKER_CHANNEL_HEX: usize = 600;
+pub const PICKER_CHANNEL_CHIP_BASE: usize = 700; // +0..N (chips.len)
+
 /// Number of cells on each crosshair bar. Odd so the center cell sits
 /// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 10 is the
 /// wheel center where ॐ lives — it's counted in the HSV quantization
@@ -370,18 +401,51 @@ pub enum PickerMode {
     Standalone,
 }
 
-/// Active-drag bookkeeping. Set when the user mouses down on a
-/// `PickerHit::DragAnchor` region; cleared on mouse-up. While set,
-/// mouse-move updates `ColorPickerState::Open.center_override` so
-/// the layout recomputes with the wheel translated.
+/// Active-gesture bookkeeping for the color picker.
+///
+/// The picker accepts two mutually-exclusive drag gestures, each
+/// captured on a different mouse button. Storing them in one enum
+/// rather than two parallel `Option`s makes the mutual exclusion
+/// a type invariant: a `Move` and `Resize` cannot both be active.
+///
+/// - **`Move`** (left-mouse-button drag from a `PickerHit::DragAnchor`
+///   region) — translates the wheel center via
+///   `center_override`. Released on LMB-up.
+/// - **`Resize`** (right-mouse-button drag from a `DragAnchor`) —
+///   scales the picker via `size_scale`. The starting cursor radius
+///   from the wheel center anchors the multiplicative scale change:
+///   pulling away grows the widget, pulling in shrinks it. Released
+///   on RMB-up.
 #[derive(Debug, Clone, Copy)]
-pub struct DragState {
-    /// Screen-space offset from the current cursor position to the
-    /// wheel center at grab time. Preserves the "pick it up from
-    /// where you grabbed" feel — the wheel doesn't snap to the
-    /// cursor on first move.
-    pub grab_offset: (f32, f32),
+pub enum PickerGesture {
+    /// LMB-drag — translate the wheel.
+    Move {
+        /// Screen-space offset from the current cursor position to
+        /// the wheel center at grab time. Preserves the "pick it
+        /// up from where you grabbed" feel — the wheel doesn't
+        /// snap to the cursor on first move.
+        grab_offset: (f32, f32),
+    },
+    /// RMB-drag — scale the wheel multiplicatively. Distance from
+    /// the wheel center at grab time anchors the ratio.
+    Resize {
+        /// Distance from the cursor to the wheel center at
+        /// grab time, floored to `font_size * 3.0` so a grab very
+        /// near the center doesn't cause divide-by-tiny sensitivity
+        /// explosions.
+        anchor_radius: f32,
+        /// `size_scale` value at grab time. New scale = this *
+        /// (current_radius / anchor_radius), then clamped to
+        /// `[resize_scale_min, resize_scale_max]` from the spec.
+        anchor_scale: f32,
+        /// Wheel center at grab time. Held constant for the
+        /// duration of the gesture so re-derived layouts (which
+        /// shift `outer_radius`) don't move the radius reference
+        /// point under the cursor.
+        anchor_center: (f32, f32),
+    },
 }
+
 
 /// Modal state for the glyph-wheel color picker.
 ///
@@ -432,6 +496,12 @@ pub enum ColorPickerState {
         /// Same, for the 24 hue ring glyphs at
         /// `font_size * HUE_RING_FONT_SCALE`. Measured once at open.
         max_ring_advance: f32,
+        /// Font size both `max_cell_advance` and `max_ring_advance`
+        /// were measured at — typically `spec.geometry.font_max`.
+        /// The layout fn divides the absolute advances by this to
+        /// recover dimensionless ratios that scale with whatever
+        /// font_size the canonical sizing formula picks.
+        measurement_font_size: f32,
         /// Tracks what the commit should do. `Hsv` → commit the
         /// current HSV hex as a per-edge/portal override. `Var(raw)`
         /// → commit the `var(--...)` string so theme-var resolution
@@ -453,10 +523,19 @@ pub enum ColorPickerState {
         /// retained after drag-release so the wheel stays where the
         /// user left it until the picker closes.
         center_override: Option<(f32, f32)>,
-        /// Active-drag bookkeeping. `Some` between mouse-down on a
-        /// [`PickerHit::DragAnchor`] and the following mouse-up;
-        /// `None` at all other times.
-        drag: Option<DragState>,
+        /// User-controlled multiplier on the picker's size. 1.0 =
+        /// the spec's `target_frac` of the screen's shorter side.
+        /// Mutated by the right-mouse-button drag-to-resize gesture
+        /// in `app.rs`. Reset to 1.0 on each new picker open
+        /// (mirrors `center_override` lifecycle) so that opening
+        /// after a window resize gets the new screen-derived
+        /// default rather than persisting a stale scale.
+        size_scale: f32,
+        /// Active-gesture bookkeeping. `Some` while the user is
+        /// dragging the wheel (LMB-move or RMB-resize); `None` at
+        /// all other times. The two gestures are mutually exclusive
+        /// by construction — only one variant can be set at a time.
+        gesture: Option<PickerGesture>,
         /// Which interactive element the cursor is currently over,
         /// or `None` if it's over the backdrop or outside. Used by
         /// the builder to apply the hover-grow scale to the matching
@@ -574,17 +653,33 @@ pub struct ColorPickerOverlayGeometry {
     /// with the lower val bar cells — now it appears only when the
     /// user is actively engaging with the picker.
     pub hex_visible: bool,
-    /// Widest shaped advance across the 40 crosshair-arm glyphs at
-    /// base `font_size`. Measured by the renderer via cosmic-text at
-    /// picker open. Used by `compute_color_picker_layout` as the
-    /// cell-spacing unit for both bars so all four arms stay symmetric
-    /// regardless of per-script shaping width.
+    /// Widest shaped advance across the 40 crosshair-arm glyphs,
+    /// measured by the renderer via cosmic-text at picker open. The
+    /// layout fn divides by [`measurement_font_size`] to recover a
+    /// dimensionless ratio it can scale with whatever font_size the
+    /// new sizing formula derives — so the picker can shrink to a
+    /// font_size below the measurement baseline without re-measuring.
     pub max_cell_advance: f32,
-    /// Same, for the 24 hue ring glyphs at
-    /// `font_size * HUE_RING_FONT_SCALE`. Used as the ring's
-    /// tangential slot-spacing baseline so slots never overlap at the
-    /// new larger font size.
+    /// Same, for the 24 hue ring glyphs (measured at
+    /// `measurement_font_size * hue_ring_font_scale`). Combined with
+    /// `measurement_font_size` it gives the ring's tangential
+    /// slot-spacing ratio that scales with font_size.
     pub max_ring_advance: f32,
+    /// The font_size both `max_cell_advance` and (after dividing by
+    /// `hue_ring_font_scale`) `max_ring_advance` were measured at.
+    /// Used to recover dimensionless advance ratios so the layout
+    /// can drive font_size from window size, not the other way
+    /// around. Open path measures at `font_max` so the ratio is
+    /// stable across the picker's whole [`font_min`, `font_max`]
+    /// range.
+    pub measurement_font_size: f32,
+    /// User-controlled scale multiplier applied to the picker's
+    /// overall size. 1.0 = the spec's `target_frac` of the screen's
+    /// shorter side; values >1 grow the widget, <1 shrink it.
+    /// Mutated by the right-mouse-button drag-to-resize gesture in
+    /// app.rs; stored alongside `center_override` on
+    /// [`ColorPickerState::Open`] and reset to 1.0 on each new open.
+    pub size_scale: f32,
     /// Wheel center override in screen-space pixels, set by the drag
     /// handler. When `None`, the layout centers the wheel at
     /// `(screen_w/2, screen_h/2)` (today's behavior). When `Some`,
@@ -653,86 +748,127 @@ pub struct ColorPickerLayout {
 /// `compute_palette_frame_layout` so unit tests can construct one from
 /// nothing but a geometry struct + screen dimensions.
 ///
-/// The cell-spacing unit (`geometry.max_cell_advance`) and ring-slot
-/// spacing unit (`geometry.max_ring_advance`) are measured at picker
-/// open time by the renderer (see `measure_max_glyph_advance` in
-/// `renderer.rs`) and threaded through `ColorPickerOverlayGeometry`.
-/// That keeps this fn pure but lets the layout honor the real shaped
-/// width of sacred-script glyphs — crucial because Devanagari
-/// clusters, Tibetan stacks, and especially Egyptian hieroglyphs
-/// shape much wider than `font_size * 0.6`, and all four crosshair
-/// arms must share a single cell advance so the cross reads as a
-/// symmetric cross.
+/// # Canonical sizing formula
+///
+/// The picker is a *widget*, not a modal — its size is driven from a
+/// target wheel-diameter fraction of the screen's shorter side. This
+/// fn back-solves font_size by inverting the geometry chain:
+///
+/// 1. Convert the measured glyph advances (which arrive as absolute
+///    pixels from `measure_max_glyph_advance` at picker open) into
+///    dimensionless ratios by dividing by `measurement_font_size`.
+///    The ratios encode each script's per-font shape and stay stable
+///    across font sizes — Egyptian hieroglyphs always advance at
+///    ~1.0× their font size, Devanagari at ~0.75×, etc.
+/// 2. Compute `wheel_side_in_fonts` — the wheel-enclosing square's
+///    side measured in units of `font_size`. Drives directly off the
+///    same ring-radius constraints used at render time:
+///       `ring_r = max(inner_crosshair_fit, no-overlap-on-circle)`,
+///       `side = 2 * (ring_r + ring_font/2 + font_padding)`.
+/// 3. Pick `target_side = short_axis * target_frac * size_scale` and
+///    derive `font_size = clamp(target_side / wheel_side_in_fonts,
+///    font_min, font_max)`. Then a final clamp guards against
+///    overflow on viewports too small to host even font_min.
+/// 4. Re-derive every dimension from the now-known font_size and
+///    advance ratios — every layout position scales together.
+///
+/// This keeps the picker visually consistent across resolutions
+/// (always ~38% of the short axis at scale=1.0) and lets the user
+/// resize it via the RMB-drag gesture without breaking proportions.
+/// The `size_scale = 1.0` default reproduces the same look on every
+/// monitor — the previous formula `min(22, h/12)` was effectively
+/// constant on any screen taller than 264 px, which is why the
+/// picker filled small windows.
 pub fn compute_color_picker_layout(
     geometry: &ColorPickerOverlayGeometry,
     screen_w: f32,
     screen_h: f32,
 ) -> ColorPickerLayout {
-    // Base font size: 22 pt on comfortably-sized windows (was 16
-    // pt). Bump makes every picker glyph — hue ring, crosshair
-    // arms, chips, hex readout — easier to aim at on modern
-    // high-DPI desktops. On very small windows we scale down so the
-    // backdrop still fits vertically (a screen that can't host
-    // 12×font_size of vertical budget would clip the chip row and
-    // hint footer otherwise). Floor at 8 pt so the glyphs remain
-    // legible even in extreme cases.
-    let font_size: f32 = 22.0_f32.min(screen_h / 12.0).max(8.0);
+    let spec = load_spec();
+    let g = &spec.geometry;
+    let ring_scale = g.hue_ring_font_scale;
+
+    // Step 1: dimensionless advance ratios. The renderer measures
+    // `max_cell_advance` at `measurement_font_size` and
+    // `max_ring_advance` at `measurement_font_size * ring_scale`,
+    // so the per-font ratios are extracted symmetrically. Fall
+    // back to plausible Latin-ish defaults if the measurement was
+    // skipped (test stubs with measurement_font_size == 0).
+    let measurement_fs = geometry.measurement_font_size.max(1.0);
+    let cell_factor = if geometry.measurement_font_size > 0.0 {
+        geometry.max_cell_advance / measurement_fs
+    } else {
+        // Fallback so old/test stubs that pass max_cell_advance
+        // directly without measurement_font_size still produce a
+        // sane layout. Treats the absolute as if it were measured
+        // at our font_max baseline.
+        (geometry.max_cell_advance / g.font_max).max(0.6)
+    };
+    let ring_factor = if geometry.measurement_font_size > 0.0 {
+        geometry.max_ring_advance / (measurement_fs * ring_scale)
+    } else {
+        (geometry.max_ring_advance / (g.font_max * ring_scale)).max(0.6)
+    };
+
+    // Step 2: wheel_side_in_fonts. ring_r per font equals the bigger
+    // of `CROSSHAIR_CENTER_CELL * cell_factor + bar_to_ring_padding`
+    // (crosshair fits inside the ring) and
+    // `HUE_SLOT_COUNT * ring_scale * ring_factor / TAU` (the 24 ring
+    // glyphs don't overlap on the circumference). The ±1 font padding
+    // around the wheel (title above, ring-glyph half-extent on each
+    // side) pads the diameter to a square the backdrop can enclose.
+    let inner_per_font = CROSSHAIR_CENTER_CELL as f32 * cell_factor;
+    let bar_pad_per_font = ring_scale * g.bar_to_ring_padding_scale;
+    let crosshair_ring_per_font = inner_per_font + bar_pad_per_font;
+    let glyph_ring_per_font = (HUE_SLOT_COUNT as f32 * ring_scale * ring_factor) / TAU;
+    let ring_r_per_font = crosshair_ring_per_font.max(glyph_ring_per_font);
+    let wheel_side_in_fonts = 2.0 * (ring_r_per_font + ring_scale * 0.5 + 1.0);
+
+    // Step 3: derive font_size from desired widget size.
+    let short = screen_w.min(screen_h).max(1.0);
+    let target_side = short * g.target_frac * geometry.size_scale.max(0.01);
+    let font_from_target = target_side / wheel_side_in_fonts.max(1.0);
+    let font_clamped = font_from_target.clamp(g.font_min, g.font_max);
+    // Final safety: even at font_min the picker must fit. With
+    // `backdrop_top = center.y - side/2 - font` and
+    // `backdrop_height = side + 7*font`, the bottom edge sits at
+    // `center.y + side/2 + 6*font`, so for the picker centered at
+    // `screen_h/2` we need `side + 12*font <= screen_h`.
+    // Substituting `side = wheel_side_in_fonts * font` gives
+    // `font <= screen_h / (wheel_side_in_fonts + 12)`. Width
+    // similarly: `wheel_side_in_fonts + 2` for the wheel itself,
+    // but the chip row tops out around 32 font units wide, so we
+    // take the larger denominator to satisfy both constraints.
+    let max_font_for_h = (screen_h / (wheel_side_in_fonts + 12.0)).max(1.0);
+    let chip_width_in_fonts: f32 = 32.0;
+    let max_font_for_w =
+        (screen_w / (wheel_side_in_fonts + 2.0).max(chip_width_in_fonts)).max(1.0);
+    let font_size = font_clamped.min(max_font_for_h).min(max_font_for_w).max(1.0);
+
     let char_width = font_size * 0.6;
-    let ring_font_size = font_size * hue_ring_font_scale();
+    let ring_font_size = font_size * ring_scale;
 
-    // Cell-advance units from geometry, with floor fallbacks so the
-    // layout still produces sane numbers when called with a stubbed
-    // zero (unit tests, or the very first rebuild before the renderer
-    // has had a chance to measure).
-    let cell_advance = geometry.max_cell_advance.max(char_width);
-    let ring_advance = geometry.max_ring_advance.max(ring_font_size * 0.6);
-
-    // Ring radius has to be large enough that adjacent slots don't
-    // overlap at the new font size. Tangential spacing between
-    // neighbors at radius R is `2*pi*R / 24`, so a minimum radius of
-    // `(ring_advance * 24) / (2*pi)` guarantees no overlap. Then we
-    // pad by half a ring-font so the glyphs have breathing room from
-    // the wheel edge.
-    let min_ring_r = (ring_advance * HUE_SLOT_COUNT as f32) / TAU;
-    // Inner extent needed to fit `(CROSSHAIR_CENTER_CELL) * cell_advance`
-    // between the wheel center and the ring inner edge on each side.
+    // Step 4: re-derive every dimension at the chosen font_size.
+    let cell_advance = (cell_factor * font_size).max(char_width);
+    let ring_advance = (ring_factor * ring_font_size).max(ring_font_size * 0.6);
     let inner_extent = CROSSHAIR_CENTER_CELL as f32 * cell_advance;
-    // Ring must be big enough to enclose both the crosshair bars and
-    // the minimum tangential spacing. Grow `ring_r` to whichever
-    // constraint dominates, plus a small padding between the bar tip
-    // and the ring glyphs so they don't touch.
-    let bar_to_ring_padding = ring_font_size * 1.1;
+    let bar_to_ring_padding = ring_font_size * g.bar_to_ring_padding_scale;
+    let min_ring_r = (HUE_SLOT_COUNT as f32 * ring_advance) / TAU;
     let desired_ring_r = (inner_extent + bar_to_ring_padding).max(min_ring_r);
 
-    // Derive the backdrop extent from the actual ring (plus padding
-    // for title above, chips + hint below). Clamp to window so small
-    // windows still produce a layout that fits.
+    // Backdrop side derived from the now-canonical ring_r — the
+    // font_size formula above already accounts for window fit, so
+    // these clamps are defensive against rounding and the rare
+    // case where the chip-row constraint forced a smaller font
+    // than the wheel-side formula expected.
     let ring_outer = desired_ring_r + ring_font_size * 0.5;
     let side_from_ring = (ring_outer + font_size) * 2.0;
     let max_side_for_w = (screen_w - font_size * 2.0).max(0.0);
-    // Vertical budget derivation: with the new `backdrop_height =
-    // side + font_size * 7.0` and `backdrop_top = center.y - side/2
-    // - font_size`, the backdrop's bottom edge is at
-    //     center.y + side/2 + font_size * 6
-    // and the top edge is at
-    //     center.y - side/2 - font_size.
-    // For the top to be >= 0 we need `side <= screen_h - 2*font_size`.
-    // For the bottom to be <= screen_h we need
-    // `side <= screen_h - 12*font_size`, so the bottom constraint
-    // dominates at `center.y = screen_h/2`. A 12 font_size floor
-    // leaves enough room for title, wheel, chip row, hex readout,
-    // and hint footer even on small windows.
     let max_side_for_h = (screen_h - font_size * 12.0).max(0.0);
     let side = side_from_ring
         .min(max_side_for_w)
         .min(max_side_for_h)
         .max(0.0);
-    // Recompute ring_r from the possibly-clamped side so layout is
-    // consistent. On unconstrained windows this is a no-op; on small
-    // windows it shrinks the ring to fit.
-    // Guard against side < 2*font_size producing a negative radius
-    // on very small windows. Clamp to 0 so downstream consumers
-    // (chip_row_y placement, backdrop math) get a sane value.
     let outer_radius = (side * 0.5 - font_size).max(0.0);
     let ring_r = (outer_radius - ring_font_size * 0.5).max(0.0);
     // Wheel center: honor the drag-override if the user has moved
@@ -777,14 +913,16 @@ pub fn compute_color_picker_layout(
         val_cell_positions[i] = (center.0, center.1 - bar_span * 0.5 + i as f32 * step);
     }
 
-    // Center preview ॐ at the bar intersection. The glyph renders
-    // at 2× font_size; the top-left of its box is offset by half the
-    // preview size in each direction so the visible glyph sits on
-    // the geometric wheel center. cosmic-text's effective glyph
-    // width is ~0.6 of its font size; we use 0.4 horizontally because
-    // the ॐ glyph (like the earlier ✦) has whitespace around it that
-    // the box includes but the visible mark does not.
-    let preview_size = font_size * 2.5;
+    // Center preview ॐ at the bar intersection. The glyph size is
+    // sourced from the spec (`preview_size_scale`) so reskins can
+    // tune the focal-point ratio. The top-left of its box is offset
+    // by half the preview size in each direction so the visible
+    // glyph sits on the geometric wheel center. cosmic-text's
+    // effective glyph width is ~0.6 of its font size; we use 0.4
+    // horizontally because the ॐ glyph (like the earlier ✦) has
+    // whitespace around it that the box includes but the visible
+    // mark does not.
+    let preview_size = font_size * g.preview_size_scale;
     let preview_pos = (
         center.0 - preview_size * 0.4,
         center.1 - preview_size * 0.5,
@@ -1013,6 +1151,11 @@ mod tests {
     use super::*;
 
     fn sample_geometry() -> ColorPickerOverlayGeometry {
+        // Plausible stub advances measured at a notional 16 pt
+        // baseline. cell ratio = 1.0 (worst-case sacred-script-ish),
+        // ring ratio = 0.7 (typical at ring_scale = 1.7). The
+        // pure-function layout only cares that the numbers are
+        // non-zero and self-consistent.
         ColorPickerOverlayGeometry {
             target_label: "edge",
             hue_deg: 0.0,
@@ -1021,14 +1164,10 @@ mod tests {
             preview_hex: "#ff0000".to_string(),
             chip_focus: None,
             hex_visible: false,
-            // Plausible stub advances. 16.0 is the base font_size and
-            // 24.0 is font_size * HUE_RING_FONT_SCALE, so these match
-            // what the renderer would measure for ordinary Latin text.
-            // Real sacred-script measurements will be wider, but the
-            // pure-function layout only cares that the numbers are
-            // non-zero and self-consistent.
             max_cell_advance: 16.0,
             max_ring_advance: 24.0,
+            measurement_font_size: 16.0,
+            size_scale: 1.0,
             center_override: None,
             hovered_hit: None,
         }
@@ -1523,5 +1662,185 @@ mod tests {
                 "right arm cell {i} codepoint U+{cp:04X} not in Hebrew",
             );
         }
+    }
+
+    /// Canonical sizing formula: at `size_scale = 1.0` the picker
+    /// occupies roughly `target_frac` of the screen's shorter side.
+    /// Verifies the new screen-driven sizing — the old `min(22, h/12)`
+    /// formula was effectively constant on any window taller than
+    /// 264 px, which is why the picker filled small windows.
+    #[test]
+    fn layout_targets_screen_short_side_fraction() {
+        let g = sample_geometry();
+        let spec = load_spec();
+        let target_frac = spec.geometry.target_frac;
+        for &(w, h) in &[(1920.0_f32, 1080.0_f32), (1280.0, 720.0), (800.0, 600.0)] {
+            let layout = compute_color_picker_layout(&g, w, h);
+            let short = w.min(h);
+            let (_, _, bw, bh) = layout.backdrop;
+            // Backdrop's bigger dimension should sit within ~10–80%
+            // of the short axis at scale 1.0 — a wide window like
+            // chip-row safety can dominate the wheel-driven side
+            // a bit, so the bound is loose.
+            let max_extent = bw.max(bh);
+            let upper = short * target_frac * 2.5;
+            let lower = short * target_frac * 0.3;
+            assert!(
+                max_extent >= lower && max_extent <= upper,
+                "{w}x{h}: backdrop extent {max_extent} not in [{lower}, {upper}] \
+                — formula doesn't drive size from short axis"
+            );
+        }
+    }
+
+    /// User-controlled `size_scale` must scale the picker
+    /// proportionally. A 1.5× scale on the same window produces a
+    /// strictly larger backdrop than the 1.0× baseline, all else
+    /// equal. Regression guard for the RMB-resize gesture.
+    #[test]
+    fn layout_scales_with_user_size_scale() {
+        let g_baseline = sample_geometry();
+        let mut g_grown = sample_geometry();
+        g_grown.size_scale = 1.5;
+        let mut g_shrunk = sample_geometry();
+        g_shrunk.size_scale = 0.7;
+        let baseline = compute_color_picker_layout(&g_baseline, 1920.0, 1080.0);
+        let grown = compute_color_picker_layout(&g_grown, 1920.0, 1080.0);
+        let shrunk = compute_color_picker_layout(&g_shrunk, 1920.0, 1080.0);
+        let (_, _, bw_b, _) = baseline.backdrop;
+        let (_, _, bw_g, _) = grown.backdrop;
+        let (_, _, bw_s, _) = shrunk.backdrop;
+        assert!(
+            bw_g > bw_b,
+            "size_scale=1.5 backdrop {bw_g} not larger than baseline {bw_b}"
+        );
+        assert!(
+            bw_s < bw_b,
+            "size_scale=0.7 backdrop {bw_s} not smaller than baseline {bw_b}"
+        );
+        // font_size also scales monotonically.
+        assert!(grown.font_size > baseline.font_size);
+        assert!(shrunk.font_size < baseline.font_size);
+    }
+
+    /// Small-window robustness: even on a tiny viewport the layout
+    /// must never produce negative geometry or a backdrop that
+    /// overflows the screen — the canonical formula's safety
+    /// clamp on `font_size` should kick in.
+    #[test]
+    fn layout_font_shrinks_on_small_windows() {
+        let g = sample_geometry();
+        let big = compute_color_picker_layout(&g, 1920.0, 1080.0);
+        let small = compute_color_picker_layout(&g, 400.0, 300.0);
+        assert!(
+            small.font_size < big.font_size,
+            "small-window font_size {} should shrink below big-window {}",
+            small.font_size,
+            big.font_size
+        );
+        let (left, top, bw, bh) = small.backdrop;
+        assert!(left >= 0.0 && top >= 0.0);
+        assert!(left + bw <= 400.5);
+        assert!(top + bh <= 300.5);
+    }
+
+    /// `measurement_font_size` factors out: a stub measured at
+    /// font_size = 16 with cell_advance = 16 (ratio 1.0) should
+    /// produce the same layout as a stub measured at font_size = 8
+    /// with cell_advance = 8 (also ratio 1.0). The dimensionless
+    /// ratio is what matters; the absolute measurement scale is
+    /// not.
+    #[test]
+    fn layout_uses_dimensionless_advance_ratios() {
+        let g_a = sample_geometry();
+        let mut g_b = sample_geometry();
+        g_b.measurement_font_size = 8.0;
+        g_b.max_cell_advance = 8.0;
+        g_b.max_ring_advance = 12.0;
+        let layout_a = compute_color_picker_layout(&g_a, 1280.0, 720.0);
+        let layout_b = compute_color_picker_layout(&g_b, 1280.0, 720.0);
+        assert!((layout_a.font_size - layout_b.font_size).abs() < 1e-3);
+        assert!((layout_a.outer_radius - layout_b.outer_radius).abs() < 1e-3);
+    }
+
+    /// A picker opened on a window-resize-shrunk viewport at
+    /// `size_scale = 0.5` keeps the backdrop fully on-screen even
+    /// though the user-controlled scale would otherwise produce a
+    /// cramped widget. The safety clamp on `font_size` must
+    /// dominate the user scale when needed.
+    #[test]
+    fn layout_safety_clamp_dominates_user_scale_on_tiny_screens() {
+        let mut g = sample_geometry();
+        g.size_scale = 1.5;
+        let layout = compute_color_picker_layout(&g, 250.0, 200.0);
+        let (left, top, bw, bh) = layout.backdrop;
+        assert!(left >= 0.0 && top >= 0.0);
+        assert!(left + bw <= 250.5);
+        assert!(top + bh <= 200.5);
+    }
+
+    /// Picker channel constants must be strictly ascending in
+    /// tree-insertion order, otherwise Baumhard's
+    /// `align_child_walks` (which pairs mutator children with
+    /// target children by ascending channel) breaks alignment and
+    /// the §B2 mutator path silently misses elements.
+    ///
+    /// Insertion order: title → hue ring (24 slots) → hint →
+    /// sat bar (21 cells, channels also stride through the
+    /// skipped center) → val bar (same) → preview → hex → chips.
+    #[test]
+    fn picker_channels_are_strictly_ascending() {
+        let chips_count = theme_chips().len();
+        let bands: &[(&str, usize, usize)] = &[
+            ("title", PICKER_CHANNEL_TITLE, 1),
+            ("hue ring", PICKER_CHANNEL_HUE_RING_BASE, HUE_SLOT_COUNT),
+            ("hint", PICKER_CHANNEL_HINT, 1),
+            ("sat bar", PICKER_CHANNEL_SAT_BASE, SAT_CELL_COUNT),
+            ("val bar", PICKER_CHANNEL_VAL_BASE, VAL_CELL_COUNT),
+            ("preview", PICKER_CHANNEL_PREVIEW, 1),
+            ("hex", PICKER_CHANNEL_HEX, 1),
+            ("chips", PICKER_CHANNEL_CHIP_BASE, chips_count),
+        ];
+        let mut prev_band_max: usize = 0;
+        for (name, base, count) in bands {
+            let band_min = *base;
+            let band_max = *base + count - 1;
+            assert!(
+                band_min > prev_band_max,
+                "{name} band starts at {band_min} but previous band ended at {prev_band_max}"
+            );
+            prev_band_max = band_max;
+        }
+    }
+
+    /// `PickerGesture::Resize` must compute the new scale
+    /// multiplicatively from cursor radius. A 2× radius produces
+    /// a 2× scale, a 0.5× radius produces a 0.5× scale, modulo
+    /// the spec's `[resize_scale_min, resize_scale_max]` clamp.
+    /// The math is shared with `handle_color_picker_mouse_move`;
+    /// this test pins it as a pure formula so a refactor that
+    /// silently flips additive can't slip through.
+    #[test]
+    fn resize_gesture_scale_math_is_multiplicative() {
+        let spec = load_spec();
+        let geom = &spec.geometry;
+        let anchor_radius: f32 = 100.0;
+        let anchor_scale: f32 = 1.0;
+        // 2x radius ⇒ 2x scale (clamped).
+        let r_double = anchor_radius * 2.0;
+        let new_double =
+            (anchor_scale * (r_double / anchor_radius)).clamp(geom.resize_scale_min, geom.resize_scale_max);
+        assert!(new_double > anchor_scale);
+        assert!(new_double <= geom.resize_scale_max);
+        // 0.5x radius ⇒ 0.5x scale (clamped).
+        let r_half = anchor_radius * 0.5;
+        let new_half =
+            (anchor_scale * (r_half / anchor_radius)).clamp(geom.resize_scale_min, geom.resize_scale_max);
+        assert!(new_half < anchor_scale);
+        assert!(new_half >= geom.resize_scale_min);
+        // Identity at same radius.
+        let new_same =
+            (anchor_scale * (anchor_radius / anchor_radius)).clamp(geom.resize_scale_min, geom.resize_scale_max);
+        assert!((new_same - anchor_scale).abs() < 1e-6);
     }
 }

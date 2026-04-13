@@ -513,6 +513,13 @@ pub fn area_block_commands() {
                             GlyphAreaField::ColorFontRegions(_) => {
                                 panic!("Not supported, use GfxElementField::Region instead, dummy (you are/have always been enough)")
                             }
+                            GlyphAreaField::Outline(_) => {
+                                // Outline mutations aren't expressible
+                                // through the legacy `GlyphAreaCommand`
+                                // surface — they only flow through
+                                // `DeltaGlyphArea` (see the dedicated
+                                // tests in `area_tests::do_outline_*`).
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -598,6 +605,10 @@ pub fn area_block_commands() {
                         }
                         GlyphAreaField::ColorFontRegions(_) => {
                             panic!("unsupported.");
+                        }
+                        GlyphAreaField::Outline(_) => {
+                            // See the matching arm in the Add branch
+                            // above — outline lives on `DeltaGlyphArea`.
                         }
                         GlyphAreaField::Operation(_) => {}
                     },
@@ -714,6 +725,9 @@ pub fn area_block_commands() {
                             GlyphAreaField::ColorFontRegions(_) => {
                                 panic!("Not supported, use GfxElementField::Region instead, idiot (God loves you)")
                             }
+                            GlyphAreaField::Outline(_) => {
+                                // See `do_outline_*` in area_tests.rs.
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -819,6 +833,9 @@ pub fn area_block_commands() {
                             GlyphAreaField::ColorFontRegions(_) => {
                                 panic!("Not supported, use GfxElementField::Region instead, dummy (you are forgiven)")
                             }
+                            GlyphAreaField::Outline(_) => {
+                                // See `do_outline_*` in area_tests.rs.
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -900,6 +917,9 @@ pub fn area_block_commands() {
                         }
                         GlyphAreaField::ColorFontRegions(_) => {
                             panic!("Use GfxElementField::Region(_,_) instead, my sweet lord");
+                        }
+                        GlyphAreaField::Outline(_) => {
+                            // See `do_outline_*` in area_tests.rs.
                         }
                         GlyphAreaField::Operation(_) => {}
                     },
@@ -2236,6 +2256,9 @@ fn assert_element_delta(element: &GfxElement, fields: Vec<GlyphAreaField>) {
             }
             GlyphAreaField::LineHeight(height) => {
                 assert_eq!(element.glyph_area().unwrap().line_height, height);
+            }
+            GlyphAreaField::Outline(outline) => {
+                assert_eq!(element.glyph_area().unwrap().outline, outline);
             }
             GlyphAreaField::Operation(_) => {}
         }

@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use baumhard::core::tests::primitives_tests::*;
+use baumhard::gfx_structs::tests::area_tests::*;
 use baumhard::gfx_structs::tests::model_tests::*;
 use baumhard::gfx_structs::tests::region_tests::*;
 use baumhard::gfx_structs::tests::scene_tests::*;
@@ -45,6 +46,12 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("overriding_insert_11", |b| b.iter(|| overriding_insert_11()));
     c.bench_function("overriding_insert_12", |b| b.iter(|| overriding_insert_12()));
     c.bench_function("overriding_insert_13", |b| b.iter(|| overriding_insert_13()));
+    // glyph_area //
+    c.bench_function("outline_default_is_none", |b| b.iter(|| do_outline_default_is_none()));
+    c.bench_function("outline_assign_round_trip", |b| b.iter(|| do_outline_assign_round_trip()));
+    c.bench_function("outline_subtract_clears", |b| b.iter(|| do_outline_subtract_clears()));
+    c.bench_function("outline_changes_hash", |b| b.iter(|| do_outline_changes_hash()));
+    c.bench_function("outline_field_add_picks_rhs", |b| b.iter(|| do_outline_field_add_picks_rhs()));
     // glyph_tree //
     c.bench_function("basics_solo_mutation", |b| b.iter(|| basics_solo_mutation()));
     c.bench_function("model_block_commands", |b| b.iter(|| model_block_commands()));

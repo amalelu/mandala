@@ -158,6 +158,7 @@ impl Predicate {
                             Exists(negation) => !negation,
                         };
                     }
+                    GlyphAreaField::Outline(_) => {} // Halo state isn't a predicate axis.
                     GlyphAreaField::Operation(_) => {}
                 },
                 Channel(channel) => {

@@ -15,6 +15,55 @@ use std::ops::Add;
 use strum_macros::{Display, EnumIter};
 use crate::gfx_structs::util::hitbox::HitBox;
 
+/// Per-glyph halo style. When set on a [`GlyphArea`], the renderer
+/// emits `samples` extra shaped buffers behind the area's text — each
+/// at the same metrics, family pinning, and alignment, but recolored
+/// to `color` and offset on a circle of radius `px` around the area's
+/// position. Used to keep colored glyphs legible against arbitrary
+/// (or transparent) backgrounds where a per-pass background fill is
+/// not on the table.
+///
+/// # Costs
+///
+/// Each outlined area costs `samples + 1` cosmic-text buffer
+/// shapings instead of one. At `samples = 4` (cardinal directions)
+/// the halo reads as a "+"-shaped contour; at `samples = 8` it
+/// reads as a smooth round halo at twice the cost. Pick the
+/// smallest count that gives the desired contour — this is hot-path
+/// work (§B7).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OutlineStyle {
+    /// RGBA halo color, applied to every glyph in every halo copy.
+    pub color: [u8; 4],
+    /// Halo radius in screen-space pixels — distance from the main
+    /// glyph anchor to each halo copy. Picker scales this with its
+    /// font_size so a shrunk widget gets a proportionally smaller
+    /// halo; consumers without that need pass a fixed value.
+    pub px: f32,
+    /// Number of evenly-spaced halo copies emitted on the circle.
+    /// 0 → no halo (semantically equivalent to `outline = None`,
+    /// but the renderer skips the loop early in either case).
+    pub samples: u8,
+}
+
+/// `Eq` is asserted manually because `f32` is only `PartialEq`. The
+/// invariant — `OutlineStyle::px` is always finite — holds for every
+/// constructor in this codebase, so reflexivity (`a == a`) is true.
+/// If a future caller stores `f32::NAN` here that's a bug at the
+/// construction site, not a soundness issue at this assert.
+impl Eq for OutlineStyle {}
+
+impl Hash for OutlineStyle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.color.hash(state);
+        // `f32` does not implement `Hash`; round-trip through bits
+        // for stable hashing (mirrors the `OrderedFloat` pattern
+        // used elsewhere in this file).
+        self.px.to_bits().hash(state);
+        self.samples.hash(state);
+    }
+}
+
 /// This is for use in HashMaps and Sets
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum GlyphAreaFieldType {
@@ -25,6 +74,7 @@ pub enum GlyphAreaFieldType {
     Position,
     Bounds,
     ColorFontRegions,
+    Outline,
     ApplyOperation,
 }
 
@@ -36,6 +86,12 @@ pub enum GlyphAreaField {
     Position(OrderedVec2),
     Bounds(OrderedVec2),
     ColorFontRegions(ColorFontRegions),
+    /// Replace the area's [`GlyphArea::outline`]. `None` clears any
+    /// previously-set halo; `Some(style)` enables one. Additive
+    /// merge under `ApplyOperation::Add` is the rhs (a halo is
+    /// either on or off; combining two halo styles isn't
+    /// meaningful).
+    Outline(Option<OutlineStyle>),
     Operation(ApplyOperation),
 }
 
@@ -88,6 +144,16 @@ impl Add for GlyphAreaField {
                         return GlyphAreaField::LineHeight(height + other_height);
                     }
                 }
+                GlyphAreaField::Outline(_) => {
+                    // Outline is on/off — combining two halo styles
+                    // additively isn't meaningful (you can't have two
+                    // halos at once). The rhs wins; that matches how
+                    // a later mutation in a delta sequence overrides
+                    // an earlier one for any single-value field.
+                    if let GlyphAreaField::Outline(other) = rhs {
+                        return GlyphAreaField::Outline(other);
+                    }
+                }
                 GlyphAreaField::Operation(_) => {}
             }
         }
@@ -119,6 +185,7 @@ impl GlyphAreaField {
             GlyphAreaField::Bounds(_) => GlyphAreaFieldType::Bounds,
             GlyphAreaField::ColorFontRegions(_) => GlyphAreaFieldType::ColorFontRegions,
             GlyphAreaField::LineHeight(_) => GlyphAreaFieldType::LineHeight,
+            GlyphAreaField::Outline(_) => GlyphAreaFieldType::Outline,
             GlyphAreaField::Operation(_) => GlyphAreaFieldType::ApplyOperation,
         }
     }
@@ -158,6 +225,15 @@ pub struct GlyphArea {
     /// matching ordinary mindmap node text.
     #[serde(default)]
     pub align_center: bool,
+    /// Optional black-or-colored halo drawn behind the area's
+    /// glyphs. When `Some`, the renderer's tree walker emits N
+    /// extra shaped buffers at offset positions before the main
+    /// one — see [`OutlineStyle`] for the cost trade-off. `None`
+    /// (the default) skips the halo entirely; ordinary mindmap
+    /// nodes that render against an opaque-enough background
+    /// don't need one.
+    #[serde(default)]
+    pub outline: Option<OutlineStyle>,
     #[derivative(PartialEq = "ignore")]
     pub hitbox: HitBox,
 }
@@ -174,6 +250,7 @@ impl Hash for GlyphArea {
         self.regions.hash(state);
         self.background_color.hash(state);
         self.align_center.hash(state);
+        self.outline.hash(state);
     }
 }
 
@@ -188,6 +265,7 @@ impl GlyphArea {
             regions: ColorFontRegions::default(),
             background_color: None,
             align_center: false,
+            outline: None,
             hitbox: HitBox::new(),
         }
     }
@@ -207,6 +285,7 @@ impl GlyphArea {
             regions: ColorFontRegions::default(),
             background_color: None,
             align_center: false,
+            outline: None,
             hitbox: HitBox::new(),
         }
     }
@@ -270,6 +349,24 @@ impl GlyphArea {
                     self.text = delta.text_ref().unwrap().to_string();
                 }
                 ApplyOperation::Add => self.text += delta.text_ref().unwrap(),
+                _ => {}
+            }
+        }
+
+        if let Some(outline) = delta.outline() {
+            match operation {
+                // For Add / Assign we just take the delta's value —
+                // halo state is on/off; "merging" two halos isn't
+                // meaningful (see `Add` impl on `GlyphAreaField`).
+                ApplyOperation::Assign | ApplyOperation::Add => {
+                    self.outline = outline;
+                }
+                // Subtract clears the halo entirely. The delta's
+                // payload doesn't matter for this branch — the
+                // semantic is "remove what's there".
+                ApplyOperation::Subtract => {
+                    self.outline = None;
+                }
                 _ => {}
             }
         }
@@ -605,6 +702,21 @@ impl DeltaGlyphArea {
     pub fn bounds(&self) -> Option<Vec2> {
         if let Some(GlyphAreaField::Bounds(x)) = self.fields.get(&GlyphAreaFieldType::Bounds) {
             Some(x.to_vec2())
+        } else {
+            None
+        }
+    }
+
+    /// Returns the delta's [`OutlineStyle`] payload if one was set
+    /// on construction. Outer `Option` distinguishes "no outline
+    /// field in this delta" (returns `None`) from "the delta
+    /// explicitly clears the outline" (returns `Some(None)`); the
+    /// latter is how a mutator removes a previously-set halo.
+    pub fn outline(&self) -> Option<Option<OutlineStyle>> {
+        if let Some(GlyphAreaField::Outline(outline)) =
+            self.fields.get(&GlyphAreaFieldType::Outline)
+        {
+            Some(*outline)
         } else {
             None
         }
