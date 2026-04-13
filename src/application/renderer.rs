@@ -2441,7 +2441,7 @@ pub struct MindMapTextBuffer {
 /// `rebuild_color_picker_overlay_buffers` call, which is the hover
 /// hot path. The legacy split skipped the hue-ring shape on hover.
 /// A follow-up will introduce a `MutatorTree`-based incremental
-/// path (per §B1 of `lib/baumhard/CONVENTIONS.md`) that mutates
+/// path (per §B2 of `lib/baumhard/CONVENTIONS.md`) that mutates
 /// only the cells whose colors changed and the indicator's
 /// position, leaving the static hue ring alone. The user
 /// explicitly asked to land the migration first and address
