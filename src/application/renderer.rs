@@ -2583,18 +2583,17 @@ fn picker_glyph_areas(
     let spec = load_spec();
     let hover_scale: f32 = spec.geometry.hover_scale;
 
-    // Halo style for every picker glyph. Sized at the spec's
+    // Outline style for every picker glyph. Sized at the spec's
     // `font_max` baseline and scaled linearly to the actual layout
-    // `font_size` so a shrunk picker gets a proportionally smaller
-    // halo. The walker (`walk_tree_into_buffers`) reads
-    // `area.outline` and emits the halo buffers — each halo costs
-    // an extra cosmic-text shape, hence the `outline_samples`
-    // tunable in the spec.
-    let outline = if spec.geometry.outline_px > 0.0 && spec.geometry.outline_samples > 0 {
+    // `font_size` so a shrunk picker gets a proportionally thinner
+    // outline. The walker (`walk_tree_into_buffers`) reads
+    // `area.outline` and stamps 8 copies at the offsets yielded by
+    // `OutlineStyle::offsets` — the stamp count is canonical inside
+    // baumhard, so there's no `samples` knob here.
+    let outline = if spec.geometry.outline_px > 0.0 {
         Some(OutlineStyle {
             color: [0, 0, 0, 255],
             px: spec.geometry.outline_px * (layout.font_size / spec.geometry.font_max),
-            samples: spec.geometry.outline_samples,
         })
     } else {
         None
@@ -2863,8 +2862,8 @@ fn picker_glyph_areas(
             scaled_preview,
             scaled_preview,
             (
-                layout.preview_pos.0 - (scaled_preview - preview_size) * 0.4,
-                layout.preview_pos.1 - (scaled_preview - preview_size) * 0.65,
+                layout.preview_pos.0 - (scaled_preview - preview_size) * 0.5,
+                layout.preview_pos.1 - (scaled_preview - preview_size) * 0.5,
             ),
             (scaled_preview * 1.5, scaled_preview * 1.5),
             true,
@@ -3389,22 +3388,18 @@ fn walk_tree_into_buffers(
 
         // Halos first — DFS yield order means later buffers render on
         // top, so emitting halos before the main glyph puts them
-        // visually behind. Each halo recolors every span to
-        // `outline.color` and offsets the position on a circle of
-        // radius `outline.px` around the main anchor.
+        // visually behind. The stamp geometry is canonical in
+        // baumhard (`OutlineStyle::offsets`) — we just recolor every
+        // span to `outline.color` and shape one buffer per offset.
         if let Some(outline) = area.outline {
-            if outline.samples > 0 && outline.px > 0.0 {
+            if outline.px > 0.0 {
                 let halo_color = cosmic_text::Color::rgba(
                     outline.color[0],
                     outline.color[1],
                     outline.color[2],
                     outline.color[3],
                 );
-                let n = outline.samples as f32;
-                for k in 0..outline.samples {
-                    let angle = (k as f32 / n) * std::f32::consts::TAU;
-                    let dx = angle.cos() * outline.px;
-                    let dy = angle.sin() * outline.px;
+                for (dx, dy) in outline.offsets() {
                     let halo_spans = build_spans(Some(halo_color));
                     shape_and_yield(halo_spans, dx, dy, font_system);
                 }

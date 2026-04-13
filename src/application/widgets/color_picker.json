@@ -2,19 +2,18 @@
   "_comment": "Widget spec for the glyph-wheel color picker. Loaded once at startup via `include_str!` so WASM can read it. First step toward user-authored widgets — everything that defines the picker's *appearance* (glyphs, proportions, copy) lives here; the pure-function layout math stays in Rust because it depends on measured shaped-glyph advances and screen dimensions that JSON can't express.",
 
   "geometry": {
-    "_comment": "Size constants shared by the layout and render paths. The picker is sized as a *widget* — its base font size is derived from the screen's shorter side (`target_frac * short_axis * size_scale / wheel_side_in_fonts`), then clamped to [`font_min`, `font_max`]. `size_scale` defaults to 1.0 and is mutated by the right-mouse-button drag-to-resize gesture; it lives on the picker state and resets each open. Glyph halos (`outline_*`) keep the cells legible against a transparent backdrop. `transparent_backdrop` skips the opaque rect underneath so canvas content shows through.",
+    "_comment": "Size constants shared by the layout and render paths. The picker is sized as a *widget* — its base font size is derived from the screen's shorter side (`target_frac * short_axis * size_scale / wheel_side_in_fonts`), then clamped to [`font_min`, `font_max`]. `size_scale` defaults to 1.0 and is mutated by the right-mouse-button drag-to-resize gesture; it lives on the picker state and resets each open. `outline_px` sets the glyph-outline thickness at the `font_max` baseline (the stamp count is canonical in baumhard's `OutlineStyle::offsets`). `transparent_backdrop` skips the opaque rect underneath so canvas content shows through.",
     "target_frac": 0.38,
     "font_min": 7.0,
     "font_max": 28.0,
     "hue_ring_font_scale": 2.0,
-    "cell_font_scale": 1.3,
+    "cell_font_scale": 1.5,
     "ring_box_scale": 1.8,
     "cell_box_scale": 1.6,
-    "preview_size_scale": 2.5,
+    "preview_size_scale": 3.0,
     "bar_to_ring_padding_scale": 1.1,
     "hover_scale": 1.3,
-    "outline_px": 7.0,
-    "outline_samples": 12,
+    "outline_px": 2.0,
     "transparent_backdrop": true,
     "resize_scale_min": 0.4,
     "resize_scale_max": 2.0

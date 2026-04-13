@@ -16,34 +16,71 @@ use strum_macros::{Display, EnumIter};
 use crate::gfx_structs::util::hitbox::HitBox;
 
 /// Per-glyph halo style. When set on a [`GlyphArea`], the renderer
-/// emits `samples` extra shaped buffers behind the area's text — each
-/// at the same metrics, family pinning, and alignment, but recolored
-/// to `color` and offset on a circle of radius `px` around the area's
-/// position. Used to keep colored glyphs legible against arbitrary
-/// (or transparent) backgrounds where a per-pass background fill is
-/// not on the table.
+/// emits 8 extra shaped buffers behind the area's text — each at the
+/// same metrics, family pinning, and alignment, but recolored to
+/// `color` and positioned at the offsets yielded by
+/// [`OutlineStyle::offsets`]. Used to keep colored glyphs legible
+/// against arbitrary (or transparent) backgrounds where a per-pass
+/// background fill is not on the table.
+///
+/// # Technique
+///
+/// We stamp the glyph 8 times — 4 cardinals at `(±px, 0)` / `(0, ±px)`
+/// and 4 diagonals at `(±px/√2, ±px/√2)` — then draw the main glyph
+/// on top. Every stamp sits on a circle of radius `px`, and adjacent
+/// stamp centers are `~0.77·px` apart. Because each stamp is an
+/// entire glyph, the stamps visually merge into a continuous outline
+/// as long as `px` is no larger than the glyph's stroke width; a
+/// halo wider than a stroke starts reading as ghost letter copies
+/// rather than a border.
 ///
 /// # Costs
 ///
-/// Each outlined area costs `samples + 1` cosmic-text buffer
-/// shapings instead of one. At `samples = 4` (cardinal directions)
-/// the halo reads as a "+"-shaped contour; at `samples = 8` it
-/// reads as a smooth round halo at twice the cost. Pick the
-/// smallest count that gives the desired contour — this is hot-path
-/// work (§B7).
+/// Each outlined area costs 9 cosmic-text buffer shapings instead of
+/// 1. The stamp count is canonical (chosen inside this crate, not a
+/// caller knob) so every consumer gets the same outline quality
+/// without having to tune it. Hot-path work (§B7) — enable only when
+/// the background legibility problem actually needs it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutlineStyle {
     /// RGBA halo color, applied to every glyph in every halo copy.
     pub color: [u8; 4],
-    /// Halo radius in screen-space pixels — distance from the main
-    /// glyph anchor to each halo copy. Picker scales this with its
-    /// font_size so a shrunk widget gets a proportionally smaller
-    /// halo; consumers without that need pass a fixed value.
+    /// Halo thickness in screen-space pixels — the radius of the
+    /// stamp circle, which sets the final outline thickness at 1:1.
+    /// Keep it at or below the glyph's thinnest stroke for a
+    /// continuous border; above that the stamps stop merging and the
+    /// halo reads as ghost copies (see the type-level `# Technique`
+    /// note). Picker scales this with its `font_size` so a shrunk
+    /// widget gets a proportionally smaller halo; consumers without
+    /// that need pass a fixed value.
     pub px: f32,
-    /// Number of evenly-spaced halo copies emitted on the circle.
-    /// 0 → no halo (semantically equivalent to `outline = None`,
-    /// but the renderer skips the loop early in either case).
-    pub samples: u8,
+}
+
+impl OutlineStyle {
+    /// Yields the 8 stamp offsets (in pixels, relative to the main
+    /// glyph's anchor) that the renderer must shape to produce the
+    /// halo. Single source of truth for the outline technique — see
+    /// the type-level `# Technique` note for the rationale.
+    #[inline]
+    pub fn offsets(&self) -> impl Iterator<Item = (f32, f32)> {
+        // 4 cardinals + 4 diagonals, all at distance `px` from the
+        // origin. `FRAC_1_SQRT_2` = 1/√2 ≈ 0.7071; the diagonals sit
+        // on the same circle as the cardinals so the outline
+        // thickness is uniform in every direction.
+        let d = self.px * std::f32::consts::FRAC_1_SQRT_2;
+        let p = self.px;
+        [
+            (p, 0.0),
+            (-p, 0.0),
+            (0.0, p),
+            (0.0, -p),
+            (d, d),
+            (d, -d),
+            (-d, d),
+            (-d, -d),
+        ]
+        .into_iter()
+    }
 }
 
 /// `Eq` is asserted manually because `f32` is only `PartialEq`. The
@@ -60,7 +97,6 @@ impl Hash for OutlineStyle {
         // for stable hashing (mirrors the `OrderedFloat` pattern
         // used elsewhere in this file).
         self.px.to_bits().hash(state);
-        self.samples.hash(state);
     }
 }
 

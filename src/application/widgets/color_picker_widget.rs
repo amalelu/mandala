@@ -94,19 +94,14 @@ pub struct GeometrySpec {
     /// Font+bounds multiplier applied to the hovered cell. 1.3×
     /// reads as "this one's hot" without pushing into neighbors.
     pub hover_scale: f32,
-    /// Halo radius in pixels at the spec's `font_max` baseline.
+    /// Outline thickness in pixels at the spec's `font_max` baseline.
     /// Scales linearly with the picker's current font_size so small
-    /// pickers get proportionally smaller halos. Picker glyphs each
-    /// draw N black-halo offsets behind themselves so the colored
-    /// glyph stands out against the (now transparent) backdrop.
+    /// pickers get proportionally smaller outlines. Each picker
+    /// glyph stamps 8 black copies of itself (cardinals + diagonals,
+    /// canonical in baumhard's `OutlineStyle::offsets`) at this
+    /// radius, producing a continuous border as long as the value
+    /// stays at or below the glyph's stroke width.
     pub outline_px: f32,
-    /// Number of halo offsets drawn per glyph, evenly spaced around
-    /// `outline_px`. Higher counts give smoother, fuller halos at
-    /// proportionally higher cosmic-text shape cost — 12 gives a
-    /// near-circular halo that reads cleanly on SMP glyphs
-    /// (Egyptian hieroglyphs especially); 4 gives a "+"-shaped
-    /// halo at a third of the cost.
-    pub outline_samples: u8,
     /// When `true`, the picker draws no backdrop fill — canvas
     /// content shows through the gaps between glyphs. Combined with
     /// the glyph halos this makes the picker read as a floating
@@ -157,7 +152,7 @@ mod tests {
         assert!(spec.geometry.font_max > spec.geometry.font_min);
         assert!(spec.geometry.hover_scale > 1.0);
         assert!(spec.geometry.cell_font_scale >= 1.0);
-        assert!(spec.geometry.outline_samples > 0);
+        assert!(spec.geometry.outline_px > 0.0);
         assert!(spec.geometry.resize_scale_min > 0.0);
         assert!(spec.geometry.resize_scale_max > spec.geometry.resize_scale_min);
     }

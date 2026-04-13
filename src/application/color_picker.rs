@@ -841,19 +841,17 @@ pub fn compute_color_picker_layout(
         val_cell_positions[i] = (center.0, center.1 - bar_span * 0.5 + i as f32 * step);
     }
 
-    // Center preview ॐ at the bar intersection. The glyph size is
-    // sourced from the spec (`preview_size_scale`) so reskins can
-    // tune the focal-point ratio. The top-left of its box is offset
-    // by half the preview size in each direction so the visible
-    // glyph sits on the geometric wheel center. cosmic-text's
-    // effective glyph width is ~0.6 of its font size; we use 0.4
-    // horizontally because the ॐ glyph (like the earlier ✦) has
-    // whitespace around it that the box includes but the visible
-    // mark does not.
+    // Center preview ࿕ at the bar intersection. The glyph is the
+    // Tibetan svasti (U+0FD5) — a roughly-square ideograph whose ink
+    // sits centered in its em box, so the canonical half-size offset
+    // in each direction lands the visible mark on the geometric
+    // wheel center. Earlier revisions used asymmetric factors (0.4,
+    // 0.65) calibrated for ॐ, whose top-heavy anusvara biased its
+    // visible center off the box center; those don't apply here.
     let preview_size = font_size * g.preview_size_scale;
     let preview_pos = (
-        center.0 - preview_size * 0.4,
-        center.1 - preview_size * 0.65,
+        center.0 - preview_size * 0.5,
+        center.1 - preview_size * 0.5,
     );
 
     // ---- Backdrop, title, hint ----
@@ -1270,19 +1268,19 @@ mod tests {
     }
 
     /// Preview glyph must center on the geometric wheel center given
-    /// the layout-emitted preview_size. The offset factors (0.4 for
-    /// x, 0.65 for y) account for the center glyph having built-in
-    /// whitespace around its visible mark — the box covers more than
-    /// the glyph does, so the glyph's visible center lands off-box-
-    /// center by a script-specific bias. Regression guard for the
-    /// "preview was anchored low-right of center" bug.
+    /// the layout-emitted `preview_size`. The ࿕ svasti is a Tibetan
+    /// ideograph whose ink sits centered in the em box, so the
+    /// canonical half-size offset `(0.5, 0.5)` is the right anchor
+    /// on both axes — any future preview glyph with a skewed visible
+    /// center needs a commensurate tweak here. Regression guard for
+    /// the "preview was anchored off-center" bug.
     #[test]
     fn layout_preview_centered_on_wheel_center() {
         let g = sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
         let (px, py) = layout.preview_pos;
-        let cx = px + layout.preview_size * 0.4;
-        let cy = py + layout.preview_size * 0.65;
+        let cx = px + layout.preview_size * 0.5;
+        let cy = py + layout.preview_size * 0.5;
         // The preview's visible center should be within ~1 px of the
         // wheel center on each axis.
         assert!((cx - layout.center.0).abs() < 1.0,
