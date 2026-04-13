@@ -207,67 +207,114 @@ pub const THEME_CHIPS: &[ThemeChip] = &[
 /// actually open, the hot hover path uses `TargetKind + target_index`
 /// instead (captured once at open time) to avoid re-resolving the ref
 /// on every mouse move — see `ColorPickerState::Open`.
+/// Which visual axis on a node the picker should write to when the
+/// target is a node. Edges / portals don't need this — they have one
+/// color field each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeColorAxis {
+    Bg,
+    Text,
+    Border,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColorTarget {
     Edge(EdgeRef),
     Portal(PortalRef),
+    Node { id: String, axis: NodeColorAxis },
 }
 
-/// Kind of target currently open. Cheaper to match on during hover
-/// than carrying the full `ColorTarget` with its owned strings.
+/// Resolved handle carried inside [`ColorPickerState::Open`]. For
+/// edges and portals it indexes into the live `Vec`; for nodes it
+/// carries the id + axis directly. One enum instead of `kind +
+/// target_index` + a parallel optional id field.
+#[derive(Clone, Debug)]
+pub enum PickerHandle {
+    Edge(usize),
+    Portal(usize),
+    Node { id: String, axis: NodeColorAxis },
+}
+
+impl PickerHandle {
+    /// Short label for the picker title bar.
+    pub fn label(&self) -> &'static str {
+        match self {
+            PickerHandle::Edge(_) => "edge",
+            PickerHandle::Portal(_) => "portal",
+            PickerHandle::Node { .. } => "node",
+        }
+    }
+
+    pub fn kind(&self) -> TargetKind {
+        match self {
+            PickerHandle::Edge(_) => TargetKind::Edge,
+            PickerHandle::Portal(_) => TargetKind::Portal,
+            PickerHandle::Node { .. } => TargetKind::Node,
+        }
+    }
+}
+
+/// Coarse target kind for legacy call-sites that only need to
+/// distinguish edges / portals / nodes without caring about the
+/// concrete id or axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetKind {
     Edge,
     Portal,
+    Node,
 }
 
 impl TargetKind {
-    /// Short label for the picker title bar — "edge" or "portal".
+    /// Short label for the picker title bar.
     pub fn label(&self) -> &'static str {
         match self {
             TargetKind::Edge => "edge",
             TargetKind::Portal => "portal",
+            TargetKind::Node => "node",
         }
     }
 }
 
 impl ColorTarget {
-    /// Resolve the target ref to a concrete index into
-    /// `doc.mindmap.edges` or `doc.mindmap.portals`. Returns `None` if
-    /// the underlying edge/portal was deleted between the palette
-    /// closing and the picker opening (should never happen in practice
-    /// because the palette holds the event loop, but the defensive
-    /// check protects against a later refactor that relaxes that).
-    pub fn resolve(&self, doc: &MindMapDocument) -> Option<(TargetKind, usize)> {
+    /// Resolve the target ref to a concrete [`PickerHandle`]. Returns
+    /// `None` if the underlying edge / portal / node was deleted
+    /// between the open trigger and the picker-open call (should
+    /// never happen in practice because the modal holds the event
+    /// loop, but defensive).
+    pub fn resolve(self, doc: &MindMapDocument) -> Option<PickerHandle> {
         match self {
             ColorTarget::Edge(er) => doc
                 .mindmap
                 .edges
                 .iter()
                 .position(|e| er.matches(e))
-                .map(|i| (TargetKind::Edge, i)),
+                .map(PickerHandle::Edge),
             ColorTarget::Portal(pr) => doc
                 .mindmap
                 .portals
                 .iter()
                 .position(|p| pr.matches(p))
-                .map(|i| (TargetKind::Portal, i)),
+                .map(PickerHandle::Portal),
+            ColorTarget::Node { id, axis } => doc
+                .mindmap
+                .nodes
+                .contains_key(&id)
+                .then_some(PickerHandle::Node { id, axis }),
         }
     }
 }
 
-/// Read the current color string for a target addressed by kind +
-/// index. Used to seed picker HSV at open time and to read the
-/// effective color for the preview after a chip action. Returns
-/// `None` if the index is out of bounds.
+/// Read the current color string for a handle. Used to seed picker
+/// HSV at open time and to read the effective color for the
+/// preview after a chip action. Returns `None` if the index / id
+/// no longer resolves.
 pub fn current_color_at(
     doc: &MindMapDocument,
-    kind: TargetKind,
-    index: usize,
+    handle: &PickerHandle,
 ) -> Option<String> {
-    match kind {
-        TargetKind::Edge => {
-            let e = doc.mindmap.edges.get(index)?;
+    match handle {
+        PickerHandle::Edge(index) => {
+            let e = doc.mindmap.edges.get(*index)?;
             Some(
                 e.glyph_connection
                     .as_ref()
@@ -275,7 +322,17 @@ pub fn current_color_at(
                     .unwrap_or_else(|| e.color.clone()),
             )
         }
-        TargetKind::Portal => doc.mindmap.portals.get(index).map(|p| p.color.clone()),
+        PickerHandle::Portal(index) => {
+            doc.mindmap.portals.get(*index).map(|p| p.color.clone())
+        }
+        PickerHandle::Node { id, axis } => {
+            let n = doc.mindmap.nodes.get(id)?;
+            Some(match axis {
+                NodeColorAxis::Bg => n.style.background_color.clone(),
+                NodeColorAxis::Text => n.style.text_color.clone(),
+                NodeColorAxis::Border => n.style.frame_color.clone(),
+            })
+        }
     }
 }
 
@@ -285,10 +342,9 @@ pub fn current_color_at(
 /// opens with a sensible default.
 pub fn current_hsv_at(
     doc: &MindMapDocument,
-    kind: TargetKind,
-    index: usize,
+    handle: &PickerHandle,
 ) -> (f32, f32, f32) {
-    let raw = match current_color_at(doc, kind, index) {
+    let raw = match current_color_at(doc, handle) {
         Some(s) => s,
         None => return (0.0, 0.0, 0.5),
     };
@@ -320,12 +376,12 @@ pub fn current_hsv_at(
 pub enum ColorPickerState {
     Closed,
     Open {
-        /// Which kind of target the picker is editing.
-        kind: TargetKind,
-        /// Direct index into `doc.mindmap.edges` or `doc.mindmap.portals`,
-        /// captured at open time. Stable for the picker's lifetime because
-        /// the modal suppresses all other document edits.
-        target_index: usize,
+        /// Handle to the target being edited — index into
+        /// `doc.mindmap.edges` / `doc.mindmap.portals` for edges and
+        /// portals, or `(id, axis)` for nodes. Captured at open time;
+        /// stable for the picker's lifetime because the modal
+        /// suppresses all other document edits.
+        handle: PickerHandle,
         /// Current preview hue in degrees, `[0, 360)`.
         hue_deg: f32,
         /// Current preview saturation, `[0, 1]`.

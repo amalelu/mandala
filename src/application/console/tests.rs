@@ -248,6 +248,61 @@ fn test_color_kv_bg_sets_node_background() {
     );
 }
 
+/// `color bg` with a single node selected opens the glyph-wheel
+/// picker with a Node target carrying the `Bg` axis — matches the
+/// "color used without a value brings up the wheel" UX.
+#[test]
+fn test_color_bg_no_value_on_node_opens_picker_with_bg_axis() {
+    use crate::application::color_picker::{ColorTarget, NodeColorAxis};
+    let mut doc = load_test_doc();
+    let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
+    doc.selection = SelectionState::Single(nid.clone());
+    let (cmd, toks) = match parse("color bg") {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        _ => panic!("parse failed"),
+    };
+    let mut eff = ConsoleEffects::new(&mut doc);
+    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
+    assert!(eff.close_console);
+    match eff.open_color_picker {
+        Some(ColorTarget::Node { id, axis }) => {
+            assert_eq!(id, nid);
+            assert_eq!(axis, NodeColorAxis::Bg);
+        }
+        other => panic!("expected picker with Node/Bg target, got {:?}", other),
+    }
+}
+
+/// `color text` on an edge still opens the picker — edges only have
+/// one color so the axis collapses onto `ColorTarget::Edge`.
+#[test]
+fn test_color_text_no_value_on_edge_opens_picker_on_edge() {
+    use crate::application::color_picker::ColorTarget;
+    let mut doc = load_test_doc();
+    let _ = select_first_edge(&mut doc);
+    let (cmd, toks) = match parse("color text") {
+        ParseResult::Ok { cmd, args } => (cmd, args),
+        _ => panic!("parse failed"),
+    };
+    let mut eff = ConsoleEffects::new(&mut doc);
+    let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
+    assert!(matches!(eff.open_color_picker, Some(ColorTarget::Edge(_))));
+}
+
+/// `color text` on a portal is nonsensical (portals have no text
+/// axis) — reject with a helpful error.
+#[test]
+fn test_color_text_no_value_on_portal_errors() {
+    let mut doc = load_test_doc();
+    let mut ids = doc.mindmap.nodes.keys().cloned();
+    let a = ids.next().unwrap();
+    let b = ids.next().unwrap();
+    let pref = doc.apply_create_portal(&a, &b).unwrap();
+    doc.selection = SelectionState::Portal(pref);
+    let result = run("color text", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
+}
+
 #[test]
 fn test_color_kv_rejects_invalid_hex() {
     let mut doc = load_test_doc();

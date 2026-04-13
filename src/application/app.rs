@@ -3654,13 +3654,13 @@ fn open_color_picker(
         ARM_TOP_GLYPHS, ColorPickerState, HUE_RING_FONT_SCALE, HUE_RING_GLYPHS,
     };
 
-    // Resolve the ref to a (kind, index) up front. If the edge/portal
-    // was deleted between the palette opening and Enter being pressed,
-    // warn and bail — the modal never opens. Should never happen
-    // because the palette holds the event loop, but the defensive
-    // check is observable via the log rather than silently swallowed.
-    let (kind, target_index) = match target.resolve(doc) {
-        Some(pair) => pair,
+    // Resolve the target to a picker handle up front. If the
+    // edge / portal / node was deleted between the open trigger
+    // and Enter being pressed, warn and bail — the modal never
+    // opens. Should never happen because the modal holds the event
+    // loop, but defensive.
+    let handle = match target.resolve(doc) {
+        Some(h) => h,
         None => {
             log::warn!("color picker: target ref did not resolve; ignoring open");
             return;
@@ -3669,7 +3669,7 @@ fn open_color_picker(
 
     // Seed HSV from the currently-displayed (possibly theme-resolved)
     // color so the picker opens right where the user already is.
-    let (hue_deg, sat, val) = current_hsv_at(doc, kind, target_index);
+    let (hue_deg, sat, val) = current_hsv_at(doc, &handle);
 
     // Measure the widest shaped advance across every crosshair-arm
     // glyph and every hue-ring glyph. These become the spacing units
@@ -3703,9 +3703,17 @@ fn open_color_picker(
         (cell, ring)
     };
 
+    // Seed the document preview so the initial render already shows
+    // the same HSV the picker opened at. Overwritten on the next
+    // hover frame, but this avoids a one-frame flash of the original
+    // color when the modal opens. Nodes don't have a scene-builder
+    // preview path yet (commit-only for the first version of the
+    // `color bg/text/border` picker flow), so the helper is a no-op
+    // for the Node arm.
+    seed_initial_preview(doc, &handle, hue_deg, sat, val);
+
     *state = ColorPickerState::Open {
-        kind,
-        target_index,
+        handle,
         hue_deg,
         sat,
         val,
@@ -3717,12 +3725,6 @@ fn open_color_picker(
         layout: None,
     };
 
-    // Seed the document preview so the initial render already shows
-    // the same HSV the picker opened at. Overwritten on the next
-    // hover frame, but this avoids a one-frame flash of the original
-    // color when the modal opens.
-    seed_initial_preview(doc, kind, target_index, hue_deg, sat, val);
-
     rebuild_color_picker_overlay(state, doc, renderer);
     rebuild_scene_only(doc, renderer);
 }
@@ -3733,29 +3735,34 @@ fn open_color_picker(
 #[cfg(not(target_arch = "wasm32"))]
 fn seed_initial_preview(
     doc: &mut MindMapDocument,
-    kind: crate::application::color_picker::TargetKind,
-    target_index: usize,
+    handle: &crate::application::color_picker::PickerHandle,
     hue_deg: f32,
     sat: f32,
     val: f32,
 ) {
-    use crate::application::color_picker::TargetKind;
+    use crate::application::color_picker::PickerHandle;
     use crate::application::document::ColorPickerPreview;
     use baumhard::util::color::hsv_to_hex;
 
     let hex = hsv_to_hex(hue_deg, sat, val);
-    match kind {
-        TargetKind::Edge => {
-            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+    match handle {
+        PickerHandle::Edge(index) => {
+            if let Some(edge) = doc.mindmap.edges.get(*index) {
                 let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
                 doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: hex });
             }
         }
-        TargetKind::Portal => {
-            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+        PickerHandle::Portal(index) => {
+            if let Some(portal) = doc.mindmap.portals.get(*index) {
                 let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
                 doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: hex });
             }
+        }
+        PickerHandle::Node { .. } => {
+            // Node preview not yet plumbed through the scene
+            // builder — commit-only for v1. The picker still opens
+            // and lets the user pick + commit; it just doesn't
+            // hover-preview on the underlying node.
         }
     }
 }
@@ -3795,7 +3802,7 @@ fn compute_picker_geometry(
     ) = match state {
         ColorPickerState::Closed => return None,
         ColorPickerState::Open {
-            kind,
+            handle,
             hue_deg,
             sat,
             val,
@@ -3806,7 +3813,7 @@ fn compute_picker_geometry(
             layout,
             ..
         } => (
-            kind.label(),
+            handle.label(),
             *hue_deg,
             *sat,
             *val,
@@ -3931,13 +3938,21 @@ fn commit_color_picker(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::{ColorPickerState, CommitMode, TargetKind};
+    use crate::application::color_picker::{
+        ColorPickerState, CommitMode, NodeColorAxis, PickerHandle,
+    };
     use baumhard::util::color::hsv_to_hex;
 
-    let (kind, target_index, hue_deg, sat, val, commit_mode) = match state {
-        ColorPickerState::Open { kind, target_index, hue_deg, sat, val, commit_mode, .. } => {
-            (*kind, *target_index, *hue_deg, *sat, *val, commit_mode.clone())
-        }
+    let (handle, hue_deg, sat, val, commit_mode) = match state {
+        ColorPickerState::Open {
+            handle, hue_deg, sat, val, commit_mode, ..
+        } => (
+            handle.clone(),
+            *hue_deg,
+            *sat,
+            *val,
+            commit_mode.clone(),
+        ),
         ColorPickerState::Closed => return,
     };
 
@@ -3946,11 +3961,16 @@ fn commit_color_picker(
     *state = ColorPickerState::Closed;
     doc.color_picker_preview = None;
 
-    match kind {
-        TargetKind::Edge => {
-            let er = doc.mindmap.edges.get(target_index).map(|e| {
-                EdgeRef::new(&e.from_id, &e.to_id, &e.edge_type)
-            });
+    // Resolve the final color string per commit mode. For nodes,
+    // `Reset` resolves to a per-axis default consistent with the
+    // `color <axis>=reset` kv path in the trait dispatcher.
+    match handle {
+        PickerHandle::Edge(index) => {
+            let er = doc
+                .mindmap
+                .edges
+                .get(index)
+                .map(|e| EdgeRef::new(&e.from_id, &e.to_id, &e.edge_type));
             if let Some(er) = er {
                 match commit_mode {
                     CommitMode::Hsv => {
@@ -3966,8 +3986,8 @@ fn commit_color_picker(
                 }
             }
         }
-        TargetKind::Portal => {
-            let pr = doc.mindmap.portals.get(target_index).map(|p| {
+        PickerHandle::Portal(index) => {
+            let pr = doc.mindmap.portals.get(index).map(|p| {
                 crate::application::document::PortalRef::new(
                     p.label.clone(),
                     p.endpoint_a.clone(),
@@ -3984,8 +4004,6 @@ fn commit_color_picker(
                         doc.set_portal_color(&pr, &raw);
                     }
                     CommitMode::ResetToInherited => {
-                        // `--accent` fallback — same rule as the old
-                        // portal Reset path.
                         let resolved = doc
                             .mindmap
                             .canvas
@@ -3995,6 +4013,27 @@ fn commit_color_picker(
                             .unwrap_or_else(|| "var(--accent)".to_string());
                         doc.set_portal_color(&pr, &resolved);
                     }
+                }
+            }
+        }
+        PickerHandle::Node { id, axis } => {
+            let color = match commit_mode {
+                CommitMode::Hsv => hsv_to_hex(hue_deg, sat, val),
+                CommitMode::Var(raw) => raw,
+                CommitMode::ResetToInherited => match axis {
+                    NodeColorAxis::Bg => "#141414".to_string(),
+                    NodeColorAxis::Text | NodeColorAxis::Border => "#ffffff".to_string(),
+                },
+            };
+            match axis {
+                NodeColorAxis::Bg => {
+                    doc.set_node_bg_color(&id, color);
+                }
+                NodeColorAxis::Text => {
+                    doc.set_node_text_color(&id, color);
+                }
+                NodeColorAxis::Border => {
+                    doc.set_node_border_color(&id, color);
                 }
             }
         }
@@ -4017,33 +4056,39 @@ fn apply_picker_preview(
     _mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
-    use crate::application::color_picker::{ColorPickerState, CommitMode, TargetKind};
+    use crate::application::color_picker::{ColorPickerState, CommitMode, PickerHandle};
     use crate::application::document::ColorPickerPreview;
     use baumhard::util::color::hsv_to_hex;
 
-    let (kind, target_index, hue_deg, sat, val) = match state {
-        ColorPickerState::Open { kind, target_index, hue_deg, sat, val, commit_mode, .. } => {
+    let (handle, hue_deg, sat, val) = match state {
+        ColorPickerState::Open {
+            handle, hue_deg, sat, val, commit_mode, ..
+        } => {
             // Any HSV movement implicitly cancels a prior chip
             // selection (Var/Reset) — the user moved the wheel, so
             // the commit mode goes back to Hsv.
             *commit_mode = CommitMode::Hsv;
-            (*kind, *target_index, *hue_deg, *sat, *val)
+            (handle.clone(), *hue_deg, *sat, *val)
         }
         ColorPickerState::Closed => return,
     };
     let hex = hsv_to_hex(hue_deg, sat, val);
-    match kind {
-        TargetKind::Edge => {
-            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+    match handle {
+        PickerHandle::Edge(index) => {
+            if let Some(edge) = doc.mindmap.edges.get(index) {
                 let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
                 doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: hex });
             }
         }
-        TargetKind::Portal => {
-            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+        PickerHandle::Portal(index) => {
+            if let Some(portal) = doc.mindmap.portals.get(index) {
                 let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
                 doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: hex });
             }
+        }
+        PickerHandle::Node { .. } => {
+            // Node preview lives on the tree pipeline, not the
+            // scene pipeline — not yet wired. Commit-only for v1.
         }
     }
     rebuild_scene_only(doc, renderer);
@@ -4067,7 +4112,7 @@ fn apply_picker_chip(
     renderer: &mut Renderer,
 ) {
     use crate::application::color_picker::{
-        ChipAction, ColorPickerState, CommitMode, TargetKind, THEME_CHIPS,
+        ChipAction, ColorPickerState, CommitMode, PickerHandle, THEME_CHIPS,
     };
     use crate::application::document::ColorPickerPreview;
 
@@ -4075,8 +4120,8 @@ fn apply_picker_chip(
         Some(c) => *c,
         None => return,
     };
-    let (kind, target_index) = match state {
-        ColorPickerState::Open { kind, target_index, .. } => (*kind, *target_index),
+    let handle = match state {
+        ColorPickerState::Open { handle, .. } => handle.clone(),
         ColorPickerState::Closed => return,
     };
 
@@ -4084,10 +4129,8 @@ fn apply_picker_chip(
     // substitution string) and (b) the commit mode for Enter. The
     // display color always resolves to something concrete so the
     // user sees the actual color rather than a `var(--name)` literal.
-    let (display_color, commit_mode): (String, CommitMode) = match (kind, chip.action) {
-        (TargetKind::Edge, ChipAction::Var(raw)) => {
-            // Resolve the var string through the theme map to get
-            // the concrete display color.
+    let (display_color, commit_mode): (String, CommitMode) = match (&handle, chip.action) {
+        (PickerHandle::Edge(_) | PickerHandle::Node { .. }, ChipAction::Var(raw)) => {
             let resolved = baumhard::util::color::resolve_var(
                 raw,
                 &doc.mindmap.canvas.theme_variables,
@@ -4095,12 +4138,8 @@ fn apply_picker_chip(
             .to_string();
             (resolved, CommitMode::Var(raw.to_string()))
         }
-        (TargetKind::Edge, ChipAction::Reset) => {
-            // Preview what the edge will look like after Reset: the
-            // inherited `edge.color` (since `cfg.color` becomes
-            // None). Resolve that through theme variables for the
-            // concrete display hex.
-            let display = match doc.mindmap.edges.get(target_index) {
+        (PickerHandle::Edge(index), ChipAction::Reset) => {
+            let display = match doc.mindmap.edges.get(*index) {
                 Some(e) => baumhard::util::color::resolve_var(
                     &e.color,
                     &doc.mindmap.canvas.theme_variables,
@@ -4110,7 +4149,12 @@ fn apply_picker_chip(
             };
             (display, CommitMode::ResetToInherited)
         }
-        (TargetKind::Portal, ChipAction::Var(raw)) => {
+        (PickerHandle::Node { .. }, ChipAction::Reset) => {
+            // Per-axis node default. Matches the `color axis=reset`
+            // kv path in the trait dispatcher.
+            ("#ffffff".to_string(), CommitMode::ResetToInherited)
+        }
+        (PickerHandle::Portal(_), ChipAction::Var(raw)) => {
             let resolved = baumhard::util::color::resolve_var(
                 raw,
                 &doc.mindmap.canvas.theme_variables,
@@ -4118,10 +4162,9 @@ fn apply_picker_chip(
             .to_string();
             (resolved, CommitMode::Var(raw.to_string()))
         }
-        (TargetKind::Portal, ChipAction::Reset) => {
+        (PickerHandle::Portal(_), ChipAction::Reset) => {
             // Portals have a non-optional color field, so "reset"
-            // re-seeds to the canvas's `--accent` value (or the
-            // raw `var(--accent)` string as a fallback).
+            // re-seeds to the canvas's `--accent` value.
             let resolved = doc
                 .mindmap
                 .canvas
@@ -4138,26 +4181,30 @@ fn apply_picker_chip(
         }
     };
 
-    // Update the picker's commit mode so Enter commits the chip's
-    // action rather than the HSV hex.
     if let ColorPickerState::Open { commit_mode: cm, .. } = state {
         *cm = commit_mode;
     }
 
     // Push the display color into the document preview so the
-    // scene substitution picks it up on the next rebuild.
-    match kind {
-        TargetKind::Edge => {
-            if let Some(edge) = doc.mindmap.edges.get(target_index) {
+    // scene substitution picks it up on the next rebuild. Nodes
+    // skip this — no scene-builder node-color preview exists.
+    match &handle {
+        PickerHandle::Edge(index) => {
+            if let Some(edge) = doc.mindmap.edges.get(*index) {
                 let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
-                doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: display_color });
+                doc.color_picker_preview =
+                    Some(ColorPickerPreview::Edge { key, color: display_color });
             }
         }
-        TargetKind::Portal => {
-            if let Some(portal) = doc.mindmap.portals.get(target_index) {
+        PickerHandle::Portal(index) => {
+            if let Some(portal) = doc.mindmap.portals.get(*index) {
                 let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
-                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: display_color });
+                doc.color_picker_preview =
+                    Some(ColorPickerPreview::Portal { key, color: display_color });
             }
+        }
+        PickerHandle::Node { .. } => {
+            // No scene-level preview for nodes.
         }
     }
 

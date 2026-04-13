@@ -5,11 +5,13 @@
 //! outcome so a pair that's not applicable to one target doesn't
 //! sink the whole command.
 //!
-//! Also supports `color pick` as a positional — hands off to the
-//! glyph-wheel picker modal for edge / portal targets.
+//! Axis-only positionals (`color bg`, `color text`, `color border`)
+//! and the legacy `color pick` both hand off to the glyph-wheel
+//! picker modal — `color bg` picks a color for that axis on the
+//! current selection.
 
 use super::Command;
-use crate::application::color_picker::ColorTarget;
+use crate::application::color_picker::{ColorTarget, NodeColorAxis};
 use crate::application::console::completion::{prefix_filter, Completion, CompletionContext, CompletionState};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
@@ -25,8 +27,8 @@ pub const VALUE_PRESETS: &[&str] = &["accent", "edge", "fg", "reset"];
 pub const COMMAND: Command = Command {
     name: "color",
     aliases: &[],
-    summary: "Set bg/text/border color, or `pick` via the glyph wheel",
-    usage: "color bg=<color> text=<color> border=<color>   |   color pick",
+    summary: "Set bg/text/border color, or pick via the glyph wheel",
+    usage: "color bg=<color> text=<color> border=<color>   |   color bg|text|border|pick",
     tags: &["color", "bg", "text", "border", "pick", "wheel"],
     applicable: always,
     complete: complete_color,
@@ -37,9 +39,10 @@ fn complete_color(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Complet
     match &state.context {
         CompletionContext::Token { index } => {
             let mut out = kv_key_completions(state.partial);
-            // `pick` is positional-only at slot 0 (the glyph-wheel
-            // handoff). Don't show it mid-command — it's a verb, not
-            // an arg.
+            // At token 0 the bare verbs — `pick` plus the axis
+            // positionals `bg` / `text` / `border` — also hand off
+            // to the glyph-wheel picker. Suggest them alongside the
+            // kv-key forms.
             if *index == 0 {
                 out.extend(prefix_filter(&["pick"], state.partial));
             }
@@ -72,24 +75,86 @@ fn kv_hint(key: &str) -> &'static str {
     }
 }
 
+/// Map a bare positional verb (`pick`, `bg`, `text`, `border`) to a
+/// concrete `ColorTarget` based on the current selection. Returns
+/// `None` if the combination isn't applicable — e.g. `color text` on
+/// a portal (portals have no text axis), or any verb with no
+/// selection.
+///
+/// Node targets carry the axis directly. Edge / portal targets
+/// collapse axis into their one color field: `bg`/`border` on an
+/// edge both resolve to the edge's line color; `bg` on a portal
+/// resolves to the portal's fill.
+fn picker_target_for(
+    verb: &str,
+    selection: &SelectionState,
+) -> Option<ColorTarget> {
+    let axis = match verb {
+        "bg" => Some(NodeColorAxis::Bg),
+        "text" => Some(NodeColorAxis::Text),
+        "border" => Some(NodeColorAxis::Border),
+        "pick" => None, // axis-agnostic legacy flow
+        _ => return None,
+    };
+    match selection {
+        SelectionState::Single(id) => match axis {
+            Some(a) => Some(ColorTarget::Node { id: id.clone(), axis: a }),
+            // `color pick` on a node defaults to bg.
+            None => Some(ColorTarget::Node {
+                id: id.clone(),
+                axis: NodeColorAxis::Bg,
+            }),
+        },
+        SelectionState::Multi(ids) => {
+            // The picker is single-target; pick the first node in
+            // the multi-selection. Fanout through the picker is
+            // a future addition.
+            let id = ids.first()?.clone();
+            Some(ColorTarget::Node {
+                id,
+                axis: axis.unwrap_or(NodeColorAxis::Bg),
+            })
+        }
+        SelectionState::Edge(er) => {
+            // Edge has one color; `border` maps to it, `text`
+            // also currently maps to it (edge label + line share
+            // `MindEdge.color`), `bg` isn't meaningful for edges
+            // — reject.
+            match verb {
+                "bg" => None,
+                _ => Some(ColorTarget::Edge(er.clone())),
+            }
+        }
+        SelectionState::Portal(pr) => {
+            // Portal has one color; `bg` and `pick` map to it,
+            // `text` / `border` aren't meaningful — reject.
+            match verb {
+                "bg" | "pick" => Some(ColorTarget::Portal(pr.clone())),
+                _ => None,
+            }
+        }
+        SelectionState::None => None,
+    }
+}
+
 fn execute_color(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    // `color pick` positional handoff — lands in the glyph-wheel
-    // modal, not in the trait dispatcher. No target fanout; just one
-    // edge or one portal.
-    if matches!(args.positional(0), Some("pick")) {
-        return match &eff.document.selection {
-            SelectionState::Edge(er) => {
-                eff.open_color_picker = Some(ColorTarget::Edge(er.clone()));
-                eff.close_console = true;
-                ExecResult::ok_empty()
-            }
-            SelectionState::Portal(pr) => {
-                eff.open_color_picker = Some(ColorTarget::Portal(pr.clone()));
-                eff.close_console = true;
-                ExecResult::ok_empty()
-            }
-            _ => ExecResult::err("color pick needs an edge or portal selected"),
-        };
+    // Positional handoffs to the glyph-wheel picker:
+    //  - `color pick` — legacy edge/portal one-axis flow
+    //  - `color bg | text | border` — pick a color for that axis on
+    //    the current selection (node axis for nodes, single-color
+    //    target for edges/portals)
+    if let Some(verb) = args.positional(0) {
+        if let Some(target) = picker_target_for(verb, &eff.document.selection) {
+            eff.open_color_picker = Some(target);
+            eff.close_console = true;
+            return ExecResult::ok_empty();
+        }
+        if matches!(verb, "pick" | "bg" | "text" | "border") {
+            return ExecResult::err(format!(
+                "color {}: nothing to pick for this selection",
+                verb
+            ));
+        }
     }
 
     let kvs: Vec<(String, String)> = args
@@ -97,7 +162,9 @@ fn execute_color(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     if kvs.is_empty() {
-        return ExecResult::err("usage: color bg=<color> text=<color> border=<color>");
+        return ExecResult::err(
+            "usage: color bg|text|border[=<color>]   |   color pick",
+        );
     }
 
     let report = apply_kvs(eff.document, &kvs, |view, key, value| {
