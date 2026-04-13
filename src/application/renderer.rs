@@ -2462,6 +2462,12 @@ fn build_color_picker_overlay_tree(
     let mut id_counter: usize = 1;
 
     // Local helper; mirrors the console builder's pattern.
+    // `centered = true` shapes the text with `Align::Center` so
+    // cross-script glyphs (Devanagari / Hebrew / Tibetan in the
+    // hue ring, mixed sat/val cells) sit on the same visual radius
+    // — matches the legacy `create_centered_cell_buffer` path. Use
+    // `false` for left-aligned chrome (title, hint, hex readout,
+    // chips).
     fn push_area(
         tree: &mut Tree<GfxElement, GfxMutator>,
         id_counter: &mut usize,
@@ -2471,6 +2477,7 @@ fn build_color_picker_overlay_tree(
         line_height: f32,
         pos: (f32, f32),
         bounds: (f32, f32),
+        centered: bool,
     ) {
         let mut area = GlyphArea::new_with_str(
             text,
@@ -2479,6 +2486,7 @@ fn build_color_picker_overlay_tree(
             Vec2::new(pos.0, pos.1),
             Vec2::new(bounds.0, bounds.1),
         );
+        area.align_center = centered;
         let cluster_count = text.chars().count();
         if cluster_count > 0 {
             let rgba = [
@@ -2518,6 +2526,7 @@ fn build_color_picker_overlay_tree(
         font_size,
         layout.title_pos,
         (font_size * 24.0, font_size * 1.5),
+        false,
     );
 
     // Hue ring
@@ -2535,6 +2544,7 @@ fn build_color_picker_overlay_tree(
             ring_font_size,
             (pos.0 - ring_box_w * 0.5, pos.1 - ring_font_size * 0.5),
             (ring_box_w, ring_font_size * 1.5),
+            true,
         );
     }
 
@@ -2550,6 +2560,7 @@ fn build_color_picker_overlay_tree(
         font_size * 0.85,
         layout.hint_pos,
         (font_size * 30.0, font_size * 1.5),
+        false,
     );
 
     // Sat / val bars (skip centre cell — that's the preview glyph slot)
@@ -2586,6 +2597,7 @@ fn build_color_picker_overlay_tree(
             font_size,
             (cx - cell_box_w * 0.5, cy - font_size * 0.5),
             (cell_box_w, font_size * 1.5),
+            true,
         );
     }
     for i in 0..VAL_CELL_COUNT {
@@ -2614,6 +2626,7 @@ fn build_color_picker_overlay_tree(
             font_size,
             (cx - cell_box_w * 0.5, cy - font_size * 0.5),
             (cell_box_w, font_size * 1.5),
+            true,
         );
     }
 
@@ -2632,6 +2645,7 @@ fn build_color_picker_overlay_tree(
         ring_font_size,
         (slot_pos.0 - ring_box_w * 0.5, slot_pos.1 - ring_font_size * 0.5),
         (ring_box_w, ring_font_size * 1.5),
+        true,
     );
 
     // Centre preview glyph ॐ
@@ -2647,6 +2661,7 @@ fn build_color_picker_overlay_tree(
         preview_size,
         layout.preview_pos,
         (preview_size * 1.5, preview_size * 1.5),
+        true,
     );
 
     // Hex readout
@@ -2661,6 +2676,7 @@ fn build_color_picker_overlay_tree(
             font_size,
             hex_anchor,
             (font_size * 8.0, font_size * 1.5),
+            false,
         );
     }
 
@@ -2684,6 +2700,7 @@ fn build_color_picker_overlay_tree(
             font_size,
             (cx, cy),
             (cw, layout.chip_height),
+            false,
         );
     }
 
@@ -3082,12 +3099,17 @@ fn walk_tree_into_buffers(
                 .collect()
         };
 
+        let alignment = if area.align_center {
+            Some(cosmic_text::Align::Center)
+        } else {
+            None
+        };
         buffer.set_rich_text(
             font_system,
             spans,
             &Attrs::new(),
             cosmic_text::Shaping::Advanced,
-            None,
+            alignment,
         );
         buffer.shape_until_scroll(font_system, false);
 
