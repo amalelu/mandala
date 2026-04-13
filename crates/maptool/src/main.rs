@@ -25,10 +25,13 @@ Commands:
                                 One trailing newline from <cmd> is
                                 stripped. text_runs are cleared on
                                 nodes whose text changed. Writes the
-                                map back in place; --dry-run prints the
-                                IDs that would change to stderr and
-                                skips the write. Zero matches is an
-                                error (exit 1), matching `grep`.";
+                                map back in place atomically (temp
+                                file + rename). --dry-run skips the
+                                write but still invokes <cmd> for each
+                                matched node, so commands with side
+                                effects will still execute. Zero
+                                matches is an error (exit 1), matching
+                                `grep`.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -260,6 +263,19 @@ fn parse_apply_args(args: &[String]) -> Result<ApplyArgs<'_>, CliError> {
             "-i" => case_insensitive = true,
             "--notes" => target_notes = true,
             "--dry-run" => dry_run = true,
+            // Reject unknown long flags explicitly rather than silently
+            // treating them as positional args — catches typos like
+            // `--dry-runn` that would otherwise be swallowed as the
+            // map path or pattern. Short flags and dash-leading
+            // patterns (e.g. a regex like `^-foo`) are still accepted
+            // so the `-i` habit doesn't accidentally lock out useful
+            // input; users with truly `--`-leading patterns can quote
+            // or escape them.
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "apply: unknown flag: {other}"
+                )));
+            }
             other => positional.push(other),
         }
     }
@@ -356,12 +372,24 @@ fn apply_command(
     Ok(changed)
 }
 
-/// Spawn `cmd` with `cmd_args`, write `input` to its stdin, close
-/// stdin to signal EOF, and return its stdout as a `String`. One
+/// Spawn `cmd` with `cmd_args`, write `input` to its stdin on a
+/// background thread, and return its stdout as a `String`. One
 /// trailing newline (`\n` or `\r\n`) is stripped so POSIX text tools
 /// that always append a newline don't inflate the node's text on every
 /// apply. A non-zero exit status becomes `CliError::Subprocess` with
 /// stderr folded into the message.
+///
+/// The stdin write runs on its own thread because the OS pipe buffer
+/// is finite (~64 KiB on Linux). If we wrote inline and input exceeded
+/// the buffer, the child could block on writing its own stdout —
+/// waiting for us to drain it — while we'd be blocked writing stdin,
+/// deadlocking both sides. `wait_with_output` already drains stdout
+/// and stderr concurrently; the writer thread closes the loop on
+/// stdin.
+///
+/// EPIPE on the stdin side (child exited or closed stdin early) is
+/// swallowed so the child's real exit status — not "broken pipe" —
+/// surfaces as the error.
 fn run_pipe(cmd: &str, cmd_args: &[String], input: &str) -> Result<String, CliError> {
     let mut child = Command::new(cmd)
         .args(cmd_args)
@@ -374,20 +402,29 @@ fn run_pipe(cmd: &str, cmd_args: &[String], input: &str) -> Result<String, CliEr
         .stdin
         .take()
         .ok_or_else(|| CliError::Subprocess(format!("`{cmd}`: stdin handle missing")))?;
-    // If the child exits before reading (or doesn't read stdin at all),
-    // write_all returns EPIPE. Swallow that specifically — we want the
-    // child's real exit status, not "broken pipe", to surface.
-    if let Err(e) = stdin.write_all(input.as_bytes()) {
-        if e.kind() != std::io::ErrorKind::BrokenPipe {
-            return Err(CliError::Subprocess(format!(
-                "`{cmd}`: write stdin: {e}"
-            )));
+    let input_bytes = input.as_bytes().to_vec();
+    let cmd_name = cmd.to_string();
+    let writer = std::thread::spawn(move || -> Result<(), String> {
+        if let Err(e) = stdin.write_all(&input_bytes) {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(format!("`{cmd_name}`: write stdin: {e}"));
+            }
         }
-    }
-    drop(stdin); // close the pipe so the child sees EOF
+        drop(stdin); // close the pipe so the child sees EOF
+        Ok(())
+    });
     let output = child
         .wait_with_output()
         .map_err(|e| CliError::Subprocess(format!("`{cmd}`: wait: {e}")))?;
+    match writer.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => return Err(CliError::Subprocess(msg)),
+        Err(_) => {
+            return Err(CliError::Subprocess(format!(
+                "`{cmd}`: stdin writer thread panicked"
+            )))
+        }
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let code = output
@@ -412,13 +449,58 @@ fn run_pipe(cmd: &str, cmd_args: &[String], input: &str) -> Result<String, CliEr
     Ok(out)
 }
 
-/// Serialize `map` back to `path` using pretty JSON. `Io` error on
-/// serialisation or write failure.
+/// Serialize `map` back to `path` using pretty JSON, with node-ID
+/// ordering stable across runs and the write itself atomic.
+///
+/// MindMap.nodes is a `HashMap<String, MindNode>`; serialising it
+/// directly iterates in HashMap's randomised order, so git-tracked
+/// maps would see their nodes reshuffled on every apply. Routing
+/// through `serde_json::Value` fixes that: with the default
+/// (non-`preserve_order`) build of serde_json, `serde_json::Map` is a
+/// `BTreeMap<String, Value>`, which sorts keys lexicographically. The
+/// output is therefore deterministic for a given in-memory map.
+///
+/// The write goes through a sibling temp file that is then renamed
+/// into place. Rename is atomic on POSIX (same filesystem), so a kill
+/// or power loss mid-write leaves the original file intact instead of
+/// truncated. The temp file name includes the PID so concurrent
+/// maptool invocations on the same map don't collide.
 fn save_map(path: &Path, map: &MindMap) -> Result<(), CliError> {
-    let json = serde_json::to_string_pretty(map)
+    let value = serde_json::to_value(map)
         .map_err(|e| CliError::Io(format!("failed to serialise map: {e}")))?;
-    fs::write(path, json)
-        .map_err(|e| CliError::Io(format!("failed to write {}: {e}", path.display())))
+    let json = serde_json::to_string_pretty(&value)
+        .map_err(|e| CliError::Io(format!("failed to render map JSON: {e}")))?;
+    write_atomic(path, &json)
+}
+
+/// Write `contents` to `path` atomically via a sibling temp file +
+/// rename. On rename failure the temp file is best-effort cleaned up
+/// so a subsequent run isn't confused by an orphaned `.tmp`.
+fn write_atomic(path: &Path, contents: &str) -> Result<(), CliError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| CliError::Io(format!("invalid path: {}", path.display())))?
+        .to_string_lossy();
+    let tmp_path = dir.join(format!(
+        ".{}.maptool.{}.tmp",
+        file_name,
+        std::process::id()
+    ));
+    fs::write(&tmp_path, contents).map_err(|e| {
+        CliError::Io(format!(
+            "failed to write {}: {e}",
+            tmp_path.display()
+        ))
+    })?;
+    fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        CliError::Io(format!(
+            "failed to rename {} → {}: {e}",
+            tmp_path.display(),
+            path.display()
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -672,21 +754,37 @@ mod tests {
         load_from_file(&apply_fixture_path()).unwrap()
     }
 
-    fn tmp_map(name: &str) -> PathBuf {
-        // pid + nanos keeps parallel test runs distinct.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let mut dst = std::env::temp_dir();
-        dst.push(format!(
-            "maptool_apply_{}_{}_{}.mindmap.json",
-            name,
-            std::process::id(),
-            nanos
-        ));
-        std::fs::copy(apply_fixture_path(), &dst).unwrap();
-        dst
+    /// RAII guard for a per-test copy of the apply fixture. The file is
+    /// placed in the OS temp dir with a PID + nanos suffix so parallel
+    /// test runs don't collide, and it's removed on drop — so a panic
+    /// mid-test doesn't leak the file.
+    struct TmpMap(PathBuf);
+
+    impl TmpMap {
+        fn new(name: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let mut dst = std::env::temp_dir();
+            dst.push(format!(
+                "maptool_apply_{}_{}_{}.mindmap.json",
+                name,
+                std::process::id(),
+                nanos
+            ));
+            std::fs::copy(apply_fixture_path(), &dst).unwrap();
+            Self(dst)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TmpMap {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     // --- select_nodes -----------------------------------------------
@@ -847,10 +945,10 @@ mod tests {
 
     #[test]
     fn run_apply_end_to_end_text() {
-        let path = tmp_map("end_to_end_text");
+        let tmp = TmpMap::new("end_to_end_text");
         let args = as_strings(&[
             "apply",
-            path.to_str().unwrap(),
+            tmp.path().to_str().unwrap(),
             "hello",
             "--",
             "tr",
@@ -858,7 +956,7 @@ mod tests {
             "A-Z",
         ]);
         assert!(run(&args).is_ok());
-        let reloaded = load_from_file(&path).unwrap();
+        let reloaded = load_from_file(tmp.path()).unwrap();
         assert_eq!(reloaded.nodes["n1"].text, "HELLO WORLD");
         assert_eq!(reloaded.nodes["n4"].text, "HELLO AGAIN");
         assert!(reloaded.nodes["n1"].text_runs.is_empty());
@@ -867,15 +965,14 @@ mod tests {
         assert_eq!(reloaded.nodes["n2"].text, "Alpha\nBeta\nGamma");
         assert_eq!(reloaded.nodes["n2"].text_runs.len(), 1);
         assert_eq!(reloaded.nodes["n3"].text, "unchanged");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn run_apply_end_to_end_notes() {
-        let path = tmp_map("end_to_end_notes");
+        let tmp = TmpMap::new("end_to_end_notes");
         let args = as_strings(&[
             "apply",
-            path.to_str().unwrap(),
+            tmp.path().to_str().unwrap(),
             "NOTES_TOKEN",
             "--notes",
             "--",
@@ -884,7 +981,7 @@ mod tests {
             "A-Z",
         ]);
         assert!(run(&args).is_ok());
-        let reloaded = load_from_file(&path).unwrap();
+        let reloaded = load_from_file(tmp.path()).unwrap();
         assert_eq!(reloaded.nodes["n2"].notes, "SECRET NOTES_TOKEN HERE");
         assert_eq!(reloaded.nodes["n2"].text, "Alpha\nBeta\nGamma");
         assert_eq!(
@@ -892,16 +989,15 @@ mod tests {
             1,
             "--notes edits should leave text_runs alone"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn run_apply_dry_run_does_not_modify_file() {
-        let path = tmp_map("dry_run");
-        let before = std::fs::read(&path).unwrap();
+        let tmp = TmpMap::new("dry_run");
+        let before = std::fs::read(tmp.path()).unwrap();
         let args = as_strings(&[
             "apply",
-            path.to_str().unwrap(),
+            tmp.path().to_str().unwrap(),
             "hello",
             "--dry-run",
             "--",
@@ -910,18 +1006,17 @@ mod tests {
             "A-Z",
         ]);
         assert!(run(&args).is_ok());
-        let after = std::fs::read(&path).unwrap();
+        let after = std::fs::read(tmp.path()).unwrap();
         assert_eq!(before, after, "--dry-run must not write the map");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn run_apply_no_matches_is_not_found_and_no_write() {
-        let path = tmp_map("no_match");
-        let before = std::fs::read(&path).unwrap();
+        let tmp = TmpMap::new("no_match");
+        let before = std::fs::read(tmp.path()).unwrap();
         let args = as_strings(&[
             "apply",
-            path.to_str().unwrap(),
+            tmp.path().to_str().unwrap(),
             "xyzzy_absent_token",
             "--",
             "tr",
@@ -932,18 +1027,17 @@ mod tests {
             Err(CliError::NotFound(_)) => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
-        let after = std::fs::read(&path).unwrap();
+        let after = std::fs::read(tmp.path()).unwrap();
         assert_eq!(before, after, "no-match run must not write the map");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn run_apply_subprocess_failure_leaves_file_unchanged() {
-        let path = tmp_map("subprocess_fail");
-        let before = std::fs::read(&path).unwrap();
+        let tmp = TmpMap::new("subprocess_fail");
+        let before = std::fs::read(tmp.path()).unwrap();
         let args = as_strings(&[
             "apply",
-            path.to_str().unwrap(),
+            tmp.path().to_str().unwrap(),
             "hello",
             "--",
             "sh",
@@ -954,12 +1048,11 @@ mod tests {
             Err(CliError::Subprocess(_)) => {}
             other => panic!("expected Subprocess, got {other:?}"),
         }
-        let after = std::fs::read(&path).unwrap();
+        let after = std::fs::read(tmp.path()).unwrap();
         assert_eq!(
             before, after,
             "file must be unchanged when any subprocess fails"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     // --- parse_apply_args -------------------------------------------
@@ -1047,5 +1140,116 @@ mod tests {
             Err(CliError::Usage(msg)) => assert!(msg.starts_with("apply: invalid regex")),
             other => panic!("expected apply: invalid regex usage error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_apply_args_unknown_long_flag_errors() {
+        let args = as_strings(&["map.json", "pat", "--dry-runn", "--", "cat"]);
+        match parse_apply_args(&args) {
+            Err(CliError::Usage(msg)) => {
+                assert!(msg.contains("--dry-runn"), "got: {msg}");
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_apply_args_dash_leading_pattern_is_positional() {
+        // `-foo` is a valid regex (literal "-foo"); our strict check
+        // only fires for double-dash prefixes. Patterns with a single
+        // leading `-` remain usable without escaping.
+        let args = as_strings(&["map.json", "-foo", "--", "cat"]);
+        let p = parse_apply_args(&args).unwrap();
+        assert_eq!(p.map_path, "map.json");
+        assert_eq!(p.pattern, "-foo");
+    }
+
+    // --- save_map: deterministic ordering + atomicity ---------------
+
+    #[test]
+    fn save_map_produces_sorted_node_order() {
+        // MindMap.nodes is a HashMap; its native iteration order is
+        // randomised per-process. save_map must serialise with keys in
+        // sorted order so git diffs stay quiet across writes.
+        let tmp = TmpMap::new("sorted_order");
+        let map = apply_fixture();
+        save_map(tmp.path(), &map).unwrap();
+        let json = std::fs::read_to_string(tmp.path()).unwrap();
+        let i1 = json.find("\"n1\"").expect("n1 missing");
+        let i2 = json.find("\"n2\"").expect("n2 missing");
+        let i3 = json.find("\"n3\"").expect("n3 missing");
+        let i4 = json.find("\"n4\"").expect("n4 missing");
+        assert!(
+            i1 < i2 && i2 < i3 && i3 < i4,
+            "nodes must appear in sorted order, got: n1@{i1} n2@{i2} n3@{i3} n4@{i4}"
+        );
+    }
+
+    #[test]
+    fn save_map_is_byte_identical_across_runs() {
+        // Two consecutive saves of the same map must produce the same
+        // bytes — proves HashMap hasher randomisation can't leak
+        // through.
+        let tmp_a = TmpMap::new("determinism_a");
+        let tmp_b = TmpMap::new("determinism_b");
+        let map = apply_fixture();
+        save_map(tmp_a.path(), &map).unwrap();
+        save_map(tmp_b.path(), &map).unwrap();
+        let a = std::fs::read(tmp_a.path()).unwrap();
+        let b = std::fs::read(tmp_b.path()).unwrap();
+        assert_eq!(a, b, "save output must be deterministic");
+    }
+
+    #[test]
+    fn save_map_roundtrip_preserves_content() {
+        // save → reload must preserve node text, notes, and runs. If
+        // routing through serde_json::Value dropped anything we'd see
+        // it here.
+        let tmp = TmpMap::new("roundtrip");
+        let map = apply_fixture();
+        save_map(tmp.path(), &map).unwrap();
+        let back = load_from_file(tmp.path()).unwrap();
+        for (id, original) in &map.nodes {
+            let reloaded = &back.nodes[id];
+            assert_eq!(reloaded.text, original.text, "{id}: text");
+            assert_eq!(reloaded.notes, original.notes, "{id}: notes");
+            assert_eq!(reloaded.text_runs.len(), original.text_runs.len(), "{id}: runs len");
+        }
+    }
+
+    #[test]
+    fn save_map_leaves_no_tmp_file_on_success() {
+        // The atomic writer stages a `.<name>.maptool.<pid>.tmp` file
+        // and then renames it; after success, the dir should only
+        // contain the final map.
+        let tmp = TmpMap::new("no_leftover");
+        let map = apply_fixture();
+        save_map(tmp.path(), &map).unwrap();
+        let dir = tmp.path().parent().unwrap();
+        let pid = std::process::id();
+        let file_name = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let tmp_name = format!(".{file_name}.maptool.{pid}.tmp");
+        let leftover = dir.join(&tmp_name);
+        assert!(
+            !leftover.exists(),
+            "atomic writer left a temp file behind: {}",
+            leftover.display()
+        );
+    }
+
+    // --- run_pipe: deadlock avoidance -------------------------------
+
+    #[test]
+    fn run_pipe_handles_input_larger_than_pipe_buffer() {
+        // Linux's default pipe buffer is 16 pages (~64 KiB). Piping
+        // 256 KiB through `cat` — which reads stdin and writes to
+        // stdout before closing — would deadlock a sync writer: the
+        // child blocks waiting for its stdout to drain, we block
+        // waiting to write more stdin. The writer thread keeps both
+        // sides moving.
+        let big = "x".repeat(256 * 1024);
+        let out = run_pipe("cat", &[], &big).unwrap();
+        assert_eq!(out.len(), big.len());
+        assert_eq!(out, big);
     }
 }
