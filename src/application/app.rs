@@ -3469,32 +3469,99 @@ fn update_portal_tree(
     }
 }
 
-/// Convert a freshly-built `RenderScene`'s connection_elements
-/// into a baumhard tree and register it under
+/// Build or in-place update the connection tree under
 /// [`CanvasRole::Connections`].
+///
+/// **§B2 dispatch.** Selection toggle, color preview, and theme
+/// switches change only per-glyph fields (color regions, body
+/// glyph) without altering the per-edge structural shape (cap
+/// presence, body-glyph count). For those calls we take the
+/// in-place mutator path. Endpoint drag resamples the path and
+/// the body-glyph count typically shifts every few pixels — the
+/// identity sequence drops the equality and we fall back to a
+/// full rebuild. The dispatcher hashes
+/// `connection_identity_sequence` to make the choice.
 fn update_connection_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
 ) {
     use crate::application::scene_host::CanvasRole;
-    let tree = baumhard::mindmap::tree_builder::build_connection_tree(&scene.connection_elements);
-    app_scene.register_canvas(CanvasRole::Connections, tree, glam::Vec2::ZERO);
+    use baumhard::mindmap::tree_builder::{
+        build_connection_mutator_tree, build_connection_tree, connection_identity_sequence,
+    };
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let identity = connection_identity_sequence(&scene.connection_elements);
+    let signature = {
+        let mut h = DefaultHasher::new();
+        identity.hash(&mut h);
+        h.finish()
+    };
+
+    let already_registered = app_scene.canvas_id(CanvasRole::Connections).is_some();
+    let signature_matches =
+        app_scene.canvas_signature(CanvasRole::Connections) == Some(signature);
+
+    if already_registered && signature_matches {
+        let mutator = build_connection_mutator_tree(&scene.connection_elements);
+        app_scene.apply_canvas_mutator(CanvasRole::Connections, &mutator);
+    } else {
+        let tree = build_connection_tree(&scene.connection_elements);
+        app_scene.register_canvas(CanvasRole::Connections, tree, glam::Vec2::ZERO);
+        app_scene.set_canvas_signature(CanvasRole::Connections, signature);
+    }
 }
 
-/// Reshape connection labels into the canvas-scene tree path.
-/// Threads the per-edge AABB hitbox map back to the renderer so
-/// `hit_test_edge_label` keeps working.
+/// Build or in-place update the connection-label tree under
+/// [`CanvasRole::ConnectionLabels`]. Threads the per-edge AABB
+/// hitbox map back to the renderer so `hit_test_edge_label`
+/// keeps working.
+///
+/// **§B2 dispatch.** Inline label edits (Phase 2.1's hot path),
+/// color changes, and label movement keep the structural identity
+/// (the per-edge `EdgeKey` sequence) stable; the in-place mutator
+/// path runs and the arena is reused. Adding or removing a label,
+/// or selection-edge reorderings, change the identity and
+/// trigger a full rebuild.
 fn update_connection_label_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
     use crate::application::scene_host::CanvasRole;
-    let result = baumhard::mindmap::tree_builder::build_connection_label_tree(
-        &scene.connection_label_elements,
-    );
-    renderer.set_connection_label_hitboxes(result.hitboxes);
-    app_scene.register_canvas(CanvasRole::ConnectionLabels, result.tree, glam::Vec2::ZERO);
+    use baumhard::mindmap::tree_builder::{
+        build_connection_label_mutator_tree, build_connection_label_tree,
+        connection_label_identity_sequence,
+    };
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let identity = connection_label_identity_sequence(&scene.connection_label_elements);
+    let signature = {
+        let mut h = DefaultHasher::new();
+        identity.hash(&mut h);
+        h.finish()
+    };
+
+    let already_registered = app_scene.canvas_id(CanvasRole::ConnectionLabels).is_some();
+    let signature_matches =
+        app_scene.canvas_signature(CanvasRole::ConnectionLabels) == Some(signature);
+
+    if already_registered && signature_matches {
+        let result = build_connection_label_mutator_tree(&scene.connection_label_elements);
+        renderer.set_connection_label_hitboxes(result.hitboxes);
+        app_scene.apply_canvas_mutator(CanvasRole::ConnectionLabels, &result.mutator);
+    } else {
+        let result = build_connection_label_tree(&scene.connection_label_elements);
+        renderer.set_connection_label_hitboxes(result.hitboxes);
+        app_scene.register_canvas(
+            CanvasRole::ConnectionLabels,
+            result.tree,
+            glam::Vec2::ZERO,
+        );
+        app_scene.set_canvas_signature(CanvasRole::ConnectionLabels, signature);
+    }
 }
 
 /// Build or in-place update the edge-handle tree under

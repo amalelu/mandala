@@ -698,18 +698,118 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
 // `walk_tree_into_buffers` pipeline as borders and portals.
 // =====================================================================
 
+/// Channel band offsets for the connection sub-tree. `cap_start`
+/// always sits at channel 1 (when present), the body glyphs occupy
+/// channels `BODY_BASE..BODY_BASE+N`, and `cap_end` sits at
+/// `CAP_END_CHANNEL` (chosen high enough that no body run can
+/// overrun it). Bands give the in-place
+/// [`build_connection_mutator_tree`] path stable channels even when
+/// the body glyph count grows or shrinks frame-to-frame, and keep
+/// the strict-ascending invariant that `align_child_walks` needs.
+const CONN_CAP_START_CHANNEL: usize = 1;
+const CONN_BODY_BASE_CHANNEL: usize = 100;
+/// One million leaves headroom for `BODY_BASE + body_count` before
+/// the cap-end channel — far more than any realistic edge can
+/// sample.
+const CONN_CAP_END_CHANNEL: usize = 1_000_001;
+
+/// Identity slice for one `ConnectionElement` — captures the
+/// structural shape (presence of caps, body glyph count) per edge.
+/// Two slices match iff the structure is identical, which is the
+/// precondition for the in-place mutator path: same shape ⇒ same
+/// channel set ⇒ `align_child_walks` matches every child.
+pub type ConnectionEdgeIdentity = (
+    crate::mindmap::scene_cache::EdgeKey,
+    /* has_cap_start */ bool,
+    /* body_count    */ usize,
+    /* has_cap_end   */ bool,
+);
+
+/// Identity sequence for a slice of `ConnectionElement`s. Used by
+/// the dispatcher in `update_connection_tree` to choose between
+/// full rebuild and the in-place mutator path. During endpoint
+/// drag the body-glyph count typically shifts every few pixels and
+/// the dispatcher takes the rebuild path; for selection / color
+/// preview / theme switches it stays stable and the mutator path
+/// runs.
+pub fn connection_identity_sequence(
+    elements: &[crate::mindmap::scene_builder::ConnectionElement],
+) -> Vec<ConnectionEdgeIdentity> {
+    elements
+        .iter()
+        .map(|e| {
+            (
+                e.edge_key.clone(),
+                e.cap_start.is_some(),
+                e.glyph_positions.len(),
+                e.cap_end.is_some(),
+            )
+        })
+        .collect()
+}
+
+/// Lay out the per-glyph shape data both connection build paths
+/// emit. Returns `(edge_channel, Vec<(child_channel, GlyphArea)>)`
+/// for one edge. Single source of truth — the initial-build path
+/// ([`build_connection_tree`]) and the in-place mutator path
+/// ([`build_connection_mutator_tree`]) cannot drift.
+fn connection_edge_layout(
+    edge_index: usize,
+    elem: &crate::mindmap::scene_builder::ConnectionElement,
+) -> (usize, Vec<(usize, GlyphArea)>) {
+    let font_size = elem.font_size_pt;
+    let half_glyph = font_size * 0.3;
+    let half_height = font_size * 0.5;
+    let glyph_bounds = Vec2::new(font_size, font_size);
+    let color_rgba = color::hex_to_rgba_safe(&elem.color, [0.78, 0.78, 0.78, 1.0]);
+
+    let mk_area = |text: &str, pos: Vec2| -> GlyphArea {
+        let mut area =
+            GlyphArea::new_with_str(text, font_size, font_size, pos, glyph_bounds);
+        let cluster_count = text.chars().count();
+        if cluster_count > 0 {
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                Range::new(0, cluster_count),
+                None,
+                Some(color_rgba),
+            ));
+            area.regions = regions;
+        }
+        area
+    };
+
+    let mut children: Vec<(usize, GlyphArea)> = Vec::new();
+    if let Some((glyph_text, (cx, cy))) = elem.cap_start.as_ref() {
+        let pos = Vec2::new(cx - half_glyph, cy - half_height);
+        children.push((CONN_CAP_START_CHANNEL, mk_area(glyph_text, pos)));
+    }
+    for (i, &(gx, gy)) in elem.glyph_positions.iter().enumerate() {
+        let pos = Vec2::new(gx - half_glyph, gy - half_height);
+        children.push((CONN_BODY_BASE_CHANNEL + i, mk_area(&elem.body_glyph, pos)));
+    }
+    if let Some((glyph_text, (cx, cy))) = elem.cap_end.as_ref() {
+        let pos = Vec2::new(cx - half_glyph, cy - half_height);
+        children.push((CONN_CAP_END_CHANNEL, mk_area(glyph_text, pos)));
+    }
+
+    // Per-edge channel: 1-based edge index. Stable across rebuilds
+    // for the same identity sequence.
+    (edge_index + 1, children)
+}
+
 /// Build a baumhard tree of connection glyphs from a slice of
 /// pre-computed `ConnectionElement`s.
 ///
 /// Tree shape per visible edge:
 ///
 /// ```text
-/// Void (per edge — channel = id_counter)
-/// ├── GlyphArea (cap_start, channel = 1)        // optional
-/// ├── GlyphArea (body glyph @ position 0, ch=2)
-/// ├── GlyphArea (body glyph @ position 1, ch=3)
+/// Void (per edge — channel = edge index, 1-based)
+/// ├── GlyphArea (cap_start, channel = 1)              // optional
+/// ├── GlyphArea (body glyph @ position 0, ch=100+0)
+/// ├── GlyphArea (body glyph @ position 1, ch=100+1)
 /// │   ...
-/// └── GlyphArea (cap_end, channel = N)          // optional
+/// └── GlyphArea (cap_end, channel = 1_000_001)        // optional
 /// ```
 ///
 /// Each GlyphArea is sized `(font_size, font_size)` and centred on
@@ -717,6 +817,11 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
 /// `(half_glyph, half_height)` offset the legacy
 /// `Renderer::rebuild_connection_buffers_keyed` applied. Color is
 /// baked into a single `ColorFontRegion` covering the body glyph.
+///
+/// Channels come from [`connection_edge_layout`] so the in-place
+/// [`build_connection_mutator_tree`] path can target each leaf by
+/// the same channel across calls when the structure (body glyph
+/// count, cap presence) hasn't changed.
 ///
 /// # Costs
 ///
@@ -727,105 +832,68 @@ pub fn build_connection_tree(
     elements: &[crate::mindmap::scene_builder::ConnectionElement],
 ) -> Tree<GfxElement, GfxMutator> {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut id_counter: usize = 1;
+    let mut unique_id: usize = 1;
 
-    for elem in elements {
-        let font_size = elem.font_size_pt;
-        let half_glyph = font_size * 0.3;
-        let half_height = font_size * 0.5;
-        let glyph_bounds = Vec2::new(font_size, font_size);
-        let color_rgba =
-            color::hex_to_rgba_safe(&elem.color, [0.78, 0.78, 0.78, 1.0]);
-
-        let edge_channel = id_counter;
+    for (idx, elem) in elements.iter().enumerate() {
+        let (edge_channel, children) = connection_edge_layout(idx, elem);
         let edge_root = tree
             .arena
-            .new_node(GfxElement::new_void_with_id(edge_channel, edge_channel));
+            .new_node(GfxElement::new_void_with_id(edge_channel, unique_id));
+        unique_id += 1;
         tree.root.append(edge_root, &mut tree.arena);
-        id_counter += 1;
 
-        // Cap-start, body glyphs, cap-end — emitted in the same
-        // order the legacy renderer produced. Channel monotonically
-        // increases so mutator trees can target a specific glyph by
-        // index when the inevitable per-glyph effects land.
-        let mut child_channel: usize = 1;
-        if let Some((glyph_text, (cx, cy))) = elem.cap_start.as_ref() {
-            let pos = Vec2::new(cx - half_glyph, cy - half_height);
-            append_connection_glyph(
-                &mut tree,
-                edge_root,
-                child_channel,
-                id_counter,
-                glyph_text,
-                font_size,
-                pos,
-                glyph_bounds,
-                color_rgba,
-            );
-            id_counter += 1;
-            child_channel += 1;
-        }
-        for &(gx, gy) in &elem.glyph_positions {
-            let pos = Vec2::new(gx - half_glyph, gy - half_height);
-            append_connection_glyph(
-                &mut tree,
-                edge_root,
-                child_channel,
-                id_counter,
-                &elem.body_glyph,
-                font_size,
-                pos,
-                glyph_bounds,
-                color_rgba,
-            );
-            id_counter += 1;
-            child_channel += 1;
-        }
-        if let Some((glyph_text, (cx, cy))) = elem.cap_end.as_ref() {
-            let pos = Vec2::new(cx - half_glyph, cy - half_height);
-            append_connection_glyph(
-                &mut tree,
-                edge_root,
-                child_channel,
-                id_counter,
-                glyph_text,
-                font_size,
-                pos,
-                glyph_bounds,
-                color_rgba,
-            );
-            id_counter += 1;
+        for (channel, area) in children {
+            let element = GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
+            unique_id += 1;
+            let leaf = tree.arena.new_node(element);
+            edge_root.append(leaf, &mut tree.arena);
         }
     }
 
     tree
 }
 
-fn append_connection_glyph(
-    tree: &mut Tree<GfxElement, GfxMutator>,
-    parent: NodeId,
-    channel: usize,
-    unique_id: usize,
-    text: &str,
-    font_size: f32,
-    position: Vec2,
-    bounds: Vec2,
-    color_rgba: [f32; 4],
-) {
-    let mut area = GlyphArea::new_with_str(text, font_size, font_size, position, bounds);
-    let cluster_count = text.chars().count();
-    if cluster_count > 0 {
-        let mut regions = ColorFontRegions::new_empty();
-        regions.submit_region(ColorFontRegion::new(
-            Range::new(0, cluster_count),
-            None,
-            Some(color_rgba),
-        ));
-        area.regions = regions;
+/// Build a [`MutatorTree`](crate::gfx_structs::tree::MutatorTree)
+/// that updates an already-registered connection tree to the
+/// current `elements` state without rebuilding the arena. Pairs
+/// with [`build_connection_tree`] — both consume
+/// [`connection_edge_layout`], so applying this mutator to a tree
+/// built from an element slice with the same
+/// [`connection_identity_sequence`] updates each glyph's variable
+/// fields in place.
+pub fn build_connection_mutator_tree(
+    elements: &[crate::mindmap::scene_builder::ConnectionElement],
+) -> crate::gfx_structs::tree::MutatorTree<GfxMutator> {
+    use crate::core::primitives::ApplyOperation;
+    use crate::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
+    use crate::gfx_structs::mutator::Mutation;
+    use crate::gfx_structs::tree::MutatorTree;
+
+    let mut mt: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::new_void(0));
+    for (idx, elem) in elements.iter().enumerate() {
+        let (edge_channel, children) = connection_edge_layout(idx, elem);
+        let edge_node = mt.arena.new_node(GfxMutator::new_void(edge_channel));
+        mt.root.append(edge_node, &mut mt.arena);
+
+        for (channel, area) in children {
+            let delta = DeltaGlyphArea::new(vec![
+                GlyphAreaField::Text(area.text),
+                GlyphAreaField::position(area.position.x.0, area.position.y.0),
+                GlyphAreaField::bounds(area.render_bounds.x.0, area.render_bounds.y.0),
+                GlyphAreaField::scale(area.scale.0),
+                GlyphAreaField::line_height(area.line_height.0),
+                GlyphAreaField::ColorFontRegions(area.regions),
+                GlyphAreaField::Outline(area.outline),
+                GlyphAreaField::Operation(ApplyOperation::Assign),
+            ]);
+            let leaf = mt.arena.new_node(GfxMutator::new(
+                Mutation::AreaDelta(Box::new(delta)),
+                channel,
+            ));
+            edge_node.append(leaf, &mut mt.arena);
+        }
     }
-    let element = GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
-    let leaf = tree.arena.new_node(element);
-    parent.append(leaf, &mut tree.arena);
+    mt
 }
 
 // =====================================================================
@@ -852,51 +920,135 @@ pub struct ConnectionLabelTree {
     pub hitboxes: HashMap<crate::mindmap::scene_cache::EdgeKey, (Vec2, Vec2)>,
 }
 
+/// Identity sequence for a slice of `ConnectionLabelElement`s — the
+/// edge-key of each labeled edge, in tree-insertion order. Two
+/// label sets share an identity iff the *set of labeled edges* and
+/// their order match. Label text, position, color, and font size
+/// can vary inside that envelope; only adding, removing, or
+/// reordering a labeled edge breaks the equality and forces a full
+/// rebuild via the dispatcher in `update_connection_label_tree`.
+pub fn connection_label_identity_sequence(
+    elements: &[crate::mindmap::scene_builder::ConnectionLabelElement],
+) -> Vec<crate::mindmap::scene_cache::EdgeKey> {
+    elements.iter().map(|e| e.edge_key.clone()).collect()
+}
+
+/// Lay out one connection-label as the
+/// `(channel, GlyphArea, hitbox_min, hitbox_max)` tuple both build
+/// paths emit. Channel is the 1-based label index, matching the
+/// ascending insertion order. Single source of truth — the
+/// initial-build path ([`build_connection_label_tree`]) and the
+/// in-place mutator path ([`build_connection_label_mutator_tree`])
+/// cannot drift.
+fn connection_label_layout(
+    channel: usize,
+    elem: &crate::mindmap::scene_builder::ConnectionLabelElement,
+) -> (usize, GlyphArea, Vec2, Vec2) {
+    let color_rgba = color::hex_to_rgba_safe(&elem.color, [0.92, 0.92, 0.92, 1.0]);
+    let pos = Vec2::new(elem.position.0, elem.position.1);
+    let bounds = Vec2::new(elem.bounds.0, elem.bounds.1);
+
+    let mut area = GlyphArea::new_with_str(
+        &elem.text,
+        elem.font_size_pt,
+        elem.font_size_pt,
+        pos,
+        bounds,
+    );
+    let cluster_count = elem.text.chars().count();
+    if cluster_count > 0 {
+        let mut regions = ColorFontRegions::new_empty();
+        regions.submit_region(ColorFontRegion::new(
+            Range::new(0, cluster_count),
+            None,
+            Some(color_rgba),
+        ));
+        area.regions = regions;
+    }
+
+    (channel, area, pos, pos + bounds)
+}
+
 /// Build a baumhard tree of every connection-label glyph from a
 /// pre-computed `ConnectionLabelElement` slice. Like the
 /// connection tree, geometry comes from `scene_builder` upstream.
+///
+/// Channels are sequential (1-based) per labeled edge so the
+/// in-place [`build_connection_label_mutator_tree`] path can target
+/// each leaf by its insertion index when the identity sequence
+/// matches.
 pub fn build_connection_label_tree(
     elements: &[crate::mindmap::scene_builder::ConnectionLabelElement],
 ) -> ConnectionLabelTree {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
     let mut hitboxes: HashMap<crate::mindmap::scene_cache::EdgeKey, (Vec2, Vec2)> =
         HashMap::new();
-    let mut id_counter: usize = 1;
+    let mut unique_id: usize = 1;
 
-    for elem in elements {
-        let color_rgba =
-            color::hex_to_rgba_safe(&elem.color, [0.92, 0.92, 0.92, 1.0]);
-        let pos = Vec2::new(elem.position.0, elem.position.1);
-        let bounds = Vec2::new(elem.bounds.0, elem.bounds.1);
-
-        let mut area = GlyphArea::new_with_str(
-            &elem.text,
-            elem.font_size_pt,
-            elem.font_size_pt,
-            pos,
-            bounds,
-        );
-        let cluster_count = elem.text.chars().count();
-        if cluster_count > 0 {
-            let mut regions = ColorFontRegions::new_empty();
-            regions.submit_region(ColorFontRegion::new(
-                Range::new(0, cluster_count),
-                None,
-                Some(color_rgba),
-            ));
-            area.regions = regions;
-        }
-
+    for (idx, elem) in elements.iter().enumerate() {
+        let (channel, area, hb_min, hb_max) = connection_label_layout(idx + 1, elem);
         let element_node =
-            GfxElement::new_area_non_indexed_with_id(area, id_counter, id_counter);
-        id_counter += 1;
+            GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
+        unique_id += 1;
         let leaf = tree.arena.new_node(element_node);
         tree.root.append(leaf, &mut tree.arena);
 
-        hitboxes.insert(elem.edge_key.clone(), (pos, pos + bounds));
+        hitboxes.insert(elem.edge_key.clone(), (hb_min, hb_max));
     }
 
     ConnectionLabelTree { tree, hitboxes }
+}
+
+/// Result of [`build_connection_label_mutator_tree`]. The `mutator`
+/// is applied to the tree returned by [`build_connection_label_tree`]
+/// via `MutatorTree::apply_to`; `hitboxes` replaces the renderer's
+/// label hitbox map (label position can move with the edge it
+/// belongs to even when the structural identity is unchanged).
+pub struct ConnectionLabelMutator {
+    pub mutator: crate::gfx_structs::tree::MutatorTree<GfxMutator>,
+    pub hitboxes: HashMap<crate::mindmap::scene_cache::EdgeKey, (Vec2, Vec2)>,
+}
+
+/// Build a [`MutatorTree`](crate::gfx_structs::tree::MutatorTree)
+/// that updates an already-registered connection-label tree to the
+/// current `elements` state without rebuilding the arena. Pairs
+/// with [`build_connection_label_tree`] — channels and insertion
+/// order match, so applying this mutator to a tree built from a
+/// label slice with the same identity sequence (per
+/// [`connection_label_identity_sequence`]) updates each label's
+/// variable fields in place.
+pub fn build_connection_label_mutator_tree(
+    elements: &[crate::mindmap::scene_builder::ConnectionLabelElement],
+) -> ConnectionLabelMutator {
+    use crate::core::primitives::ApplyOperation;
+    use crate::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
+    use crate::gfx_structs::mutator::Mutation;
+    use crate::gfx_structs::tree::MutatorTree;
+
+    let mut mt: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::new_void(0));
+    let mut hitboxes: HashMap<crate::mindmap::scene_cache::EdgeKey, (Vec2, Vec2)> =
+        HashMap::new();
+
+    for (idx, elem) in elements.iter().enumerate() {
+        let (channel, area, hb_min, hb_max) = connection_label_layout(idx + 1, elem);
+        let delta = DeltaGlyphArea::new(vec![
+            GlyphAreaField::Text(area.text),
+            GlyphAreaField::position(area.position.x.0, area.position.y.0),
+            GlyphAreaField::bounds(area.render_bounds.x.0, area.render_bounds.y.0),
+            GlyphAreaField::scale(area.scale.0),
+            GlyphAreaField::line_height(area.line_height.0),
+            GlyphAreaField::ColorFontRegions(area.regions),
+            GlyphAreaField::Outline(area.outline),
+            GlyphAreaField::Operation(ApplyOperation::Assign),
+        ]);
+        let leaf = mt
+            .arena
+            .new_node(GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), channel));
+        mt.root.append(leaf, &mut mt.arena);
+        hitboxes.insert(elem.edge_key.clone(), (hb_min, hb_max));
+    }
+
+    ConnectionLabelMutator { mutator: mt, hitboxes }
 }
 
 /// Stable channel for an [`EdgeHandleKind`]. The channel doubles as
@@ -1851,6 +2003,148 @@ mod tests {
                 assert_eq!(a_area.regions, e_area.regions);
                 assert_eq!(a_area.outline, e_area.outline);
             }
+        }
+    }
+
+    /// Connection identity sequence captures cap presence and body
+    /// glyph count per edge. A change in any of those is structural
+    /// and must drop the equality so the dispatcher in
+    /// `update_connection_tree` falls back to a full rebuild.
+    #[test]
+    fn connection_identity_sequence_changes_with_structural_shifts() {
+        use crate::mindmap::scene_builder::ConnectionElement;
+        use crate::mindmap::scene_cache::EdgeKey;
+
+        let mk = |body_count: usize,
+                  cap_start: Option<(String, (f32, f32))>,
+                  cap_end: Option<(String, (f32, f32))>,
+                  color: &str| ConnectionElement {
+            edge_key: EdgeKey::new("a", "b", "child"),
+            glyph_positions: (0..body_count).map(|i| (i as f32 * 10.0, 0.0)).collect(),
+            body_glyph: "·".into(),
+            cap_start,
+            cap_end,
+            font: None,
+            font_size_pt: 12.0,
+            color: color.into(),
+        };
+
+        let cap_start = Some(("◀".to_string(), (0.0, 0.0)));
+        let cap_end = Some(("▶".to_string(), (30.0, 0.0)));
+        let base = mk(2, cap_start.clone(), cap_end.clone(), "#ff0000");
+        let id_base = connection_identity_sequence(std::slice::from_ref(&base));
+
+        // Body count change (drag-shrinks-path): structural shift.
+        let shorter = mk(1, cap_start.clone(), cap_end.clone(), "#ff0000");
+        assert_ne!(
+            id_base,
+            connection_identity_sequence(std::slice::from_ref(&shorter))
+        );
+
+        // Cap removal: structural shift.
+        let no_cap = mk(2, None, cap_end.clone(), "#ff0000");
+        assert_ne!(
+            id_base,
+            connection_identity_sequence(std::slice::from_ref(&no_cap))
+        );
+
+        // Color change at fixed structure: identity preserved (the
+        // mutator path is sound for color-only updates like
+        // selection toggle and color preview).
+        let recolored = mk(2, cap_start, cap_end, "#00E5FF");
+        assert_eq!(
+            id_base,
+            connection_identity_sequence(std::slice::from_ref(&recolored))
+        );
+    }
+
+    /// Round-trip: `build_connection_tree(A)` + the mutator from B
+    /// reads identical to a fresh `build_connection_tree(B)` when A
+    /// and B share an identity sequence (typical for selection /
+    /// color preview / theme switches that do not move endpoints).
+    #[test]
+    fn connection_mutator_round_trip_matches_full_rebuild() {
+        use crate::core::primitives::Applicable;
+        use crate::mindmap::scene_builder::ConnectionElement;
+        use crate::mindmap::scene_cache::EdgeKey;
+
+        let mk = |color: &str| ConnectionElement {
+            edge_key: EdgeKey::new("a", "b", "child"),
+            glyph_positions: vec![(10.0, 0.0), (20.0, 0.0)],
+            body_glyph: "·".into(),
+            cap_start: Some(("◀".into(), (0.0, 0.0))),
+            cap_end: Some(("▶".into(), (30.0, 0.0))),
+            font: None,
+            font_size_pt: 12.0,
+            color: color.into(),
+        };
+        let elem_a = mk("#ff0000");
+        let elem_b = mk("#00E5FF");
+
+        let mut tree_a = build_connection_tree(std::slice::from_ref(&elem_a));
+        let mutator = build_connection_mutator_tree(std::slice::from_ref(&elem_b));
+        mutator.apply_to(&mut tree_a);
+
+        let expected = build_connection_tree(std::slice::from_ref(&elem_b));
+
+        let actual_edges: Vec<NodeId> = tree_a.root.children(&tree_a.arena).collect();
+        let expected_edges: Vec<NodeId> = expected.root.children(&expected.arena).collect();
+        assert_eq!(actual_edges.len(), expected_edges.len());
+        for (a_e, e_e) in actual_edges.iter().zip(expected_edges.iter()) {
+            let a_glyphs: Vec<NodeId> = a_e.children(&tree_a.arena).collect();
+            let e_glyphs: Vec<NodeId> = e_e.children(&expected.arena).collect();
+            assert_eq!(a_glyphs.len(), e_glyphs.len());
+            for (a, e) in a_glyphs.iter().zip(e_glyphs.iter()) {
+                let a_area = tree_a.arena.get(*a).unwrap().get().glyph_area().unwrap();
+                let e_area = expected.arena.get(*e).unwrap().get().glyph_area().unwrap();
+                assert_eq!(a_area.text, e_area.text);
+                assert_eq!(a_area.position, e_area.position);
+                assert_eq!(a_area.regions, e_area.regions);
+            }
+        }
+    }
+
+    /// Connection-label round-trip with a label-text edit (the
+    /// hot path for inline label editing in Phase 2.1): identity
+    /// is the per-edge `EdgeKey` sequence, so changing the text
+    /// alone keeps the identity stable and the in-place mutator
+    /// path runs.
+    #[test]
+    fn connection_label_mutator_round_trip_handles_text_edit() {
+        use crate::core::primitives::Applicable;
+        use crate::mindmap::scene_builder::ConnectionLabelElement;
+        use crate::mindmap::scene_cache::EdgeKey;
+
+        let mk = |text: &str| ConnectionLabelElement {
+            edge_key: EdgeKey::new("a", "b", "child"),
+            text: text.into(),
+            position: (10.0, 10.0),
+            bounds: (40.0, 16.0),
+            color: "#ffffff".into(),
+            font: None,
+            font_size_pt: 12.0,
+        };
+        let elem_a = mk("old");
+        let elem_b = mk("new label");
+        assert_eq!(
+            connection_label_identity_sequence(std::slice::from_ref(&elem_a)),
+            connection_label_identity_sequence(std::slice::from_ref(&elem_b))
+        );
+
+        let mut tree_a = build_connection_label_tree(std::slice::from_ref(&elem_a)).tree;
+        let mutator = build_connection_label_mutator_tree(std::slice::from_ref(&elem_b));
+        mutator.mutator.apply_to(&mut tree_a);
+
+        let expected = build_connection_label_tree(std::slice::from_ref(&elem_b)).tree;
+        let actual_leaves: Vec<NodeId> = tree_a.root.children(&tree_a.arena).collect();
+        let expected_leaves: Vec<NodeId> = expected.root.children(&expected.arena).collect();
+        assert_eq!(actual_leaves.len(), expected_leaves.len());
+        for (a, e) in actual_leaves.iter().zip(expected_leaves.iter()) {
+            let a_area = tree_a.arena.get(*a).unwrap().get().glyph_area().unwrap();
+            let e_area = expected.arena.get(*e).unwrap().get().glyph_area().unwrap();
+            assert_eq!(a_area.text, "new label");
+            assert_eq!(a_area.text, e_area.text);
+            assert_eq!(a_area.regions, e_area.regions);
         }
     }
 
