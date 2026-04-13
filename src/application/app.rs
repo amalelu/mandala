@@ -1624,9 +1624,7 @@ impl Application {
                                 // Labels are emitted per frame (not
                                 // cached) so their positions track the
                                 // live drag.
-                                renderer.rebuild_connection_label_buffers(
-                                    &scene.connection_label_elements,
-                                );
+                                update_connection_label_tree(&scene, &mut app_scene, &mut renderer);
                                 // Portal markers also track the live drag.
                                 update_portal_tree(
                                     doc, &offsets, &mut app_scene, &mut renderer,
@@ -1694,9 +1692,7 @@ impl Application {
                                 // Labels are rebuilt per frame so a
                                 // control-point drag keeps the label
                                 // correctly anchored to the live path.
-                                renderer.rebuild_connection_label_buffers(
-                                    &scene.connection_label_elements,
-                                );
+                                update_connection_label_tree(&scene, &mut app_scene, &mut renderer);
                                 update_portal_tree(
                                     doc,
                                     &std::collections::HashMap::new(),
@@ -1775,9 +1771,7 @@ impl Application {
                                 renderer.camera_zoom(),
                             );
                             update_connection_tree(&scene, &mut app_scene, &mut renderer);
-                            renderer.rebuild_connection_label_buffers(
-                                &scene.connection_label_elements,
-                            );
+                            update_connection_label_tree(&scene, &mut app_scene, &mut renderer);
                             update_portal_tree(
                                 doc,
                                 &HashMap::new(),
