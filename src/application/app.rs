@@ -1882,6 +1882,26 @@ impl Application {
                         }
                     }
 
+                    // Phase 4: tick any active animations. Each
+                    // tick lerps the from / to snapshots into the
+                    // model and (on completion) routes the final
+                    // state through `apply_custom_mutation` so the
+                    // standard model-sync + undo-push runs once.
+                    // Drives `rebuild_all` only when something
+                    // actually advanced — sleeping in Poll mode
+                    // when no animations are active is automatic.
+                    let animation_advanced = match document.as_mut() {
+                        Some(doc) if doc.has_active_animations() => {
+                            doc.tick_animations(now_ms() as u64, mindmap_tree.as_mut())
+                        }
+                        _ => false,
+                    };
+                    if animation_advanced {
+                        if let Some(doc) = document.as_ref() {
+                            rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
+                        }
+                    }
+
                     // Drive the render loop each frame
                     renderer.process();
                 }
@@ -5221,7 +5241,12 @@ fn handle_click(
             // `find_triggered_mutations` returned cloned CustomMutations so
             // we can iterate without holding an immutable borrow on doc.
             for cm in triggered {
-                if let Some(tree) = mindmap_tree.as_mut() {
+                if cm.timing.as_ref().map_or(false, |t| t.duration_ms > 0) {
+                    // Animated: snapshot from/to and start an
+                    // instance. The AboutToWait tick interpolates
+                    // and commits the final mutation at completion.
+                    doc.start_animation(&cm, id, now_ms() as u64);
+                } else if let Some(tree) = mindmap_tree.as_mut() {
                     doc.apply_custom_mutation(&cm, id, tree);
                 }
                 doc.apply_document_actions(&cm);
