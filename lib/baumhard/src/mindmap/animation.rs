@@ -61,7 +61,16 @@ pub struct AnimationTiming {
     pub easing: Easing,
     /// What happens when the animation reaches `t = 1`. `None`
     /// means "stop". See [`Followup`] for the chained shapes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// **Not yet wired through the tick loop.** The type exists
+    /// in-memory so the eventual dispatcher lands without a
+    /// wire-format migration, but `#[serde(skip)]` keeps the
+    /// field out of `.mindmap.json` until the tick loop reads
+    /// it. Authoring `"then": "Loop"` today would be a silent
+    /// half-feature (§4) — the map loads, the animation runs
+    /// once, and nothing ever loops. The gate lifts when
+    /// `tick_animations` gains the followup dispatch.
+    #[serde(skip)]
     pub then: Option<Followup>,
 }
 
@@ -248,16 +257,20 @@ mod tests {
         assert_eq!(lerp_vec2(from_v, to_v, 1.0), to_v);
     }
 
-    /// Round-trip through serde keeps the timing envelope
-    /// intact. Pins the wire format so a `.mindmap.json` saved
-    /// with timing fields loads back correctly.
+    /// Round-trip through serde keeps the on-the-wire timing
+    /// envelope intact. Pins the wire format so a
+    /// `.mindmap.json` saved with timing fields loads back
+    /// correctly.
     #[test]
     fn test_animation_timing_serde_round_trip() {
         let timing = AnimationTiming {
             duration_ms: 350,
             delay_ms: 100,
             easing: Easing::EaseInOut,
-            then: Some(Followup::Reverse { hold_ms: 50 }),
+            // `then` is intentionally `None` — the wire format
+            // skips `Followup` until the tick loop dispatches
+            // it (see the field's doc-comment).
+            then: None,
         };
         let json = serde_json::to_string(&timing).unwrap();
         let back: AnimationTiming = serde_json::from_str(&json).unwrap();
@@ -274,9 +287,28 @@ mod tests {
         let from_empty: AnimationTiming = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty, default_timing);
         // And the default serializes without the optional fields
-        // (zero delay_ms is skipped, no `then`).
+        // (zero delay_ms is skipped, `then` is always skipped).
         let json = serde_json::to_string(&default_timing).unwrap();
         assert!(!json.contains("delay_ms"));
         assert!(!json.contains("then"));
+    }
+
+    /// `Followup` variants are not reachable via the wire
+    /// format. Authoring `"then": "Loop"` in a `.mindmap.json`
+    /// today would be a silent half-feature (§4): the map would
+    /// load, the animation would run once, and nothing would
+    /// loop. The gate lifts when `tick_animations` gains the
+    /// followup dispatch.
+    #[test]
+    fn test_followup_is_never_deserialized() {
+        let with_followup = r#"{
+            "duration_ms": 200,
+            "then": {"Reverse": {"hold_ms": 50}}
+        }"#;
+        let parsed: AnimationTiming = serde_json::from_str(with_followup).unwrap();
+        assert!(parsed.then.is_none());
+        let loop_followup = r#"{"duration_ms": 200, "then": "Loop"}"#;
+        let parsed: AnimationTiming = serde_json::from_str(loop_followup).unwrap();
+        assert!(parsed.then.is_none());
     }
 }
