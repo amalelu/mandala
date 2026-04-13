@@ -3511,14 +3511,50 @@ fn update_border_tree_static(
     update_border_tree_with_offsets(doc, &std::collections::HashMap::new(), app_scene);
 }
 
+/// Build or in-place update the border tree under
+/// [`CanvasRole::Borders`].
+///
+/// **§B2 dispatch.** The hot path this closes: when the color
+/// picker is open, every throttled `AboutToWait` drain calls
+/// `rebuild_scene_only`, which runs this function. Pre-dispatch,
+/// that meant a fresh `Tree<GfxElement, GfxMutator>` allocation
+/// per picker-hover frame plus a full canvas-scene buffer
+/// re-shape — O(n_borders × per-glyph shape cost). With the
+/// identity-sequence dispatch below, hover takes the in-place
+/// mutator path (which walks the same per-node Void + 4 runs but
+/// only overwrites variable fields) and the arena is reused.
+///
+/// Structural identity: the sorted sequence of bordered
+/// (non-folded, `show_frame = true`) node IDs. Drag, text-edit,
+/// color-preview, and preset-swap all leave this stable. Adding
+/// / removing a framed node, folding an ancestor, or toggling
+/// `show_frame` shifts the sequence and the dispatcher takes the
+/// full rebuild.
 fn update_border_tree_with_offsets(
     doc: &MindMapDocument,
     offsets: &std::collections::HashMap<String, (f32, f32)>,
     app_scene: &mut crate::application::scene_host::AppScene,
 ) {
-    use crate::application::scene_host::CanvasRole;
-    let tree = baumhard::mindmap::tree_builder::build_border_tree(&doc.mindmap, offsets);
-    app_scene.register_canvas(CanvasRole::Borders, tree, glam::Vec2::ZERO);
+    use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
+    use baumhard::mindmap::tree_builder::{
+        border_identity_sequence, border_node_data, build_border_mutator_tree_from_nodes,
+        build_border_tree_from_nodes,
+    };
+
+    let nodes = border_node_data(&doc.mindmap, offsets);
+    let signature = hash_canvas_signature(&border_identity_sequence(&nodes));
+
+    match app_scene.canvas_dispatch(CanvasRole::Borders, signature) {
+        CanvasDispatch::InPlaceMutator => {
+            let mutator = build_border_mutator_tree_from_nodes(&nodes);
+            app_scene.apply_canvas_mutator(CanvasRole::Borders, &mutator);
+        }
+        CanvasDispatch::FullRebuild => {
+            let tree = build_border_tree_from_nodes(&nodes);
+            app_scene.register_canvas(CanvasRole::Borders, tree, glam::Vec2::ZERO);
+            app_scene.set_canvas_signature(CanvasRole::Borders, signature);
+        }
+    }
 }
 
 /// Build or in-place update the portal tree under
