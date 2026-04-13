@@ -61,7 +61,7 @@ pub const HUE_SLOT_COUNT: usize = 24;
 // strictly ascending in tree-insertion order, otherwise the walker
 // breaks out of its alignment loop.
 //
-// Layout-wise: title → hue ring → hint → sat bar → val bar → ॐ
+// Layout-wise: title → hue ring → hint → sat bar → val bar → ࿕
 // preview → hex readout → chip row.
 
 pub const PICKER_CHANNEL_TITLE: usize = 1;
@@ -74,13 +74,13 @@ pub const PICKER_CHANNEL_HEX: usize = 600;
 
 /// Number of cells on each crosshair bar. Odd so the center cell sits
 /// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 10 is the
-/// wheel center where ॐ lives — it's counted in the HSV quantization
+/// wheel center where ࿕ lives — it's counted in the HSV quantization
 /// but not rendered as a bar cell.
 pub const SAT_CELL_COUNT: usize = 21;
 pub const VAL_CELL_COUNT: usize = 21;
 
 /// The center cell index of each 21-cell crosshair bar — the wheel
-/// center where ॐ sits. Skipped during bar rendering so the ॐ glyph
+/// center where ࿕ sits. Skipped during bar rendering so the ࿕ glyph
 /// shows through cleanly; still counted in sat/val quantization.
 pub const CROSSHAIR_CENTER_CELL: usize = 10;
 
@@ -153,7 +153,7 @@ pub fn arm_right_glyphs() -> &'static [&'static str] {
     CACHE.get_or_init(|| leak_glyphs(&load_spec().arm_right_glyphs))
 }
 
-/// Central preview glyph — doubles as the commit button on the ॐ.
+/// Central preview glyph — doubles as the commit button on the ࿕.
 pub fn center_preview_glyph() -> &'static str {
     static CACHE: OnceLock<&'static str> = OnceLock::new();
     CACHE.get_or_init(|| {
@@ -333,13 +333,13 @@ pub fn current_hsv_at(
 /// Which of the two picker modes is active.
 ///
 /// - **Contextual**: summoned with a specific target (e.g.
-///   `color pick edge`, `color bg` on a node). Clicking the center ॐ
+///   `color pick edge`, `color bg` on a node). Clicking the center ࿕
 ///   glyph commits the current HSV to that bound target and closes
 ///   the wheel. Esc cancels (restores the original color) and closes.
 ///   A click outside the backdrop also cancels. The pre-existing
 ///   single-target picker flow lives here.
 /// - **Standalone**: summoned as a persistent palette
-///   (`color picker on`). No target bound at open time. Clicking ॐ
+///   (`color picker on`). No target bound at open time. Clicking ࿕
 ///   applies the current HSV to every colorable item in the
 ///   document's current selection (supports multi-select), then
 ///   stays open. Esc and outside-clicks are ignored. The only way to
@@ -567,7 +567,7 @@ pub struct ColorPickerOverlayGeometry {
     /// `&'static str` so the picker render path doesn't allocate a
     /// fresh `String` per rebuild. Empty string `""` signals
     /// Standalone mode: the builder renders a generic "palette"
-    /// title instead of "ॐ {label} color".
+    /// title instead of "࿕ {label} color".
     pub target_label: &'static str,
     pub hue_deg: f32,
     pub sat: f32,
@@ -650,7 +650,7 @@ pub struct ColorPickerLayout {
     /// 21 val-bar cell centers, top → bottom (top = brightest). Cell
     /// 10 is the wheel center — same skip rule as sat.
     pub val_cell_positions: [(f32, f32); VAL_CELL_COUNT],
-    /// Center preview glyph anchor (the ॐ). Top-left corner of the
+    /// Center preview glyph anchor (the ࿕). Top-left corner of the
     /// glyph box, computed so the glyph visually centers on the wheel
     /// center given `preview_size`.
     pub preview_pos: (f32, f32),
@@ -818,7 +818,7 @@ pub fn compute_color_picker_layout(
     }
 
     // ---- Crosshair sat/val bars (21 cells each, center cell is the
-    // wheel center and rendered as ॐ not as a bar cell) ----
+    // wheel center and rendered as ࿕ not as a bar cell) ----
     // Bars span `20 * cell_advance` across the diameter of the inner
     // cross region. If the constrained ring forced the inner extent
     // smaller than `CROSSHAIR_CENTER_CELL * cell_advance`, shrink the
@@ -841,19 +841,17 @@ pub fn compute_color_picker_layout(
         val_cell_positions[i] = (center.0, center.1 - bar_span * 0.5 + i as f32 * step);
     }
 
-    // Center preview ॐ at the bar intersection. The glyph size is
-    // sourced from the spec (`preview_size_scale`) so reskins can
-    // tune the focal-point ratio. The top-left of its box is offset
-    // by half the preview size in each direction so the visible
-    // glyph sits on the geometric wheel center. cosmic-text's
-    // effective glyph width is ~0.6 of its font size; we use 0.4
-    // horizontally because the ॐ glyph (like the earlier ✦) has
-    // whitespace around it that the box includes but the visible
-    // mark does not.
+    // Center preview ࿕ at the bar intersection. The glyph is the
+    // Tibetan svasti (U+0FD5) — a roughly-square ideograph whose ink
+    // sits centered in its em box, so the canonical half-size offset
+    // in each direction lands the visible mark on the geometric
+    // wheel center. Earlier revisions used asymmetric factors (0.4,
+    // 0.65) calibrated for ॐ, whose top-heavy anusvara biased its
+    // visible center off the box center; those don't apply here.
     let preview_size = font_size * g.preview_size_scale;
     let preview_pos = (
-        center.0 - preview_size * 0.4,
-        center.1 - preview_size * 0.65,
+        center.0 - preview_size * 0.5,
+        center.1 - preview_size * 0.5,
     );
 
     // ---- Backdrop, title, hint ----
@@ -958,7 +956,7 @@ pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit 
 
     // Sat (horizontal) bar — only consider when cursor is vertically
     // close to the bar line. Skip the center cell so a click at the
-    // wheel center resolves to `Commit` (the ॐ button) below.
+    // wheel center resolves to `Commit` (the ࿕ button) below.
     if (y - layout.center.1).abs() <= cell_half {
         for (i, (cx, _)) in layout.sat_cell_positions.iter().enumerate() {
             if i == CROSSHAIR_CENTER_CELL {
@@ -993,9 +991,9 @@ pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit 
         }
     }
 
-    // Center ॐ — the commit button. Circular hit of radius
+    // Center ࿕ — the commit button. Circular hit of radius
     // `preview_size * 0.45` (slightly smaller than the glyph box so
-    // users who click in the padding between the ॐ and the crosshair
+    // users who click in the padding between the ࿕ and the crosshair
     // arm glyphs don't accidentally commit).
     let commit_radius = layout.preview_size * 0.45;
     let dx = x - layout.center.0;
@@ -1129,7 +1127,7 @@ mod tests {
         assert_eq!(hit_test_picker(&layout, 5000.0, 5000.0), PickerHit::Outside);
     }
 
-    /// A click at the exact wheel center — where the central ॐ glyph
+    /// A click at the exact wheel center — where the central ࿕ glyph
     /// lives — must resolve to `Commit`. This is the gesture that
     /// commits the current HSV (Contextual) or applies it to the
     /// document selection (Standalone). The center used to be
@@ -1155,7 +1153,7 @@ mod tests {
         let (bl, bt, _bw, _bh) = layout.backdrop;
         // 4 px inside the backdrop's top-left corner — far from the
         // ring (which is centered on the wheel), the chips (bottom),
-        // the ॐ (center), and the crosshair arms (central cross).
+        // the ࿕ (center), and the crosshair arms (central cross).
         let x = bl + 4.0;
         let y = bt + 4.0;
         assert_eq!(hit_test_picker(&layout, x, y), PickerHit::DragAnchor);
@@ -1270,19 +1268,19 @@ mod tests {
     }
 
     /// Preview glyph must center on the geometric wheel center given
-    /// the layout-emitted preview_size. The offset factors (0.4 for
-    /// x, 0.65 for y) account for the center glyph having built-in
-    /// whitespace around its visible mark — the box covers more than
-    /// the glyph does, so the glyph's visible center lands off-box-
-    /// center by a script-specific bias. Regression guard for the
-    /// "preview was anchored low-right of center" bug.
+    /// the layout-emitted `preview_size`. The ࿕ svasti is a Tibetan
+    /// ideograph whose ink sits centered in the em box, so the
+    /// canonical half-size offset `(0.5, 0.5)` is the right anchor
+    /// on both axes — any future preview glyph with a skewed visible
+    /// center needs a commensurate tweak here. Regression guard for
+    /// the "preview was anchored off-center" bug.
     #[test]
     fn layout_preview_centered_on_wheel_center() {
         let g = sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
         let (px, py) = layout.preview_pos;
-        let cx = px + layout.preview_size * 0.4;
-        let cy = py + layout.preview_size * 0.65;
+        let cx = px + layout.preview_size * 0.5;
+        let cy = py + layout.preview_size * 0.5;
         // The preview's visible center should be within ~1 px of the
         // wheel center on each axis.
         assert!((cx - layout.center.0).abs() < 1.0,
@@ -1405,7 +1403,7 @@ mod tests {
     /// Each crosshair arm must render exactly 10 cells. The bars
     /// have SAT_CELL_COUNT / VAL_CELL_COUNT = 21 cells, cell
     /// CROSSHAIR_CENTER_CELL = 10 is the shared wheel-center slot
-    /// (ॐ overlay), and each arm covers 10 non-center cells —
+    /// (࿕ overlay), and each arm covers 10 non-center cells —
     /// totaling 40 rendered crosshair glyphs. Also asserts that the
     /// center cells of both bars sit exactly on the wheel center.
     #[test]

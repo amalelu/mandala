@@ -22,10 +22,10 @@ use crate::gfx_structs::area::{
     DeltaGlyphArea, GlyphArea, GlyphAreaField, OutlineStyle,
 };
 
-/// A halo style suitable for "add a 3 px black halo at 8 samples"
-/// — the picker's default. Reused across the outline tests.
+/// A halo style suitable for "add a 3 px black outline" — the
+/// picker's default. Reused across the outline tests.
 fn sample_outline() -> OutlineStyle {
-    OutlineStyle { color: [0, 0, 0, 255], px: 3.0, samples: 8 }
+    OutlineStyle { color: [0, 0, 0, 255], px: 3.0 }
 }
 
 /// Newly-constructed `GlyphArea`s default to no halo. A consumer
@@ -165,13 +165,45 @@ pub fn do_outline_field_add_picks_rhs() {
     let lhs = GlyphAreaField::Outline(Some(OutlineStyle {
         color: [0, 0, 0, 255],
         px: 1.0,
-        samples: 4,
     }));
     let rhs = GlyphAreaField::Outline(Some(OutlineStyle {
         color: [255, 255, 255, 255],
         px: 5.0,
-        samples: 8,
     }));
     let combined = lhs + rhs.clone();
     assert_eq!(combined, rhs, "Add on Outline should pick rhs");
+}
+
+/// Canonical stamp pattern: `offsets()` yields 8 entries, each at
+/// distance `px` from the origin (cardinals + diagonals). Pins the
+/// outline technique that the renderer's walker depends on — a
+/// future change that drops to 4 samples or moves to an uneven
+/// radius must be a conscious call, not an accident.
+#[test]
+pub fn test_outline_offsets_canonical_8_stamp() {
+    do_outline_offsets_canonical_8_stamp();
+}
+
+pub fn do_outline_offsets_canonical_8_stamp() {
+    let style = OutlineStyle { color: [0, 0, 0, 255], px: 3.0 };
+    let offsets: Vec<(f32, f32)> = style.offsets().collect();
+    assert_eq!(offsets.len(), 8, "canonical pattern is 8 stamps");
+    for (dx, dy) in &offsets {
+        let r = (dx * dx + dy * dy).sqrt();
+        assert!(
+            (r - 3.0).abs() < 1e-4,
+            "stamp at ({dx}, {dy}) has radius {r}, expected 3.0"
+        );
+    }
+    // All stamps distinct — no duplicates would mean a wasted
+    // cosmic-text shape.
+    for i in 0..offsets.len() {
+        for j in (i + 1)..offsets.len() {
+            assert!(
+                (offsets[i].0 - offsets[j].0).abs() > 1e-4
+                    || (offsets[i].1 - offsets[j].1).abs() > 1e-4,
+                "stamps {i} and {j} are duplicates"
+            );
+        }
+    }
 }
