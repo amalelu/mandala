@@ -2351,6 +2351,7 @@ fn handle_console_key(
         count_grapheme_clusters, delete_front_unicode, delete_grapheme_at,
         find_byte_index_of_grapheme, insert_str_at_grapheme,
     };
+    let _ = shift_pressed; // Shift+Tab no longer cycles backward; popup navigation is Up/Down.
 
     let name = match key_name.as_deref() {
         Some(n) => n,
@@ -2363,13 +2364,12 @@ fn handle_console_key(
             CONSOLE_KEY_CTRL_C => {
                 // Clear input without closing — same as the shell
                 // muscle-memory: Ctrl+C abandons the current line.
-                if let ConsoleState::Open { input, cursor, completions, completion_idx, history_idx, .. } = console_state {
+                if let ConsoleState::Open { input, cursor, history_idx, .. } = console_state {
                     input.clear();
                     *cursor = 0;
-                    completions.clear();
-                    *completion_idx = None;
                     *history_idx = None;
                 }
+                recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
@@ -2396,12 +2396,11 @@ fn handle_console_key(
             CONSOLE_KEY_CTRL_U => {
                 // Kill to start of line — drop the first `cursor`
                 // grapheme clusters via `delete_front_unicode`.
-                if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+                if let ConsoleState::Open { input, cursor, .. } = console_state {
                     delete_front_unicode(input, *cursor);
                     *cursor = 0;
-                    completions.clear();
-                    *completion_idx = None;
                 }
+                recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
@@ -2412,7 +2411,7 @@ fn handle_console_key(
                 // Walk back through grapheme clusters, first skipping
                 // trailing whitespace, then the word — everything is
                 // kept grapheme-indexed.
-                if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+                if let ConsoleState::Open { input, cursor, .. } = console_state {
                     let end_g = *cursor;
                     // Collect graphemes up to `end_g` so we can walk
                     // them backwards without re-parsing.
@@ -2431,16 +2430,12 @@ fn handle_console_key(
                     {
                         start_g -= 1;
                     }
-                    // Drop `end_g - start_g` graphemes starting at
-                    // `start_g` by deleting them one at a time from
-                    // the back forward.
                     for _ in 0..(end_g - start_g) {
                         delete_grapheme_at(input, start_g);
                     }
                     *cursor = start_g;
-                    completions.clear();
-                    *completion_idx = None;
                 }
+                recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
@@ -2451,9 +2446,28 @@ fn handle_console_key(
     }
     match name {
         CONSOLE_KEY_ESCAPE => {
-            save_console_history(console_history);
-            *console_state = ConsoleState::Closed;
-            renderer.rebuild_console_overlay_buffers(None);
+            // Two-tier Esc: if the completion popup is open, first
+            // press dismisses it; second press (with no popup)
+            // closes the console entirely. Matches the
+            // "temporary-UI-first" muscle memory from vim and
+            // browser address bars.
+            let had_popup = matches!(
+                console_state,
+                ConsoleState::Open { completions, .. } if !completions.is_empty()
+            );
+            if had_popup {
+                if let ConsoleState::Open { completions, completion_idx, .. } = console_state {
+                    completions.clear();
+                    *completion_idx = None;
+                }
+                if let Some(doc) = document.as_ref() {
+                    rebuild_console_overlay(console_state, doc, renderer, keybinds);
+                }
+            } else {
+                save_console_history(console_history);
+                *console_state = ConsoleState::Closed;
+                renderer.rebuild_console_overlay_buffers(None);
+            }
         }
         CONSOLE_KEY_ENTER => {
             // Snapshot input, reset state, then parse + execute.
@@ -2516,80 +2530,63 @@ fn handle_console_key(
             }
         }
         CONSOLE_KEY_TAB => {
-            // Cycle completions. First Tab: compute + select first.
-            // Subsequent Tabs: advance (or reverse on Shift+Tab).
-            // The completion engine takes a byte cursor; translate
-            // from grapheme index via `find_byte_index_of_grapheme`.
-            let (has_completions, advance) = match console_state {
-                ConsoleState::Open { completions, completion_idx, input, cursor, .. } => {
-                    if completions.is_empty() {
-                        if let Some(doc) = document.as_ref() {
-                            let byte_cursor = find_byte_index_of_grapheme(input, *cursor)
-                                .unwrap_or(input.len());
-                            let ctx = ConsoleContext::from_document(doc);
-                            let new = complete_console(input, byte_cursor, &ctx);
-                            *completions = new
-                                .into_iter()
-                                .map(|c| crate::application::console::completion::Completion {
-                                    text: c.text,
-                                    display: c.display,
-                                    hint: c.hint,
-                                })
-                                .collect();
-                            *completion_idx = if completions.is_empty() { None } else { Some(0) };
-                        }
-                        (false, 0i32)
-                    } else {
-                        (true, if shift_pressed { -1 } else { 1 })
-                    }
-                }
-                _ => (false, 0),
-            };
-            if has_completions {
-                if let ConsoleState::Open { completions, completion_idx, .. } = console_state {
-                    let len = completions.len() as i32;
-                    let cur = completion_idx.map(|i| i as i32).unwrap_or(-1);
-                    let next = ((cur + advance).rem_euclid(len)) as usize;
-                    *completion_idx = Some(next);
-                }
-            }
+            // Tab accepts the highlighted completion (or index 0 if
+            // somehow no row is highlighted). The popup is live —
+            // it's already populated by the per-keystroke recompute
+            // that the character-input arms run below, so Tab has
+            // no "first-press compute" branch anymore.
+            accept_console_completion(console_state);
+            recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         CONSOLE_KEY_ARROW_UP | CONSOLE_KEY_UP => {
-            if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
-                if !history.is_empty() {
-                    let next = match history_idx {
-                        None => history.len() - 1,
-                        Some(0) => 0,
-                        Some(i) => *i - 1,
-                    };
-                    *history_idx = Some(next);
-                    *input = history[next].clone();
-                    *cursor = count_grapheme_clusters(input);
+            // If the popup is open, Up moves the selection toward
+            // the top of the list; otherwise it walks history
+            // backwards.
+            let moved_in_popup = nav_popup(console_state, -1);
+            if !moved_in_popup {
+                if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
+                    if !history.is_empty() {
+                        let next = match history_idx {
+                            None => history.len() - 1,
+                            Some(0) => 0,
+                            Some(i) => *i - 1,
+                        };
+                        *history_idx = Some(next);
+                        *input = history[next].clone();
+                        *cursor = count_grapheme_clusters(input);
+                    }
                 }
+                recompute_console_completions(console_state, document.as_ref());
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         CONSOLE_KEY_ARROW_DOWN | CONSOLE_KEY_DOWN => {
-            if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
-                match history_idx {
-                    Some(i) if *i + 1 < history.len() => {
-                        let next = *i + 1;
-                        *history_idx = Some(next);
-                        *input = history[next].clone();
-                        *cursor = count_grapheme_clusters(input);
+            // Down moves the selection toward the prompt (the row
+            // closest to the input line). Same branch logic as Up.
+            let moved_in_popup = nav_popup(console_state, 1);
+            if !moved_in_popup {
+                if let ConsoleState::Open { input, cursor, history, history_idx, .. } = console_state {
+                    match history_idx {
+                        Some(i) if *i + 1 < history.len() => {
+                            let next = *i + 1;
+                            *history_idx = Some(next);
+                            *input = history[next].clone();
+                            *cursor = count_grapheme_clusters(input);
+                        }
+                        Some(_) => {
+                            *history_idx = None;
+                            input.clear();
+                            *cursor = 0;
+                        }
+                        None => {}
                     }
-                    Some(_) => {
-                        *history_idx = None;
-                        input.clear();
-                        *cursor = 0;
-                    }
-                    None => {}
                 }
+                recompute_console_completions(console_state, document.as_ref());
             }
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
@@ -2633,26 +2630,24 @@ fn handle_console_key(
             }
         }
         CONSOLE_KEY_BACKSPACE => {
-            if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+            if let ConsoleState::Open { input, cursor, .. } = console_state {
                 if *cursor > 0 {
                     *cursor -= 1;
                     delete_grapheme_at(input, *cursor);
-                    completions.clear();
-                    *completion_idx = None;
                 }
             }
+            recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         CONSOLE_KEY_DELETE => {
-            if let ConsoleState::Open { input, cursor, completions, completion_idx, .. } = console_state {
+            if let ConsoleState::Open { input, cursor, .. } = console_state {
                 if *cursor < count_grapheme_clusters(input) {
                     delete_grapheme_at(input, *cursor);
-                    completions.clear();
-                    *completion_idx = None;
                 }
             }
+            recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
@@ -2662,42 +2657,27 @@ fn handle_console_key(
             // rather than a `Key::Character(" ")`, so the `_` arm below
             // (which only handles `Key::Character`) would drop it. Insert
             // a literal space here instead.
-            if let ConsoleState::Open {
-                input,
-                cursor,
-                completions,
-                completion_idx,
-                history_idx,
-                ..
-            } = console_state
-            {
+            if let ConsoleState::Open { input, cursor, history_idx, .. } = console_state {
                 insert_str_at_grapheme(input, *cursor, " ");
                 *cursor += 1;
-                completions.clear();
-                *completion_idx = None;
                 *history_idx = None;
             }
+            recompute_console_completions(console_state, document.as_ref());
             if let Some(doc) = document.as_ref() {
                 rebuild_console_overlay(console_state, doc, renderer, keybinds);
             }
         }
         _ => {
             // Character input: insert at cursor, one grapheme at a
-            // time. Filter control chars to match
-            // `handle_text_edit_key` at app.rs:3386 — dead keys / IME
-            // can occasionally ship control payloads via
+            // time. Filter control chars — dead keys / IME can
+            // occasionally ship control payloads via
             // `Key::Character` and those must not land in the input
             // buffer as literal glyphs. Inserts go through
             // `insert_str_at_grapheme` so the cursor stays a
             // grapheme index.
             if let Key::Character(c) = logical_key {
                 if let ConsoleState::Open {
-                    input,
-                    cursor,
-                    completions,
-                    completion_idx,
-                    history_idx,
-                    ..
+                    input, cursor, history_idx, ..
                 } = console_state
                 {
                     for ch in c.as_str().chars() {
@@ -2709,15 +2689,157 @@ fn handle_console_key(
                         insert_str_at_grapheme(input, *cursor, encoded);
                         *cursor += 1;
                     }
-                    completions.clear();
-                    *completion_idx = None;
                     *history_idx = None;
                 }
+                recompute_console_completions(console_state, document.as_ref());
                 if let Some(doc) = document.as_ref() {
                     rebuild_console_overlay(console_state, doc, renderer, keybinds);
                 }
             }
         }
+    }
+}
+
+/// Re-run the completion engine against the current input and
+/// cursor, populating `completions` and defaulting `completion_idx`
+/// to the bottom row (row closest to the prompt — which is what
+/// Down-then-Tab muscle memory expects to land on first).
+#[cfg(not(target_arch = "wasm32"))]
+fn recompute_console_completions(
+    console_state: &mut ConsoleState,
+    document: Option<&MindMapDocument>,
+) {
+    use baumhard::util::grapheme_chad::find_byte_index_of_grapheme;
+    let Some(doc) = document else { return };
+    if let ConsoleState::Open {
+        input,
+        cursor,
+        completions,
+        completion_idx,
+        ..
+    } = console_state
+    {
+        let byte_cursor = find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
+        let ctx = ConsoleContext::from_document(doc);
+        let new = complete_console(input, byte_cursor, &ctx);
+        *completions = new
+            .into_iter()
+            .map(|c| crate::application::console::completion::Completion {
+                text: c.text,
+                display: c.display,
+                hint: c.hint,
+            })
+            .collect();
+        // Default highlight: the last row — the one closest to the
+        // prompt line, which reads as "most likely to accept next."
+        *completion_idx = if completions.is_empty() {
+            None
+        } else {
+            Some(completions.len() - 1)
+        };
+    }
+}
+
+/// Move the completion highlight by `step` (-1 for Up, +1 for Down).
+/// Returns `true` if a popup was present and the move was consumed;
+/// `false` when there's no popup, letting the caller fall through
+/// to history navigation.
+#[cfg(not(target_arch = "wasm32"))]
+fn nav_popup(console_state: &mut ConsoleState, step: i32) -> bool {
+    if let ConsoleState::Open { completions, completion_idx, .. } = console_state {
+        if completions.is_empty() {
+            return false;
+        }
+        let len = completions.len() as i32;
+        let cur = completion_idx.map(|i| i as i32).unwrap_or(-1);
+        let next = ((cur + step).rem_euclid(len)) as usize;
+        *completion_idx = Some(next);
+        return true;
+    }
+    false
+}
+
+/// Replace the current token under the cursor with the highlighted
+/// completion's `text`, and advance the cursor past the replacement.
+/// A trailing space is appended when the replacement is a complete
+/// positional or command-name slot; when the replacement is a
+/// kv-key (ending in `=`) no space is added so the user can keep
+/// typing the value. No-op if no popup is present.
+#[cfg(not(target_arch = "wasm32"))]
+fn accept_console_completion(console_state: &mut ConsoleState) {
+    use baumhard::util::grapheme_chad::{count_grapheme_clusters, find_byte_index_of_grapheme};
+    use unicode_segmentation::UnicodeSegmentation;
+    let ConsoleState::Open {
+        input,
+        cursor,
+        completions,
+        completion_idx,
+        ..
+    } = console_state
+    else {
+        return;
+    };
+    if completions.is_empty() {
+        return;
+    }
+    let idx = completion_idx.unwrap_or(completions.len() - 1);
+    let Some(cand) = completions.get(idx).cloned() else {
+        return;
+    };
+
+    // Find the start of the token under the cursor: walk back from
+    // the cursor position past non-whitespace grapheme clusters,
+    // treating `key=value` as one token (so a kv-value completion
+    // replaces only the value portion).
+    let cursor_byte = find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
+    let before: Vec<&str> = input[..cursor_byte].graphemes(true).collect();
+    let mut start_g = before.len();
+    while start_g > 0
+        && !before[start_g - 1].chars().all(|c| c.is_whitespace())
+    {
+        start_g -= 1;
+    }
+    // If the token contains an `=`, and we're completing a kv-value,
+    // the replacement starts *after* the `=`.
+    let token: String = before[start_g..].concat();
+    let replace_from = if let Some(eq_pos_in_token) = token.find('=') {
+        if eq_pos_in_token > 0 {
+            // start_g counts graphemes; the `=` is a single
+            // grapheme, so we can walk the slice directly.
+            let graph_before_eq = token[..eq_pos_in_token].graphemes(true).count();
+            start_g + graph_before_eq + 1
+        } else {
+            start_g
+        }
+    } else {
+        start_g
+    };
+
+    // Delete graphemes from replace_from..cursor, then insert the
+    // candidate text at replace_from.
+    let replace_from_byte =
+        find_byte_index_of_grapheme(input, replace_from).unwrap_or(input.len());
+    input.replace_range(replace_from_byte..cursor_byte, &cand.text);
+    *cursor = replace_from + count_grapheme_clusters(&cand.text);
+
+    // Append a trailing space unless the completion is a kv-key
+    // (ends in `=`) — the user will want to keep typing the value.
+    if !cand.text.ends_with('=') {
+        let cursor_byte_after =
+            find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
+        // Only add a space if the next char isn't already whitespace
+        // or end-of-string — don't double-space.
+        let next_is_ws = input[cursor_byte_after..]
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(true);
+        if !next_is_ws {
+            input.insert_str(cursor_byte_after, " ");
+        } else if cursor_byte_after == input.len() {
+            input.push(' ');
+        }
+        *cursor += 1;
     }
 }
 
