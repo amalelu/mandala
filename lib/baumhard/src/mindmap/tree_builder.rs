@@ -333,6 +333,447 @@ fn append_border_sub_tree(
     *id_counter += 1;
 }
 
+// =====================================================================
+// Portal tree builder
+//
+// Emits one baumhard `Tree<GfxElement, GfxMutator>` containing one
+// `GlyphArea` per (portal-pair × endpoint). Mirrors the legacy
+// `scene_builder::PortalElement` emission rule: each `PortalPair`
+// produces two markers, one floating above each endpoint node's
+// top-right corner.
+// =====================================================================
+
+/// Cyan highlight color for selected portals — kept in sync with
+/// `scene_builder::SELECTED_PORTAL_COLOR_HEX`. Hardcoded as a
+/// hex literal here too rather than re-exporting because the
+/// scene_builder constant is private and the duplication is one
+/// scalar.
+const SELECTED_PORTAL_COLOR_HEX: &str = "#00E5FF";
+
+/// Identifier for the currently selected portal pair, used to
+/// route the cyan highlight color to the right two markers.
+/// Tuple is `(label, endpoint_a, endpoint_b)` matching
+/// [`crate::mindmap::scene_cache::PortalRefKey`]'s ordering.
+pub type SelectedPortalRef<'a> = (&'a str, &'a str, &'a str);
+
+/// Optional live preview of one portal pair's color, mirroring
+/// `scene_builder::PortalColorPreview`. Wins over selection on
+/// the previewed pair so the live HSV feedback is visible on
+/// both markers.
+#[derive(Debug, Clone, Copy)]
+pub struct PortalColorPreviewRef<'a> {
+    pub label: &'a str,
+    pub endpoint_a: &'a str,
+    pub endpoint_b: &'a str,
+    pub color: &'a str,
+}
+
+/// Result of [`build_portal_tree`]. Bundles the tree with the
+/// AABB-per-marker map the legacy `hit_test_portal` path needs
+/// while it's still running. Session 5 wires hit-testing
+/// through `Scene::component_at` and this auxiliary map goes
+/// away.
+pub struct PortalTree {
+    pub tree: Tree<GfxElement, GfxMutator>,
+    /// `((label, endpoint_a, endpoint_b), endpoint_node_id) → AABB`.
+    pub hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)>,
+}
+
+/// Build a baumhard tree of every visible portal marker.
+///
+/// Tree shape:
+///
+/// ```text
+/// Void (root)
+/// ├── Void (per portal pair — channel = id_counter)
+/// │   ├── GlyphArea (endpoint A marker, channel = 1)
+/// │   └── GlyphArea (endpoint B marker, channel = 2)
+/// ├── Void (next pair) ...
+/// ```
+///
+/// Pairs are emitted in `MindMap.portals` order (which is a
+/// `Vec`, deterministic). Markers attached to folded nodes are
+/// skipped, mirroring `scene_builder::build_scene`.
+///
+/// # Costs
+///
+/// O(visible portal-pairs × 2). Allocates one tree arena plus
+/// the auxiliary `hitboxes` HashMap. Color resolution uses
+/// `color::resolve_var` for `var(--name)` references.
+pub fn build_portal_tree(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+    selected_portal: Option<SelectedPortalRef>,
+    color_preview: Option<PortalColorPreviewRef>,
+) -> PortalTree {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)> =
+        HashMap::new();
+    let vars = &map.canvas.theme_variables;
+    let mut id_counter: usize = 1;
+
+    for portal in &map.portals {
+        let Some(node_a) = map.nodes.get(&portal.endpoint_a) else {
+            continue;
+        };
+        let Some(node_b) = map.nodes.get(&portal.endpoint_b) else {
+            continue;
+        };
+        if map.is_hidden_by_fold(node_a) || map.is_hidden_by_fold(node_b) {
+            continue;
+        }
+
+        let is_selected = selected_portal.map_or(false, |(l, a, b)| {
+            l == portal.label && a == portal.endpoint_a && b == portal.endpoint_b
+        });
+        let preview_for_this_portal: Option<&str> = color_preview.and_then(|p| {
+            if p.label == portal.label
+                && p.endpoint_a == portal.endpoint_a
+                && p.endpoint_b == portal.endpoint_b
+            {
+                Some(p.color)
+            } else {
+                None
+            }
+        });
+        let raw_color: &str = if let Some(p) = preview_for_this_portal {
+            p
+        } else if is_selected {
+            SELECTED_PORTAL_COLOR_HEX
+        } else {
+            portal.color.as_str()
+        };
+        let color_hex = color::resolve_var(raw_color, vars);
+        let color_rgba =
+            color::hex_to_rgba_safe(color_hex, [0.92, 0.92, 0.92, 1.0]);
+
+        let pair_channel = id_counter;
+        let pair_root = tree.arena.new_node(GfxElement::new_void_with_id(
+            pair_channel,
+            pair_channel,
+        ));
+        tree.root.append(pair_root, &mut tree.arena);
+        id_counter += 1;
+
+        let key_tuple = (
+            portal.label.clone(),
+            portal.endpoint_a.clone(),
+            portal.endpoint_b.clone(),
+        );
+
+        for (slot, endpoint) in [(1usize, node_a), (2usize, node_b)] {
+            let (ox, oy) = offsets.get(&endpoint.id).copied().unwrap_or((0.0, 0.0));
+            let node_x = endpoint.position.x as f32 + ox;
+            let node_y = endpoint.position.y as f32 + oy;
+            let node_w = endpoint.size.width as f32;
+
+            let bounds_w = portal.font_size_pt * 1.4;
+            let bounds_h = portal.font_size_pt * 1.4;
+            let top_left = Vec2::new(
+                node_x + node_w - bounds_w * 0.9,
+                node_y - bounds_h - 8.0,
+            );
+
+            let mut area = GlyphArea::new_with_str(
+                &portal.glyph,
+                portal.font_size_pt,
+                portal.font_size_pt,
+                top_left,
+                Vec2::new(bounds_w, bounds_h),
+            );
+            let cluster_count = portal.glyph.chars().count();
+            if cluster_count > 0 {
+                let mut regions = ColorFontRegions::new_empty();
+                regions.submit_region(ColorFontRegion::new(
+                    Range::new(0, cluster_count),
+                    None,
+                    Some(color_rgba),
+                ));
+                area.regions = regions;
+            }
+
+            let element =
+                GfxElement::new_area_non_indexed_with_id(area, slot, id_counter);
+            id_counter += 1;
+            let leaf = tree.arena.new_node(element);
+            pair_root.append(leaf, &mut tree.arena);
+
+            let max = top_left + Vec2::new(bounds_w, bounds_h);
+            hitboxes.insert(
+                (key_tuple.clone(), endpoint.id.clone()),
+                (top_left, max),
+            );
+        }
+    }
+
+    PortalTree { tree, hitboxes }
+}
+
+// =====================================================================
+// Connection tree builder
+//
+// Converts a `&[ConnectionElement]` (the flat-scene representation
+// `scene_builder::build_scene*` already produces) into a baumhard
+// `Tree<GfxElement, GfxMutator>`. Each edge becomes one Void parent
+// with one GlyphArea per glyph along its path (caps included).
+//
+// This deliberately does NOT recompute the geometry. The
+// scene_builder still owns bezier sampling, theme variable
+// resolution, selection / preview color routing, and the drag cache
+// (`SceneConnectionCache`). The tree builder is a structural
+// re-shape from the flat list to the tree form so the canvas-scene
+// renderer can consume connections through the same
+// `walk_tree_into_buffers` pipeline as borders and portals.
+// =====================================================================
+
+/// Build a baumhard tree of connection glyphs from a slice of
+/// pre-computed `ConnectionElement`s.
+///
+/// Tree shape per visible edge:
+///
+/// ```text
+/// Void (per edge — channel = id_counter)
+/// ├── GlyphArea (cap_start, channel = 1)        // optional
+/// ├── GlyphArea (body glyph @ position 0, ch=2)
+/// ├── GlyphArea (body glyph @ position 1, ch=3)
+/// │   ...
+/// └── GlyphArea (cap_end, channel = N)          // optional
+/// ```
+///
+/// Each GlyphArea is sized `(font_size, font_size)` and centred on
+/// the connection-element's reported glyph position via the same
+/// `(half_glyph, half_height)` offset the legacy
+/// `Renderer::rebuild_connection_buffers_keyed` applied. Color is
+/// baked into a single `ColorFontRegion` covering the body glyph.
+///
+/// # Costs
+///
+/// O(sum of glyph_positions across all elements). Allocates the
+/// tree arena. No font shaping happens here — that's the
+/// renderer's `walk_tree_into_buffers` step.
+pub fn build_connection_tree(
+    elements: &[crate::mindmap::scene_builder::ConnectionElement],
+) -> Tree<GfxElement, GfxMutator> {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut id_counter: usize = 1;
+
+    for elem in elements {
+        let font_size = elem.font_size_pt;
+        let half_glyph = font_size * 0.3;
+        let half_height = font_size * 0.5;
+        let glyph_bounds = Vec2::new(font_size, font_size);
+        let color_rgba =
+            color::hex_to_rgba_safe(&elem.color, [0.78, 0.78, 0.78, 1.0]);
+
+        let edge_channel = id_counter;
+        let edge_root = tree
+            .arena
+            .new_node(GfxElement::new_void_with_id(edge_channel, edge_channel));
+        tree.root.append(edge_root, &mut tree.arena);
+        id_counter += 1;
+
+        // Cap-start, body glyphs, cap-end — emitted in the same
+        // order the legacy renderer produced. Channel monotonically
+        // increases so mutator trees can target a specific glyph by
+        // index when the inevitable per-glyph effects land.
+        let mut child_channel: usize = 1;
+        if let Some((glyph_text, (cx, cy))) = elem.cap_start.as_ref() {
+            let pos = Vec2::new(cx - half_glyph, cy - half_height);
+            append_connection_glyph(
+                &mut tree,
+                edge_root,
+                child_channel,
+                id_counter,
+                glyph_text,
+                font_size,
+                pos,
+                glyph_bounds,
+                color_rgba,
+            );
+            id_counter += 1;
+            child_channel += 1;
+        }
+        for &(gx, gy) in &elem.glyph_positions {
+            let pos = Vec2::new(gx - half_glyph, gy - half_height);
+            append_connection_glyph(
+                &mut tree,
+                edge_root,
+                child_channel,
+                id_counter,
+                &elem.body_glyph,
+                font_size,
+                pos,
+                glyph_bounds,
+                color_rgba,
+            );
+            id_counter += 1;
+            child_channel += 1;
+        }
+        if let Some((glyph_text, (cx, cy))) = elem.cap_end.as_ref() {
+            let pos = Vec2::new(cx - half_glyph, cy - half_height);
+            append_connection_glyph(
+                &mut tree,
+                edge_root,
+                child_channel,
+                id_counter,
+                glyph_text,
+                font_size,
+                pos,
+                glyph_bounds,
+                color_rgba,
+            );
+            id_counter += 1;
+        }
+    }
+
+    tree
+}
+
+fn append_connection_glyph(
+    tree: &mut Tree<GfxElement, GfxMutator>,
+    parent: NodeId,
+    channel: usize,
+    unique_id: usize,
+    text: &str,
+    font_size: f32,
+    position: Vec2,
+    bounds: Vec2,
+    color_rgba: [f32; 4],
+) {
+    let mut area = GlyphArea::new_with_str(text, font_size, font_size, position, bounds);
+    let cluster_count = text.chars().count();
+    if cluster_count > 0 {
+        let mut regions = ColorFontRegions::new_empty();
+        regions.submit_region(ColorFontRegion::new(
+            Range::new(0, cluster_count),
+            None,
+            Some(color_rgba),
+        ));
+        area.regions = regions;
+    }
+    let element = GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
+    let leaf = tree.arena.new_node(element);
+    parent.append(leaf, &mut tree.arena);
+}
+
+// =====================================================================
+// Connection-label and edge-handle tree builders
+//
+// Both are flat — one GlyphArea per element directly under the
+// tree root, no per-element Void wrapper, because nothing needs to
+// target a single label or handle as a structural mutator group
+// today (each element has only one renderable glyph). If grouping
+// becomes necessary, wrap them like portals / borders.
+//
+// Both functions also produce auxiliary AABB maps so the renderer's
+// existing hit-test paths (`hit_test_edge_label`,
+// `hit_test_edge_handle`-equivalents) keep working until Session 5
+// routes hit-testing through `Scene::component_at`.
+// =====================================================================
+
+/// Result of [`build_connection_label_tree`]. Pairs the tree with
+/// the AABB-per-edge hitbox map the legacy
+/// `Renderer::hit_test_edge_label` path needs.
+pub struct ConnectionLabelTree {
+    pub tree: Tree<GfxElement, GfxMutator>,
+    /// `EdgeKey → AABB` for click hit-testing on the label.
+    pub hitboxes: HashMap<crate::mindmap::scene_cache::EdgeKey, (Vec2, Vec2)>,
+}
+
+/// Build a baumhard tree of every connection-label glyph from a
+/// pre-computed `ConnectionLabelElement` slice. Like the
+/// connection tree, geometry comes from `scene_builder` upstream.
+pub fn build_connection_label_tree(
+    elements: &[crate::mindmap::scene_builder::ConnectionLabelElement],
+) -> ConnectionLabelTree {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut hitboxes: HashMap<crate::mindmap::scene_cache::EdgeKey, (Vec2, Vec2)> =
+        HashMap::new();
+    let mut id_counter: usize = 1;
+
+    for elem in elements {
+        let color_rgba =
+            color::hex_to_rgba_safe(&elem.color, [0.92, 0.92, 0.92, 1.0]);
+        let pos = Vec2::new(elem.position.0, elem.position.1);
+        let bounds = Vec2::new(elem.bounds.0, elem.bounds.1);
+
+        let mut area = GlyphArea::new_with_str(
+            &elem.text,
+            elem.font_size_pt,
+            elem.font_size_pt,
+            pos,
+            bounds,
+        );
+        let cluster_count = elem.text.chars().count();
+        if cluster_count > 0 {
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                Range::new(0, cluster_count),
+                None,
+                Some(color_rgba),
+            ));
+            area.regions = regions;
+        }
+
+        let element_node =
+            GfxElement::new_area_non_indexed_with_id(area, id_counter, id_counter);
+        id_counter += 1;
+        let leaf = tree.arena.new_node(element_node);
+        tree.root.append(leaf, &mut tree.arena);
+
+        hitboxes.insert(elem.edge_key.clone(), (pos, pos + bounds));
+    }
+
+    ConnectionLabelTree { tree, hitboxes }
+}
+
+/// Build a baumhard tree of every edge-handle glyph from a
+/// pre-computed `EdgeHandleElement` slice. Handles only exist
+/// while an edge is selected, so this tree is typically empty or
+/// has ≤ 5 leaves.
+pub fn build_edge_handle_tree(
+    elements: &[crate::mindmap::scene_builder::EdgeHandleElement],
+) -> Tree<GfxElement, GfxMutator> {
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut id_counter: usize = 1;
+
+    for elem in elements {
+        let color_rgba = color::hex_to_rgba_safe(&elem.color, [0.0, 0.9, 1.0, 1.0]);
+        // Handle glyphs are centered on the position with the same
+        // half-glyph offset the legacy renderer used.
+        let half_w = elem.font_size_pt * 0.3;
+        let half_h = elem.font_size_pt * 0.5;
+        let pos = Vec2::new(elem.position.0 - half_w, elem.position.1 - half_h);
+        let bounds = Vec2::new(elem.font_size_pt, elem.font_size_pt);
+
+        let mut area = GlyphArea::new_with_str(
+            &elem.glyph,
+            elem.font_size_pt,
+            elem.font_size_pt,
+            pos,
+            bounds,
+        );
+        let cluster_count = elem.glyph.chars().count();
+        if cluster_count > 0 {
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                Range::new(0, cluster_count),
+                None,
+                Some(color_rgba),
+            ));
+            area.regions = regions;
+        }
+
+        let element_node =
+            GfxElement::new_area_non_indexed_with_id(area, id_counter, id_counter);
+        id_counter += 1;
+        let leaf = tree.arena.new_node(element_node);
+        tree.root.append(leaf, &mut tree.arena);
+    }
+
+    tree
+}
+
 fn append_border_run(
     tree: &mut Tree<GfxElement, GfxMutator>,
     parent_id: NodeId,
@@ -530,7 +971,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     use crate::mindmap::model::{
-        Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
+        Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, PortalPair, Position, Size,
     };
     use std::collections::HashMap;
 
@@ -919,5 +1360,142 @@ mod tests {
             .map(|id| tree.arena.get(*id).unwrap().get().channel())
             .collect();
         assert_eq!(channels, vec![1, 2, 3, 4]);
+    }
+
+    // -----------------------------------------------------------------
+    // Portal tree builder
+    // -----------------------------------------------------------------
+
+    fn synthetic_portal(label: &str, a: &str, b: &str, color: &str) -> PortalPair {
+        PortalPair {
+            endpoint_a: a.into(),
+            endpoint_b: b.into(),
+            label: label.into(),
+            glyph: "◈".into(),
+            color: color.into(),
+            font_size_pt: 16.0,
+            font: None,
+        }
+    }
+
+    #[test]
+    fn portal_tree_emits_two_markers_per_pair() {
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("a", None, 0, 0.0, 0.0),
+                synthetic_node("b", None, 1, 200.0, 0.0),
+            ],
+            vec![],
+        );
+        map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+
+        let result = build_portal_tree(&map, &HashMap::new(), None, None);
+        let pairs: Vec<NodeId> = result.tree.root.children(&result.tree.arena).collect();
+        assert_eq!(pairs.len(), 1);
+
+        let markers: Vec<NodeId> = pairs[0].children(&result.tree.arena).collect();
+        assert_eq!(markers.len(), 2);
+        // Hitboxes: one entry per (pair, endpoint).
+        assert_eq!(result.hitboxes.len(), 2);
+    }
+
+    #[test]
+    fn portal_tree_skips_pair_with_folded_endpoint() {
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("parent", None, 0, 0.0, 0.0),
+                synthetic_node("child", Some("parent"), 0, 0.0, 100.0),
+                synthetic_node("other", None, 1, 200.0, 0.0),
+            ],
+            vec![],
+        );
+        map.nodes.get_mut("parent").unwrap().folded = true;
+        // Pair endpoints: hidden child + visible other. Should be
+        // skipped wholesale because is_hidden_by_fold(child) is true.
+        map.portals
+            .push(synthetic_portal("Y", "child", "other", "#00ff00"));
+        let result = build_portal_tree(&map, &HashMap::new(), None, None);
+        assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
+        assert!(result.hitboxes.is_empty());
+    }
+
+    #[test]
+    fn connection_tree_emits_one_void_per_edge_with_glyph_children() {
+        use crate::mindmap::scene_builder::ConnectionElement;
+        use crate::mindmap::scene_cache::EdgeKey;
+
+        let elem = ConnectionElement {
+            edge_key: EdgeKey::new("a", "b", "child"),
+            glyph_positions: vec![(10.0, 0.0), (20.0, 0.0), (30.0, 0.0)],
+            body_glyph: "·".into(),
+            cap_start: Some(("◀".into(), (0.0, 0.0))),
+            cap_end: Some(("▶".into(), (40.0, 0.0))),
+            font: None,
+            font_size_pt: 12.0,
+            color: "#ff0000".into(),
+        };
+        let tree = build_connection_tree(&[elem]);
+        let edge_parents: Vec<NodeId> = tree.root.children(&tree.arena).collect();
+        assert_eq!(edge_parents.len(), 1);
+        let glyphs: Vec<NodeId> = edge_parents[0].children(&tree.arena).collect();
+        // 1 cap-start + 3 body + 1 cap-end = 5
+        assert_eq!(glyphs.len(), 5);
+        for id in &glyphs {
+            assert!(tree.arena.get(*id).unwrap().get().glyph_area().is_some());
+        }
+    }
+
+    #[test]
+    fn connection_tree_skips_caps_when_absent() {
+        use crate::mindmap::scene_builder::ConnectionElement;
+        use crate::mindmap::scene_cache::EdgeKey;
+
+        let elem = ConnectionElement {
+            edge_key: EdgeKey::new("a", "b", "child"),
+            glyph_positions: vec![(0.0, 0.0)],
+            body_glyph: "·".into(),
+            cap_start: None,
+            cap_end: None,
+            font: None,
+            font_size_pt: 12.0,
+            color: "#ffffff".into(),
+        };
+        let tree = build_connection_tree(&[elem]);
+        let edge_parent = tree.root.children(&tree.arena).next().unwrap();
+        assert_eq!(edge_parent.children(&tree.arena).count(), 1);
+    }
+
+    #[test]
+    fn portal_tree_selection_overrides_color() {
+        let mut map = synthetic_map(
+            vec![
+                synthetic_node("a", None, 0, 0.0, 0.0),
+                synthetic_node("b", None, 1, 200.0, 0.0),
+            ],
+            vec![],
+        );
+        map.portals.push(synthetic_portal("Z", "a", "b", "#ff0000"));
+
+        let selected = Some(("Z", "a", "b"));
+        let result = build_portal_tree(&map, &HashMap::new(), selected, None);
+
+        // Each marker's GlyphArea should carry the cyan color, not red.
+        let pair = result.tree.root.children(&result.tree.arena).next().unwrap();
+        for marker in pair.children(&result.tree.arena) {
+            let area = result
+                .tree
+                .arena
+                .get(marker)
+                .unwrap()
+                .get()
+                .glyph_area()
+                .unwrap();
+            let region = area.regions.all_regions()[0];
+            let c = region.color.unwrap();
+            // #00E5FF: r=0, g≈229/255, b≈1.0
+            assert!(c[0] < 0.05);
+            assert!((c[1] - 229.0 / 255.0).abs() < 0.02);
+            assert!((c[2] - 1.0).abs() < 0.02);
+        }
     }
 }

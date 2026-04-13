@@ -260,9 +260,9 @@ impl Tree<GfxElement, GfxMutator> {
     /// O(n) on the first call after the tree mutates; O(1) on
     /// repeated calls thanks to a per-tree memo. The memo is
     /// cleared by [`MutatorTree::apply_to`] — any other mutating
-    /// caller that bypasses the mutator pipeline must call
-    /// [`Self::invalidate_aabb_cache`] itself or the bbox will
-    /// drift.
+    /// caller that bypasses the mutator pipeline must clear
+    /// `aabb_cache` itself (currently only reachable from inside
+    /// the crate) or the bbox will drift.
     pub fn descendants_aabb(&self) -> Option<(Vec2, Vec2)> {
         if let Some(cached) = self.aabb_cache.get() {
             return cached;
@@ -270,14 +270,6 @@ impl Tree<GfxElement, GfxMutator> {
         let computed = self.compute_descendants_aabb();
         self.aabb_cache.set(Some(computed));
         computed
-    }
-
-    /// Drop the memoised bbox so the next [`Self::descendants_aabb`]
-    /// recomputes. Call this from any custom mutating path that
-    /// touches `GlyphArea::position` / `render_bounds` outside of
-    /// [`MutatorTree::apply_to`].
-    pub fn invalidate_aabb_cache(&self) {
-        self.aabb_cache.set(None);
     }
 
     fn compute_descendants_aabb(&self) -> Option<(Vec2, Vec2)> {
@@ -319,35 +311,5 @@ impl Tree<GfxElement, GfxMutator> {
         }
     }
 
-    /// Sets `flag` on the `GlyphArea` descendant closest to `point`,
-    /// expanding each AABB by `slack` pixels on every side before
-    /// the test. `depth` is reserved for a future overlapping-
-    /// element disambiguator; today it is ignored. Returns the
-    /// flagged node's [`NodeId`], or [`None`].
-    ///
-    /// # Costs
-    ///
-    /// O(n) over the descendants of [`Self::root`]; see
-    /// [`Self::descendant_near`] for the underlying walk.
-    pub fn flag_near(
-        &mut self,
-        flag: Flag,
-        point: Vec2,
-        _depth: usize,
-        slack: usize,
-    ) -> Option<NodeId> {
-        let node_id = self.descendant_near(point, slack as f32)?;
-        if let Some(node) = self.arena.get_mut(node_id) {
-            node.get_mut().set_flag(flag);
-        }
-        Some(node_id)
-    }
-}
-
-impl<T: Flaggable + Clone, M: Applicable<T>> Tree<T, M> {
-    /// Placeholder for a future "apply a mutator to every flagged
-    /// descendant" helper. No implementation yet; documented here so
-    /// a call site can be trivially grepped when the feature lands.
-    pub fn do_for_all_flagged(&mut self, _flag: Flag, _mutator: Tree<T, M>) {}
 }
 

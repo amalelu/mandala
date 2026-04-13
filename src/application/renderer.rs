@@ -23,6 +23,9 @@ use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch}
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
 use baumhard::util::grapheme_chad;
+use baumhard::core::primitives::{
+    ColorFontRegion, ColorFontRegions, Range as ColorFontRange,
+};
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::mutator::GfxMutator;
@@ -1387,31 +1390,6 @@ impl Renderer {
         self.connection_viewport_dirty = true;
     }
 
-    fn load_mindmap(&mut self, path: &str) {
-        match loader::load_from_file(Path::new(path)) {
-            Ok(map) => {
-                info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
-
-                // Nodes via Baumhard tree
-                let mindmap_tree = baumhard::mindmap::tree_builder::build_mindmap_tree(&map);
-                self.rebuild_buffers_from_tree(&mindmap_tree.tree);
-                self.fit_camera_to_tree(&mindmap_tree.tree);
-
-                // Connections + borders via flat scene. `fit_camera_to_tree`
-                // ran above, so `self.camera.zoom` is settled and
-                // `effective_font_size_pt` will resolve against the final
-                // zoom rather than whatever the zoom was before the load.
-                let scene = baumhard::mindmap::scene_builder::build_scene(&map, self.camera.zoom);
-                self.rebuild_connection_buffers(&scene.connection_elements);
-                self.rebuild_border_buffers(&scene.border_elements);
-
-                self.should_render = true;
-            }
-            Err(e) => {
-                error!("Failed to load mindmap: {}", e);
-            }
-        }
-    }
 
     /// Fit the camera to show a RenderScene's content.
     pub fn fit_camera_to_scene(&mut self, scene: &RenderScene) {
@@ -1797,653 +1775,86 @@ impl Renderer {
     /// the console stays a fixed size regardless of canvas zoom.
     pub fn rebuild_console_overlay_buffers(
         &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
         geometry: Option<&ConsoleOverlayGeometry>,
     ) {
-        self.console_overlay_buffers.clear();
-        // Drop any previously-recorded backdrop — the render pass
-        // emits a console rect only when this is `Some`, so closing
-        // the console also clears the backdrop.
-        self.console_backdrop = None;
-        let geometry = match geometry {
-            Some(g) => g,
-            None => return,
+        use crate::application::scene_host::OverlayRole;
+
+        let Some(geometry) = geometry else {
+            // Closed: drop the backdrop, drop the tree, refresh
+            // overlay buffers so the console disappears.
+            self.console_backdrop = None;
+            app_scene.unregister_overlay(OverlayRole::Console);
+            self.rebuild_overlay_scene_buffers(app_scene);
+            return;
         };
 
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
-
-        // Compute the screen-space layout via the pure helper so the
-        // backdrop rect and the border-glyph positions come from the
-        // same source of truth. See `compute_console_frame_layout`.
         let layout = compute_console_frame_layout(
             geometry,
             self.config.width as f32,
             self.config.height as f32,
         );
-        let ConsoleFrameLayout {
-            left,
-            top,
-            frame_width,
-            frame_height,
-            font_size,
-            char_width,
-            row_height,
-            inner_padding,
-            scrollback_rows,
-            completion_rows,
-        } = layout;
-
-        // Palette sourced from `console::visuals` so the whole
-        // console look lives in one grep.
-        use crate::application::console::visuals::{
-            ACCENT_COLOR, BORDER_COLOR, ERROR_COLOR, GUTTER_GLYPH, INPUT_ECHO_COLOR,
-            SCROLLBACK_MIN_ALPHA, SELECTED_COMPLETION_MARKER, TEXT_COLOR,
-            UNSELECTED_COMPLETION_MARKER,
-        };
-
-        // Backdrop spans exactly from the top border glyph row to
-        // the bottom border glyph row.
         self.console_backdrop = Some(layout.backdrop_rect());
 
-        // Cosmic-text's `Family::Name` doesn't own the string — we
-        // have to keep the source alive for the duration of `attrs`.
-        // Empty = cosmic-text default fallback chain.
-        let font_family = geometry.font_family.as_str();
-        let mk_attrs = |color: cosmic_text::Color, fs: f32| {
-            let mut a = Attrs::new()
-                .color(color)
-                .metrics(cosmic_text::Metrics::new(fs, fs));
-            if !font_family.is_empty() {
-                a = a.family(cosmic_text::Family::Name(font_family));
-            }
-            a
+        // Build the tree under the FONT_SYSTEM lock — we need it
+        // for `measure_max_glyph_advance` only. Tree construction
+        // itself doesn't shape; that happens during the overlay-
+        // scene walk below.
+        let tree = {
+            let mut font_system = fonts::FONT_SYSTEM
+                .write()
+                .expect("Failed to acquire font_system lock");
+            build_console_overlay_tree(geometry, &layout, &mut font_system)
         };
-        let border_attrs = mk_attrs(BORDER_COLOR, font_size);
-
-        // Measure the actual shaped advance of the horizontal border
-        // glyph in the user's configured font. The `font_size * 0.6`
-        // char_width from the layout pass is a conservative estimate
-        // — the real advance can differ by 10-20% depending on the
-        // font, and that slop shows up as a visible gap between the
-        // right side `│` column and the top-right `╮` corner. Measure
-        // once and use the measured value for all horizontal
-        // positioning below.
-        let measured_char_width =
-            measure_max_glyph_advance(&mut font_system, &["\u{2500}", "\u{2502}"], font_size);
-
-        // Border: top + bottom as single buffers sized by
-        // measured_char_width. Sides rendered as one buffer each
-        // with an explicit `row_height` line-height so the vertical
-        // stack of `│` glyphs aligns with the content rows (default
-        // line-height is `font_size`, which drifts short by 2px per
-        // row against the content's `row_height`).
-        let cols = ((frame_width / measured_char_width).floor() as usize).max(2);
-        let side_rows = side_row_count(frame_height, font_size, row_height);
-        let (top_border, bottom_border, left_col, right_col) =
-            build_console_border_strings(cols, side_rows);
-
-        self.console_overlay_buffers.push(create_border_buffer(
-            &mut font_system,
-            &top_border,
-            &border_attrs,
-            font_size,
-            (left, top),
-            (frame_width, font_size * 1.5),
-        ));
-        self.console_overlay_buffers.push(create_border_buffer(
-            &mut font_system,
-            &bottom_border,
-            &border_attrs,
-            font_size,
-            (left, top + frame_height),
-            (frame_width, font_size * 1.5),
-        ));
-        self.console_overlay_buffers.push(create_border_buffer_lh(
-            &mut font_system,
-            &left_col,
-            &border_attrs,
-            font_size,
-            row_height,
-            (left, top + font_size),
-            (measured_char_width, frame_height),
-        ));
-        // Right column sits where the top-border's last glyph
-        // (`╮`) lands: left + (cols - 1) * measured_char_width.
-        let right_col_x = left + (cols.saturating_sub(1) as f32) * measured_char_width;
-        self.console_overlay_buffers.push(create_border_buffer_lh(
-            &mut font_system,
-            &right_col,
-            &border_attrs,
-            font_size,
-            row_height,
-            (right_col_x, top + font_size),
-            (measured_char_width, frame_height),
-        ));
-
-        // Content column: left border + gutter glyph on the inside.
-        // `gutter_x` sits immediately right of the left `│`; content
-        // starts one more cell in, with the inner padding.
-        let gutter_x = left + measured_char_width;
-        let content_left = gutter_x + measured_char_width + inner_padding;
-        let content_width =
-            right_col_x - content_left - inner_padding;
-        let content_top = top + font_size + inner_padding;
-        // Content measured in monospace cells, for clipping
-        // wide-glyph scrollback lines against the frame. See
-        // baumhard::util::grapheme_chad::truncate_to_display_width.
-        let content_cols = (content_width / measured_char_width).floor() as usize;
-
-        // Scrollback region: bottom-most N lines, rendered top → bottom.
-        // Older rows (higher `i` from the top) fade toward
-        // SCROLLBACK_MIN_ALPHA so freshly-printed output reads as
-        // "live" and older output as "context".
-        let skip = geometry.scrollback.len().saturating_sub(scrollback_rows);
-        let visible_count = scrollback_rows.max(1);
-        for (i, line) in geometry
-            .scrollback
-            .iter()
-            .skip(skip)
-            .take(scrollback_rows)
-            .enumerate()
-        {
-            // i=0 is the oldest visible row; i=last is newest.
-            let newness = if visible_count <= 1 {
-                1.0
-            } else {
-                i as f32 / (visible_count - 1) as f32
-            };
-            let alpha = lerp_alpha(SCROLLBACK_MIN_ALPHA, 0xff, newness);
-            let (text_color, gutter_color, gutter_glyph) = match line.kind {
-                ConsoleOverlayLineKind::Input => (
-                    with_alpha(INPUT_ECHO_COLOR, alpha),
-                    with_alpha(INPUT_ECHO_COLOR, alpha),
-                    " ",
-                ),
-                ConsoleOverlayLineKind::Output => (
-                    with_alpha(TEXT_COLOR, alpha),
-                    with_alpha(ACCENT_COLOR, alpha),
-                    GUTTER_GLYPH,
-                ),
-                ConsoleOverlayLineKind::Error => (
-                    with_alpha(ERROR_COLOR, alpha),
-                    with_alpha(ERROR_COLOR, alpha),
-                    GUTTER_GLYPH,
-                ),
-            };
-            let y = content_top + row_height * i as f32;
-
-            // Gutter glyph sits one char-cell right of the left
-            // border, colored by the line kind.
-            if gutter_glyph != " " {
-                let gutter_attrs = mk_attrs(gutter_color, font_size);
-                self.console_overlay_buffers.push(create_border_buffer(
-                    &mut font_system,
-                    gutter_glyph,
-                    &gutter_attrs,
-                    font_size,
-                    (gutter_x, y),
-                    (char_width, row_height),
-                ));
-            }
-
-            // Scrollback text — clipped to content_cols so a wide
-            // CJK line can't push into the right border.
-            let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
-                &line.text,
-                content_cols,
-            );
-            let attrs = mk_attrs(text_color, font_size);
-            self.console_overlay_buffers.push(create_border_buffer(
-                &mut font_system,
-                clipped,
-                &attrs,
-                font_size,
-                (content_left, y),
-                (content_width, row_height),
-            ));
-        }
-
-        // Completion popup: sits directly above the prompt line.
-        let completion_top = content_top + row_height * scrollback_rows as f32;
-        for (i, c) in geometry
-            .completions
-            .iter()
-            .take(completion_rows)
-            .enumerate()
-        {
-            let is_selected = geometry.selected_completion == Some(i);
-            let color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
-            let attrs = mk_attrs(color, font_size);
-            let prefix = if is_selected {
-                SELECTED_COMPLETION_MARKER
-            } else {
-                UNSELECTED_COMPLETION_MARKER
-            };
-            let line = match &c.hint {
-                Some(hint) => format!("{prefix}{}    {}", c.text, hint),
-                None => format!("{prefix}{}", c.text),
-            };
-            let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
-                &line,
-                content_cols,
-            );
-            let y = completion_top + row_height * i as f32;
-            self.console_overlay_buffers.push(create_border_buffer(
-                &mut font_system,
-                clipped,
-                &attrs,
-                font_size,
-                (content_left, y),
-                (content_width, row_height),
-            ));
-        }
-
-        // Prompt line: one rich-text buffer with two spans — the
-        // accent-colored `❯ ` followed by the text-colored input.
-        // Using spans (not two separate buffers) means cosmic-text
-        // lays out the input immediately after the prompt glyph's
-        // actual shaped advance, so there's no hard-coded gap
-        // between `❯` and the cursor `▌`.
-        let prompt_attrs = mk_attrs(ACCENT_COLOR, font_size);
-        let input_attrs = mk_attrs(TEXT_COLOR, font_size);
-        let prompt_budget = font_size * 1.4;
-        let y = layout.prompt_y();
-        let cursor_byte = baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
-            &geometry.input,
-            geometry.cursor_grapheme,
-        )
-        .unwrap_or(geometry.input.len());
-        let (pre, post) = geometry.input.split_at(cursor_byte);
-        let input_with_cursor = format!("{pre}{CURSOR_GLYPH}{post}");
-        // Reserve two cells for `"❯ "` when clipping the input.
-        let input_clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
-            &input_with_cursor,
-            content_cols.saturating_sub(2),
-        );
-        let prompt_span_text = "\u{276F} ";
-        self.console_overlay_buffers.push(create_border_buffer_spans(
-            &mut font_system,
-            &[
-                (prompt_span_text, prompt_attrs),
-                (input_clipped, input_attrs),
-            ],
-            font_size,
-            (content_left, y),
-            (content_width, prompt_budget),
-        ));
+        app_scene.register_overlay(OverlayRole::Console, tree, glam::Vec2::ZERO);
+        self.rebuild_overlay_scene_buffers(app_scene);
     }
 
-    /// Rebuild the glyph-wheel color picker's full overlay —
-    /// BOTH the static buffer list (title, hint, hue ring) AND the
-    /// dynamic buffer list (sat/val bars, preview, hex, chips,
-    /// selection indicator). Called by `open_color_picker` and by
-    /// the `Resized` handler; closing the picker with `None` clears
-    /// both lists.
+
+    /// Build the picker's overlay tree from `geometry`, register
+    /// it under [`OverlayRole::ColorPicker`](crate::application::scene_host::OverlayRole),
+    /// and walk the overlay sub-scene into
+    /// `overlay_scene_buffers`. `None` means the picker is closed
+    /// — drops the backdrop, unregisters the tree, refreshes
+    /// overlay buffers so it disappears.
     ///
-    /// For per-hover updates — where only the dynamic parts change
-    /// — call `rebuild_color_picker_dynamic_buffers` instead. That
-    /// path skips the static buffers entirely and is the reason
-    /// this method exists as a separate entry point at all.
+    /// Called by `open_color_picker`, the `Resized` handler, and
+    /// the hover / chip-focus / commit / cancel paths in
+    /// `app::rebuild_color_picker_overlay`.
+    ///
+    /// **Performance note**: every invocation re-shapes every
+    /// glyph in the picker (~64 cells). The legacy split that
+    /// skipped re-shaping the static hue ring on hover is gone;
+    /// the planned `MutatorTree`-based hover path will mutate
+    /// only changed cell colors and the indicator's position
+    /// per §B1 of `lib/baumhard/CONVENTIONS.md`.
     pub fn rebuild_color_picker_overlay_buffers(
         &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
         geometry: Option<&crate::application::color_picker::ColorPickerOverlayGeometry>,
     ) {
-        // Close path clears both halves + drops the backdrop.
-        let g = match geometry {
-            Some(g) => g,
-            None => {
-                self.color_picker_static_buffers.clear();
-                self.color_picker_dynamic_buffers.clear();
-                self.color_picker_backdrop = None;
-                return;
-            }
+        use crate::application::color_picker::compute_color_picker_layout;
+        use crate::application::scene_host::OverlayRole;
+
+        let Some(g) = geometry else {
+            self.color_picker_backdrop = None;
+            app_scene.unregister_overlay(OverlayRole::ColorPicker);
+            self.rebuild_overlay_scene_buffers(app_scene);
+            return;
         };
-        self.rebuild_color_picker_static_buffers(g);
-        self.rebuild_color_picker_dynamic_buffers(g);
-    }
-
-    /// Rebuild just the static part of the picker overlay: the
-    /// title bar, the hint footer, and the 24-slot hue ring. These
-    /// don't depend on the current HSV or chip focus, so they only
-    /// need to be reshaped on open (with the current window
-    /// dimensions) and on resize. Every hover reuses these buffers
-    /// untouched, saving ~26 shape calls per frame of hover.
-    ///
-    /// Also captures the backdrop rect — the layout pass is
-    /// deterministic, so the backdrop ends up at the same
-    /// coordinates whether the static or the dynamic pass computes
-    /// it. Callers that invoke this method always follow with
-    /// `rebuild_color_picker_dynamic_buffers` using the same
-    /// geometry.
-    fn rebuild_color_picker_static_buffers(
-        &mut self,
-        geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
-    ) {
-        use crate::application::color_picker::{
-            compute_color_picker_layout, hue_slot_to_degrees, HUE_RING_GLYPHS, HUE_SLOT_COUNT,
-        };
-        use baumhard::util::color::hsv_to_rgb;
-
-        self.color_picker_static_buffers.clear();
-
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
 
         let layout = compute_color_picker_layout(
-            geometry,
+            g,
             self.config.width as f32,
             self.config.height as f32,
         );
         self.color_picker_backdrop = Some(layout.backdrop);
 
-        let font_size = layout.font_size;
-        let ring_font_size = layout.ring_font_size;
-        let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
-        let ring_glyph_box = (ring_box_w, ring_font_size * 1.5);
-
-        // ---- Title bar ----
-        let title_text = format!("\u{0950} {} color", geometry.target_label);
-        let title_attrs = Attrs::new()
-            .color(cosmic_text::Color::rgba(0, 229, 255, 255))
-            .metrics(cosmic_text::Metrics::new(font_size, font_size));
-        self.color_picker_static_buffers.push(create_border_buffer(
-            &mut font_system,
-            &title_text,
-            &title_attrs,
-            font_size,
-            layout.title_pos,
-            (font_size * 24.0, font_size * 1.5),
-        ));
-
-        // ---- Hue ring (24 sacred-script glyphs) — three 8-glyph
-        // arcs clockwise from 12 o'clock: Devanagari, Hebrew, Tibetan.
-        // Each slot renders at HUE_RING_FONT_SCALE × base font size
-        // so the ring reads as the dominant visual element. Each
-        // glyph is center-aligned inside its box so scripts with
-        // different shaped widths (Devanagari headstrokes are
-        // noticeably wider than Tibetan consonants) don't throw the
-        // ring visually out of round. The dynamic pass later
-        // overlays a cyan outline ring ◯ on top of the currently-
-        // selected slot, so we don't need to rebuild the hue ring
-        // when the selection moves.
-        for i in 0..HUE_SLOT_COUNT {
-            let hue = hue_slot_to_degrees(i);
-            let rgb = hsv_to_rgb(hue, 1.0, 1.0);
-            let cosmic_color = rgb_to_cosmic_color(rgb);
-            let attrs = Attrs::new()
-                .color(cosmic_color)
-                .metrics(cosmic_text::Metrics::new(ring_font_size, ring_font_size));
-            let pos = layout.hue_slot_positions[i];
-            self.color_picker_static_buffers.push(create_centered_cell_buffer(
-                &mut font_system,
-                HUE_RING_GLYPHS[i],
-                &attrs,
-                ring_font_size,
-                (pos.0 - ring_box_w * 0.5, pos.1 - ring_font_size * 0.5),
-                ring_glyph_box,
-            ));
-        }
-
-        // ---- Hint footer ----
-        let hint_text =
-            "Esc cancel  \u{00B7}  Enter commit  \u{00B7}  h/s/v nudge  \u{00B7}  Tab chips";
-        let hint_attrs = Attrs::new()
-            .color(cosmic_text::Color::rgba(140, 140, 150, 255))
-            .metrics(cosmic_text::Metrics::new(font_size * 0.85, font_size * 0.85));
-        self.color_picker_static_buffers.push(create_border_buffer(
-            &mut font_system,
-            hint_text,
-            &hint_attrs,
-            font_size * 0.85,
-            layout.hint_pos,
-            (font_size * 30.0, font_size * 1.5),
-        ));
+        let tree = build_color_picker_overlay_tree(g, &layout);
+        app_scene.register_overlay(OverlayRole::ColorPicker, tree, glam::Vec2::ZERO);
+        self.rebuild_overlay_scene_buffers(app_scene);
     }
 
-    /// Rebuild the dynamic (per-hover) part of the picker overlay:
-    /// the crosshair sat and val bars (re-colored at the current
-    /// hue+val and hue+sat respectively), the center preview glyph,
-    /// the hex readout, the chip row (with the focus arrow), and
-    /// the selected-hue-slot outline ring. Called on every cursor
-    /// move inside the picker and on every h/s/v/Tab keystroke.
-    ///
-    /// Safe to call without `rebuild_color_picker_static_buffers`
-    /// having been called first — cosmic-text buffers are
-    /// independent and the render pass draws both lists in one
-    /// glyphon pass. In practice callers always invoke the static
-    /// rebuild first (via `rebuild_color_picker_overlay_buffers`
-    /// from `open_color_picker`) so the two lists are populated in
-    /// lockstep.
-    pub fn rebuild_color_picker_dynamic_buffers(
-        &mut self,
-        geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
-    ) {
-        use crate::application::color_picker::{
-            compute_color_picker_layout, sat_cell_to_value, val_cell_to_value,
-            ARM_BOTTOM_GLYPHS, ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS, ARM_TOP_GLYPHS,
-            CENTER_PREVIEW_GLYPH, CROSSHAIR_CENTER_CELL, HUE_SLOT_COUNT, SAT_CELL_COUNT,
-            THEME_CHIPS, VAL_CELL_COUNT,
-        };
-        use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
-
-        self.color_picker_dynamic_buffers.clear();
-
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
-
-        let layout = compute_color_picker_layout(
-            geometry,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
-
-        let font_size = layout.font_size;
-        let ring_font_size = layout.ring_font_size;
-        // Cell-box width: at least the widest crosshair glyph, with a
-        // font-size floor so narrow Latin-width glyphs (chips, etc.)
-        // don't end up with absurdly small boxes. Center-alignment
-        // inside the box (via `create_centered_cell_buffer`) then
-        // pins each glyph's visual midpoint to the cell midpoint,
-        // independent of per-script advance.
-        let cell_box_w = (layout.cell_advance * 1.2).max(font_size * 1.5);
-        let cell_box = (cell_box_w, font_size * 1.5);
-        let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
-        let ring_glyph_box = (ring_box_w, ring_font_size * 1.5);
-
-        // ---- Saturation crosshair bar (horizontal) ----
-        // Each cell shows the color at (current_hue, cell_sat, current_val)
-        // so the bar acts as a live "what does this saturation look
-        // like for the chosen hue?" preview. Cell CROSSHAIR_CENTER_CELL
-        // is the wheel center and is NOT rendered as a bar cell — the
-        // ॐ glyph drawn below occupies that position.
-        //
-        // Note on mid-value highlight: when `sat` or `val` is exactly
-        // 0.5, the quantization lands on `CROSSHAIR_CENTER_CELL`
-        // (sat=10/20=0.5), which is the skipped center slot — so no
-        // arm cell receives the highlight tint at that exact value.
-        // The center ॐ glyph already renders with the previewed HSV
-        // color, so it serves as the implicit selection indicator at
-        // mid values. Normal values away from 0.5 highlight an arm
-        // cell as usual. Clamp defensively so a future out-of-range
-        // sat/val never overflows the usize cast.
-        let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0))
-            .round()
-            .clamp(0.0, (SAT_CELL_COUNT - 1) as f32) as usize;
-        let current_val_cell = ((1.0 - geometry.val) * (VAL_CELL_COUNT as f32 - 1.0))
-            .round()
-            .clamp(0.0, (VAL_CELL_COUNT - 1) as f32) as usize;
-        for i in 0..SAT_CELL_COUNT {
-            if i == CROSSHAIR_CENTER_CELL {
-                continue;
-            }
-            let cell_sat = sat_cell_to_value(i);
-            let base_rgb = hsv_to_rgb(geometry.hue_deg, cell_sat, geometry.val);
-            // Selected cell gets a tint-up toward white so it pops out
-            // against its arm-mate cells — replaces the earlier
-            // ■ → ◆ glyph-swap highlight which doesn't translate to
-            // sacred-script glyphs (we'd lose the per-cell script
-            // identity if we swapped glyphs).
-            let cosmic_color = if i == current_sat_cell {
-                highlight_selected_cell_color(base_rgb)
-            } else {
-                rgb_to_cosmic_color(base_rgb)
-            };
-            let glyph = if i < CROSSHAIR_CENTER_CELL {
-                ARM_LEFT_GLYPHS[i]
-            } else {
-                ARM_RIGHT_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
-            };
-            let attrs = Attrs::new()
-                .color(cosmic_color)
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
-            let (cx, cy) = layout.sat_cell_positions[i];
-            // Center the cell box on (cx, cy). `create_centered_cell_buffer`
-            // uses `Align::Center` so the glyph visually centers on the
-            // cell midpoint regardless of its shaped width — Hebrew
-            // aleph (~5 px) and Egyptian hieroglyphs (~20 px) both land
-            // on the same visual column.
-            self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
-                &mut font_system,
-                glyph,
-                &attrs,
-                font_size,
-                (cx - cell_box_w * 0.5, cy - font_size * 0.5),
-                cell_box,
-            ));
-        }
-
-        // ---- Value crosshair bar (vertical) ----
-        for i in 0..VAL_CELL_COUNT {
-            if i == CROSSHAIR_CENTER_CELL {
-                continue;
-            }
-            let cell_val = val_cell_to_value(i);
-            let base_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, cell_val);
-            let cosmic_color = if i == current_val_cell {
-                highlight_selected_cell_color(base_rgb)
-            } else {
-                rgb_to_cosmic_color(base_rgb)
-            };
-            let glyph = if i < CROSSHAIR_CENTER_CELL {
-                ARM_TOP_GLYPHS[i]
-            } else {
-                ARM_BOTTOM_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
-            };
-            let attrs = Attrs::new()
-                .color(cosmic_color)
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
-            let (cx, cy) = layout.val_cell_positions[i];
-            self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
-                &mut font_system,
-                glyph,
-                &attrs,
-                font_size,
-                (cx - cell_box_w * 0.5, cy - font_size * 0.5),
-                cell_box,
-            ));
-        }
-
-        // ---- Selected hue slot indicator ----
-        // A cyan outline circle ◯ drawn on top of the static hue
-        // ring's sacred-script glyph at the currently-picked slot.
-        // ◯ is hollow, so the user can still read the hue-colored
-        // letter through the indicator ring. Font size matches the
-        // ring's HUE_RING_FONT_SCALE so the ring encircles the
-        // glyph rather than sitting inside it. Center-aligned so
-        // the ring stays concentric with the ring glyph it overlays
-        // even on non-integer positions.
-        let current_hue_slot = ((geometry.hue_deg.rem_euclid(360.0) / 360.0)
-            * HUE_SLOT_COUNT as f32)
-            .round() as usize
-            % HUE_SLOT_COUNT;
-        let indicator_attrs = Attrs::new()
-            .color(cosmic_text::Color::rgba(0, 229, 255, 255))
-            .metrics(cosmic_text::Metrics::new(ring_font_size, ring_font_size));
-        let slot_pos = layout.hue_slot_positions[current_hue_slot];
-        self.color_picker_dynamic_buffers.push(create_centered_cell_buffer(
-            &mut font_system,
-            "\u{25EF}",
-            &indicator_attrs,
-            ring_font_size,
-            (slot_pos.0 - ring_box_w * 0.5, slot_pos.1 - ring_font_size * 0.5),
-            ring_glyph_box,
-        ));
-
-        // ---- Center preview glyph ॐ at 2× font size ----
-        // The position and size both come from the layout — the
-        // pre-render layout pass owns the centering math, so the
-        // glyph anchors correctly even if we tweak preview size.
-        let preview_size = layout.preview_size;
-        let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
-        let preview_color = rgb_to_cosmic_color(preview_rgb);
-        let preview_attrs = Attrs::new()
-            .color(preview_color)
-            .metrics(cosmic_text::Metrics::new(preview_size, preview_size));
-        self.color_picker_dynamic_buffers.push(create_border_buffer(
-            &mut font_system,
-            CENTER_PREVIEW_GLYPH,
-            &preview_attrs,
-            preview_size,
-            layout.preview_pos,
-            (preview_size * 1.5, preview_size * 1.5),
-        ));
-
-        // ---- Preview hex readout (small, below the chip row, only
-        // when geometry.hex_visible) ----
-        // The readout is hidden by default; the layout fn sets
-        // `hex_pos` to `Some(..)` when `geometry.hex_visible` is true
-        // (cursor inside backdrop or chip focused), `None` otherwise.
-        // Anchored horizontally centered on the wheel center, below
-        // the theme chip row.
-        if let Some(hex_anchor) = layout.hex_pos {
-            let hex_text = hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val);
-            let hex_attrs = Attrs::new()
-                .color(cosmic_text::Color::rgba(220, 220, 220, 255))
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
-            self.color_picker_dynamic_buffers.push(create_border_buffer(
-                &mut font_system,
-                &hex_text,
-                &hex_attrs,
-                font_size,
-                hex_anchor,
-                (font_size * 8.0, font_size * 1.5),
-            ));
-        }
-
-        // ---- Theme chips row ----
-        // Each chip looks like "▸ --accent" if focused, "  --accent"
-        // otherwise. Focused chips render in cyan to signal
-        // keyboard focus; unfocused chips use a dim text color.
-        // (A per-chip swatch color preview — resolving the chip's
-        // `var(--name)` reference through the canvas theme map — is
-        // deferred. The center preview glyph already shows the
-        // currently-picked color, which covers the common case.)
-        for (i, chip) in THEME_CHIPS.iter().enumerate() {
-            let focused = geometry.chip_focus == Some(i);
-            let prefix = if focused { "\u{25B8} " } else { "  " };
-            let label = format!("{prefix}{}", chip.label);
-            let chip_color = if focused {
-                cosmic_text::Color::rgba(0, 229, 255, 255)
-            } else {
-                cosmic_text::Color::rgba(200, 200, 200, 255)
-            };
-            let attrs = Attrs::new()
-                .color(chip_color)
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
-            let (cx, cy, cw) = layout.chip_positions[i];
-            self.color_picker_dynamic_buffers.push(create_border_buffer(
-                &mut font_system,
-                &label,
-                &attrs,
-                font_size,
-                (cx, cy),
-                (cw, layout.chip_height),
-            ));
-        }
-    }
 
     /// Keyed connection rebuild. See [`rebuild_border_buffers_keyed`] for
     /// the general pattern.
@@ -2670,55 +2081,48 @@ impl Renderer {
         }
     }
 
-    /// Session 6E: (re)build the per-portal-marker cosmic-text
-    /// buffers from `scene.portal_elements`. Mirrors
-    /// `rebuild_connection_label_buffers` byte-for-byte: clear both
-    /// keyed maps, iterate the scene elements, build a buffer per
-    /// marker at the element's position and color, and record an
-    /// AABB hitbox keyed by `(portal_ref, endpoint_node_id)` so
-    /// `hit_test_portal` can resolve clicks back to a
-    /// `PortalRefKey`.
-    ///
-    /// Portals are cheap: ≤ 2 markers per pair and portal counts
-    /// stay in the dozens, so there is no incremental-reuse cache
-    /// and the full map is rebuilt on every scene build.
-    pub fn rebuild_portal_buffers(
+    /// Replace the connection-label hitbox map wholesale.
+    /// Used by `update_connection_label_tree` once labels render
+    /// through the canvas-scene tree path; the tree builder owns
+    /// the AABB computation and hands the map over via this
+    /// setter so the legacy `hit_test_edge_label` keeps working.
+    /// Will go away in Session 5.
+    pub fn set_connection_label_hitboxes(
         &mut self,
-        portal_elements: &[PortalElement],
+        hitboxes: std::collections::HashMap<EdgeKey, (Vec2, Vec2)>,
     ) {
-        self.portal_buffers.clear();
-        self.portal_hitboxes.clear();
-        if portal_elements.is_empty() {
-            return;
+        self.connection_label_hitboxes.clear();
+        for (k, v) in hitboxes {
+            self.connection_label_hitboxes.insert(k, v);
         }
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
+    }
 
-        for elem in portal_elements {
-            let cosmic_color = parse_hex_color(&elem.color)
-                .unwrap_or(cosmic_text::Color::rgba(235, 235, 235, 255));
-            let attrs = Attrs::new()
-                .color(cosmic_color)
-                .metrics(cosmic_text::Metrics::new(elem.font_size_pt, elem.font_size_pt));
-
-            let buffer = create_border_buffer(
-                &mut font_system,
-                &elem.glyph,
-                &attrs,
-                elem.font_size_pt,
-                elem.position,
-                elem.bounds,
+    /// Replace the portal-hitbox map wholesale.
+    ///
+    /// Used by the `update_portal_tree` helper in `app.rs` once
+    /// portal rendering migrated to the canvas-scene tree path:
+    /// the tree builder owns geometry computation and emits both
+    /// the tree and the AABBs, then hands the AABBs over via
+    /// this setter so [`Self::hit_test_portal`] keeps working.
+    /// Will go away in Session 5 when portal hit-testing routes
+    /// through `Scene::component_at`.
+    pub fn set_portal_hitboxes(
+        &mut self,
+        hitboxes: std::collections::HashMap<
+            (
+                (String, String, String),
+                String,
+            ),
+            (Vec2, Vec2),
+        >,
+    ) {
+        self.portal_hitboxes.clear();
+        for (((label, endpoint_a, endpoint_b), endpoint_node_id), bbox) in hitboxes {
+            let key = (
+                PortalRefKey::new(label, endpoint_a, endpoint_b),
+                endpoint_node_id,
             );
-            let key = (elem.portal_ref.clone(), elem.endpoint_node_id.clone());
-            self.portal_buffers.insert(key.clone(), buffer);
-
-            let min = Vec2::new(elem.position.0, elem.position.1);
-            let max = Vec2::new(
-                elem.position.0 + elem.bounds.0,
-                elem.position.1 + elem.bounds.1,
-            );
-            self.portal_hitboxes.insert(key, (min, max));
+            self.portal_hitboxes.insert(key, bbox);
         }
     }
 
@@ -2922,9 +2326,6 @@ impl Renderer {
                 self.connection_viewport_dirty = true;
                 self.connection_geometry_dirty = true;
             }
-            RenderDecree::LoadMindMap(path) => {
-                self.load_mindmap(&path);
-            }
         }
     }
 }
@@ -3010,6 +2411,580 @@ pub struct MindMapTextBuffer {
     pub buffer: Buffer,
     pub pos: (f32, f32),
     pub bounds: (f32, f32),
+}
+
+/// Build the color-picker overlay tree from a geometry +
+/// pre-computed layout. Mirrors what
+/// `Renderer::rebuild_color_picker_overlay_buffers_legacy` did
+/// across its static + dynamic halves, but as one
+/// `Tree<GfxElement, GfxMutator>` instead of two parallel buffer
+/// lists.
+///
+/// Tree shape (flat under root, per-element ordering preserved):
+///
+/// ```text
+/// Void (root)
+/// ├── GlyphArea title bar
+/// ├── GlyphArea hue ring slot 0
+/// │   ...
+/// ├── GlyphArea hue ring slot 23
+/// ├── GlyphArea hint footer
+/// ├── GlyphArea sat-bar cell 0..N (skipping centre)
+/// ├── GlyphArea val-bar cell 0..N (skipping centre)
+/// ├── GlyphArea selected-hue indicator (cyan ring)
+/// ├── GlyphArea preview glyph (ॐ at 2× font size)
+/// ├── GlyphArea hex readout (when geometry.hex_visible)
+/// └── GlyphArea theme chip 0..N
+/// ```
+///
+/// **Performance note**: this rebuilds every glyph on every
+/// `rebuild_color_picker_overlay_buffers` call, which is the hover
+/// hot path. The legacy split skipped the hue-ring shape on hover.
+/// A follow-up will introduce a `MutatorTree`-based incremental
+/// path (per §B1 of `lib/baumhard/CONVENTIONS.md`) that mutates
+/// only the cells whose colors changed and the indicator's
+/// position, leaving the static hue ring alone. The user
+/// explicitly asked to land the migration first and address
+/// picker sluggishness afterwards.
+fn build_color_picker_overlay_tree(
+    geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+    layout: &crate::application::color_picker::ColorPickerLayout,
+) -> Tree<GfxElement, GfxMutator> {
+    use crate::application::color_picker::{
+        hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, ARM_BOTTOM_GLYPHS,
+        ARM_LEFT_GLYPHS, ARM_RIGHT_GLYPHS, ARM_TOP_GLYPHS, CENTER_PREVIEW_GLYPH,
+        CROSSHAIR_CENTER_CELL, HUE_RING_GLYPHS, HUE_SLOT_COUNT, SAT_CELL_COUNT, THEME_CHIPS,
+        VAL_CELL_COUNT,
+    };
+    use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
+
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut id_counter: usize = 1;
+
+    // Local helper; mirrors the console builder's pattern.
+    fn push_area(
+        tree: &mut Tree<GfxElement, GfxMutator>,
+        id_counter: &mut usize,
+        text: &str,
+        color: cosmic_text::Color,
+        font_size: f32,
+        line_height: f32,
+        pos: (f32, f32),
+        bounds: (f32, f32),
+    ) {
+        let mut area = GlyphArea::new_with_str(
+            text,
+            font_size,
+            line_height,
+            Vec2::new(pos.0, pos.1),
+            Vec2::new(bounds.0, bounds.1),
+        );
+        let cluster_count = text.chars().count();
+        if cluster_count > 0 {
+            let rgba = [
+                color.r() as f32 / 255.0,
+                color.g() as f32 / 255.0,
+                color.b() as f32 / 255.0,
+                color.a() as f32 / 255.0,
+            ];
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                ColorFontRange::new(0, cluster_count),
+                None,
+                Some(rgba),
+            ));
+            area.regions = regions;
+        }
+        let element =
+            GfxElement::new_area_non_indexed_with_id(area, *id_counter, *id_counter);
+        *id_counter += 1;
+        let leaf = tree.arena.new_node(element);
+        tree.root.append(leaf, &mut tree.arena);
+    }
+
+    let font_size = layout.font_size;
+    let ring_font_size = layout.ring_font_size;
+    let ring_box_w = (layout.ring_font_size * 1.5).max(ring_font_size * 1.5);
+    let cell_box_w = (layout.cell_advance * 1.2).max(font_size * 1.5);
+
+    // Title
+    let title_text = format!("\u{0950} {} color", geometry.target_label);
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &title_text,
+        cosmic_text::Color::rgba(0, 229, 255, 255),
+        font_size,
+        font_size,
+        layout.title_pos,
+        (font_size * 24.0, font_size * 1.5),
+    );
+
+    // Hue ring
+    for i in 0..HUE_SLOT_COUNT {
+        let hue = hue_slot_to_degrees(i);
+        let rgb = hsv_to_rgb(hue, 1.0, 1.0);
+        let color = rgb_to_cosmic_color(rgb);
+        let pos = layout.hue_slot_positions[i];
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            HUE_RING_GLYPHS[i],
+            color,
+            ring_font_size,
+            ring_font_size,
+            (pos.0 - ring_box_w * 0.5, pos.1 - ring_font_size * 0.5),
+            (ring_box_w, ring_font_size * 1.5),
+        );
+    }
+
+    // Hint footer
+    let hint_text =
+        "Esc cancel  \u{00B7}  Enter commit  \u{00B7}  h/s/v nudge  \u{00B7}  Tab chips";
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        hint_text,
+        cosmic_text::Color::rgba(140, 140, 150, 255),
+        font_size * 0.85,
+        font_size * 0.85,
+        layout.hint_pos,
+        (font_size * 30.0, font_size * 1.5),
+    );
+
+    // Sat / val bars (skip centre cell — that's the preview glyph slot)
+    let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0))
+        .round()
+        .clamp(0.0, (SAT_CELL_COUNT - 1) as f32) as usize;
+    let current_val_cell = ((1.0 - geometry.val) * (VAL_CELL_COUNT as f32 - 1.0))
+        .round()
+        .clamp(0.0, (VAL_CELL_COUNT - 1) as f32) as usize;
+
+    for i in 0..SAT_CELL_COUNT {
+        if i == CROSSHAIR_CENTER_CELL {
+            continue;
+        }
+        let cell_sat = sat_cell_to_value(i);
+        let base_rgb = hsv_to_rgb(geometry.hue_deg, cell_sat, geometry.val);
+        let color = if i == current_sat_cell {
+            highlight_selected_cell_color(base_rgb)
+        } else {
+            rgb_to_cosmic_color(base_rgb)
+        };
+        let glyph = if i < CROSSHAIR_CENTER_CELL {
+            ARM_LEFT_GLYPHS[i]
+        } else {
+            ARM_RIGHT_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
+        };
+        let (cx, cy) = layout.sat_cell_positions[i];
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            glyph,
+            color,
+            font_size,
+            font_size,
+            (cx - cell_box_w * 0.5, cy - font_size * 0.5),
+            (cell_box_w, font_size * 1.5),
+        );
+    }
+    for i in 0..VAL_CELL_COUNT {
+        if i == CROSSHAIR_CENTER_CELL {
+            continue;
+        }
+        let cell_val = val_cell_to_value(i);
+        let base_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, cell_val);
+        let color = if i == current_val_cell {
+            highlight_selected_cell_color(base_rgb)
+        } else {
+            rgb_to_cosmic_color(base_rgb)
+        };
+        let glyph = if i < CROSSHAIR_CENTER_CELL {
+            ARM_TOP_GLYPHS[i]
+        } else {
+            ARM_BOTTOM_GLYPHS[i - CROSSHAIR_CENTER_CELL - 1]
+        };
+        let (cx, cy) = layout.val_cell_positions[i];
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            glyph,
+            color,
+            font_size,
+            font_size,
+            (cx - cell_box_w * 0.5, cy - font_size * 0.5),
+            (cell_box_w, font_size * 1.5),
+        );
+    }
+
+    // Selected hue indicator (cyan outline ring)
+    let current_hue_slot = ((geometry.hue_deg.rem_euclid(360.0) / 360.0)
+        * HUE_SLOT_COUNT as f32)
+        .round() as usize
+        % HUE_SLOT_COUNT;
+    let slot_pos = layout.hue_slot_positions[current_hue_slot];
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        "\u{25EF}",
+        cosmic_text::Color::rgba(0, 229, 255, 255),
+        ring_font_size,
+        ring_font_size,
+        (slot_pos.0 - ring_box_w * 0.5, slot_pos.1 - ring_font_size * 0.5),
+        (ring_box_w, ring_font_size * 1.5),
+    );
+
+    // Centre preview glyph ॐ
+    let preview_size = layout.preview_size;
+    let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
+    let preview_color = rgb_to_cosmic_color(preview_rgb);
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        CENTER_PREVIEW_GLYPH,
+        preview_color,
+        preview_size,
+        preview_size,
+        layout.preview_pos,
+        (preview_size * 1.5, preview_size * 1.5),
+    );
+
+    // Hex readout
+    if let Some(hex_anchor) = layout.hex_pos {
+        let hex_text = hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val);
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            &hex_text,
+            cosmic_text::Color::rgba(220, 220, 220, 255),
+            font_size,
+            font_size,
+            hex_anchor,
+            (font_size * 8.0, font_size * 1.5),
+        );
+    }
+
+    // Theme chips row
+    for (i, chip) in THEME_CHIPS.iter().enumerate() {
+        let focused = geometry.chip_focus == Some(i);
+        let prefix = if focused { "\u{25B8} " } else { "  " };
+        let label = format!("{prefix}{}", chip.label);
+        let color = if focused {
+            cosmic_text::Color::rgba(0, 229, 255, 255)
+        } else {
+            cosmic_text::Color::rgba(200, 200, 200, 255)
+        };
+        let (cx, cy, cw) = layout.chip_positions[i];
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            &label,
+            color,
+            font_size,
+            font_size,
+            (cx, cy),
+            (cw, layout.chip_height),
+        );
+    }
+
+    tree
+}
+
+/// Build the console overlay tree from a geometry + pre-computed
+/// layout. One Void root with one GlyphArea per visible element:
+/// 4 borders, gutter glyphs, scrollback rows, completion rows,
+/// and the prompt line. Used by
+/// [`Renderer::rebuild_console_overlay_buffers`] which then
+/// registers the tree under
+/// [`crate::application::scene_host::OverlayRole::Console`] and
+/// walks it through the standard overlay-scene pipeline.
+///
+/// `font_system` is needed only for `measure_max_glyph_advance` —
+/// no shaping happens here. The returned tree's GlyphArea
+/// positions are absolute screen coordinates so the walker's
+/// per-tree offset can be `Vec2::ZERO`.
+fn build_console_overlay_tree(
+    geometry: &ConsoleOverlayGeometry,
+    layout: &ConsoleFrameLayout,
+    font_system: &mut FontSystem,
+) -> Tree<GfxElement, GfxMutator> {
+    use crate::application::console::visuals::{
+        ACCENT_COLOR, BORDER_COLOR, ERROR_COLOR, GUTTER_GLYPH, INPUT_ECHO_COLOR,
+        SCROLLBACK_MIN_ALPHA, SELECTED_COMPLETION_MARKER, TEXT_COLOR,
+        UNSELECTED_COMPLETION_MARKER,
+    };
+
+    let &ConsoleFrameLayout {
+        left,
+        top,
+        frame_width,
+        frame_height,
+        font_size,
+        char_width,
+        row_height,
+        inner_padding,
+        scrollback_rows,
+        completion_rows,
+    } = layout;
+
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut id_counter: usize = 1;
+    let push_area = |tree: &mut Tree<GfxElement, GfxMutator>,
+                     id_counter: &mut usize,
+                     text: &str,
+                     color: cosmic_text::Color,
+                     font_size: f32,
+                     line_height: f32,
+                     pos: (f32, f32),
+                     bounds: (f32, f32)| {
+        let mut area = GlyphArea::new_with_str(
+            text,
+            font_size,
+            line_height,
+            Vec2::new(pos.0, pos.1),
+            Vec2::new(bounds.0, bounds.1),
+        );
+        let cluster_count = text.chars().count();
+        if cluster_count > 0 {
+            let rgba = [
+                color.r() as f32 / 255.0,
+                color.g() as f32 / 255.0,
+                color.b() as f32 / 255.0,
+                color.a() as f32 / 255.0,
+            ];
+            let mut regions = ColorFontRegions::new_empty();
+            regions.submit_region(ColorFontRegion::new(
+                ColorFontRange::new(0, cluster_count),
+                None,
+                Some(rgba),
+            ));
+            area.regions = regions;
+        }
+        let element =
+            GfxElement::new_area_non_indexed_with_id(area, *id_counter, *id_counter);
+        *id_counter += 1;
+        let leaf = tree.arena.new_node(element);
+        tree.root.append(leaf, &mut tree.arena);
+    };
+
+    // Border glyph advance — measured rather than estimated so the
+    // top-right `╮` lands flush with the right side `│` column.
+    let measured_char_width =
+        measure_max_glyph_advance(font_system, &["\u{2500}", "\u{2502}"], font_size);
+    let cols = ((frame_width / measured_char_width).floor() as usize).max(2);
+    let side_rows = side_row_count(frame_height, font_size, row_height);
+    let (top_border, bottom_border, left_col, right_col) =
+        build_console_border_strings(cols, side_rows);
+
+    // Borders
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &top_border,
+        BORDER_COLOR,
+        font_size,
+        font_size,
+        (left, top),
+        (frame_width, font_size * 1.5),
+    );
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &bottom_border,
+        BORDER_COLOR,
+        font_size,
+        font_size,
+        (left, top + frame_height),
+        (frame_width, font_size * 1.5),
+    );
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &left_col,
+        BORDER_COLOR,
+        font_size,
+        row_height,
+        (left, top + font_size),
+        (measured_char_width, frame_height),
+    );
+    let right_col_x = left + (cols.saturating_sub(1) as f32) * measured_char_width;
+    push_area(
+        &mut tree,
+        &mut id_counter,
+        &right_col,
+        BORDER_COLOR,
+        font_size,
+        row_height,
+        (right_col_x, top + font_size),
+        (measured_char_width, frame_height),
+    );
+
+    // Scrollback rows (oldest → newest, with alpha dimming)
+    let gutter_x = left + measured_char_width;
+    let content_left = gutter_x + measured_char_width + inner_padding;
+    let content_width = right_col_x - content_left - inner_padding;
+    let content_top = top + font_size + inner_padding;
+    let content_cols = (content_width / measured_char_width).floor() as usize;
+
+    let skip = geometry.scrollback.len().saturating_sub(scrollback_rows);
+    let visible_count = scrollback_rows.max(1);
+    for (i, line) in geometry
+        .scrollback
+        .iter()
+        .skip(skip)
+        .take(scrollback_rows)
+        .enumerate()
+    {
+        let newness = if visible_count <= 1 {
+            1.0
+        } else {
+            i as f32 / (visible_count - 1) as f32
+        };
+        let alpha = lerp_alpha(SCROLLBACK_MIN_ALPHA, 0xff, newness);
+        let (text_color, gutter_color, gutter_glyph) = match line.kind {
+            ConsoleOverlayLineKind::Input => (
+                with_alpha(INPUT_ECHO_COLOR, alpha),
+                with_alpha(INPUT_ECHO_COLOR, alpha),
+                " ",
+            ),
+            ConsoleOverlayLineKind::Output => (
+                with_alpha(TEXT_COLOR, alpha),
+                with_alpha(ACCENT_COLOR, alpha),
+                GUTTER_GLYPH,
+            ),
+            ConsoleOverlayLineKind::Error => (
+                with_alpha(ERROR_COLOR, alpha),
+                with_alpha(ERROR_COLOR, alpha),
+                GUTTER_GLYPH,
+            ),
+        };
+        let y = content_top + row_height * i as f32;
+        if gutter_glyph != " " {
+            push_area(
+                &mut tree,
+                &mut id_counter,
+                gutter_glyph,
+                gutter_color,
+                font_size,
+                row_height,
+                (gutter_x, y),
+                (char_width, row_height),
+            );
+        }
+        let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+            &line.text,
+            content_cols,
+        );
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            clipped,
+            text_color,
+            font_size,
+            row_height,
+            (content_left, y),
+            (content_width, row_height),
+        );
+    }
+
+    // Completion popup rows
+    let completion_top = content_top + row_height * scrollback_rows as f32;
+    for (i, c) in geometry
+        .completions
+        .iter()
+        .take(completion_rows)
+        .enumerate()
+    {
+        let is_selected = geometry.selected_completion == Some(i);
+        let color = if is_selected { ACCENT_COLOR } else { TEXT_COLOR };
+        let prefix = if is_selected {
+            SELECTED_COMPLETION_MARKER
+        } else {
+            UNSELECTED_COMPLETION_MARKER
+        };
+        let line = match &c.hint {
+            Some(hint) => format!("{prefix}{}    {}", c.text, hint),
+            None => format!("{prefix}{}", c.text),
+        };
+        let clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+            &line,
+            content_cols,
+        );
+        let y = completion_top + row_height * i as f32;
+        push_area(
+            &mut tree,
+            &mut id_counter,
+            clipped,
+            color,
+            font_size,
+            row_height,
+            (content_left, y),
+            (content_width, row_height),
+        );
+    }
+
+    // Prompt line — single GlyphArea with two ColorFontRegions so
+    // cosmic-text shapes "❯ " and the input as one run, and the
+    // input's first glyph lands at the prompt's actual shaped
+    // advance. The legacy `create_border_buffer_spans` path used
+    // the same trick; an earlier draft of this builder split into
+    // two GlyphAreas with a `measured_char_width * 2.0` gap
+    // estimate that visibly drifted on fonts where `❯ ` and
+    // `─/│` advance differently.
+    let prompt_budget = font_size * 1.4;
+    let y = layout.prompt_y();
+    let cursor_byte = baumhard::util::grapheme_chad::find_byte_index_of_grapheme(
+        &geometry.input,
+        geometry.cursor_grapheme,
+    )
+    .unwrap_or(geometry.input.len());
+    let (pre, post) = geometry.input.split_at(cursor_byte);
+    let input_with_cursor = format!("{pre}{CURSOR_GLYPH}{post}");
+    let input_clipped = baumhard::util::grapheme_chad::truncate_to_display_width(
+        &input_with_cursor,
+        content_cols.saturating_sub(2),
+    );
+    let prompt_text = "\u{276F} ";
+    let combined = format!("{prompt_text}{input_clipped}");
+    let prompt_chars = prompt_text.chars().count();
+    let input_chars = input_clipped.chars().count();
+
+    let mut prompt_area = GlyphArea::new_with_str(
+        &combined,
+        font_size,
+        font_size,
+        Vec2::new(content_left, y),
+        Vec2::new(content_width, prompt_budget),
+    );
+    let mut regions = ColorFontRegions::new_empty();
+    let to_rgba = |c: cosmic_text::Color| -> [f32; 4] {
+        [
+            c.r() as f32 / 255.0,
+            c.g() as f32 / 255.0,
+            c.b() as f32 / 255.0,
+            c.a() as f32 / 255.0,
+        ]
+    };
+    regions.submit_region(ColorFontRegion::new(
+        ColorFontRange::new(0, prompt_chars),
+        None,
+        Some(to_rgba(ACCENT_COLOR)),
+    ));
+    if input_chars > 0 {
+        regions.submit_region(ColorFontRegion::new(
+            ColorFontRange::new(prompt_chars, prompt_chars + input_chars),
+            None,
+            Some(to_rgba(TEXT_COLOR)),
+        ));
+    }
+    prompt_area.regions = regions;
+    let prompt_element =
+        GfxElement::new_area_non_indexed_with_id(prompt_area, id_counter, id_counter);
+    id_counter += 1;
+    let prompt_leaf = tree.arena.new_node(prompt_element);
+    tree.root.append(prompt_leaf, &mut tree.arena);
+
+    tree
 }
 
 /// Shared tree → cosmic-text buffer walker.

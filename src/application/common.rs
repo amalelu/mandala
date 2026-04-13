@@ -25,7 +25,6 @@ pub enum RenderDecree {
     Terminate,
     CameraPan(f32, f32),
     CameraZoom { screen_x: f32, screen_y: f32, factor: f32 },
-    LoadMindMap(String),
 }
 
 impl Default for RenderDecree {
