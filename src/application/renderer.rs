@@ -1408,10 +1408,12 @@ impl Renderer {
             max_x = max_x.max(x + w);
             max_y = max_y.max(y + h);
         }
-        self.camera.fit_to_bounds(
-            Vec2::new(min_x, min_y),
-            Vec2::new(max_x, max_y),
-            0.05,
+        self.camera.apply_mutation(
+            &baumhard::gfx_structs::camera::CameraMutation::FitToBounds {
+                min: Vec2::new(min_x, min_y),
+                max: Vec2::new(max_x, max_y),
+                padding_fraction: 0.05,
+            },
         );
     }
 
@@ -2246,10 +2248,12 @@ impl Renderer {
             found_any = true;
         }
         if found_any {
-            self.camera.fit_to_bounds(
-                Vec2::new(min_x, min_y),
-                Vec2::new(max_x, max_y),
-                0.05,
+            self.camera.apply_mutation(
+                &baumhard::gfx_structs::camera::CameraMutation::FitToBounds {
+                    min: Vec2::new(min_x, min_y),
+                    max: Vec2::new(max_x, max_y),
+                    padding_fraction: 0.05,
+                },
             );
             // The fit typically changes both pan and zoom. Today this
             // is only called from `load_mindmap`, which follows up

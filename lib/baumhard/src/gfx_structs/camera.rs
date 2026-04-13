@@ -56,6 +56,15 @@ pub enum CameraMutation {
     /// Idempotent assignment of the zoom factor. Clamped to
     /// `MIN_ZOOM..=MAX_ZOOM`.
     SetZoom { factor: f32 },
+    /// Recentre and rescale the camera so the canvas-space AABB
+    /// `[min, max]` fits inside the viewport, with
+    /// `padding_fraction` of the viewport held back as margin on
+    /// each side (0.05 = 5% padding). Used by the load-a-mindmap
+    /// path and any fit-to-selection gesture. Equivalent to the
+    /// existing [`Camera2D::fit_to_bounds`] imperative call —
+    /// expressed as a mutation so every camera change has one
+    /// dispatch point.
+    FitToBounds { min: Vec2, max: Vec2, padding_fraction: f32 },
 }
 
 impl Camera2D {
@@ -164,6 +173,11 @@ impl Camera2D {
             CameraMutation::SetZoom { factor } => {
                 self.zoom = factor.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
             }
+            CameraMutation::FitToBounds {
+                min,
+                max,
+                padding_fraction,
+            } => self.fit_to_bounds(min, max, padding_fraction),
         }
     }
 
@@ -287,6 +301,27 @@ mod tests {
         assert_eq!(cam.zoom, Camera2D::MAX_ZOOM);
         cam.apply_mutation(&CameraMutation::SetZoom { factor: 0.0001 });
         assert_eq!(cam.zoom, Camera2D::MIN_ZOOM);
+    }
+
+    /// `apply_mutation(FitToBounds { ... })` matches the
+    /// imperative `fit_to_bounds` round-trip. Load-a-mindmap and
+    /// fit-to-selection both land on this, so the identity with
+    /// the imperative call is what keeps the single-dispatch
+    /// invariant honest.
+    #[test]
+    fn test_apply_mutation_fit_to_bounds_matches_imperative() {
+        let mut imperative = Camera2D::new(800, 600);
+        let mut via_mutation = Camera2D::new(800, 600);
+        let min = Vec2::new(-500.0, -400.0);
+        let max = Vec2::new(500.0, 400.0);
+        imperative.fit_to_bounds(min, max, 0.05);
+        via_mutation.apply_mutation(&CameraMutation::FitToBounds {
+            min,
+            max,
+            padding_fraction: 0.05,
+        });
+        assert_eq!(imperative.position, via_mutation.position);
+        assert_eq!(imperative.zoom, via_mutation.zoom);
     }
 
     /// `SetPosition` is a clean assignment, no clamping or
