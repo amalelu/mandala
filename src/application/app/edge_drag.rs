@@ -81,14 +81,30 @@ pub(in crate::application::app) fn apply_edge_handle_drag(
             // Pick the side of from_node whose midpoint is closest to
             // the new cursor position. Value in 1..=4 (top/right/
             // bottom/left) — never 0 (auto) during manual drag.
-            let from_node = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+            // The endpoint lookup mirrors the resolve at the top of
+            // this function; if the node vanished between then and
+            // here (a delete racing the drag), keep the anchor at
+            // its current value rather than panicking the frame.
+            let Some(from_node) = doc.mindmap.nodes.get(&edge.from_id) else {
+                log::warn!(
+                    "apply_edge_handle_drag: AnchorFrom from_id {} disappeared mid-drag",
+                    edge.from_id
+                );
+                return handle;
+            };
             let node_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
             let node_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
             edge.anchor_from = nearest_anchor_side(new_handle_canvas, node_pos, node_size);
             EdgeHandleKind::AnchorFrom
         }
         EdgeHandleKind::AnchorTo => {
-            let to_node = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+            let Some(to_node) = doc.mindmap.nodes.get(&edge.to_id) else {
+                log::warn!(
+                    "apply_edge_handle_drag: AnchorTo to_id {} disappeared mid-drag",
+                    edge.to_id
+                );
+                return handle;
+            };
             let node_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
             let node_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
             edge.anchor_to = nearest_anchor_side(new_handle_canvas, node_pos, node_size);
