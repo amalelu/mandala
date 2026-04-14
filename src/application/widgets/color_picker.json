@@ -49,5 +49,21 @@
   "title_template_contextual": "࿕ {target_label} color",
   "title_template_standalone": "࿕ color palette",
   "hint_text_contextual": "Esc cancel  ·  ࿕ commit  ·  drag to move  ·  RMB resize",
-  "hint_text_standalone": "࿕ commit  ·  drag to move  ·  RMB resize"
+  "hint_text_standalone": "࿕ commit  ·  drag to move  ·  RMB resize",
+
+  "_mutator_spec_comment": "Declarative mutator-tree shape for the picker overlay. Root is a Void on channel 0; each Repeat expands to N consecutive Singles on channels [channel_base, channel_base+count), skipping declared skip_indices. Every Single's AreaDelta carries the same 8-field template; bare CellField names pull per-cell values from the section-keyed area lookup at apply time, Operation::Assign is baked in for every cell. See src/application/mutator_builder/ for the walker.",
+  "mutator_spec": {
+    "Void": {
+      "channel": 0,
+      "children": [
+        { "Repeat": { "section": "title",    "channel_base": 1,   "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
+        { "Repeat": { "section": "hue_ring", "channel_base": 100, "count": { "Literal": 24 }, "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
+        { "Repeat": { "section": "hint",     "channel_base": 200, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
+        { "Repeat": { "section": "sat_bar",  "channel_base": 300, "count": { "Literal": 21 }, "skip_indices": [10], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
+        { "Repeat": { "section": "val_bar",  "channel_base": 400, "count": { "Literal": 21 }, "skip_indices": [10], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
+        { "Repeat": { "section": "preview",  "channel_base": 500, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
+        { "Repeat": { "section": "hex",      "channel_base": 600, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}}
+      ]
+    }
+  }
 }

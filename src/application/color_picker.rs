@@ -55,22 +55,39 @@ pub const HUE_SLOT_COUNT: usize = 24;
 // (Baumhard's `align_child_walks` pairs mutator children with target
 // children by ascending channel — see `tree_walker.rs:226`).
 //
-// The constants below define the picker's channel space. Bands are
-// 100 wide so a future addition (e.g. an extra ring of glyphs) can
-// slot in without renumbering. **Order matters**: the values must be
-// strictly ascending in tree-insertion order, otherwise the walker
-// breaks out of its alignment loop.
+// The channel layout now lives in `widgets/color_picker.json` under
+// `mutator_spec.children[*].Repeat` — each `Repeat` declares a
+// section name, `channel_base`, and `count`. The declaration order
+// of sections in the JSON IS the picker's tree-insertion order; bands
+// are 100 wide so a future addition (e.g. an extra ring of glyphs)
+// can slot in without renumbering. Reading the layout here means the
+// Rust side never has to restate it.
 //
-// Layout-wise: title → hue ring → hint → sat bar → val bar → ࿕
-// preview → hex readout → chip row.
+// `picker_channel(section, index)` below is the canonical lookup —
+// it walks the spec once (cached via OnceLock) and returns the
+// channel for a given section + iteration index. Layout-wise: title
+// → hue ring → hint → sat bar → val bar → ࿕ preview → hex readout.
 
-pub const PICKER_CHANNEL_TITLE: usize = 1;
-pub const PICKER_CHANNEL_HUE_RING_BASE: usize = 100; // +0..23
-pub const PICKER_CHANNEL_HINT: usize = 200;
-pub const PICKER_CHANNEL_SAT_BASE: usize = 300; // +0..20 (skipping +10)
-pub const PICKER_CHANNEL_VAL_BASE: usize = 400; // +0..20 (skipping +10)
-pub const PICKER_CHANNEL_PREVIEW: usize = 500;
-pub const PICKER_CHANNEL_HEX: usize = 600;
+/// Resolve the stable channel for the picker's `(section, index)`
+/// cell from `widgets/color_picker.json`'s `mutator_spec`. First
+/// call walks the spec; subsequent calls hit an `OnceLock` cache.
+/// Panics if the section isn't declared — that's a JSON/Rust drift
+/// bug, not a recoverable state.
+pub fn picker_channel(section: &str, index: usize) -> usize {
+    static CACHE: OnceLock<std::collections::HashMap<(String, usize), usize>> = OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        use crate::application::mutator_builder::{iter_section_channels, SectionContext};
+        struct NoCtx;
+        impl SectionContext for NoCtx {}
+        let mut out = Vec::new();
+        iter_section_channels(&load_spec().mutator_spec, &NoCtx, &mut out);
+        out.into_iter()
+            .map(|(s, i, c)| ((s, i), c))
+            .collect()
+    });
+    *map.get(&(section.to_string(), index))
+        .unwrap_or_else(|| panic!("picker_channel: unknown section/index ({section:?}, {index})"))
+}
 
 /// Number of cells on each crosshair bar. Odd so the center cell sits
 /// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 10 is the
@@ -1872,11 +1889,12 @@ mod tests {
         assert!(top + bh <= 200.5);
     }
 
-    /// Picker channel constants must be strictly ascending in
-    /// tree-insertion order, otherwise Baumhard's
-    /// `align_child_walks` (which pairs mutator children with
-    /// target children by ascending channel) breaks alignment and
-    /// the §B2 mutator path silently misses elements.
+    /// Picker channels must be strictly ascending in tree-insertion
+    /// order, otherwise Baumhard's `align_child_walks` (which pairs
+    /// mutator children with target children by ascending channel)
+    /// breaks alignment and the §B2 mutator path silently misses
+    /// elements. Channels are resolved through [`picker_channel`],
+    /// which reads `widgets/color_picker.json`'s `mutator_spec`.
     ///
     /// Insertion order: title → hue ring (24 slots) → hint →
     /// sat bar (21 cells, channels also stride through the
@@ -1884,13 +1902,13 @@ mod tests {
     #[test]
     fn picker_channels_are_strictly_ascending() {
         let bands: &[(&str, usize, usize)] = &[
-            ("title", PICKER_CHANNEL_TITLE, 1),
-            ("hue ring", PICKER_CHANNEL_HUE_RING_BASE, HUE_SLOT_COUNT),
-            ("hint", PICKER_CHANNEL_HINT, 1),
-            ("sat bar", PICKER_CHANNEL_SAT_BASE, SAT_CELL_COUNT),
-            ("val bar", PICKER_CHANNEL_VAL_BASE, VAL_CELL_COUNT),
-            ("preview", PICKER_CHANNEL_PREVIEW, 1),
-            ("hex", PICKER_CHANNEL_HEX, 1),
+            ("title", picker_channel("title", 0), 1),
+            ("hue ring", picker_channel("hue_ring", 0), HUE_SLOT_COUNT),
+            ("hint", picker_channel("hint", 0), 1),
+            ("sat bar", picker_channel("sat_bar", 0), SAT_CELL_COUNT),
+            ("val bar", picker_channel("val_bar", 0), VAL_CELL_COUNT),
+            ("preview", picker_channel("preview", 0), 1),
+            ("hex", picker_channel("hex", 0), 1),
         ];
         let mut prev_band_max: usize = 0;
         for (name, base, count) in bands {

@@ -15,6 +15,8 @@ use std::sync::OnceLock;
 use baumhard::font::fonts::AppFont;
 use serde::Deserialize;
 
+use crate::application::mutator_builder::MutatorNode;
+
 /// Top-level spec — one file describes the whole widget. All
 /// `Vec<String>` fields are read as slices by the renderer and never
 /// mutated after load; the heap allocation happens exactly once per
@@ -56,6 +58,12 @@ pub struct ColorPickerWidgetSpec {
     /// effect on a standalone picker, which only closes via
     /// `color picker off` from the console.
     pub hint_text_standalone: String,
+    /// Declarative mutator-tree shape for the picker overlay. Walked
+    /// by `crate::application::mutator_builder` at apply time to
+    /// produce the `MutatorTree<GfxMutator>` that updates the
+    /// picker's registered tree in place. See the JSON file's
+    /// `_mutator_spec_comment` for the on-disk contract.
+    pub mutator_spec: MutatorNode,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,6 +173,67 @@ mod tests {
         assert!(spec.geometry.outline_px > 0.0);
         assert!(spec.geometry.resize_scale_min > 0.0);
         assert!(spec.geometry.resize_scale_max > spec.geometry.resize_scale_min);
+    }
+
+    /// The `mutator_spec` block must parse into a Void root with the
+    /// seven expected Repeat children (title, hue_ring, hint, sat_bar,
+    /// val_bar, preview, hex) in declaration order, the right channel
+    /// bases, and the skip_indices for the crosshair bars. A drift
+    /// guard — any JSON renumbering that sneaks past surfaces here
+    /// rather than as a silent picker misalignment.
+    #[test]
+    fn spec_mutator_spec_shape_matches_expectations() {
+        use crate::application::mutator_builder::{CountSrc, MutatorNode};
+        let spec = load_spec();
+        let MutatorNode::Void { channel, children } = &spec.mutator_spec else {
+            panic!("mutator_spec root must be a Void");
+        };
+        assert_eq!(*channel, 0, "picker overlay root channel must be 0");
+        let expected: &[(&str, usize, usize, &[usize])] = &[
+            ("title", 1, 1, &[]),
+            ("hue_ring", 100, 24, &[]),
+            ("hint", 200, 1, &[]),
+            ("sat_bar", 300, 21, &[10]),
+            ("val_bar", 400, 21, &[10]),
+            ("preview", 500, 1, &[]),
+            ("hex", 600, 1, &[]),
+        ];
+        assert_eq!(children.len(), expected.len());
+        for (child, (exp_section, exp_base, exp_count, exp_skip)) in
+            children.iter().zip(expected.iter())
+        {
+            let MutatorNode::Repeat {
+                section,
+                channel_base,
+                count,
+                skip_indices,
+                ..
+            } = child
+            else {
+                panic!("mutator_spec children must all be Repeat");
+            };
+            assert_eq!(section, exp_section);
+            assert_eq!(*channel_base, *exp_base);
+            match count {
+                CountSrc::Literal(n) => assert_eq!(*n, *exp_count),
+                _ => panic!("picker sections use literal counts"),
+            }
+            assert_eq!(skip_indices.as_slice(), *exp_skip);
+        }
+    }
+
+    /// Total live picker cells = 1 title + 24 hue + 1 hint + 20 sat
+    /// + 20 val + 1 preview + 1 hex = 68. Pins the element-count
+    /// contract the mutator path relies on.
+    #[test]
+    fn spec_mutator_spec_total_live_cells_is_68() {
+        use crate::application::mutator_builder::{iter_section_channels, SectionContext};
+        struct NoCtx;
+        impl SectionContext for NoCtx {}
+        let spec = load_spec();
+        let mut out = Vec::new();
+        iter_section_channels(&spec.mutator_spec, &NoCtx, &mut out);
+        assert_eq!(out.len(), 68);
     }
 
     /// The bottom-arm font must be set — without it cosmic-text

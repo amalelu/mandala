@@ -119,9 +119,7 @@ mod tests {
     /// layout's intended preview centre within rounding slack.
     #[test]
     fn picker_preview_box_centered_symmetrically_on_wheel() {
-        use crate::application::color_picker::{
-            compute_color_picker_layout, PICKER_CHANNEL_PREVIEW,
-        };
+        use crate::application::color_picker::{compute_color_picker_layout, picker_channel};
         use crate::application::widgets::color_picker_widget::load_spec;
         let g = picker_sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
@@ -131,9 +129,10 @@ mod tests {
             layout.preview_pos.1 + preview_size * 0.5,
         );
         let areas = picker_glyph_areas_for(&g);
+        let preview_ch = picker_channel("preview", 0);
         let (_, preview_area) = areas
             .iter()
-            .find(|(channel, _)| *channel == PICKER_CHANNEL_PREVIEW)
+            .find(|(channel, _)| *channel == preview_ch)
             .expect("preview area must be emitted");
         let box_center = (
             preview_area.position.x.0 + preview_area.render_bounds.x.0 * 0.5,
@@ -312,14 +311,15 @@ mod tests {
         let visible_channels: Vec<usize> = visible.iter().map(|(c, _)| *c).collect();
         assert_eq!(invisible_channels, visible_channels);
         // Hex itself: invisible → empty text, visible → hex string.
+        let hex_ch = crate::application::color_picker::picker_channel("hex", 0);
         let hex_invisible = invisible
             .iter()
-            .find(|(c, _)| *c == crate::application::color_picker::PICKER_CHANNEL_HEX)
+            .find(|(c, _)| *c == hex_ch)
             .expect("hex channel present");
         assert!(hex_invisible.1.text.is_empty());
         let hex_visible = visible
             .iter()
-            .find(|(c, _)| *c == crate::application::color_picker::PICKER_CHANNEL_HEX)
+            .find(|(c, _)| *c == hex_ch)
             .expect("hex channel present");
         assert!(hex_visible.1.text.starts_with('#'));
     }
