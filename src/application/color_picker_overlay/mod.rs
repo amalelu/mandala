@@ -120,9 +120,7 @@ mod tests {
     /// layout's intended preview centre within rounding slack.
     #[test]
     fn picker_preview_box_centered_symmetrically_on_wheel() {
-        use crate::application::color_picker::{
-            compute_color_picker_layout, PICKER_CHANNEL_PREVIEW,
-        };
+        use crate::application::color_picker::{compute_color_picker_layout, picker_channel};
         use crate::application::widgets::color_picker_widget::load_spec;
         let g = picker_sample_geometry();
         let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
@@ -132,9 +130,10 @@ mod tests {
             layout.preview_pos.1 + preview_size * 0.5,
         );
         let areas = picker_glyph_areas_for(&g);
+        let preview_ch = picker_channel("preview", 0);
         let (_, preview_area) = areas
             .iter()
-            .find(|(channel, _)| *channel == PICKER_CHANNEL_PREVIEW)
+            .find(|(channel, _)| *channel == preview_ch)
             .expect("preview area must be emitted");
         let box_center = (
             preview_area.position.x.0 + preview_area.render_bounds.x.0 * 0.5,
@@ -241,6 +240,55 @@ mod tests {
         assert_eq!(area_count, model_count, "every area has its model");
     }
 
+    /// Spec-driven mutator output matches the picker's structural
+    /// invariants: root `Void` on channel 0, 60 `Single` children
+    /// (title + 24 hue + hint + 16 sat + 16 val + preview + hex),
+    /// each carrying an `AreaDelta` with exactly 8 fields. Guards
+    /// against drift between `widgets/color_picker.json`'s
+    /// `mutator_spec` block and the `mutator_builder` walker — if
+    /// either side silently changes shape, the picker's registered
+    /// tree alignment breaks and this test fires first.
+    #[test]
+    fn picker_mutator_output_matches_spec_shape() {
+        use baumhard::gfx_structs::mutator::{GfxMutator, Mutation, MutatorType};
+        use crate::application::color_picker::compute_color_picker_layout;
+
+        let g = picker_sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let mt = build_color_picker_overlay_mutator(&g, &layout);
+
+        // Root must be a Void on channel 0 (the root_channel the
+        // JSON declares).
+        match mt.arena.get(mt.root).unwrap().get() {
+            GfxMutator::Void { channel: 0 } => {}
+            other => panic!("picker mutator root must be Void(0), got {other:?}"),
+        }
+
+        let children: Vec<&GfxMutator> = mt
+            .root
+            .children(&mt.arena)
+            .map(|id| mt.arena.get(id).unwrap().get())
+            .collect();
+        assert_eq!(children.len(), 60, "picker emits 60 live cells");
+
+        for child in &children {
+            assert!(
+                matches!(child.get_type(), MutatorType::Single),
+                "every picker cell is a Single"
+            );
+            let GfxMutator::Single { mutation, .. } = child else { unreachable!() };
+            let Mutation::AreaDelta(delta) = mutation else {
+                panic!("picker cells carry AreaDelta");
+            };
+            assert_eq!(
+                delta.fields.len(),
+                8,
+                "picker cell template has 8 fields (Text, position, bounds, scale, \
+                 line_height, ColorFontRegions, Outline, Operation::Assign)"
+            );
+        }
+    }
+
     /// Mutator round-trip: the §B2 in-place update path keeps working
     /// across the tree-shape change in `build_color_picker_overlay_tree`.
     /// Build a tree at state A, apply a mutator computed from state B
@@ -313,14 +361,15 @@ mod tests {
         let visible_channels: Vec<usize> = visible.iter().map(|(c, _)| *c).collect();
         assert_eq!(invisible_channels, visible_channels);
         // Hex itself: invisible → empty text, visible → hex string.
+        let hex_ch = crate::application::color_picker::picker_channel("hex", 0);
         let hex_invisible = invisible
             .iter()
-            .find(|(c, _)| *c == crate::application::color_picker::PICKER_CHANNEL_HEX)
+            .find(|(c, _)| *c == hex_ch)
             .expect("hex channel present");
         assert!(hex_invisible.1.text.is_empty());
         let hex_visible = visible
             .iter()
-            .find(|(c, _)| *c == crate::application::color_picker::PICKER_CHANNEL_HEX)
+            .find(|(c, _)| *c == hex_ch)
             .expect("hex channel present");
         assert!(hex_visible.1.text.starts_with('#'));
     }
