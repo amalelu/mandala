@@ -19,7 +19,6 @@ use crate::application::color_picker::{compute_color_picker_layout, ColorPickerO
 mod color;
 mod glyph_model;
 mod picker_glyph_areas;
-mod tree_builder;
 
 /// Result of [`build`] — the picker tree plus the opaque-backdrop
 /// rectangle the renderer needs to draw underneath it.
@@ -50,7 +49,7 @@ pub(crate) fn build(
     } else {
         Some(layout.backdrop)
     };
-    let tree = tree_builder::build_color_picker_overlay_tree(geometry, &layout);
+    let tree = picker_glyph_areas::build_color_picker_overlay_tree(geometry, &layout);
     ColorPickerOverlayBuild { tree, backdrop }
 }
 
@@ -67,7 +66,7 @@ pub(crate) fn build_mutator(
     viewport_h: f32,
 ) -> MutatorTree<GfxMutator> {
     let layout = compute_color_picker_layout(geometry, viewport_w, viewport_h);
-    tree_builder::build_color_picker_overlay_mutator(geometry, &layout)
+    picker_glyph_areas::build_color_picker_overlay_mutator(geometry, &layout)
 }
 
 /// Build an in-place [`MutatorTree`] for the picker — the **dynamic**
@@ -82,15 +81,14 @@ pub(crate) fn build_dynamic_mutator(
     viewport_h: f32,
 ) -> MutatorTree<GfxMutator> {
     let layout = compute_color_picker_layout(geometry, viewport_w, viewport_h);
-    tree_builder::build_color_picker_overlay_dynamic_mutator(geometry, &layout)
+    picker_glyph_areas::build_color_picker_overlay_dynamic_mutator(geometry, &layout)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::picker_glyph_areas::picker_glyph_areas;
-    use super::tree_builder::{
+    use super::picker_glyph_areas::{
         build_color_picker_overlay_dynamic_mutator, build_color_picker_overlay_mutator,
-        build_color_picker_overlay_tree,
+        build_color_picker_overlay_tree, picker_glyph_areas,
     };
     use crate::application::color_picker::CROSSHAIR_CENTER_CELL;
     use baumhard::gfx_structs::area::GlyphArea;
