@@ -13,8 +13,6 @@
 //! `widgets/color_picker.json` — the spec's channel layout is
 //! authoritative and the fn below fills the cells it asks for.
 
-use std::collections::HashMap;
-
 use baumhard::core::primitives::ColorFontRegions;
 use baumhard::gfx_structs::area::{GlyphArea, OutlineStyle};
 use glam::Vec2;
@@ -22,57 +20,86 @@ use glam::Vec2;
 use super::color::{
     highlight_hovered_cell_color, highlight_selected_cell_color, rgb_to_cosmic_color,
 };
+use crate::application::color_picker::{HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT};
 
-/// One entry in the picker's tagged area list. Same payload as the
-/// old `(usize, GlyphArea)` tuples plus the `(section, index)`
-/// identity that lets the mutator path route by section name rather
-/// than by channel math.
-struct TaggedArea {
-    section: &'static str,
-    index: usize,
-    channel: usize,
-    area: GlyphArea,
-}
-
-/// All `GlyphArea`s the picker will emit on one apply cycle, in two
-/// complementary forms:
+/// All `GlyphArea`s the picker will emit on one apply cycle.
 ///
-/// - [`ordered`] is the channel-ascending `(channel, area)` list the
-///   initial-build path needs to build its tree in the right walker
-///   order.
-/// - [`by_section`] is a `section → index → vec_index` lookup the
-///   mutator path uses to resolve
-///   `mutator_builder::SectionContext::area(section, index)` calls
-///   without scanning or doing channel math.
-///
-/// Both share the same backing storage: `ordered[by_section[..][..]]`
-/// is always the matching area.
-///
-/// [`ordered`]: PickerAreas::ordered
-/// [`by_section`]: PickerAreas::by_section
+/// `ordered` is the channel-ascending `(channel, area)` list the
+/// initial-build path walks to seat each cell at the right channel.
+/// The per-section `[Option<usize>; N]` arrays index into `ordered` so
+/// the mutator path can resolve
+/// `mutator_builder::SectionContext::area(section, index)` calls
+/// without scanning or doing channel math. The arrays are inline on
+/// the struct (no per-frame heap allocation) — sized at compile time
+/// from the per-section constants in `color_picker.rs`. `None` slots
+/// mark intentionally-skipped indices (e.g. the centre crosshair cell
+/// at `sat_bar[8]` / `val_bar[8]`); calling `area` on a skipped slot
+/// is a programming error.
 pub(super) struct PickerAreas {
     pub(super) ordered: Vec<(usize, GlyphArea)>,
-    by_section: HashMap<&'static str, Vec<Option<usize>>>,
+    title: [Option<usize>; 1],
+    hue_ring: [Option<usize>; HUE_SLOT_COUNT],
+    hint: [Option<usize>; 1],
+    sat_bar: [Option<usize>; SAT_CELL_COUNT],
+    val_bar: [Option<usize>; VAL_CELL_COUNT],
+    preview: [Option<usize>; 1],
+    hex: [Option<usize>; 1],
+}
+
+/// Compile-time enum mirror of the picker's JSON section names. Lets
+/// `PickerAreas::area` translate the spec's `&str` section key into a
+/// branch on a known-shape array without a HashMap. The `from_name`
+/// match panics on an unknown section since the JSON / Rust drift
+/// would be a programming error, not a recoverable state.
+#[derive(Copy, Clone, Debug)]
+enum PickerSection {
+    Title,
+    HueRing,
+    Hint,
+    SatBar,
+    ValBar,
+    Preview,
+    Hex,
+}
+
+impl PickerSection {
+    fn from_name(name: &str) -> Self {
+        match name {
+            "title" => PickerSection::Title,
+            "hue_ring" => PickerSection::HueRing,
+            "hint" => PickerSection::Hint,
+            "sat_bar" => PickerSection::SatBar,
+            "val_bar" => PickerSection::ValBar,
+            "preview" => PickerSection::Preview,
+            "hex" => PickerSection::Hex,
+            other => panic!("picker area lookup: unknown section {other:?}"),
+        }
+    }
 }
 
 impl PickerAreas {
     /// Resolve a `(section, index) → &GlyphArea` lookup. Panics if
     /// the section wasn't populated (the spec / builder disagree
-    /// on what sections exist), since the picker apply path treats
-    /// an absent section as a programming error rather than a
-    /// recoverable state.
+    /// on what sections exist) or the requested index was deliberately
+    /// skipped (e.g. the crosshair centre slot at sat_bar[8]) —
+    /// the picker apply path treats both as a programming error
+    /// rather than a recoverable state.
     pub(super) fn area(&self, section: &str, index: usize) -> &GlyphArea {
-        let row = self
-            .by_section
-            .get(section)
-            .unwrap_or_else(|| panic!("picker area lookup: unknown section {section:?}"));
-        let vec_index = row
-            .get(index)
-            .and_then(|v| *v)
-            .unwrap_or_else(|| panic!(
+        let slot: Option<usize> = match PickerSection::from_name(section) {
+            PickerSection::Title => self.title.get(index).copied().flatten(),
+            PickerSection::HueRing => self.hue_ring.get(index).copied().flatten(),
+            PickerSection::Hint => self.hint.get(index).copied().flatten(),
+            PickerSection::SatBar => self.sat_bar.get(index).copied().flatten(),
+            PickerSection::ValBar => self.val_bar.get(index).copied().flatten(),
+            PickerSection::Preview => self.preview.get(index).copied().flatten(),
+            PickerSection::Hex => self.hex.get(index).copied().flatten(),
+        };
+        let vec_index = slot.unwrap_or_else(|| {
+            panic!(
                 "picker area lookup: section {section:?} index {index} was not populated \
                  (skipped or out-of-range)"
-            ));
+            )
+        });
         &self.ordered[vec_index].1
     }
 }
@@ -158,7 +185,45 @@ pub(super) fn compute_picker_areas(
     let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
     let preview_color = rgb_to_cosmic_color(preview_rgb);
 
-    let mut tagged: Vec<TaggedArea> = Vec::with_capacity(80);
+    // Build directly into the final two-form layout — no intermediate
+    // `Vec<TaggedArea>`, no HashMap. The picker emits a fixed 60 cells
+    // across 7 sections, all sized at compile time, so the per-section
+    // index arrays sit on the stack as `Option<usize>` slots and the
+    // single `Vec<(usize, GlyphArea)>` holds the channel-ascending
+    // payload.
+    let mut areas = PickerAreas {
+        ordered: Vec::with_capacity(60),
+        title: [None; 1],
+        hue_ring: [None; HUE_SLOT_COUNT],
+        hint: [None; 1],
+        sat_bar: [None; SAT_CELL_COUNT],
+        val_bar: [None; VAL_CELL_COUNT],
+        preview: [None; 1],
+        hex: [None; 1],
+    };
+
+    // Closure-free helper: push a built area into `ordered` and stamp
+    // its position into the matching per-section slot.
+    fn push(
+        areas: &mut PickerAreas,
+        section: PickerSection,
+        index: usize,
+        channel: usize,
+        area: GlyphArea,
+    ) {
+        let vec_index = areas.ordered.len();
+        areas.ordered.push((channel, area));
+        let slot = match section {
+            PickerSection::Title => areas.title.get_mut(index),
+            PickerSection::HueRing => areas.hue_ring.get_mut(index),
+            PickerSection::Hint => areas.hint.get_mut(index),
+            PickerSection::SatBar => areas.sat_bar.get_mut(index),
+            PickerSection::ValBar => areas.val_bar.get_mut(index),
+            PickerSection::Preview => areas.preview.get_mut(index),
+            PickerSection::Hex => areas.hex.get_mut(index),
+        };
+        *slot.expect("picker area builder: index past compile-time section size") = Some(vec_index);
+    }
 
     // Title.
     let is_standalone = geometry.target_label.is_empty();
@@ -168,11 +233,12 @@ pub(super) fn compute_picker_areas(
         spec.title_template_contextual
             .replace("{target_label}", geometry.target_label)
     };
-    tagged.push(TaggedArea {
-        section: "title",
-        index: 0,
-        channel: picker_channel("title", 0),
-        area: make_area(
+    push(
+        &mut areas,
+        PickerSection::Title,
+        0,
+        picker_channel("title", 0),
+        make_area(
             &title_text,
             preview_color,
             font_size,
@@ -183,7 +249,7 @@ pub(super) fn compute_picker_areas(
             None,
             outline,
         ),
-    });
+    );
 
     // Hue ring.
     for (i, &ring_glyph) in hue_ring_glyphs().iter().enumerate() {
@@ -199,11 +265,12 @@ pub(super) fn compute_picker_areas(
         let pos = layout.hue_slot_positions[i];
         let fs = ring_font_size * scale;
         let bw = ring_box_w * scale;
-        tagged.push(TaggedArea {
-            section: "hue_ring",
-            index: i,
-            channel: picker_channel("hue_ring", i),
-            area: make_area(
+        push(
+            &mut areas,
+            PickerSection::HueRing,
+            i,
+            picker_channel("hue_ring", i),
+            make_area(
                 ring_glyph,
                 color,
                 fs,
@@ -214,7 +281,7 @@ pub(super) fn compute_picker_areas(
                 None,
                 outline,
             ),
-        });
+        );
     }
 
     // Hint footer.
@@ -223,11 +290,12 @@ pub(super) fn compute_picker_areas(
     } else {
         spec.hint_text_contextual.as_str()
     };
-    tagged.push(TaggedArea {
-        section: "hint",
-        index: 0,
-        channel: picker_channel("hint", 0),
-        area: make_area(
+    push(
+        &mut areas,
+        PickerSection::Hint,
+        0,
+        picker_channel("hint", 0),
+        make_area(
             hint_text,
             preview_color,
             font_size * 0.85,
@@ -238,7 +306,7 @@ pub(super) fn compute_picker_areas(
             None,
             outline,
         ),
-    });
+    );
 
     // Sat / val bars (skip centre cell — that's the preview glyph slot).
     let current_sat_cell = (geometry.sat * (SAT_CELL_COUNT as f32 - 1.0))
@@ -271,11 +339,12 @@ pub(super) fn compute_picker_areas(
         let (cx, cy) = layout.sat_cell_positions[i];
         let fs = cell_font_size * scale;
         let bw = cell_box_w * scale;
-        tagged.push(TaggedArea {
-            section: "sat_bar",
-            index: i,
-            channel: picker_channel("sat_bar", i),
-            area: make_area(
+        push(
+            &mut areas,
+            PickerSection::SatBar,
+            i,
+            picker_channel("sat_bar", i),
+            make_area(
                 glyph,
                 color,
                 fs,
@@ -286,7 +355,7 @@ pub(super) fn compute_picker_areas(
                 None,
                 outline,
             ),
-        });
+        );
     }
     for i in 0..VAL_CELL_COUNT {
         if i == CROSSHAIR_CENTER_CELL {
@@ -314,11 +383,12 @@ pub(super) fn compute_picker_areas(
         let (cx, cy) = layout.val_cell_positions[i];
         let fs = cell_font_size * scale;
         let bw = cell_box_w * scale;
-        tagged.push(TaggedArea {
-            section: "val_bar",
-            index: i,
-            channel: picker_channel("val_bar", i),
-            area: make_area(
+        push(
+            &mut areas,
+            PickerSection::ValBar,
+            i,
+            picker_channel("val_bar", i),
+            make_area(
                 glyph,
                 color,
                 fs,
@@ -329,7 +399,7 @@ pub(super) fn compute_picker_areas(
                 font,
                 outline,
             ),
-        });
+        );
     }
 
     // Centre preview glyph ࿕.
@@ -349,11 +419,12 @@ pub(super) fn compute_picker_areas(
     );
     let preview_box_w = scaled_preview * 1.5;
     let preview_box_h = scaled_preview * 1.5;
-    tagged.push(TaggedArea {
-        section: "preview",
-        index: 0,
-        channel: picker_channel("preview", 0),
-        area: make_area(
+    push(
+        &mut areas,
+        PickerSection::Preview,
+        0,
+        picker_channel("preview", 0),
+        make_area(
             center_preview_glyph(),
             commit_color,
             scaled_preview,
@@ -367,7 +438,7 @@ pub(super) fn compute_picker_areas(
             center_font,
             outline,
         ),
-    });
+    );
 
     // Hex readout — always emitted at a stable channel so the mutator
     // path doesn't have to handle a flickering element. Empty text
@@ -380,11 +451,12 @@ pub(super) fn compute_picker_areas(
         ),
         None => (String::new(), (0.0, 0.0), (0.0, 0.0)),
     };
-    tagged.push(TaggedArea {
-        section: "hex",
-        index: 0,
-        channel: picker_channel("hex", 0),
-        area: make_area(
+    push(
+        &mut areas,
+        PickerSection::Hex,
+        0,
+        picker_channel("hex", 0),
+        make_area(
             &hex_text,
             preview_color,
             font_size,
@@ -395,30 +467,9 @@ pub(super) fn compute_picker_areas(
             None,
             outline,
         ),
-    });
+    );
 
-    // Bake into the two-form result. `tagged` was built in the
-    // canonical insertion order (matches the spec's section order),
-    // so `ordered` is channel-ascending already.
-    let mut ordered: Vec<(usize, GlyphArea)> = Vec::with_capacity(tagged.len());
-    let mut by_section: HashMap<&'static str, Vec<Option<usize>>> = HashMap::new();
-    for TaggedArea {
-        section,
-        index,
-        channel,
-        area,
-    } in tagged
-    {
-        let vec_index = ordered.len();
-        ordered.push((channel, area));
-        let row = by_section.entry(section).or_default();
-        if row.len() <= index {
-            row.resize(index + 1, None);
-        }
-        row[index] = Some(vec_index);
-    }
-
-    PickerAreas { ordered, by_section }
+    areas
 }
 
 /// Backward-compat shim — returns the channel-ordered list for
