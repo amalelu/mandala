@@ -71,6 +71,13 @@ pub enum Action {
     /// console is open closes it — symmetric with Esc and the shell
     /// muscle memory around a toggle-open console.
     OpenConsole,
+    /// Save the currently-open mindmap document to its bound file
+    /// path. If no `file_path` is set (e.g. after `new` without a
+    /// path), the action is a no-op aside from a status message —
+    /// the user has to invoke `save <path>` from the console first
+    /// to bind a target. WASM builds have no filesystem access, so
+    /// the action is logged and ignored there.
+    SaveDocument,
 }
 
 /// A parsed keybinding: a logical key name plus modifier flags. Key names
@@ -191,6 +198,7 @@ pub struct KeybindConfig {
     pub edit_selection: Vec<String>,
     pub edit_selection_clean: Vec<String>,
     pub open_console: Vec<String>,
+    pub save_document: Vec<String>,
     /// Font family name for the console overlay. Passed verbatim to
     /// cosmic-text's `Family::Name`. Empty means "use the default
     /// fallback chain", which is usually what you want unless you've
@@ -222,6 +230,7 @@ impl Default for KeybindConfig {
             edit_selection: vec!["Enter".into()],
             edit_selection_clean: vec!["Backspace".into()],
             open_console: vec!["/".into()],
+            save_document: vec!["Ctrl+S".into()],
             console_font: String::new(),
             console_font_size: 16.0,
             custom_mutation_bindings: HashMap::new(),
@@ -252,6 +261,7 @@ impl KeybindConfig {
             (Action::EditSelection, &self.edit_selection),
             (Action::EditSelectionClean, &self.edit_selection_clean),
             (Action::OpenConsole, &self.open_console),
+            (Action::SaveDocument, &self.save_document),
         ];
         for (action, strings) in sets {
             for s in strings {
@@ -723,6 +733,16 @@ mod tests {
         assert_eq!(
             resolved.action_for("/", false, false, false),
             Some(Action::OpenConsole)
+        );
+    }
+
+    #[test]
+    fn test_save_document_default_bound_to_ctrl_s() {
+        let cfg = KeybindConfig::default();
+        let resolved = cfg.resolve();
+        assert_eq!(
+            resolved.action_for("s", true, false, false),
+            Some(Action::SaveDocument)
         );
     }
 

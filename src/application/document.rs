@@ -586,6 +586,40 @@ impl MindMapDocument {
         }
     }
 
+    /// Construct an empty document, optionally bound to a target file
+    /// path. Used by the `new` console command. `dirty` starts `false`
+    /// — the in-memory map matches its (possibly absent) on-disk state
+    /// at construction time. When `file_path` is `Some`, the caller is
+    /// expected to write the blank map to disk so the binding is real;
+    /// otherwise the document is "untitled" and `save` will require a
+    /// path argument.
+    pub fn new_blank(file_path: Option<String>) -> Self {
+        let name = file_path
+            .as_deref()
+            .and_then(|p| {
+                Path::new(p)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.trim_end_matches(".mindmap").to_string())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "untitled".to_string());
+        let mut doc = MindMapDocument {
+            mindmap: MindMap::new_blank(name),
+            file_path,
+            dirty: false,
+            selection: SelectionState::None,
+            undo_stack: Vec::new(),
+            mutation_registry: HashMap::new(),
+            active_toggles: HashSet::new(),
+            label_edit_preview: None,
+            color_picker_preview: None,
+            active_animations: Vec::new(),
+        };
+        doc.build_mutation_registry();
+        doc
+    }
+
     /// Build a Baumhard mutation tree from the MindMap hierarchy.
     /// Each MindNode becomes a GlyphArea in the tree, preserving parent-child structure.
     pub fn build_tree(&self) -> MindMapTree {
