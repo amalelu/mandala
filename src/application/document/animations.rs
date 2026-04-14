@@ -4,14 +4,10 @@
 //! `apply_position_mutations_to_node` — the scratch-node position
 //! replay helper used during tick.
 
-use std::collections::HashMap;
-
-use glam::Vec2;
-
 use baumhard::gfx_structs::area::GlyphAreaCommand;
 use baumhard::gfx_structs::mutator::Mutation;
 use baumhard::mindmap::animation::lerp_f32;
-use baumhard::mindmap::custom_mutation::{CustomMutation, MutationBehavior, PlatformContext, Trigger};
+use baumhard::mindmap::custom_mutation::{CustomMutation, PlatformContext, Trigger};
 use baumhard::mindmap::model::MindNode;
 use baumhard::mindmap::tree_builder::MindMapTree;
 

@@ -3,11 +3,6 @@
 //! `CustomMutation` shape and the document's mutation-and-undo
 //! plumbing.
 
-use baumhard::gfx_structs::area::GlyphAreaCommand;
-use baumhard::gfx_structs::mutator::{GfxMutator, Mutation};
-use baumhard::gfx_structs::tree::MutatorTree;
-use baumhard::gfx_structs::tree_walker::walk_tree_from;
-use baumhard::core::primitives::Range;
 use baumhard::mindmap::custom_mutation::{
     apply_mutations_to_element, CustomMutation, DocumentAction, MutationBehavior, TargetScope,
 };

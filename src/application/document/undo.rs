@@ -3,9 +3,7 @@
 //! that pushed it. Each variant of `UndoAction` has a matching
 //! branch here and nowhere else.
 
-use baumhard::mindmap::custom_mutation::apply_mutations_to_element;
-
-use super::types::{PortalRef, SelectionState};
+use super::types::SelectionState;
 use super::undo_action::UndoAction;
 use super::MindMapDocument;
 

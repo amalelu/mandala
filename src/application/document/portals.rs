@@ -3,7 +3,7 @@
 //! `set_portal_color`) that wrap `apply_edit_portal` for the
 //! console / keyboard call sites.
 
-use baumhard::mindmap::model::{PortalPair, Position, PORTAL_GLYPH_PRESETS};
+use baumhard::mindmap::model::{PortalPair, PORTAL_GLYPH_PRESETS};
 
 use super::types::PortalRef;
 use super::undo_action::UndoAction;

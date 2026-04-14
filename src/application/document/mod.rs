@@ -49,8 +49,8 @@ pub use hit_test::{
     point_in_node_aabb, rect_select,
 };
 pub use types::{
-    AnimationInstance, EdgeRef, PortalRef, ReparentUndoData, SelectionState,
-    HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
+    AnimationInstance, EdgeRef, PortalRef, SelectionState, HIGHLIGHT_COLOR,
+    REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 pub use undo_action::UndoAction;
 

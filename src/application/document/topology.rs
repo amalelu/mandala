@@ -3,11 +3,9 @@
 //! sit, and who their parent is. Also carries `delete_node` —
 //! the node-centric remove that also rips touching edges.
 
-use std::collections::HashSet;
-
 use glam::Vec2;
 
-use baumhard::mindmap::model::{MindEdge, MindNode, Position};
+use baumhard::mindmap::model::{MindEdge, Position};
 
 use super::defaults::{default_cross_link_edge, default_orphan_node, default_parent_child_edge};
 use super::types::{EdgeRef, PortalRef, ReparentUndoData, SelectionState};

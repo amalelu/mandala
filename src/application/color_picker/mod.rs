@@ -62,15 +62,18 @@ pub use compute::compute_color_picker_layout;
 pub use geometry::ColorPickerOverlayGeometry;
 pub use glyph_tables::{
     arm_bottom_font, arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs,
-    center_preview_glyph, degrees_to_hue_slot, hue_ring_font_scale, hue_ring_glyphs,
-    hue_slot_to_degrees, picker_channel, sat_cell_to_value, val_cell_to_value,
-    CROSSHAIR_CENTER_CELL, HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT,
+    center_preview_glyph, hue_ring_font_scale, hue_ring_glyphs, hue_slot_to_degrees,
+    picker_channel, sat_cell_to_value, val_cell_to_value, CROSSHAIR_CENTER_CELL,
+    HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT,
 };
+// `degrees_to_hue_slot` has no external callers today but is pinned
+// by the `degrees_to_hue_slot_*` tests in `tests_layout`; re-exported
+// test-only so non-test builds don't warn.
+#[cfg(test)]
+pub(crate) use glyph_tables::degrees_to_hue_slot;
 pub use hit::{hit_test_picker, PickerHit};
 pub use layout::ColorPickerLayout;
 pub use state::{
     request_error_flash, ColorPickerState, FlashKind, PickerGesture, PickerMode,
 };
-pub use targets::{
-    current_color_at, current_hsv_at, ColorTarget, NodeColorAxis, PickerHandle, TargetKind,
-};
+pub use targets::{current_hsv_at, ColorTarget, NodeColorAxis, PickerHandle};

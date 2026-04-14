@@ -6,7 +6,6 @@
 
 use glam::Vec2;
 
-use baumhard::mindmap::connection;
 use baumhard::mindmap::model::{Canvas, GlyphConnectionConfig, MindEdge};
 use baumhard::mindmap::scene_builder;
 

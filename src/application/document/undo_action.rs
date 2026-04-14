@@ -3,10 +3,7 @@
 //! `undo()` dispatch lives in `undo.rs` and branches on these
 //! variants.
 
-use baumhard::mindmap::custom_mutation::CustomMutation;
 use baumhard::mindmap::model::{Canvas, MindEdge, MindNode, NodeStyle, PortalPair, Position, TextRun};
-
-use super::types::ReparentUndoData;
 
 /// An undoable action that can be reversed.
 #[derive(Clone, Debug)]
