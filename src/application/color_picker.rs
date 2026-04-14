@@ -693,7 +693,12 @@ pub struct ColorPickerOverlayGeometry {
 
 /// Pure-function output of the color-picker layout pass. All positions
 /// are in screen-space pixels.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` exists so callers can detect "did anything that the
+/// layout phase needs to refresh actually move?" without diffing the
+/// upstream geometry / viewport tuple by hand. `Eq` is *not* implemented
+/// because `f32` rules it out.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColorPickerLayout {
     pub center: (f32, f32),
     pub outer_radius: f32,

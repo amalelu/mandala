@@ -4574,17 +4574,31 @@ fn seed_initial_preview(
     }
 }
 
-/// Build geometry from the current picker state. Internal helper —
-/// callers pick whether to push it through the full rebuild (static
-/// + dynamic, called on open and resize) or just the dynamic rebuild
-/// (called on hover). Also caches the resulting layout back into the
+/// Build geometry from the current picker state and report whether
+/// the layout has changed since the previous call. Internal helper —
+/// the bool lets [`rebuild_color_picker_overlay`] pick between the
+/// layout-phase mutator (full per-cell field set; viewport resize,
+/// RMB drag-to-resize, drag-to-move repositioning) and the cheaper
+/// dynamic-phase mutator (color + hover scale + hex text only). Also
+/// caches the freshly-computed `ColorPickerLayout` back into the
 /// state so the mouse hit-test can read it without re-running the
 /// layout pure fn.
+///
+/// The "first call after open" case (no cached layout yet) reports
+/// `changed = true` so the layout phase fires once before any
+/// dynamic frames land — without it the dynamic mutator would only
+/// write the per-frame fields onto a tree whose static fields are
+/// still at their initial-build values, which is correct on this
+/// path (the initial build IS the layout phase) but the bool keeps
+/// the dispatch readable.
 #[cfg(not(target_arch = "wasm32"))]
 fn compute_picker_geometry(
     state: &mut crate::application::color_picker::ColorPickerState,
     renderer: &Renderer,
-) -> Option<crate::application::color_picker::ColorPickerOverlayGeometry> {
+) -> Option<(
+    crate::application::color_picker::ColorPickerOverlayGeometry,
+    bool,
+)> {
     use crate::application::color_picker::{
         compute_color_picker_layout, ColorPickerOverlayGeometry, ColorPickerState,
     };
@@ -4693,34 +4707,45 @@ fn compute_picker_geometry(
         preview_ink_offset,
     };
 
-    // Cache the layout into the state so the mouse hit-test can use it.
+    // Cache the layout into the state so the mouse hit-test can use
+    // it, and report whether it actually changed since the last
+    // rebuild — `true` on the first call after open (no cached layout
+    // yet) and on any layout-affecting change (resize, size_scale,
+    // center_override, ink-offset measurement update).
     let layout = compute_color_picker_layout(
         &geometry,
         renderer.surface_width() as f32,
         renderer.surface_height() as f32,
     );
-    if let ColorPickerState::Open { layout: cached, .. } = state {
+    let layout_changed = if let ColorPickerState::Open { layout: cached, .. } = state {
+        let changed = cached.as_ref().map_or(true, |c| c != &layout);
         *cached = Some(layout);
-    }
+        changed
+    } else {
+        true
+    };
 
-    Some(geometry)
+    Some((geometry, layout_changed))
 }
 
 /// Picker overlay update entry point. Dispatches between the
-/// initial-build path and the §B2-compliant in-place mutator path:
+/// initial-build path and the §B2-compliant in-place mutator paths:
 ///
 /// - **Closed** (`compute_picker_geometry` returns `None`): unregister
 ///   the overlay tree by passing `None` to the buffer rebuild.
 /// - **First open** (no tree registered): build a fresh tree via
-///   [`Renderer::rebuild_color_picker_overlay_buffers`].
-/// - **Already open** (tree exists in `AppScene`): apply a
-///   `MutatorTree<GfxMutator>` of `Assign`-style `DeltaGlyphArea`s
-///   keyed by stable channel, mutating the existing arena in place.
-///   This is the §B2 "mutation, not rebuild" path — it still
-///   re-shapes every cell through cosmic-text (the §B1 perf gap
-///   tracked in `ROADMAP.md` as the hash-keyed shape cache
-///   follow-up), but the picker's tree arena is no longer
-///   re-allocated per hover.
+///   [`Renderer::rebuild_color_picker_overlay_buffers`]. The initial
+///   build *is* the layout phase, so dynamic frames after this can
+///   safely target the just-built static fields.
+/// - **Layout changed** (resize, RMB drag-to-resize, drag-to-move
+///   repositioning): apply the layout-phase mutator —
+///   [`Renderer::apply_color_picker_overlay_mutator`] — which writes
+///   every variable field on every cell via `Assign` deltas.
+/// - **Layout unchanged** (per-frame hover / HSV / chip / drag-Move
+///   without geometry change): apply the dynamic-phase mutator —
+///   [`Renderer::apply_color_picker_overlay_dynamic_mutator`] — which
+///   writes only the fields that genuinely move per frame
+///   (`ColorFontRegions`, `scale`, hex `Text`).
 #[cfg(not(target_arch = "wasm32"))]
 fn rebuild_color_picker_overlay(
     state: &mut crate::application::color_picker::ColorPickerState,
@@ -4729,12 +4754,16 @@ fn rebuild_color_picker_overlay(
     renderer: &mut Renderer,
 ) {
     use crate::application::scene_host::OverlayRole;
-    let Some(geometry) = compute_picker_geometry(state, renderer) else {
+    let Some((geometry, layout_changed)) = compute_picker_geometry(state, renderer) else {
         renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
         return;
     };
     if app_scene.overlay_id(OverlayRole::ColorPicker).is_some() {
-        renderer.apply_color_picker_overlay_mutator(app_scene, &geometry);
+        if layout_changed {
+            renderer.apply_color_picker_overlay_mutator(app_scene, &geometry);
+        } else {
+            renderer.apply_color_picker_overlay_dynamic_mutator(app_scene, &geometry);
+        }
     } else {
         renderer.rebuild_color_picker_overlay_buffers(app_scene, Some(&geometry));
     }
