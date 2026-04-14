@@ -30,7 +30,6 @@ fn emit_level(map: &MindMap, nodes: &[&MindNode], depth: usize, out: &mut String
     for node in nodes {
         let children = map.children_of(&node.id);
         if node.text.trim().is_empty() {
-            // Transparent: splice the children in at the current depth.
             emit_level(map, &children, depth, out);
             continue;
         }
