@@ -3,6 +3,7 @@
 //! for the 600-line-per-file target.
 
 use super::*;
+use super::glyph_tables::degrees_to_hue_slot;
 use crate::application::widgets::color_picker_widget::load_spec;
 
 

@@ -24,19 +24,15 @@ impl MindMapDocument {
         Some((idx, edge))
     }
 
-    /// Remove a node from the map, orphaning its immediate children (they
-    /// become roots with fresh sibling indices), and removing every edge
-    /// that touched the node (parent_child, cross_link, etc.). Returns an
-    /// `UndoAction::DeleteNode` payload that fully reverses the operation
-    /// on undo, or `None` if the node doesn't exist.
+    /// Hit-test the grab-handles of a specific edge at `canvas_pos`.
+    /// Returns the closest handle whose canvas-space position is
+    /// within `tolerance` of the cursor, or `None` if nothing is in
+    /// range. Used by the Session 6C edge-reshape drag flow — called
+    /// at mouse-down time when an edge is currently selected.
     ///
-    /// Orphaning is shallow — only direct children are promoted. Each
-    /// grand-child stays attached to its parent, so entire subtrees
-    /// survive the delete intact, just one level higher in the hierarchy.
-    /// Matches the user request "orphan children" at Session 7A follow-up.
-    ///
-    /// The caller is expected to push the returned undo payload onto the
-    /// stack and trigger a `rebuild_all`.
+    /// Computed from the live edge (so any in-progress drag is
+    /// reflected), without consulting the scene cache. Bounded cost:
+    /// one `build_connection_path` + up to five distance comparisons.
     pub fn hit_test_edge_handle(
         &self,
         canvas_pos: Vec2,

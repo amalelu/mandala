@@ -66,11 +66,6 @@ pub use glyph_tables::{
     picker_channel, sat_cell_to_value, val_cell_to_value, CROSSHAIR_CENTER_CELL,
     HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT,
 };
-// `degrees_to_hue_slot` has no external callers today but is pinned
-// by the `degrees_to_hue_slot_*` tests in `tests_layout`; re-exported
-// test-only so non-test builds don't warn.
-#[cfg(test)]
-pub(crate) use glyph_tables::degrees_to_hue_slot;
 pub use hit::{hit_test_picker, PickerHit};
 pub use layout::ColorPickerLayout;
 pub use state::{

@@ -14,6 +14,15 @@ use baumhard::mindmap::tree_builder::MindMapTree;
 use super::types::AnimationInstance;
 use super::MindMapDocument;
 
+/// Apply position-bearing `Mutation`s to a `MindNode` to derive
+/// the `to` snapshot for an animation. Mirrors the GlyphArea
+/// command vocabulary of the existing tree mutator path so that
+/// "what does this mutation do" has only one definition,
+/// regardless of whether it lands instantly or via tween. v1
+/// only handles `NudgeLeft` / `NudgeRight` / `NudgeUp` /
+/// `NudgeDown`; other commands are no-ops on the model snapshot
+/// (their tree-side effect still runs at completion via
+/// `apply_custom_mutation`).
 fn apply_position_mutations_to_node(
     mutations: &[Mutation],
     node: &mut MindNode,
@@ -43,6 +52,8 @@ fn apply_position_mutations_to_node(
 }
 
 impl MindMapDocument {
+    /// Build the mutation registry from map-level and inline node mutations.
+    /// Inline mutations override map-level mutations with the same id.
     pub fn build_mutation_registry(&mut self) {
         self.build_mutation_registry_with_user(&[]);
     }

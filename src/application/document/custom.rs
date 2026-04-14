@@ -13,6 +13,9 @@ use super::undo_action::UndoAction;
 use super::MindMapDocument;
 
 impl MindMapDocument {
+    /// Apply a custom mutation to the tree and optionally sync to the model.
+    /// For Persistent mutations, snapshots affected nodes for undo and sets dirty flag.
+    /// For Toggle mutations, tracks active state without model sync.
     pub fn apply_custom_mutation(
         &mut self,
         custom: &CustomMutation,
