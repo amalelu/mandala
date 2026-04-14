@@ -8,6 +8,7 @@
 //! have no text the first-text generation becomes the `#` level.
 
 use baumhard::mindmap::model::{MindMap, MindNode};
+use std::collections::HashMap;
 
 /// Convert `map` into a Markdown document containing only node text,
 /// indented by tree depth via `#` heading characters. The first line
@@ -21,16 +22,49 @@ use baumhard::mindmap::model::{MindMap, MindNode};
 /// Most renderers treat 7+ as plain text, which is fine here since
 /// the goal is a lossless text-and-shape dump, not a styled document.
 pub fn mindmap_to_markdown(map: &MindMap) -> String {
+    let index = ChildIndex::build(map);
     let mut out = String::new();
-    emit_level(map, &map.root_nodes(), 1, &mut out);
+    emit_level(&index, &index.roots, 1, &mut out);
     out
 }
 
-fn emit_level(map: &MindMap, nodes: &[&MindNode], depth: usize, out: &mut String) {
+/// One-shot parent → sorted-children lookup built up front so the
+/// recursive walk doesn't re-scan `map.nodes` (an O(N) filter) once
+/// per node. `MindMap::children_of` is the obvious call here but
+/// using it would make the export O(N²) — fine for a 243-node map,
+/// noticeable on very large ones.
+struct ChildIndex<'a> {
+    roots: Vec<&'a MindNode>,
+    by_parent: HashMap<&'a str, Vec<&'a MindNode>>,
+}
+
+impl<'a> ChildIndex<'a> {
+    fn build(map: &'a MindMap) -> Self {
+        let mut roots: Vec<&'a MindNode> = Vec::new();
+        let mut by_parent: HashMap<&'a str, Vec<&'a MindNode>> = HashMap::new();
+        for node in map.nodes.values() {
+            match &node.parent_id {
+                None => roots.push(node),
+                Some(pid) => by_parent.entry(pid.as_str()).or_default().push(node),
+            }
+        }
+        roots.sort_by_key(|n| n.index);
+        for children in by_parent.values_mut() {
+            children.sort_by_key(|n| n.index);
+        }
+        Self { roots, by_parent }
+    }
+
+    fn children_of(&self, id: &str) -> &[&'a MindNode] {
+        self.by_parent.get(id).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+fn emit_level(index: &ChildIndex, nodes: &[&MindNode], depth: usize, out: &mut String) {
     for node in nodes {
-        let children = map.children_of(&node.id);
+        let children = index.children_of(&node.id);
         if node.text.trim().is_empty() {
-            emit_level(map, &children, depth, out);
+            emit_level(index, children, depth, out);
             continue;
         }
         let mut lines = node.text.lines();
@@ -46,7 +80,7 @@ fn emit_level(map: &MindMap, nodes: &[&MindNode], depth: usize, out: &mut String
             out.push('\n');
         }
         out.push('\n');
-        emit_level(map, &children, depth + 1, out);
+        emit_level(index, children, depth + 1, out);
     }
 }
 
