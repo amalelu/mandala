@@ -55,7 +55,7 @@ use super::picker_glyph_areas::picker_glyph_areas;
 /// position, leaving the static hue ring alone. The user
 /// explicitly asked to land the migration first and address
 /// picker sluggishness afterwards.
-pub(crate) fn build_color_picker_overlay_tree(
+pub(super) fn build_color_picker_overlay_tree(
     geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
     layout: &crate::application::color_picker::ColorPickerLayout,
 ) -> Tree<GfxElement, GfxMutator> {
@@ -99,7 +99,7 @@ pub(crate) fn build_color_picker_overlay_tree(
 /// change. The walker still re-shapes every cell — that's the
 /// remaining §B1 perf gap, tracked in `ROADMAP.md` as the
 /// hash-keyed shape cache follow-up.
-pub(crate) fn build_color_picker_overlay_mutator(
+pub(super) fn build_color_picker_overlay_mutator(
     geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
     layout: &crate::application::color_picker::ColorPickerLayout,
 ) -> MutatorTree<GfxMutator> {

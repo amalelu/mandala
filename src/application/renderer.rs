@@ -1452,7 +1452,8 @@ impl Renderer {
     }
 
     /// Rebuild the screen-space buffer list for every tree the app
-    /// has registered into [`AppScene`]. Walks the scene in layer
+    /// has registered into [`crate::application::scene_host::AppScene`].
+    /// Walks the scene in layer
     /// order and produces one flat list; callers do not need to
     /// know about individual overlays. The renderer composites the
     /// result into the palette pass alongside the per-overlay
@@ -1503,7 +1504,8 @@ impl Renderer {
     }
 
     /// Rebuild the canvas-space buffer list for every tree the app
-    /// has registered into [`AppScene`]'s canvas sub-scene
+    /// has registered into
+    /// [`crate::application::scene_host::AppScene`]'s canvas sub-scene
     /// (borders, connections, portals, edge handles, connection
     /// labels — whichever have migrated). These buffers feed the
     /// camera-transformed main pass alongside the mindmap's own
@@ -1861,8 +1863,7 @@ impl Renderer {
         app_scene: &mut crate::application::scene_host::AppScene,
         geometry: Option<&crate::application::color_picker::ColorPickerOverlayGeometry>,
     ) {
-        use crate::application::color_picker::compute_color_picker_layout;
-        use crate::application::color_picker_overlay::build_color_picker_overlay_tree;
+        use crate::application::color_picker_overlay;
         use crate::application::scene_host::OverlayRole;
 
         let Some(g) = geometry else {
@@ -1872,33 +1873,19 @@ impl Renderer {
             return;
         };
 
-        let layout = compute_color_picker_layout(
+        let build = color_picker_overlay::build(
             g,
             self.config.width as f32,
             self.config.height as f32,
         );
-        // Spec-gated transparent backdrop. When enabled, the picker
-        // skips emitting an opaque rect — canvas content shows
-        // through the gaps between glyphs, and per-glyph black
-        // halos (added in `build_color_picker_overlay_tree`) keep
-        // them legible against any background. The hit-test
-        // `layout.backdrop` rectangle is the *semantic* boundary,
-        // independent of whether the rect is drawn.
-        let spec = crate::application::widgets::color_picker_widget::load_spec();
-        self.color_picker_backdrop = if spec.geometry.transparent_backdrop {
-            None
-        } else {
-            Some(layout.backdrop)
-        };
-
-        let tree = build_color_picker_overlay_tree(g, &layout);
-        app_scene.register_overlay(OverlayRole::ColorPicker, tree, glam::Vec2::ZERO);
+        self.color_picker_backdrop = build.backdrop;
+        app_scene.register_overlay(OverlayRole::ColorPicker, build.tree, glam::Vec2::ZERO);
         self.rebuild_overlay_scene_buffers(app_scene);
     }
 
     /// §B2 mutation path — apply an in-place delta to the picker
     /// overlay tree without rebuilding it. Pairs with
-    /// [`crate::application::color_picker_overlay::build_color_picker_overlay_mutator`]:
+    /// [`crate::application::color_picker_overlay::build_mutator`]:
     /// every variable field on every picker GlyphArea is overwritten
     /// via an `Assign` `DeltaGlyphArea` keyed by stable channel.
     ///
@@ -1915,21 +1902,20 @@ impl Renderer {
         app_scene: &mut crate::application::scene_host::AppScene,
         geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
     ) {
-        use crate::application::color_picker::compute_color_picker_layout;
-        use crate::application::color_picker_overlay::build_color_picker_overlay_mutator;
+        use crate::application::color_picker_overlay;
         use crate::application::scene_host::OverlayRole;
-        let layout = compute_color_picker_layout(
+
+        let mutator = color_picker_overlay::build_mutator(
             geometry,
             self.config.width as f32,
             self.config.height as f32,
         );
-        let mutator = build_color_picker_overlay_mutator(geometry, &layout);
         app_scene.apply_overlay_mutator(OverlayRole::ColorPicker, &mutator);
         self.rebuild_overlay_scene_buffers(app_scene);
     }
 
 
-    /// Keyed connection rebuild. See [`rebuild_border_buffers_keyed`] for
+    /// Keyed connection rebuild. See [`Self::rebuild_border_buffers_keyed`] for
     /// the general pattern.
     ///
     /// If `dirty_edge_keys` is `Some`, clean edges (those whose
@@ -2865,8 +2851,9 @@ fn build_console_overlay_tree(
     tree
 }
 
-/// Build a [`MutatorTree`] that updates an already-registered
-/// console overlay tree to the current `(geometry, layout)` state
+/// Build a [`baumhard::gfx_structs::tree::MutatorTree`] that updates
+/// an already-registered console overlay tree to the current
+/// `(geometry, layout)` state
 /// without rebuilding the arena. Pairs with
 /// [`build_console_overlay_tree`] — both consume
 /// [`console_overlay_areas`] so channels and slot counts match.

@@ -1,22 +1,71 @@
 //! Glyph-wheel color picker overlay: tree / mutator / area builders
-//! for the modal picker the user opens from an edge or portal
-//! context menu.
+//! for the picker the user opens from an edge or portal context menu
+//! (modal) or via the `color picker` console command (standalone
+//! palette).
 //!
-//! The two entry points [`build_color_picker_overlay_tree`] and
-//! [`build_color_picker_overlay_mutator`] pair up — the tree builder
-//! creates the picker's `(GlyphArea, GlyphModel)` pairs keyed by
-//! stable channel; the mutator builder produces an in-place
-//! `MutatorTree<GfxMutator>` that updates those same channels
-//! without rebuilding the arena.
+//! Public surface is two functions and a [`ColorPickerOverlayBuild`]
+//! result: [`build`] produces a fresh `(tree, backdrop)` from a
+//! geometry + viewport, [`build_mutator`] produces an in-place
+//! `MutatorTree<GfxMutator>` that updates the same tree's channels
+//! without rebuilding the arena. Layout, picker spec, and the
+//! `(GlyphArea, GlyphModel)` pair shape stay internal to the module.
+
+use baumhard::gfx_structs::element::GfxElement;
+use baumhard::gfx_structs::mutator::GfxMutator;
+use baumhard::gfx_structs::tree::{MutatorTree, Tree};
+
+use crate::application::color_picker::{compute_color_picker_layout, ColorPickerOverlayGeometry};
 
 mod color;
 mod glyph_model;
 mod picker_glyph_areas;
 mod tree_builder;
 
-pub(crate) use tree_builder::{
-    build_color_picker_overlay_mutator, build_color_picker_overlay_tree,
-};
+/// Result of [`build`] — the picker tree plus the opaque-backdrop
+/// rectangle the renderer needs to draw underneath it.
+///
+/// `backdrop` is `None` when the picker spec's `transparent_backdrop`
+/// flag is set (no opaque rect drawn; per-glyph halos handle
+/// legibility) or when the layout yields no backdrop for this
+/// geometry — the renderer treats both cases the same: skip the
+/// fill-rect pass.
+pub(crate) struct ColorPickerOverlayBuild {
+    pub tree: Tree<GfxElement, GfxMutator>,
+    pub backdrop: Option<(f32, f32, f32, f32)>,
+}
+
+/// Build the picker's overlay tree and its backdrop rect from the
+/// current `geometry` at the given viewport size. Consumes the
+/// picker spec internally to decide whether to emit an opaque
+/// backdrop or leave it transparent.
+pub(crate) fn build(
+    geometry: &ColorPickerOverlayGeometry,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> ColorPickerOverlayBuild {
+    let layout = compute_color_picker_layout(geometry, viewport_w, viewport_h);
+    let spec = crate::application::widgets::color_picker_widget::load_spec();
+    let backdrop = if spec.geometry.transparent_backdrop {
+        None
+    } else {
+        Some(layout.backdrop)
+    };
+    let tree = tree_builder::build_color_picker_overlay_tree(geometry, &layout);
+    ColorPickerOverlayBuild { tree, backdrop }
+}
+
+/// Build an in-place [`MutatorTree`] for the picker's
+/// already-registered overlay tree. The resulting mutator updates
+/// every picker GlyphArea's variable fields at its stable channel;
+/// the arena is reused.
+pub(crate) fn build_mutator(
+    geometry: &ColorPickerOverlayGeometry,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> MutatorTree<GfxMutator> {
+    let layout = compute_color_picker_layout(geometry, viewport_w, viewport_h);
+    tree_builder::build_color_picker_overlay_mutator(geometry, &layout)
+}
 
 #[cfg(test)]
 mod tests {
