@@ -9,6 +9,7 @@
   "create_orphan_node": ["Ctrl+N"],
   "orphan_selection": ["Ctrl+O"],
   "open_console": ["/"],
+  "save_document": ["Ctrl+S"],
 
   "console_font": "",
   "console_font_size": 16.0,

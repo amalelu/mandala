@@ -93,6 +93,13 @@ pub struct ConsoleEffects<'a> {
     /// console even on a successful command (e.g. `quit`, or after a
     /// modal handoff).
     pub close_console: bool,
+    /// If set when `execute` returns, the dispatcher swaps the
+    /// app's document for this one. Set by `open` and `new` —
+    /// commands that wholesale replace the current map. The
+    /// dispatcher also drops the cached `mindmap_tree` and clears
+    /// any open modal-editor state so stale references into the
+    /// old document can't outlive the swap.
+    pub replace_document: Option<MindMapDocument>,
 }
 
 impl<'a> ConsoleEffects<'a> {
@@ -104,6 +111,7 @@ impl<'a> ConsoleEffects<'a> {
             open_color_picker_standalone: false,
             close_color_picker: false,
             close_console: false,
+            replace_document: None,
         }
     }
 }

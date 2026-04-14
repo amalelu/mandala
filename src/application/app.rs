@@ -1649,6 +1649,16 @@ impl Application {
                                 }
                             }
                         }
+                        Some(Action::SaveDocument) => {
+                            // Quick-save to the document's bound file
+                            // path. If no path is bound (e.g. after `new`
+                            // without a path), this is a no-op aside from
+                            // a status message — the user has to invoke
+                            // `save <path>` from the console first.
+                            if let Some(doc) = document.as_mut() {
+                                save_document_to_bound_path(doc, &mut console_state);
+                            }
+                        }
                         None => {
                             // No built-in action matched — try the
                             // user-defined `custom_mutation_bindings`.
@@ -2335,6 +2345,12 @@ impl Application {
                             // de-gating AppMode, hovered_node, and the
                             // reparent/connect click handlers).
                             log::debug!("WASM: mode-based action {:?} deferred", a);
+                        }
+                        Some(a) => {
+                            // Actions whose backing surface is native-only
+                            // (console, filesystem-backed save). On WASM
+                            // they're acknowledged in the log and ignored.
+                            log::debug!("WASM: action {:?} not supported", a);
                         }
                         None => {}
                     }
@@ -3147,6 +3163,7 @@ fn execute_console_line(
     let color_picker_standalone_req = effects.open_color_picker_standalone;
     let color_picker_close_req = effects.close_color_picker;
     let close_after = effects.close_console;
+    let replace_doc = effects.replace_document.take();
 
     // Emit the command's result lines into the scrollback.
     match result {
@@ -3161,6 +3178,18 @@ fn execute_console_line(
                 push_scrollback_output(console_state, l);
             }
         }
+    }
+
+    // Wholesale document swap from `open` / `new`. Drop the cached
+    // tree so `rebuild_all` rebuilds it fresh against the new map,
+    // and clear any open modal-editor state so stale references
+    // into the old document can't outlive the swap.
+    if let Some(new_doc) = replace_doc {
+        *doc = new_doc;
+        *mindmap_tree = None;
+        *label_edit_state = LabelEditState::Closed;
+        *color_picker_state =
+            crate::application::color_picker::ColorPickerState::Closed;
     }
 
     // Any successful command may have mutated the doc; rebuild.
@@ -3206,6 +3235,42 @@ fn push_scrollback_output(state: &mut ConsoleState, text: String) {
 fn push_scrollback_error(state: &mut ConsoleState, text: String) {
     if let ConsoleState::Open { scrollback, .. } = state {
         scrollback.push(ConsoleLine::Error(text));
+    }
+}
+
+/// Persist the document to its bound `file_path`, clear the dirty
+/// flag, and surface the outcome — to the console scrollback when
+/// open, and always to the log. Used by the `Ctrl+S` keybind. When
+/// no path is bound, surfaces a hint pointing the user at `save
+/// <path>` from the console; the dirty flag is left untouched.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_document_to_bound_path(
+    doc: &mut MindMapDocument,
+    console_state: &mut ConsoleState,
+) {
+    let path = match doc.file_path.clone() {
+        Some(p) => p,
+        None => {
+            let msg = "no file path bound; use `save <path>` to choose one".to_string();
+            log::warn!("{}", msg);
+            push_scrollback_error(console_state, msg);
+            return;
+        }
+    };
+    match baumhard::mindmap::loader::save_to_file(
+        std::path::Path::new(&path),
+        &doc.mindmap,
+    ) {
+        Ok(()) => {
+            doc.dirty = false;
+            let msg = format!("saved to {}", path);
+            log::info!("{}", msg);
+            push_scrollback_output(console_state, msg);
+        }
+        Err(e) => {
+            log::error!("{}", e);
+            push_scrollback_error(console_state, e);
+        }
     }
 }
 
