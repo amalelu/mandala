@@ -239,6 +239,55 @@ mod tests {
         assert_eq!(area_count, model_count, "every area has its model");
     }
 
+    /// Spec-driven mutator output matches the picker's structural
+    /// invariants: root `Void` on channel 0, 68 `Single` children
+    /// (title + 24 hue + hint + 20 sat + 20 val + preview + hex),
+    /// each carrying an `AreaDelta` with exactly 8 fields. Guards
+    /// against drift between `widgets/color_picker.json`'s
+    /// `mutator_spec` block and the `mutator_builder` walker — if
+    /// either side silently changes shape, the picker's registered
+    /// tree alignment breaks and this test fires first.
+    #[test]
+    fn picker_mutator_output_matches_spec_shape() {
+        use baumhard::gfx_structs::mutator::{GfxMutator, Mutation, MutatorType};
+        use crate::application::color_picker::compute_color_picker_layout;
+
+        let g = picker_sample_geometry();
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let mt = build_color_picker_overlay_mutator(&g, &layout);
+
+        // Root must be a Void on channel 0 (the root_channel the
+        // JSON declares).
+        match mt.arena.get(mt.root).unwrap().get() {
+            GfxMutator::Void { channel: 0 } => {}
+            other => panic!("picker mutator root must be Void(0), got {other:?}"),
+        }
+
+        let children: Vec<&GfxMutator> = mt
+            .root
+            .children(&mt.arena)
+            .map(|id| mt.arena.get(id).unwrap().get())
+            .collect();
+        assert_eq!(children.len(), 68, "picker emits 68 live cells");
+
+        for child in &children {
+            assert!(
+                matches!(child.get_type(), MutatorType::Single),
+                "every picker cell is a Single"
+            );
+            let GfxMutator::Single { mutation, .. } = child else { unreachable!() };
+            let Mutation::AreaDelta(delta) = mutation else {
+                panic!("picker cells carry AreaDelta");
+            };
+            assert_eq!(
+                delta.fields.len(),
+                8,
+                "picker cell template has 8 fields (Text, position, bounds, scale, \
+                 line_height, ColorFontRegions, Outline, Operation::Assign)"
+            );
+        }
+    }
+
     /// Mutator round-trip: the §B2 in-place update path keeps working
     /// across the tree-shape change in `build_color_picker_overlay_tree`.
     /// Build a tree at state A, apply a mutator computed from state B
