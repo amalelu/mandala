@@ -17,11 +17,14 @@ pub fn load_from_str(json: &str) -> Result<MindMap, String> {
 /// Mirrors `load_from_file` — the same `Result<_, String>` error
 /// convention, native-only synchronous I/O via `std::fs`. Pretty
 /// printing keeps the on-disk format diff-friendly so authors can
-/// inspect saved maps with normal text tools.
+/// inspect saved maps with normal text tools. Streams through a
+/// `BufWriter` so large maps don't have to materialize the entire
+/// JSON in memory before hitting disk.
 pub fn save_to_file(path: &Path, map: &MindMap) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(map)
-        .map_err(|e| format!("Failed to serialize mindmap: {}", e))?;
-    fs::write(path, json)
+    let file = fs::File::create(path)
+        .map_err(|e| format!("Failed to create {}: {}", path.display(), e))?;
+    let writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, map)
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 

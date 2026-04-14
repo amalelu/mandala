@@ -554,6 +554,27 @@ fn grow_node_sizes_to_fit_text(map: &mut MindMap) {
 }
 
 impl MindMapDocument {
+    /// Wrap a `MindMap` in a fresh document shell (selection cleared,
+    /// undo stack empty, mutation registry rebuilt from the map's
+    /// declared mutations). Shared by `load` and `new_blank` so the
+    /// transient-state defaults stay in one place.
+    fn from_mindmap(mindmap: MindMap, file_path: Option<String>) -> Self {
+        let mut doc = MindMapDocument {
+            mindmap,
+            file_path,
+            dirty: false,
+            selection: SelectionState::None,
+            undo_stack: Vec::new(),
+            mutation_registry: HashMap::new(),
+            active_toggles: HashSet::new(),
+            label_edit_preview: None,
+            color_picker_preview: None,
+            active_animations: Vec::new(),
+        };
+        doc.build_mutation_registry();
+        doc
+    }
+
     /// Load a MindMap from a file path and create a Document.
     pub fn load(path: &str) -> Result<Self, String> {
         match loader::load_from_file(Path::new(path)) {
@@ -563,20 +584,7 @@ impl MindMapDocument {
                 // before the model is handed to the tree/scene builders.
                 // See `grow_node_sizes_to_fit_text` for the invariants.
                 grow_node_sizes_to_fit_text(&mut map);
-                let mut doc = MindMapDocument {
-                    mindmap: map,
-                    file_path: Some(path.to_string()),
-                    dirty: false,
-                    selection: SelectionState::None,
-                    undo_stack: Vec::new(),
-                    mutation_registry: HashMap::new(),
-                    active_toggles: HashSet::new(),
-                    label_edit_preview: None,
-                    color_picker_preview: None,
-                    active_animations: Vec::new(),
-                };
-                doc.build_mutation_registry();
-                Ok(doc)
+                Ok(Self::from_mindmap(map, Some(path.to_string())))
             }
             Err(e) => {
                 let msg = format!("Failed to load mindmap '{}': {}", path, e);
@@ -604,20 +612,7 @@ impl MindMapDocument {
             })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "untitled".to_string());
-        let mut doc = MindMapDocument {
-            mindmap: MindMap::new_blank(name),
-            file_path,
-            dirty: false,
-            selection: SelectionState::None,
-            undo_stack: Vec::new(),
-            mutation_registry: HashMap::new(),
-            active_toggles: HashSet::new(),
-            label_edit_preview: None,
-            color_picker_preview: None,
-            active_animations: Vec::new(),
-        };
-        doc.build_mutation_registry();
-        doc
+        Self::from_mindmap(MindMap::new_blank(name), file_path)
     }
 
     /// Build a Baumhard mutation tree from the MindMap hierarchy.
