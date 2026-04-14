@@ -48,7 +48,7 @@ pub(super) enum PickerSection {
 }
 
 impl PickerSection {
-    fn from_name(name: &str) -> Self {
+    pub(super) fn from_name(name: &str) -> Self {
         match name {
             "title" => PickerSection::Title,
             "hue_ring" => PickerSection::HueRing,

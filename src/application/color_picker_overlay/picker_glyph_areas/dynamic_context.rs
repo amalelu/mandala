@@ -20,6 +20,8 @@ use crate::application::color_picker_overlay::color::{
 use crate::application::mutator_builder::{CellField, SectionContext};
 use crate::application::widgets::color_picker_widget::load_spec;
 
+use super::areas::PickerSection;
+
 /// Slim per-frame context for the picker's dynamic phase. Builds each
 /// requested `GlyphAreaField` directly from
 /// `(geometry, layout, section, index)` without allocating a full
@@ -139,31 +141,33 @@ impl<'a> PickerDynamicContext<'a> {
     /// layout phase feeds to `GlyphArea::new_with_str`'s `scale`
     /// parameter (first float). Mirrors `picker_glyph_areas::make_area`
     /// call-sites. Used by the dynamic spec's `scale` field.
-    fn scale_for(&self, section: &str, index: usize) -> f32 {
+    ///
+    /// Converts the `&str` section name through [`PickerSection::from_name`]
+    /// so the exhaustive enum match below stays total — unknown-section
+    /// panics are centralised in `from_name`.
+    fn scale_for(&self, section: PickerSection, index: usize) -> f32 {
         let g = self.geometry;
         let layout = self.layout;
         let hover = |matches_hover: bool| if matches_hover { self.hover_scale } else { 1.0 };
         match section {
-            "title" => layout.font_size,
-            "hint" => layout.font_size * 0.85,
-            "hex" => layout.font_size,
-            "hue_ring" => {
+            PickerSection::Title | PickerSection::Hex => layout.font_size,
+            PickerSection::Hint => layout.font_size * 0.85,
+            PickerSection::HueRing => {
                 let hovered = matches!(g.hovered_hit, Some(PickerHit::Hue(h)) if h == index);
                 layout.ring_font_size * hover(hovered)
             }
-            "sat_bar" => {
+            PickerSection::SatBar => {
                 let hovered = matches!(g.hovered_hit, Some(PickerHit::SatCell(h)) if h == index);
                 layout.cell_font_size * hover(hovered)
             }
-            "val_bar" => {
+            PickerSection::ValBar => {
                 let hovered = matches!(g.hovered_hit, Some(PickerHit::ValCell(h)) if h == index);
                 layout.cell_font_size * hover(hovered)
             }
-            "preview" => {
+            PickerSection::Preview => {
                 let commit_hovered = matches!(g.hovered_hit, Some(PickerHit::Commit));
                 layout.preview_size * hover(commit_hovered)
             }
-            other => panic!("picker dynamic context scale_for: unknown section {other:?}"),
         }
     }
 }
@@ -183,6 +187,13 @@ fn cosmic_to_rgba(color: cosmic_text::Color) -> [f32; 4] {
 
 impl<'a> SectionContext for PickerDynamicContext<'a> {
     fn field(&self, section: &str, index: usize, template: &CellField) -> GlyphAreaField {
+        // Resolve the section string to the typed enum up front so
+        // every `match` below is exhaustive on the enum rather than
+        // repeating the unknown-section panic per branch. Invalid
+        // section names surface at this single call — JSON / Rust
+        // drift is a programming error, not a recoverable state, and
+        // `from_name` is the canonical place to fail loudly.
+        let section = PickerSection::from_name(section);
         match template {
             CellField::Operation(op) => return GlyphAreaField::Operation(*op),
             // `area.scale` is the final font size the cell renders
@@ -194,8 +205,8 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
             // mutator-applied trees round-trip equal.
             CellField::scale => return GlyphAreaField::scale(self.scale_for(section, index)),
             CellField::Text => {
-                debug_assert_eq!(
-                    section, "hex",
+                debug_assert!(
+                    matches!(section, PickerSection::Hex),
                     "dynamic spec only writes Text on the hex section"
                 );
                 return GlyphAreaField::Text(self.hex_text.clone());
@@ -210,10 +221,10 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
         // Color + grapheme count + optional font pin per section.
         let g = self.geometry;
         let (count, color, font): (usize, cosmic_text::Color, Option<AppFont>) = match section {
-            "title" => (self.title_count, self.preview_color, None),
-            "hint" => (self.hint_count, self.preview_color, None),
-            "hex" => (self.hex_count, self.preview_color, None),
-            "hue_ring" => {
+            PickerSection::Title => (self.title_count, self.preview_color, None),
+            PickerSection::Hint => (self.hint_count, self.preview_color, None),
+            PickerSection::Hex => (self.hex_count, self.preview_color, None),
+            PickerSection::HueRing => {
                 let hue = hue_slot_to_degrees(index);
                 let rgb = hsv_to_rgb(hue, 1.0, 1.0);
                 let hovered = matches!(g.hovered_hit, Some(PickerHit::Hue(h)) if h == index);
@@ -224,7 +235,7 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
                 };
                 (1, color, None)
             }
-            "sat_bar" => {
+            PickerSection::SatBar => {
                 debug_assert_ne!(index, CROSSHAIR_CENTER_CELL);
                 let cell_sat = sat_cell_to_value(index);
                 let rgb = hsv_to_rgb(g.hue_deg, cell_sat, g.val);
@@ -238,7 +249,7 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
                 };
                 (1, color, None)
             }
-            "val_bar" => {
+            PickerSection::ValBar => {
                 debug_assert_ne!(index, CROSSHAIR_CENTER_CELL);
                 let cell_val = val_cell_to_value(index);
                 let rgb = hsv_to_rgb(g.hue_deg, g.sat, cell_val);
@@ -261,7 +272,7 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
                 };
                 (1, color, font)
             }
-            "preview" => {
+            PickerSection::Preview => {
                 let commit_hovered = matches!(g.hovered_hit, Some(PickerHit::Commit));
                 let color = if commit_hovered {
                     highlight_hovered_cell_color(self.preview_rgb)
@@ -270,7 +281,6 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
                 };
                 (1, color, Some(AppFont::NotoSerifTibetanRegular))
             }
-            other => panic!("picker dynamic context: unknown section {other:?}"),
         };
 
         GlyphAreaField::ColorFontRegions(ColorFontRegions::single_span(
