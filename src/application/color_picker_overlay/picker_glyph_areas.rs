@@ -140,7 +140,11 @@ pub(super) fn compute_picker_areas(
             color.b() as f32 / 255.0,
             color.a() as f32 / 255.0,
         ];
-        area.regions = ColorFontRegions::single_span(text.chars().count(), Some(rgba), font);
+        area.regions = ColorFontRegions::single_span(
+            baumhard::util::grapheme_chad::count_grapheme_clusters(text),
+            Some(rgba),
+            font,
+        );
         area
     }
 
