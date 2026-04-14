@@ -1172,7 +1172,23 @@ impl Application {
                     // the cursor outside the backdrop the move
                     // falls through so the canvas's own hover
                     // (button-node cursor, etc.) keeps working.
-                    if color_picker_state.is_open() {
+                    //
+                    // Guard on `DragState::None`: if a canvas-side
+                    // drag (pan / node move / edge-handle drag /
+                    // rubber-band / pending threshold) is already in
+                    // flight, do not route the move to the picker.
+                    // The picker would otherwise swallow the move
+                    // whenever the cursor crossed its UI, freezing
+                    // the drag until the cursor left again. A
+                    // press that the picker consumed never sets
+                    // `drag_state` away from `None`, and an active
+                    // wheel-move/wheel-resize gesture on the picker
+                    // also lives entirely in `drag_state == None`,
+                    // so this guard can't steal events from the
+                    // picker's own interactions.
+                    if color_picker_state.is_open()
+                        && matches!(drag_state, DragState::None)
+                    {
                         let consumed = if let Some(doc) = document.as_mut() {
                             handle_color_picker_mouse_move(
                                 cursor_pos,
