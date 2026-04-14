@@ -1,0 +1,326 @@
+//! Animation runtime — the `MindMapDocument` methods that build
+//! the mutation registry, evaluate triggered mutations, start /
+//! tick / fast-forward animations. Also carries
+//! `apply_position_mutations_to_node` — the scratch-node position
+//! replay helper used during tick.
+
+use std::collections::HashMap;
+
+use glam::Vec2;
+
+use baumhard::gfx_structs::area::GlyphAreaCommand;
+use baumhard::gfx_structs::mutator::Mutation;
+use baumhard::mindmap::animation::lerp_f32;
+use baumhard::mindmap::custom_mutation::{CustomMutation, MutationBehavior, PlatformContext, Trigger};
+use baumhard::mindmap::model::MindNode;
+use baumhard::mindmap::tree_builder::MindMapTree;
+
+use super::types::AnimationInstance;
+use super::MindMapDocument;
+
+fn apply_position_mutations_to_node(
+    mutations: &[Mutation],
+    node: &mut MindNode,
+) {
+    for mutation in mutations {
+        if let Mutation::AreaCommand(cmd) = mutation {
+            match cmd.as_ref() {
+                GlyphAreaCommand::NudgeLeft(dx) => {
+                    node.position.x -= *dx as f64;
+                }
+                GlyphAreaCommand::NudgeRight(dx) => {
+                    node.position.x += *dx as f64;
+                }
+                GlyphAreaCommand::NudgeUp(dy) => {
+                    node.position.y -= *dy as f64;
+                }
+                GlyphAreaCommand::NudgeDown(dy) => {
+                    node.position.y += *dy as f64;
+                }
+                // Other commands don't move the node — their
+                // visible effect lands at completion via
+                // `apply_custom_mutation`.
+                _ => {}
+            }
+        }
+    }
+}
+
+impl MindMapDocument {
+    pub fn build_mutation_registry(&mut self) {
+        self.build_mutation_registry_with_user(&[]);
+    }
+
+    /// Variant that also accepts a slice of user-defined mutations
+    /// (from `$XDG_CONFIG_HOME/mandala/mutations.json`). Precedence
+    /// is user < map < inline: user mutations are inserted first, so
+    /// map and inline entries with the same id overwrite them.
+    pub fn build_mutation_registry_with_user(
+        &mut self,
+        user_mutations: &[CustomMutation],
+    ) {
+        self.mutation_registry.clear();
+        // User-defined mutations (lowest precedence).
+        for cm in user_mutations {
+            self.mutation_registry.insert(cm.id.clone(), cm.clone());
+        }
+        // Map-level mutations (overrides user).
+        for cm in &self.mindmap.custom_mutations {
+            self.mutation_registry.insert(cm.id.clone(), cm.clone());
+        }
+        // Inline node mutations (highest — overrides map and user).
+        for node in self.mindmap.nodes.values() {
+            for cm in &node.inline_mutations {
+                self.mutation_registry.insert(cm.id.clone(), cm.clone());
+            }
+        }
+    }
+
+    /// Find custom mutations triggered by a given trigger on a specific node.
+    /// Checks the node's trigger_bindings and filters by platform context.
+    pub fn find_triggered_mutations(
+        &self,
+        node_id: &str,
+        trigger: &Trigger,
+        platform: &PlatformContext,
+    ) -> Vec<CustomMutation> {
+        let node = match self.mindmap.nodes.get(node_id) {
+            Some(n) => n,
+            None => return vec![],
+        };
+        let mut results = Vec::new();
+        for binding in &node.trigger_bindings {
+            if &binding.trigger != trigger {
+                continue;
+            }
+            // Check platform context filter
+            if !binding.contexts.is_empty() && !binding.contexts.contains(platform) {
+                continue;
+            }
+            if let Some(cm) = self.mutation_registry.get(&binding.mutation_id) {
+                results.push(cm.clone());
+            }
+        }
+        results
+    }
+
+    // ---- Animation lifecycle (Phase 4.2) ----
+    //
+    // Animations are an *envelope* on `apply_custom_mutation` — when
+    // a `CustomMutation` carries `timing: Some(AnimationTiming { ... })`
+    // with a non-zero `duration_ms`, the dispatcher routes it through
+    // `start_animation` instead of applying instantly. Each tick
+    // computes a blended `MindNode` snapshot and writes it back into
+    // `mindmap.nodes` so the existing `rebuild_all` path sees the
+    // in-progress state and repaints. The tree never sees the from
+    // state mid-flight; the render pipeline reads model → builds tree
+    // → walks → shapes, so the model write is the single source of
+    // truth for the animated frame.
+    //
+    // The architecture mirrors the dragging / editing invariant: the
+    // *tree* (or in this case, the model — drag and edit work
+    // tree-only because they're transient previews) carries the
+    // in-progress state, the model is the boundary commit. For
+    // animations we write to the model directly because the
+    // animation IS the commit — `apply_custom_mutation` would have
+    // produced the same final state anyway, just in one step
+    // instead of many. The undo entry is pushed once at completion.
+    //
+    // Per the original Phase 4 plan: position / size / color
+    // interpolate; structural changes (text replacement, region
+    // count shifts) snap at the boundary. v1 only interpolates
+    // `position` because every other interpolated field needs
+    // careful per-mutation snapshot logic that adds more lines than
+    // the foundation justifies. Subsequent commits expand the
+    // interpolated-field set as concrete consumers arrive.
+
+    /// Start an animation for `cm` targeting `target_id`. Snapshots
+    /// the current node state, applies the mutation to a scratch
+    /// copy to derive the `to` snapshot, and pushes an
+    /// [`AnimationInstance`] onto [`Self::active_animations`]. The
+    /// caller has already verified
+    /// `cm.timing.as_ref().is_some_and(|t| t.duration_ms > 0)`.
+    ///
+    /// **v1 restrictions** (lifted as concrete consumers arrive):
+    /// only `TargetScope::SelfOnly` interpolates per-frame; other
+    /// scopes apply at the boundary. Only `position` is lerped
+    /// continuously; text / regions / structural fields snap at
+    /// completion. `Followup` variants (`Reverse`, `Chain`, `Loop`)
+    /// are recorded on the instance but not yet enacted.
+    pub fn start_animation(
+        &mut self,
+        cm: &CustomMutation,
+        target_id: &str,
+        now_ms: u64,
+    ) {
+        // Invariant check the `AnimationInstance::timing()`
+        // projection relies on: `cm.timing` must be Some with a
+        // non-zero duration, else the caller should have taken
+        // the instant-mutation path.
+        if !cm
+            .timing
+            .as_ref()
+            .is_some_and(|t| t.duration_ms > 0)
+        {
+            return;
+        }
+
+        // Re-trigger the same (mutation_id, node_id) mid-flight is a
+        // silent no-op — same semantics as the original Phase 4 plan.
+        if self
+            .active_animations
+            .iter()
+            .any(|a| a.mutation_id() == cm.id && a.target_id == target_id)
+        {
+            return;
+        }
+
+        // Snapshot the from state.
+        let Some(from_node) = self.mindmap.nodes.get(target_id).cloned() else {
+            return;
+        };
+
+        // Compute the to state by applying the mutation to a scratch
+        // copy of the document. The scratch path uses the existing
+        // GlyphArea command vocabulary so animation receives the same
+        // final state instant-mode would have landed on — there's
+        // only one source of truth for "what does this mutation do".
+        let mut scratch = from_node.clone();
+        apply_position_mutations_to_node(&cm.mutations, &mut scratch);
+        let to_node = scratch;
+
+        self.active_animations.push(AnimationInstance {
+            target_id: target_id.to_string(),
+            from_node,
+            to_node,
+            start_ms: now_ms,
+            cm: cm.clone(),
+        });
+    }
+
+    /// Tick every active animation against the wall clock at
+    /// `now_ms`. For each instance, lerp position from `from_node`
+    /// to `to_node` according to the easing curve and write the
+    /// blended state back into `mindmap.nodes`. Returns `true` iff
+    /// any animation advanced (so the caller knows to trigger a
+    /// scene rebuild).
+    ///
+    /// Animations whose elapsed time has reached `duration_ms +
+    /// delay_ms` complete: their final state is committed via
+    /// `apply_custom_mutation` (so the standard
+    /// model-sync + undo-push path runs exactly once), then the
+    /// instance is dropped. Drain order is back-to-front so
+    /// `swap_remove` is safe.
+    pub fn tick_animations(
+        &mut self,
+        now_ms: u64,
+        mut tree: Option<&mut MindMapTree>,
+    ) -> bool {
+        if self.active_animations.is_empty() {
+            return false;
+        }
+
+        let mut completed_indices: Vec<usize> = Vec::new();
+        let mut any_advanced = false;
+
+        for (idx, anim) in self.active_animations.iter().enumerate() {
+            let timing = anim.timing();
+            let elapsed = now_ms.saturating_sub(anim.start_ms);
+            let total = timing.delay_ms as u64 + timing.duration_ms as u64;
+            if elapsed >= total {
+                completed_indices.push(idx);
+                continue;
+            }
+            // Skip the delay phase — node stays at `from` until the
+            // delay elapses.
+            if elapsed < timing.delay_ms as u64 {
+                continue;
+            }
+            let progress =
+                (elapsed - timing.delay_ms as u64) as f32 / timing.duration_ms as f32;
+            let t = timing.easing.evaluate(progress);
+
+            let node = match self.mindmap.nodes.get_mut(&anim.target_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            node.position.x = lerp_f32(
+                anim.from_node.position.x as f32,
+                anim.to_node.position.x as f32,
+                t,
+            ) as f64;
+            node.position.y = lerp_f32(
+                anim.from_node.position.y as f32,
+                anim.to_node.position.y as f32,
+                t,
+            ) as f64;
+            any_advanced = true;
+        }
+
+        if !completed_indices.is_empty() {
+            // Drain completed animations. Apply each one's final
+            // state through `apply_custom_mutation` — that's the
+            // single path that handles model-sync + undo-push for
+            // both Persistent and Toggle behaviour, so the tree
+            // animation's commit is indistinguishable from the
+            // instant-mode equivalent.
+            for idx in completed_indices.into_iter().rev() {
+                let anim = self.active_animations.swap_remove(idx);
+                if let Some(tree) = tree.as_deref_mut() {
+                    self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+                } else {
+                    // No tree available — at minimum restore the
+                    // model to the `to` snapshot so the next
+                    // rebuild_all sees the post-animation state.
+                    if let Some(node) = self.mindmap.nodes.get_mut(&anim.target_id) {
+                        node.position = anim.to_node.position.clone();
+                    }
+                }
+                any_advanced = true;
+            }
+        }
+
+        any_advanced
+    }
+
+    /// `true` while one or more animations are still ticking.
+    /// Used by the event loop to decide whether to keep emitting
+    /// `AboutToWait` work and rebuilding the scene.
+    pub fn has_active_animations(&self) -> bool {
+        !self.active_animations.is_empty()
+    }
+
+    /// Fast-forward every active animation to its `to` state and
+    /// commit it through `apply_custom_mutation` (which pushes
+    /// one undo entry per completed animation). Called by the
+    /// Ctrl+Z handler before `undo()` so mid-animation Ctrl+Z
+    /// has predictable semantics: the animation snaps to
+    /// completion, the undo entry it would have pushed at the
+    /// natural boundary is pushed immediately, and the
+    /// subsequent `undo()` pops that entry — so Ctrl+Z during
+    /// an animated transition reverses the animation's effect
+    /// in one keystroke, same as Ctrl+Z after the animation
+    /// completed naturally.
+    ///
+    /// Drains `active_animations` wholesale. Order within the
+    /// drain doesn't matter because each instance commits
+    /// independently and pushes its own undo entry.
+    pub fn fast_forward_animations(&mut self, tree: Option<&mut MindMapTree>) {
+        if self.active_animations.is_empty() {
+            return;
+        }
+        let drained = std::mem::take(&mut self.active_animations);
+        let mut tree = tree;
+        for anim in drained {
+            if let Some(tree) = tree.as_deref_mut() {
+                self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+            } else if let Some(node) = self.mindmap.nodes.get_mut(&anim.target_id) {
+                // No tree available — restore the model to the
+                // `to` snapshot directly. Undo path is then the
+                // caller's responsibility, matching what
+                // `tick_animations` does on its no-tree path.
+                node.position = anim.to_node.position.clone();
+            }
+        }
+    }
+}

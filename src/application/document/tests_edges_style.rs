@@ -1,0 +1,605 @@
+//! Edge-handle hit-test, ensure_glyph_connection, color-picker preview, edge style setters (first half).
+//!
+//! Part of the tests split for `document`. Helpers live in
+//! `tests_common`; only the tests for this theme live here.
+use super::*;
+use super::tests_common::{
+    first_testament_edge_ref, first_testament_node_id, load_test_doc, load_test_tree,
+    pick_test_edge, test_map_path,
+};
+
+use baumhard::gfx_structs::area::GlyphAreaCommand;
+use baumhard::gfx_structs::mutator::Mutation;
+use baumhard::mindmap::animation::{AnimationTiming, Easing};
+use baumhard::mindmap::custom_mutation::{
+    apply_mutations_to_element, CustomMutation as CM, DocumentAction,
+    MutationBehavior as MB, PlatformContext as PC, TargetScope as TS,
+    Trigger as Tr, TriggerBinding as TB,
+};
+use baumhard::mindmap::model::{
+    Canvas, GlyphConnectionConfig, MindEdge, MindNode, NodeLayout, NodeStyle, Position, Size,
+    TextRun, PORTAL_GLYPH_PRESETS,
+};
+use baumhard::mindmap::scene_builder::EdgeHandleKind;
+use baumhard::mindmap::model::ControlPoint;
+use glam::Vec2;
+
+use super::defaults::default_cross_link_edge;
+
+
+    #[test]
+    fn test_hit_test_edge_handle_finds_anchor_from() {
+        let doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+        let edge = doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)).unwrap();
+        let from_node = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+        let to_node = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+        let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
+        let anchor_from_pos = baumhard::mindmap::connection::resolve_anchor_point(
+            from_pos, from_size, edge.anchor_from, to_center,
+        );
+
+        let hit = doc.hit_test_edge_handle(anchor_from_pos, &edge_ref, 2.0);
+        assert!(matches!(hit, Some((EdgeHandleKind::AnchorFrom, _))),
+            "expected AnchorFrom hit, got {:?}", hit.as_ref().map(|(k, _)| k));
+    }
+
+    #[test]
+    fn test_hit_test_edge_handle_finds_midpoint_on_straight_edge() {
+        let mut doc = load_test_doc();
+        // Make sure we have a straight edge with empty control_points
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .expect("testament map should have at least one straight edge");
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let _ = &mut doc;
+
+        let edge = &doc.mindmap.edges[edge_idx];
+        let from_node = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+        let to_node = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+        let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
+        let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
+        let start = baumhard::mindmap::connection::resolve_anchor_point(
+            from_pos, from_size, edge.anchor_from, to_center,
+        );
+        let end = baumhard::mindmap::connection::resolve_anchor_point(
+            to_pos, to_size, edge.anchor_to, from_center,
+        );
+        let midpoint = start.lerp(end, 0.5);
+
+        let hit = doc.hit_test_edge_handle(midpoint, &edge_ref, 2.0);
+        assert!(matches!(hit, Some((EdgeHandleKind::Midpoint, _))),
+            "expected Midpoint hit for straight edge");
+    }
+
+    #[test]
+    fn test_hit_test_edge_handle_no_midpoint_on_curved_edge() {
+        let mut doc = load_test_doc();
+        // Give an edge a control point so it's curved
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        doc.mindmap.edges[edge_idx].control_points.push(ControlPoint { x: 50.0, y: 50.0 });
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+
+        // Compute what the midpoint WOULD be on a straight line; the
+        // hit test should NOT return Midpoint for this curved edge
+        // regardless of whether some other handle happens to be near.
+        let edge = &doc.mindmap.edges[edge_idx];
+        let from_node = doc.mindmap.nodes.get(&edge.from_id).unwrap();
+        let to_node = doc.mindmap.nodes.get(&edge.to_id).unwrap();
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size = Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+        let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
+
+        // The control point is at from_center + (50, 50). Hit there:
+        // should get ControlPoint(0), not Midpoint.
+        let cp_pos = from_center + Vec2::new(50.0, 50.0);
+        let hit = doc.hit_test_edge_handle(cp_pos, &edge_ref, 5.0);
+        assert!(matches!(hit, Some((EdgeHandleKind::ControlPoint(0), _))),
+            "expected ControlPoint(0) hit on curved edge, got {:?}",
+            hit.as_ref().map(|(k, _)| k));
+    }
+
+    #[test]
+    fn test_hit_test_edge_handle_miss_outside_tolerance() {
+        let doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+        let hit = doc.hit_test_edge_handle(
+            Vec2::new(-99999.0, -99999.0),
+            &edge_ref,
+            10.0,
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn test_reset_edge_to_straight_clears_control_points() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        doc.mindmap.edges[edge_idx].control_points.push(ControlPoint { x: 10.0, y: 20.0 });
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let ok = doc.reset_edge_to_straight(&edge_ref);
+        assert!(ok, "reset should report success");
+        assert!(doc.mindmap.edges[edge_idx].control_points.is_empty());
+        assert!(doc.dirty);
+        assert_eq!(doc.undo_stack.len(), 1);
+    }
+
+    #[test]
+    fn test_reset_edge_to_straight_noop_on_already_straight() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let ok = doc.reset_edge_to_straight(&edge_ref);
+        assert!(!ok, "reset on already-straight edge should be a no-op");
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_edge_anchor_pushes_undo() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        // Force a change by picking a value different from the current
+        let original = doc.mindmap.edges[edge_idx].anchor_from;
+        let new_value = if original == 1 { 3 } else { 1 };
+        let ok = doc.set_edge_anchor(&edge_ref, true, new_value);
+        assert!(ok);
+        assert_eq!(doc.mindmap.edges[edge_idx].anchor_from, new_value);
+        assert_eq!(doc.undo_stack.len(), 1);
+    }
+
+    #[test]
+    fn test_set_edge_anchor_noop_when_already_set() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let current = doc.mindmap.edges[edge_idx].anchor_from;
+        let ok = doc.set_edge_anchor(&edge_ref, true, current);
+        assert!(!ok);
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_edit_edge_undo_restores_control_points() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        doc.mindmap.edges[edge_idx].control_points.push(ControlPoint { x: 33.0, y: 44.0 });
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        doc.reset_edge_to_straight(&edge_ref);
+        assert!(doc.mindmap.edges[edge_idx].control_points.is_empty());
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.edges[edge_idx].control_points.len(), 1);
+        assert_eq!(doc.mindmap.edges[edge_idx].control_points[0].x, 33.0);
+    }
+
+    #[test]
+    fn test_edit_edge_undo_restores_anchor() {
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        let original = doc.mindmap.edges[edge_idx].anchor_from;
+        let new_value = if original == 2 { 4 } else { 2 };
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        doc.set_edge_anchor(&edge_ref, true, new_value);
+        assert_eq!(doc.mindmap.edges[edge_idx].anchor_from, new_value);
+        assert!(doc.undo());
+        assert_eq!(doc.mindmap.edges[edge_idx].anchor_from, original);
+    }
+
+    #[test]
+    fn test_edge_index_finds_existing_edge() {
+        let doc = load_test_doc();
+        let (edge_ref, _) = pick_test_edge(&doc);
+        let idx = doc.edge_index(&edge_ref);
+        assert!(idx.is_some());
+    }
+
+    #[test]
+    fn test_edge_index_unknown_returns_none() {
+        let doc = load_test_doc();
+        let bogus = EdgeRef::new("nope", "nope2", "cross_link");
+        assert!(doc.edge_index(&bogus).is_none());
+    }
+
+    // ========================================================================
+    // Session 6D — connection style and label mutation tests
+    // ========================================================================
+
+    #[test]
+    fn test_ensure_glyph_connection_forks_from_hardcoded_default() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Make sure the test subject starts with no per-edge override
+        // AND the canvas has no default — forces the hardcoded default
+        // path.
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].glyph_connection = None;
+        doc.mindmap.canvas.default_connection = None;
+        doc.undo_stack.clear();
+        doc.dirty = false;
+
+        // First style edit: changing the body glyph. The fork should
+        // materialize a concrete GlyphConnectionConfig with the
+        // hardcoded default body (·) — then the mutation overwrites
+        // `body` with the requested value.
+        let changed = doc.set_edge_body_glyph(&er, "\u{2500}");
+        assert!(changed, "body change should succeed on fresh edge");
+        let cfg = doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .expect("fork should install a config");
+        assert_eq!(cfg.body, "\u{2500}");
+        // The other fields should match the hardcoded default.
+        let hard = GlyphConnectionConfig::default();
+        assert_eq!(cfg.font_size_pt, hard.font_size_pt);
+        assert_eq!(cfg.min_font_size_pt, hard.min_font_size_pt);
+    }
+
+    #[test]
+    fn test_ensure_glyph_connection_forks_from_canvas_default() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].glyph_connection = None;
+        // Set a canvas-level default with a distinctive body glyph.
+        doc.mindmap.canvas.default_connection = Some(GlyphConnectionConfig {
+            body: "\u{22EF}".to_string(), // ⋯
+            ..GlyphConnectionConfig::default()
+        });
+        doc.undo_stack.clear();
+        doc.dirty = false;
+
+        // Change a different field (spacing) so the fork copies the
+        // canvas body (⋯) into the edge before the field overwrite.
+        let changed = doc.set_edge_spacing(&er, 6.0);
+        assert!(changed);
+        let cfg = doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .expect("fork should install a config");
+        // Body was copied from the canvas default, not from the
+        // hardcoded default.
+        assert_eq!(cfg.body, "\u{22EF}");
+        assert_eq!(cfg.spacing, 6.0);
+    }
+
+    /// Glyph-wheel color picker invariant: setting
+    /// `doc.color_picker_preview` never pushes an undo entry and
+    /// never flips dirty. Mirrors what the picker hover path does
+    /// after the Step C refactor, which moved preview from model-
+    /// mutation (`preview_edge_color`) to a transient scene-level
+    /// substitution via the document field.
+    #[test]
+    fn test_color_picker_preview_does_not_push_undo_or_dirty() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        let stack_depth = doc.undo_stack.len();
+        let before = doc.mindmap.edges[idx].clone();
+        doc.dirty = false;
+
+        let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(
+            &doc.mindmap.edges[idx],
+        );
+        doc.color_picker_preview = Some(ColorPickerPreview::Edge {
+            key,
+            color: "#abcdef".to_string(),
+        });
+
+        // Model is byte-identical to the pre-preview state.
+        assert_eq!(doc.mindmap.edges[idx], before);
+        assert_eq!(doc.undo_stack.len(), stack_depth);
+        assert!(!doc.dirty);
+
+        // And the scene builder substitutes the preview color into
+        // the matching edge's label element.
+        doc.selection = SelectionState::Edge(er.clone());
+        let scene = doc.build_scene_with_selection(1.0);
+        // The edge has a glyph label → scene_builder should emit a
+        // ConnectionLabelElement for it. If the edge has no label
+        // this test case simply verifies nothing crashes.
+        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(
+            &doc.mindmap.edges[idx],
+        );
+        // Preview beats selection on the previewed edge → the
+        // connection color (body glyphs) should be the preview hex,
+        // not the selection cyan.
+        if let Some(conn) = scene
+            .connection_elements
+            .iter()
+            .find(|c| c.edge_key == edge_key)
+        {
+            assert_eq!(conn.color, "#abcdef",
+                "preview should beat selection override on the previewed edge");
+        }
+    }
+
+    /// Clearing `doc.color_picker_preview` returns scene output to
+    /// the pre-preview state without any model mutation.
+    #[test]
+    fn test_color_picker_preview_cleared_returns_to_committed() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        let committed_before = doc.mindmap.edges[idx].clone();
+
+        let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(
+            &doc.mindmap.edges[idx],
+        );
+        doc.color_picker_preview = Some(ColorPickerPreview::Edge {
+            key,
+            color: "#112233".to_string(),
+        });
+        // ... hover frames would call build_scene here ...
+        doc.color_picker_preview = None;
+
+        // Model is untouched across the full preview session.
+        assert_eq!(doc.mindmap.edges[idx], committed_before);
+    }
+
+    #[test]
+    fn test_set_edge_body_glyph_pushes_edit_edge_undo() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let stack_depth = doc.undo_stack.len();
+        let changed = doc.set_edge_body_glyph(&er, "\u{2550}");
+        assert!(changed);
+        assert_eq!(doc.undo_stack.len(), stack_depth + 1);
+        assert!(matches!(doc.undo_stack.last(), Some(UndoAction::EditEdge { .. })));
+        assert!(doc.dirty);
+    }
+
+    #[test]
+    fn test_undo_after_first_style_edit_restores_pre_fork_none() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        // Force the pre-edit state to None so we can verify the fork
+        // is rolled back on undo.
+        doc.mindmap.edges[idx].glyph_connection = None;
+        doc.undo_stack.clear();
+
+        assert!(doc.set_edge_body_glyph(&er, "\u{2500}"));
+        assert!(doc.mindmap.edges[idx].glyph_connection.is_some());
+        doc.undo();
+        assert!(
+            doc.mindmap.edges[idx].glyph_connection.is_none(),
+            "undo should restore the pre-fork None"
+        );
+    }
+
+    #[test]
+    fn test_set_edge_color_none_clears_override() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // First install a color override.
+        assert!(doc.set_edge_color(&er, Some("#112233")));
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .glyph_connection
+                .as_ref()
+                .and_then(|c| c.color.as_deref()),
+            Some("#112233")
+        );
+        // Then clear it.
+        assert!(doc.set_edge_color(&er, None));
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .glyph_connection
+                .as_ref()
+                .and_then(|c| c.color.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_set_edge_font_size_step_clamps_at_min_and_max() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Force a known starting config.
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].glyph_connection = Some(GlyphConnectionConfig {
+            font_size_pt: 12.0,
+            min_font_size_pt: 8.0,
+            max_font_size_pt: 24.0,
+            ..GlyphConnectionConfig::default()
+        });
+        doc.undo_stack.clear();
+
+        // Step down past the min: should clamp, returning a smaller
+        // but not less-than-min value. Repeatedly stepping down should
+        // eventually pin at the min and return false on subsequent
+        // attempts (no-op).
+        for _ in 0..20 {
+            doc.set_edge_font_size_step(&er, -2.0);
+        }
+        let pinned_low = doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .unwrap()
+            .font_size_pt;
+        assert_eq!(pinned_low, 8.0);
+        // Further steps down return false.
+        assert!(!doc.set_edge_font_size_step(&er, -2.0));
+
+        // Step up past the max: clamps to 24.
+        for _ in 0..20 {
+            doc.set_edge_font_size_step(&er, 2.0);
+        }
+        let pinned_high = doc.mindmap.edges[idx]
+            .glyph_connection
+            .as_ref()
+            .unwrap()
+            .font_size_pt;
+        assert_eq!(pinned_high, 24.0);
+        assert!(!doc.set_edge_font_size_step(&er, 2.0));
+    }
+
+    #[test]
+    fn test_set_edge_spacing_idempotent_noop() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // First set succeeds.
+        assert!(doc.set_edge_spacing(&er, 2.0));
+        let stack_depth = doc.undo_stack.len();
+        // Second set with the same value is a no-op; undo stack
+        // doesn't grow.
+        assert!(!doc.set_edge_spacing(&er, 2.0));
+        assert_eq!(doc.undo_stack.len(), stack_depth);
+    }
+
+    #[test]
+    fn test_set_edge_label_round_trip() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Set a label.
+        assert!(doc.set_edge_label(&er, Some("hello".to_string())));
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(doc.mindmap.edges[idx].label.as_deref(), Some("hello"));
+        // Clear via Some("").
+        assert!(doc.set_edge_label(&er, Some(String::new())));
+        assert_eq!(doc.mindmap.edges[idx].label, None);
+        // Setting the same None is a no-op.
+        let depth = doc.undo_stack.len();
+        assert!(!doc.set_edge_label(&er, None));
+        assert_eq!(doc.undo_stack.len(), depth);
+    }
+
+    #[test]
+    fn test_set_edge_label_position_clamps_into_0_1() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        assert!(doc.set_edge_label_position(&er, -5.0));
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(0.0));
+
+        assert!(doc.set_edge_label_position(&er, 42.0));
+        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(1.0));
+
+        assert!(doc.set_edge_label_position(&er, 0.75));
+        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(0.75));
+    }
+
+    #[test]
+    fn test_set_edge_type_updates_selection_edge_ref() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        doc.selection = SelectionState::Edge(er.clone());
+        let new_type = if er.edge_type == "parent_child" { "cross_link" } else { "parent_child" };
+        assert!(doc.set_edge_type(&er, new_type));
+        // Selection should now carry the new type.
+        match &doc.selection {
+            SelectionState::Edge(new_ref) => {
+                assert_eq!(new_ref.edge_type, new_type);
+                assert_eq!(new_ref.from_id, er.from_id);
+                assert_eq!(new_ref.to_id, er.to_id);
+            }
+            _ => panic!("selection should still be an edge after type flip"),
+        }
+    }
+
+    #[test]
+    fn test_set_edge_type_refuses_duplicate() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let from_id = er.from_id.clone();
+        let to_id = er.to_id.clone();
+        // Seed a duplicate edge with the OPPOSITE type so conversion
+        // would collide with it.
+        let target_type = if er.edge_type == "parent_child" { "cross_link" } else { "parent_child" };
+        let mut dup = doc.mindmap.edges[doc.edge_index(&er).unwrap()].clone();
+        dup.edge_type = target_type.to_string();
+        doc.mindmap.edges.push(dup);
+        // Conversion should be refused.
+        assert!(!doc.set_edge_type(&er, target_type));
+        // Original edge is unchanged.
+        assert_eq!(
+            doc.mindmap.edges[doc.edge_index(&er).unwrap()].edge_type,
+            er.edge_type
+        );
+    }
+
+    #[test]
+    fn test_reset_edge_style_to_default_clears_glyph_connection() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Install an override.
+        assert!(doc.set_edge_color(&er, Some("#00ff00")));
+        let idx = doc.edge_index(&er).unwrap();
+        assert!(doc.mindmap.edges[idx].glyph_connection.is_some());
+        // Reset clears it.
+        assert!(doc.reset_edge_style_to_default(&er));
+        assert!(doc.mindmap.edges[idx].glyph_connection.is_none());
+        // Repeat call is a no-op.
+        assert!(!doc.reset_edge_style_to_default(&er));
+    }
+
+    #[test]
+    fn test_set_edge_cap_start_none_is_noop_when_already_none() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Force cap_start to None via a fresh config.
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].glyph_connection = Some(GlyphConnectionConfig::default());
+        doc.undo_stack.clear();
+        // Setting cap_start to None when already None is a no-op.
+        assert!(!doc.set_edge_cap_start(&er, None));
+        // Undo stack didn't grow.
+        assert_eq!(doc.undo_stack.len(), 0);
+    }
