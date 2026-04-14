@@ -1,14 +1,12 @@
 //! Recursive walker that turns a [`MutatorNode`] + [`SectionContext`]
 //! into a concrete `MutatorTree<GfxMutator>`.
 
-use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaField};
+use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
 use baumhard::gfx_structs::mutator::{GfxMutator, Mutation};
 use baumhard::gfx_structs::tree::MutatorTree;
 use indextree::NodeId;
 
-use super::ast::{
-    CellField, ChannelSrc, CountSrc, MutationListSrc, MutationSrc, MutatorNode,
-};
+use super::ast::{ChannelSrc, CountSrc, MutationListSrc, MutationSrc, MutatorNode};
 use super::context::SectionContext;
 
 /// Build a `MutatorTree<GfxMutator>` from `node` + `ctx`. The tree's
@@ -190,27 +188,11 @@ fn materialize_mutation<C: SectionContext + ?Sized>(
                 "MutationSrc::AreaDelta requires a Repeat-templated context \
                  (needs a section name + iteration index)",
             );
-            let area = ctx.area(it.section, it.index);
             let fields: Vec<GlyphAreaField> = template
                 .iter()
-                .map(|f| materialize_field(f, area))
+                .map(|f| ctx.field(it.section, it.index, f))
                 .collect();
             Mutation::AreaDelta(Box::new(DeltaGlyphArea::new(fields)))
         }
-    }
-}
-
-fn materialize_field(template: &CellField, area: &GlyphArea) -> GlyphAreaField {
-    match template {
-        CellField::Text => GlyphAreaField::Text(area.text.clone()),
-        CellField::position => GlyphAreaField::position(area.position.x.0, area.position.y.0),
-        CellField::bounds => {
-            GlyphAreaField::bounds(area.render_bounds.x.0, area.render_bounds.y.0)
-        }
-        CellField::scale => GlyphAreaField::scale(area.scale.0),
-        CellField::line_height => GlyphAreaField::line_height(area.line_height.0),
-        CellField::ColorFontRegions => GlyphAreaField::ColorFontRegions(area.regions.clone()),
-        CellField::Outline => GlyphAreaField::Outline(area.outline.clone()),
-        CellField::Operation(op) => GlyphAreaField::Operation(*op),
     }
 }
