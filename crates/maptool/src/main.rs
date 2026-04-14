@@ -6,6 +6,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
+mod export;
+
 const USAGE: &str = "\
 Usage: maptool <command> <map.json> <args...>
 
@@ -31,7 +33,18 @@ Commands:
                                 matched node, so commands with side
                                 effects will still execute. Zero
                                 matches is an error (exit 1), matching
-                                `grep`.";
+                                `grep`.
+  export <map.json> [out.md]    Render the node tree as a Markdown
+                                document. The first line of each
+                                node's text becomes a heading whose
+                                depth matches the node's generation
+                                (#, ##, ###, ...); any further lines
+                                appear as plain text under it.
+                                Empty-text nodes are transparent —
+                                their children surface at the same
+                                depth. Notes, fonts, and edges are
+                                ignored. Writes to stdout, or to
+                                <out.md> if a second path is given.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -135,6 +148,23 @@ fn run(args: &[String]) -> Result<(), CliError> {
                 save_map(Path::new(parsed.map_path), &map)?;
             }
             Ok(())
+        }
+        "export" => {
+            let map_path = args
+                .get(1)
+                .ok_or_else(|| CliError::Usage("export: missing <map.json>".into()))?;
+            let out_path = args.get(2);
+            let map = load_map(map_path)?;
+            let markdown = export::mindmap_to_markdown(&map);
+            match out_path {
+                None => {
+                    print!("{markdown}");
+                    Ok(())
+                }
+                Some(path) => fs::write(Path::new(path), &markdown).map_err(|e| {
+                    CliError::Io(format!("failed to write {path}: {e}"))
+                }),
+            }
         }
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
