@@ -90,16 +90,18 @@ pub fn picker_channel(section: &str, index: usize) -> usize {
 }
 
 /// Number of cells on each crosshair bar. Odd so the center cell sits
-/// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 10 is the
+/// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 8 is the
 /// wheel center where ࿕ lives — it's counted in the HSV quantization
 /// but not rendered as a bar cell.
-pub const SAT_CELL_COUNT: usize = 21;
-pub const VAL_CELL_COUNT: usize = 21;
+pub const SAT_CELL_COUNT: usize = 17;
+pub const VAL_CELL_COUNT: usize = 17;
 
-/// The center cell index of each 21-cell crosshair bar — the wheel
+/// The center cell index of each 17-cell crosshair bar — the wheel
 /// center where ࿕ sits. Skipped during bar rendering so the ࿕ glyph
-/// shows through cleanly; still counted in sat/val quantization.
-pub const CROSSHAIR_CENTER_CELL: usize = 10;
+/// shows through cleanly; still counted in sat/val quantization. Its
+/// value doubles as the number of rendered cells on each arm, and is
+/// used as the fixed size of the per-glyph ink-offset arrays.
+pub const CROSSHAIR_CENTER_CELL: usize = 8;
 
 /// Hue ring font size multiplier over the picker's base font_size.
 ///
@@ -124,7 +126,7 @@ pub fn hue_ring_font_scale() -> f32 {
 /// Cached `&'static [&'static str]` derived from a Vec<String> in the
 /// spec. The spec is itself cached; leaking the per-glyph strings
 /// costs one allocation per glyph per process, which is trivial
-/// (~40 glyphs total) and avoids spreading `String` ownership
+/// (~32 glyphs total) and avoids spreading `String` ownership
 /// through the render hot path.
 fn leak_glyphs(v: &[String]) -> &'static [&'static str] {
     let slice: Vec<&'static str> = v
@@ -451,7 +453,7 @@ pub enum ColorPickerState {
         /// after open. Threaded into geometry so `compute_picker_geometry`
         /// can toggle `hex_visible` based on "cursor inside backdrop".
         last_cursor_pos: Option<(f32, f32)>,
-        /// Widest shaped advance across all 40 crosshair-arm glyphs at
+        /// Widest shaped advance across all 32 crosshair-arm glyphs at
         /// base `font_size`. Measured once at picker-open via
         /// cosmic-text in `open_color_picker`, cached here so every
         /// subsequent `compute_picker_geometry` call can forward it to
@@ -468,19 +470,20 @@ pub enum ColorPickerState {
         /// recover dimensionless ratios that scale with whatever
         /// font_size the canonical sizing formula picks.
         measurement_font_size: f32,
-        /// Per-arm ink-center-vs-em-box-center offsets (dimensionless
-        /// — pixels at `measurement_font_size` divided by
-        /// `measurement_font_size`), measured once at open via
-        /// `baumhard::font::fonts::measure_glyph_ink_bounds`. Used by
-        /// `compute_color_picker_layout` to re-anchor each arm's
-        /// cell position on the ink centre rather than the em-box
-        /// centre. Each arm uses a different script so the four
-        /// offsets differ — the primitive is the only honest way to
-        /// keep the crosshair visually symmetric across scripts.
-        arm_top_ink_offset: (f32, f32),
-        arm_bottom_ink_offset: (f32, f32),
-        arm_left_ink_offset: (f32, f32),
-        arm_right_ink_offset: (f32, f32),
+        /// Per-glyph ink-center-vs-em-box-center offsets
+        /// (dimensionless — pixels at `measurement_font_size`
+        /// divided by `measurement_font_size`), measured once at open
+        /// via `baumhard::font::fonts::measure_glyph_ink_bounds`.
+        /// Used by `compute_color_picker_layout` to re-anchor each
+        /// arm's cell position on the ink centre rather than the
+        /// em-box centre. One offset per arm cell (8 cells per arm,
+        /// excluding the centre slot) — every glyph in the picker has
+        /// distinct sidebearings and a distinct baseline-relative ink
+        /// extent, so a per-arm aggregate can't keep both axes flush.
+        arm_top_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+        arm_bottom_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+        arm_left_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+        arm_right_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
         /// Same, for the central preview glyph (Tibetan ࿕).
         preview_ink_offset: (f32, f32),
         /// Cached layout from the last rebuild. `None` between `Open`
@@ -611,7 +614,7 @@ pub struct ColorPickerOverlayGeometry {
     /// with the picker so it doesn't collide with the lower val bar
     /// cells.
     pub hex_visible: bool,
-    /// Widest shaped advance across the 40 crosshair-arm glyphs,
+    /// Widest shaped advance across the 32 crosshair-arm glyphs,
     /// measured by the renderer via cosmic-text at picker open. The
     /// layout fn divides by [`measurement_font_size`] to recover a
     /// dimensionless ratio it can scale with whatever font_size the
@@ -623,25 +626,35 @@ pub struct ColorPickerOverlayGeometry {
     /// `measurement_font_size` it gives the ring's tangential
     /// slot-spacing ratio that scales with font_size.
     pub max_ring_advance: f32,
-    /// Per-arm worst-case ink-center offset from the
-    /// advance/em-box center, measured via Baumhard's
-    /// `measure_glyph_ink_bounds` primitive at picker open. Each
-    /// arm's four glyphs use a different script (Devanagari top,
-    /// Egyptian hieroglyphs bottom, Tibetan left, Hebrew right), so
-    /// cosmic-text's `Align::Center` centers the em-box, not the
-    /// ink — yielding per-script drift off the crosshair center.
+    /// Per-glyph ink-center offset from the advance/em-box center,
+    /// measured via Baumhard's `measure_glyph_ink_bounds` primitive
+    /// at picker open. Each arm's ten glyphs use the same script but
+    /// have distinct sidebearings and distinct baseline-relative ink
+    /// extents — Devanagari vowels in the top arm differ glyph-to-
+    /// glyph, Egyptian hieroglyphs in the bottom arm differ
+    /// glyph-to-glyph, etc. cosmic-text's `Align::Center` centers
+    /// the em-box (not the ink) along x, and offers no vertical
+    /// centering at all — so without a per-glyph correction every
+    /// cell drifts a different amount off the crosshair line.
     /// `compute_color_picker_layout` subtracts the scaled offset
-    /// from each arm's cell position so the ink lands on the
-    /// intended visual radius.
+    /// from each cell position so the ink lands on the intended
+    /// visual radius.
     ///
-    /// Dimensionless ratios: multiply by the layout's chosen
-    /// cell font size to get pixels. Stored as `(dx, dy)` in the
+    /// Dimensionless ratios: multiply by the layout's chosen cell
+    /// font size to get pixels. Stored as `(dx, dy)` in the
     /// measurement font's pixel units divided by
-    /// `measurement_font_size`.
-    pub arm_top_ink_offset: (f32, f32),
-    pub arm_bottom_ink_offset: (f32, f32),
-    pub arm_left_ink_offset: (f32, f32),
-    pub arm_right_ink_offset: (f32, f32),
+    /// `measurement_font_size`. `dx` carries
+    /// [`baumhard::font::fonts::InkBounds::x_offset_from_advance_center`];
+    /// `dy` carries
+    /// [`baumhard::font::fonts::InkBounds::y_offset_from_box_center`]
+    /// at the picker's `1.5` line-height multiplier.
+    ///
+    /// One entry per arm cell (8 per arm, excluding the centre
+    /// slot which renders the preview glyph instead).
+    pub arm_top_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+    pub arm_bottom_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+    pub arm_left_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+    pub arm_right_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
     /// Same, for the central preview glyph (Tibetan ࿕ U+0FD5).
     /// Applied at the `preview_size` scale rather than the cell
     /// scale so a large ࿕ drifts proportionally more pixels than
@@ -699,13 +712,13 @@ pub struct ColorPickerLayout {
     pub ring_font_size: f32,
     /// 24 hue ring positions, ordered clockwise from 12-o'clock.
     pub hue_slot_positions: [(f32, f32); HUE_SLOT_COUNT],
-    /// 21 sat-bar cell centers, left → right. Cell 10 is the wheel
+    /// 17 sat-bar cell centers, left → right. Cell 8 is the wheel
     /// center — NOT rendered (center glyph shows through), but still
     /// used by hit-testing so a click at the exact center resolves
     /// to it.
     pub sat_cell_positions: [(f32, f32); SAT_CELL_COUNT],
-    /// 21 val-bar cell centers, top → bottom (top = brightest). Cell
-    /// 10 is the wheel center — same skip rule as sat.
+    /// 17 val-bar cell centers, top → bottom (top = brightest). Cell
+    /// 8 is the wheel center — same skip rule as sat.
     pub val_cell_positions: [(f32, f32); VAL_CELL_COUNT],
     /// Center preview glyph anchor (the ࿕). Top-left corner of the
     /// glyph box, computed so the glyph visually centers on the wheel
@@ -888,9 +901,9 @@ pub fn compute_color_picker_layout(
         );
     }
 
-    // ---- Crosshair sat/val bars (21 cells each, center cell is the
+    // ---- Crosshair sat/val bars (17 cells each, center cell is the
     // wheel center and rendered as ࿕ not as a bar cell) ----
-    // Bars span `20 * cell_advance` across the diameter of the inner
+    // Bars span `16 * cell_advance` across the diameter of the inner
     // cross region. If the constrained ring forced the inner extent
     // smaller than `CROSSHAIR_CENTER_CELL * cell_advance`, shrink the
     // actual step so cells still fit — keeps the small-window case
@@ -904,56 +917,42 @@ pub fn compute_color_picker_layout(
     let step = actual_cell_advance;
     let bar_span = step * (SAT_CELL_COUNT as f32 - 1.0);
 
-    // Per-arm ink offsets in layout pixels. The geometry carries
+    // Per-glyph ink offsets in layout pixels. The geometry carries
     // dimensionless ratios (ink offset divided by
     // `measurement_font_size`); scale by the current cell font size
     // so the correction tracks the actual glyph size the picker is
-    // rendering at. `compute_color_picker_layout` subtracts these
-    // from each arm's cell center so the ink — not the em-box —
-    // lands on the crosshair radius.
+    // rendering at. We subtract each glyph's own (dx, dy) from its
+    // cell centre so the ink — not the em-box — lands on the
+    // crosshair radius. A single per-arm value can't pull this off:
+    // every glyph in each arm has its own sidebearings (drives x)
+    // and its own baseline-relative ink extent (drives y).
     let cell_fs = font_size * g.cell_font_scale;
-    let arm_left_ink = (
-        geometry.arm_left_ink_offset.0 * cell_fs,
-        geometry.arm_left_ink_offset.1 * cell_fs,
-    );
-    let arm_right_ink = (
-        geometry.arm_right_ink_offset.0 * cell_fs,
-        geometry.arm_right_ink_offset.1 * cell_fs,
-    );
-    let arm_top_ink = (
-        geometry.arm_top_ink_offset.0 * cell_fs,
-        geometry.arm_top_ink_offset.1 * cell_fs,
-    );
-    let arm_bottom_ink = (
-        geometry.arm_bottom_ink_offset.0 * cell_fs,
-        geometry.arm_bottom_ink_offset.1 * cell_fs,
-    );
 
     let mut sat_cell_positions = [(0.0_f32, 0.0_f32); SAT_CELL_COUNT];
     let mut val_cell_positions = [(0.0_f32, 0.0_f32); VAL_CELL_COUNT];
     for i in 0..SAT_CELL_COUNT {
         let base_x = center.0 - bar_span * 0.5 + i as f32 * step;
         let base_y = center.1;
-        let ink = if i < CROSSHAIR_CENTER_CELL {
-            arm_left_ink
+        let ink_ratio = if i < CROSSHAIR_CENTER_CELL {
+            geometry.arm_left_ink_offsets[i]
         } else if i > CROSSHAIR_CENTER_CELL {
-            arm_right_ink
+            geometry.arm_right_ink_offsets[i - CROSSHAIR_CENTER_CELL - 1]
         } else {
             (0.0, 0.0)
         };
-        sat_cell_positions[i] = (base_x - ink.0, base_y - ink.1);
+        sat_cell_positions[i] = (base_x - ink_ratio.0 * cell_fs, base_y - ink_ratio.1 * cell_fs);
     }
     for i in 0..VAL_CELL_COUNT {
         let base_x = center.0;
         let base_y = center.1 - bar_span * 0.5 + i as f32 * step;
-        let ink = if i < CROSSHAIR_CENTER_CELL {
-            arm_top_ink
+        let ink_ratio = if i < CROSSHAIR_CENTER_CELL {
+            geometry.arm_top_ink_offsets[i]
         } else if i > CROSSHAIR_CENTER_CELL {
-            arm_bottom_ink
+            geometry.arm_bottom_ink_offsets[i - CROSSHAIR_CENTER_CELL - 1]
         } else {
             (0.0, 0.0)
         };
-        val_cell_positions[i] = (base_x - ink.0, base_y - ink.1);
+        val_cell_positions[i] = (base_x - ink_ratio.0 * cell_fs, base_y - ink_ratio.1 * cell_fs);
     }
 
     // Center preview ࿕ at the bar intersection. The glyph is the
@@ -1180,10 +1179,10 @@ mod tests {
             size_scale: 1.0,
             center_override: None,
             hovered_hit: None,
-            arm_top_ink_offset: (0.0, 0.0),
-            arm_bottom_ink_offset: (0.0, 0.0),
-            arm_left_ink_offset: (0.0, 0.0),
-            arm_right_ink_offset: (0.0, 0.0),
+            arm_top_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_bottom_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_left_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_right_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
             preview_ink_offset: (0.0, 0.0),
         }
     }
@@ -1194,47 +1193,44 @@ mod tests {
         g
     }
 
-    /// The arm and preview ink offsets carried on geometry are
-    /// subtracted from the corresponding cell / preview-anchor
-    /// positions at layout time. Comparing a zero-offset baseline
-    /// against one with non-zero per-arm ink offsets verifies each
-    /// axis is shifted by the expected scaled amount without
-    /// cross-contamination: top-arm ink only affects val cells
-    /// above centre, bottom-arm only below, left only sat below
-    /// centre, right only sat above, preview only the preview
-    /// anchor.
+    /// The per-glyph arm and preview ink offsets carried on geometry
+    /// are subtracted from the corresponding cell / preview-anchor
+    /// positions at layout time. The previous revision tested a
+    /// uniform per-arm offset; we now test that each cell consumes
+    /// its own array entry — varying the offset per index and
+    /// checking each cell shifted by exactly its own (dx, dy) scaled
+    /// to layout pixels.
     #[test]
     fn layout_subtracts_ink_offsets_for_arms_and_preview() {
         let baseline = compute_color_picker_layout(&sample_geometry(), 1280.0, 720.0);
         let mut g = sample_geometry();
-        // Unit offsets per arm so the expected delta is
-        // `cell_fs * 1.0` (for arms) and `preview_size * 1.0`
-        // (for preview).
-        g.arm_top_ink_offset = (0.1, -0.2);
-        g.arm_bottom_ink_offset = (-0.1, 0.2);
-        g.arm_left_ink_offset = (0.15, 0.0);
-        g.arm_right_ink_offset = (-0.15, 0.0);
+        // Distinct per-cell offsets so a "single offset for the whole
+        // arm" regression would visibly fail. Index `i` (arm-local)
+        // carries (0.01*(i+1), -0.02*(i+1)) on the top arm, etc.
+        for i in 0..CROSSHAIR_CENTER_CELL {
+            let f = (i + 1) as f32;
+            g.arm_top_ink_offsets[i] = (0.01 * f, -0.02 * f);
+            g.arm_bottom_ink_offsets[i] = (-0.01 * f, 0.02 * f);
+            g.arm_left_ink_offsets[i] = (0.015 * f, 0.005 * f);
+            g.arm_right_ink_offsets[i] = (-0.015 * f, -0.005 * f);
+        }
         g.preview_ink_offset = (0.25, -0.3);
         let shifted = compute_color_picker_layout(&g, 1280.0, 720.0);
 
         let cell_fs = baseline.cell_font_size;
         let preview_size = baseline.preview_size;
 
-        // Val bar: top arm cells (index < center) shift by
-        // (-0.1*cell_fs, +0.2*cell_fs); bottom arm by
-        // (+0.1*cell_fs, -0.2*cell_fs). Center cell at
-        // CROSSHAIR_CENTER_CELL is untouched.
+        // Val bar: each arm cell shifts by its own (dx, dy)*cell_fs.
+        // Centre cell at CROSSHAIR_CENTER_CELL is untouched.
         for i in 0..VAL_CELL_COUNT {
-            if i == CROSSHAIR_CENTER_CELL {
-                let dx = shifted.val_cell_positions[i].0 - baseline.val_cell_positions[i].0;
-                let dy = shifted.val_cell_positions[i].1 - baseline.val_cell_positions[i].1;
-                assert!((dx).abs() < 0.001 && (dy).abs() < 0.001);
-                continue;
-            }
-            let (expect_dx, expect_dy) = if i < CROSSHAIR_CENTER_CELL {
-                (-0.1 * cell_fs, 0.2 * cell_fs)
+            let (expect_dx, expect_dy) = if i == CROSSHAIR_CENTER_CELL {
+                (0.0, 0.0)
+            } else if i < CROSSHAIR_CENTER_CELL {
+                let (rx, ry) = g.arm_top_ink_offsets[i];
+                (-rx * cell_fs, -ry * cell_fs)
             } else {
-                (0.1 * cell_fs, -0.2 * cell_fs)
+                let (rx, ry) = g.arm_bottom_ink_offsets[i - CROSSHAIR_CENTER_CELL - 1];
+                (-rx * cell_fs, -ry * cell_fs)
             };
             let dx = shifted.val_cell_positions[i].0 - baseline.val_cell_positions[i].0;
             let dy = shifted.val_cell_positions[i].1 - baseline.val_cell_positions[i].1;
@@ -1242,21 +1238,21 @@ mod tests {
             assert!((dy - expect_dy).abs() < 0.001, "val[{i}].dy {dy} vs {expect_dy}");
         }
 
-        // Sat bar: left arm cells (index < center) shift by
-        // -0.15*cell_fs in x; right arm by +0.15*cell_fs.
+        // Sat bar: same per-cell pattern using the left/right arrays.
         for i in 0..SAT_CELL_COUNT {
-            if i == CROSSHAIR_CENTER_CELL {
-                continue;
-            }
-            let expect_dx = if i < CROSSHAIR_CENTER_CELL {
-                -0.15 * cell_fs
+            let (expect_dx, expect_dy) = if i == CROSSHAIR_CENTER_CELL {
+                (0.0, 0.0)
+            } else if i < CROSSHAIR_CENTER_CELL {
+                let (rx, ry) = g.arm_left_ink_offsets[i];
+                (-rx * cell_fs, -ry * cell_fs)
             } else {
-                0.15 * cell_fs
+                let (rx, ry) = g.arm_right_ink_offsets[i - CROSSHAIR_CENTER_CELL - 1];
+                (-rx * cell_fs, -ry * cell_fs)
             };
             let dx = shifted.sat_cell_positions[i].0 - baseline.sat_cell_positions[i].0;
             let dy = shifted.sat_cell_positions[i].1 - baseline.sat_cell_positions[i].1;
             assert!((dx - expect_dx).abs() < 0.001, "sat[{i}].dx {dx} vs {expect_dx}");
-            assert!((dy).abs() < 0.001, "sat[{i}] unexpected y drift {dy}");
+            assert!((dy - expect_dy).abs() < 0.001, "sat[{i}].dy {dy} vs {expect_dy}");
         }
 
         // Preview glyph anchor shifts by (-0.25*preview_size, +0.3*preview_size).
@@ -1637,14 +1633,14 @@ mod tests {
         );
     }
 
-    /// Each crosshair arm must render exactly 10 cells. The bars
-    /// have SAT_CELL_COUNT / VAL_CELL_COUNT = 21 cells, cell
-    /// CROSSHAIR_CENTER_CELL = 10 is the shared wheel-center slot
-    /// (࿕ overlay), and each arm covers 10 non-center cells —
-    /// totaling 40 rendered crosshair glyphs. Also asserts that the
+    /// Each crosshair arm must render exactly 8 cells. The bars
+    /// have SAT_CELL_COUNT / VAL_CELL_COUNT = 17 cells, cell
+    /// CROSSHAIR_CENTER_CELL = 8 is the shared wheel-center slot
+    /// (࿕ overlay), and each arm covers 8 non-center cells —
+    /// totaling 32 rendered crosshair glyphs. Also asserts that the
     /// center cells of both bars sit exactly on the wheel center.
     #[test]
-    fn crosshair_arms_render_exactly_10_cells_each() {
+    fn crosshair_arms_render_exactly_8_cells_each() {
         let layout = compute_color_picker_layout(&sample_geometry(), 1280.0, 720.0);
         // Center cell of the sat bar = wheel center.
         let (scx, scy) = layout.sat_cell_positions[CROSSHAIR_CENTER_CELL];
@@ -1654,23 +1650,101 @@ mod tests {
         let (vcx, vcy) = layout.val_cell_positions[CROSSHAIR_CENTER_CELL];
         assert!((vcx - layout.center.0).abs() < 0.1);
         assert!((vcy - layout.center.1).abs() < 0.1);
-        // Left arm = 10 cells (0..CROSSHAIR_CENTER_CELL).
-        assert_eq!(CROSSHAIR_CENTER_CELL, 10);
-        assert_eq!(arm_left_glyphs().len(), 10);
-        // Right arm = 10 cells (CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT).
-        assert_eq!(SAT_CELL_COUNT - CROSSHAIR_CENTER_CELL - 1, 10);
-        assert_eq!(arm_right_glyphs().len(), 10);
-        // Top arm = 10 cells, bottom arm = 10 cells.
-        assert_eq!(arm_top_glyphs().len(), 10);
-        assert_eq!(arm_bottom_glyphs().len(), 10);
-        // Four arms × 10 glyphs = 40 total.
+        // Left arm = 8 cells (0..CROSSHAIR_CENTER_CELL).
+        assert_eq!(CROSSHAIR_CENTER_CELL, 8);
+        assert_eq!(arm_left_glyphs().len(), 8);
+        // Right arm = 8 cells (CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT).
+        assert_eq!(SAT_CELL_COUNT - CROSSHAIR_CENTER_CELL - 1, 8);
+        assert_eq!(arm_right_glyphs().len(), 8);
+        // Top arm = 8 cells, bottom arm = 8 cells.
+        assert_eq!(arm_top_glyphs().len(), 8);
+        assert_eq!(arm_bottom_glyphs().len(), 8);
+        // Four arms × 8 glyphs = 32 total.
         assert_eq!(
             arm_top_glyphs().len()
                 + arm_bottom_glyphs().len()
                 + arm_left_glyphs().len()
                 + arm_right_glyphs().len(),
-            40,
+            32,
         );
+    }
+
+    /// Every arm cell, after ink correction, must sit on its target
+    /// radial point — sat cells on `center.y`, val cells on
+    /// `center.x` — within 0.1 px. This is the per-cell version of
+    /// the centre-only assertion in
+    /// [`crosshair_arms_render_exactly_10_cells_each`]: a regression
+    /// against the previous "single per-arm offset" model would
+    /// fail this test because the worst-case heuristic mis-corrected
+    /// non-worst glyphs by their delta. We re-add each cell's stored
+    /// ink offset (`offset_ratio * cell_fs`) and check the result
+    /// hits the unrotated radial point.
+    #[test]
+    fn crosshair_arms_per_cell_ink_correction_aligns_to_radial_target() {
+        // Use a non-trivial per-cell offset pattern so any "lost"
+        // index would visibly fail.
+        let mut g = sample_geometry();
+        for i in 0..CROSSHAIR_CENTER_CELL {
+            let f = (i + 1) as f32;
+            g.arm_top_ink_offsets[i] = (0.02 * f, -0.03 * f);
+            g.arm_bottom_ink_offsets[i] = (-0.02 * f, 0.03 * f);
+            g.arm_left_ink_offsets[i] = (0.025 * f, 0.01 * f);
+            g.arm_right_ink_offsets[i] = (-0.025 * f, -0.01 * f);
+        }
+        let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
+        let cell_fs = layout.cell_font_size;
+        let step = layout.cell_advance;
+        let cx = layout.center.0;
+        let cy = layout.center.1;
+
+        // Sat cells: each (after re-adding its ink offset) must land
+        // on (cx + (i - CENTER)*step, cy).
+        for i in 0..SAT_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
+            let (rx, ry) = if i < CROSSHAIR_CENTER_CELL {
+                g.arm_left_ink_offsets[i]
+            } else {
+                g.arm_right_ink_offsets[i - CROSSHAIR_CENTER_CELL - 1]
+            };
+            let (px, py) = layout.sat_cell_positions[i];
+            let restored_x = px + rx * cell_fs;
+            let restored_y = py + ry * cell_fs;
+            let target_x = cx + (i as f32 - CROSSHAIR_CENTER_CELL as f32) * step;
+            assert!(
+                (restored_x - target_x).abs() < 0.1,
+                "sat[{i}] restored x {restored_x} != target {target_x}",
+            );
+            assert!(
+                (restored_y - cy).abs() < 0.1,
+                "sat[{i}] restored y {restored_y} != center y {cy}",
+            );
+        }
+
+        // Val cells: each must land on (cx, cy + (i - CENTER)*step).
+        for i in 0..VAL_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
+            let (rx, ry) = if i < CROSSHAIR_CENTER_CELL {
+                g.arm_top_ink_offsets[i]
+            } else {
+                g.arm_bottom_ink_offsets[i - CROSSHAIR_CENTER_CELL - 1]
+            };
+            let (px, py) = layout.val_cell_positions[i];
+            let restored_x = px + rx * cell_fs;
+            let restored_y = py + ry * cell_fs;
+            let target_y = cy + (i as f32 - CROSSHAIR_CENTER_CELL as f32) * step;
+            assert!(
+                (restored_x - cx).abs() < 0.1,
+                "val[{i}] restored x {restored_x} != center x {cx}",
+            );
+            assert!(
+                (restored_y - target_y).abs() < 0.1,
+                "val[{i}] restored y {restored_y} != target {target_y}",
+            );
+        }
     }
 
     /// The four crosshair arms must emit the same per-cell advance so
@@ -1897,7 +1971,7 @@ mod tests {
     /// which reads `widgets/color_picker.json`'s `mutator_spec`.
     ///
     /// Insertion order: title → hue ring (24 slots) → hint →
-    /// sat bar (21 cells, channels also stride through the
+    /// sat bar (17 cells, channels also stride through the
     /// skipped center) → val bar (same) → preview → hex.
     #[test]
     fn picker_channels_are_strictly_ascending() {

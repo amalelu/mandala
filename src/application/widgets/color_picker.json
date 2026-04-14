@@ -6,15 +6,15 @@
     "target_frac": 0.38,
     "font_min": 7.0,
     "font_max": 28.0,
-    "hue_ring_font_scale": 2.0,
-    "cell_font_scale": 1.5,
+    "hue_ring_font_scale": 2.3,
+    "cell_font_scale": 1.8,
     "ring_box_scale": 1.8,
     "cell_box_scale": 1.6,
     "preview_size_scale": 3.0,
     "bar_to_ring_padding_scale": 1.1,
     "bar_to_preview_padding_scale": 0.15,
     "hover_scale": 1.3,
-    "outline_px": 2.0,
+    "outline_px": 2.5,
     "transparent_backdrop": true,
     "resize_scale_min": 0.4,
     "resize_scale_max": 2.0
@@ -27,19 +27,19 @@
   ],
 
   "arm_top_glyphs": [
-    "अ", "आ", "इ", "ई", "उ", "ऊ", "ऋ", "ए", "ऐ", "ओ"
+    "अ", "आ", "इ", "ई", "उ", "ऊ", "ऋ", "ए"
   ],
 
   "arm_bottom_glyphs": [
-    "𓂀", "𓋹", "𓊽", "𓂍", "𓊊", "𓋀", "𓆀", "𓈌", "𓄿", "𓂙"
+    "𓂀", "𓋹", "𓊽", "𓂍", "𓊊", "𓋀", "𓆀", "𓈌"
   ],
 
   "arm_left_glyphs": [
-    "ཉ", "ཐ", "ད", "ན", "ཕ", "བ", "ཙ", "ཞ", "ར", "ས"
+    "ཉ", "ཐ", "ད", "ན", "ཕ", "བ", "ཙ", "ཞ"
   ],
 
   "arm_right_glyphs": [
-    "ט", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ"
+    "ט", "י", "כ", "ל", "מ", "נ", "ס", "ע"
   ],
 
   "center_preview_glyph": "࿕",
@@ -59,8 +59,8 @@
         { "Repeat": { "section": "title",    "channel_base": 1,   "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "hue_ring", "channel_base": 100, "count": { "Literal": 24 }, "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "hint",     "channel_base": 200, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
-        { "Repeat": { "section": "sat_bar",  "channel_base": 300, "count": { "Literal": 21 }, "skip_indices": [10], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
-        { "Repeat": { "section": "val_bar",  "channel_base": 400, "count": { "Literal": 21 }, "skip_indices": [10], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
+        { "Repeat": { "section": "sat_bar",  "channel_base": 300, "count": { "Literal": 17 }, "skip_indices": [8], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
+        { "Repeat": { "section": "val_bar",  "channel_base": 400, "count": { "Literal": 17 }, "skip_indices": [8], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "preview",  "channel_base": 500, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "hex",      "channel_base": 600, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}}
       ]

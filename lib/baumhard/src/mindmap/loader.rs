@@ -13,6 +13,21 @@ pub fn load_from_str(json: &str) -> Result<MindMap, String> {
         .map_err(|e| format!("Failed to parse mindmap JSON: {}", e))
 }
 
+/// Serialize a `MindMap` to pretty-printed JSON and write it to disk.
+/// Mirrors `load_from_file` — the same `Result<_, String>` error
+/// convention, native-only synchronous I/O via `std::fs`. Pretty
+/// printing keeps the on-disk format diff-friendly so authors can
+/// inspect saved maps with normal text tools. Streams through a
+/// `BufWriter` so large maps don't have to materialize the entire
+/// JSON in memory before hitting disk.
+pub fn save_to_file(path: &Path, map: &MindMap) -> Result<(), String> {
+    let file = fs::File::create(path)
+        .map_err(|e| format!("Failed to create {}: {}", path.display(), e))?;
+    let writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, map)
+        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +268,46 @@ mod tests {
         let back: MindMap = serde_json::from_str(&json).unwrap();
         assert_eq!(back.canvas.theme_variants.len(), 3);
         assert_eq!(back.custom_mutations.len(), 3);
+    }
+
+    #[test]
+    fn test_save_to_file_round_trip() {
+        // A `save_to_file` followed by `load_from_file` must reproduce
+        // the same MindMap, locking the on-disk format as the canonical
+        // serialization.
+        let path = test_map_path();
+        let original = load_from_file(&path).unwrap();
+
+        let tmp = std::env::temp_dir().join("mandala_save_round_trip.mindmap.json");
+        save_to_file(&tmp, &original).expect("save failed");
+        let reloaded = load_from_file(&tmp).expect("reload failed");
+
+        assert_eq!(reloaded.version, original.version);
+        assert_eq!(reloaded.name, original.name);
+        assert_eq!(reloaded.nodes.len(), original.nodes.len());
+        assert_eq!(reloaded.edges.len(), original.edges.len());
+        assert_eq!(reloaded.canvas.background_color, original.canvas.background_color);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_save_blank_map_round_trip() {
+        // A freshly-created blank map must serialize to JSON that
+        // re-parses cleanly — the `new` console command relies on
+        // this.
+        let blank = MindMap::new_blank("untitled");
+        let tmp = std::env::temp_dir().join("mandala_blank_round_trip.mindmap.json");
+        save_to_file(&tmp, &blank).expect("save failed");
+        let reloaded = load_from_file(&tmp).expect("reload failed");
+
+        assert_eq!(reloaded.name, "untitled");
+        assert_eq!(reloaded.version, "1.0");
+        assert!(reloaded.nodes.is_empty());
+        assert!(reloaded.edges.is_empty());
+        assert_eq!(reloaded.canvas.background_color, "#000000");
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

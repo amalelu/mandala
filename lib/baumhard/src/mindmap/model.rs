@@ -407,6 +407,29 @@ pub const PORTAL_GLYPH_PRESETS: &[&str] = &[
 ];
 
 impl MindMap {
+    /// Construct an empty `MindMap` with the given name. The canvas
+    /// uses the same default background as fixture maps (`#000000`)
+    /// and no theme variants. Nodes and edges start empty — ready to
+    /// be populated by the `new` console command (or by direct user
+    /// editing once a save target is bound).
+    pub fn new_blank(name: impl Into<String>) -> Self {
+        MindMap {
+            version: "1.0".to_string(),
+            name: name.into(),
+            canvas: Canvas {
+                background_color: "#000000".to_string(),
+                default_border: None,
+                default_connection: None,
+                theme_variables: HashMap::new(),
+                theme_variants: HashMap::new(),
+            },
+            nodes: HashMap::new(),
+            edges: Vec::new(),
+            custom_mutations: Vec::new(),
+            portals: Vec::new(),
+        }
+    }
+
     /// Returns root nodes (nodes with no parent), sorted by index.
     pub fn root_nodes(&self) -> Vec<&MindNode> {
         let mut roots: Vec<&MindNode> = self.nodes.values()

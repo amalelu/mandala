@@ -160,10 +160,10 @@ mod tests {
     fn spec_loads() {
         let spec = load_spec();
         assert_eq!(spec.hue_ring_glyphs.len(), 24);
-        assert_eq!(spec.arm_top_glyphs.len(), 10);
-        assert_eq!(spec.arm_bottom_glyphs.len(), 10);
-        assert_eq!(spec.arm_left_glyphs.len(), 10);
-        assert_eq!(spec.arm_right_glyphs.len(), 10);
+        assert_eq!(spec.arm_top_glyphs.len(), 8);
+        assert_eq!(spec.arm_bottom_glyphs.len(), 8);
+        assert_eq!(spec.arm_left_glyphs.len(), 8);
+        assert_eq!(spec.arm_right_glyphs.len(), 8);
         assert!(!spec.center_preview_glyph.is_empty());
         assert!(spec.geometry.target_frac > 0.0 && spec.geometry.target_frac < 1.0);
         assert!(spec.geometry.font_min > 0.0);
@@ -193,8 +193,8 @@ mod tests {
             ("title", 1, 1, &[]),
             ("hue_ring", 100, 24, &[]),
             ("hint", 200, 1, &[]),
-            ("sat_bar", 300, 21, &[10]),
-            ("val_bar", 400, 21, &[10]),
+            ("sat_bar", 300, 17, &[8]),
+            ("val_bar", 400, 17, &[8]),
             ("preview", 500, 1, &[]),
             ("hex", 600, 1, &[]),
         ];
@@ -222,18 +222,18 @@ mod tests {
         }
     }
 
-    /// Total live picker cells = 1 title + 24 hue + 1 hint + 20 sat
-    /// + 20 val + 1 preview + 1 hex = 68. Pins the element-count
+    /// Total live picker cells = 1 title + 24 hue + 1 hint + 16 sat
+    /// + 16 val + 1 preview + 1 hex = 60. Pins the element-count
     /// contract the mutator path relies on.
     #[test]
-    fn spec_mutator_spec_total_live_cells_is_68() {
+    fn spec_mutator_spec_total_live_cells_is_60() {
         use crate::application::mutator_builder::{iter_section_channels, SectionContext};
         struct NoCtx;
         impl SectionContext for NoCtx {}
         let spec = load_spec();
         let mut out = Vec::new();
         iter_section_channels(&spec.mutator_spec, &NoCtx, &mut out);
-        assert_eq!(out.len(), 68);
+        assert_eq!(out.len(), 60);
     }
 
     /// The bottom-arm font must be set — without it cosmic-text

@@ -102,3 +102,73 @@ pub fn do_measure_glyph_ink_bounds_x_offset_from_advance_center() {
     assert!(svasti.x_offset_from_advance_center().is_finite());
 }
 
+#[test]
+fn test_measure_glyph_ink_bounds_reports_baseline_line_y() {
+    do_measure_glyph_ink_bounds_reports_baseline_line_y();
+}
+
+/// `line_y` (baseline-from-buffer-top) is non-zero for any inked
+/// glyph — cosmic-text places the baseline below the buffer's top
+/// edge by approximately the font's ascent.
+pub fn do_measure_glyph_ink_bounds_reports_baseline_line_y() {
+    fonts::init();
+    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut cache = SwashCache::new();
+    let bounds = measure_glyph_ink_bounds(&mut fs, &mut cache, None, "M", 24.0);
+    assert!(
+        bounds.line_y > 0.0 && bounds.line_y.is_finite(),
+        "baseline should sit below buffer top, got line_y={}",
+        bounds.line_y
+    );
+}
+
+#[test]
+fn test_measure_glyph_ink_bounds_y_offset_from_box_center() {
+    do_measure_glyph_ink_bounds_y_offset_from_box_center();
+}
+
+/// `y_offset_from_box_center` is finite for inked glyphs and varies
+/// with `line_height_mul` linearly (every doubling of the bounds
+/// height shifts the box center down by half the increase, so the
+/// offset shifts up by the same amount). Compares Devanagari (ink
+/// biased toward the shirorekha-top) against Egyptian hieroglyphs
+/// (ink typically biased low) at the picker's `1.5` line-height
+/// multiplier — both must be finite and the two scripts must
+/// produce different offsets, which is the whole point of moving
+/// from a single per-arm Y of zero to a per-glyph Y correction.
+pub fn do_measure_glyph_ink_bounds_y_offset_from_box_center() {
+    fonts::init();
+    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut cache = SwashCache::new();
+    let font_size = 24.0;
+    let deva = measure_glyph_ink_bounds(&mut fs, &mut cache, None, "अ", font_size);
+    let hiero = measure_glyph_ink_bounds(
+        &mut fs,
+        &mut cache,
+        Some(AppFont::NotoSansEgyptianHieroglyphsRegular),
+        "\u{13000}",
+        font_size,
+    );
+    let deva_y = deva.y_offset_from_box_center(font_size, 1.5);
+    let hiero_y = hiero.y_offset_from_box_center(font_size, 1.5);
+    assert!(deva_y.is_finite() && hiero_y.is_finite());
+    // The two scripts must drift differently — that's the bug a
+    // single per-arm Y of zero couldn't fix.
+    assert!(
+        (deva_y - hiero_y).abs() > 0.5,
+        "scripts should produce different Y offsets, got deva={} hiero={}",
+        deva_y,
+        hiero_y
+    );
+    // Doubling line_height_mul halves the box-center distance from
+    // the buffer top, so the offset shrinks by exactly that delta.
+    let deva_y_doubled = deva.y_offset_from_box_center(font_size, 3.0);
+    let expected_delta = -(font_size * (3.0 - 1.5) * 0.5);
+    assert!(
+        (deva_y_doubled - deva_y - expected_delta).abs() < 0.001,
+        "doubling line_height_mul should shift offset by {}; got {}",
+        expected_delta,
+        deva_y_doubled - deva_y
+    );
+}
+

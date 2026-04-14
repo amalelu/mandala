@@ -168,6 +168,12 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("measure_glyph_ink_bounds_x_offset_from_advance_center", |b| {
         b.iter(|| do_measure_glyph_ink_bounds_x_offset_from_advance_center())
     });
+    c.bench_function("measure_glyph_ink_bounds_reports_baseline_line_y", |b| {
+        b.iter(|| do_measure_glyph_ink_bounds_reports_baseline_line_y())
+    });
+    c.bench_function("measure_glyph_ink_bounds_y_offset_from_box_center", |b| {
+        b.iter(|| do_measure_glyph_ink_bounds_y_offset_from_box_center())
+    });
     // scene + hit-test //
     c.bench_function("descendant_at_hits_single_area", |b| b.iter(|| do_descendant_at_hits_single_area()));
     c.bench_function("descendant_at_prefers_smallest", |b| b.iter(|| do_descendant_at_prefers_smallest()));

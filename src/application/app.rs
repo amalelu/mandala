@@ -1649,6 +1649,16 @@ impl Application {
                                 }
                             }
                         }
+                        Some(Action::SaveDocument) => {
+                            // Quick-save to the document's bound file
+                            // path. If no path is bound (e.g. after `new`
+                            // without a path), this is a no-op aside from
+                            // a status message — the user has to invoke
+                            // `save <path>` from the console first.
+                            if let Some(doc) = document.as_mut() {
+                                save_document_to_bound_path(doc, &mut console_state);
+                            }
+                        }
                         None => {
                             // No built-in action matched — try the
                             // user-defined `custom_mutation_bindings`.
@@ -2335,6 +2345,12 @@ impl Application {
                             // de-gating AppMode, hovered_node, and the
                             // reparent/connect click handlers).
                             log::debug!("WASM: mode-based action {:?} deferred", a);
+                        }
+                        Some(a) => {
+                            // Actions whose backing surface is native-only
+                            // (console, filesystem-backed save). On WASM
+                            // they're acknowledged in the log and ignored.
+                            log::debug!("WASM: action {:?} not supported", a);
                         }
                         None => {}
                     }
@@ -3147,6 +3163,7 @@ fn execute_console_line(
     let color_picker_standalone_req = effects.open_color_picker_standalone;
     let color_picker_close_req = effects.close_color_picker;
     let close_after = effects.close_console;
+    let replace_doc = effects.replace_document.take();
 
     // Emit the command's result lines into the scrollback.
     match result {
@@ -3161,6 +3178,18 @@ fn execute_console_line(
                 push_scrollback_output(console_state, l);
             }
         }
+    }
+
+    // Wholesale document swap from `open` / `new`. Drop the cached
+    // tree so `rebuild_all` rebuilds it fresh against the new map,
+    // and clear any open modal-editor state so stale references
+    // into the old document can't outlive the swap.
+    if let Some(new_doc) = replace_doc {
+        *doc = new_doc;
+        *mindmap_tree = None;
+        *label_edit_state = LabelEditState::Closed;
+        *color_picker_state =
+            crate::application::color_picker::ColorPickerState::Closed;
     }
 
     // Any successful command may have mutated the doc; rebuild.
@@ -3206,6 +3235,42 @@ fn push_scrollback_output(state: &mut ConsoleState, text: String) {
 fn push_scrollback_error(state: &mut ConsoleState, text: String) {
     if let ConsoleState::Open { scrollback, .. } = state {
         scrollback.push(ConsoleLine::Error(text));
+    }
+}
+
+/// Persist the document to its bound `file_path`, clear the dirty
+/// flag, and surface the outcome — to the console scrollback when
+/// open, and always to the log. Used by the `Ctrl+S` keybind. When
+/// no path is bound, surfaces a hint pointing the user at `save
+/// <path>` from the console; the dirty flag is left untouched.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_document_to_bound_path(
+    doc: &mut MindMapDocument,
+    console_state: &mut ConsoleState,
+) {
+    let path = match doc.file_path.clone() {
+        Some(p) => p,
+        None => {
+            let msg = "no file path bound; use `save <path>` to choose one".to_string();
+            log::warn!("{}", msg);
+            push_scrollback_error(console_state, msg);
+            return;
+        }
+    };
+    match baumhard::mindmap::loader::save_to_file(
+        std::path::Path::new(&path),
+        &doc.mindmap,
+    ) {
+        Ok(()) => {
+            doc.dirty = false;
+            let msg = format!("saved to {}", path);
+            log::info!("{}", msg);
+            push_scrollback_output(console_state, msg);
+        }
+        Err(e) => {
+            log::error!("{}", e);
+            push_scrollback_error(console_state, e);
+        }
     }
 }
 
@@ -4348,10 +4413,10 @@ fn open_picker_inner(
     let (
         max_cell_advance,
         max_ring_advance,
-        arm_top_ink_offset,
-        arm_bottom_ink_offset,
-        arm_left_ink_offset,
-        arm_right_ink_offset,
+        arm_top_ink_offsets,
+        arm_bottom_ink_offsets,
+        arm_left_ink_offsets,
+        arm_right_ink_offsets,
         preview_ink_offset,
     ) = {
         let mut font_system = baumhard::font::fonts::FONT_SYSTEM
@@ -4373,38 +4438,47 @@ fn open_picker_inner(
             &ring_glyphs,
             ring_font_size,
         );
-        // Per-arm worst-case ink-center-vs-advance-center offset.
-        // Only the horizontal axis is corrected here: the issue
-        // names `Align::Center` centering the em-box (the per-script
-        // advance rectangle) as the source of drift, which is a
-        // purely horizontal problem. The vertical-axis drift is a
-        // separate concern (baseline placement inside the
-        // `fs * 1.5`-tall box depends on the font's ascent /
-        // descent) that would need the primitive to return
-        // `line_y` too; that's deferred. `y` stays zero so the
-        // layout's y-correction step is a no-op.
+        // Per-glyph ink-center-vs-em-box-center offset, both axes.
+        // The picker renders each cell with `Align::Center` in a
+        // bounds box of width `cell_box_w` and height
+        // `cell_font_size * 1.5`. For the ink to land on the
+        // crosshair radius (not the em-box centre) we measure each
+        // glyph's actual ink rectangle and store a dimensionless
+        // (dx, dy) — `compute_color_picker_layout` subtracts those
+        // per-cell. A single per-arm correction can't pull this
+        // off: both sidebearings (drives x) and baseline-relative
+        // ink extent (drives y) vary glyph-to-glyph within an arm.
         let mut swash_cache = cosmic_text::SwashCache::new();
         use baumhard::font::fonts::measure_glyph_ink_bounds;
-        let mut arm_ink_offset = |glyphs: &[&str], font: Option<baumhard::font::fonts::AppFont>| -> (f32, f32) {
-            // Accumulate the ink-center-x offset per glyph and keep
-            // the worst (largest |offset|) so a single correction
-            // applied uniformly to every cell on the arm targets
-            // the worst-drifting glyph.
-            let mut best_dx: f32 = 0.0;
-            for g in glyphs {
-                let b = measure_glyph_ink_bounds(&mut font_system, &mut swash_cache, font, g, measurement_font_size);
+        use crate::application::color_picker::CROSSHAIR_CENTER_CELL;
+        let mut arm_ink_offsets = |glyphs: &[&str], font: Option<baumhard::font::fonts::AppFont>|
+            -> [(f32, f32); CROSSHAIR_CENTER_CELL] {
+            // Spec-load tests assert each arm has exactly
+            // `CROSSHAIR_CENTER_CELL` glyphs; index directly so a
+            // runtime spec mismatch panics here instead of silently
+            // shipping zero offsets for the missing entries.
+            let mut out = [(0.0_f32, 0.0_f32); CROSSHAIR_CENTER_CELL];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let b = measure_glyph_ink_bounds(
+                    &mut font_system,
+                    &mut swash_cache,
+                    font,
+                    glyphs[i],
+                    measurement_font_size,
+                );
                 let dx = b.x_offset_from_advance_center() / measurement_font_size;
-                if dx.abs() > best_dx.abs() {
-                    best_dx = dx;
-                }
+                let dy = b.y_offset_from_box_center(measurement_font_size, 1.5)
+                    / measurement_font_size;
+                *slot = (dx, dy);
             }
-            (best_dx, 0.0)
+            out
         };
-        let arm_top = arm_ink_offset(arm_top_glyphs(), None);
-        let arm_bottom = arm_ink_offset(arm_bottom_glyphs(), arm_bottom_font());
-        let arm_left = arm_ink_offset(arm_left_glyphs(), None);
-        let arm_right = arm_ink_offset(arm_right_glyphs(), None);
-        // Preview ࿕ — only horizontal correction, same reasoning.
+        let arm_top = arm_ink_offsets(arm_top_glyphs(), None);
+        let arm_bottom = arm_ink_offsets(arm_bottom_glyphs(), arm_bottom_font());
+        let arm_left = arm_ink_offsets(arm_left_glyphs(), None);
+        let arm_right = arm_ink_offsets(arm_right_glyphs(), None);
+        // Preview ࿕ — full (dx, dy) correction at the preview's own
+        // box height (also `1.5 * font_size`).
         let preview_bounds = measure_glyph_ink_bounds(
             &mut font_system,
             &mut swash_cache,
@@ -4414,7 +4488,8 @@ fn open_picker_inner(
         );
         let preview = (
             preview_bounds.x_offset_from_advance_center() / measurement_font_size,
-            0.0,
+            preview_bounds.y_offset_from_box_center(measurement_font_size, 1.5)
+                / measurement_font_size,
         );
         (cell, ring, arm_top, arm_bottom, arm_left, arm_right, preview)
     };
@@ -4428,10 +4503,10 @@ fn open_picker_inner(
         max_cell_advance,
         max_ring_advance,
         measurement_font_size,
-        arm_top_ink_offset,
-        arm_bottom_ink_offset,
-        arm_left_ink_offset,
-        arm_right_ink_offset,
+        arm_top_ink_offsets,
+        arm_bottom_ink_offsets,
+        arm_left_ink_offsets,
+        arm_right_ink_offsets,
         preview_ink_offset,
         layout: None,
         center_override: None,
@@ -4518,10 +4593,10 @@ fn compute_picker_geometry(
         cached_backdrop,
         center_override,
         hovered_hit,
-        arm_top_ink_offset,
-        arm_bottom_ink_offset,
-        arm_left_ink_offset,
-        arm_right_ink_offset,
+        arm_top_ink_offsets,
+        arm_bottom_ink_offsets,
+        arm_left_ink_offsets,
+        arm_right_ink_offsets,
         preview_ink_offset,
     ) = match state {
         ColorPickerState::Closed => return None,
@@ -4538,10 +4613,10 @@ fn compute_picker_geometry(
             center_override,
             size_scale,
             hovered_hit,
-            arm_top_ink_offset,
-            arm_bottom_ink_offset,
-            arm_left_ink_offset,
-            arm_right_ink_offset,
+            arm_top_ink_offsets,
+            arm_bottom_ink_offsets,
+            arm_left_ink_offsets,
+            arm_right_ink_offsets,
             preview_ink_offset,
             ..
         } => (
@@ -4562,10 +4637,10 @@ fn compute_picker_geometry(
             layout.as_ref().map(|l| l.backdrop),
             *center_override,
             *hovered_hit,
-            *arm_top_ink_offset,
-            *arm_bottom_ink_offset,
-            *arm_left_ink_offset,
-            *arm_right_ink_offset,
+            *arm_top_ink_offsets,
+            *arm_bottom_ink_offsets,
+            *arm_left_ink_offsets,
+            *arm_right_ink_offsets,
             *preview_ink_offset,
         ),
     };
@@ -4595,10 +4670,10 @@ fn compute_picker_geometry(
         size_scale,
         center_override,
         hovered_hit,
-        arm_top_ink_offset,
-        arm_bottom_ink_offset,
-        arm_left_ink_offset,
-        arm_right_ink_offset,
+        arm_top_ink_offsets,
+        arm_bottom_ink_offsets,
+        arm_left_ink_offsets,
+        arm_right_ink_offsets,
         preview_ink_offset,
     };
 
