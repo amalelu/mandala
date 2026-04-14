@@ -1426,7 +1426,7 @@ impl MindMapDocument {
         });
         let new_runs = vec![TextRun {
             start: 0,
-            end: new_text.chars().count(),
+            end: baumhard::util::grapheme_chad::count_grapheme_clusters(&new_text),
             ..template
         }];
         node.text = new_text;

@@ -2,7 +2,7 @@
 //! picker's `GlyphArea`-side construction inside
 //! [`super::picker_glyph_areas`] — both are baumhard `GfxElement`
 //! variants, both get stamped into the picker overlay tree by
-//! [`super::tree_builder::build_color_picker_overlay_tree`].
+//! [`super::picker_glyph_areas::build_color_picker_overlay_tree`].
 
 use baumhard::font::fonts::AppFont;
 use baumhard::gfx_structs::area::GlyphArea;
@@ -11,7 +11,7 @@ use glam::Vec2;
 /// Build a `GlyphModel` mirroring a picker `GlyphArea`'s text +
 /// dominant color/font, used as the model child attached to each
 /// picker GlyphArea by
-/// [`super::tree_builder::build_color_picker_overlay_tree`].
+/// [`super::picker_glyph_areas::build_color_picker_overlay_tree`].
 ///
 /// Establishes the architectural pattern the user requested in the
 /// color-picker restructure: every picker piece is a (GlyphArea

@@ -1883,17 +1883,19 @@ impl Renderer {
         self.rebuild_overlay_scene_buffers(app_scene);
     }
 
-    /// §B2 mutation path — apply an in-place delta to the picker
-    /// overlay tree without rebuilding it. Pairs with
+    /// §B2 mutation path — apply the **layout-phase** delta to the
+    /// picker overlay tree without rebuilding the arena. Pairs with
     /// [`crate::application::color_picker_overlay::build_mutator`]:
     /// every variable field on every picker GlyphArea is overwritten
     /// via an `Assign` `DeltaGlyphArea` keyed by stable channel.
     ///
-    /// Use this for hover, HSV, chip-focus, and drag-Move /
-    /// drag-Resize updates (anything that doesn't change the
-    /// picker's element set). Open / close still use
-    /// [`Self::rebuild_color_picker_overlay_buffers`] because the
-    /// arena needs to be created or torn down. Calls
+    /// Use this only when something the layout depends on actually
+    /// changed (viewport resize, RMB size_scale drag, drag-move
+    /// repositioning the wheel). Per-frame hover/HSV/chip updates
+    /// should call [`Self::apply_color_picker_overlay_dynamic_mutator`]
+    /// instead — same arena, slimmer per-cell delta. Open / close
+    /// still use [`Self::rebuild_color_picker_overlay_buffers`]
+    /// because the arena needs to be created or torn down. Calls
     /// `rebuild_overlay_scene_buffers` afterward to refresh the
     /// shaped buffers — the cosmic-text shape pass is still per-
     /// element, which is the §B1 perf gap tracked in `ROADMAP.md`.
@@ -1906,6 +1908,34 @@ impl Renderer {
         use crate::application::scene_host::OverlayRole;
 
         let mutator = color_picker_overlay::build_mutator(
+            geometry,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+        app_scene.apply_overlay_mutator(OverlayRole::ColorPicker, &mutator);
+        self.rebuild_overlay_scene_buffers(app_scene);
+    }
+
+    /// §B2 mutation path — apply the **dynamic-phase** delta to the
+    /// picker overlay tree. Pairs with
+    /// [`crate::application::color_picker_overlay::build_dynamic_mutator`]:
+    /// only the per-frame fields (color regions, hover scale, hex
+    /// text) are written; layout-phase fields stay as the previous
+    /// layout-mutator wrote them.
+    ///
+    /// This is the per-frame hot path for hover / HSV / chip-focus
+    /// updates — the picker's element set, position, and bounds are
+    /// unchanged. Calls `rebuild_overlay_scene_buffers` afterward to
+    /// refresh the shaped buffers.
+    pub fn apply_color_picker_overlay_dynamic_mutator(
+        &mut self,
+        app_scene: &mut crate::application::scene_host::AppScene,
+        geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+    ) {
+        use crate::application::color_picker_overlay;
+        use crate::application::scene_host::OverlayRole;
+
+        let mutator = color_picker_overlay::build_dynamic_mutator(
             geometry,
             self.config.width as f32,
             self.config.height as f32,
