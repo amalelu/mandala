@@ -1,16 +1,14 @@
-//! Single source of truth for the picker's GlyphArea content, keyed
-//! by stable channels. Both
-//! [`super::tree_builder::build_color_picker_overlay_tree`] (the
-//! initial-build path) and
-//! [`super::tree_builder::build_color_picker_overlay_mutator`] (the
-//! in-place update path) consume this so they can never drift.
+//! Single source of truth for the picker's `(channel, GlyphArea)`
+//! set — consumed by both the initial-build and in-place-update
+//! paths in `super::tree_builder` so the two cannot drift.
 
+use baumhard::core::primitives::ColorFontRegions;
 use baumhard::gfx_structs::area::{GlyphArea, OutlineStyle};
+use glam::Vec2;
 
 use super::color::{
     highlight_hovered_cell_color, highlight_selected_cell_color, rgb_to_cosmic_color,
 };
-use super::make_area::make_area;
 
 /// Single source of truth for the picker's GlyphArea content, keyed
 /// by stable channels. Both [`super::tree_builder::build_color_picker_overlay_tree`]
@@ -63,6 +61,46 @@ pub(super) fn picker_glyph_areas(
     } else {
         None
     };
+
+    // Local `make_area` helper — returns the GlyphArea rather than
+    // appending to a tree, so both the tree- and mutator-building
+    // paths can route the same value through their respective
+    // wrappers. `centered = true` shapes the text with `Align::Center`
+    // so cross-script glyphs (Devanagari / Hebrew / Tibetan in the
+    // hue ring, mixed sat/val cells) sit on the same visual radius.
+    //
+    // `font` pins a specific `AppFont` for this area's region span
+    // when cosmic-text's default fallback won't pick a covering
+    // face — the SMP-range Egyptian hieroglyphs in particular.
+    fn make_area(
+        text: &str,
+        color: cosmic_text::Color,
+        font_size: f32,
+        line_height: f32,
+        pos: (f32, f32),
+        bounds: (f32, f32),
+        centered: bool,
+        font: Option<baumhard::font::fonts::AppFont>,
+        outline: Option<OutlineStyle>,
+    ) -> GlyphArea {
+        let mut area = GlyphArea::new_with_str(
+            text,
+            font_size,
+            line_height,
+            Vec2::new(pos.0, pos.1),
+            Vec2::new(bounds.0, bounds.1),
+        );
+        area.align_center = centered;
+        area.outline = outline;
+        let rgba = [
+            color.r() as f32 / 255.0,
+            color.g() as f32 / 255.0,
+            color.b() as f32 / 255.0,
+            color.a() as f32 / 255.0,
+        ];
+        area.regions = ColorFontRegions::single_span(text.chars().count(), Some(rgba), font);
+        area
+    }
 
     let font_size = layout.font_size;
     let ring_font_size = layout.ring_font_size;

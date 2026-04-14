@@ -1898,9 +1898,9 @@ impl Renderer {
 
     /// §B2 mutation path — apply an in-place delta to the picker
     /// overlay tree without rebuilding it. Pairs with
-    /// [`build_color_picker_overlay_mutator`]: every variable
-    /// field on every picker GlyphArea is overwritten via an
-    /// `Assign` `DeltaGlyphArea` keyed by stable channel.
+    /// [`crate::application::color_picker_overlay::build_color_picker_overlay_mutator`]:
+    /// every variable field on every picker GlyphArea is overwritten
+    /// via an `Assign` `DeltaGlyphArea` keyed by stable channel.
     ///
     /// Use this for hover, HSV, chip-focus, and drag-Move /
     /// drag-Resize updates (anything that doesn't change the

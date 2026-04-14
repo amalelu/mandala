@@ -2,26 +2,15 @@
 //! for the modal picker the user opens from an edge or portal
 //! context menu.
 //!
-//! Split out of `src/application/renderer.rs` so the renderer stays
-//! focused on GPU / pipeline wiring. The renderer's two delegate
-//! methods (`Renderer::rebuild_color_picker_overlay_buffers` and
-//! `Renderer::apply_color_picker_overlay_mutator`) thread the
-//! geometry + layout through the entry points re-exported below.
-//!
-//! Submodule shape:
-//! - [`color`] — RGB → cosmic-text helpers and hover / selected
-//!   highlight mixes
-//! - [`glyph_model`] — `GlyphModel` mirror constructor for picker
-//!   `GlyphArea`s
-//! - [`make_area`] — per-element `GlyphArea` constructor
-//! - [`picker_glyph_areas`] — single source of truth for the
-//!   picker's `(channel, GlyphArea)` set
-//! - [`tree_builder`] — the two entry points below, built on top of
-//!   the above
+//! The two entry points [`build_color_picker_overlay_tree`] and
+//! [`build_color_picker_overlay_mutator`] pair up — the tree builder
+//! creates the picker's `(GlyphArea, GlyphModel)` pairs keyed by
+//! stable channel; the mutator builder produces an in-place
+//! `MutatorTree<GfxMutator>` that updates those same channels
+//! without rebuilding the arena.
 
 mod color;
 mod glyph_model;
-mod make_area;
 mod picker_glyph_areas;
 mod tree_builder;
 

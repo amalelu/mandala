@@ -1,6 +1,7 @@
-//! `GlyphModel` mirror for a picker `GlyphArea`.
-//!
-//! Used as the model child attached to each picker GlyphArea by
+//! `GlyphModel` mirror for a picker `GlyphArea`. Peer file to the
+//! picker's `GlyphArea`-side construction inside
+//! [`super::picker_glyph_areas`] — both are baumhard `GfxElement`
+//! variants, both get stamped into the picker overlay tree by
 //! [`super::tree_builder::build_color_picker_overlay_tree`].
 
 use baumhard::font::fonts::AppFont;
@@ -9,7 +10,8 @@ use glam::Vec2;
 
 /// Build a `GlyphModel` mirroring a picker `GlyphArea`'s text +
 /// dominant color/font, used as the model child attached to each
-/// picker GlyphArea by `build_color_picker_overlay_tree`.
+/// picker GlyphArea by
+/// [`super::tree_builder::build_color_picker_overlay_tree`].
 ///
 /// Establishes the architectural pattern the user requested in the
 /// color-picker restructure: every picker piece is a (GlyphArea
@@ -40,7 +42,10 @@ use glam::Vec2;
 /// (not truncation) so the round-trip through float regions →
 /// byte components → float regions is symmetric to the picker's
 /// own byte→float conversion in `make_area`.
-pub(super) fn glyph_model_from_picker_area(area: &GlyphArea) -> baumhard::gfx_structs::model::GlyphModel {
+#[inline]
+pub(super) fn glyph_model_from_picker_area(
+    area: &GlyphArea,
+) -> baumhard::gfx_structs::model::GlyphModel {
     use baumhard::gfx_structs::model::{GlyphComponent, GlyphLine, GlyphModel};
     use baumhard::util::color::Color as BaumhardColor;
     use baumhard::util::ordered_vec2::OrderedVec2;

@@ -1,14 +1,12 @@
 //! Tree- and mutator-builders for the glyph-wheel color picker
-//! overlay.
-//!
-//! Both paths consume the same
+//! overlay. Both paths consume the same
 //! [`super::picker_glyph_areas::picker_glyph_areas`] so the initial
 //! build and the §B2 in-place update can never drift on what the
 //! picker's element set looks like.
 
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
-use baumhard::gfx_structs::tree::Tree;
+use baumhard::gfx_structs::tree::{MutatorTree, Tree};
 
 use super::glyph_model::glyph_model_from_picker_area;
 use super::picker_glyph_areas::picker_glyph_areas;
@@ -104,11 +102,10 @@ pub(crate) fn build_color_picker_overlay_tree(
 pub(crate) fn build_color_picker_overlay_mutator(
     geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
     layout: &crate::application::color_picker::ColorPickerLayout,
-) -> baumhard::gfx_structs::tree::MutatorTree<GfxMutator> {
+) -> MutatorTree<GfxMutator> {
     use baumhard::core::primitives::ApplyOperation;
     use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
     use baumhard::gfx_structs::mutator::Mutation;
-    use baumhard::gfx_structs::tree::MutatorTree;
 
     let mut mt = MutatorTree::new_with(GfxMutator::new_void(0));
     for (channel, area) in picker_glyph_areas(geometry, layout) {

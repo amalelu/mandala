@@ -1,8 +1,5 @@
-//! Color helpers for the glyph-wheel color picker.
-//!
-//! Factored out of `renderer.rs` so the tree / mutator / area builders
-//! can share a single source of truth for RGB → cosmic-text conversion
-//! and the hover / selected highlight mixes.
+//! RGB → cosmic-text conversion and highlight mixes shared by the
+//! picker's tree / mutator / area builders.
 
 /// Convert a normalized `[0, 1]` RGB triple into an opaque
 /// `cosmic_text::Color`. Used by the glyph-wheel color picker render
