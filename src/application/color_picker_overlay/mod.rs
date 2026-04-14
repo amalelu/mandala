@@ -73,6 +73,7 @@ mod tests {
     use super::tree_builder::{
         build_color_picker_overlay_mutator, build_color_picker_overlay_tree,
     };
+    use crate::application::color_picker::CROSSHAIR_CENTER_CELL;
     use baumhard::gfx_structs::area::GlyphArea;
 
     /// Helpers for the picker mutator tests below.
@@ -90,10 +91,10 @@ mod tests {
             size_scale: 1.0,
             center_override: None,
             hovered_hit: None,
-            arm_top_ink_offset: (0.0, 0.0),
-            arm_bottom_ink_offset: (0.0, 0.0),
-            arm_left_ink_offset: (0.0, 0.0),
-            arm_right_ink_offset: (0.0, 0.0),
+            arm_top_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_bottom_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_left_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_right_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
             preview_ink_offset: (0.0, 0.0),
         }
     }

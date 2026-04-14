@@ -153,6 +153,11 @@ pub fn adjust_buffer_metrics(buffer: &mut Buffer, metrics: Metrics) {
 ///   down (cosmic-text convention). Negative values sit above the
 ///   baseline; positive values (descenders) sit below.
 /// - `advance`: sum of glyph advances across the shaped string.
+/// - `line_y`: baseline-from-buffer-top in pixels at the measurement
+///   font size — equals `cosmic_text::LayoutRun::line_y` for the run
+///   that produced the ink. Combined with `y_center()` this gives
+///   the ink center y inside a rendering box positioned at the
+///   buffer's top.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InkBounds {
     pub x_min: f32,
@@ -160,6 +165,7 @@ pub struct InkBounds {
     pub x_max: f32,
     pub y_max: f32,
     pub advance: f32,
+    pub line_y: f32,
 }
 
 impl InkBounds {
@@ -181,6 +187,21 @@ impl InkBounds {
     pub fn x_offset_from_advance_center(&self) -> f32 {
         self.x_center() - self.advance * 0.5
     }
+
+    /// Vertical offset of the ink center from the rendering box
+    /// center, in pixels at the measurement font size. Positive
+    /// means ink sits below box-center; a caller wanting the ink
+    /// (not the em-box) to land at a target y must subtract this
+    /// from that target.
+    ///
+    /// `font_size` is the size used at measurement (so the box's
+    /// height in pixels is `font_size * line_height_mul`).
+    /// `line_height_mul` is the height of the rendering bounds
+    /// expressed as a multiple of `font_size` — for the color picker
+    /// arms today this is `1.5` (bounds = `fs * 1.5`).
+    pub fn y_offset_from_box_center(&self, font_size: f32, line_height_mul: f32) -> f32 {
+        (self.line_y + self.y_center()) - font_size * line_height_mul * 0.5
+    }
 }
 
 /// Shape `glyph` through cosmic-text at `font_size` (pinning
@@ -193,14 +214,10 @@ impl InkBounds {
 /// the color picker open path in `src/application/app.rs`, which
 /// measures advances and ink in the same lock scope).
 ///
-/// **Y-axis caveat**: `y_min` / `y_max` are baseline-relative. To
-/// compute a "box-center-vs-ink-center" y-offset a caller also
-/// needs to know where the baseline lands inside its rendering box
-/// — which depends on the font's ascent / descent metrics and the
-/// buffer's `line_height`. This primitive does not yet return that,
-/// so consumers today use only [`InkBounds::x_offset_from_advance_center`]
-/// for the named sidebearing fix; the vertical correction is
-/// deferred until the primitive grows to return `line_y` too.
+/// `y_min` / `y_max` are baseline-relative; `line_y` (also returned
+/// on [`InkBounds`]) carries the baseline-from-buffer-top so callers
+/// can compute box-relative ink positions via
+/// [`InkBounds::y_offset_from_box_center`].
 ///
 /// Costs: allocates a scratch `Buffer`, shapes one line, rasterizes
 /// each glyph through `SwashCache::get_image_uncached` (no caching
@@ -237,6 +254,9 @@ pub fn measure_glyph_ink_bounds(
     let mut advance_total = 0.0f32;
 
     for run in buffer.layout_runs() {
+        // Multi-run shapes overwrite — last run wins. Acceptable
+        // because the only caller today shapes a single glyph.
+        out.line_y = run.line_y;
         for layout_glyph in run.glyphs.iter() {
             advance_total += layout_glyph.w;
             // `physical` bakes the sub-pixel position into `cache_key`
