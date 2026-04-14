@@ -7,7 +7,6 @@
 
 use winit::keyboard::Key;
 
-use crate::application::color_picker::ColorPickerState;
 use crate::application::console::commands::Command;
 use crate::application::console::completion::complete as complete_console;
 use crate::application::console::parser::{parse, Args, ParseResult};
@@ -19,7 +18,7 @@ use crate::application::keybinds::ResolvedKeybinds;
 use crate::application::renderer::Renderer;
 
 use super::color_picker_flow::{
-    cancel_color_picker, close_color_picker_standalone, open_color_picker_contextual,
+    close_color_picker_standalone, open_color_picker_contextual,
     open_color_picker_standalone,
 };
 use super::{open_label_edit, rebuild_all, LabelEditState};

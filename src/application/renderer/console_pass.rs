@@ -7,21 +7,15 @@
 //! (`build_console_overlay_mutator`) consume its output so the two
 //! paths cannot drift.
 
-use std::ops::Range;
 
-use cosmic_text::{Attrs, Color, FontSystem};
+use cosmic_text::FontSystem;
 use glam::Vec2;
 
 use baumhard::core::primitives::{ColorFontRegions, Range as ColorFontRange, ColorFontRegion};
-use baumhard::font::attrs::attrs_list_from_regions;
-use baumhard::font::fonts::{self, AppFont};
-use baumhard::gfx_structs::area::{
-    DeltaGlyphArea, GlyphArea, GlyphAreaField,
-};
+use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::element::GfxElement;
-use baumhard::gfx_structs::mutator::{GfxMutator, Mutation};
-use baumhard::gfx_structs::tree::{MutatorTree, Tree};
-use baumhard::core::primitives::ApplyOperation;
+use baumhard::gfx_structs::mutator::GfxMutator;
+use baumhard::gfx_structs::tree::Tree;
 
 use super::console_geometry::{
     build_console_border_strings, lerp_alpha, side_row_count, with_alpha, ConsoleFrameLayout,

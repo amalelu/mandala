@@ -4,7 +4,9 @@
 //! initial-build path consume — both go through this function so they
 //! cannot drift.
 
-use baumhard::gfx_structs::area::{GlyphArea, OutlineStyle};
+use baumhard::gfx_structs::area::OutlineStyle;
+#[cfg(test)]
+use baumhard::gfx_structs::area::GlyphArea;
 
 use super::areas::PickerAreas;
 use super::sections;

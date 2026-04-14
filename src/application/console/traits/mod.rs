@@ -38,4 +38,11 @@ pub use capabilities::{
 pub use color_value::ColorValue;
 pub use dispatch::{apply_kvs, DispatchReport};
 pub use outcome::Outcome;
+// `TargetView` and `TargetId` are re-exported as part of the
+// public surface even when no in-tree caller imports them by name —
+// they're the return type / parameter type of `view_for` and the
+// element type of `selection_targets`'s return value, so external
+// consumers (tests, future plugins) reach for them implicitly via
+// those signatures. Cargo's unused-import lint can't see that.
+#[allow(unused_imports)]
 pub use view::{selection_targets, view_for, TargetId, TargetView};

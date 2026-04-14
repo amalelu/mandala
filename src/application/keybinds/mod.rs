@@ -42,9 +42,12 @@ mod platform_web;
 mod tests;
 
 pub use action::Action;
+// `normalize_key_name` and `KeyBind` are referenced from the in-crate
+// test block (`tests`) and are part of the keybinds public surface
+// for any future external consumer; cargo check (without --tests)
+// flags them as unused, allow + retain.
+#[allow(unused_imports)]
 pub use bind::{key_to_name, normalize_key_name, KeyBind};
 pub use config::KeybindConfig;
 pub use resolved::ResolvedKeybinds;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use platform_desktop::default_desktop_config_path;

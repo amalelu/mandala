@@ -21,7 +21,7 @@
 //! The engine is a pure function; the event loop re-runs it on every
 //! keystroke that mutates the input buffer, so the popup stays live.
 
-use super::commands::{command_by_name, Command, COMMANDS};
+use super::commands::{command_by_name, COMMANDS};
 use super::parser::tokenize;
 use super::ConsoleContext;
 

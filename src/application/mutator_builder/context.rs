@@ -46,10 +46,12 @@ pub trait SectionContext {
 }
 
 /// Default projection used by `SectionContext::field`: pulls each
-/// field out of a pre-built `GlyphArea`. Reused by both the trait
-/// default and by slim overrides that want to fall back to the
-/// full-area projection for a subset of field variants.
-pub fn default_field_from_area(area: &GlyphArea, template: &CellField) -> GlyphAreaField {
+/// field out of a pre-built `GlyphArea`. Only consumed by the
+/// trait's own default implementation today — kept `pub(super)`
+/// because no consumer outside `mutator_builder` needs to reach
+/// for it; slim overrides that want a subset projection can call
+/// it via the trait default by delegating to `area`.
+pub(super) fn default_field_from_area(area: &GlyphArea, template: &CellField) -> GlyphAreaField {
     match template {
         CellField::Text => GlyphAreaField::Text(area.text.clone()),
         CellField::position => GlyphAreaField::position(area.position.x.0, area.position.y.0),

@@ -17,25 +17,25 @@ mod label_edit;
 mod scene_rebuild;
 mod text_edit;
 #[cfg(not(target_arch = "wasm32"))]
-use edge_drag::{apply_edge_handle_drag, nearest_anchor_side};
-use text_edit::{
-    apply_text_edit_to_tree, close_text_edit, handle_text_edit_key, open_text_edit,
-    read_node_regions,
-};
+use edge_drag::apply_edge_handle_drag;
+use text_edit::{close_text_edit, handle_text_edit_key, open_text_edit};
 #[cfg(not(target_arch = "wasm32"))]
-use label_edit::{close_label_edit, handle_label_edit_key, open_label_edit};
+use label_edit::{handle_label_edit_key, open_label_edit};
 #[cfg(not(target_arch = "wasm32"))]
 use color_picker_flow::{
-    commit_color_picker, commit_color_picker_to_selection, end_color_picker_gesture,
-    handle_color_picker_click, handle_color_picker_key, handle_color_picker_mouse_move,
-    rebuild_color_picker_overlay,
+    end_color_picker_gesture, handle_color_picker_click, handle_color_picker_key,
+    handle_color_picker_mouse_move, rebuild_color_picker_overlay,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use console_input::{
-    accept_console_completion, handle_console_key, load_console_history, push_scrollback_error,
-    push_scrollback_output, rebuild_console_overlay, save_console_history,
+    handle_console_key, load_console_history, rebuild_console_overlay, save_console_history,
     save_document_to_bound_path,
 };
+// `accept_console_completion` is only invoked from the test block at
+// the bottom of this file — gate the import so non-test builds stay
+// clean of unused-import warnings.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use console_input::accept_console_completion;
 use scene_rebuild::{
     flush_canvas_scene_buffers, rebuild_all, rebuild_scene_only, update_border_tree_static,
     update_border_tree_with_offsets, update_connection_label_tree, update_connection_tree,
@@ -65,7 +65,7 @@ use indextree::Arena;
 use wgpu::{Instance, SurfaceTargetUnsafe};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ControlFlow;
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::ModifiersState;
 use winit::window::CursorIcon;
 use winit::{event_loop::EventLoop, window::Window};
 
@@ -79,12 +79,7 @@ use crate::application::document::{
 use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::{Action, ResolvedKeybinds};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::application::console::{
-    commands::Command,
-    completion::complete as complete_console,
-    parser::{parse, Args, ParseResult},
-    ConsoleContext, ConsoleEffects, ConsoleLine, ConsoleState, ExecResult, MAX_HISTORY,
-};
+use crate::application::console::ConsoleState;
 use crate::application::renderer::Renderer;
 
 use baumhard::gfx_structs::element::GfxElement;

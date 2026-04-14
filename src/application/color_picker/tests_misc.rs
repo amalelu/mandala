@@ -442,11 +442,6 @@ use crate::application::widgets::color_picker_widget::load_spec;
         }
     }
 
-    /// `PickerGesture::Resize` must compute the new scale
-    /// multiplicatively from cursor radius. A 2× radius produces
-    /// a 2× scale, a 0.5× radius produces a 0.5× scale, modulo
-    /// the spec's `[resize_scale_min, resize_scale_max]` clamp.
-    /// The math is shared with `handle_color_picker_mouse_move`;
     /// The dynamic-apply short-circuit key must equate two geometries
     /// with the same HSV / hover / hex-visibility, and distinguish
     /// geometries that differ in any of those axes. Guards the
@@ -484,6 +479,11 @@ use crate::application::widgets::color_picker_widget::load_spec;
         assert_ne!(base, no_hover, "unhover must not short-circuit");
     }
 
+    /// `PickerGesture::Resize` must compute the new scale
+    /// multiplicatively from cursor radius. A 2× radius produces
+    /// a 2× scale, a 0.5× radius produces a 0.5× scale, modulo
+    /// the spec's `[resize_scale_min, resize_scale_max]` clamp.
+    /// The math is shared with `handle_color_picker_mouse_move`;
     /// this test pins it as a pure formula so a refactor that
     /// silently flips additive can't slip through.
     #[test]

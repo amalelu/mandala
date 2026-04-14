@@ -5,13 +5,10 @@
 //! cosmic-text awareness — `attrs_list_from_regions` lives in
 //! baumhard but the `Buffer::set_rich_text` call sites stay here.
 
-use cosmic_text::{Attrs, AttrsList, Buffer, BufferRef, Edit, Editor, Family, FontSystem};
+use cosmic_text::{Attrs, Family, FontSystem};
 use glam::Vec2;
 
-use baumhard::core::primitives::ColorFontRegions;
-use baumhard::font::attrs::attrs_list_from_regions;
 use baumhard::font::fonts;
-use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;

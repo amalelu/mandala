@@ -9,11 +9,9 @@
 //! `cancel_color_picker` / `close_color_picker_standalone`, and the
 //! event loop calls every other entry point in the file.
 
-use glam::Vec2;
 use winit::event::MouseButton;
 use winit::keyboard::Key;
 
-use crate::application::common::InputMode;
 use crate::application::document::{EdgeRef, MindMapDocument};
 use crate::application::renderer::Renderer;
 

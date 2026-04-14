@@ -4,20 +4,28 @@ mod console_pass;
 mod tree_walker;
 
 pub use borders::measure_max_glyph_advance;
+// `ConsoleFrameLayout` / `MAX_*` / `build_console_border_strings` are
+// part of the renderer's public surface and consumed by the test
+// block at the bottom of this file plus external callers (the app
+// crate threads `ConsoleFrameLayout` through the rebuild path).
+// cargo check (without `--tests`) doesn't see those usages.
+#[allow(unused_imports)]
 pub use console_geometry::{
     build_console_border_strings, compute_console_frame_layout, ConsoleFrameLayout,
     ConsoleOverlayCompletion, ConsoleOverlayGeometry, ConsoleOverlayLine, ConsoleOverlayLineKind,
     MAX_CONSOLE_COMPLETION_ROWS, MAX_CONSOLE_SCROLLBACK_ROWS,
 };
 use borders::{
-    create_border_buffer, create_border_buffer_lh, create_border_buffer_spans,
-    create_centered_cell_buffer, parse_hex_color,
+    create_border_buffer, parse_hex_color,
 };
-use console_geometry::{lerp_alpha, side_row_count, with_alpha};
 use console_pass::{
-    build_console_overlay_mutator, build_console_overlay_tree, console_overlay_areas,
-    console_overlay_signature,
+    build_console_overlay_mutator, build_console_overlay_tree, console_overlay_signature,
 };
+// `console_overlay_areas` is referenced only from the test block; the
+// non-test build flags it as unused. Gate to keep cargo check clean
+// while leaving the test build self-contained.
+#[cfg(test)]
+use console_pass::console_overlay_areas;
 use tree_walker::walk_tree_into_buffers;
 
 use std::borrow::Cow;
@@ -44,10 +52,6 @@ use winit::window::Window;
 use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch};
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
-use baumhard::util::grapheme_chad;
-use baumhard::core::primitives::{
-    ColorFontRegion, ColorFontRegions, Range as ColorFontRange,
-};
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::mutator::GfxMutator;
@@ -55,13 +59,9 @@ use baumhard::gfx_structs::tree::Tree;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
 use baumhard::font::attrs::attrs_list_from_regions;
 use baumhard::gfx_structs::camera::Camera2D;
-use baumhard::mindmap::model::MindMap;
-use baumhard::mindmap::loader;
-use baumhard::mindmap::border::BorderStyle;
-use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement, PortalElement, PortalRefKey};
+use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement, PortalRefKey};
 use baumhard::mindmap::scene_cache::EdgeKey;
 use glam::Vec2;
-use std::path::Path;
 
 
 /// Inline WGSL shader for the colored-rectangle pipeline. Draws a
