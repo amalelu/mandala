@@ -2,7 +2,6 @@ use crate::util::primes::is_prime;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::sync::{RwLock, RwLockReadGuard, TryLockError};
-use thiserror::Error;
 
 /// Scenes and Trees all have their own unique [RegionIndexer]
 #[derive(Debug, Clone)]
@@ -14,6 +13,9 @@ pub struct RegionIndexer {
 }
 
 impl RegionIndexer {
+    /// Construct a fresh indexer with the reverse element→regions index
+    /// enabled. Cheap — no region slots allocated until
+    /// [`RegionIndexer::initialize`] is called.
     pub fn new() -> Self {
         RegionIndexer {
             index: Vec::new(),
@@ -22,6 +24,10 @@ impl RegionIndexer {
         }
     }
 
+    /// Construct a fresh indexer without the reverse element→regions
+    /// index. Use when the consumer never calls
+    /// [`RegionIndexer::get_reverse_index_for_element`] — saves memory
+    /// proportional to the number of indexed elements.
     pub fn new_without_reverse_index() -> Self {
         RegionIndexer {
             index: Vec::new(),
@@ -30,11 +36,16 @@ impl RegionIndexer {
         }
     }
 
+    /// Allocate `x * y` region buckets in one call. Convenience for the
+    /// common 2-D grid case; equivalent to
+    /// [`RegionIndexer::initialize`]`(x * y)`.
     pub fn initialize_with(&mut self, x: usize, y: usize) {
         self.initialize(x * y)
     }
 
-    /// Initializes all regions
+    /// Allocate `num_regions` empty region buckets. Drops any previously
+    /// allocated buckets — O(num_regions) and clears all indexed
+    /// elements.
     pub fn initialize(&mut self, num_regions: usize) {
         if self.index.len() > 0 {
             self.index = Vec::new();
@@ -76,10 +87,15 @@ impl RegionIndexer {
         self.index[region].iter().cloned().collect()
     }
 
+    /// Borrow the per-region index slot vector. Index `r` is the set of
+    /// element ids currently sitting in region `r`. O(1).
     pub fn index_as_ref(&self) -> &Vec<BTreeSet<usize>> {
         &self.index
     }
 
+    /// Borrow the reverse element→regions map. Empty when the indexer
+    /// was constructed with [`RegionIndexer::new_without_reverse_index`].
+    /// O(1).
     pub fn reverse_index_as_ref(&self) -> &FxHashMap<usize, BTreeSet<usize>> {
         &self.reverse_index
     }
@@ -111,13 +127,32 @@ impl Default for RegionIndexer {
     }
 }
 
-#[derive(Error, Debug, PartialEq)]
+/// Failure modes returned by [`RegionParams`] accessors and computation
+/// methods.
+///
+/// Per `CODE_CONVENTIONS.md` §7, baumhard does not implement `Display` or
+/// `std::error::Error` for its own enums — call sites match on the
+/// variant directly. Variants:
+///
+/// - `Updating`: the inner lock is held for write (target / size / factor
+///   are mid-`adapt`); the read attempt would block, so the call returns
+///   immediately. The caller decides to retry, drop the frame, or skip.
+/// - `InvalidParameters`: an input is out of range (pixel beyond the
+///   resolution, region index past the live count, malformed rectangle).
+///   The `&'static str` is a short, log-ready reason.
+/// - `Poisoned`: an earlier writer panicked while holding the lock. The
+///   region state may be inconsistent; the caller should not retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionError {
-    #[error("RegionParams are being updated")]
+    /// The lock would block — `RegionParams` is mid-`adapt`. Retry on
+    /// the next frame.
     Updating,
-    #[error("The parameters used are invalid")]
+    /// One of the inputs (pixel, region index, rectangle bounds) is
+    /// outside the live resolution / region grid. Carries a static
+    /// reason for the log.
     InvalidParameters(&'static str),
-    #[error("A lock is poisoned")]
+    /// An inner lock is poisoned — an earlier write panicked while
+    /// holding it. Region state may be inconsistent.
     Poisoned,
 }
 
