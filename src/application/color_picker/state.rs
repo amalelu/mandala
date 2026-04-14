@@ -186,8 +186,47 @@ pub enum ColorPickerState {
         /// on, the renderer reads and clears it, the tree gets a
         /// red-tint mutation for ~250 ms. See [`request_error_flash`].
         pending_error_flash: bool,
+        /// `(hue_deg, sat, val, hovered_hit)` of the last
+        /// dynamic-phase apply. On layout-stable frames, the
+        /// dispatcher compares the current geometry against this
+        /// snapshot and skips `apply_color_picker_overlay_dynamic_mutator`
+        /// when nothing observable has changed (a mouse move within
+        /// the same cell is the common case). `None` between picker
+        /// open and the first dynamic apply. Reset (`None`) after
+        /// every layout-phase apply because those rewrite the full
+        /// cell set and the next dynamic apply should target the
+        /// freshly-written state.
+        last_dynamic_apply: Option<PickerDynamicApplyKey>,
     },
 }
+
+/// Snapshot of the picker state the dynamic phase writes against.
+/// Floats are compared bit-exactly (`f32::to_bits()`) so the
+/// short-circuit treats two identical geometries as equal even in
+/// the pathological NaN case — the op is an optimization, not a
+/// correctness boundary, but bit-equality is what we want.
+#[derive(Debug, Clone, Copy)]
+pub struct PickerDynamicApplyKey {
+    pub hue_deg: f32,
+    pub sat: f32,
+    pub val: f32,
+    pub hovered_hit: Option<PickerHit>,
+    /// Hex visibility flips change the hex cell's text + regions
+    /// without changing the layout, so it's part of the
+    /// dynamic-apply key.
+    pub hex_visible: bool,
+}
+
+impl PartialEq for PickerDynamicApplyKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.hue_deg.to_bits() == other.hue_deg.to_bits()
+            && self.sat.to_bits() == other.sat.to_bits()
+            && self.val.to_bits() == other.val.to_bits()
+            && self.hovered_hit == other.hovered_hit
+            && self.hex_visible == other.hex_visible
+    }
+}
+impl Eq for PickerDynamicApplyKey {}
 
 impl ColorPickerState {
     pub fn is_open(&self) -> bool {

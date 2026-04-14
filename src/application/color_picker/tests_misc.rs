@@ -447,6 +447,43 @@ use crate::application::widgets::color_picker_widget::load_spec;
     /// a 2× scale, a 0.5× radius produces a 0.5× scale, modulo
     /// the spec's `[resize_scale_min, resize_scale_max]` clamp.
     /// The math is shared with `handle_color_picker_mouse_move`;
+    /// The dynamic-apply short-circuit key must equate two geometries
+    /// with the same HSV / hover / hex-visibility, and distinguish
+    /// geometries that differ in any of those axes. Guards the
+    /// `rebuild_color_picker_overlay` dispatcher's bail-out so a hover
+    /// within the same cell skips the mutator build, but any real
+    /// observable change does not.
+    #[test]
+    fn picker_dynamic_apply_key_equates_stable_state_and_distinguishes_changes() {
+        use crate::application::color_picker::{PickerDynamicApplyKey, PickerHit};
+
+        let base = PickerDynamicApplyKey {
+            hue_deg: 120.0,
+            sat: 0.5,
+            val: 0.7,
+            hovered_hit: Some(PickerHit::Hue(4)),
+            hex_visible: true,
+        };
+        let same = PickerDynamicApplyKey { ..base };
+        assert_eq!(base, same, "identical state must compare equal");
+
+        let mut diff_hue = base;
+        diff_hue.hue_deg = 121.0;
+        assert_ne!(base, diff_hue, "hue change must not short-circuit");
+
+        let mut diff_hover = base;
+        diff_hover.hovered_hit = Some(PickerHit::Hue(5));
+        assert_ne!(base, diff_hover, "hover change must not short-circuit");
+
+        let mut diff_hex = base;
+        diff_hex.hex_visible = false;
+        assert_ne!(base, diff_hex, "hex visibility flip must not short-circuit");
+
+        let mut no_hover = base;
+        no_hover.hovered_hit = None;
+        assert_ne!(base, no_hover, "unhover must not short-circuit");
+    }
+
     /// this test pins it as a pure formula so a refactor that
     /// silently flips additive can't slip through.
     #[test]
