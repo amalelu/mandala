@@ -58,12 +58,23 @@ pub struct ColorPickerWidgetSpec {
     /// effect on a standalone picker, which only closes via
     /// `color picker off` from the console.
     pub hint_text_standalone: String,
-    /// Declarative mutator-tree shape for the picker overlay. Walked
-    /// by `crate::application::mutator_builder` at apply time to
-    /// produce the `MutatorTree<GfxMutator>` that updates the
-    /// picker's registered tree in place. See the JSON file's
+    /// Declarative mutator-tree shape for the picker overlay's
+    /// **layout phase** — full per-cell field set, applied on layout
+    /// changes only (initial open, viewport resize, RMB size_scale
+    /// drag). Walked by `crate::application::mutator_builder` at
+    /// apply time to produce a `MutatorTree<GfxMutator>` covering
+    /// every variable field on every cell. See the JSON file's
     /// `_mutator_spec_comment` for the on-disk contract.
     pub mutator_spec: MutatorNode,
+    /// Declarative mutator-tree shape for the picker overlay's
+    /// **dynamic phase** — slim per-section field lists, applied on
+    /// every hover / HSV / drag frame. Shares the same channel layout
+    /// as `mutator_spec`, but each cell only emits the fields that
+    /// genuinely change between frames (color, hover scale, hex text).
+    /// Pairs with the layout phase: layout writes static fields once,
+    /// dynamic writes per-frame fields on top. See the JSON file's
+    /// `_dynamic_mutator_spec_comment` for the on-disk contract.
+    pub dynamic_mutator_spec: MutatorNode,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -234,6 +245,82 @@ mod tests {
         let mut out = Vec::new();
         iter_section_channels(&spec.mutator_spec, &NoCtx, &mut out);
         assert_eq!(out.len(), 60);
+    }
+
+    /// `dynamic_mutator_spec` must mirror `mutator_spec`'s channel
+    /// layout exactly — same root, same Repeat sections, same channel
+    /// bases / counts / skips. Only the per-section AreaDelta field
+    /// list differs (slimmer, per-frame). A drift here means the
+    /// dynamic mutator could re-channel a cell that the layout
+    /// mutator already registered, silently misaligning the §B2
+    /// in-place update.
+    #[test]
+    fn spec_dynamic_mutator_spec_channel_layout_mirrors_layout_spec() {
+        use crate::application::mutator_builder::{iter_section_channels, SectionContext};
+        struct NoCtx;
+        impl SectionContext for NoCtx {}
+        let spec = load_spec();
+        let mut layout_out = Vec::new();
+        iter_section_channels(&spec.mutator_spec, &NoCtx, &mut layout_out);
+        let mut dynamic_out = Vec::new();
+        iter_section_channels(&spec.dynamic_mutator_spec, &NoCtx, &mut dynamic_out);
+        assert_eq!(
+            layout_out, dynamic_out,
+            "dynamic spec channel layout must match layout spec"
+        );
+    }
+
+    /// Per-section dynamic field lists are deliberately slim — only
+    /// fields that actually change between hover / HSV / drag frames.
+    /// Pins the choice so a future "just add the field, it's harmless"
+    /// edit surfaces here as a deliberate design trade rather than a
+    /// silent perf regression on the picker hot path.
+    #[test]
+    fn spec_dynamic_mutator_spec_per_section_fields_are_slim() {
+        use crate::application::mutator_builder::{CellField, MutationSrc, MutatorNode};
+        let spec = load_spec();
+        let MutatorNode::Void { children, .. } = &spec.dynamic_mutator_spec else {
+            panic!("dynamic_mutator_spec root must be Void");
+        };
+        // (section, expected dynamic field count). Title/hint = color
+        // only (1 + Operation). hue/sat/val/preview = color + scale
+        // (2 + Operation). hex = text + color (2 + Operation).
+        let expected: &[(&str, usize)] = &[
+            ("title", 2),
+            ("hue_ring", 3),
+            ("hint", 2),
+            ("sat_bar", 3),
+            ("val_bar", 3),
+            ("preview", 3),
+            ("hex", 3),
+        ];
+        assert_eq!(children.len(), expected.len());
+        for (child, (exp_section, exp_field_count)) in children.iter().zip(expected.iter()) {
+            let MutatorNode::Repeat {
+                section, template, ..
+            } = child
+            else {
+                panic!("dynamic_mutator_spec children must all be Repeat");
+            };
+            assert_eq!(section, exp_section);
+            let MutatorNode::Single { mutation, .. } = template.as_ref() else {
+                panic!("dynamic spec template must be Single");
+            };
+            let MutationSrc::AreaDelta(fields) = mutation else {
+                panic!("dynamic spec mutation must be AreaDelta");
+            };
+            assert_eq!(
+                fields.len(),
+                *exp_field_count,
+                "section {exp_section}: expected {exp_field_count} dynamic fields, got {}",
+                fields.len(),
+            );
+            // Always last: Operation::Assign sentinel.
+            assert!(
+                matches!(fields.last(), Some(CellField::Operation(_))),
+                "dynamic spec section {exp_section} must end with an Operation field"
+            );
+        }
     }
 
     /// The bottom-arm font must be set — without it cosmic-text

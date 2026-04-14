@@ -57,15 +57,15 @@ pub(super) fn build_color_picker_overlay_tree(
 /// Build a [`MutatorTree`] that updates an already-registered picker
 /// tree to the current `(geometry, layout)` state without rebuilding
 /// the arena. The tree shape is declared in
-/// `widgets/color_picker.json`'s `mutator_spec`; the per-cell
-/// `GlyphArea` values come from [`PickerAreas`] via a
-/// [`PickerSectionContext`] adapter.
+/// `widgets/color_picker.json`'s `mutator_spec` (the **layout** spec
+/// — full per-cell field set); the per-cell `GlyphArea` values come
+/// from [`PickerAreas`] via a [`PickerSectionContext`] adapter.
 ///
-/// This is the §B2 "mutation, not rebuild" path for picker hover /
-/// HSV / chip / drag updates. The arena is reused; only field values
-/// change. The walker still re-shapes every cell — the remaining
-/// §B1 perf gap is tracked as the hash-keyed shape cache follow-up
-/// in `ROADMAP.md`.
+/// This is the §B2 "mutation, not rebuild" path for layout-change
+/// events: initial open, viewport resize, and RMB size_scale drag.
+/// Hover / HSV / chip frames go through
+/// [`build_color_picker_overlay_dynamic_mutator`] instead — same
+/// channel layout, slimmer per-section field lists.
 pub(super) fn build_color_picker_overlay_mutator(
     geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
     layout: &crate::application::color_picker::ColorPickerLayout,
@@ -74,6 +74,31 @@ pub(super) fn build_color_picker_overlay_mutator(
     let areas = compute_picker_areas(geometry, layout);
     let ctx = PickerSectionContext { areas: &areas };
     mutator_builder::build(&spec.mutator_spec, &ctx)
+}
+
+/// Per-frame [`MutatorTree`] for the picker — the **dynamic** phase.
+/// Walked from `widgets/color_picker.json`'s `dynamic_mutator_spec`,
+/// which carries the same channel layout as `mutator_spec` but only
+/// the per-section `CellField`s that actually change between hover /
+/// HSV / drag frames (color, hover scale, hex text). Position,
+/// bounds, line_height, and outline come from the layout phase and
+/// stay untouched here.
+///
+/// **Cost note**: this still routes through [`compute_picker_areas`]
+/// today, so the per-frame work is dominated by full GlyphArea
+/// construction even though the mutator only reads a subset of
+/// fields. Closing that gap is the next consolidation step (slim
+/// per-section context + `SectionContext::dynamic_field`); pinned by
+/// the `dynamic_mutator_spec_per_section_fields_are_slim` test in
+/// `widgets::color_picker_widget`.
+pub(super) fn build_color_picker_overlay_dynamic_mutator(
+    geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+    layout: &crate::application::color_picker::ColorPickerLayout,
+) -> MutatorTree<GfxMutator> {
+    let spec = crate::application::widgets::color_picker_widget::load_spec();
+    let areas = compute_picker_areas(geometry, layout);
+    let ctx = PickerSectionContext { areas: &areas };
+    mutator_builder::build(&spec.dynamic_mutator_spec, &ctx)
 }
 
 /// Adapter implementing [`SectionContext`] on top of a precomputed
