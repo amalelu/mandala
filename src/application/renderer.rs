@@ -1861,23 +1861,22 @@ impl Renderer {
     pub fn rebuild_color_picker_overlay_buffers(
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,
-        geometry: Option<&crate::application::color_picker::ColorPickerOverlayGeometry>,
+        geometry_and_layout: Option<(
+            &crate::application::color_picker::ColorPickerOverlayGeometry,
+            &crate::application::color_picker::ColorPickerLayout,
+        )>,
     ) {
         use crate::application::color_picker_overlay;
         use crate::application::scene_host::OverlayRole;
 
-        let Some(g) = geometry else {
+        let Some((g, layout)) = geometry_and_layout else {
             self.color_picker_backdrop = None;
             app_scene.unregister_overlay(OverlayRole::ColorPicker);
             self.rebuild_overlay_scene_buffers(app_scene);
             return;
         };
 
-        let build = color_picker_overlay::build(
-            g,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
+        let build = color_picker_overlay::build(g, layout);
         self.color_picker_backdrop = build.backdrop;
         app_scene.register_overlay(OverlayRole::ColorPicker, build.tree, glam::Vec2::ZERO);
         self.rebuild_overlay_scene_buffers(app_scene);
@@ -1903,15 +1902,12 @@ impl Renderer {
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,
         geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+        layout: &crate::application::color_picker::ColorPickerLayout,
     ) {
         use crate::application::color_picker_overlay;
         use crate::application::scene_host::OverlayRole;
 
-        let mutator = color_picker_overlay::build_mutator(
-            geometry,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
+        let mutator = color_picker_overlay::build_mutator(geometry, layout);
         app_scene.apply_overlay_mutator(OverlayRole::ColorPicker, &mutator);
         self.rebuild_overlay_scene_buffers(app_scene);
     }
@@ -1931,15 +1927,12 @@ impl Renderer {
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,
         geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
+        layout: &crate::application::color_picker::ColorPickerLayout,
     ) {
         use crate::application::color_picker_overlay;
         use crate::application::scene_host::OverlayRole;
 
-        let mutator = color_picker_overlay::build_dynamic_mutator(
-            geometry,
-            self.config.width as f32,
-            self.config.height as f32,
-        );
+        let mutator = color_picker_overlay::build_dynamic_mutator(geometry, layout);
         app_scene.apply_overlay_mutator(OverlayRole::ColorPicker, &mutator);
         self.rebuild_overlay_scene_buffers(app_scene);
     }

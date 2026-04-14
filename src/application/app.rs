@@ -4753,19 +4753,29 @@ fn rebuild_color_picker_overlay(
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
+    use crate::application::color_picker::ColorPickerState;
     use crate::application::scene_host::OverlayRole;
     let Some((geometry, layout_changed)) = compute_picker_geometry(state, renderer) else {
         renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
         return;
     };
+    // compute_picker_geometry stored the fresh layout on state; borrow
+    // it immutably so every dispatch path below reuses that single
+    // computation rather than re-running it per-frame.
+    let Some(layout) = (match state {
+        ColorPickerState::Open { layout, .. } => layout.as_ref(),
+        ColorPickerState::Closed => None,
+    }) else {
+        return;
+    };
     if app_scene.overlay_id(OverlayRole::ColorPicker).is_some() {
         if layout_changed {
-            renderer.apply_color_picker_overlay_mutator(app_scene, &geometry);
+            renderer.apply_color_picker_overlay_mutator(app_scene, &geometry, layout);
         } else {
-            renderer.apply_color_picker_overlay_dynamic_mutator(app_scene, &geometry);
+            renderer.apply_color_picker_overlay_dynamic_mutator(app_scene, &geometry, layout);
         }
     } else {
-        renderer.rebuild_color_picker_overlay_buffers(app_scene, Some(&geometry));
+        renderer.rebuild_color_picker_overlay_buffers(app_scene, Some((&geometry, layout)));
     }
 }
 

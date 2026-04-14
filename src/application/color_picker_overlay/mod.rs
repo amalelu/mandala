@@ -5,16 +5,20 @@
 //!
 //! Public surface is two functions and a [`ColorPickerOverlayBuild`]
 //! result: [`build`] produces a fresh `(tree, backdrop)` from a
-//! geometry + viewport, [`build_mutator`] produces an in-place
+//! geometry + layout, [`build_mutator`] produces an in-place
 //! `MutatorTree<GfxMutator>` that updates the same tree's channels
-//! without rebuilding the arena. Layout, picker spec, and the
-//! `(GlyphArea, GlyphModel)` pair shape stay internal to the module.
+//! without rebuilding the arena. Layout is computed once at the
+//! dispatch site (app.rs `compute_picker_geometry`) and threaded
+//! through to every builder so the per-frame hot path doesn't
+//! recompute font-size derivation, cell anchor math, or backdrop
+//! geometry. Picker spec and the `(GlyphArea, GlyphModel)` pair shape
+//! stay internal to the module.
 
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::{MutatorTree, Tree};
 
-use crate::application::color_picker::{compute_color_picker_layout, ColorPickerOverlayGeometry};
+use crate::application::color_picker::{ColorPickerLayout, ColorPickerOverlayGeometry};
 
 mod color;
 mod glyph_model;
@@ -34,22 +38,20 @@ pub(crate) struct ColorPickerOverlayBuild {
 }
 
 /// Build the picker's overlay tree and its backdrop rect from the
-/// current `geometry` at the given viewport size. Consumes the
-/// picker spec internally to decide whether to emit an opaque
-/// backdrop or leave it transparent.
+/// current `geometry` + pre-computed `layout`. Consumes the picker
+/// spec internally to decide whether to emit an opaque backdrop or
+/// leave it transparent.
 pub(crate) fn build(
     geometry: &ColorPickerOverlayGeometry,
-    viewport_w: f32,
-    viewport_h: f32,
+    layout: &ColorPickerLayout,
 ) -> ColorPickerOverlayBuild {
-    let layout = compute_color_picker_layout(geometry, viewport_w, viewport_h);
     let spec = crate::application::widgets::color_picker_widget::load_spec();
     let backdrop = if spec.geometry.transparent_backdrop {
         None
     } else {
         Some(layout.backdrop)
     };
-    let tree = picker_glyph_areas::build_color_picker_overlay_tree(geometry, &layout);
+    let tree = picker_glyph_areas::build_color_picker_overlay_tree(geometry, layout);
     ColorPickerOverlayBuild { tree, backdrop }
 }
 
@@ -62,11 +64,9 @@ pub(crate) fn build(
 /// Per-frame updates go through [`build_dynamic_mutator`] instead.
 pub(crate) fn build_mutator(
     geometry: &ColorPickerOverlayGeometry,
-    viewport_w: f32,
-    viewport_h: f32,
+    layout: &ColorPickerLayout,
 ) -> MutatorTree<GfxMutator> {
-    let layout = compute_color_picker_layout(geometry, viewport_w, viewport_h);
-    picker_glyph_areas::build_color_picker_overlay_mutator(geometry, &layout)
+    picker_glyph_areas::build_color_picker_overlay_mutator(geometry, layout)
 }
 
 /// Build an in-place [`MutatorTree`] for the picker — the **dynamic**
@@ -77,11 +77,9 @@ pub(crate) fn build_mutator(
 /// phase and stay valid across dynamic applies.
 pub(crate) fn build_dynamic_mutator(
     geometry: &ColorPickerOverlayGeometry,
-    viewport_w: f32,
-    viewport_h: f32,
+    layout: &ColorPickerLayout,
 ) -> MutatorTree<GfxMutator> {
-    let layout = compute_color_picker_layout(geometry, viewport_w, viewport_h);
-    picker_glyph_areas::build_color_picker_overlay_dynamic_mutator(geometry, &layout)
+    picker_glyph_areas::build_color_picker_overlay_dynamic_mutator(geometry, layout)
 }
 
 #[cfg(test)]
