@@ -152,10 +152,10 @@ mod tests {
     fn spec_loads() {
         let spec = load_spec();
         assert_eq!(spec.hue_ring_glyphs.len(), 24);
-        assert_eq!(spec.arm_top_glyphs.len(), 10);
-        assert_eq!(spec.arm_bottom_glyphs.len(), 10);
-        assert_eq!(spec.arm_left_glyphs.len(), 10);
-        assert_eq!(spec.arm_right_glyphs.len(), 10);
+        assert_eq!(spec.arm_top_glyphs.len(), 8);
+        assert_eq!(spec.arm_bottom_glyphs.len(), 8);
+        assert_eq!(spec.arm_left_glyphs.len(), 8);
+        assert_eq!(spec.arm_right_glyphs.len(), 8);
         assert!(!spec.center_preview_glyph.is_empty());
         assert!(spec.geometry.target_frac > 0.0 && spec.geometry.target_frac < 1.0);
         assert!(spec.geometry.font_min > 0.0);

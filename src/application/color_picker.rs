@@ -67,22 +67,24 @@ pub const HUE_SLOT_COUNT: usize = 24;
 pub const PICKER_CHANNEL_TITLE: usize = 1;
 pub const PICKER_CHANNEL_HUE_RING_BASE: usize = 100; // +0..23
 pub const PICKER_CHANNEL_HINT: usize = 200;
-pub const PICKER_CHANNEL_SAT_BASE: usize = 300; // +0..20 (skipping +10)
-pub const PICKER_CHANNEL_VAL_BASE: usize = 400; // +0..20 (skipping +10)
+pub const PICKER_CHANNEL_SAT_BASE: usize = 300; // +0..16 (skipping +8)
+pub const PICKER_CHANNEL_VAL_BASE: usize = 400; // +0..16 (skipping +8)
 pub const PICKER_CHANNEL_PREVIEW: usize = 500;
 pub const PICKER_CHANNEL_HEX: usize = 600;
 
 /// Number of cells on each crosshair bar. Odd so the center cell sits
-/// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 10 is the
+/// exactly on the bar's midpoint (sat=0.5 / val=0.5). Cell 8 is the
 /// wheel center where ࿕ lives — it's counted in the HSV quantization
 /// but not rendered as a bar cell.
-pub const SAT_CELL_COUNT: usize = 21;
-pub const VAL_CELL_COUNT: usize = 21;
+pub const SAT_CELL_COUNT: usize = 17;
+pub const VAL_CELL_COUNT: usize = 17;
 
-/// The center cell index of each 21-cell crosshair bar — the wheel
+/// The center cell index of each 17-cell crosshair bar — the wheel
 /// center where ࿕ sits. Skipped during bar rendering so the ࿕ glyph
-/// shows through cleanly; still counted in sat/val quantization.
-pub const CROSSHAIR_CENTER_CELL: usize = 10;
+/// shows through cleanly; still counted in sat/val quantization. Its
+/// value doubles as the number of rendered cells on each arm, and is
+/// used as the fixed size of the per-glyph ink-offset arrays.
+pub const CROSSHAIR_CENTER_CELL: usize = 8;
 
 /// Hue ring font size multiplier over the picker's base font_size.
 ///
@@ -107,7 +109,7 @@ pub fn hue_ring_font_scale() -> f32 {
 /// Cached `&'static [&'static str]` derived from a Vec<String> in the
 /// spec. The spec is itself cached; leaking the per-glyph strings
 /// costs one allocation per glyph per process, which is trivial
-/// (~40 glyphs total) and avoids spreading `String` ownership
+/// (~32 glyphs total) and avoids spreading `String` ownership
 /// through the render hot path.
 fn leak_glyphs(v: &[String]) -> &'static [&'static str] {
     let slice: Vec<&'static str> = v
@@ -434,7 +436,7 @@ pub enum ColorPickerState {
         /// after open. Threaded into geometry so `compute_picker_geometry`
         /// can toggle `hex_visible` based on "cursor inside backdrop".
         last_cursor_pos: Option<(f32, f32)>,
-        /// Widest shaped advance across all 40 crosshair-arm glyphs at
+        /// Widest shaped advance across all 32 crosshair-arm glyphs at
         /// base `font_size`. Measured once at picker-open via
         /// cosmic-text in `open_color_picker`, cached here so every
         /// subsequent `compute_picker_geometry` call can forward it to
@@ -457,7 +459,7 @@ pub enum ColorPickerState {
         /// via `baumhard::font::fonts::measure_glyph_ink_bounds`.
         /// Used by `compute_color_picker_layout` to re-anchor each
         /// arm's cell position on the ink centre rather than the
-        /// em-box centre. One offset per arm cell (10 cells per arm,
+        /// em-box centre. One offset per arm cell (8 cells per arm,
         /// excluding the centre slot) — every glyph in the picker has
         /// distinct sidebearings and a distinct baseline-relative ink
         /// extent, so a per-arm aggregate can't keep both axes flush.
@@ -595,7 +597,7 @@ pub struct ColorPickerOverlayGeometry {
     /// with the picker so it doesn't collide with the lower val bar
     /// cells.
     pub hex_visible: bool,
-    /// Widest shaped advance across the 40 crosshair-arm glyphs,
+    /// Widest shaped advance across the 32 crosshair-arm glyphs,
     /// measured by the renderer via cosmic-text at picker open. The
     /// layout fn divides by [`measurement_font_size`] to recover a
     /// dimensionless ratio it can scale with whatever font_size the
@@ -630,7 +632,7 @@ pub struct ColorPickerOverlayGeometry {
     /// [`baumhard::font::fonts::InkBounds::y_offset_from_box_center`]
     /// at the picker's `1.5` line-height multiplier.
     ///
-    /// One entry per arm cell (10 per arm, excluding the centre
+    /// One entry per arm cell (8 per arm, excluding the centre
     /// slot which renders the preview glyph instead).
     pub arm_top_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
     pub arm_bottom_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
@@ -693,13 +695,13 @@ pub struct ColorPickerLayout {
     pub ring_font_size: f32,
     /// 24 hue ring positions, ordered clockwise from 12-o'clock.
     pub hue_slot_positions: [(f32, f32); HUE_SLOT_COUNT],
-    /// 21 sat-bar cell centers, left → right. Cell 10 is the wheel
+    /// 17 sat-bar cell centers, left → right. Cell 8 is the wheel
     /// center — NOT rendered (center glyph shows through), but still
     /// used by hit-testing so a click at the exact center resolves
     /// to it.
     pub sat_cell_positions: [(f32, f32); SAT_CELL_COUNT],
-    /// 21 val-bar cell centers, top → bottom (top = brightest). Cell
-    /// 10 is the wheel center — same skip rule as sat.
+    /// 17 val-bar cell centers, top → bottom (top = brightest). Cell
+    /// 8 is the wheel center — same skip rule as sat.
     pub val_cell_positions: [(f32, f32); VAL_CELL_COUNT],
     /// Center preview glyph anchor (the ࿕). Top-left corner of the
     /// glyph box, computed so the glyph visually centers on the wheel
@@ -882,9 +884,9 @@ pub fn compute_color_picker_layout(
         );
     }
 
-    // ---- Crosshair sat/val bars (21 cells each, center cell is the
+    // ---- Crosshair sat/val bars (17 cells each, center cell is the
     // wheel center and rendered as ࿕ not as a bar cell) ----
-    // Bars span `20 * cell_advance` across the diameter of the inner
+    // Bars span `16 * cell_advance` across the diameter of the inner
     // cross region. If the constrained ring forced the inner extent
     // smaller than `CROSSHAIR_CENTER_CELL * cell_advance`, shrink the
     // actual step so cells still fit — keeps the small-window case
@@ -1614,14 +1616,14 @@ mod tests {
         );
     }
 
-    /// Each crosshair arm must render exactly 10 cells. The bars
-    /// have SAT_CELL_COUNT / VAL_CELL_COUNT = 21 cells, cell
-    /// CROSSHAIR_CENTER_CELL = 10 is the shared wheel-center slot
-    /// (࿕ overlay), and each arm covers 10 non-center cells —
-    /// totaling 40 rendered crosshair glyphs. Also asserts that the
+    /// Each crosshair arm must render exactly 8 cells. The bars
+    /// have SAT_CELL_COUNT / VAL_CELL_COUNT = 17 cells, cell
+    /// CROSSHAIR_CENTER_CELL = 8 is the shared wheel-center slot
+    /// (࿕ overlay), and each arm covers 8 non-center cells —
+    /// totaling 32 rendered crosshair glyphs. Also asserts that the
     /// center cells of both bars sit exactly on the wheel center.
     #[test]
-    fn crosshair_arms_render_exactly_10_cells_each() {
+    fn crosshair_arms_render_exactly_8_cells_each() {
         let layout = compute_color_picker_layout(&sample_geometry(), 1280.0, 720.0);
         // Center cell of the sat bar = wheel center.
         let (scx, scy) = layout.sat_cell_positions[CROSSHAIR_CENTER_CELL];
@@ -1631,22 +1633,22 @@ mod tests {
         let (vcx, vcy) = layout.val_cell_positions[CROSSHAIR_CENTER_CELL];
         assert!((vcx - layout.center.0).abs() < 0.1);
         assert!((vcy - layout.center.1).abs() < 0.1);
-        // Left arm = 10 cells (0..CROSSHAIR_CENTER_CELL).
-        assert_eq!(CROSSHAIR_CENTER_CELL, 10);
-        assert_eq!(arm_left_glyphs().len(), 10);
-        // Right arm = 10 cells (CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT).
-        assert_eq!(SAT_CELL_COUNT - CROSSHAIR_CENTER_CELL - 1, 10);
-        assert_eq!(arm_right_glyphs().len(), 10);
-        // Top arm = 10 cells, bottom arm = 10 cells.
-        assert_eq!(arm_top_glyphs().len(), 10);
-        assert_eq!(arm_bottom_glyphs().len(), 10);
-        // Four arms × 10 glyphs = 40 total.
+        // Left arm = 8 cells (0..CROSSHAIR_CENTER_CELL).
+        assert_eq!(CROSSHAIR_CENTER_CELL, 8);
+        assert_eq!(arm_left_glyphs().len(), 8);
+        // Right arm = 8 cells (CROSSHAIR_CENTER_CELL+1..SAT_CELL_COUNT).
+        assert_eq!(SAT_CELL_COUNT - CROSSHAIR_CENTER_CELL - 1, 8);
+        assert_eq!(arm_right_glyphs().len(), 8);
+        // Top arm = 8 cells, bottom arm = 8 cells.
+        assert_eq!(arm_top_glyphs().len(), 8);
+        assert_eq!(arm_bottom_glyphs().len(), 8);
+        // Four arms × 8 glyphs = 32 total.
         assert_eq!(
             arm_top_glyphs().len()
                 + arm_bottom_glyphs().len()
                 + arm_left_glyphs().len()
                 + arm_right_glyphs().len(),
-            40,
+            32,
         );
     }
 
@@ -1951,7 +1953,7 @@ mod tests {
     /// the §B2 mutator path silently misses elements.
     ///
     /// Insertion order: title → hue ring (24 slots) → hint →
-    /// sat bar (21 cells, channels also stride through the
+    /// sat bar (17 cells, channels also stride through the
     /// skipped center) → val bar (same) → preview → hex.
     #[test]
     fn picker_channels_are_strictly_ascending() {
