@@ -8,7 +8,6 @@
 //! `edit` is a positional verb that hands off to the inline label
 //! editor modal.
 
-use super::color::finalize_report;
 use super::Command;
 use crate::application::console::completion::{prefix_filter, Completion, CompletionContext, CompletionState};
 use crate::application::console::parser::Args;

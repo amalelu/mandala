@@ -69,6 +69,7 @@ pub use glyph_tables::{
 pub use hit::{hit_test_picker, PickerHit};
 pub use layout::ColorPickerLayout;
 pub use state::{
-    request_error_flash, ColorPickerState, FlashKind, PickerGesture, PickerMode,
+    request_error_flash, ColorPickerState, FlashKind, PickerDynamicApplyKey, PickerGesture,
+    PickerMode,
 };
 pub use targets::{current_hsv_at, ColorTarget, NodeColorAxis, PickerHandle};
