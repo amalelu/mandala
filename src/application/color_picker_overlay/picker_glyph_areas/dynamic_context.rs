@@ -65,10 +65,8 @@ static HUE_RING_COLORS: OnceLock<[CellColor; HUE_SLOT_COUNT]> = OnceLock::new();
 fn hue_ring_colors() -> &'static [CellColor; HUE_SLOT_COUNT] {
     HUE_RING_COLORS.get_or_init(|| {
         let mut table = [CellColor::zero(); HUE_SLOT_COUNT];
-        let mut i = 0;
-        while i < HUE_SLOT_COUNT {
-            table[i] = CellColor::new(hsv_to_rgb(hue_slot_to_degrees(i), 1.0, 1.0));
-            i += 1;
+        for (i, slot) in table.iter_mut().enumerate() {
+            *slot = CellColor::new(hsv_to_rgb(hue_slot_to_degrees(i), 1.0, 1.0));
         }
         table
     })
@@ -106,9 +104,10 @@ pub(super) struct PickerDynamicContext<'a> {
     /// for the preview-commit-hover branch.
     preview_rgb: [f32; 3],
     /// Sat-bar base colors: for each cell `i`, the non-hovered,
-    /// non-selected cosmic color and its source RGB. Crosshair center
-    /// cell (`CROSSHAIR_CENTER_CELL`) is zero — the dynamic spec
-    /// never queries it.
+    /// non-selected cosmic color and its source RGB. Populated for
+    /// every slot including the crosshair center (see `new()`); a
+    /// `debug_assert_ne!` in `field()` keeps the center slot off the
+    /// hot path.
     sat_colors: [CellColor; SAT_CELL_COUNT],
     /// Val-bar base colors — same layout as `sat_colors`.
     val_colors: [CellColor; VAL_CELL_COUNT],
@@ -151,24 +150,23 @@ impl<'a> PickerDynamicContext<'a> {
             .round()
             .clamp(0.0, (VAL_CELL_COUNT - 1) as f32) as usize;
 
-        // Precompute sat-bar base colors. Skip the crosshair center
-        // cell (the dynamic spec never queries it — see the
-        // `debug_assert_ne!` guard in `field()`).
+        // Precompute sat-bar / val-bar base colors for every cell
+        // including the crosshair center. The dynamic spec never
+        // queries the center cell in practice (a `debug_assert_ne!`
+        // in `field()` pins it), but populating every slot with a
+        // valid HSV sample — rather than leaving the center as a
+        // transparent-black `CellColor::zero()` — means an
+        // accidental spec drift produces a plausible color instead
+        // of an invisible cell. The wasted work is two extra
+        // `hsv_to_rgb` calls per dynamic apply.
         let mut sat_colors = [CellColor::zero(); SAT_CELL_COUNT];
-        for i in 0..SAT_CELL_COUNT {
-            if i == CROSSHAIR_CENTER_CELL {
-                continue;
-            }
-            sat_colors[i] =
+        for (i, slot) in sat_colors.iter_mut().enumerate() {
+            *slot =
                 CellColor::new(hsv_to_rgb(geometry.hue_deg, sat_cell_to_value(i), geometry.val));
         }
-        // Precompute val-bar base colors. Same skip-center rule.
         let mut val_colors = [CellColor::zero(); VAL_CELL_COUNT];
-        for i in 0..VAL_CELL_COUNT {
-            if i == CROSSHAIR_CENTER_CELL {
-                continue;
-            }
-            val_colors[i] =
+        for (i, slot) in val_colors.iter_mut().enumerate() {
+            *slot =
                 CellColor::new(hsv_to_rgb(geometry.hue_deg, geometry.sat, val_cell_to_value(i)));
         }
 

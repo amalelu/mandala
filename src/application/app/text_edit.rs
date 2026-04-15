@@ -28,11 +28,13 @@ use super::{
 /// initial caret through the Baumhard mutation pipeline so the live
 /// tree shows the cursor on the next frame.
 ///
-/// No snapshot of the node's pre-edit text is stored on
-/// `TextEditState`: the model is untouched during typing, so the
-/// model itself *is* the pre-edit state. `set_node_text` takes its
-/// own "before" snapshot at commit time, and cancel just rebuilds
-/// the tree from the unchanged model.
+/// Snapshots the tree's pre-edit `(text, regions)` into
+/// `TextEditState::Open::{original_text, original_regions}` so cancel
+/// can revert via `revert_node_text_on_tree` without going through
+/// the full `rebuild_all`. Both snapshots read from the tree — not
+/// the model — so any selection-highlight the current `rebuild_all`
+/// stamped onto the node (via `apply_tree_highlights`) round-trips
+/// through cancel.
 pub(in crate::application::app) fn open_text_edit(
     node_id: &str,
     from_creation: bool,
@@ -53,17 +55,28 @@ pub(in crate::application::app) fn open_text_edit(
     // The tree is the source of truth for regions during an edit
     // session; the model is frozen until commit. `from_creation`
     // nodes have no prior regions, so we start from empty.
+    // Snapshot the tree's pre-edit text + regions so cancel can
+    // apply them back as a delta instead of triggering `rebuild_all`.
+    // Both reads go through the tree rather than the model so any
+    // selection-highlight the last `rebuild_all` stamped onto the
+    // node survives cancel — the `from_creation` path is no
+    // exception (a freshly-created node is `Single(new_id)`
+    // selected, so its tree regions carry the cyan highlight we'd
+    // otherwise wipe on cancel).
+    let original_text = read_node_text(mindmap_tree.as_ref(), node_id).unwrap_or_default();
+    let original_regions =
+        read_node_regions(mindmap_tree.as_ref(), node_id).unwrap_or_default();
+    // `buffer_regions` drives region bookkeeping during typing —
+    // seeded from the original regions and then mutated by each
+    // keystroke via `shift_regions_after` / `shrink_regions_after`.
+    // `from_creation` nodes start with empty regions because the
+    // buffer itself starts empty, so there's nothing the cursor
+    // could be absorbed into yet.
     let buffer_regions = if from_creation {
         baumhard::core::primitives::ColorFontRegions::new_empty()
     } else {
-        read_node_regions(mindmap_tree.as_ref(), node_id).unwrap_or_default()
+        original_regions.clone()
     };
-    // Snapshot the tree's pre-edit text + regions so cancel can
-    // apply them back as a delta instead of triggering `rebuild_all`.
-    // `from_creation` nodes were just inserted — the tree's current
-    // `area.text` is `node.text` (empty) and regions are empty.
-    let original_text = read_node_text(mindmap_tree.as_ref(), node_id).unwrap_or_default();
-    let original_regions = buffer_regions.clone();
     *text_edit_state = TextEditState::Open {
         node_id: node_id.to_string(),
         buffer: buffer.clone(),
@@ -113,38 +126,35 @@ pub(in crate::application::app) fn read_node_text(
     element.glyph_area().map(|a| a.text.clone())
 }
 
-/// Apply a snapshot of `(text, regions)` back to the live tree's
-/// `GlyphArea` for `node_id`, via a `DeltaGlyphArea` with `Assign`
-/// semantics. Used by the text-editor cancel path to revert the
-/// tree to its pre-edit state without going through the full
-/// `rebuild_all` (which rebuilds every node from the model and
-/// re-walks the scene). Returns early on the usual "node
-/// disappeared" edge cases.
-pub(in crate::application::app) fn revert_node_text_on_tree(
+/// Assign a `(text, regions)` snapshot onto the live tree's
+/// `GlyphArea` for `node_id`, via a `DeltaGlyphArea`. Pure tree
+/// mutation — no renderer contact — so unit tests can drive it
+/// without a GPU context. Returns `true` on success, `false` when
+/// the tree, node, or element isn't present.
+pub(in crate::application::app) fn apply_text_and_regions_delta(
     node_id: &str,
     text: String,
     regions: baumhard::core::primitives::ColorFontRegions,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    renderer: &mut Renderer,
-) {
+) -> bool {
     use baumhard::core::primitives::{Applicable, ApplyOperation};
     use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
 
     let tree = match mindmap_tree.as_mut() {
         Some(t) => t,
-        None => return,
+        None => return false,
     };
     let indextree_node_id = match tree.node_map.get(node_id) {
         Some(id) => *id,
-        None => return,
+        None => return false,
     };
     let element = match tree.tree.arena.get_mut(indextree_node_id) {
         Some(n) => n.get_mut(),
-        None => return,
+        None => return false,
     };
     let area = match element.glyph_area_mut() {
         Some(a) => a,
-        None => return,
+        None => return false,
     };
 
     let delta = DeltaGlyphArea::new(vec![
@@ -153,7 +163,31 @@ pub(in crate::application::app) fn revert_node_text_on_tree(
         GlyphAreaField::Operation(ApplyOperation::Assign),
     ]);
     delta.apply_to(area);
-    renderer.rebuild_buffers_from_tree(&tree.tree);
+    true
+}
+
+/// Apply a snapshot of `(text, regions)` back to the live tree's
+/// `GlyphArea` for `node_id` and refresh the renderer's cosmic-text
+/// buffers. Used by the text-editor cancel path to revert the tree
+/// to its pre-edit state without going through the full
+/// `rebuild_all` (which rebuilds every node from the model and
+/// re-walks the scene). Thin wrapper over
+/// [`apply_text_and_regions_delta`] — the latter is unit-tested
+/// directly; this function just pairs it with the renderer
+/// rebuild.
+pub(in crate::application::app) fn revert_node_text_on_tree(
+    node_id: &str,
+    text: String,
+    regions: baumhard::core::primitives::ColorFontRegions,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    if !apply_text_and_regions_delta(node_id, text, regions, mindmap_tree) {
+        return;
+    }
+    if let Some(tree) = mindmap_tree.as_ref() {
+        renderer.rebuild_buffers_from_tree(&tree.tree);
+    }
 }
 
 /// Session 7A: commit or cancel the open text editor.
@@ -418,6 +452,127 @@ pub(in crate::application::app) fn handle_text_edit_key(
             mindmap_tree,
             renderer,
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests {
+    //! Unit tests for the text-edit cancel path. Focus on
+    //! [`apply_text_and_regions_delta`] — the pure tree-mutation
+    //! half of `revert_node_text_on_tree` — so we can exercise the
+    //! `Assign`-delta contract without needing a live `Renderer`.
+
+    use super::*;
+    use baumhard::core::primitives::{ColorFontRegion, ColorFontRegions, Range};
+    use baumhard::mindmap::loader;
+    use baumhard::mindmap::tree_builder::build_mindmap_tree;
+    use std::path::PathBuf;
+
+    fn test_map_path() -> PathBuf {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("maps/testament.mindmap.json");
+        path
+    }
+
+    /// Build a fresh tree from the testament map and pick the first
+    /// node id whose `GlyphArea::text` is non-empty — we need a
+    /// real text string so the "mutate then revert" assertion is
+    /// meaningful.
+    fn tree_with_text_node() -> (baumhard::mindmap::tree_builder::MindMapTree, String) {
+        let map = loader::load_from_file(&test_map_path()).unwrap();
+        let tree = build_mindmap_tree(&map);
+        let node_id = tree
+            .node_map
+            .iter()
+            .find(|(_, nid)| {
+                tree.tree
+                    .arena
+                    .get(**nid)
+                    .and_then(|n| n.get().glyph_area())
+                    .map(|a| !a.text.is_empty())
+                    .unwrap_or(false)
+            })
+            .map(|(id, _)| id.clone())
+            .expect("testament map has at least one node with non-empty text");
+        (tree, node_id)
+    }
+
+    /// Simulate a text-edit session: capture the pre-edit snapshot,
+    /// stamp garbage onto the tree's text + regions, then call
+    /// `apply_text_and_regions_delta` with the snapshot and assert
+    /// the tree's `GlyphArea` is byte-equal to its pre-edit state.
+    /// Regression guard for the cancel path bypassing `rebuild_all`.
+    #[test]
+    fn apply_text_and_regions_delta_restores_pre_edit_snapshot() {
+        let (tree, node_id) = tree_with_text_node();
+        let mut tree_opt = Some(tree);
+
+        // Snapshot pre-edit text + regions.
+        let original_text = read_node_text(tree_opt.as_ref(), &node_id).unwrap();
+        let original_regions =
+            read_node_regions(tree_opt.as_ref(), &node_id).unwrap();
+
+        // Stamp garbage onto the live tree to simulate an edit session.
+        let mut garbage_regions = ColorFontRegions::new_empty();
+        garbage_regions.submit_region(ColorFontRegion::new(
+            Range::new(0, 5),
+            None,
+            Some([1.0, 0.0, 1.0, 1.0]),
+        ));
+        let garbage_text = "zzzzz|".to_string();
+        assert!(apply_text_and_regions_delta(
+            &node_id,
+            garbage_text.clone(),
+            garbage_regions,
+            &mut tree_opt,
+        ));
+        let after_garbage = read_node_text(tree_opt.as_ref(), &node_id).unwrap();
+        assert_eq!(after_garbage, garbage_text, "garbage delta must stick");
+
+        // Revert to the pre-edit snapshot.
+        assert!(apply_text_and_regions_delta(
+            &node_id,
+            original_text.clone(),
+            original_regions.clone(),
+            &mut tree_opt,
+        ));
+        assert_eq!(
+            read_node_text(tree_opt.as_ref(), &node_id).unwrap(),
+            original_text,
+            "revert delta must restore text exactly"
+        );
+        assert_eq!(
+            read_node_regions(tree_opt.as_ref(), &node_id).unwrap(),
+            original_regions,
+            "revert delta must restore regions exactly"
+        );
+    }
+
+    /// Missing tree / missing node / missing glyph_area must all
+    /// return `false` rather than panic. Covers the three early-exit
+    /// branches in `apply_text_and_regions_delta` so a refactor that
+    /// silently accepts the bad inputs surfaces here.
+    #[test]
+    fn apply_text_and_regions_delta_early_exits_gracefully() {
+        // No tree at all.
+        let mut none_tree: Option<baumhard::mindmap::tree_builder::MindMapTree> = None;
+        assert!(!apply_text_and_regions_delta(
+            "whatever",
+            String::new(),
+            ColorFontRegions::new_empty(),
+            &mut none_tree,
+        ));
+
+        // Tree present, node id not found.
+        let (tree, _real_id) = tree_with_text_node();
+        let mut some_tree = Some(tree);
+        assert!(!apply_text_and_regions_delta(
+            "nonexistent-node-id",
+            String::new(),
+            ColorFontRegions::new_empty(),
+            &mut some_tree,
+        ));
     }
 }
 
