@@ -382,7 +382,7 @@ fn append_border_sub_tree(
     *unique_id += 1;
 }
 
-fn append_border_run(
+pub(super) fn append_border_run(
     tree: &mut Tree<GfxElement, GfxMutator>,
     parent_id: NodeId,
     channel: usize,

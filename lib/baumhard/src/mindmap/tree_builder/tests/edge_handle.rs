@@ -109,3 +109,34 @@ fn edge_handle_identity_sequence_changes_on_midpoint_to_cp() {
         edge_handle_identity_sequence(&curved)
     );
 }
+
+/// Edge-handle glyphs can in principle be any text the element
+/// carries; a ZWJ emoji glyph must size the `ColorFontRegions`
+/// span to the grapheme-cluster count (1), not the codepoint
+/// count (5). Guards the grapheme-aware edge_handle.rs builder
+/// against a revert to `.chars().count()`.
+#[test]
+fn edge_handle_region_sized_by_grapheme_cluster_count_not_codepoints() {
+    use crate::mindmap::scene_builder::{EdgeHandleElement, EdgeHandleKind};
+    use crate::mindmap::scene_cache::EdgeKey;
+
+    let elem = EdgeHandleElement {
+        edge_key: EdgeKey::new("a", "b", "child"),
+        kind: EdgeHandleKind::Midpoint,
+        position: (0.0, 0.0),
+        // 👨‍👩‍👧 — 5 codepoints, 1 grapheme cluster.
+        glyph: "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".into(),
+        color: "#00E5FF".into(),
+        font_size_pt: 14.0,
+    };
+    let tree = build_edge_handle_tree(&[elem]);
+    let handle = tree.root.children(&tree.arena).next().unwrap();
+    let area = tree.arena.get(handle).unwrap().get().glyph_area().unwrap();
+    let regions = area.regions.all_regions();
+    assert_eq!(regions.len(), 1);
+    assert_eq!(
+        regions[0].range.end - regions[0].range.start,
+        1,
+        "region must cover 1 grapheme cluster, not 5 codepoints"
+    );
+}

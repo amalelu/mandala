@@ -199,3 +199,67 @@ fn connection_label_mutator_round_trip_handles_text_edit() {
         assert_eq!(a_area.outline, e_area.outline);
     }
 }
+
+/// Connection body / cap glyphs whose text is a ZWJ sequence (a
+/// single grapheme cluster spanning multiple codepoints) must size
+/// the `ColorFontRegions` span to the cluster count, not the
+/// codepoint count. Guards the grapheme-aware connection.rs
+/// builder against a revert to `.chars().count()`.
+#[test]
+fn connection_region_sized_by_grapheme_cluster_count_not_codepoints() {
+    use crate::mindmap::scene_builder::ConnectionElement;
+    use crate::mindmap::scene_cache::EdgeKey;
+
+    let elem = ConnectionElement {
+        edge_key: EdgeKey::new("a", "b", "child"),
+        glyph_positions: vec![(10.0, 0.0)],
+        // 👨‍👩‍👧 — 5 codepoints, 1 grapheme cluster.
+        body_glyph: "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".into(),
+        cap_start: None,
+        cap_end: None,
+        font: None,
+        font_size_pt: 12.0,
+        color: "#ffffff".into(),
+    };
+    let tree = build_connection_tree(&[elem]);
+    let edge_parent = tree.root.children(&tree.arena).next().unwrap();
+    let glyph = edge_parent.children(&tree.arena).next().unwrap();
+    let area = tree.arena.get(glyph).unwrap().get().glyph_area().unwrap();
+    let regions = area.regions.all_regions();
+    assert_eq!(regions.len(), 1, "connection body emits one region");
+    assert_eq!(
+        regions[0].range.end - regions[0].range.start,
+        1,
+        "region must cover 1 grapheme cluster, not 5 codepoints"
+    );
+}
+
+/// Connection labels are user-editable text on every edge that
+/// carries a `label`. A ZWJ emoji in the label must size the
+/// region to the grapheme-cluster count (1). Mirrors the body /
+/// cap test above for the connection-label surface.
+#[test]
+fn connection_label_region_sized_by_grapheme_cluster_count_not_codepoints() {
+    use crate::mindmap::scene_builder::ConnectionLabelElement;
+    use crate::mindmap::scene_cache::EdgeKey;
+
+    let elem = ConnectionLabelElement {
+        edge_key: EdgeKey::new("a", "b", "cross_link"),
+        text: "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".into(), // 👨‍👩‍👧
+        position: (0.0, 0.0),
+        bounds: (120.0, 20.0),
+        color: "#ffffff".into(),
+        font: None,
+        font_size_pt: 12.0,
+    };
+    let tree = build_connection_label_tree(&[elem]);
+    let label_node = tree.tree.root.children(&tree.tree.arena).next().unwrap();
+    let area = tree.tree.arena.get(label_node).unwrap().get().glyph_area().unwrap();
+    let regions = area.regions.all_regions();
+    assert_eq!(regions.len(), 1, "connection label emits one region");
+    assert_eq!(
+        regions[0].range.end - regions[0].range.start,
+        1,
+        "region must cover 1 grapheme cluster, not 5 codepoints"
+    );
+}

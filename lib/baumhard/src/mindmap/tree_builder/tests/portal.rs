@@ -198,3 +198,38 @@ fn portal_identity_sequence_drops_folded_pairs() {
     );
 }
 
+
+/// A portal glyph containing a ZWJ (zero-width joiner) sequence —
+/// e.g. the family emoji "👨‍👩‍👧" which is three codepoints joined
+/// into one grapheme cluster — must size its `ColorFontRegions`
+/// span to the grapheme-cluster count (1), not the codepoint count
+/// (5). Guards against a revert to `.chars().count()` on the
+/// region-building path; `.chars().count()` would produce 5 here
+/// and the region would extend past the rendered glyph, bleeding
+/// the marker colour into empty space.
+#[test]
+fn portal_marker_region_sized_by_grapheme_cluster_count_not_codepoints() {
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0, 0.0, 0.0),
+            synthetic_node("b", None, 1, 200.0, 0.0),
+        ],
+        vec![],
+    );
+    let mut portal = synthetic_portal("X", "a", "b", "#ff0000");
+    portal.glyph = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".into(); // 👨‍👩‍👧
+    map.portals.push(portal);
+
+    let result = build_portal_tree(&map, &HashMap::new(), None, None);
+    let pair = result.tree.root.children(&result.tree.arena).next().unwrap();
+    let marker = pair.children(&result.tree.arena).next().unwrap();
+    let area = glyph_area_of(&result.tree, marker);
+    let regions = area.regions.all_regions();
+    assert_eq!(regions.len(), 1, "portal marker should emit one region");
+    // 5 codepoints joined by ZWJ render as a single grapheme cluster.
+    assert_eq!(
+        regions[0].range.end - regions[0].range.start,
+        1,
+        "region must cover 1 grapheme cluster, not 5 codepoints"
+    );
+}
