@@ -4,7 +4,6 @@ use super::fixtures::*;
 use super::super::*;
 use crate::mindmap::scene_cache::SceneConnectionCache;
 use std::collections::HashMap;
-use glam::Vec2;
 
 #[test]
 fn portal_emits_two_elements_per_pair() {

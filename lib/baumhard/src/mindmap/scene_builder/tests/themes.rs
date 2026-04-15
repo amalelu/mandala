@@ -2,8 +2,6 @@
 
 use super::fixtures::*;
 use super::super::*;
-use std::collections::HashMap;
-use glam::Vec2;
 
 #[test]
 fn test_scene_background_resolves_theme_variable() {

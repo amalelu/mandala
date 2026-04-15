@@ -1,6 +1,5 @@
 //! Edge handle builder tests — channel ordering/distinctness, mutator round-trip, identity shift on midpoint→control-point transitions.
 
-use super::fixtures::*;
 use super::super::*;
 
 #[test]

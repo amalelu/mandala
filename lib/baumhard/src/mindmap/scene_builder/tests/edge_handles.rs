@@ -5,7 +5,6 @@ use super::super::*;
 use crate::mindmap::loader;
 use crate::mindmap::scene_cache::SceneConnectionCache;
 use std::collections::HashMap;
-use glam::Vec2;
 
 #[test]
 fn test_no_edge_handles_when_nothing_selected() {

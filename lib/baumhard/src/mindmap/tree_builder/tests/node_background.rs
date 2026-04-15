@@ -87,7 +87,3 @@ fn test_background_color_three_digit_hex_works() {
     let area = glyph_area_of(&result.tree, *result.node_map.get("n").unwrap());
     assert_eq!(area.background_color, Some([0, 0, 0, 255]));
 }
-
-// -----------------------------------------------------------------
-// Border tree builder
-// -----------------------------------------------------------------

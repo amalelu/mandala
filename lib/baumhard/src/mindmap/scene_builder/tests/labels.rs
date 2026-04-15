@@ -3,8 +3,6 @@
 use super::fixtures::*;
 use super::super::*;
 use crate::mindmap::model::GlyphConnectionConfig;
-use std::collections::HashMap;
-use glam::Vec2;
 
 #[test]
 fn test_label_element_emitted_for_edge_with_label() {
@@ -104,9 +102,3 @@ fn test_label_color_follows_glyph_connection_color_override() {
     // The glyph_connection.color override wins over edge.color.
     assert_eq!(scene.connection_label_elements[0].color, "#112233");
 }
-
-// ====================================================================
-// Session 6E — Portal marker emission
-// ====================================================================
-
-use crate::mindmap::model::PortalPair;

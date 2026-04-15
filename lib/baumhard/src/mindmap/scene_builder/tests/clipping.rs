@@ -2,9 +2,6 @@
 
 use super::fixtures::*;
 use super::super::*;
-use crate::mindmap::model::GlyphConnectionConfig;
-use std::collections::HashMap;
-use glam::Vec2;
 
 #[test]
 fn test_scene_clips_connection_glyphs_inside_node() {

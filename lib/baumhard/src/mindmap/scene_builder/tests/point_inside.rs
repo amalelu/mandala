@@ -1,9 +1,6 @@
 //! `point_inside_any_node` boundary cases: strictly inside, on boundary (not inside), outside, and multi-AABB fan-out.
 
-use super::fixtures::*;
-use super::super::*;
 use super::super::builder::point_inside_any_node;
-use std::collections::HashMap;
 use glam::Vec2;
 
 #[test]
@@ -45,8 +42,3 @@ fn test_point_inside_any_node_checks_all_aabbs() {
     // Inside the second box
     assert!(point_inside_any_node(Vec2::new(125.0, 125.0), &aabbs));
 }
-
-// Shared helpers for the synthetic-map scene tests below.
-use crate::mindmap::model::{
-    Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
-};

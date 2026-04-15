@@ -248,7 +248,3 @@ fn border_identity_sequence_changes_on_show_frame_toggle() {
     assert_eq!(after, vec!["a".to_string()]);
     assert_ne!(before, after);
 }
-
-// -----------------------------------------------------------------
-// Portal tree builder
-// -----------------------------------------------------------------

@@ -54,13 +54,3 @@ fn test_build_tree_deep_chain_no_stack_overflow() {
     }
     assert_eq!(depth, 500);
 }
-
-// -----------------------------------------------------------------
-// Background color → GlyphArea.background_color plumbing
-//
-// Session 6C follow-up: node backgrounds now live on the Baumhard
-// tree (as `GlyphArea.background_color`) so they can be mutated
-// through the tree walker and efficiently rendered as filled
-// rectangles by the renderer. These tests lock in that
-// `NodeStyle.background_color` survives the tree build intact,
-// honors the theme-variable indirection, and degrades safely on

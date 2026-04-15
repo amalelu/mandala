@@ -107,11 +107,12 @@ fn portal_pair_channels_are_strictly_ascending() {
 }
 
 /// Round-trip: building a tree at state A and then applying the
-/// mutator computed from state B must produce a tree whose
-/// per-channel GlyphAreas match what `build_portal_tree(B)`
-/// would produce directly. Pins the canonical §B2
-/// "mutation, not rebuild" promise — the in-place path's
-/// observable output is identical to a full rebuild's, modulo
+/// Applying the mutator computed from state B to a tree built
+/// from state A must produce a tree whose per-channel GlyphAreas
+/// match what `build_portal_tree(B)` would produce directly.
+/// Pins the canonical §B2 "mutation, not rebuild" promise — the
+/// in-place path's observable output is identical to a full
+/// rebuild's.
 #[test]
 fn portal_mutator_round_trip_matches_full_rebuild() {
     use crate::core::primitives::Applicable;
@@ -161,9 +162,10 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
     }
 }
 
-/// Connection identity sequence captures cap presence and body
-/// glyph count per edge. A change in any of those is structural
-/// and must drop the equality so the dispatcher in
+/// Folding a node drops its outgoing portals from
+/// `portal_identity_sequence` so the dispatcher in
+/// `update_portal_tree` takes the full-rebuild path instead of the
+/// in-place mutator path (the mutator assumes a fixed slot count).
 #[test]
 fn portal_identity_sequence_drops_folded_pairs() {
     let mut map = synthetic_map(

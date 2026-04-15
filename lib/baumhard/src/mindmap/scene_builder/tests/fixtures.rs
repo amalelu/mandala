@@ -2,7 +2,6 @@
 //! `pub(super)` so themed sibling modules can reuse them without
 //! per-file duplication.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::mindmap::model::{
