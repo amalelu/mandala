@@ -29,12 +29,11 @@ use console_pass::console_overlay_areas;
 use tree_walker::walk_tree_into_buffers;
 
 use std::borrow::Cow;
-use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cosmic_text::{Attrs, AttrsList, Buffer, Editor, FontSystem};
+use cosmic_text::{Attrs, AttrsList, Buffer, FontSystem};
 use glam::{Mat4, Quat, Vec3};
 use cosmic_text::{Family, Style};
 use glyphon::{Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
@@ -52,11 +51,11 @@ use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch}
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
 use baumhard::gfx_structs::element::GfxElement;
+#[cfg(test)]
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
-use baumhard::font::attrs::attrs_list_from_regions;
 use baumhard::gfx_structs::camera::Camera2D;
 use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement, PortalRefKey};
 use baumhard::mindmap::scene_cache::EdgeKey;
@@ -874,7 +873,7 @@ impl Renderer {
         // Palette buffers go into a separate list so they render
         // in a second glyphon pass (with the backdrop rect
         // between them, hence the split).
-        let mut main_text_areas: Vec<TextArea> = self.mindmap_buffers.values()
+        let main_text_areas: Vec<TextArea> = self.mindmap_buffers.values()
             .chain(self.border_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_label_buffers.values())

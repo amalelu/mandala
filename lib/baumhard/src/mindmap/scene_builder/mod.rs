@@ -11,13 +11,9 @@
 //! - [`builder`] — `build_edge_handles`, the `build_scene` family,
 //!   and the big `build_scene_with_cache` implementation.
 
-use std::collections::{HashMap, HashSet};
 use crate::mindmap::border::BorderStyle;
-use crate::mindmap::connection;
-use crate::mindmap::model::{GlyphConnectionConfig, MindMap, TextRun};
-use crate::mindmap::scene_cache::{CachedConnection, EdgeKey, SceneConnectionCache};
-use crate::util::color::resolve_var;
-use glam::Vec2;
+use crate::mindmap::model::TextRun;
+use crate::mindmap::scene_cache::EdgeKey;
 
 /// A transient, scene-build-only substitution of an edge's effective
 /// color. Used by the inline color picker's hover preview so the edge
@@ -253,17 +249,17 @@ pub struct EdgeHandleElement {
 /// Color override applied to the `ConnectionElement` of a selected edge.
 /// Kept in sync visually with the cyan node selection highlight in
 /// `src/application/document.rs::HIGHLIGHT_COLOR`.
-pub(super) const SELECTED_EDGE_COLOR: &str = "#00E5FF";
+const SELECTED_EDGE_COLOR: &str = "#00E5FF";
 
 /// Glyph used for edge grab-handles in Session 6C's connection
 /// reshape surface. A solid black diamond reads as a clickable
 /// control point across most fonts.
-pub(super) const EDGE_HANDLE_GLYPH: &str = "\u{25C6}"; // ◆
+const EDGE_HANDLE_GLYPH: &str = "\u{25C6}"; // ◆
 
 /// Font size (in points) for the edge handle glyphs. Slightly larger
 /// than the default connection glyph size so handles stand out on top
 /// of the selected edge.
-pub(super) const EDGE_HANDLE_FONT_SIZE_PT: f32 = 14.0;
+const EDGE_HANDLE_FONT_SIZE_PT: f32 = 14.0;
 
 mod builder;
 

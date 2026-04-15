@@ -5,6 +5,10 @@
 use super::*;
 use super::builder::point_inside_any_node;
 use crate::mindmap::loader;
+use crate::mindmap::model::GlyphConnectionConfig;
+use crate::mindmap::scene_cache::{CachedConnection, SceneConnectionCache};
+use glam::Vec2;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn test_map_path() -> PathBuf {

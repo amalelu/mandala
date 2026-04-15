@@ -15,16 +15,6 @@ use crate::gfx_structs::tree::Tree;
 use crate::mindmap::model::{MindMap, MindNode};
 use crate::util::color;
 
-// =====================================================================
-// Portal tree builder
-//
-// Emits one baumhard `Tree<GfxElement, GfxMutator>` containing one
-// `GlyphArea` per (portal-pair × endpoint). Mirrors the legacy
-// `scene_builder::PortalElement` emission rule: each `PortalPair`
-// produces two markers, one floating above each endpoint node's
-// top-right corner.
-// =====================================================================
-
 /// Cyan highlight color for selected portals — kept in sync with
 /// `scene_builder::SELECTED_PORTAL_COLOR_HEX`. Hardcoded as a
 /// hex literal here too rather than re-exporting because the
