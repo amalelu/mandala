@@ -150,22 +150,29 @@ impl<'a> PickerDynamicContext<'a> {
             .round()
             .clamp(0.0, (VAL_CELL_COUNT - 1) as f32) as usize;
 
-        // Precompute sat-bar / val-bar base colors for every cell
-        // including the crosshair center. The dynamic spec never
-        // queries the center cell in practice (a `debug_assert_ne!`
-        // in `field()` pins it), but populating every slot with a
-        // valid HSV sample — rather than leaving the center as a
-        // transparent-black `CellColor::zero()` — means an
-        // accidental spec drift produces a plausible color instead
-        // of an invisible cell. The wasted work is two extra
-        // `hsv_to_rgb` calls per dynamic apply.
+        // Precompute sat-bar / val-bar base colors for every live
+        // cell. The crosshair centre is skipped — the dynamic spec
+        // never queries it (pinned by `debug_assert_ne!` in
+        // `field()`), and the layout-phase mutator_spec lists `8`
+        // in `skip_indices`, so a filled entry there would be
+        // wasted work. The centre slots keep their
+        // `CellColor::zero()` sentinel; any accidental read would
+        // surface through the debug-assert rather than painting a
+        // plausible-but-wrong colour. Saves two `hsv_to_rgb` calls
+        // per dynamic apply (one per bar).
         let mut sat_colors = [CellColor::zero(); SAT_CELL_COUNT];
         for (i, slot) in sat_colors.iter_mut().enumerate() {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
             *slot =
                 CellColor::new(hsv_to_rgb(geometry.hue_deg, sat_cell_to_value(i), geometry.val));
         }
         let mut val_colors = [CellColor::zero(); VAL_CELL_COUNT];
         for (i, slot) in val_colors.iter_mut().enumerate() {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
             *slot =
                 CellColor::new(hsv_to_rgb(geometry.hue_deg, geometry.sat, val_cell_to_value(i)));
         }
