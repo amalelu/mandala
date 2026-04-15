@@ -118,7 +118,11 @@ pub(super) fn console_overlay_areas(
             color.b() as f32 / 255.0,
             color.a() as f32 / 255.0,
         ];
-        area.regions = ColorFontRegions::single_span(text.chars().count(), Some(rgba), None);
+        area.regions = ColorFontRegions::single_span(
+            baumhard::util::grapheme_chad::count_grapheme_clusters(text),
+            Some(rgba),
+            None,
+        );
         area
     };
 
@@ -323,8 +327,9 @@ pub(super) fn console_overlay_areas(
     );
     let prompt_text = "\u{276F} ";
     let combined = format!("{prompt_text}{input_clipped}");
-    let prompt_chars = prompt_text.chars().count();
-    let input_chars = input_clipped.chars().count();
+    let prompt_chars = baumhard::util::grapheme_chad::count_grapheme_clusters(prompt_text);
+    let input_chars =
+        baumhard::util::grapheme_chad::count_grapheme_clusters(&input_clipped);
 
     let mut prompt_area = GlyphArea::new_with_str(
         &combined,

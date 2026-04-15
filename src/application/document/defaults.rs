@@ -34,7 +34,7 @@ pub(super) fn default_orphan_node(id: &str, position: Vec2, index: i32) -> MindN
     let text = "New node".to_string();
     let text_runs = vec![TextRun {
         start: 0,
-        end: text.chars().count(),
+        end: baumhard::util::grapheme_chad::count_grapheme_clusters(&text),
         bold: false,
         italic: false,
         underline: false,
