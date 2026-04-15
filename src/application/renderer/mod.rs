@@ -29,18 +29,16 @@ use console_pass::console_overlay_areas;
 use tree_walker::walk_tree_into_buffers;
 
 use std::borrow::Cow;
-use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use cosmic_text::{Attrs, AttrsList, Buffer, BufferRef, Edit, Editor, FontSystem};
+use cosmic_text::{Attrs, AttrsList, Buffer, FontSystem};
 use glam::{Mat4, Quat, Vec3};
 use cosmic_text::{Family, Style};
 use glyphon::{Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
-use indextree::Arena;
 use log::{debug, error, info};
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::FxHashMap;
 
 use wgpu::{
     Adapter, Color, Device, Instance, MultisampleState, PipelineLayout, Queue, RenderPipeline,
@@ -53,11 +51,11 @@ use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch}
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
 use baumhard::gfx_structs::element::GfxElement;
+#[cfg(test)]
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
-use baumhard::font::attrs::attrs_list_from_regions;
 use baumhard::gfx_structs::camera::Camera2D;
 use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement, PortalRefKey};
 use baumhard::mindmap::scene_cache::EdgeKey;
@@ -117,8 +115,6 @@ pub struct Renderer {
     device: Device,
     queue: Queue,
     viewport: Viewport,
-    graphics_arena: Arc<RwLock<Arena<GfxElement>>>,
-    buffer_cache: FxHashMap<usize, TextBuffer>,
     swash_cache: SwashCache,
     glyphon_cache: Cache,
     atlas: TextAtlas,
@@ -312,7 +308,6 @@ impl Renderer {
         instance: Instance,
         surface: Surface<'static>,
         window: Arc<Window>,
-        arena: Arc<RwLock<Arena<GfxElement>>>,
     ) -> Renderer {
         let adapter = Self::get_adapter(&instance, &surface).await;
         let (device, queue) = Self::get_device(&adapter).await;
@@ -441,8 +436,6 @@ impl Renderer {
             redraw_mode: RedrawMode::NoLimit,
             run: true,
             fps_clock: 0,
-            graphics_arena: arena,
-            buffer_cache: Default::default(),
             glyphon_cache,
             viewport,
             camera,
@@ -752,68 +745,6 @@ impl Renderer {
         self.window.inner_size()
     }
 
-    /// Checks if the block exists in the buffer_cache already, and if so, is the cached version up to date?
-    /// Updates the cache as necessary
-    fn prepare_glyph_block(
-        block: &GlyphArea,
-        unique_id: &usize,
-        buffer_cache: &mut FxHashMap<usize, TextBuffer>,
-    ) {
-        let mut hasher = FxHasher::default();
-        block.hash(&mut hasher);
-        let block_hash = hasher.finish();
-
-        let mut contains_id = false;
-        let mut existing_hash: u64 = 0;
-        if let Some(k) = buffer_cache.get(unique_id) {
-            contains_id = true;
-            existing_hash = k.block_hash;
-        }
-        if !contains_id || existing_hash != block_hash {
-            let mut editor = fonts::create_cosmic_editor(
-               block.scale.0,
-               block.line_height.0,
-               block.render_bounds.x.0,
-               block.render_bounds.y.0,
-            );
-            // Interactive path: a contended font-system lock skips
-            // this node's buffer update — the next frame will retry.
-            let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
-                return;
-            };
-            editor.insert_string(
-                block.text.as_str(),
-                Some(attrs_list_from_regions(&block.regions, &mut font_system)),
-            );
-            editor.shape_as_needed(&mut font_system, false);
-            let text_buffer = TextBuffer::new(
-               editor,
-               block_hash,
-               (block.render_bounds.x.0, block.render_bounds.y.0),
-               (block.position.x.0, block.position.y.0),
-            );
-            buffer_cache.insert(*unique_id, text_buffer);
-        }
-    }
-
-    fn update_buffer_cache(&mut self) {
-        // Interactive path: a contended arena lock or a node that has
-        // shed its glyph_area mid-mutation must not abort the frame.
-        let Ok(arena) = self.graphics_arena.try_read() else {
-            return;
-        };
-        for node in arena.iter() {
-            if node.is_removed() {
-                continue;
-            }
-            let element = node.get();
-            let Some(area) = element.glyph_area() else {
-                continue;
-            };
-            Self::prepare_glyph_block(area, &element.unique_id(), &mut self.buffer_cache);
-        }
-    }
-
     #[inline]
     fn render(&mut self) {
         if !self.should_render {
@@ -942,7 +873,7 @@ impl Renderer {
         // Palette buffers go into a separate list so they render
         // in a second glyphon pass (with the backdrop rect
         // between them, hence the split).
-        let mut main_text_areas: Vec<TextArea> = self.mindmap_buffers.values()
+        let main_text_areas: Vec<TextArea> = self.mindmap_buffers.values()
             .chain(self.border_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_label_buffers.values())
@@ -969,18 +900,6 @@ impl Renderer {
             })
             .collect();
 
-        // GfxElement arena-based buffers (no camera transform)
-        for text_buffer in self.buffer_cache.values() {
-            main_text_areas.push(TextArea {
-                buffer: text_buffer.buffer(),
-                left: text_buffer.pos.0,
-                top: text_buffer.pos.1,
-                scale: 1.0,
-                bounds: vp_bounds,
-                default_color,
-                custom_glyphs: &[],
-            });
-        }
 
         // Palette overlay: screen-space text, drawn in its own
         // glyphon pass so the rect-pipeline backdrop can be
@@ -2149,9 +2068,6 @@ impl Renderer {
                 self.run = false;
             }
             RenderDecree::Noop => {}
-            RenderDecree::ArenaUpdate => {
-                self.update_buffer_cache();
-            }
             RenderDecree::CameraPan(dx, dy) => {
                 self.camera.apply_mutation(
                     &baumhard::gfx_structs::camera::CameraMutation::Pan {
@@ -2211,32 +2127,6 @@ fn glyph_position_in_viewport(
         && x <= vp_max.x + margin
         && y >= vp_min.y - margin
         && y <= vp_max.y + margin
-}
-
-pub struct TextBuffer {
-    pub block_hash: u64,
-    pub editor: Editor<'static>,
-    pub pos: (f32, f32),
-    pub bounds: (f32, f32),
-}
-
-impl TextBuffer {
-    pub fn new(editor: Editor<'static>, block_hash: u64, bounds: (f32, f32), pos: (f32, f32)) -> Self {
-        TextBuffer {
-            block_hash,
-            editor,
-            pos,
-            bounds,
-        }
-    }
-
-    pub fn buffer(&self) -> &Buffer {
-        match self.editor.buffer_ref() {
-            BufferRef::Owned(buffer) => {buffer},
-            BufferRef::Borrowed(buffer) => {*buffer},
-            BufferRef::Arc(buffer) => {buffer.as_ref()},
-        }
-    }
 }
 
 pub fn example_attrib(font_system: &mut FontSystem) -> AttrsList {

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
@@ -61,7 +61,6 @@ fn now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 use glam::Vec2;
-use indextree::Arena;
 use wgpu::{Instance, SurfaceTargetUnsafe};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ControlFlow;
@@ -82,7 +81,6 @@ use crate::application::keybinds::{Action, ResolvedKeybinds};
 use crate::application::console::ConsoleState;
 use crate::application::renderer::Renderer;
 
-use baumhard::gfx_structs::element::GfxElement;
 #[cfg(not(target_arch = "wasm32"))]
 use baumhard::mindmap::custom_mutation::{PlatformContext, Trigger};
 use baumhard::util::grapheme_chad;
@@ -179,6 +177,20 @@ enum TextEditState {
         /// display-text regions from this by inserting caret coverage
         /// at `cursor_grapheme_pos`.
         buffer_regions: baumhard::core::primitives::ColorFontRegions,
+        /// Snapshot of the tree's `GlyphArea::text` at open time,
+        /// before any caret or typing mutations landed. On cancel
+        /// we apply these back via a `DeltaGlyphArea` so the tree
+        /// returns to its pre-edit state without going through the
+        /// full `doc.build_tree()` + scene rebuild that `rebuild_all`
+        /// would trigger. The model is untouched during editing, so
+        /// the snapshot stays valid for the whole session.
+        original_text: String,
+        /// Snapshot of the tree's `GlyphArea::regions` at open time.
+        /// Pairs with `original_text` — together they let cancel
+        /// restore the exact pre-edit tree state (including any
+        /// selection-highlight regions that the last `rebuild_all`
+        /// stamped into the node).
+        original_regions: baumhard::core::primitives::ColorFontRegions,
     },
 }
 
@@ -555,9 +567,6 @@ impl Application {
         // Single-threaded architecture: App owns the Renderer directly
         baumhard::font::fonts::init();
 
-        // Initialize graphics arena (core GfxElement infrastructure)
-        let gfx_arena: Arc<RwLock<Arena<GfxElement>>> = Arc::new(RwLock::new(Arena::new()));
-
         let unsafe_target = unsafe { SurfaceTargetUnsafe::from_window(self.window.as_ref()) }
             .expect("Failed to create a SurfaceTargetUnsafe");
         let instance = Instance::default();
@@ -567,15 +576,11 @@ impl Application {
             instance,
             surface,
             Arc::clone(&self.window),
-            gfx_arena.clone(),
         ));
 
         // Configure initial surface size
         let size = self.window.inner_size();
         renderer.process_decree(RenderDecree::SetSurfaceSize(size.width, size.height));
-
-        // Update arena buffers
-        renderer.process_decree(RenderDecree::ArenaUpdate);
 
         // Load mindmap — document and tree persist for interactive use
         let mut document: Option<MindMapDocument> = None;
@@ -2133,7 +2138,6 @@ impl Application {
             pd_cb.forget();
         }
 
-        let gfx_arena: Arc<RwLock<Arena<GfxElement>>> = Arc::new(RwLock::new(Arena::new()));
         let renderer_window = Arc::clone(&self.window);
 
         // On WASM, check for ?map= query parameter to override the default path
@@ -2195,7 +2199,6 @@ impl Application {
                 instance,
                 surface,
                 renderer_window,
-                gfx_arena.clone(),
             )
             .await;
 
@@ -3426,6 +3429,8 @@ mod text_edit_tests {
             buffer: "hi".to_string(),
             cursor_grapheme_pos: 2,
             buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
+            original_text: String::new(),
+            original_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         assert_eq!(open.node_id(), Some("n-42"));
         assert!(open.is_open());
@@ -3579,6 +3584,8 @@ mod text_edit_tests {
             buffer: "in progress".to_string(),
             cursor_grapheme_pos: 11,
             buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
+            original_text: String::new(),
+            original_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         let hit = Some("node-A".to_string());
         let already_editing = editor
@@ -3595,6 +3602,8 @@ mod text_edit_tests {
             buffer: "in progress".to_string(),
             cursor_grapheme_pos: 11,
             buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
+            original_text: String::new(),
+            original_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         let hit = Some("node-B".to_string());
         let already_editing = editor

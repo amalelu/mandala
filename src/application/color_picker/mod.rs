@@ -54,9 +54,7 @@ mod state;
 mod targets;
 
 #[cfg(test)]
-mod tests_layout;
-#[cfg(test)]
-mod tests_misc;
+mod tests;
 
 pub use compute::compute_color_picker_layout;
 pub use geometry::ColorPickerOverlayGeometry;
