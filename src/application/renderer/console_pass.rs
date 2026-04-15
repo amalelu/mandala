@@ -203,10 +203,21 @@ pub(super) fn console_overlay_areas(
     let skip = geometry.scrollback.len().saturating_sub(scrollback_rows);
     let visible_count = scrollback_rows.max(1);
     for slot in 0..scrollback_rows {
-        let line = geometry
-            .scrollback
-            .get(skip + slot)
-            .expect("slot index derived from scrollback_rows is always in-bounds");
+        // `scrollback_rows` is pinned to `geometry.scrollback.len()`
+        // (minus the drop prefix) by construction, so `skip + slot`
+        // is in-bounds for every iteration. An out-of-bounds read
+        // would mean a caller violated that invariant; skip the slot
+        // and log rather than panicking — interactive paths never
+        // abort (§7).
+        let Some(line) = geometry.scrollback.get(skip + slot) else {
+            log::warn!(
+                "console_pass: scrollback slot {} out of range (len={}, skip={})",
+                slot,
+                geometry.scrollback.len(),
+                skip,
+            );
+            continue;
+        };
         let y = content_top + row_height * slot as f32;
         let (gutter_text, gutter_color, text_str, text_color) = {
             let newness = if visible_count <= 1 {
@@ -272,10 +283,17 @@ pub(super) fn console_overlay_areas(
     // slot index is `Some`.
     let completion_top = content_top + row_height * scrollback_rows as f32;
     for slot in 0..completion_rows {
-        let c = geometry
-            .completions
-            .get(slot)
-            .expect("slot index derived from completion_rows is always in-bounds");
+        // Same invariant as scrollback above: `completion_rows` is
+        // capped by `geometry.completions.len()`. Defensive skip on
+        // a violated invariant rather than a panic in the render path.
+        let Some(c) = geometry.completions.get(slot) else {
+            log::warn!(
+                "console_pass: completion slot {} out of range (len={})",
+                slot,
+                geometry.completions.len(),
+            );
+            continue;
+        };
         let y = completion_top + row_height * slot as f32;
         let (text_str, color) = {
             let is_selected = geometry.selected_completion == Some(slot);
