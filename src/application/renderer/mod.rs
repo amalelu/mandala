@@ -1,4 +1,5 @@
 mod borders;
+mod color_picker;
 mod console_geometry;
 mod console_pass;
 mod tree_walker;
@@ -188,22 +189,6 @@ pub struct Renderer {
     /// everything else in screen coordinates. Populated only when
     /// the palette is open; cleared otherwise.
     console_overlay_buffers: Vec<MindMapTextBuffer>,
-    /// Glyph-wheel color picker static overlay buffers. Shaped once
-    /// when the picker opens (and rebuilt on window resize) and left
-    /// alone thereafter — they cover the parts of the modal whose
-    /// positions and colors don't change per hover: the title bar,
-    /// the hint footer, and the 24 hue-ring glyphs (each colored at
-    /// its own fixed slot hue). Populated only when the picker is
-    /// open; cleared otherwise.
-    color_picker_static_buffers: Vec<MindMapTextBuffer>,
-    /// Glyph-wheel color picker dynamic overlay buffers. Rebuilt on
-    /// every hover / Tab / h-s-v keystroke because their content
-    /// depends on the current HSV or chip focus: sat bar cells
-    /// (re-colored at current hue+val), val bar cells (re-colored at
-    /// current hue+sat), the center preview glyph, the hex readout,
-    /// the chip row (focus arrow moves), and a selection indicator
-    /// ring around the currently-picked hue slot.
-    color_picker_dynamic_buffers: Vec<MindMapTextBuffer>,
     /// Screen-space geometry of the color picker's opaque backdrop.
     /// Captured inside `rebuild_color_picker_overlay_buffers`; the
     /// `render()` rect-pipeline pass appends a black fill rect for
@@ -448,8 +433,6 @@ impl Renderer {
             portal_buffers: FxHashMap::default(),
             portal_hitboxes: FxHashMap::default(),
             console_overlay_buffers: Vec::new(),
-            color_picker_static_buffers: Vec::new(),
-            color_picker_dynamic_buffers: Vec::new(),
             color_picker_backdrop: None,
             overlay_buffers: Vec::new(),
             overlay_scene_buffers: Vec::new(),
@@ -904,16 +887,13 @@ impl Renderer {
         // Palette overlay: screen-space text, drawn in its own
         // glyphon pass so the rect-pipeline backdrop can be
         // interleaved between the main text and this one. The
-        // glyph-wheel color picker shares this pass — it's a
-        // mutually exclusive screen-space modal. The picker is
-        // split into static (hue ring + title + hint, shaped once
-        // per open/resize) and dynamic (sat/val bars, preview,
-        // hex, chips, selection indicator — shaped every hover)
-        // buffer lists; both chain in here so a single render
-        // pass handles them.
+        // glyph-wheel color picker's glyph buffers flow through
+        // `overlay_scene_buffers` (populated by
+        // `rebuild_overlay_scene_buffers` from the picker's overlay
+        // tree in `AppScene`) — it's a mutually exclusive
+        // screen-space modal that shares this pass with the
+        // console.
         let palette_text_areas: Vec<TextArea> = self.console_overlay_buffers.iter()
-            .chain(self.color_picker_static_buffers.iter())
-            .chain(self.color_picker_dynamic_buffers.iter())
             .chain(self.overlay_scene_buffers.iter())
             .map(|tb| TextArea {
                 buffer: &tb.buffer,
@@ -1553,19 +1533,8 @@ impl Renderer {
             &crate::application::color_picker::ColorPickerLayout,
         )>,
     ) {
-        use crate::application::color_picker_overlay;
-        use crate::application::scene_host::OverlayRole;
-
-        let Some((g, layout)) = geometry_and_layout else {
-            self.color_picker_backdrop = None;
-            app_scene.unregister_overlay(OverlayRole::ColorPicker);
-            self.rebuild_overlay_scene_buffers(app_scene);
-            return;
-        };
-
-        let build = color_picker_overlay::build(g, layout);
-        self.color_picker_backdrop = build.backdrop;
-        app_scene.register_overlay(OverlayRole::ColorPicker, build.tree, glam::Vec2::ZERO);
+        self.color_picker_backdrop =
+            color_picker::prepare_overlay_for_rebuild(app_scene, geometry_and_layout);
         self.rebuild_overlay_scene_buffers(app_scene);
     }
 
@@ -1591,11 +1560,7 @@ impl Renderer {
         geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
         layout: &crate::application::color_picker::ColorPickerLayout,
     ) {
-        use crate::application::color_picker_overlay;
-        use crate::application::scene_host::OverlayRole;
-
-        let mutator = color_picker_overlay::build_mutator(geometry, layout);
-        app_scene.apply_overlay_mutator(OverlayRole::ColorPicker, &mutator);
+        color_picker::apply_layout_mutator(app_scene, geometry, layout);
         self.rebuild_overlay_scene_buffers(app_scene);
     }
 
@@ -1616,11 +1581,7 @@ impl Renderer {
         geometry: &crate::application::color_picker::ColorPickerOverlayGeometry,
         layout: &crate::application::color_picker::ColorPickerLayout,
     ) {
-        use crate::application::color_picker_overlay;
-        use crate::application::scene_host::OverlayRole;
-
-        let mutator = color_picker_overlay::build_dynamic_mutator(geometry, layout);
-        app_scene.apply_overlay_mutator(OverlayRole::ColorPicker, &mutator);
+        color_picker::apply_dynamic_mutator(app_scene, geometry, layout);
         self.rebuild_overlay_scene_buffers(app_scene);
     }
 

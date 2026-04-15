@@ -246,10 +246,7 @@ pub struct EdgeHandleElement {
     pub font_size_pt: f32,
 }
 
-/// Color override applied to the `ConnectionElement` of a selected edge.
-/// Kept in sync visually with the cyan node selection highlight in
-/// `src/application/document.rs::HIGHLIGHT_COLOR`.
-const SELECTED_EDGE_COLOR: &str = "#00E5FF";
+use super::SELECTION_HIGHLIGHT_HEX as SELECTED_EDGE_COLOR;
 
 /// Glyph used for edge grab-handles in Session 6C's connection
 /// reshape surface. A solid black diamond reads as a clickable
@@ -262,12 +259,17 @@ const EDGE_HANDLE_GLYPH: &str = "\u{25C6}"; // ◆
 const EDGE_HANDLE_FONT_SIZE_PT: f32 = 14.0;
 
 mod builder;
+mod connection;
+mod edge_handles;
+mod label;
+mod node_pass;
+mod portal;
 
 #[cfg(test)]
 mod tests;
 
 pub use builder::{
-    build_edge_handles, build_scene, build_scene_with_cache,
-    build_scene_with_offsets, build_scene_with_offsets_and_selection,
+    build_scene, build_scene_with_cache, build_scene_with_offsets,
     build_scene_with_offsets_selection_and_overrides,
 };
+pub use edge_handles::build_edge_handles;
