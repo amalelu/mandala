@@ -69,7 +69,7 @@ fn connection_edge_layout(
     let mk_area = |text: &str, pos: Vec2| -> GlyphArea {
         let mut area =
             GlyphArea::new_with_str(text, font_size, font_size, pos, glyph_bounds);
-        let cluster_count = text.chars().count();
+        let cluster_count = crate::util::grapheme_chad::count_grapheme_clusters(text);
         if cluster_count > 0 {
             let mut regions = ColorFontRegions::new_empty();
             regions.submit_region(ColorFontRegion::new(

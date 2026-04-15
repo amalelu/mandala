@@ -63,7 +63,7 @@ fn edge_handle_layout(
         pos,
         bounds,
     );
-    let cluster_count = elem.glyph.chars().count();
+    let cluster_count = crate::util::grapheme_chad::count_grapheme_clusters(&elem.glyph);
     if cluster_count > 0 {
         let mut regions = ColorFontRegions::new_empty();
         regions.submit_region(ColorFontRegion::new(

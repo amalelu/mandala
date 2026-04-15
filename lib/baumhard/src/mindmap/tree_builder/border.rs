@@ -256,7 +256,7 @@ pub fn build_border_mutator_tree_from_nodes(
         ];
 
         for (channel, text, fs, pos, bounds) in runs {
-            let cluster_count = text.chars().count();
+            let cluster_count = crate::util::grapheme_chad::count_grapheme_clusters(&text);
             let mut regions = ColorFontRegions::new_empty();
             if cluster_count > 0 {
                 regions.submit_region(ColorFontRegion::new(
@@ -403,11 +403,13 @@ fn append_border_run(
 
     // Single ColorFontRegion covering the whole run — the renderer
     // walker translates this into a cosmic-text `Attrs::color`
-    // span. Grapheme cluster count matches `chars().count()` here
-    // because box-drawing glyphs are all single-scalar ASCII-range
-    // codepoints, but using the grapheme counter is cheap and
-    // future-proof.
-    let cluster_count = text.chars().count();
+    // span. The grapheme counter matches `chars().count()` on the
+    // default box-drawing presets (single-scalar codepoints) but
+    // keeps the math correct if a future preset or custom border
+    // mixes in combining marks or ZWJ sequences — §1 prescribes
+    // grapheme-aware counts everywhere a region is derived from
+    // reachable user text.
+    let cluster_count = crate::util::grapheme_chad::count_grapheme_clusters(text);
     if cluster_count > 0 {
         let mut regions = ColorFontRegions::new_empty();
         regions.submit_region(ColorFontRegion::new(

@@ -154,7 +154,8 @@ pub fn portal_pair_data(
                 top_left,
                 Vec2::new(bounds_w, bounds_h),
             );
-            let cluster_count = portal.glyph.chars().count();
+            let cluster_count =
+                crate::util::grapheme_chad::count_grapheme_clusters(&portal.glyph);
             if cluster_count > 0 {
                 let mut regions = ColorFontRegions::new_empty();
                 regions.submit_region(ColorFontRegion::new(
