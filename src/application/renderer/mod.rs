@@ -2,6 +2,7 @@ mod borders;
 mod color_picker;
 mod console_geometry;
 mod console_pass;
+mod pipeline;
 mod tree_walker;
 
 pub use borders::measure_max_glyph_advance;
@@ -562,105 +563,6 @@ impl Renderer {
     }
 
     #[inline]
-    fn create_surface_config(
-        texture_format: TextureFormat,
-        surface_capabilities: &SurfaceCapabilities,
-        surface_size: PhysicalSize<u32>,
-    ) -> SurfaceConfiguration {
-        SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: texture_format,
-            width: surface_size.width,
-            height: surface_size.height,
-            present_mode: wgpu::PresentMode::Fifo,
-            desired_maximum_frame_latency: 2,
-            alpha_mode: surface_capabilities.alpha_modes[0],
-            view_formats: vec![],
-        }
-    }
-
-    #[inline]
-    fn create_render_pipeline(
-        device: &Device,
-        shader: &ShaderModule,
-        pipeline_layout: &PipelineLayout,
-        texture_format: TextureFormat,
-    ) -> RenderPipeline {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(texture_format.into())],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        })
-    }
-
-    #[inline]
-    fn load_shaders(device: &Device, shaders: &mut FxHashMap<&'static str, ShaderModule>) {
-        assert!(SHADERS.len() > 0, "No shaders defined!");
-        for i in 0..SHADERS.len() {
-            let (name, source) = SHADERS[i].clone();
-            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: None,
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
-            });
-            shaders.insert(name, shader);
-            debug!("Loaded a shader");
-        }
-    }
-
-    #[inline]
-    fn create_pipeline_layout(device: &Device) -> PipelineLayout {
-        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[],
-            immediate_size: 0,
-        })
-    }
-
-    #[inline]
-    async fn get_device(adapter: &Adapter) -> (Device, Queue) {
-        adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: None,
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults()
-                        .using_resolution(adapter.limits()),
-                    memory_hints: Default::default(),
-                    trace: Default::default(),
-                    experimental_features: Default::default(),
-                },
-            )
-            .await
-            .expect("Failed to create device")
-    }
-
-    #[inline]
-    async fn get_adapter(instance: &Instance, surface: &Surface<'static>) -> Adapter {
-        instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .expect("Failed to find an appropriate adapter")
-    }
 
     const ZERO_DURATION: Duration = Duration::new(0, 0);
 
