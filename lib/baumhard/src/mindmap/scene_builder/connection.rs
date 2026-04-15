@@ -25,7 +25,7 @@ use crate::mindmap::model::{GlyphConnectionConfig, MindMap};
 use crate::mindmap::scene_cache::{CachedConnection, EdgeKey, SceneConnectionCache};
 use crate::util::color::resolve_var;
 
-use super::edge_handles::build_edge_handles;
+use super::edge_handle::build_edge_handles;
 use super::{
     ConnectionElement, EdgeColorPreview, EdgeHandleElement, SELECTED_EDGE_COLOR,
 };
@@ -34,7 +34,7 @@ use super::{
 /// `node_aabbs` from the node pass for the clip filter; mutates
 /// `cache` on slow-path edges and after the loop (retain_keys
 /// evicts deleted edges).
-pub fn build_connection_elements(
+pub(super) fn build_connection_elements(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     node_aabbs: &[(Vec2, Vec2)],

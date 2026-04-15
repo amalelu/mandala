@@ -4,16 +4,29 @@
 //! `EdgeHandleElement`) that the renderer walks into cosmic-text
 //! buffers.
 //!
-//! Split by concern so the entry-point scan stays short:
-//! - [`mod@self`] — types (the element structs, preview wrappers,
-//!   `RenderScene` aggregate), constants (`SELECTED_EDGE_COLOR`,
-//!   `EDGE_HANDLE_GLYPH`, `EDGE_HANDLE_FONT_SIZE_PT`), and re-exports.
-//! - [`builder`] — `build_edge_handles`, the `build_scene` family,
-//!   and the big `build_scene_with_cache` implementation.
+//! Sharded by role so each file stays focused:
+//! - [`mod@self`] — element structs, preview wrappers, `RenderScene`
+//!   aggregate, edge-handle glyph constants, the public re-export
+//!   surface.
+//! - [`builder`] — `build_scene`, `build_scene_with_cache`, and the
+//!   cache-less wrappers. Thin orchestrator; delegates to the
+//!   role modules below.
+//! - [`node_pass`] — emits `TextElement`s + `BorderElement`s + clip
+//!   AABBs in a single walk over visible nodes.
+//! - [`connection`] — connection body glyphs (with
+//!   `SceneConnectionCache` fast/slow paths), edge-handle glyphs,
+//!   and the `point_inside_any_node` clip predicate.
+//! - [`label`] — connection labels with the inline-edit override
+//!   + synthesize-if-empty pass.
+//! - [`portal`] — two markers per visible `PortalPair`.
+//! - [`edge_handle`] — `build_edge_handles` helper (re-exported
+//!   for external callers that hit-test handles without building
+//!   a full scene).
 
 use crate::mindmap::border::BorderStyle;
 use crate::mindmap::model::TextRun;
 use crate::mindmap::scene_cache::EdgeKey;
+use crate::mindmap::SELECTION_HIGHLIGHT_HEX as SELECTED_EDGE_COLOR;
 
 /// A transient, scene-build-only substitution of an edge's effective
 /// color. Used by the inline color picker's hover preview so the edge
@@ -246,11 +259,8 @@ pub struct EdgeHandleElement {
     pub font_size_pt: f32,
 }
 
-use super::SELECTION_HIGHLIGHT_HEX as SELECTED_EDGE_COLOR;
-
-/// Glyph used for edge grab-handles in Session 6C's connection
-/// reshape surface. A solid black diamond reads as a clickable
-/// control point across most fonts.
+/// Glyph used for edge grab-handles. A solid black diamond reads as
+/// a clickable control point across most fonts.
 const EDGE_HANDLE_GLYPH: &str = "\u{25C6}"; // ◆
 
 /// Font size (in points) for the edge handle glyphs. Slightly larger
@@ -260,7 +270,7 @@ const EDGE_HANDLE_FONT_SIZE_PT: f32 = 14.0;
 
 mod builder;
 mod connection;
-mod edge_handles;
+mod edge_handle;
 mod label;
 mod node_pass;
 mod portal;
@@ -272,4 +282,4 @@ pub use builder::{
     build_scene, build_scene_with_cache, build_scene_with_offsets,
     build_scene_with_offsets_selection_and_overrides,
 };
-pub use edge_handles::build_edge_handles;
+pub use edge_handle::build_edge_handles;

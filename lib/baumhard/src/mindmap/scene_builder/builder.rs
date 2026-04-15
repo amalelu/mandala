@@ -1,10 +1,10 @@
 //! Scene builders — `build_scene`, `build_scene_with_cache`, and
-//! the three cache-less wrappers. The big `build_scene_with_cache`
-//! orchestrator walks nodes (via `super::node_pass`), edges (inline
-//! connection pass), labels (via `super::label`), and portals (via
-//! `super::portal`) to assemble a `RenderScene`. The edge-handle
-//! emission for the selected edge delegates to
-//! `super::edge_handles::build_edge_handles`.
+//! the cache-less wrappers. The big `build_scene_with_cache`
+//! orchestrator is a thin linear pipeline: [`super::node_pass`] →
+//! [`super::connection`] → [`super::label`] → [`super::portal`],
+//! assembled into a `RenderScene`. The selected-edge handle
+//! emission rides inside the connection pass (delegating to
+//! [`super::edge_handle::build_edge_handles`]).
 
 use std::collections::HashMap;
 
