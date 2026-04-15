@@ -104,7 +104,18 @@ pub fn build_edge_handles(
 /// [`crate::mindmap::model::GlyphConnectionConfig::effective_font_size_pt`].
 /// Pass `1.0` if no camera context applies (e.g. loader tests).
 pub fn build_scene(map: &MindMap, camera_zoom: f32) -> RenderScene {
-    build_scene_with_offsets_and_selection(map, &HashMap::new(), None, None, camera_zoom)
+    let mut scratch = SceneConnectionCache::new();
+    build_scene_with_cache(
+        map,
+        &HashMap::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut scratch,
+        camera_zoom,
+    )
 }
 
 /// Builds a RenderScene with position offsets applied to specific nodes.
@@ -116,40 +127,13 @@ pub fn build_scene_with_offsets(
     offsets: &HashMap<String, (f32, f32)>,
     camera_zoom: f32,
 ) -> RenderScene {
-    build_scene_with_offsets_and_selection(map, offsets, None, None, camera_zoom)
-}
-
-/// Thin wrapper over the cache-aware builder that uses a scratch
-/// (throwaway) cache so call sites that don't track a persistent cache
-/// still work. Prefer `build_scene_with_cache` on the hot drag path.
-///
-/// `selected_portal` carries `(label, endpoint_a, endpoint_b)` and
-/// mirrors `selected_edge`: when set, the matching pair's two emitted
-/// `PortalElement`s are colorized with the cyan selection highlight
-/// so the user sees which portal is active.
-pub fn build_scene_with_offsets_and_selection(
-    map: &MindMap,
-    offsets: &HashMap<String, (f32, f32)>,
-    selected_edge: Option<(&str, &str, &str)>,
-    selected_portal: Option<(&str, &str, &str)>,
-    camera_zoom: f32,
-) -> RenderScene {
     let mut scratch = SceneConnectionCache::new();
     build_scene_with_cache(
-        map,
-        offsets,
-        selected_edge,
-        selected_portal,
-        None,
-        None,
-        None,
-        &mut scratch,
-        camera_zoom,
+        map, offsets, None, None, None, None, None, &mut scratch, camera_zoom,
     )
 }
 
-/// Like `build_scene_with_offsets_and_selection`, plus transient
-/// interaction overrides:
+/// Cache-less wrapper that threads transient interaction overrides:
 ///
 /// - `label_edit_override`: inline label-edit buffer + caret
 ///   substitution for a single edge.
@@ -157,8 +141,8 @@ pub fn build_scene_with_offsets_and_selection(
 ///   edge, beats selection on the previewed edge.
 /// - `portal_color_preview`: same, for portals.
 ///
-/// When any override is `None`, behavior matches
-/// `build_scene_with_offsets_and_selection`.
+/// Prefer [`build_scene_with_cache`] on the hot drag path — this
+/// variant allocates a throwaway cache per call.
 pub fn build_scene_with_offsets_selection_and_overrides(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
