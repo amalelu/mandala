@@ -28,7 +28,7 @@ use super::{ConnectionLabelElement, EdgeColorPreview};
 /// the two-pass union: committed labels first, then (optionally) a
 /// synthesized label for the inline-edited edge if its committed
 /// label was empty.
-pub fn build_label_elements(
+pub(super) fn build_label_elements(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     label_edit_override: Option<(&EdgeKey, &str)>,

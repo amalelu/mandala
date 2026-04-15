@@ -17,7 +17,7 @@ use crate::util::color::resolve_var;
 use super::{PortalColorPreview, PortalElement, PortalRefKey};
 
 /// Emit two portal markers per visible `PortalPair`.
-pub fn build_portal_elements(
+pub(super) fn build_portal_elements(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_portal: Option<(&str, &str, &str)>,

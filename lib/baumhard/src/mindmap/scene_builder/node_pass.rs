@@ -34,7 +34,7 @@ use super::{BorderElement, TextElement};
 /// nodes skip the `BorderElement` push and use a raw-rect AABB
 /// (no border-expansion) so connection glyphs can run right up to
 /// the node edge.
-pub fn build_node_elements(
+pub(super) fn build_node_elements(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
 ) -> (Vec<TextElement>, Vec<BorderElement>, Vec<(Vec2, Vec2)>) {
