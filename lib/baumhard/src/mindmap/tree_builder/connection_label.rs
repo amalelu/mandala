@@ -54,7 +54,7 @@ fn connection_label_layout(
         pos,
         bounds,
     );
-    let cluster_count = elem.text.chars().count();
+    let cluster_count = crate::util::grapheme_chad::count_grapheme_clusters(&elem.text);
     if cluster_count > 0 {
         let mut regions = ColorFontRegions::new_empty();
         regions.submit_region(ColorFontRegion::new(

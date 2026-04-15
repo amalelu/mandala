@@ -43,14 +43,18 @@ pub(in crate::application::color_picker_overlay) fn build_color_picker_overlay_t
 ) -> Tree<GfxElement, GfxMutator> {
     let areas = compute_picker_areas(geometry, layout);
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    for (channel, area) in &areas.ordered {
-        let model = glyph_model_from_picker_area(area);
+    // Consume the ordered vector so each GlyphArea is moved into its
+    // GfxElement rather than cloned. The model is derived from the
+    // area by reference before the move so both children share the
+    // same text / color / position without a second allocation.
+    for (channel, area) in areas.ordered {
+        let model = glyph_model_from_picker_area(&area);
         let area_element =
-            GfxElement::new_area_non_indexed_with_id(area.clone(), *channel, *channel);
+            GfxElement::new_area_non_indexed_with_id(area, channel, channel);
         let area_id = tree.arena.new_node(area_element);
         tree.root.append(area_id, &mut tree.arena);
         let model_element =
-            GfxElement::new_model_non_indexed_with_id(model, *channel, *channel);
+            GfxElement::new_model_non_indexed_with_id(model, channel, channel);
         let model_id = tree.arena.new_node(model_element);
         area_id.append(model_id, &mut tree.arena);
     }
