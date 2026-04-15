@@ -11,9 +11,10 @@ use baumhard::util::grapheme_chad;
 use crate::application::document::MindMapDocument;
 use crate::application::renderer::Renderer;
 
+use super::text_edit::insert_caret;
 use super::{
-    insert_caret, rebuild_all, route_label_edit_key, update_connection_label_tree,
-    update_portal_tree, LabelEditState,
+    rebuild_all, route_label_edit_key, update_connection_label_tree, update_portal_tree,
+    LabelEditState,
 };
 
 /// Session 6D: transition into inline label edit mode for the given

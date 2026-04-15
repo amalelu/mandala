@@ -13,10 +13,10 @@ use baumhard::util::grapheme_chad;
 use crate::application::document::MindMapDocument;
 use crate::application::renderer::Renderer;
 
+use super::super::rebuild_all;
 use super::{
     cursor_to_line_end, cursor_to_line_start, delete_at_cursor, delete_before_cursor,
-    insert_at_cursor, insert_caret, move_cursor_down_line, move_cursor_up_line, rebuild_all,
-    TextEditState,
+    insert_at_cursor, insert_caret, move_cursor_down_line, move_cursor_up_line, TextEditState,
 };
 
 // =====================================================================
@@ -454,7 +454,6 @@ pub(in crate::application::app) fn handle_text_edit_key(
         );
     }
 }
-
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
