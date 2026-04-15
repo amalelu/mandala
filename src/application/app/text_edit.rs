@@ -58,11 +58,19 @@ pub(in crate::application::app) fn open_text_edit(
     } else {
         read_node_regions(mindmap_tree.as_ref(), node_id).unwrap_or_default()
     };
+    // Snapshot the tree's pre-edit text + regions so cancel can
+    // apply them back as a delta instead of triggering `rebuild_all`.
+    // `from_creation` nodes were just inserted — the tree's current
+    // `area.text` is `node.text` (empty) and regions are empty.
+    let original_text = read_node_text(mindmap_tree.as_ref(), node_id).unwrap_or_default();
+    let original_regions = buffer_regions.clone();
     *text_edit_state = TextEditState::Open {
         node_id: node_id.to_string(),
         buffer: buffer.clone(),
         cursor_grapheme_pos,
         buffer_regions: buffer_regions.clone(),
+        original_text,
+        original_regions,
     };
     // Push the initial (caret-only for creation, or "existing text +
     // caret at end" for edit) through the Baumhard mutation pipeline.
@@ -92,13 +100,75 @@ pub(in crate::application::app) fn read_node_regions(
     element.glyph_area().map(|a| a.regions.clone())
 }
 
-/// Session 7A: commit or cancel the open text editor. Commit writes
-/// the final buffer back to the model via `set_node_text`, which is
-/// the single source of truth for "did the text change" — it
-/// snapshots `before_text`/`before_runs` and only pushes an undo
-/// entry if the value actually differs. Cancel just calls
-/// `rebuild_all`, which rebuilds the tree from the untouched model —
-/// the transient caret-bearing tree state is discarded wholesale.
+/// Read a node's `GlyphArea::text` off the live tree. Pairs with
+/// [`read_node_regions`] — together they capture the pre-edit
+/// snapshot the cancel path restores via `DeltaGlyphArea`.
+pub(in crate::application::app) fn read_node_text(
+    mindmap_tree: Option<&baumhard::mindmap::tree_builder::MindMapTree>,
+    node_id: &str,
+) -> Option<String> {
+    let tree = mindmap_tree?;
+    let nid = *tree.node_map.get(node_id)?;
+    let element = tree.tree.arena.get(nid)?.get();
+    element.glyph_area().map(|a| a.text.clone())
+}
+
+/// Apply a snapshot of `(text, regions)` back to the live tree's
+/// `GlyphArea` for `node_id`, via a `DeltaGlyphArea` with `Assign`
+/// semantics. Used by the text-editor cancel path to revert the
+/// tree to its pre-edit state without going through the full
+/// `rebuild_all` (which rebuilds every node from the model and
+/// re-walks the scene). Returns early on the usual "node
+/// disappeared" edge cases.
+pub(in crate::application::app) fn revert_node_text_on_tree(
+    node_id: &str,
+    text: String,
+    regions: baumhard::core::primitives::ColorFontRegions,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    renderer: &mut Renderer,
+) {
+    use baumhard::core::primitives::{Applicable, ApplyOperation};
+    use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
+
+    let tree = match mindmap_tree.as_mut() {
+        Some(t) => t,
+        None => return,
+    };
+    let indextree_node_id = match tree.node_map.get(node_id) {
+        Some(id) => *id,
+        None => return,
+    };
+    let element = match tree.tree.arena.get_mut(indextree_node_id) {
+        Some(n) => n.get_mut(),
+        None => return,
+    };
+    let area = match element.glyph_area_mut() {
+        Some(a) => a,
+        None => return,
+    };
+
+    let delta = DeltaGlyphArea::new(vec![
+        GlyphAreaField::Text(text),
+        GlyphAreaField::ColorFontRegions(regions),
+        GlyphAreaField::Operation(ApplyOperation::Assign),
+    ]);
+    delta.apply_to(area);
+    renderer.rebuild_buffers_from_tree(&tree.tree);
+}
+
+/// Session 7A: commit or cancel the open text editor.
+///
+/// - **Commit**: writes the final buffer back to the model via
+///   `set_node_text` (no-op on unchanged text, handles its own undo
+///   push), then `rebuild_all` to pull the tree back to the freshly
+///   mutated model.
+/// - **Cancel**: applies the `(original_text, original_regions)`
+///   snapshot captured at open time as a `DeltaGlyphArea` to the
+///   edited node. The model is untouched during editing, so the rest
+///   of the tree + scene are already in sync — no `rebuild_all` is
+///   needed. This skips the `doc.build_tree()` walk and the full
+///   `rebuild_scene_only` (connections, borders, portals, labels,
+///   edge handles), which matters on maps with many nodes.
 pub(in crate::application::app) fn close_text_edit(
     commit: bool,
     doc: &mut MindMapDocument,
@@ -107,18 +177,34 @@ pub(in crate::application::app) fn close_text_edit(
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) {
-    let (node_id, buffer) = match std::mem::replace(text_edit_state, TextEditState::Closed) {
-        TextEditState::Open { node_id, buffer, .. } => (node_id, buffer),
+    let snapshot = match std::mem::replace(text_edit_state, TextEditState::Closed) {
+        TextEditState::Open {
+            node_id,
+            buffer,
+            original_text,
+            original_regions,
+            ..
+        } => (node_id, buffer, original_text, original_regions),
         TextEditState::Closed => return,
     };
+    let (node_id, buffer, original_text, original_regions) = snapshot;
     if commit {
-        // `set_node_text` is a no-op on unchanged text and handles
-        // its own undo push.
         doc.set_node_text(&node_id, buffer);
+        // Commit changed the model — pull the tree back to it.
+        rebuild_all(doc, mindmap_tree, app_scene, renderer);
+    } else {
+        // Cancel: model is untouched, so we only need to revert the
+        // edited node's transient caret-bearing text/regions to the
+        // pre-edit snapshot. Scene elements (borders, connections,
+        // etc.) were never mutated during the edit session.
+        revert_node_text_on_tree(
+            &node_id,
+            original_text,
+            original_regions,
+            mindmap_tree,
+            renderer,
+        );
     }
-    // Full rebuild pulls the tree back to the model — any transient
-    // caret-bearing mutations on the live tree are discarded.
-    rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
 /// Session 7A: push the current (`buffer`, `cursor`) state into the
@@ -223,6 +309,7 @@ pub(in crate::application::app) fn handle_text_edit_key(
             buffer,
             cursor_grapheme_pos,
             buffer_regions,
+            ..
         } => (node_id, buffer, cursor_grapheme_pos, buffer_regions),
         TextEditState::Closed => return,
     };

@@ -4,6 +4,8 @@
 //! directly from `(geometry, layout, section, index)` so no
 //! intermediate `GlyphArea` table is allocated per cell per frame.
 
+use std::sync::OnceLock;
+
 use baumhard::core::primitives::ColorFontRegions;
 use baumhard::font::fonts::AppFont;
 use baumhard::gfx_structs::area::GlyphAreaField;
@@ -12,7 +14,8 @@ use baumhard::util::grapheme_chad::count_grapheme_clusters;
 
 use crate::application::color_picker::{
     arm_bottom_font, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, ColorPickerLayout,
-    ColorPickerOverlayGeometry, PickerHit, CROSSHAIR_CENTER_CELL, SAT_CELL_COUNT, VAL_CELL_COUNT,
+    ColorPickerOverlayGeometry, PickerHit, CROSSHAIR_CENTER_CELL, HUE_SLOT_COUNT, SAT_CELL_COUNT,
+    VAL_CELL_COUNT,
 };
 use crate::application::color_picker_overlay::color::{
     highlight_hovered_cell_color, highlight_selected_cell_color, rgb_to_cosmic_color,
@@ -22,6 +25,55 @@ use crate::application::widgets::color_picker_widget::load_spec;
 
 use super::areas::PickerSection;
 
+/// Per-section base-color tables precomputed in
+/// [`PickerDynamicContext::new`]. Each entry pairs the float RGB
+/// (the shape `highlight_hovered_cell_color` wants as input) with the
+/// already-quantized `cosmic_text::Color` (for the common non-hovered,
+/// non-selected case). `field()` becomes an array-index lookup plus
+/// an optional highlight mix for the 1-3 cells per apply that are
+/// actually hovered or the currently-selected sat/val cell.
+#[derive(Clone, Copy)]
+struct CellColor {
+    rgb: [f32; 3],
+    color: cosmic_text::Color,
+}
+
+impl CellColor {
+    const fn zero() -> Self {
+        Self {
+            rgb: [0.0; 3],
+            color: cosmic_text::Color(0),
+        }
+    }
+
+    fn new(rgb: [f32; 3]) -> Self {
+        Self {
+            rgb,
+            color: rgb_to_cosmic_color(rgb),
+        }
+    }
+}
+
+/// Hue-ring cell colors — a pure function of slot index (no HSV
+/// state), so we compute them once at first picker use and share the
+/// table across every subsequent `PickerDynamicContext::new`. 24
+/// entries × 16 bytes = 384 bytes kept warm in the binary's data
+/// segment. This is the main cheap-per-apply win for mouse scrubs
+/// across the hue ring: hover-only changes no longer do 24 × `hsv_to_rgb`.
+static HUE_RING_COLORS: OnceLock<[CellColor; HUE_SLOT_COUNT]> = OnceLock::new();
+
+fn hue_ring_colors() -> &'static [CellColor; HUE_SLOT_COUNT] {
+    HUE_RING_COLORS.get_or_init(|| {
+        let mut table = [CellColor::zero(); HUE_SLOT_COUNT];
+        let mut i = 0;
+        while i < HUE_SLOT_COUNT {
+            table[i] = CellColor::new(hsv_to_rgb(hue_slot_to_degrees(i), 1.0, 1.0));
+            i += 1;
+        }
+        table
+    })
+}
+
 /// Slim per-frame context for the picker's dynamic phase. Builds each
 /// requested `GlyphAreaField` directly from
 /// `(geometry, layout, section, index)` without allocating a full
@@ -29,9 +81,11 @@ use super::areas::PickerSection;
 ///
 /// Construction captures the handful of derived values that are
 /// genuinely shared across cells (preview color in both cosmic and
-/// RGB form, currently-selected sat/val cells, title/hint/hex text
-/// grapheme counts, the hex text itself). Each `field` call then
-/// dispatches on section name to produce just the requested field.
+/// RGB form, the precomputed sat/val base-color tables, the
+/// currently-selected sat/val cells, title/hint/hex text grapheme
+/// counts, the hex text itself). Each `field` call then dispatches
+/// on section name and looks the color up by index — no per-cell
+/// `hsv_to_rgb`.
 ///
 /// Panics on unsupported `CellField` variants — the dynamic spec is
 /// declared in JSON and pinned by
@@ -46,14 +100,18 @@ pub(super) struct PickerDynamicContext<'a> {
     /// `ColorPickerState::Open.layout` for the same frame.
     layout: &'a ColorPickerLayout,
     /// Preview color in cosmic form — reused by title/hint/hex/preview
-    /// (when not commit-hovered). Going through cosmic preserves the
-    /// u8 quantization round-trip the layout path bakes via
-    /// `rgb_to_cosmic_color`, so regions produced here compare equal
-    /// to regions produced by a fresh `compute_picker_areas` pass.
+    /// (when not commit-hovered).
     preview_color: cosmic_text::Color,
     /// Preview color in float RGB — input to the `highlight_*` mixes
     /// for the preview-commit-hover branch.
     preview_rgb: [f32; 3],
+    /// Sat-bar base colors: for each cell `i`, the non-hovered,
+    /// non-selected cosmic color and its source RGB. Crosshair center
+    /// cell (`CROSSHAIR_CENTER_CELL`) is zero — the dynamic spec
+    /// never queries it.
+    sat_colors: [CellColor; SAT_CELL_COUNT],
+    /// Val-bar base colors — same layout as `sat_colors`.
+    val_colors: [CellColor; VAL_CELL_COUNT],
     /// Currently-selected sat-bar cell (based on `geometry.sat`).
     /// Cells at this index render with the selected-cell highlight
     /// unless hovered — matches the layout-phase logic.
@@ -93,6 +151,27 @@ impl<'a> PickerDynamicContext<'a> {
             .round()
             .clamp(0.0, (VAL_CELL_COUNT - 1) as f32) as usize;
 
+        // Precompute sat-bar base colors. Skip the crosshair center
+        // cell (the dynamic spec never queries it — see the
+        // `debug_assert_ne!` guard in `field()`).
+        let mut sat_colors = [CellColor::zero(); SAT_CELL_COUNT];
+        for i in 0..SAT_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
+            sat_colors[i] =
+                CellColor::new(hsv_to_rgb(geometry.hue_deg, sat_cell_to_value(i), geometry.val));
+        }
+        // Precompute val-bar base colors. Same skip-center rule.
+        let mut val_colors = [CellColor::zero(); VAL_CELL_COUNT];
+        for i in 0..VAL_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
+            val_colors[i] =
+                CellColor::new(hsv_to_rgb(geometry.hue_deg, geometry.sat, val_cell_to_value(i)));
+        }
+
         let spec = load_spec();
         let is_standalone = geometry.target_label.is_empty();
         // Title / hint grapheme counts mirror the strings the layout
@@ -127,6 +206,8 @@ impl<'a> PickerDynamicContext<'a> {
             layout,
             preview_color,
             preview_rgb,
+            sat_colors,
+            val_colors,
             current_sat_cell,
             current_val_cell,
             hover_scale: spec.geometry.hover_scale,
@@ -219,47 +300,48 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
         }
 
         // Color + grapheme count + optional font pin per section.
+        // Every branch reads its base color from a precomputed table
+        // and only runs a highlight mix for the at-most-3 cells per
+        // apply that are hovered or the currently-selected sat/val
+        // cell. No `hsv_to_rgb` calls on this hot loop.
         let g = self.geometry;
         let (count, color, font): (usize, cosmic_text::Color, Option<AppFont>) = match section {
             PickerSection::Title => (self.title_count, self.preview_color, None),
             PickerSection::Hint => (self.hint_count, self.preview_color, None),
             PickerSection::Hex => (self.hex_count, self.preview_color, None),
             PickerSection::HueRing => {
-                let hue = hue_slot_to_degrees(index);
-                let rgb = hsv_to_rgb(hue, 1.0, 1.0);
+                let entry = hue_ring_colors()[index];
                 let hovered = matches!(g.hovered_hit, Some(PickerHit::Hue(h)) if h == index);
                 let color = if hovered {
-                    highlight_hovered_cell_color(rgb)
+                    highlight_hovered_cell_color(entry.rgb)
                 } else {
-                    rgb_to_cosmic_color(rgb)
+                    entry.color
                 };
                 (1, color, None)
             }
             PickerSection::SatBar => {
                 debug_assert_ne!(index, CROSSHAIR_CENTER_CELL);
-                let cell_sat = sat_cell_to_value(index);
-                let rgb = hsv_to_rgb(g.hue_deg, cell_sat, g.val);
+                let entry = self.sat_colors[index];
                 let hovered = matches!(g.hovered_hit, Some(PickerHit::SatCell(h)) if h == index);
                 let color = if hovered {
-                    highlight_hovered_cell_color(rgb)
+                    highlight_hovered_cell_color(entry.rgb)
                 } else if index == self.current_sat_cell {
-                    highlight_selected_cell_color(rgb)
+                    highlight_selected_cell_color(entry.rgb)
                 } else {
-                    rgb_to_cosmic_color(rgb)
+                    entry.color
                 };
                 (1, color, None)
             }
             PickerSection::ValBar => {
                 debug_assert_ne!(index, CROSSHAIR_CENTER_CELL);
-                let cell_val = val_cell_to_value(index);
-                let rgb = hsv_to_rgb(g.hue_deg, g.sat, cell_val);
+                let entry = self.val_colors[index];
                 let hovered = matches!(g.hovered_hit, Some(PickerHit::ValCell(h)) if h == index);
                 let color = if hovered {
-                    highlight_hovered_cell_color(rgb)
+                    highlight_hovered_cell_color(entry.rgb)
                 } else if index == self.current_val_cell {
-                    highlight_selected_cell_color(rgb)
+                    highlight_selected_cell_color(entry.rgb)
                 } else {
-                    rgb_to_cosmic_color(rgb)
+                    entry.color
                 };
                 // Top arm uses the default font fallback; bottom arm
                 // pins `arm_bottom_font()` (Egyptian hieroglyphs need

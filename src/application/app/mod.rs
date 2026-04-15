@@ -179,6 +179,20 @@ enum TextEditState {
         /// display-text regions from this by inserting caret coverage
         /// at `cursor_grapheme_pos`.
         buffer_regions: baumhard::core::primitives::ColorFontRegions,
+        /// Snapshot of the tree's `GlyphArea::text` at open time,
+        /// before any caret or typing mutations landed. On cancel
+        /// we apply these back via a `DeltaGlyphArea` so the tree
+        /// returns to its pre-edit state without going through the
+        /// full `doc.build_tree()` + scene rebuild that `rebuild_all`
+        /// would trigger. The model is untouched during editing, so
+        /// the snapshot stays valid for the whole session.
+        original_text: String,
+        /// Snapshot of the tree's `GlyphArea::regions` at open time.
+        /// Pairs with `original_text` — together they let cancel
+        /// restore the exact pre-edit tree state (including any
+        /// selection-highlight regions that the last `rebuild_all`
+        /// stamped into the node).
+        original_regions: baumhard::core::primitives::ColorFontRegions,
     },
 }
 
@@ -3426,6 +3440,8 @@ mod text_edit_tests {
             buffer: "hi".to_string(),
             cursor_grapheme_pos: 2,
             buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
+            original_text: String::new(),
+            original_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         assert_eq!(open.node_id(), Some("n-42"));
         assert!(open.is_open());
@@ -3579,6 +3595,8 @@ mod text_edit_tests {
             buffer: "in progress".to_string(),
             cursor_grapheme_pos: 11,
             buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
+            original_text: String::new(),
+            original_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         let hit = Some("node-A".to_string());
         let already_editing = editor
@@ -3595,6 +3613,8 @@ mod text_edit_tests {
             buffer: "in progress".to_string(),
             cursor_grapheme_pos: 11,
             buffer_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
+            original_text: String::new(),
+            original_regions: baumhard::core::primitives::ColorFontRegions::new_empty(),
         };
         let hit = Some("node-B".to_string());
         let already_editing = editor
