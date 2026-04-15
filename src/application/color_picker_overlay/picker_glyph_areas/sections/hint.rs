@@ -8,7 +8,7 @@ use super::super::areas::{PickerAreas, PickerSection};
 use super::super::make_area::make_area;
 use crate::application::color_picker::{picker_channel, ColorPickerLayout, ColorPickerOverlayGeometry};
 use crate::application::color_picker_overlay::color::rgb_to_cosmic_color;
-use crate::application::widgets::color_picker_widget::load_spec;
+use crate::application::widgets::color_picker_widget::ColorPickerWidgetSpec;
 use baumhard::util::color::hsv_to_rgb;
 
 pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
@@ -16,8 +16,8 @@ pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
     geometry: &ColorPickerOverlayGeometry,
     layout: &ColorPickerLayout,
     outline: Option<OutlineStyle>,
+    spec: &ColorPickerWidgetSpec,
 ) {
-    let spec = load_spec();
     let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);
     let preview_color = rgb_to_cosmic_color(preview_rgb);
     let font_size = layout.font_size;

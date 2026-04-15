@@ -14,7 +14,7 @@ use crate::application::color_picker::{
 use crate::application::color_picker_overlay::color::{
     highlight_hovered_cell_color, rgb_to_cosmic_color,
 };
-use crate::application::widgets::color_picker_widget::load_spec;
+use crate::application::widgets::color_picker_widget::ColorPickerWidgetSpec;
 use baumhard::util::color::hsv_to_rgb;
 
 pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
@@ -22,8 +22,8 @@ pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
     geometry: &ColorPickerOverlayGeometry,
     layout: &ColorPickerLayout,
     outline: Option<OutlineStyle>,
+    spec: &ColorPickerWidgetSpec,
 ) {
-    let spec = load_spec();
     let hover_scale = spec.geometry.hover_scale;
     let preview_size = layout.preview_size;
     let preview_rgb = hsv_to_rgb(geometry.hue_deg, geometry.sat, geometry.val);

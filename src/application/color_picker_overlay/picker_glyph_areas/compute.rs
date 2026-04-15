@@ -30,12 +30,12 @@ pub(super) fn compute_picker_areas(
     let outline = build_outline(spec, layout);
     let mut areas = PickerAreas::new();
 
-    sections::title::build(&mut areas, geometry, layout, outline);
-    sections::hue_ring::build(&mut areas, geometry, layout, outline);
-    sections::hint::build(&mut areas, geometry, layout, outline);
-    sections::sat_bar::build(&mut areas, geometry, layout, outline);
-    sections::val_bar::build(&mut areas, geometry, layout, outline);
-    sections::preview::build(&mut areas, geometry, layout, outline);
+    sections::title::build(&mut areas, geometry, layout, outline, spec);
+    sections::hue_ring::build(&mut areas, geometry, layout, outline, spec);
+    sections::hint::build(&mut areas, geometry, layout, outline, spec);
+    sections::sat_bar::build(&mut areas, geometry, layout, outline, spec);
+    sections::val_bar::build(&mut areas, geometry, layout, outline, spec);
+    sections::preview::build(&mut areas, geometry, layout, outline, spec);
     sections::hex::build(&mut areas, geometry, layout, outline);
 
     areas
