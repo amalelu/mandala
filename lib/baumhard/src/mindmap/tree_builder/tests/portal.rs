@@ -1,0 +1,198 @@
+//! Portal tree builder tests — marker emission, fold filtering, selection highlight, ascending channels, mutator round-trip, identity sequence.
+
+use super::fixtures::*;
+use super::super::*;
+
+#[test]
+fn portal_tree_emits_two_markers_per_pair() {
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0, 0.0, 0.0),
+            synthetic_node("b", None, 1, 200.0, 0.0),
+        ],
+        vec![],
+    );
+    map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+
+    let result = build_portal_tree(&map, &HashMap::new(), None, None);
+    let pairs: Vec<NodeId> = result.tree.root.children(&result.tree.arena).collect();
+    assert_eq!(pairs.len(), 1);
+
+    let markers: Vec<NodeId> = pairs[0].children(&result.tree.arena).collect();
+    assert_eq!(markers.len(), 2);
+    // Hitboxes: one entry per (pair, endpoint).
+    assert_eq!(result.hitboxes.len(), 2);
+}
+
+#[test]
+fn portal_tree_skips_pair_with_folded_endpoint() {
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("parent", None, 0, 0.0, 0.0),
+            synthetic_node("child", Some("parent"), 0, 0.0, 100.0),
+            synthetic_node("other", None, 1, 200.0, 0.0),
+        ],
+        vec![],
+    );
+    map.nodes.get_mut("parent").unwrap().folded = true;
+    // Pair endpoints: hidden child + visible other. Should be
+    // skipped wholesale because is_hidden_by_fold(child) is true.
+    map.portals
+        .push(synthetic_portal("Y", "child", "other", "#00ff00"));
+    let result = build_portal_tree(&map, &HashMap::new(), None, None);
+    assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
+    assert!(result.hitboxes.is_empty());
+}
+#[test]
+fn portal_tree_selection_overrides_color() {
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0, 0.0, 0.0),
+            synthetic_node("b", None, 1, 200.0, 0.0),
+        ],
+        vec![],
+    );
+    map.portals.push(synthetic_portal("Z", "a", "b", "#ff0000"));
+
+    let selected = Some(("Z", "a", "b"));
+    let result = build_portal_tree(&map, &HashMap::new(), selected, None);
+
+    // Each marker's GlyphArea should carry the cyan color, not red.
+    let pair = result.tree.root.children(&result.tree.arena).next().unwrap();
+    for marker in pair.children(&result.tree.arena) {
+        let area = result
+            .tree
+            .arena
+            .get(marker)
+            .unwrap()
+            .get()
+            .glyph_area()
+            .unwrap();
+        let region = area.regions.all_regions()[0];
+        let c = region.color.unwrap();
+        // #00E5FF: r=0, g≈229/255, b≈1.0
+        assert!(c[0] < 0.05);
+        assert!((c[1] - 229.0 / 255.0).abs() < 0.02);
+        assert!((c[2] - 1.0).abs() < 0.02);
+    }
+}
+
+/// `portal_pair_data` is the single source of truth for both
+/// [`build_portal_tree`] and [`build_portal_mutator_tree`]; the
+/// mutator path needs the resulting `pair_channel` set to be
+/// strictly ascending (Baumhard's `align_child_walks` pairs
+/// mutator children against target children by ascending
+/// channel and breaks alignment if the order is violated).
+#[test]
+fn portal_pair_channels_are_strictly_ascending() {
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0, 0.0, 0.0),
+            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("c", None, 2, 400.0, 0.0),
+        ],
+        vec![],
+    );
+    map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+    map.portals.push(synthetic_portal("Y", "b", "c", "#00ff00"));
+
+    let pairs = portal_pair_data(&map, &HashMap::new(), None, None);
+    assert_eq!(pairs.len(), 2);
+    let channels: Vec<usize> = pairs.iter().map(|p| p.pair_channel).collect();
+    let mut prev = 0;
+    for c in &channels {
+        assert!(*c > prev, "pair channels must be strictly ascending: {channels:?}");
+        prev = *c;
+    }
+}
+
+/// Round-trip: building a tree at state A and then applying the
+/// mutator computed from state B must produce a tree whose
+/// per-channel GlyphAreas match what `build_portal_tree(B)`
+/// would produce directly. Pins the canonical §B2
+/// "mutation, not rebuild" promise — the in-place path's
+/// observable output is identical to a full rebuild's, modulo
+#[test]
+fn portal_mutator_round_trip_matches_full_rebuild() {
+    use crate::core::primitives::Applicable;
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0, 0.0, 0.0),
+            synthetic_node("b", None, 1, 200.0, 0.0),
+        ],
+        vec![],
+    );
+    map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+
+    // State A: no offsets, no selection.
+    let mut tree_a = build_portal_tree(&map, &HashMap::new(), None, None).tree;
+
+    // State B: drag offset on `b`, plus selection.
+    let mut offsets = HashMap::new();
+    offsets.insert("b".to_string(), (10.0, -5.0));
+    let selected = Some(("X", "a", "b"));
+
+    let mutator = build_portal_mutator_tree(&map, &offsets, selected, None);
+    mutator.mutator.apply_to(&mut tree_a);
+
+    let expected = build_portal_tree(&map, &offsets, selected, None).tree;
+
+    // Walk both: per pair, per slot, GlyphArea fields (text,
+    // position, bounds, scale, line_height, regions, outline)
+    // must match.
+    let actual_pairs: Vec<NodeId> = tree_a.root.children(&tree_a.arena).collect();
+    let expected_pairs: Vec<NodeId> = expected.root.children(&expected.arena).collect();
+    assert_eq!(actual_pairs.len(), expected_pairs.len());
+    for (a_pair, e_pair) in actual_pairs.iter().zip(expected_pairs.iter()) {
+        let a_markers: Vec<NodeId> = a_pair.children(&tree_a.arena).collect();
+        let e_markers: Vec<NodeId> = e_pair.children(&expected.arena).collect();
+        assert_eq!(a_markers.len(), e_markers.len());
+        for (a_m, e_m) in a_markers.iter().zip(e_markers.iter()) {
+            let a_area = tree_a.arena.get(*a_m).unwrap().get().glyph_area().unwrap();
+            let e_area = expected.arena.get(*e_m).unwrap().get().glyph_area().unwrap();
+            assert_eq!(a_area.text, e_area.text);
+            assert_eq!(a_area.position, e_area.position);
+            assert_eq!(a_area.render_bounds, e_area.render_bounds);
+            assert_eq!(a_area.scale, e_area.scale);
+            assert_eq!(a_area.line_height, e_area.line_height);
+            assert_eq!(a_area.regions, e_area.regions);
+            assert_eq!(a_area.outline, e_area.outline);
+        }
+    }
+}
+
+/// Connection identity sequence captures cap presence and body
+/// glyph count per edge. A change in any of those is structural
+/// and must drop the equality so the dispatcher in
+#[test]
+fn portal_identity_sequence_drops_folded_pairs() {
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0, 0.0, 0.0),
+            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("parent", None, 2, 400.0, 0.0),
+            synthetic_node("child", Some("parent"), 0, 0.0, 100.0),
+        ],
+        vec![],
+    );
+    map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+    map.portals
+        .push(synthetic_portal("Y", "b", "child", "#00ff00"));
+
+    let pairs_before = portal_pair_data(&map, &HashMap::new(), None, None);
+    assert_eq!(
+        portal_identity_sequence(&pairs_before),
+        vec![
+            ("X".into(), "a".into(), "b".into()),
+            ("Y".into(), "b".into(), "child".into()),
+        ]
+    );
+
+    map.nodes.get_mut("parent").unwrap().folded = true;
+    let pairs_after = portal_pair_data(&map, &HashMap::new(), None, None);
+    assert_eq!(
+        portal_identity_sequence(&pairs_after),
+        vec![("X".into(), "a".into(), "b".into())]
+    );
+}
+
