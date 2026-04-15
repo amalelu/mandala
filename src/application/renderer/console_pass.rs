@@ -211,7 +211,9 @@ pub(super) fn console_overlay_areas(
         // abort (§7).
         let Some(line) = geometry.scrollback.get(skip + slot) else {
             log::warn!(
-                "console_pass: scrollback slot {} out of range (len={}, skip={})",
+                "console_pass: scrollback slot {} out of range \
+                 (len={}, skip={}) — geometry was mutated between \
+                 scrollback_rows derivation and this read",
                 slot,
                 geometry.scrollback.len(),
                 skip,
@@ -288,7 +290,9 @@ pub(super) fn console_overlay_areas(
         // a violated invariant rather than a panic in the render path.
         let Some(c) = geometry.completions.get(slot) else {
             log::warn!(
-                "console_pass: completion slot {} out of range (len={})",
+                "console_pass: completion slot {} out of range \
+                 (len={}) — geometry was mutated between \
+                 completion_rows derivation and this read",
                 slot,
                 geometry.completions.len(),
             );

@@ -3,9 +3,10 @@
 //! `keybinds::normalize_key_name` lowercases the winit key identifier,
 //! so every console-handled key matches the lowercase forms here.
 //! Kept in its own file so both the dispatcher and any future
-//! test-only matchers can share them without a cyclic dep.
-
-#![cfg(not(target_arch = "wasm32"))]
+//! test-only matchers can share them without a cyclic dep. The
+//! parent `console_input/mod.rs` already carries
+//! `#![cfg(not(target_arch = "wasm32"))]` at module level, so this
+//! file inherits the native-only gate without a redundant attribute.
 
 pub(super) const CONSOLE_KEY_ESCAPE: &str = "escape";
 pub(super) const CONSOLE_KEY_ENTER: &str = "enter";

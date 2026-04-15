@@ -374,6 +374,14 @@ impl RegionParams {
     }
 }
 
+/// Pairing of a region bucket number and an element's unique id —
+/// the token a [`crate::gfx_structs::tree::Tree`] sends through its
+/// `scene_index_sender` channel when an element lands in (or moves
+/// between) region buckets. Downstream scene-index consumers use the
+/// pair to keep a `region → elements` map in step with the tree.
+///
+/// Copy + 16 bytes so shipping one through a channel is free — no
+/// heap, no clone.
 #[derive(Debug, Clone, Copy)]
 pub struct RegionElementKeyPair {
     region_num: usize,
@@ -381,6 +389,9 @@ pub struct RegionElementKeyPair {
 }
 
 impl RegionElementKeyPair {
+    /// Construct a pair. Both fields are plain `usize`s — no
+    /// validation; the sender is trusted to have produced them from
+    /// a live tree / region bucket.
     pub fn new(region_num: usize, element_id: usize) -> Self {
         Self {
             region_num,
@@ -388,10 +399,14 @@ impl RegionElementKeyPair {
         }
     }
 
+    /// Element `unique_id` the pair refers to — matches the id the
+    /// element was registered with in its owning tree's arena.
     pub fn element_id(&self) -> usize {
         self.element_id
     }
 
+    /// Region bucket number the element belongs to (or was moving
+    /// into, on a move event).
     pub fn region_num(&self) -> usize {
         self.region_num
     }
