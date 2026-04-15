@@ -26,16 +26,9 @@ mod click;
 mod open;
 mod rebuild;
 
-pub(in crate::application::app) use commit::{
-    apply_picker_preview, cancel_color_picker, close_color_picker_standalone, commit_color_picker,
-    commit_color_picker_to_selection,
-};
 pub(in crate::application::app) use click::{end_color_picker_gesture, handle_color_picker_click};
-pub(in crate::application::app) use geometry::compute_picker_geometry;
+pub(in crate::application::app) use commit::close_color_picker_standalone;
 pub(in crate::application::app) use key::handle_color_picker_key;
 pub(in crate::application::app) use mouse::handle_color_picker_mouse_move;
-pub(in crate::application::app) use open::{
-    open_color_picker_contextual, open_color_picker_standalone, open_picker_inner,
-    seed_initial_preview,
-};
+pub(in crate::application::app) use open::{open_color_picker_contextual, open_color_picker_standalone};
 pub(in crate::application::app) use rebuild::rebuild_color_picker_overlay;

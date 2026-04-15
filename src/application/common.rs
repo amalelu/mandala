@@ -16,7 +16,6 @@ pub enum InputMode {
 #[derive(Clone, PartialEq)]
 pub enum RenderDecree {
     Noop,
-    ArenaUpdate,
     DisplayFps,
     StartRender,
     StopRender,
