@@ -452,3 +452,165 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Axis-split cache coverage for `sat_colors_for` and
+    //! `val_colors_for`. These helpers are module-private so the
+    //! test module sits inline here rather than in the
+    //! `color_picker_overlay/tests/` tree.
+    //!
+    //! The caches live in thread-local statics; each test runs on
+    //! its own thread under `cargo test`, but a single test can
+    //! still observe prior state if it's the second call with the
+    //! same key. To isolate cache-hit vs cache-miss we deliberately
+    //! interpose a known-different HSV between probes so a stale
+    //! cache entry can never match the expected output.
+
+    use super::*;
+    use crate::application::color_picker::CROSSHAIR_CENTER_CELL;
+
+    fn geom(hue_deg: f32, sat: f32, val: f32) -> ColorPickerOverlayGeometry {
+        ColorPickerOverlayGeometry {
+            target_label: "edge",
+            hue_deg,
+            sat,
+            val,
+            preview_hex: String::new(),
+            hex_visible: false,
+            max_cell_advance: 16.0,
+            max_ring_advance: 24.0,
+            measurement_font_size: 16.0,
+            size_scale: 1.0,
+            center_override: None,
+            hovered_hit: None,
+            arm_top_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_bottom_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_left_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            arm_right_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
+            preview_ink_offset: (0.0, 0.0),
+        }
+    }
+
+    /// A `sat_colors` table is a pure function of `(hue, val)` — the
+    /// `sat` axis only shifts which cell is "selected" on the bar,
+    /// which doesn't touch the base-colour table. Two geometries
+    /// differing only in `sat` must produce bit-identical sat_colors.
+    #[test]
+    fn sat_colors_for_independent_of_sat_axis() {
+        // Evict any stale state first by probing an unrelated HSV.
+        let _ = sat_colors_for(&geom(123.0, 0.5, 0.5));
+
+        let a = sat_colors_for(&geom(60.0, 0.25, 0.75));
+        let b = sat_colors_for(&geom(60.0, 0.90, 0.75));
+        for i in 0..SAT_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
+            assert_eq!(
+                a[i].rgb, b[i].rgb,
+                "sat_colors cell {} must not depend on sat axis",
+                i
+            );
+        }
+    }
+
+    /// Mirror test on the val side: `val_colors` is a pure function
+    /// of `(hue, sat)`. Two geometries differing only in `val` must
+    /// produce bit-identical val_colors.
+    #[test]
+    fn val_colors_for_independent_of_val_axis() {
+        let _ = val_colors_for(&geom(321.0, 0.5, 0.5));
+
+        let a = val_colors_for(&geom(200.0, 0.4, 0.1));
+        let b = val_colors_for(&geom(200.0, 0.4, 0.9));
+        for i in 0..VAL_CELL_COUNT {
+            if i == CROSSHAIR_CENTER_CELL {
+                continue;
+            }
+            assert_eq!(
+                a[i].rgb, b[i].rgb,
+                "val_colors cell {} must not depend on val axis",
+                i
+            );
+        }
+    }
+
+    /// Changing `hue_deg` invalidates the sat cache. A hue shift
+    /// between two calls must produce a different cell colour at
+    /// any saturated cell (cell 0 is sat=0 = pure grey regardless
+    /// of hue, so probe the last cell where sat_cell_to_value = 1).
+    #[test]
+    fn sat_colors_for_invalidates_on_hue_change() {
+        let a = sat_colors_for(&geom(0.0, 0.5, 0.5));
+        let b = sat_colors_for(&geom(180.0, 0.5, 0.5));
+        let probe = SAT_CELL_COUNT - 1;
+        assert_ne!(
+            a[probe].rgb, b[probe].rgb,
+            "hue_deg shift must produce a different sat table at a saturated cell"
+        );
+    }
+
+    /// The val axis is the one that matters for `sat_colors`
+    /// (since sat_colors uses `hsv_to_rgb(hue, sat_cell, val)`).
+    /// A val change between two calls must produce a different
+    /// table. Guards against the reverse over-caching failure
+    /// where the split somehow keyed sat_colors on (hue, sat).
+    #[test]
+    fn sat_colors_for_invalidates_on_val_change() {
+        let a = sat_colors_for(&geom(45.0, 0.5, 0.2));
+        let b = sat_colors_for(&geom(45.0, 0.5, 0.9));
+        assert_ne!(
+            a[0].rgb, b[0].rgb,
+            "val shift must produce a different sat table"
+        );
+    }
+
+    /// Symmetric guard for val_colors: val_colors depends on
+    /// `(hue, sat)`, so a sat change must invalidate.
+    #[test]
+    fn val_colors_for_invalidates_on_sat_change() {
+        let a = val_colors_for(&geom(45.0, 0.1, 0.5));
+        let b = val_colors_for(&geom(45.0, 0.9, 0.5));
+        assert_ne!(
+            a[0].rgb, b[0].rgb,
+            "sat shift must produce a different val table"
+        );
+    }
+
+    /// The crosshair centre slot is never populated on the dynamic
+    /// path — the layout spec's `skip_indices: [8]` keeps it off the
+    /// mutator target set, and a `debug_assert_ne!` in
+    /// `PickerDynamicContext::field` pins reads. Verify every
+    /// HSV leaves cell 8 at the `CellColor::zero()` sentinel.
+    #[test]
+    fn crosshair_centre_stays_zero_across_hsv() {
+        for (hue, sat, val) in [(0.0, 1.0, 1.0), (90.0, 0.3, 0.7), (270.0, 0.8, 0.2)] {
+            let g = geom(hue, sat, val);
+            let s = sat_colors_for(&g);
+            let v = val_colors_for(&g);
+            assert_eq!(s[CROSSHAIR_CENTER_CELL].rgb, [0.0; 3]);
+            assert_eq!(v[CROSSHAIR_CENTER_CELL].rgb, [0.0; 3]);
+        }
+    }
+
+    /// Hue-only change populates the maximally-saturated cell
+    /// (SAT_CELL_COUNT - 1 → sat = 1.0) with a different colour
+    /// on each call. Cheap regression that any future "cached the
+    /// wrong axis" bug will trip. Cell 0 is pure grey (sat=0) so
+    /// probe the saturated end.
+    #[test]
+    fn cache_produces_different_cell_colors_per_hue() {
+        let a = sat_colors_for(&geom(0.0, 0.5, 1.0));
+        let b = sat_colors_for(&geom(120.0, 0.5, 1.0));
+        let c = sat_colors_for(&geom(240.0, 0.5, 1.0));
+        let probe = SAT_CELL_COUNT - 1;
+        // Three primaries — each must produce a distinct table at
+        // the fully-saturated cell.
+        assert!(
+            a[probe].rgb != b[probe].rgb
+                && b[probe].rgb != c[probe].rgb
+                && a[probe].rgb != c[probe].rgb
+        );
+    }
+}
