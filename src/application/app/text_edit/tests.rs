@@ -1,6 +1,6 @@
-//! Text-edit cursor-math unit tests. Sharded here from
-//! `app::mod::text_edit_tests` as part of the text_edit
-//! submodule conversion.
+//! Unit tests for the text-edit cursor / grapheme helpers defined
+//! in the parent module, plus related keyboard-routing predicates
+//! shared with `label_edit` and `console_input`.
 
 use super::*;
 use super::super::{

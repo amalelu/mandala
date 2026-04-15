@@ -20,7 +20,7 @@ mod text_edit;
 use edge_drag::apply_edge_handle_drag;
 use text_edit::{
     close_text_edit, delete_at_cursor, delete_before_cursor, handle_text_edit_key,
-    insert_at_cursor, insert_caret, open_text_edit, TextEditState,
+    insert_at_cursor, open_text_edit, TextEditState,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use label_edit::{handle_label_edit_key, open_label_edit, LabelEditState};

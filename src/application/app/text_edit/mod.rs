@@ -1,15 +1,10 @@
 //! Inline node text editor — module root.
 //!
-//! Holds the text-editor `TextEditState` enum + the shared cursor /
-//! grapheme-aware buffer helpers that both the editor and the label
-//! editor (`app::label_edit`) consume. The editor lifecycle itself
-//! (open / close / apply / handle_key / revert) lives in
-//! [`editor`]. The 800+ lines of cursor-math unit tests live in
-//! [`tests`] (`#[cfg(test)]`).
-//!
-//! Pulled out of `app::mod` as part of the text_edit submodule
-//! consolidation — `TextEditState`, the cursor helpers, and the
-//! cursor-math tests no longer bloat the event-loop file.
+//! Holds [`TextEditState`] + the grapheme-aware cursor / buffer
+//! helpers that both the editor and [`super::label_edit`] consume.
+//! The editor lifecycle itself (open / close / apply / handle_key
+//! / revert) lives in [`editor`]; cursor-math unit tests live in
+//! the `tests` submodule.
 
 use baumhard::util::grapheme_chad;
 
@@ -18,22 +13,19 @@ mod editor;
 #[cfg(test)]
 mod tests;
 
-pub(in crate::application::app) use editor::{
-    apply_text_and_regions_delta, apply_text_edit_to_tree, close_text_edit, handle_text_edit_key,
-    open_text_edit, read_node_regions, read_node_text, revert_node_text_on_tree,
-};
+pub(in crate::application::app) use editor::{close_text_edit, handle_text_edit_key, open_text_edit};
 
-/// Session 7A: inline multi-line text editor for a node. Entered via
+/// Inline multi-line text editor for a node. Entered via
 /// double-click on a node (or on empty canvas, which creates a new
 /// orphan and opens the editor on it). Key input is routed to
-/// `handle_text_edit_key` before the normal keybind dispatch, so
+/// [`handle_text_edit_key`] before the normal keybind dispatch, so
 /// Tab/Enter/etc. become literal character inserts while typing.
 ///
 /// Commit is via click-outside-the-edited-node; Esc cancels. The
-/// `buffer` is the transient in-progress text; `cursor_char_pos` is a
-/// char-index offset within `buffer`. The transient edits flow
-/// through Baumhard's `Mutation::AreaDelta` vocabulary applied to the
-/// live tree — the model is untouched until commit.
+/// `buffer` is the transient in-progress text; `cursor_grapheme_pos`
+/// is a grapheme-cluster offset within `buffer`. The transient edits
+/// flow through Baumhard's `Mutation::AreaDelta` vocabulary applied
+/// to the live tree — the model is untouched until commit.
 #[derive(Debug, Clone)]
 pub(in crate::application::app) enum TextEditState {
     Closed,
@@ -87,12 +79,12 @@ impl TextEditState {
     }
 }
 
-/// Session 7A: glyph rendered at the cursor position while a node
-/// text editor is open. Reuses the same caret as `LabelEditState`.
+/// Glyph rendered at the cursor position while a node text editor
+/// is open. Shared with `LabelEditState`.
 const TEXT_EDIT_CARET: char = '\u{258C}';
 
 
-// Session 7A text-edit cursor helpers.
+// Text-edit cursor helpers.
 //
 // These all operate on **grapheme-cluster indices** (not chars or
 // bytes), routing through `baumhard::util::grapheme_chad`. This is
