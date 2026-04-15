@@ -73,60 +73,57 @@ fn hue_ring_colors() -> &'static [CellColor; HUE_SLOT_COUNT] {
     })
 }
 
-/// HSV bit-pattern key for the sat/val base-color caches. Bit-exact
-/// comparison keeps cache hits to the common "same HSV, different
-/// hover cell" case without drifting on FP rounding — NaN HSV would
-/// fail to match itself on a second frame, which forces a rebuild
-/// rather than a corrupt cache read. The `hovered_hit`-only change
-/// case the dispatcher routinely triggers (mouse scrubs across a
-/// bar) now costs one key comparison instead of 16 × `hsv_to_rgb`.
+/// Two-axis HSV bit-pattern key for the per-table caches. `sat_colors`
+/// is `hsv_to_rgb(hue, sat_cell_to_value(i), val)` — independent of
+/// `geometry.sat`, so its key is `(hue, val)`. `val_colors` mirrors
+/// the shape: `hsv_to_rgb(hue, sat, val_cell_to_value(i))`, keyed by
+/// `(hue, sat)`. Splitting the key lets a single-axis scrub — the
+/// user drags only the sat slider, say — hit the table that doesn't
+/// depend on that axis and skip its rebuild entirely. Bit-exact
+/// comparison means NaN fails to match itself (forcing a rebuild
+/// rather than a corrupt read).
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct HsvKey(u32, u32, u32);
+struct AxisKey(u32, u32);
 
-impl HsvKey {
-    fn from_geometry(geometry: &ColorPickerOverlayGeometry) -> Self {
-        Self(
-            geometry.hue_deg.to_bits(),
-            geometry.sat.to_bits(),
-            geometry.val.to_bits(),
-        )
-    }
+struct SatCache {
+    /// `(hue, val)` — the axes `sat_colors` depends on.
+    key: AxisKey,
+    sat_colors: [CellColor; SAT_CELL_COUNT],
 }
 
-struct SatValColorCache {
-    key: HsvKey,
-    sat_colors: [CellColor; SAT_CELL_COUNT],
+struct ValCache {
+    /// `(hue, sat)` — the axes `val_colors` depends on.
+    key: AxisKey,
     val_colors: [CellColor; VAL_CELL_COUNT],
 }
 
 thread_local! {
-    /// Per-thread cache of the sat-bar and val-bar base-color tables
-    /// keyed by the HSV that produced them. The app is single-threaded
-    /// so this is effectively global state. `RefCell` borrows are
-    /// short and mutually exclusive (one dynamic apply at a time),
-    /// so contention is impossible. `None` until the first picker
-    /// open populates it; stays live for the life of the process so
-    /// subsequent open/close cycles keep hitting the cache when HSV
-    /// hasn't changed.
-    static SATVAL_CACHE: RefCell<Option<SatValColorCache>> = const { RefCell::new(None) };
+    /// Per-thread sat-bar base-color cache keyed by `(hue, val)`. The
+    /// app is single-threaded so this is effectively global; `RefCell`
+    /// borrows are short and mutually exclusive (one dynamic apply
+    /// at a time). Stays live for the process lifetime so open/close
+    /// cycles keep hitting the cache when the relevant axes haven't
+    /// moved.
+    static SAT_CACHE: RefCell<Option<SatCache>> = const { RefCell::new(None) };
+
+    /// Per-thread val-bar base-color cache keyed by `(hue, sat)`.
+    /// Same shape as `SAT_CACHE`; split so a user scrubbing only the
+    /// sat axis leaves this table's key unchanged and the rebuild
+    /// skips.
+    static VAL_CACHE: RefCell<Option<ValCache>> = const { RefCell::new(None) };
 }
 
-/// Return fresh `(sat_colors, val_colors)` tables for `geometry`. On
-/// cache hit (same HSV as the last call), copies the cached arrays
-/// out without calling `hsv_to_rgb` at all — the common
-/// mouse-scrub-across-cells case where only `hovered_hit` changes
-/// but HSV stays put. On miss (HSV changed, picker just opened, or
-/// cache was never populated), rebuilds both tables and writes them
-/// back before returning.
-fn sat_val_colors_for(
-    geometry: &ColorPickerOverlayGeometry,
-) -> ([CellColor; SAT_CELL_COUNT], [CellColor; VAL_CELL_COUNT]) {
-    let key = HsvKey::from_geometry(geometry);
-    SATVAL_CACHE.with(|cell| {
+/// Return the sat-bar base-color table for `geometry`. On hit (same
+/// `(hue, val)` as the last call) hands back the cached array. On
+/// miss rebuilds it — one `hsv_to_rgb` per live cell (centre slot
+/// skipped, matching the layout spec's `skip_indices: [8]`).
+fn sat_colors_for(geometry: &ColorPickerOverlayGeometry) -> [CellColor; SAT_CELL_COUNT] {
+    let key = AxisKey(geometry.hue_deg.to_bits(), geometry.val.to_bits());
+    SAT_CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         if let Some(cache) = slot.as_ref() {
             if cache.key == key {
-                return (cache.sat_colors, cache.val_colors);
+                return cache.sat_colors;
             }
         }
         let mut sat_colors = [CellColor::zero(); SAT_CELL_COUNT];
@@ -136,6 +133,23 @@ fn sat_val_colors_for(
             }
             *s = CellColor::new(hsv_to_rgb(geometry.hue_deg, sat_cell_to_value(i), geometry.val));
         }
+        *slot = Some(SatCache { key, sat_colors });
+        sat_colors
+    })
+}
+
+/// Return the val-bar base-color table for `geometry`. Same cache
+/// discipline as [`sat_colors_for`] but keyed by `(hue, sat)` — a
+/// pure-sat drag hits the cache here even when it missed above.
+fn val_colors_for(geometry: &ColorPickerOverlayGeometry) -> [CellColor; VAL_CELL_COUNT] {
+    let key = AxisKey(geometry.hue_deg.to_bits(), geometry.sat.to_bits());
+    VAL_CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if let Some(cache) = slot.as_ref() {
+            if cache.key == key {
+                return cache.val_colors;
+            }
+        }
         let mut val_colors = [CellColor::zero(); VAL_CELL_COUNT];
         for (i, v) in val_colors.iter_mut().enumerate() {
             if i == CROSSHAIR_CENTER_CELL {
@@ -143,12 +157,8 @@ fn sat_val_colors_for(
             }
             *v = CellColor::new(hsv_to_rgb(geometry.hue_deg, geometry.sat, val_cell_to_value(i)));
         }
-        *slot = Some(SatValColorCache {
-            key,
-            sat_colors,
-            val_colors,
-        });
-        (sat_colors, val_colors)
+        *slot = Some(ValCache { key, val_colors });
+        val_colors
     })
 }
 
@@ -234,10 +244,13 @@ impl<'a> PickerDynamicContext<'a> {
         // The crosshair centre keeps its `CellColor::zero()` sentinel
         // — the dynamic spec never queries it (pinned by
         // `debug_assert_ne!` in `field()`) and `skip_indices` in the
-        // layout spec lists `8`. The helper caches by HSV so a mouse
-        // scrub (hover changes, HSV unchanged) hits the cache and
-        // skips the 16 + 16 `hsv_to_rgb` calls entirely.
-        let (sat_colors, val_colors) = sat_val_colors_for(geometry);
+        // layout spec lists `8`. Two axis-specific caches: sat_colors
+        // depends on `(hue, val)`, val_colors depends on `(hue, sat)`,
+        // so a user scrubbing only the sat slider leaves the val
+        // table's cache key untouched (and vice versa) — doubling
+        // the hit rate on single-axis drags vs a single combined key.
+        let sat_colors = sat_colors_for(geometry);
+        let val_colors = val_colors_for(geometry);
 
         let spec = load_spec();
         let is_standalone = geometry.target_label.is_empty();
