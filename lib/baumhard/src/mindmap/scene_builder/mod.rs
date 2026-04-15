@@ -262,11 +262,16 @@ const EDGE_HANDLE_GLYPH: &str = "\u{25C6}"; // ◆
 const EDGE_HANDLE_FONT_SIZE_PT: f32 = 14.0;
 
 mod builder;
+mod edge_handles;
+mod label;
+mod node_pass;
+mod portal;
 
 #[cfg(test)]
 mod tests;
 
 pub use builder::{
-    build_edge_handles, build_scene, build_scene_with_cache, build_scene_with_offsets,
+    build_scene, build_scene_with_cache, build_scene_with_offsets,
     build_scene_with_offsets_selection_and_overrides,
 };
+pub use edge_handles::build_edge_handles;
