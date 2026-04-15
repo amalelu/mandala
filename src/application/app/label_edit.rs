@@ -11,10 +11,52 @@ use baumhard::util::grapheme_chad;
 use crate::application::document::MindMapDocument;
 use crate::application::renderer::Renderer;
 
+use super::text_edit::insert_caret;
 use super::{
-    insert_caret, rebuild_all, route_label_edit_key, update_connection_label_tree,
-    update_portal_tree, LabelEditState,
+    rebuild_all, route_label_edit_key, update_connection_label_tree, update_portal_tree,
 };
+
+/// Session 6D: inline-edit state for a connection's label. When
+/// `Open`, all keyboard input is routed to the label-edit handler
+/// (just like `ConsoleState::Open` captures keys for the console
+/// input line). Mutually exclusive with `ConsoleState::Open` — the
+/// console check runs first, so opening the console while editing a
+/// label is a no-op.
+///
+/// Mirrors `TextEditState` in shape (buffer + grapheme cursor),
+/// per CODE_CONVENTIONS §1: every keystroke routes through
+/// `grapheme_chad` so backspace over an emoji removes the whole
+/// cluster, not a stray byte. The buffer is threaded into the
+/// scene_builder via `MindMapDocument::label_edit_preview`; the
+/// connection-label tree's §B2 mutator path (Phase 1.3) picks up
+/// the new text + caret without rebuilding the arena.
+#[derive(Debug, Clone)]
+pub(in crate::application::app) enum LabelEditState {
+    Closed,
+    Open {
+        edge_ref: crate::application::document::EdgeRef,
+        /// The in-progress buffer. Committed to
+        /// `MindEdge.label` on Enter; discarded on Escape.
+        buffer: String,
+        /// Cursor position as a grapheme-cluster index into
+        /// `buffer`. Valid range
+        /// `[0, count_grapheme_clusters(buffer)]`. Stored in
+        /// graphemes (not chars or bytes) so backspace over an
+        /// emoji or ZWJ cluster removes the whole user-visible
+        /// character — same invariant as
+        /// `TextEditState::Open::cursor_grapheme_pos`.
+        cursor_grapheme_pos: usize,
+        /// The edge's label value at the moment edit mode opened.
+        /// Used to restore state on Escape so the cancel is clean.
+        original: Option<String>,
+    },
+}
+
+impl LabelEditState {
+    pub(in crate::application::app) fn is_open(&self) -> bool {
+        matches!(self, LabelEditState::Open { .. })
+    }
+}
 
 /// Session 6D: transition into inline label edit mode for the given
 /// edge. Seeds the buffer from the edge's current label (or the
@@ -165,3 +207,131 @@ pub(in crate::application::app) fn close_label_edit(
     // the buffer was empty + original was None).
     rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests {
+    //! Label-edit key-routing tests — backspace / delete / arrow /
+    //! home / end / printable-char behaviour for
+    //! [`super::route_label_edit_key`], the pure keyboard router
+    //! both the label editor and its text-edit sibling consume.
+    //! No winit event loop needed; the router is a pure function.
+
+    use super::*;
+
+    #[test]
+    fn test_route_label_edit_backspace_deletes_grapheme_before_cursor() {
+        let mut buf = String::from("café");
+        // 4 graphemes: c a f é. Cursor at end; backspace removes é.
+        let mut cursor = 4;
+        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "caf");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_backspace_at_zero_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        assert!(!changed);
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn test_route_label_edit_delete_at_end_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 3;
+        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        assert!(!changed);
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_delete_removes_grapheme_at_cursor() {
+        let mut buf = String::from("abc");
+        let mut cursor = 1;
+        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "ac");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn test_route_label_edit_arrow_left_right_walks_graphemes() {
+        let mut buf = String::from("café");
+        let mut cursor = 4;
+        // Left past é, f, a — landing on the c boundary.
+        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 3);
+        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 2);
+        // Right brings us back.
+        assert!(route_label_edit_key(Some("arrowright"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn test_route_label_edit_arrow_left_at_zero_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 0;
+        assert!(!route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn test_route_label_edit_home_end_jump_to_ends() {
+        let mut buf = String::from("café");
+        let mut cursor = 2;
+        assert!(route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+        // Home again is a no-op.
+        assert!(!route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 0);
+        assert!(route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 4);
+        // End again is a no-op.
+        assert!(!route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn test_route_label_edit_printable_inserts_and_advances() {
+        let mut buf = String::from("ab");
+        let mut cursor = 1;
+        let changed = route_label_edit_key(None, Some("X"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "aXb");
+        assert_eq!(cursor, 2);
+    }
+
+    /// IME / dead-key sequences can arrive as multi-char strings.
+    /// Each non-control char inserts in order and the cursor
+    /// advances past them.
+    #[test]
+    fn test_route_label_edit_multichar_typed_payload() {
+        let mut buf = String::from("");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(None, Some("né"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "né");
+        assert_eq!(cursor, 2);
+    }
+
+    /// Control characters in a typed payload are filtered out.
+    /// Pins the regression where an IME sequence like `"a\t"`
+    /// would otherwise insert a literal tab.
+    #[test]
+    fn test_route_label_edit_typed_control_chars_are_skipped() {
+        let mut buf = String::from("");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(None, Some("a\tb"), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "ab");
+        assert_eq!(cursor, 2);
+    }
+}
+

@@ -1,4 +1,4 @@
-//! Inline node text editor (Session 7A): open / close / handle key /
+//! Inline node text editor: open / close / handle key /
 //! apply preview-to-tree. The text editor is a multi-line in-place
 //! buffer whose cursor + content live on `TextEditState::Open` and
 //! whose preview is stamped into the live Baumhard tree via
@@ -13,15 +13,12 @@ use baumhard::util::grapheme_chad;
 use crate::application::document::MindMapDocument;
 use crate::application::renderer::Renderer;
 
+use super::super::rebuild_all;
 use super::{
     cursor_to_line_end, cursor_to_line_start, delete_at_cursor, delete_before_cursor,
-    insert_at_cursor, insert_caret, move_cursor_down_line, move_cursor_up_line, rebuild_all,
-    TextEditState,
+    insert_at_cursor, insert_caret, move_cursor_down_line, move_cursor_up_line, TextEditState,
 };
 
-// =====================================================================
-// Session 7A: inline node text editor
-// =====================================================================
 
 /// Open the text editor on the given node. Seeds the buffer (empty if
 /// `from_creation`, else the node's current text), and pushes the
@@ -190,7 +187,7 @@ pub(in crate::application::app) fn revert_node_text_on_tree(
     }
 }
 
-/// Session 7A: commit or cancel the open text editor.
+/// commit or cancel the open text editor.
 ///
 /// - **Commit**: writes the final buffer back to the model via
 ///   `set_node_text` (no-op on unchanged text, handles its own undo
@@ -241,7 +238,7 @@ pub(in crate::application::app) fn close_text_edit(
     }
 }
 
-/// Session 7A: push the current (`buffer`, `cursor`) state into the
+/// push the current (`buffer`, `cursor`) state into the
 /// live Baumhard tree via a `Mutation::AreaDelta { text: Assign }`
 /// targeting the edited node's GlyphArea. This is the "utilize
 /// Baumhard" path — the buffer is transient UI state on the app
@@ -316,7 +313,7 @@ pub(in crate::application::app) fn apply_text_edit_to_tree(
     renderer.rebuild_buffers_from_tree(&tree.tree);
 }
 
-/// Session 7A: route a keystroke to the open node text editor. All
+/// route a keystroke to the open node text editor. All
 /// keys are stolen from normal keybind dispatch — Tab and Enter
 /// produce literal characters, Esc cancels, arrows/Home/End navigate,
 /// Backspace/Delete delete, and printable chars are inserted at the
@@ -454,7 +451,6 @@ pub(in crate::application::app) fn handle_text_edit_key(
         );
     }
 }
-
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
