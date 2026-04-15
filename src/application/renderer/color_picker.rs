@@ -4,10 +4,11 @@
 //! free fns and then invoke the renderer-owned
 //! `rebuild_overlay_scene_buffers` to reshape cosmic-text buffers.
 //!
-//! The returned backdrop value flows back through the wrapper as
-//! a "return-value publish" pattern — the `color_picker_backdrop`
-//! field stays in `Renderer` (shared with the rect pipeline's
-//! render pass) rather than being moved out behind `pub(super)`.
+//! The backdrop value travels back through each wrapper via a
+//! "return-value publish" pattern — the `color_picker_backdrop`
+//! field stays owned by `Renderer` (the rect pipeline's render
+//! pass reads it in the same frame) rather than being relocated
+//! here with `pub(super)` visibility.
 
 use crate::application::color_picker::{ColorPickerLayout, ColorPickerOverlayGeometry};
 use crate::application::color_picker_overlay;

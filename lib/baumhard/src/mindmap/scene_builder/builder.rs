@@ -119,11 +119,6 @@ pub fn build_scene_with_cache(
     // stale spacing doesn't leak into this frame.
     cache.ensure_zoom(camera_zoom);
 
-    // Theme variable map — every color string we hand off to render
-    // elements is run through `resolve_var` first so authors can use
-    // `var(--name)` anywhere a literal hex was accepted.
-    let vars = &map.canvas.theme_variables;
-
     // Per-node pass: emits `TextElement`s + `BorderElement`s and
     // computes the clip AABBs the connection pass below consumes.
     let (text_elements, border_elements, node_aabbs) = build_node_elements(map, offsets);
@@ -141,7 +136,6 @@ pub fn build_scene_with_cache(
         cache,
         camera_zoom,
     );
-
 
     // Label pass — sub-builder rebuilds paths per labeled edge
     // (trivial cost, no cache). Handles the label-edit override
@@ -163,7 +157,6 @@ pub fn build_scene_with_cache(
         portal_color_preview,
     );
 
-
     RenderScene {
         text_elements,
         border_elements,
@@ -171,7 +164,8 @@ pub fn build_scene_with_cache(
         portal_elements,
         edge_handles,
         connection_label_elements,
-        background_color: resolve_var(&map.canvas.background_color, vars).to_string(),
+        background_color: resolve_var(&map.canvas.background_color, &map.canvas.theme_variables)
+            .to_string(),
     }
 }
 

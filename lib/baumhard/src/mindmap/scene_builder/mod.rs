@@ -246,10 +246,7 @@ pub struct EdgeHandleElement {
     pub font_size_pt: f32,
 }
 
-/// Color override applied to the `ConnectionElement` of a selected edge.
-/// Kept in sync visually with the cyan node selection highlight in
-/// `src/application/document.rs::HIGHLIGHT_COLOR`.
-const SELECTED_EDGE_COLOR: &str = "#00E5FF";
+use super::SELECTION_HIGHLIGHT_HEX as SELECTED_EDGE_COLOR;
 
 /// Glyph used for edge grab-handles in Session 6C's connection
 /// reshape surface. A solid black diamond reads as a clickable

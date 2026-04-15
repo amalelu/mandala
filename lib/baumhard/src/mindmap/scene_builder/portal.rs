@@ -11,14 +11,10 @@
 use std::collections::HashMap;
 
 use crate::mindmap::model::MindMap;
+use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color::resolve_var;
 
 use super::{PortalColorPreview, PortalElement, PortalRefKey};
-
-/// Cyan highlight hex for selected portals. Matches the
-/// `HIGHLIGHT_COLOR` constant in `document.rs` that drives the
-/// node-selection color mutation.
-const SELECTED_PORTAL_COLOR_HEX: &str = "#00E5FF";
 
 /// Emit two portal markers per visible `PortalPair`.
 pub fn build_portal_elements(
@@ -59,7 +55,7 @@ pub fn build_portal_elements(
         let raw_color: &str = if let Some(p) = preview_for_this_portal {
             p
         } else if is_selected {
-            SELECTED_PORTAL_COLOR_HEX
+            SELECTION_HIGHLIGHT_HEX
         } else {
             portal.color.as_str()
         };

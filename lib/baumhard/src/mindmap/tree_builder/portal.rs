@@ -13,14 +13,8 @@ use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::tree::Tree;
 use crate::mindmap::model::{MindMap, MindNode};
+use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color;
-
-/// Cyan highlight color for selected portals — kept in sync with
-/// `scene_builder::SELECTED_PORTAL_COLOR_HEX`. Hardcoded as a
-/// hex literal here too rather than re-exporting because the
-/// scene_builder constant is private and the duplication is one
-/// scalar.
-const SELECTED_PORTAL_COLOR_HEX: &str = "#00E5FF";
 
 /// Identifier for the currently selected portal pair, used to
 /// route the cyan highlight color to the right two markers.
@@ -126,7 +120,7 @@ pub fn portal_pair_data(
         let raw_color: &str = if let Some(p) = preview_for_this_portal {
             p
         } else if is_selected {
-            SELECTED_PORTAL_COLOR_HEX
+            SELECTION_HIGHLIGHT_HEX
         } else {
             portal.color.as_str()
         };
