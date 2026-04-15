@@ -262,6 +262,7 @@ const EDGE_HANDLE_GLYPH: &str = "\u{25C6}"; // ◆
 const EDGE_HANDLE_FONT_SIZE_PT: f32 = 14.0;
 
 mod builder;
+mod connection;
 mod edge_handles;
 mod label;
 mod node_pass;

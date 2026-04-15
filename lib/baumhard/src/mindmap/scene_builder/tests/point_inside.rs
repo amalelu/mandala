@@ -1,6 +1,6 @@
 //! `point_inside_any_node` boundary cases: strictly inside, on boundary (not inside), outside, and multi-AABB fan-out.
 
-use super::super::builder::point_inside_any_node;
+use super::super::connection::point_inside_any_node;
 use glam::Vec2;
 
 #[test]
