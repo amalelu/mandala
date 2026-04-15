@@ -14,8 +14,49 @@ use crate::application::renderer::Renderer;
 use super::text_edit::insert_caret;
 use super::{
     rebuild_all, route_label_edit_key, update_connection_label_tree, update_portal_tree,
-    LabelEditState,
 };
+
+/// Session 6D: inline-edit state for a connection's label. When
+/// `Open`, all keyboard input is routed to the label-edit handler
+/// (just like `ConsoleState::Open` captures keys for the console
+/// input line). Mutually exclusive with `ConsoleState::Open` — the
+/// console check runs first, so opening the console while editing a
+/// label is a no-op.
+///
+/// Mirrors `TextEditState` in shape (buffer + grapheme cursor),
+/// per CODE_CONVENTIONS §1: every keystroke routes through
+/// `grapheme_chad` so backspace over an emoji removes the whole
+/// cluster, not a stray byte. The buffer is threaded into the
+/// scene_builder via `MindMapDocument::label_edit_preview`; the
+/// connection-label tree's §B2 mutator path (Phase 1.3) picks up
+/// the new text + caret without rebuilding the arena.
+#[derive(Debug, Clone)]
+pub(in crate::application::app) enum LabelEditState {
+    Closed,
+    Open {
+        edge_ref: crate::application::document::EdgeRef,
+        /// The in-progress buffer. Committed to
+        /// `MindEdge.label` on Enter; discarded on Escape.
+        buffer: String,
+        /// Cursor position as a grapheme-cluster index into
+        /// `buffer`. Valid range
+        /// `[0, count_grapheme_clusters(buffer)]`. Stored in
+        /// graphemes (not chars or bytes) so backspace over an
+        /// emoji or ZWJ cluster removes the whole user-visible
+        /// character — same invariant as
+        /// `TextEditState::Open::cursor_grapheme_pos`.
+        cursor_grapheme_pos: usize,
+        /// The edge's label value at the moment edit mode opened.
+        /// Used to restore state on Escape so the cancel is clean.
+        original: Option<String>,
+    },
+}
+
+impl LabelEditState {
+    pub(in crate::application::app) fn is_open(&self) -> bool {
+        matches!(self, LabelEditState::Open { .. })
+    }
+}
 
 /// Session 6D: transition into inline label edit mode for the given
 /// edge. Seeds the buffer from the edge's current label (or the

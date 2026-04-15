@@ -23,7 +23,7 @@ use text_edit::{
     insert_at_cursor, insert_caret, open_text_edit, TextEditState,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use label_edit::{handle_label_edit_key, open_label_edit};
+use label_edit::{handle_label_edit_key, open_label_edit, LabelEditState};
 #[cfg(not(target_arch = "wasm32"))]
 use color_picker_flow::{
     end_color_picker_gesture, handle_color_picker_click, handle_color_picker_key,
@@ -100,50 +100,6 @@ const EDGE_HIT_TOLERANCE_PX: f32 = 8.0;
 /// more grab-area to feel forgiving.
 #[cfg(not(target_arch = "wasm32"))]
 const EDGE_HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
-
-/// Session 6D: inline-edit state for a connection's label. When
-/// `Open`, all keyboard input is routed to the label-edit handler
-/// (just like `ConsoleState::Open` captures keys for the console
-/// input line). Mutually exclusive with `ConsoleState::Open` — the
-/// console check runs first, so opening the console while editing a
-/// label is a no-op.
-///
-/// Mirrors [`TextEditState`] in shape (buffer + grapheme cursor),
-/// per CODE_CONVENTIONS §1: every keystroke routes through
-/// `grapheme_chad` so backspace over an emoji removes the whole
-/// cluster, not a stray byte. The buffer is threaded into the
-/// scene_builder via [`MindMapDocument::label_edit_preview`]; the
-/// connection-label tree's §B2 mutator path (Phase 1.3) picks up
-/// the new text + caret without rebuilding the arena.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone)]
-pub(super) enum LabelEditState {
-    Closed,
-    Open {
-        edge_ref: crate::application::document::EdgeRef,
-        /// The in-progress buffer. Committed to
-        /// `MindEdge.label` on Enter; discarded on Escape.
-        buffer: String,
-        /// Cursor position as a grapheme-cluster index into
-        /// `buffer`. Valid range
-        /// `[0, count_grapheme_clusters(buffer)]`. Stored in
-        /// graphemes (not chars or bytes) so backspace over an
-        /// emoji or ZWJ cluster removes the whole user-visible
-        /// character — same invariant as
-        /// [`TextEditState::Open::cursor_grapheme_pos`].
-        cursor_grapheme_pos: usize,
-        /// The edge's label value at the moment edit mode opened.
-        /// Used to restore state on Escape so the cancel is clean.
-        original: Option<String>,
-    },
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl LabelEditState {
-    fn is_open(&self) -> bool {
-        matches!(self, LabelEditState::Open { .. })
-    }
-}
 
 
 /// Tracks the previous left-click in screen space so a second click
