@@ -5,8 +5,6 @@
 //! dispatcher can pick between the layout-phase and dynamic-phase
 //! mutators.
 
-use crate::application::renderer::Renderer;
-
 /// Build geometry from the current picker state and report whether
 /// the layout has changed since the previous call. Internal helper —
 /// the bool lets `rebuild_color_picker_overlay` pick between the
@@ -24,10 +22,16 @@ use crate::application::renderer::Renderer;
 /// still at their initial-build values, which is correct on this
 /// path (the initial build IS the layout phase) but the bool keeps
 /// the dispatch readable.
+///
+/// Takes `surface_size` as a plain `(width, height)` tuple in pixels
+/// rather than a `&Renderer`: per `CODE_CONVENTIONS.md §3`, platform-
+/// shared layout math must be reachable without a wgpu instance, and
+/// the pure layout fn `compute_color_picker_layout` only needs the
+/// two screen dimensions.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn compute_picker_geometry(
     state: &mut crate::application::color_picker::ColorPickerState,
-    renderer: &Renderer,
+    surface_size: (f32, f32),
 ) -> Option<(
     crate::application::color_picker::ColorPickerOverlayGeometry,
     bool,
@@ -148,11 +152,8 @@ pub(in crate::application::app) fn compute_picker_geometry(
     // rebuild — `true` on the first call after open (no cached layout
     // yet) and on any layout-affecting change (resize, size_scale,
     // center_override, ink-offset measurement update).
-    let layout = compute_color_picker_layout(
-        &geometry,
-        renderer.surface_width() as f32,
-        renderer.surface_height() as f32,
-    );
+    let (surface_w, surface_h) = surface_size;
+    let layout = compute_color_picker_layout(&geometry, surface_w, surface_h);
     let layout_changed = if let ColorPickerState::Open { layout: cached, .. } = state {
         let changed = cached.as_ref().map_or(true, |c| c != &layout);
         *cached = Some(layout);
