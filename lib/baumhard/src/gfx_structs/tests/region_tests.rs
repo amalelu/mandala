@@ -37,7 +37,6 @@ pub fn do_region_indexer_insert_delete() {
         assert_eq!(indexer.elements_in_region(i).len(), 1);
         assert!(indexer.elements_in_region(i).contains(&i));
         assert!(indexer.get_reverse_index_for_element(i).contains(&i));
-        assert!(indexer.scan_regions_for_element(i).contains(&i));
     }
 
     for i in 0..500 {
@@ -45,7 +44,6 @@ pub fn do_region_indexer_insert_delete() {
         assert_eq!(indexer.elements_in_region(i).len(), 0);
         assert!(!indexer.elements_in_region(i).contains(&i));
         assert!(!indexer.get_reverse_index_for_element(i).contains(&i));
-        assert!(!indexer.scan_regions_for_element(i).contains(&i));
     }
 }
 

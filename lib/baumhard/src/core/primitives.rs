@@ -334,8 +334,8 @@ impl ColorFontRegions {
     }
 
     /// Test-only convenience: like [`Self::get`] but copies the region
-    /// out and panics when it is missing, with the full region table
-    /// dumped to `debug!` first to ease assertion debugging. **Not for
+    /// out and panics if the range is not present, with the full region
+    /// table dumped to `debug!` first to ease assertion debugging. **Not for
     /// interactive paths** — production callers must use [`Self::get`]
     /// and handle the `None` arm; CODE_CONVENTIONS §7 forbids panics
     /// after the first frame.

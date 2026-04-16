@@ -127,18 +127,6 @@ impl RegionIndexer {
             .cloned()
             .unwrap_or_default()
     }
-
-    /// Iterates through all regions and returns a set of the ones containing element_id
-    /// This should not be necessary to use with reverse_index enabled
-    pub fn scan_regions_for_element(&mut self, element_id: usize) -> BTreeSet<usize> {
-        let mut regions = BTreeSet::new();
-        for region in self.index.iter() {
-            if region.contains(&element_id) {
-                regions.insert(element_id);
-            }
-        }
-        regions
-    }
 }
 
 impl Default for RegionIndexer {
