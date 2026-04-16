@@ -10,7 +10,7 @@ fn test_label_element_emitted_for_edge_with_label() {
         synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
         synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
     ];
-    let mut edge = synthetic_edge("a", "b", 0, 0);
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
     edge.label = Some("hello".to_string());
     let map = synthetic_map(nodes, vec![edge]);
     let scene = build_scene(&map, 1.0);
@@ -25,13 +25,13 @@ fn test_no_label_element_for_missing_or_empty_label() {
         synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
         synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
     ];
-    let edge = synthetic_edge("a", "b", 0, 0);
+    let edge = synthetic_edge("a", "b", "auto", "auto");
     let map = synthetic_map(nodes.clone(), vec![edge]);
     let scene = build_scene(&map, 1.0);
     assert_eq!(scene.connection_label_elements.len(), 0);
 
     // label = Some("") → no element (empty-string special case).
-    let mut edge = synthetic_edge("a", "b", 0, 0);
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
     edge.label = Some(String::new());
     let map = synthetic_map(nodes, vec![edge]);
     let scene = build_scene(&map, 1.0);
@@ -48,7 +48,7 @@ fn test_label_position_follows_label_position_t() {
         synthetic_node("b", 1000.0, 0.0, 40.0, 40.0, false),
     ];
     let make = |t: f32| {
-        let mut e = synthetic_edge("a", "b", 0, 0);
+        let mut e = synthetic_edge("a", "b", "auto", "auto");
         e.label = Some("x".to_string());
         e.label_position_t = Some(t);
         e
@@ -75,7 +75,7 @@ fn test_label_color_inherits_edge_color_when_config_color_none() {
         synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
         synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
     ];
-    let mut edge = synthetic_edge("a", "b", 0, 0);
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
     edge.label = Some("lbl".to_string());
     edge.color = "#abcdef".to_string();
     // glyph_connection is None → falls back to edge.color.
@@ -90,7 +90,7 @@ fn test_label_color_follows_glyph_connection_color_override() {
         synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
         synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
     ];
-    let mut edge = synthetic_edge("a", "b", 0, 0);
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
     edge.label = Some("lbl".to_string());
     edge.color = "#abcdef".to_string();
     edge.glyph_connection = Some(GlyphConnectionConfig {

@@ -18,18 +18,16 @@ pub struct MindEdge {
     pub edge_type: String,
     pub color: String,
     pub width: i32,
-    pub line_style: i32,
+    pub line_style: String,
     pub visible: bool,
     pub label: Option<String>,
     /// Parameter-space position of the label along the connection
     /// path. `0.0` sits at the from-anchor, `1.0` at the to-anchor,
-    /// `0.5` (or `None`) at the midpoint. Introduced in Session 6D
-    /// for labeled edges; absent on older maps, which render their
-    /// labels at the midpoint.
+    /// `0.5` (or `None`) at the midpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_position_t: Option<f32>,
-    pub anchor_from: i32,
-    pub anchor_to: i32,
+    pub anchor_from: String,
+    pub anchor_to: String,
     pub control_points: Vec<ControlPoint>,
     /// Glyph-based connection rendering. Optional — if absent, the renderer
     /// composes a connection from default glyphs based on the edge direction.

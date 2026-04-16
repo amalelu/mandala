@@ -40,7 +40,7 @@ use super::defaults::default_cross_link_edge;
         let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
         let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
         let anchor_from_pos = baumhard::mindmap::connection::resolve_anchor_point(
-            from_pos, from_size, edge.anchor_from, to_center,
+            from_pos, from_size, &edge.anchor_from, to_center,
         );
 
         let hit = doc.hit_test_edge_handle(anchor_from_pos, &edge_ref, 2.0);
@@ -72,10 +72,10 @@ use super::defaults::default_cross_link_edge;
         let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
         let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
         let start = baumhard::mindmap::connection::resolve_anchor_point(
-            from_pos, from_size, edge.anchor_from, to_center,
+            from_pos, from_size, &edge.anchor_from, to_center,
         );
         let end = baumhard::mindmap::connection::resolve_anchor_point(
-            to_pos, to_size, edge.anchor_to, from_center,
+            to_pos, to_size, &edge.anchor_to, from_center,
         );
         let midpoint = start.lerp(end, 0.5);
 
@@ -178,8 +178,8 @@ use super::defaults::default_cross_link_edge;
             &doc.mindmap.edges[edge_idx].edge_type,
         );
         // Force a change by picking a value different from the current
-        let original = doc.mindmap.edges[edge_idx].anchor_from;
-        let new_value = if original == 1 { 3 } else { 1 };
+        let original = doc.mindmap.edges[edge_idx].anchor_from.clone();
+        let new_value = if original == "top" { "bottom" } else { "top" };
         let ok = doc.set_edge_anchor(&edge_ref, true, new_value);
         assert!(ok);
         assert_eq!(doc.mindmap.edges[edge_idx].anchor_from, new_value);
@@ -197,8 +197,8 @@ use super::defaults::default_cross_link_edge;
             &doc.mindmap.edges[edge_idx].to_id,
             &doc.mindmap.edges[edge_idx].edge_type,
         );
-        let current = doc.mindmap.edges[edge_idx].anchor_from;
-        let ok = doc.set_edge_anchor(&edge_ref, true, current);
+        let current = doc.mindmap.edges[edge_idx].anchor_from.clone();
+        let ok = doc.set_edge_anchor(&edge_ref, true, &current);
         assert!(!ok);
         assert!(doc.undo_stack.is_empty());
     }
@@ -228,8 +228,8 @@ use super::defaults::default_cross_link_edge;
         let edge_idx = doc.mindmap.edges.iter()
             .position(|e| e.visible)
             .unwrap();
-        let original = doc.mindmap.edges[edge_idx].anchor_from;
-        let new_value = if original == 2 { 4 } else { 2 };
+        let original = doc.mindmap.edges[edge_idx].anchor_from.clone();
+        let new_value = if original == "right" { "left" } else { "right" };
         let edge_ref = EdgeRef::new(
             &doc.mindmap.edges[edge_idx].from_id,
             &doc.mindmap.edges[edge_idx].to_id,

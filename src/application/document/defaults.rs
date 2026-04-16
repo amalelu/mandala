@@ -15,22 +15,20 @@ pub(super) fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge 
         edge_type: "parent_child".to_string(),
         color: "#888888".to_string(),
         width: 4,
-        line_style: 0,
+        line_style: "solid".to_string(),
         visible: true,
         label: None,
         label_position_t: None,
-        anchor_from: 0,
-        anchor_to: 0,
+        anchor_from: "auto".to_string(),
+        anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
     }
 }
 
 /// Build a fresh "orphan" MindNode with sensible defaults, positioned at
-/// `position` and marked as a root (`parent_id = None`). The node has
-/// placeholder text so it's visible on the canvas until the user edits it
-/// (text editing is still WIP; see roadmap M7).
-pub(super) fn default_orphan_node(id: &str, position: Vec2, index: i32) -> MindNode {
+/// `position` and marked as a root (`parent_id = None`).
+pub(super) fn default_orphan_node(id: &str, position: Vec2) -> MindNode {
     let text = "New node".to_string();
     let text_runs = vec![TextRun {
         start: 0,
@@ -46,7 +44,6 @@ pub(super) fn default_orphan_node(id: &str, position: Vec2, index: i32) -> MindN
     MindNode {
         id: id.to_string(),
         parent_id: None,
-        index,
         position: Position {
             x: position.x as f64,
             y: position.y as f64,
@@ -61,7 +58,7 @@ pub(super) fn default_orphan_node(id: &str, position: Vec2, index: i32) -> MindN
             background_color: "#141414".to_string(),
             frame_color: "#30b082".to_string(),
             text_color: "#ffffff".to_string(),
-            shape_type: 0,
+            shape: "rectangle".to_string(),
             corner_radius_percent: 10.0,
             frame_thickness: 4.0,
             show_frame: true,
@@ -69,13 +66,14 @@ pub(super) fn default_orphan_node(id: &str, position: Vec2, index: i32) -> MindN
             border: None,
         },
         layout: NodeLayout {
-            layout_type: 0,
-            direction: 0,
+            layout_type: "map".to_string(),
+            direction: "auto".to_string(),
             spacing: 50.0,
         },
         folded: false,
         notes: String::new(),
         color_schema: None,
+        channel: 0,
         trigger_bindings: Vec::new(),
         inline_mutations: Vec::new(),
     }
@@ -91,12 +89,12 @@ pub(super) fn default_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
         edge_type: "cross_link".to_string(),
         color: "#aa88cc".to_string(),
         width: 3,
-        line_style: 0,
+        line_style: "solid".to_string(),
         visible: true,
         label: None,
         label_position_t: None,
-        anchor_from: 0,
-        anchor_to: 0,
+        anchor_from: "auto".to_string(),
+        anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
     }

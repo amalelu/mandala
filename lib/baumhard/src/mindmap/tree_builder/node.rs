@@ -95,7 +95,7 @@ pub(super) fn build_children_recursive(
             continue;
         }
         let area = mindnode_to_glyph_area(child, vars);
-        let element = GfxElement::new_area_non_indexed_with_id(area, 0, *id_counter);
+        let element = GfxElement::new_area_non_indexed_with_id(area, child.channel, *id_counter);
         *id_counter += 1;
 
         let child_node_id = tree.arena.new_node(element);

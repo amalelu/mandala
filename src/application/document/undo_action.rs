@@ -12,11 +12,11 @@ pub enum UndoAction {
     MoveNodes { original_positions: Vec<(String, Position)> },
     /// Stores full node snapshots before a custom mutation was applied.
     CustomMutation { node_snapshots: Vec<(String, MindNode)> },
-    /// Stores original parent_id and index for each reparented node, plus a
-    /// full snapshot of `mindmap.edges` from before the reparent so that
+    /// Stores original parent_id for each reparented node, plus a full
+    /// snapshot of `mindmap.edges` from before the reparent so that
     /// parent_child edge rewrites can be reversed on undo.
     ReparentNodes {
-        entries: Vec<(String, Option<String>, i32)>,
+        entries: Vec<(String, Option<String>)>,
         old_edges: Vec<MindEdge>,
     },
     /// Edge removed via the Delete key on a selected connection. Restored
@@ -75,19 +75,16 @@ pub enum UndoAction {
     EditPortal { index: usize, before: PortalPair },
     /// A node was deleted. Restored by re-inserting the node, re-inserting
     /// every edge that touched it at its original `mindmap.edges` index,
-    /// and restoring the `parent_id`/`index` of every child that was
-    /// orphaned by the delete. Mirrors the `DeleteEdge`/`DeletePortal`
-    /// pattern, extended for the extra bookkeeping node deletion requires.
+    /// and restoring the `parent_id` of every child that was orphaned by
+    /// the delete.
     DeleteNode {
         node: MindNode,
         /// Edges that referenced the deleted node (parent_child, cross_link,
         /// etc.), paired with their original index in `mindmap.edges`.
-        /// Stored in ascending index order so the insertion loop on undo
-        /// re-inserts them in the order they were removed.
         removed_edges: Vec<(usize, MindEdge)>,
-        /// For each child that was orphaned by the delete, its id and
-        /// pre-delete sibling `index`. `parent_id` is always the deleted
-        /// node's id so it doesn't need to be stored separately.
-        orphaned_children: Vec<(String, i32)>,
+        /// For each child that was orphaned: its original id (before
+        /// orphaning assigned it a root-level id) and the root-level id
+        /// it was given. Undo restores the original id and parent_id.
+        orphaned_children: Vec<(String, String)>,
     },
 }

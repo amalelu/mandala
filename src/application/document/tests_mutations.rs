@@ -150,7 +150,7 @@ use super::defaults::default_cross_link_edge;
         // Inline mutation on a node with the same id
         let mut inline_cm = make_test_mutation("shared-id", TS::Children);
         inline_cm.name = "Inline Version".to_string();
-        let node_id = "348068464";
+        let node_id = "0";
         doc.mindmap.nodes.get_mut(node_id).unwrap().inline_mutations.push(inline_cm);
 
         doc.build_mutation_registry();
@@ -166,7 +166,7 @@ use super::defaults::default_cross_link_edge;
         doc.mindmap.custom_mutations.push(make_test_mutation("nudge", TS::SelfOnly));
         doc.build_mutation_registry();
 
-        let node_id = "348068464";
+        let node_id = "0";
         doc.mindmap.nodes.get_mut(node_id).unwrap().trigger_bindings.push(TB {
             trigger: Tr::OnClick,
             mutation_id: "nudge".to_string(),
@@ -184,7 +184,7 @@ use super::defaults::default_cross_link_edge;
         doc.mindmap.custom_mutations.push(make_test_mutation("nudge", TS::SelfOnly));
         doc.build_mutation_registry();
 
-        let node_id = "348068464";
+        let node_id = "0";
         doc.mindmap.nodes.get_mut(node_id).unwrap().trigger_bindings.push(TB {
             trigger: Tr::OnClick,
             mutation_id: "nudge".to_string(),
@@ -202,7 +202,7 @@ use super::defaults::default_cross_link_edge;
         doc.mindmap.custom_mutations.push(make_test_mutation("desktop-only", TS::SelfOnly));
         doc.build_mutation_registry();
 
-        let node_id = "348068464";
+        let node_id = "0";
         doc.mindmap.nodes.get_mut(node_id).unwrap().trigger_bindings.push(TB {
             trigger: Tr::OnClick,
             mutation_id: "desktop-only".to_string(),
@@ -221,15 +221,15 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_collect_affected_node_ids_self_only() {
         let doc = load_test_doc();
-        let ids = doc.collect_affected_node_ids("348068464", &TS::SelfOnly);
-        assert_eq!(ids, vec!["348068464"]);
+        let ids = doc.collect_affected_node_ids("0", &TS::SelfOnly);
+        assert_eq!(ids, vec!["0"]);
     }
 
     #[test]
     fn test_collect_affected_node_ids_children() {
         let doc = load_test_doc();
-        let children = doc.mindmap.children_of("348068464");
-        let ids = doc.collect_affected_node_ids("348068464", &TS::Children);
+        let children = doc.mindmap.children_of("0");
+        let ids = doc.collect_affected_node_ids("0", &TS::Children);
         assert_eq!(ids.len(), children.len());
         for child in &children {
             assert!(ids.contains(&child.id));
@@ -239,18 +239,18 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_collect_affected_node_ids_descendants() {
         let doc = load_test_doc();
-        let all_desc = doc.mindmap.all_descendants("348068464");
-        let ids = doc.collect_affected_node_ids("348068464", &TS::Descendants);
+        let all_desc = doc.mindmap.all_descendants("0");
+        let ids = doc.collect_affected_node_ids("0", &TS::Descendants);
         assert_eq!(ids.len(), all_desc.len());
     }
 
     #[test]
     fn test_collect_affected_node_ids_self_and_descendants() {
         let doc = load_test_doc();
-        let all_desc = doc.mindmap.all_descendants("348068464");
-        let ids = doc.collect_affected_node_ids("348068464", &TS::SelfAndDescendants);
+        let all_desc = doc.mindmap.all_descendants("0");
+        let ids = doc.collect_affected_node_ids("0", &TS::SelfAndDescendants);
         assert_eq!(ids.len(), all_desc.len() + 1);
-        assert!(ids.contains(&"348068464".to_string()));
+        assert!(ids.contains(&"0".to_string()));
     }
 
     #[test]
@@ -272,7 +272,7 @@ use super::defaults::default_cross_link_edge;
     fn test_collect_affected_node_ids_parent_of_root_is_empty() {
         let doc = load_test_doc();
         // Root node (348068464) has no parent
-        let ids = doc.collect_affected_node_ids("348068464", &TS::Parent);
+        let ids = doc.collect_affected_node_ids("0", &TS::Parent);
         assert!(ids.is_empty(), "Root node has no parent; should return empty");
     }
 
@@ -297,7 +297,7 @@ use super::defaults::default_cross_link_edge;
     fn test_collect_affected_node_ids_siblings_of_root_is_empty() {
         let doc = load_test_doc();
         // Root has no parent, so no siblings
-        let ids = doc.collect_affected_node_ids("348068464", &TS::Siblings);
+        let ids = doc.collect_affected_node_ids("0", &TS::Siblings);
         assert!(ids.is_empty());
     }
 
@@ -310,7 +310,7 @@ use super::defaults::default_cross_link_edge;
         let mut tree = doc.build_tree();
 
         assert!(!doc.dirty);
-        doc.apply_custom_mutation(&cm, "348068464", &mut tree);
+        doc.apply_custom_mutation(&cm, "0", &mut tree);
         assert!(doc.dirty, "Persistent mutation should set dirty flag");
         assert_eq!(doc.undo_stack.len(), 1, "Should push undo action");
     }
@@ -324,10 +324,10 @@ use super::defaults::default_cross_link_edge;
         doc.build_mutation_registry();
         let mut tree = doc.build_tree();
 
-        doc.apply_custom_mutation(&cm, "348068464", &mut tree);
+        doc.apply_custom_mutation(&cm, "0", &mut tree);
         assert!(!doc.dirty, "Toggle mutation should not set dirty flag");
         assert!(doc.undo_stack.is_empty(), "Toggle mutation should not push undo");
-        assert!(doc.active_toggles.contains(&("348068464".to_string(), "toggle-test".to_string())));
+        assert!(doc.active_toggles.contains(&("0".to_string(), "toggle-test".to_string())));
     }
 
     #[test]
@@ -340,19 +340,19 @@ use super::defaults::default_cross_link_edge;
         let mut tree = doc.build_tree();
 
         // First apply: activates toggle
-        doc.apply_custom_mutation(&cm, "348068464", &mut tree);
-        assert!(doc.active_toggles.contains(&("348068464".to_string(), "toggle-test".to_string())));
+        doc.apply_custom_mutation(&cm, "0", &mut tree);
+        assert!(doc.active_toggles.contains(&("0".to_string(), "toggle-test".to_string())));
 
         // Second apply: deactivates toggle
-        doc.apply_custom_mutation(&cm, "348068464", &mut tree);
-        assert!(!doc.active_toggles.contains(&("348068464".to_string(), "toggle-test".to_string())));
+        doc.apply_custom_mutation(&cm, "0", &mut tree);
+        assert!(!doc.active_toggles.contains(&("0".to_string(), "toggle-test".to_string())));
     }
 
     #[test]
     fn test_undo_custom_mutation_restores_node() {
         let mut doc = load_test_doc();
         let cm = make_test_mutation("nudge", TS::SelfOnly);
-        let node_id = "348068464";
+        let node_id = "0";
 
         let orig_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;
         let mut tree = doc.build_tree();

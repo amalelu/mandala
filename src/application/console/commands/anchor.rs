@@ -43,13 +43,9 @@ fn complete_anchor(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Comple
     }
 }
 
-fn side_value(name: &str) -> Option<i32> {
+fn side_value(name: &str) -> Option<&str> {
     match name {
-        "auto" => Some(0),
-        "top" => Some(1),
-        "right" => Some(2),
-        "bottom" => Some(3),
-        "left" => Some(4),
+        "auto" | "top" | "right" | "bottom" | "left" => Some(name),
         _ => None,
     }
 }

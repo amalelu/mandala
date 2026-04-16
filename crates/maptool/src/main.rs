@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
+mod convert;
 mod export;
 
 const USAGE: &str = "\
@@ -44,7 +45,12 @@ Commands:
                                 their children surface at the same
                                 depth. Notes, fonts, and edges are
                                 ignored. Writes to stdout, or to
-                                <out.md> if a second path is given.";
+                                <out.md> if a second path is given.
+  convert --legacy <in.json> <out.json>
+                                Convert a legacy (miMind-derived) map
+                                to the current format: structural IDs,
+                                named enums, hoisted palettes, channel
+                                field.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -165,6 +171,21 @@ fn run(args: &[String]) -> Result<(), CliError> {
                     CliError::Io(format!("failed to write {path}: {e}"))
                 }),
             }
+        }
+        "convert" => {
+            if args.get(1).map(|s| s.as_str()) != Some("--legacy") {
+                return Err(CliError::Usage(
+                    "convert: expected --legacy flag".into(),
+                ));
+            }
+            let input = args
+                .get(2)
+                .ok_or_else(|| CliError::Usage("convert: missing <in.json>".into()))?;
+            let output = args
+                .get(3)
+                .ok_or_else(|| CliError::Usage("convert: missing <out.json>".into()))?;
+            convert::convert_legacy(Path::new(input), Path::new(output))
+                .map_err(CliError::Io)
         }
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
@@ -555,7 +576,7 @@ mod tests {
     #[test]
     fn show_returns_text_for_known_id() {
         let map = testament();
-        assert_eq!(show_node(&map, "348068464"), Some("Lord God"));
+        assert_eq!(show_node(&map, "0"), Some("Lord God"));
     }
 
     #[test]
@@ -570,14 +591,14 @@ mod tests {
     fn grep_finds_literal_pattern() {
         let map = testament();
         let hits = grep_nodes(&map, &rx("Lord God", false));
-        assert!(hits.iter().any(|(id, _)| *id == "348068464"));
+        assert!(hits.iter().any(|(id, _)| *id == "0"));
     }
 
     #[test]
     fn grep_case_insensitive_matches() {
         let map = testament();
         let insen = grep_nodes(&map, &rx("lord god", true));
-        assert!(insen.iter().any(|(id, _)| *id == "348068464"));
+        assert!(insen.iter().any(|(id, _)| *id == "0"));
     }
 
     #[test]
@@ -591,7 +612,7 @@ mod tests {
         let map = testament();
         // "." is a wildcard, "L.rd God" matches "Lord God".
         let hits = grep_nodes(&map, &rx("L.rd God", false));
-        assert!(hits.iter().any(|(id, _)| *id == "348068464"));
+        assert!(hits.iter().any(|(id, _)| *id == "0"));
     }
 
     #[test]
@@ -599,7 +620,7 @@ mod tests {
         let map = testament();
         // Character class: matches either "Lord" or "lord".
         let hits = grep_nodes(&map, &rx("[Ll]ord God", false));
-        assert!(hits.iter().any(|(id, _)| *id == "348068464"));
+        assert!(hits.iter().any(|(id, _)| *id == "0"));
     }
 
     #[test]
@@ -608,7 +629,7 @@ mod tests {
         // "^Lord God" anchors on the start of a line (the root node
         // text has "Lord God" as its first and only line).
         let hits = grep_nodes(&map, &rx("^Lord God", false));
-        assert!(hits.iter().any(|(id, _)| *id == "348068464"));
+        assert!(hits.iter().any(|(id, _)| *id == "0"));
     }
 
     #[test]
@@ -628,27 +649,27 @@ mod tests {
         // any node's text — so finding it proves notes are searched.
         let mut map = testament();
         map.nodes
-            .get_mut("348068464")
+            .get_mut("0")
             .unwrap()
             .notes = "SENTINEL_ZXCVBNM_12345".into();
 
         let hits = grep_nodes(&map, &rx("SENTINEL_ZXCVBNM_12345", false));
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0, "348068464");
+        assert_eq!(hits[0].0, "0");
         assert!(hits[0].1.contains("SENTINEL_ZXCVBNM_12345"));
     }
 
     #[test]
     fn grep_returns_text_lines_before_notes_lines() {
         let mut map = testament();
-        let node = map.nodes.get_mut("348068464").unwrap();
+        let node = map.nodes.get_mut("0").unwrap();
         node.text = "MARK_A\nMARK_B".into();
         node.notes = "MARK_C".into();
 
         let hits = grep_nodes(&map, &rx("^MARK_", false));
         let just_this: Vec<&str> = hits
             .iter()
-            .filter(|(id, _)| *id == "348068464")
+            .filter(|(id, _)| *id == "0")
             .map(|(_, line)| *line)
             .collect();
         assert_eq!(just_this, vec!["MARK_A", "MARK_B", "MARK_C"]);
@@ -823,7 +844,7 @@ mod tests {
     fn select_nodes_text_field_matches_hello() {
         let map = apply_fixture();
         let ids = select_nodes(&map, &rx("hello", false), false);
-        assert_eq!(ids, vec!["n1".to_string(), "n4".to_string()]);
+        assert_eq!(ids, vec!["0".to_string(), "0.2".to_string()]);
     }
 
     #[test]
@@ -838,14 +859,14 @@ mod tests {
     fn select_nodes_notes_field_matches_only_notes() {
         let map = apply_fixture();
         let ids = select_nodes(&map, &rx("NOTES_TOKEN", false), true);
-        assert_eq!(ids, vec!["n2".to_string()]);
+        assert_eq!(ids, vec!["0.0".to_string()]);
     }
 
     #[test]
     fn select_nodes_case_insensitive() {
         let map = apply_fixture();
         let ids = select_nodes(&map, &rx("HELLO", true), false);
-        assert_eq!(ids, vec!["n1".to_string(), "n4".to_string()]);
+        assert_eq!(ids, vec!["0".to_string(), "0.2".to_string()]);
     }
 
     #[test]
@@ -914,45 +935,45 @@ mod tests {
     #[test]
     fn apply_command_text_updates_and_clears_runs() {
         let mut map = apply_fixture();
-        let ids = vec!["n1".to_string(), "n4".to_string()];
+        let ids = vec!["0".to_string(), "0.2".to_string()];
         let changed =
             apply_command(&mut map, &ids, false, "tr", &["a-z".into(), "A-Z".into()]).unwrap();
-        assert_eq!(changed, vec!["n1".to_string(), "n4".to_string()]);
-        assert_eq!(map.nodes["n1"].text, "HELLO WORLD");
+        assert_eq!(changed, vec!["0".to_string(), "0.2".to_string()]);
+        assert_eq!(map.nodes["0"].text, "HELLO WORLD");
         assert!(
-            map.nodes["n1"].text_runs.is_empty(),
+            map.nodes["0"].text_runs.is_empty(),
             "text_runs should be cleared when text changes"
         );
-        assert_eq!(map.nodes["n4"].text, "HELLO AGAIN");
-        assert!(map.nodes["n4"].text_runs.is_empty());
+        assert_eq!(map.nodes["0.2"].text, "HELLO AGAIN");
+        assert!(map.nodes["0.2"].text_runs.is_empty());
         // Untouched node keeps its runs.
-        assert_eq!(map.nodes["n2"].text, "Alpha\nBeta\nGamma");
-        assert_eq!(map.nodes["n2"].text_runs.len(), 1);
+        assert_eq!(map.nodes["0.0"].text, "Alpha\nBeta\nGamma");
+        assert_eq!(map.nodes["0.0"].text_runs.len(), 1);
     }
 
     #[test]
     fn apply_command_notes_preserves_text_and_runs() {
         let mut map = apply_fixture();
-        let original_text = map.nodes["n2"].text.clone();
+        let original_text = map.nodes["0.0"].text.clone();
         // TextRun doesn't implement PartialEq, so check structural fields.
-        let before_len = map.nodes["n2"].text_runs.len();
-        let before_start = map.nodes["n2"].text_runs[0].start;
-        let before_end = map.nodes["n2"].text_runs[0].end;
-        let ids = vec!["n2".to_string()];
+        let before_len = map.nodes["0.0"].text_runs.len();
+        let before_start = map.nodes["0.0"].text_runs[0].start;
+        let before_end = map.nodes["0.0"].text_runs[0].end;
+        let ids = vec!["0.0".to_string()];
         let changed =
             apply_command(&mut map, &ids, true, "tr", &["a-z".into(), "A-Z".into()]).unwrap();
-        assert_eq!(changed, vec!["n2".to_string()]);
-        assert_eq!(map.nodes["n2"].notes, "SECRET NOTES_TOKEN HERE");
-        assert_eq!(map.nodes["n2"].text, original_text, "text untouched");
-        assert_eq!(map.nodes["n2"].text_runs.len(), before_len);
-        assert_eq!(map.nodes["n2"].text_runs[0].start, before_start);
-        assert_eq!(map.nodes["n2"].text_runs[0].end, before_end);
+        assert_eq!(changed, vec!["0.0".to_string()]);
+        assert_eq!(map.nodes["0.0"].notes, "SECRET NOTES_TOKEN HERE");
+        assert_eq!(map.nodes["0.0"].text, original_text, "text untouched");
+        assert_eq!(map.nodes["0.0"].text_runs.len(), before_len);
+        assert_eq!(map.nodes["0.0"].text_runs[0].start, before_start);
+        assert_eq!(map.nodes["0.0"].text_runs[0].end, before_end);
     }
 
     #[test]
     fn apply_command_idempotent_when_output_equals_input() {
         let mut map = apply_fixture();
-        let ids = vec!["n3".to_string()];
+        let ids = vec!["0.1".to_string()];
         // `cat` returns input verbatim; n3's text has no trailing newline,
         // so strip-one is a no-op and the value is unchanged.
         let changed = apply_command(&mut map, &ids, false, "cat", &[]).unwrap();
@@ -960,13 +981,13 @@ mod tests {
             changed.is_empty(),
             "expected no change, got: {changed:?}"
         );
-        assert_eq!(map.nodes["n3"].text, "unchanged");
+        assert_eq!(map.nodes["0.1"].text, "unchanged");
     }
 
     #[test]
     fn apply_command_subprocess_failure_propagates() {
         let mut map = apply_fixture();
-        let ids = vec!["n1".to_string()];
+        let ids = vec!["0".to_string()];
         let result = apply_command(&mut map, &ids, false, "sh", &["-c".into(), "exit 4".into()]);
         assert!(matches!(result, Err(CliError::Subprocess(_))));
     }
@@ -987,14 +1008,14 @@ mod tests {
         ]);
         assert!(run(&args).is_ok());
         let reloaded = load_from_file(tmp.path()).unwrap();
-        assert_eq!(reloaded.nodes["n1"].text, "HELLO WORLD");
-        assert_eq!(reloaded.nodes["n4"].text, "HELLO AGAIN");
-        assert!(reloaded.nodes["n1"].text_runs.is_empty());
-        assert!(reloaded.nodes["n4"].text_runs.is_empty());
+        assert_eq!(reloaded.nodes["0"].text, "HELLO WORLD");
+        assert_eq!(reloaded.nodes["0.2"].text, "HELLO AGAIN");
+        assert!(reloaded.nodes["0"].text_runs.is_empty());
+        assert!(reloaded.nodes["0.2"].text_runs.is_empty());
         // Nodes that didn't match keep their content and their runs.
-        assert_eq!(reloaded.nodes["n2"].text, "Alpha\nBeta\nGamma");
-        assert_eq!(reloaded.nodes["n2"].text_runs.len(), 1);
-        assert_eq!(reloaded.nodes["n3"].text, "unchanged");
+        assert_eq!(reloaded.nodes["0.0"].text, "Alpha\nBeta\nGamma");
+        assert_eq!(reloaded.nodes["0.0"].text_runs.len(), 1);
+        assert_eq!(reloaded.nodes["0.1"].text, "unchanged");
     }
 
     #[test]
@@ -1012,10 +1033,10 @@ mod tests {
         ]);
         assert!(run(&args).is_ok());
         let reloaded = load_from_file(tmp.path()).unwrap();
-        assert_eq!(reloaded.nodes["n2"].notes, "SECRET NOTES_TOKEN HERE");
-        assert_eq!(reloaded.nodes["n2"].text, "Alpha\nBeta\nGamma");
+        assert_eq!(reloaded.nodes["0.0"].notes, "SECRET NOTES_TOKEN HERE");
+        assert_eq!(reloaded.nodes["0.0"].text, "Alpha\nBeta\nGamma");
         assert_eq!(
-            reloaded.nodes["n2"].text_runs.len(),
+            reloaded.nodes["0.0"].text_runs.len(),
             1,
             "--notes edits should leave text_runs alone"
         );

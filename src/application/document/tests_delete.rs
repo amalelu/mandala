@@ -47,12 +47,12 @@ use super::defaults::default_cross_link_edge;
             edge_type: "cross_link".into(),
             color: "#fff".into(),
             width: 1,
-            line_style: 0,
+            line_style: "solid".to_string(),
             visible: true,
             label: None,
             label_position_t: None,
-            anchor_from: 0,
-            anchor_to: 0,
+            anchor_from: "auto".to_string(),
+            anchor_to: "auto".to_string(),
             control_points: vec![],
             glyph_connection: None,
         };
@@ -153,21 +153,24 @@ use super::defaults::default_cross_link_edge;
     fn test_delete_node_orphans_children() {
         let mut doc = load_test_doc();
         let target = find_node_with_children_and_parent(&doc);
-        let child_ids: Vec<String> = doc.mindmap.children_of(&target)
-            .iter().map(|n| n.id.clone()).collect();
-        assert!(!child_ids.is_empty(), "target should have at least one child");
+        let child_count = doc.mindmap.children_of(&target).len();
+        assert!(child_count > 0, "target should have at least one child");
 
         let undo = doc.delete_node(&target).expect("delete should succeed");
-        assert!(matches!(undo, UndoAction::DeleteNode { .. }));
 
         // The node itself is gone.
         assert!(!doc.mindmap.nodes.contains_key(&target));
-        // Every child is now a root (parent_id == None).
-        for cid in &child_ids {
-            let child = doc.mindmap.nodes.get(cid)
-                .expect("child should still exist — only direct attachment is severed");
-            assert!(child.parent_id.is_none(),
-                "child {} should be orphaned", cid);
+        // Orphaned children got new root-level IDs and are now roots.
+        if let UndoAction::DeleteNode { ref orphaned_children, .. } = undo {
+            assert_eq!(orphaned_children.len(), child_count);
+            for (_old_id, new_root_id) in orphaned_children {
+                let child = doc.mindmap.nodes.get(new_root_id)
+                    .expect("orphaned child should exist under its new root ID");
+                assert!(child.parent_id.is_none(),
+                    "child {} should be orphaned", new_root_id);
+            }
+        } else {
+            panic!("expected DeleteNode undo action");
         }
         // No parent_child edges touch the deleted id anymore.
         assert!(doc.mindmap.edges.iter().all(|e|
@@ -202,10 +205,10 @@ use super::defaults::default_cross_link_edge;
         // Capture pre-delete state to compare after undo.
         let orig_node = doc.mindmap.nodes.get(&target).cloned().unwrap();
         let orig_edges = doc.mindmap.edges.clone();
-        let orig_child_state: Vec<(String, Option<String>, i32)> = doc.mindmap
+        let orig_child_state: Vec<(String, Option<String>)> = doc.mindmap
             .children_of(&target)
             .iter()
-            .map(|n| (n.id.clone(), n.parent_id.clone(), n.index))
+            .map(|n| (n.id.clone(), n.parent_id.clone()))
             .collect();
 
         let undo = doc.delete_node(&target).unwrap();
@@ -236,13 +239,11 @@ use super::defaults::default_cross_link_edge;
                 "edge at index {} should match after undo", i,
             );
         }
-        // Children are re-attached with original parent_id + index.
-        for (cid, old_parent, old_idx) in orig_child_state {
+        // Children are re-attached with original parent_id.
+        for (cid, old_parent) in orig_child_state {
             let child = doc.mindmap.nodes.get(&cid).unwrap();
             assert_eq!(child.parent_id, old_parent,
                 "child {} parent_id should be restored", cid);
-            assert_eq!(child.index, old_idx,
-                "child {} index should be restored", cid);
         }
     }
 
@@ -284,12 +285,12 @@ use super::defaults::default_cross_link_edge;
             edge_type: etype.to_string(),
             color: "#ffffff".to_string(),
             width: 1,
-            line_style: 0,
+            line_style: "solid".to_string(),
             visible: true,
             label: None,
             label_position_t: None,
-            anchor_from: 0,
-            anchor_to: 0,
+            anchor_from: "auto".to_string(),
+            anchor_to: "auto".to_string(),
             control_points: Vec::new(),
             glyph_connection: None,
         };
@@ -344,16 +345,19 @@ use super::defaults::default_cross_link_edge;
         // case where the deleted node has no parent itself.
         let mut doc = load_test_doc();
         // "Lord God" is a known root with children in testament.
-        let target = "348068464".to_string();
+        let target = "0".to_string();
         assert!(doc.mindmap.nodes.get(&target).unwrap().parent_id.is_none());
-        let child_ids: Vec<String> = doc.mindmap.children_of(&target)
-            .iter().map(|n| n.id.clone()).collect();
-        assert!(!child_ids.is_empty());
+        let child_count = doc.mindmap.children_of(&target).len();
+        assert!(child_count > 0);
 
-        doc.delete_node(&target).unwrap();
+        let undo = doc.delete_node(&target).unwrap();
         assert!(!doc.mindmap.nodes.contains_key(&target));
-        for cid in &child_ids {
-            assert!(doc.mindmap.nodes.get(cid).unwrap().parent_id.is_none());
+        // Orphaned children should have new root-level IDs and be roots.
+        if let UndoAction::DeleteNode { ref orphaned_children, .. } = undo {
+            assert_eq!(orphaned_children.len(), child_count);
+            for (_old_id, new_root_id) in orphaned_children {
+                assert!(doc.mindmap.nodes.get(new_root_id).unwrap().parent_id.is_none());
+            }
         }
     }
 
@@ -395,8 +399,8 @@ use super::defaults::default_cross_link_edge;
         assert_eq!(e.to_id, "b");
         assert_eq!(e.edge_type, "cross_link");
         assert!(e.visible);
-        assert_eq!(e.anchor_from, 0);
-        assert_eq!(e.anchor_to, 0);
+        assert_eq!(e.anchor_from, "auto");
+        assert_eq!(e.anchor_to, "auto");
         assert!(e.control_points.is_empty());
         assert!(e.label.is_none());
     }
@@ -564,7 +568,6 @@ use super::defaults::default_cross_link_edge;
             .map(|n| n.id.clone())
             .expect("at least one non-root node");
         let original_parent = doc.mindmap.nodes.get(&non_root).unwrap().parent_id.clone();
-        let original_index = doc.mindmap.nodes.get(&non_root).unwrap().index;
 
         let undo = doc.apply_orphan_selection(&[non_root.clone()]);
         doc.undo_stack.push(UndoAction::ReparentNodes {
@@ -575,11 +578,10 @@ use super::defaults::default_cross_link_edge;
         // Precondition: it's now a root
         assert!(doc.mindmap.nodes.get(&non_root).unwrap().parent_id.is_none());
 
-        // Undo restores the parent link + index
+        // Undo restores the parent link
         assert!(doc.undo());
         let restored = doc.mindmap.nodes.get(&non_root).unwrap();
         assert_eq!(restored.parent_id, original_parent);
-        assert_eq!(restored.index, original_index);
     }
 
     #[test]

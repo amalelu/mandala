@@ -11,16 +11,21 @@ use crate::mindmap::custom_mutation::{CustomMutation, TriggerBinding};
 pub struct MindNode {
     pub id: String,
     pub parent_id: Option<String>,
-    pub index: i32,
     pub position: Position,
     pub size: Size,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text_runs: Vec<TextRun>,
     pub style: NodeStyle,
     pub layout: NodeLayout,
     pub folded: bool,
     pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_schema: Option<ColorSchema>,
+    /// Channel index for mutation targeting in the baumhard tree.
+    /// Multiple siblings can share a channel to form broadcast groups.
+    #[serde(default)]
+    pub channel: usize,
     /// Trigger bindings attached to this specific node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trigger_bindings: Vec<TriggerBinding>,
@@ -59,7 +64,8 @@ pub struct NodeStyle {
     pub background_color: String,
     pub frame_color: String,
     pub text_color: String,
-    pub shape_type: i32,
+    #[serde(default = "default_shape")]
+    pub shape: String,
     pub corner_radius_percent: f64,
     pub frame_thickness: f64,
     pub show_frame: bool,
@@ -94,6 +100,7 @@ pub struct GlyphBorderConfig {
     pub padding: f32,
 }
 
+fn default_shape() -> String { "rectangle".to_string() }
 fn default_border_preset() -> String { "rounded".to_string() }
 fn default_border_font_size() -> f32 { 14.0 }
 fn default_border_padding() -> f32 { 4.0 }
@@ -130,20 +137,17 @@ fn default_br_glyph() -> String { "\u{256F}".to_string() }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeLayout {
     #[serde(rename = "type")]
-    pub layout_type: i32,
-    pub direction: i32,
+    pub layout_type: String,
+    pub direction: String,
     pub spacing: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColorSchema {
-    pub level: i32,
     pub palette: String,
-    pub variant: i32,
+    pub level: i32,
     pub starts_at_root: bool,
     pub connections_colored: bool,
-    pub theme_id: String,
-    pub groups: Vec<ColorGroup>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

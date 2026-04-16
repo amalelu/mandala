@@ -7,7 +7,7 @@
 //! their children surface at the same heading depth, so if the roots
 //! have no text the first-text generation becomes the `#` level.
 
-use baumhard::mindmap::model::{MindMap, MindNode};
+use baumhard::mindmap::model::{id_sort_key, MindMap, MindNode};
 use std::collections::HashMap;
 
 /// Convert `map` into a Markdown document containing only node text,
@@ -48,9 +48,9 @@ impl<'a> ChildIndex<'a> {
                 Some(pid) => by_parent.entry(pid.as_str()).or_default().push(node),
             }
         }
-        roots.sort_by_key(|n| n.index);
+        roots.sort_by_key(|n| id_sort_key(&n.id));
         for children in by_parent.values_mut() {
-            children.sort_by_key(|n| n.index);
+            children.sort_by_key(|n| id_sort_key(&n.id));
         }
         Self { roots, by_parent }
     }
@@ -105,11 +105,10 @@ mod tests {
     /// Build a minimal `MindNode` with the given id/parent/index/text.
     /// All the style/layout/position fields are filled with throwaway
     /// defaults — the export code never reads them.
-    fn make_node(id: &str, parent_id: Option<&str>, index: i32, text: &str) -> MindNode {
+    fn make_node(id: &str, parent_id: Option<&str>, text: &str) -> MindNode {
         MindNode {
             id: id.to_string(),
             parent_id: parent_id.map(|s| s.to_string()),
-            index,
             position: Position { x: 0.0, y: 0.0 },
             size: Size { width: 0.0, height: 0.0 },
             text: text.to_string(),
@@ -118,7 +117,7 @@ mod tests {
                 background_color: "#000000".to_string(),
                 frame_color: "#ffffff".to_string(),
                 text_color: "#ffffff".to_string(),
-                shape_type: 0,
+                shape: "rectangle".to_string(),
                 corner_radius_percent: 0.0,
                 frame_thickness: 0.0,
                 show_frame: false,
@@ -126,13 +125,14 @@ mod tests {
                 border: None,
             },
             layout: NodeLayout {
-                layout_type: 0,
-                direction: 0,
+                layout_type: "map".to_string(),
+                direction: "auto".to_string(),
                 spacing: 0.0,
             },
             folded: false,
             notes: String::new(),
             color_schema: None,
+            channel: 0,
             trigger_bindings: Vec::new(),
             inline_mutations: Vec::new(),
         }
@@ -154,6 +154,7 @@ mod tests {
                 theme_variables: HashMap::new(),
                 theme_variants: HashMap::new(),
             },
+            palettes: HashMap::new(),
             nodes: map_nodes,
             edges: Vec::new(),
             custom_mutations: Vec::new(),
@@ -176,9 +177,9 @@ mod tests {
     #[test]
     fn test_export_depth_increments_with_generation() {
         let map = make_map(vec![
-            make_node("r", None, 0, "Root"),
-            make_node("c", Some("r"), 0, "Child"),
-            make_node("g", Some("c"), 0, "Grand"),
+            make_node("r", None, "Root"),
+            make_node("c", Some("r"), "Child"),
+            make_node("g", Some("c"), "Grand"),
         ]);
         let out = mindmap_to_markdown(&map);
         let root_pos = out.find("# Root\n").expect("root heading");
@@ -191,9 +192,9 @@ mod tests {
     fn test_export_passthrough_empty_text() {
         // Empty-text root with two text children — both should appear as `#`.
         let map = make_map(vec![
-            make_node("r", None, 0, ""),
-            make_node("a", Some("r"), 0, "Alpha"),
-            make_node("b", Some("r"), 1, "Beta"),
+            make_node("r", None, ""),
+            make_node("a", Some("r"), "Alpha"),
+            make_node("b", Some("r"), "Beta"),
         ]);
         let out = mindmap_to_markdown(&map);
         assert!(out.contains("# Alpha\n"), "Alpha should be top-level: {out}");
@@ -204,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_export_ignores_notes_and_runs() {
-        let mut node = make_node("r", None, 0, "Visible");
+        let mut node = make_node("r", None, "Visible");
         node.notes = "HIDDEN_NOTES_STRING".to_string();
         node.text_runs = vec![TextRun {
             start: 0,
@@ -227,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_export_multiline_text_first_line_is_heading() {
-        let map = make_map(vec![make_node("r", None, 0, "Title\nbody line\nmore body")]);
+        let map = make_map(vec![make_node("r", None, "Title\nbody line\nmore body")]);
         let out = mindmap_to_markdown(&map);
         assert!(out.starts_with("# Title\nbody line\nmore body\n"), "got: {out:?}");
     }
@@ -236,10 +237,10 @@ mod tests {
     fn test_export_sibling_order_matches_index() {
         // Indexes deliberately out of insertion order.
         let map = make_map(vec![
-            make_node("r", None, 0, "Root"),
-            make_node("late", Some("r"), 100, "Late"),
-            make_node("mid", Some("r"), 50, "Mid"),
-            make_node("early", Some("r"), 10, "Early"),
+            make_node("r", None, "Root"),
+            make_node("late", Some("r"), "Late"),
+            make_node("mid", Some("r"), "Mid"),
+            make_node("early", Some("r"), "Early"),
         ]);
         let out = mindmap_to_markdown(&map);
         let early = out.find("## Early\n").expect("early");

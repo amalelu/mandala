@@ -42,7 +42,7 @@ pub(super) fn load_test_tree() -> MindMapTree {
 /// Pick a stable node id from the testament map that has a real
 /// text value. The root node id is well-known from other tests.
 pub(super) fn first_testament_node_id(_doc: &MindMapDocument) -> String {
-    "348068464".to_string()
+    "0".to_string()
 }
 
 /// Pick the first visible edge and return its EdgeRef + a guaranteed
@@ -59,8 +59,8 @@ pub(super) fn pick_test_edge(doc: &MindMapDocument) -> (super::EdgeRef, glam::Ve
     let to_pos = Vec2::new(to.position.x as f32, to.position.y as f32);
     let to_size = Vec2::new(to.size.width as f32, to.size.height as f32);
     let path = baumhard::mindmap::connection::build_connection_path(
-        from_pos, from_size, edge.anchor_from,
-        to_pos, to_size, edge.anchor_to,
+        from_pos, from_size, &edge.anchor_from,
+        to_pos, to_size, &edge.anchor_to,
         &edge.control_points,
     );
     let samples = baumhard::mindmap::connection::sample_path(&path, 4.0);

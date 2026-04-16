@@ -114,18 +114,18 @@ pub(in crate::application::app) fn apply_edge_handle_drag(
 }
 
 /// Given a canvas-space position and a node's AABB, return the
-/// anchor code (1=top, 2=right, 3=bottom, 4=left) of the edge
+/// anchor name ("top", "right", "bottom", "left") of the edge
 /// midpoint closest to the position. Used by the anchor-handle
 /// drag to snap the anchor to whichever side the cursor is nearest.
 #[cfg(not(target_arch = "wasm32"))]
-pub(in crate::application::app) fn nearest_anchor_side(point: Vec2, node_pos: Vec2, node_size: Vec2) -> i32 {
+pub(in crate::application::app) fn nearest_anchor_side(point: Vec2, node_pos: Vec2, node_size: Vec2) -> String {
     let half_w = node_size.x * 0.5;
     let half_h = node_size.y * 0.5;
     let top = Vec2::new(node_pos.x + half_w, node_pos.y);
     let right = Vec2::new(node_pos.x + node_size.x, node_pos.y + half_h);
     let bottom = Vec2::new(node_pos.x + half_w, node_pos.y + node_size.y);
     let left = Vec2::new(node_pos.x, node_pos.y + half_h);
-    let candidates = [(1, top), (2, right), (3, bottom), (4, left)];
+    let candidates = [("top", top), ("right", right), ("bottom", bottom), ("left", left)];
     candidates
         .iter()
         .min_by(|a, b| {
@@ -133,6 +133,6 @@ pub(in crate::application::app) fn nearest_anchor_side(point: Vec2, node_pos: Ve
             let db = b.1.distance_squared(point);
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         })
-        .map(|(code, _)| *code)
-        .unwrap_or(0)
+        .map(|(name, _)| name.to_string())
+        .unwrap_or_else(|| "auto".to_string())
 }
