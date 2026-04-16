@@ -1,5 +1,5 @@
 //! Capability traits a console-target component can implement. The
-//! `TargetView` enum implements all six and dispatches on its
+//! `TargetView` enum implements each trait and dispatches on its
 //! variant; commands reach for the trait method matching their key
 //! and let `NotApplicable` fall out naturally for variants that
 //! don't support that channel.

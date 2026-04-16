@@ -762,6 +762,8 @@ app.event_loop.run(move |event, _window_target| {
                     let is_cut = matches!(action, Some(Action::Cut));
                     if let Some(doc) = document.as_mut() {
                         let targets = selection_targets(&doc.selection);
+                        // First applicable target wins — multi-select
+                        // copy takes the first item that produces text.
                         for tid in &targets {
                             let mut view = view_for(doc, tid);
                             let content = if is_cut {
