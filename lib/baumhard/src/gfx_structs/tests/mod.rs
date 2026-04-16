@@ -11,3 +11,5 @@ pub mod camera_tests;
 pub mod element_tests;
 pub mod predicate_tests;
 pub mod subtree_aabb_tests;
+pub mod bvh_descent_tests;
+pub mod spatial_descend_tests;
