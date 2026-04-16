@@ -2,8 +2,10 @@
 # Launch the release build of Mandala on both targets at once: the
 # native binary in one process, `trunk serve --release` for the
 # WASM bundle in another. Ctrl+C stops both. Expects `./build.sh`
-# to have produced the native artefact already; trunk rebuilds
-# WASM itself.
+# to have produced the release native artefact already; trunk
+# rebuilds WASM itself. Release-only by design — iterating against
+# `--debug` or `--fat` builds belongs in `cargo run` / `trunk serve`
+# directly.
 set -euo pipefail
 
 MAP="${1:-maps/testament.mindmap.json}"
@@ -11,7 +13,15 @@ NATIVE_BIN="target/release/mandala"
 
 if [ ! -x "$NATIVE_BIN" ]; then
     echo "Error: $NATIVE_BIN not found or not executable."
-    echo "Run ./build.sh first (it builds both native and WASM)."
+    echo "run.sh launches release builds only. Run ./build.sh"
+    echo "(without --debug / --fat) to produce $NATIVE_BIN, then retry."
+    exit 1
+fi
+
+if [ ! -f "$MAP" ]; then
+    echo "Error: map file not found: $MAP"
+    echo "Pass a mindmap path as the first argument, or ensure the"
+    echo "default ($MAP) exists."
     exit 1
 fi
 
