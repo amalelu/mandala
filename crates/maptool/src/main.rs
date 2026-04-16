@@ -1221,18 +1221,22 @@ mod tests {
     fn save_map_produces_sorted_node_order() {
         // MindMap.nodes is a HashMap; its native iteration order is
         // randomised per-process. save_map must serialise with keys in
-        // sorted order so git diffs stay quiet across writes.
+        // sorted order so git diffs stay quiet across writes. The
+        // fixture uses Dewey-decimal ids (`0`, `0.0`, `0.1`, `0.2`) so
+        // we assert on those; lexicographic sort on Dewey ids happens
+        // to match their tree order, which is exactly the property
+        // git-diff stability needs.
         let tmp = TmpMap::new("sorted_order");
         let map = apply_fixture();
         save_map(tmp.path(), &map).unwrap();
         let json = std::fs::read_to_string(tmp.path()).unwrap();
-        let i1 = json.find("\"n1\"").expect("n1 missing");
-        let i2 = json.find("\"n2\"").expect("n2 missing");
-        let i3 = json.find("\"n3\"").expect("n3 missing");
-        let i4 = json.find("\"n4\"").expect("n4 missing");
+        let i0 = json.find("\"0\":").expect("0 missing");
+        let i00 = json.find("\"0.0\":").expect("0.0 missing");
+        let i01 = json.find("\"0.1\":").expect("0.1 missing");
+        let i02 = json.find("\"0.2\":").expect("0.2 missing");
         assert!(
-            i1 < i2 && i2 < i3 && i3 < i4,
-            "nodes must appear in sorted order, got: n1@{i1} n2@{i2} n3@{i3} n4@{i4}"
+            i0 < i00 && i00 < i01 && i01 < i02,
+            "nodes must appear in sorted order, got: 0@{i0} 0.0@{i00} 0.1@{i01} 0.2@{i02}"
         );
     }
 
