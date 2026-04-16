@@ -264,12 +264,13 @@ use super::defaults::default_cross_link_edge;
         // Pick any node with at least one incident edge.
         let target = find_node_with_children_and_parent(&doc);
 
-        // Reset edges to a known layout: a mix of edges touching and
-        // not touching the target, spaced out so the bug's effect
-        // is visible. Use existing node ids so the edges are valid
-        // references (any two existing-but-not-target ids work).
+        // Pick reference nodes that are not descendants of the target
+        // (otherwise they'd be cascade-renamed when the target's
+        // children are orphaned, invalidating the assertions below).
+        let descendants: std::collections::HashSet<String> =
+            doc.mindmap.all_descendants(&target).into_iter().collect();
         let other_ids: Vec<String> = doc.mindmap.nodes.keys()
-            .filter(|id| id.as_str() != target.as_str())
+            .filter(|id| id.as_str() != target.as_str() && !descendants.contains(*id))
             .take(4)
             .cloned()
             .collect();

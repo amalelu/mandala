@@ -8,6 +8,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 mod convert;
 mod export;
+mod verify;
 
 const USAGE: &str = "\
 Usage: maptool <command> <map.json> <args...>
@@ -50,7 +51,14 @@ Commands:
                                 Convert a legacy (miMind-derived) map
                                 to the current format: structural IDs,
                                 named enums, hoisted palettes, channel
-                                field.";
+                                field.
+  verify <map.json>             Check the file against the format's
+                                structural invariants (parent_id
+                                consistency, Dewey IDs, edge and portal
+                                references, palette references, named
+                                enums, text-run bounds). Exit 0 if
+                                valid; nonzero with a list of
+                                violations otherwise.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -186,6 +194,27 @@ fn run(args: &[String]) -> Result<(), CliError> {
                 .ok_or_else(|| CliError::Usage("convert: missing <out.json>".into()))?;
             convert::convert_legacy(Path::new(input), Path::new(output))
                 .map_err(CliError::Io)
+        }
+        "verify" => {
+            let map_path = args
+                .get(1)
+                .ok_or_else(|| CliError::Usage("verify: missing <map.json>".into()))?;
+            let map = load_map(map_path)?;
+            let violations = verify::verify(&map);
+            if violations.is_empty() {
+                println!("{}: valid", map_path);
+                Ok(())
+            } else {
+                for v in &violations {
+                    eprintln!("{v}");
+                }
+                eprintln!("{} violation(s)", violations.len());
+                Err(CliError::NotFound(format!(
+                    "{} violation(s) in {}",
+                    violations.len(),
+                    map_path
+                )))
+            }
         }
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
@@ -786,6 +815,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn run_verify_on_testament_succeeds() {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.pop();
+        p.pop();
+        p.push("maps/testament.mindmap.json");
+        let args = as_strings(&["verify", p.to_str().unwrap()]);
+        assert!(run(&args).is_ok(), "testament map must verify clean");
+    }
+
+    #[test]
+    fn run_verify_flags_invalid_fixture() {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests/fixtures/invalid_sampler.mindmap.json");
+        let args = as_strings(&["verify", p.to_str().unwrap()]);
+        match run(&args) {
+            Err(CliError::NotFound(msg)) => {
+                assert!(msg.contains("violation"), "got: {msg}");
+            }
+            other => panic!("expected NotFound with violations, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_verify_missing_map_is_usage_error() {
+        let args = as_strings(&["verify"]);
+        assert!(matches!(run(&args), Err(CliError::Usage(_))));
+    }
+
     // --- apply: fixture + tmpfile helpers ---------------------------
     //
     // The apply tests use a small hand-crafted map (tests/fixtures/
@@ -1226,13 +1284,13 @@ mod tests {
         let map = apply_fixture();
         save_map(tmp.path(), &map).unwrap();
         let json = std::fs::read_to_string(tmp.path()).unwrap();
-        let i1 = json.find("\"n1\"").expect("n1 missing");
-        let i2 = json.find("\"n2\"").expect("n2 missing");
-        let i3 = json.find("\"n3\"").expect("n3 missing");
-        let i4 = json.find("\"n4\"").expect("n4 missing");
+        let i0 = json.find("\"0\"").expect("0 missing");
+        let i00 = json.find("\"0.0\"").expect("0.0 missing");
+        let i01 = json.find("\"0.1\"").expect("0.1 missing");
+        let i02 = json.find("\"0.2\"").expect("0.2 missing");
         assert!(
-            i1 < i2 && i2 < i3 && i3 < i4,
-            "nodes must appear in sorted order, got: n1@{i1} n2@{i2} n3@{i3} n4@{i4}"
+            i0 < i00 && i00 < i01 && i01 < i02,
+            "nodes must appear in sorted order, got: 0@{i0} 0.0@{i00} 0.1@{i01} 0.2@{i02}"
         );
     }
 

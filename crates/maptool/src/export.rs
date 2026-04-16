@@ -102,7 +102,7 @@ mod tests {
         path
     }
 
-    /// Build a minimal `MindNode` with the given id/parent/index/text.
+    /// Build a minimal `MindNode` with the given id/parent/text.
     /// All the style/layout/position fields are filled with throwaway
     /// defaults — the export code never reads them.
     fn make_node(id: &str, parent_id: Option<&str>, text: &str) -> MindNode {
@@ -234,13 +234,13 @@ mod tests {
     }
 
     #[test]
-    fn test_export_sibling_order_matches_index() {
-        // Indexes deliberately out of insertion order.
+    fn test_export_sibling_order_follows_dewey_id() {
+        // Sibling order follows the Dewey last segment: 0 < 1 < 2.
         let map = make_map(vec![
-            make_node("r", None, "Root"),
-            make_node("late", Some("r"), "Late"),
-            make_node("mid", Some("r"), "Mid"),
-            make_node("early", Some("r"), "Early"),
+            make_node("0", None, "Root"),
+            make_node("0.2", Some("0"), "Late"),
+            make_node("0.1", Some("0"), "Mid"),
+            make_node("0.0", Some("0"), "Early"),
         ]);
         let out = mindmap_to_markdown(&map);
         let early = out.find("## Early\n").expect("early");
