@@ -48,6 +48,9 @@ pub struct EdgeKey {
 }
 
 impl EdgeKey {
+    /// Construct an `EdgeKey` from its three components. Accepts
+    /// anything `Into<String>` so callers can pass `&str` or `String`
+    /// without `.to_string()` boilerplate. O(1) + up to 3 allocations.
     pub fn new(from_id: impl Into<String>, to_id: impl Into<String>, edge_type: impl Into<String>) -> Self {
         Self {
             from_id: from_id.into(),
@@ -56,6 +59,8 @@ impl EdgeKey {
         }
     }
 
+    /// Shorthand: derive the key from a `MindEdge`'s identity fields.
+    /// O(1) + 3 string clones.
     pub fn from_edge(edge: &MindEdge) -> Self {
         Self::new(&edge.from_id, &edge.to_id, &edge.edge_type)
     }
