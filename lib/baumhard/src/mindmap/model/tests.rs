@@ -20,10 +20,10 @@ fn test_all_descendants() {
     let map = loader::load_from_file(&path).unwrap();
 
     // "Lord God" (348068464) has children — descendants should include them all
-    let children = map.children_of("348068464");
+    let children = map.children_of("0");
     assert!(!children.is_empty(), "Lord God should have children");
 
-    let descendants = map.all_descendants("348068464");
+    let descendants = map.all_descendants("0");
     // Every direct child should appear in descendants
     for child in &children {
         assert!(descendants.contains(&child.id), "Child {} missing from descendants", child.id);
@@ -236,8 +236,8 @@ fn label_position_t_missing_defaults_to_none() {
     // Older maps without the field must still deserialize.
     let json = r##"{
         "from_id":"a","to_id":"b","type":"cross_link",
-        "color":"#fff","width":1,"line_style":0,"visible":true,
-        "label":null,"anchor_from":0,"anchor_to":0,"control_points":[]
+        "color":"#fff","width":1,"line_style":"solid","visible":true,
+        "label":null,"anchor_from":"auto","anchor_to":"auto","control_points":[]
     }"##;
     let edge: MindEdge = serde_json::from_str(json).unwrap();
     assert_eq!(edge.label_position_t, None);

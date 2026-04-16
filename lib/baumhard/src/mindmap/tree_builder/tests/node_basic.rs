@@ -47,8 +47,8 @@ fn test_glyph_area_properties() {
     let result = build_mindmap_tree(&map);
 
     // Check "Lord God" node (id: 348068464)
-    let lord_god = map.nodes.get("348068464").unwrap();
-    let node_id = result.node_map.get("348068464").unwrap();
+    let lord_god = map.nodes.get("0").unwrap();
+    let node_id = result.node_map.get("0").unwrap();
     let element = result.tree.arena.get(*node_id).unwrap().get();
 
     let area = element.glyph_area().expect("Expected GlyphArea");
@@ -67,7 +67,7 @@ fn test_color_regions_from_text_runs() {
     let result = build_mindmap_tree(&map);
 
     // Lord God has 1 text run with color #ffffff
-    let node_id = result.node_map.get("348068464").unwrap();
+    let node_id = result.node_map.get("0").unwrap();
     let element = result.tree.arena.get(*node_id).unwrap().get();
     let area = element.glyph_area().unwrap();
 
@@ -89,8 +89,8 @@ fn test_parent_child_hierarchy_preserved() {
     let result = build_mindmap_tree(&map);
 
     // Lord God's children in the mindmap should be children in the tree
-    let lord_god_tree_id = result.node_map.get("348068464").unwrap();
-    let mindmap_children = map.children_of("348068464");
+    let lord_god_tree_id = result.node_map.get("0").unwrap();
+    let mindmap_children = map.children_of("0");
 
     let tree_children: Vec<NodeId> = lord_god_tree_id
         .children(&result.tree.arena)

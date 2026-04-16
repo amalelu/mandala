@@ -72,9 +72,9 @@ fn inject_palettes(root: &mut Value, palettes: &HashMap<String, Value>) {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    root.as_object_mut().map(|obj| {
-        obj.insert("palettes".to_string(), Value::Object(palette_obj))
-    });
+    if let Some(obj) = root.as_object_mut() {
+        obj.insert("palettes".to_string(), Value::Object(palette_obj));
+    }
 }
 
 /// Simplify each node's color_schema: keep palette (as key), level,
@@ -106,8 +106,8 @@ fn simplify_node_schemas(root: &mut Value) {
             "connections_colored": connections_colored
         });
 
-        node.as_object_mut().map(|obj| {
-            obj.insert("color_schema".to_string(), simplified)
-        });
+        if let Some(obj) = node.as_object_mut() {
+            obj.insert("color_schema".to_string(), simplified);
+        }
     }
 }

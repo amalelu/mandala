@@ -95,35 +95,6 @@ impl MindMap {
         children
     }
 
-    /// Finds the color schema root for a themed node by walking up the
-    /// parent chain. Returns the first ancestor (or self) at level 0.
-    pub fn find_schema_root<'a>(&'a self, node: &'a MindNode) -> Option<&'a MindNode> {
-        if let Some(ref schema) = node.color_schema {
-            if schema.level == 0 {
-                return Some(node);
-            }
-        }
-        let mut current = node;
-        loop {
-            match current.parent_id.as_deref() {
-                None => return None,
-                Some(pid) => {
-                    match self.nodes.get(pid) {
-                        None => return None,
-                        Some(parent) => {
-                            if let Some(ref schema) = parent.color_schema {
-                                if schema.level == 0 {
-                                    return Some(parent);
-                                }
-                            }
-                            current = parent;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Returns true if any ancestor of this node is folded, meaning
     /// this node should be hidden from view.
     pub fn is_hidden_by_fold(&self, node: &MindNode) -> bool {

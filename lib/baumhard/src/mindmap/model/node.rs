@@ -20,6 +20,7 @@ pub struct MindNode {
     pub layout: NodeLayout,
     pub folded: bool,
     pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_schema: Option<ColorSchema>,
     /// Channel index for mutation targeting in the baumhard tree.
     /// Multiple siblings can share a channel to form broadcast groups.

@@ -14,12 +14,13 @@ use super::MindMapDocument;
 
 impl MindMapDocument {
     /// Remove a node from the map, orphaning its immediate children (they
-    /// become roots), and removing every edge that touched the node.
+    /// become roots with cascaded ID renames), and removing every edge
+    /// that touched the deleted node.
     pub fn delete_node(&mut self, node_id: &str) -> Option<UndoAction> {
         let node = self.mindmap.nodes.remove(node_id)?;
 
-        // Orphan immediate children: promote each to a root with a fresh
-        // root-level Dewey ID.
+        // Orphan immediate children: each gets a fresh root-level ID,
+        // and ALL descendants have their IDs cascaded (old prefix → new).
         let child_ids: Vec<String> = self
             .mindmap
             .nodes
@@ -30,11 +31,11 @@ impl MindMapDocument {
         let mut orphaned_children: Vec<(String, String)> = Vec::new();
         for cid in &child_ids {
             let new_root_id = self.fresh_child_id(None);
-            if let Some(mut child) = self.mindmap.nodes.remove(cid) {
-                orphaned_children.push((cid.clone(), new_root_id.clone()));
+            orphaned_children.push((cid.clone(), new_root_id.clone()));
+            self.cascade_rename(cid, &new_root_id);
+            // Clear parent_id on the newly-rooted child.
+            if let Some(child) = self.mindmap.nodes.get_mut(&new_root_id) {
                 child.parent_id = None;
-                child.id = new_root_id.clone();
-                self.mindmap.nodes.insert(new_root_id, child);
             }
         }
 
@@ -57,6 +58,61 @@ impl MindMapDocument {
             removed_edges,
             orphaned_children,
         })
+    }
+
+    /// Rename a node and all its descendants from `old_id` to `new_id`,
+    /// updating the node's `id` field, `parent_id` of descendants,
+    /// and all edge/portal references.
+    pub(super) fn cascade_rename(&mut self, old_id: &str, new_id: &str) {
+        // Collect the full old→new mapping: the node itself + all descendants.
+        let old_prefix = format!("{}.", old_id);
+        let renames: Vec<(String, String)> = self
+            .mindmap
+            .nodes
+            .keys()
+            .filter(|k| *k == old_id || k.starts_with(&old_prefix))
+            .map(|k| {
+                let new_k = if k == old_id {
+                    new_id.to_string()
+                } else {
+                    format!("{}{}", new_id, &k[old_id.len()..])
+                };
+                (k.clone(), new_k)
+            })
+            .collect();
+
+        // Rename nodes in the HashMap.
+        for (old, new) in &renames {
+            if let Some(mut node) = self.mindmap.nodes.remove(old) {
+                node.id = new.clone();
+                // Update parent_id if it references another renamed node.
+                if let Some(ref pid) = node.parent_id {
+                    for (ro, rn) in &renames {
+                        if pid == ro {
+                            node.parent_id = Some(rn.clone());
+                            break;
+                        }
+                    }
+                }
+                self.mindmap.nodes.insert(new.clone(), node);
+            }
+        }
+
+        // Update edge references.
+        for edge in &mut self.mindmap.edges {
+            for (old, new) in &renames {
+                if edge.from_id == *old { edge.from_id = new.clone(); }
+                if edge.to_id == *old { edge.to_id = new.clone(); }
+            }
+        }
+
+        // Update portal references.
+        for portal in &mut self.mindmap.portals {
+            for (old, new) in &renames {
+                if portal.endpoint_a == *old { portal.endpoint_a = new.clone(); }
+                if portal.endpoint_b == *old { portal.endpoint_b = new.clone(); }
+            }
+        }
     }
 
     /// Create a new unattached (orphan) node at the given canvas position.

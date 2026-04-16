@@ -76,9 +76,9 @@ fn rewrite_nodes(root: &mut Value, id_map: &HashMap<String, String>) {
         let new_id = id_map.get(&old_id).cloned().unwrap_or(old_id);
 
         // Update the id field inside the node
-        node.as_object_mut().map(|obj| {
+        if let Some(obj) = node.as_object_mut() {
             obj.insert("id".to_string(), Value::String(new_id.clone()));
-        });
+        }
 
         // Update parent_id
         if let Some(obj) = node.as_object_mut() {
@@ -97,8 +97,9 @@ fn rewrite_nodes(root: &mut Value, id_map: &HashMap<String, String>) {
         new_nodes.insert(new_id, node);
     }
 
-    root.as_object_mut()
-        .map(|obj| obj.insert("nodes".to_string(), Value::Object(new_nodes)));
+    if let Some(obj) = root.as_object_mut() {
+        obj.insert("nodes".to_string(), Value::Object(new_nodes));
+    }
 }
 
 fn rewrite_edges(root: &mut Value, id_map: &HashMap<String, String>) {
@@ -126,9 +127,9 @@ fn rewrite_portals(root: &mut Value, id_map: &HashMap<String, String>) {
 fn rewrite_field(obj: &mut Value, field: &str, id_map: &HashMap<String, String>) {
     if let Some(old_val) = obj.get(field).and_then(|v| v.as_str()).map(|s| s.to_string()) {
         if let Some(new_val) = id_map.get(&old_val) {
-            obj.as_object_mut().map(|o| {
-                o.insert(field.to_string(), Value::String(new_val.clone()))
-            });
+            if let Some(o) = obj.as_object_mut() {
+                o.insert(field.to_string(), Value::String(new_val.clone()));
+            }
         }
     }
 }

@@ -94,13 +94,13 @@ impl MindMapDocument {
                         let idx = idx.min(self.mindmap.edges.len());
                         self.mindmap.edges.insert(idx, edge);
                     }
-                    // Re-attach orphaned children: remove the root-level
-                    // node entry, restore its original ID and parent_id.
+                    // Reverse the cascade rename for each orphaned child:
+                    // rename from root-level ID back to original subtree ID,
+                    // then restore parent_id to the deleted node.
                     for (old_id, root_id) in orphaned_children {
-                        if let Some(mut child) = self.mindmap.nodes.remove(&root_id) {
-                            child.id = old_id.clone();
+                        self.cascade_rename(&root_id, &old_id);
+                        if let Some(child) = self.mindmap.nodes.get_mut(&old_id) {
                             child.parent_id = Some(restored_id.clone());
-                            self.mindmap.nodes.insert(old_id, child);
                         }
                     }
                 }
