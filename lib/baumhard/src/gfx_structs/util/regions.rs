@@ -82,9 +82,14 @@ impl RegionIndexer {
         }
     }
 
-    /// Returns a set of elements that occupies the region
-    pub fn elements_in_region(&self, region: usize) -> BTreeSet<usize> {
-        self.index[region].iter().cloned().collect()
+    /// Borrow the set of element ids currently sitting in `region`.
+    /// Zero-copy by design: callers that want an owned set can call
+    /// `.clone()`, and the common "count" / "contains" queries stay
+    /// allocation-free. O(1). Panics if `region` is out of bounds —
+    /// caller is responsible for validating against
+    /// [`RegionParams::number_of_regions`].
+    pub fn elements_in_region(&self, region: usize) -> &BTreeSet<usize> {
+        &self.index[region]
     }
 
     /// Borrow the per-region index slot vector. Index `r` is the set of
