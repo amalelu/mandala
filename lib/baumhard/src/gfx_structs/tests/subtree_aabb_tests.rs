@@ -317,3 +317,88 @@ pub fn do_subtree_aabb_negative_position() {
         (Vec2::new(-50.0, -30.0), Vec2::new(50.0, 30.0))
     );
 }
+
+// ── union_aabb coverage via subtree computation ───────────────────
+// union_aabb is private, so we exercise its code paths through trees
+// that force specific merge patterns.
+
+#[test]
+fn test_subtree_aabb_merge_none_base_with_child() {
+    do_subtree_aabb_merge_none_base_with_child();
+}
+
+/// A void parent (own AABB = None) with one area child: the merge
+/// of None + child_aabb should equal child_aabb. Exercises the
+/// `union_aabb(None, other) -> other` path.
+pub fn do_subtree_aabb_merge_none_base_with_child() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let void = tree.arena.new_node(GfxElement::new_void(0));
+    let child = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("c", 14.0, 14.0, Vec2::new(5.0, 5.0), Vec2::new(10.0, 10.0)),
+        0,
+    );
+    let child_id = tree.arena.new_node(child);
+    tree.root.append(void, &mut tree.arena);
+    void.append(child_id, &mut tree.arena);
+
+    tree.ensure_subtree_aabbs();
+    let void_aabb = tree.arena.get(void).unwrap().get().subtree_aabb().unwrap();
+    assert_eq!(void_aabb, (Vec2::new(5.0, 5.0), Vec2::new(15.0, 15.0)));
+}
+
+#[test]
+fn test_subtree_aabb_merge_two_disjoint_children() {
+    do_subtree_aabb_merge_two_disjoint_children();
+}
+
+/// A void parent with two disjoint area children: the merge should
+/// produce the bounding box enclosing both. Exercises the
+/// `union_aabb(Some(a), b) -> min/max merge` path.
+pub fn do_subtree_aabb_merge_two_disjoint_children() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let void = tree.arena.new_node(GfxElement::new_void(0));
+    let a = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("a", 14.0, 14.0, Vec2::new(-10.0, -10.0), Vec2::new(5.0, 5.0)),
+        0,
+    );
+    let b = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("b", 14.0, 14.0, Vec2::new(100.0, 200.0), Vec2::new(5.0, 5.0)),
+        0,
+    );
+    let a_id = tree.arena.new_node(a);
+    let b_id = tree.arena.new_node(b);
+    tree.root.append(void, &mut tree.arena);
+    void.append(a_id, &mut tree.arena);
+    void.append(b_id, &mut tree.arena);
+
+    tree.ensure_subtree_aabbs();
+    let void_aabb = tree.arena.get(void).unwrap().get().subtree_aabb().unwrap();
+    assert_eq!(void_aabb, (Vec2::new(-10.0, -10.0), Vec2::new(105.0, 205.0)));
+}
+
+#[test]
+fn test_subtree_aabb_all_children_zero_bounds() {
+    do_subtree_aabb_all_children_zero_bounds();
+}
+
+/// A void parent whose children all have zero-size bounds: every
+/// child contributes None, so the parent's subtree AABB is None.
+pub fn do_subtree_aabb_all_children_zero_bounds() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let void = tree.arena.new_node(GfxElement::new_void(0));
+    for _ in 0..3 {
+        let area = GfxElement::new_area_non_indexed(
+            GlyphArea::new_with_str("z", 14.0, 14.0, Vec2::new(50.0, 50.0), Vec2::new(0.0, 0.0)),
+            0,
+        );
+        let id = tree.arena.new_node(area);
+        void.append(id, &mut tree.arena);
+    }
+    tree.root.append(void, &mut tree.arena);
+
+    tree.ensure_subtree_aabbs();
+    assert!(tree.arena.get(void).unwrap().get().subtree_aabb().is_none());
+}

@@ -125,7 +125,6 @@ pub struct Predicate {
     #[serde(default)]
     pub always_match: bool,
 }
-// TODO: I want to reduce the complexity of this, there is a better design here, I just need to analyze it
 impl Predicate {
     /// Create an empty predicate that matches nothing (no fields, no
     /// `always_match`). O(1), one empty `Vec` allocation.
@@ -174,7 +173,7 @@ impl Predicate {
                         let element_line_height = element.glyph_area().unwrap().line_height;
                         return comparator.compare_f32(element_line_height.0, line_height.0);
                     }
-                    ColorFontRegions(_) => {} //todo
+                    ColorFontRegions(_) => {} // not a predicate axis
 
                     GlyphAreaField::Position(vec) => {
                         return match comparator {
@@ -318,7 +317,7 @@ impl Predicate {
                                 GlyphModelField::Position(vec) => {
                                     (target_model.position == *vec) != *negation
                                 }
-                                GlyphModelField::Operation(_) => false, //todo: what's up here
+                                GlyphModelField::Operation(_) => false,
                             },
                             GreaterThan(negation) => {
                                 match model_field {
@@ -348,7 +347,7 @@ impl Predicate {
                                             > vec.to_vec2().distance(Vec2::new(0.0, 0.0)))
                                             != *negation
                                     }
-                                    GlyphModelField::Operation(_) => false, //todo
+                                    GlyphModelField::Operation(_) => false,
                                 }
                             }
                             LessThan(negation) => {
@@ -379,7 +378,7 @@ impl Predicate {
                                             < vec.to_vec2().distance(Vec2::new(0.0, 0.0)))
                                             != *negation
                                     }
-                                    GlyphModelField::Operation(_) => false, //todo
+                                    GlyphModelField::Operation(_) => false,
                                 }
                             }
                             Exists(negation) => !negation,
@@ -387,7 +386,7 @@ impl Predicate {
                     }
                     return false;
                 }
-                GfxElementField::Flag(flag) => {} //todo
+                GfxElementField::Flag(_flag) => {} // flag predicates not yet supported
             }
         }
         false

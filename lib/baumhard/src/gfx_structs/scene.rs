@@ -245,11 +245,16 @@ impl Scene {
     /// (O(1) when warm, O(descendants) once after each mutator).
     /// On a hit, one additional O(descendants) walk inside the
     /// matched tree via [`Tree::descendant_at`]. Misses cost only
-    /// the bbox check — they don't trigger the inner walk. No
-    /// allocation. The scene keeps no per-node spatial index —
-    /// that's the tree's responsibility if one is ever wired up
-    /// (see the unimplemented
-    /// [`crate::gfx_structs::util::regions::RegionIndexer`]).
+    /// the bbox check — they don't trigger the inner walk.
+    ///
+    /// # Precondition
+    ///
+    /// All pending mutations must be applied before calling this
+    /// method. The BVH caches are invalidated by
+    /// [`MutatorTree::apply_to`](crate::gfx_structs::tree::MutatorTree)
+    /// and lazily recomputed on the first query after mutation.
+    /// Calling `component_at` between a mutation and its
+    /// application may return stale results.
     pub fn component_at(&mut self, point: Vec2) -> Option<(SceneTreeId, NodeId)> {
         self.ensure_layer_order();
         // Two-pass: first collect candidates via cheap AABB reject

@@ -1,3 +1,6 @@
+//! Tests for [`crate::gfx_structs::tree_walker`] — RepeatWhile,
+//! channel alignment, and instruction processing (§T1).
+
 use glam::Vec2;
 use indextree::NodeId;
 use crate::font::fonts;

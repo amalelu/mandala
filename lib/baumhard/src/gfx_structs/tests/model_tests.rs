@@ -1,3 +1,6 @@
+//! Tests for [`crate::gfx_structs::model::GlyphModel`] — line/matrix
+//! construction and component layout (§T1).
+
 use crate::font::fonts::AppFont;
 use crate::util::color::Color;
 use crate::gfx_structs::model::{GlyphComponent, GlyphLine, GlyphMatrix};

@@ -241,3 +241,63 @@ pub fn do_bvh_point_in_subtree_aabb_but_outside_own_area() {
     assert_eq!(tree.descendant_at(Vec2::new(80.0, 55.0)), Some(child_id));
     assert_eq!(tree.descendant_at(Vec2::new(20.0, 15.0)), Some(parent_id));
 }
+
+// ── descendant_near with slack ────────────────────────────────────
+
+#[test]
+fn test_descendant_near_slack_expands_hit_region() {
+    do_descendant_near_slack_expands_hit_region();
+}
+
+/// `descendant_near` with `slack > 0` finds nodes when the point is
+/// just outside the AABB but within the slack margin.
+pub fn do_descendant_near_slack_expands_hit_region() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let area = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("s", 14.0, 14.0, Vec2::new(10.0, 10.0), Vec2::new(20.0, 20.0)),
+        0,
+    );
+    let id = tree.arena.new_node(area);
+    tree.root.append(id, &mut tree.arena);
+
+    // Point just outside on the right: x=31, AABB max_x=30.
+    assert!(tree.descendant_at(Vec2::new(31.0, 20.0)).is_none());
+    assert_eq!(tree.descendant_near(Vec2::new(31.0, 20.0), 2.0), Some(id));
+    // Slack too small.
+    assert!(tree.descendant_near(Vec2::new(31.0, 20.0), 0.5).is_none());
+
+    // Point just outside on the top: y=9, AABB min_y=10.
+    assert!(tree.descendant_at(Vec2::new(20.0, 9.0)).is_none());
+    assert_eq!(tree.descendant_near(Vec2::new(20.0, 9.0), 2.0), Some(id));
+}
+
+#[test]
+fn test_descendant_near_slack_smallest_area_still_wins() {
+    do_descendant_near_slack_smallest_area_still_wins();
+}
+
+/// When slack causes two nodes' expanded AABBs to both contain the
+/// point, the smaller-area node still wins (tie-break by original
+/// area, not slacked area).
+pub fn do_descendant_near_slack_smallest_area_still_wins() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let big = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("big", 14.0, 14.0, Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0)),
+        0,
+    );
+    let small = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("sm", 14.0, 14.0, Vec2::new(50.0, 50.0), Vec2::new(10.0, 10.0)),
+        1,
+    );
+    let big_id = tree.arena.new_node(big);
+    let small_id = tree.arena.new_node(small);
+    tree.root.append(big_id, &mut tree.arena);
+    tree.root.append(small_id, &mut tree.arena);
+
+    // Point at (62, 55) is outside small's AABB (max_x=60) but within
+    // slack=5. Both big and small+slack contain the point; small wins.
+    let hit = tree.descendant_near(Vec2::new(62.0, 55.0), 5.0);
+    assert_eq!(hit, Some(small_id));
+}

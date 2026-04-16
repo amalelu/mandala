@@ -1,3 +1,6 @@
+//! Test modules for [`crate::gfx_structs`]. Each module covers one
+//! conceptual area; see individual module docs for scope.
+
 pub mod area_tests;
 pub mod model_tests;
 pub mod mutator_tests;

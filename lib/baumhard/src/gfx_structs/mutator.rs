@@ -46,6 +46,12 @@ pub enum Instruction {
    /// delivers a mutation to the hit node through the mutator
    /// pipeline.
    ///
+   /// Unlike [`RepeatWhile`](Instruction::RepeatWhile), spatial
+   /// descent bypasses channel alignment — the mutation is delivered
+   /// to whichever node the point lands on, regardless of its
+   /// channel. This is intentional: spatial routing targets the
+   /// visually correct node, not a structurally aligned one.
+   ///
    /// Costs: O(branching_factor × depth) when subtrees are spatially
    /// disjoint; O(n) worst case with fully overlapping subtrees.
    SpatialDescend(OrderedVec2),
@@ -81,10 +87,10 @@ pub enum MutatorType {
 pub struct GlyphTreeEventInstance {
    /// The kind of event being delivered.
    pub event_type: GlyphTreeEvent,
-   // This will just be millis since the application was launched in order to handle sequences
-   // todo but we should handle rollover too, it will not be difficult and will only be relevant after 50 days
    /// Milliseconds since application launch — used to order and
-   /// deduplicate event sequences.
+   /// deduplicate event sequences. Wraps after ~50 days; callers
+   /// that sequence events across long sessions should account for
+   /// rollover.
    pub event_time_millis: usize,
 }
 
