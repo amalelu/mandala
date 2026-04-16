@@ -1,11 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 
-#[cfg(not(target_arch = "wasm32"))]
-use pollster::block_on;
+// Cross-platform submodules: compile for both native and WASM.
+mod scene_rebuild;
+mod text_edit;
 
+// Native-only submodules: the interactive modal state machines
+// (click routing, console, color picker, label edit, edge drag) live
+// here and are entirely absent from the WASM build. Per
+// `CODE_CONVENTIONS.md §2`, cross-platform `cfg` discipline puts the
+// split at the module boundary rather than per-item; the one-line
+// status of what's native-only vs. cross-platform lives in
+// `CLAUDE.md`'s "Dual-target status" section.
 #[cfg(not(target_arch = "wasm32"))]
 mod click;
 #[cfg(not(target_arch = "wasm32"))]
@@ -15,30 +21,38 @@ mod console_input;
 #[cfg(not(target_arch = "wasm32"))]
 mod drain_frame;
 #[cfg(not(target_arch = "wasm32"))]
-mod event_mouse_click;
-#[cfg(not(target_arch = "wasm32"))]
 mod edge_drag;
+#[cfg(not(target_arch = "wasm32"))]
+mod event_mouse_click;
 #[cfg(not(target_arch = "wasm32"))]
 mod label_edit;
 #[cfg(not(target_arch = "wasm32"))]
 mod run_native;
 #[cfg(target_arch = "wasm32")]
 mod run_wasm;
-mod scene_rebuild;
-mod text_edit;
+
+// Cross-platform imports.
+use scene_rebuild::{
+    flush_canvas_scene_buffers, rebuild_all, rebuild_scene_only, update_border_tree_static,
+    update_border_tree_with_offsets, update_connection_label_tree, update_connection_tree,
+    update_edge_handle_tree, update_portal_tree,
+};
+use text_edit::{
+    close_text_edit, delete_at_cursor, delete_before_cursor, handle_text_edit_key,
+    insert_at_cursor, open_text_edit, TextEditState,
+};
+
+// Native-only imports: every name below is only referenced from
+// `run_native` or native-only helpers in this file.
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use pollster::block_on;
 #[cfg(not(target_arch = "wasm32"))]
 use click::{
     handle_click, handle_connect_target_click, handle_reparent_target_click,
     rebuild_all_with_mode,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use edge_drag::apply_edge_handle_drag;
-use text_edit::{
-    close_text_edit, delete_at_cursor, delete_before_cursor, handle_text_edit_key,
-    insert_at_cursor, open_text_edit, TextEditState,
-};
-#[cfg(not(target_arch = "wasm32"))]
-use label_edit::{handle_label_edit_key, open_label_edit, LabelEditState};
 #[cfg(not(target_arch = "wasm32"))]
 use color_picker_flow::{
     end_color_picker_gesture, handle_color_picker_click, handle_color_picker_key,
@@ -49,11 +63,10 @@ use console_input::{
     handle_console_key, load_console_history, rebuild_console_overlay, save_console_history,
     save_document_to_bound_path,
 };
-use scene_rebuild::{
-    flush_canvas_scene_buffers, rebuild_all, rebuild_scene_only, update_border_tree_static,
-    update_border_tree_with_offsets, update_connection_label_tree, update_connection_tree,
-    update_edge_handle_tree, update_portal_tree,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use edge_drag::apply_edge_handle_drag;
+#[cfg(not(target_arch = "wasm32"))]
+use label_edit::{handle_label_edit_key, open_label_edit, LabelEditState};
 
 /// Cross-platform monotonic clock returning milliseconds since first call.
 /// Native: uses `Instant` (guaranteed monotonic). WASM: uses
