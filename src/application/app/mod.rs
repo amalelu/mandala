@@ -85,7 +85,8 @@ use crate::application::common::{InputMode, RenderDecree, WindowMode};
 use crate::application::document::{
     EdgeRef, MindMapDocument, SelectionState, UndoAction,
     hit_test, hit_test_edge, rect_select,
-    apply_drag_delta, apply_tree_highlights,
+    apply_drag_delta, apply_drag_delta_and_collect_patches,
+    apply_tree_highlights,
     HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 use crate::application::frame_throttle::MutationFrequencyThrottle;

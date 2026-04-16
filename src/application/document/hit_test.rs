@@ -206,18 +206,90 @@ pub fn apply_drag_delta(tree: &mut MindMapTree, node_id: &str, dx: f32, dy: f32,
         None => return,
     };
 
-    // Collect node IDs to mutate (must collect first to avoid borrow conflict with arena)
-    let node_ids: Vec<indextree::NodeId> = if include_descendants {
-        tree_node_id.descendants(&tree.tree.arena).collect()
-    } else {
-        vec![tree_node_id]
+    if include_descendants {
+        apply_delta_recursive(&mut tree.tree.arena, tree_node_id, dx, dy);
+    } else if let Some(node) = tree.tree.arena.get_mut(tree_node_id) {
+        if let Some(area) = node.get_mut().glyph_area_mut() {
+            area.move_position(dx, dy);
+        }
+    }
+}
+
+/// Apply a position delta and return `(unique_id, new_position)` for
+/// every node that was moved. The renderer uses these patches to
+/// update buffer positions in-place without reshaping text.
+///
+/// O(moved_nodes) — no text shaping, no font-system lock. Uses
+/// `first_child` / `next_sibling` iteration instead of collecting
+/// descendants into a `Vec` (§B7).
+pub fn apply_drag_delta_and_collect_patches(
+    tree: &mut MindMapTree,
+    node_id: &str,
+    dx: f32, dy: f32,
+    include_descendants: bool,
+    patches: &mut Vec<(usize, (f32, f32))>,
+) {
+    let tree_node_id = match tree.node_map.get(node_id) {
+        Some(&id) => id,
+        None => return,
     };
 
-    for nid in node_ids {
-        if let Some(node) = tree.tree.arena.get_mut(nid) {
-            if let Some(area) = node.get_mut().glyph_area_mut() {
+    if include_descendants {
+        collect_patches_recursive(&mut tree.tree.arena, tree_node_id, dx, dy, patches);
+    } else {
+        if let Some(node) = tree.tree.arena.get_mut(tree_node_id) {
+            let elem = node.get_mut();
+            if let Some(area) = elem.glyph_area_mut() {
                 area.move_position(dx, dy);
             }
+            let pos = elem.position();
+            patches.push((elem.unique_id(), (pos.x, pos.y)));
         }
+    }
+}
+
+/// Recursively apply delta and collect patches via `first_child` /
+/// `next_sibling` — zero allocations per call (§B7).
+fn apply_delta_recursive(
+    arena: &mut indextree::Arena<baumhard::gfx_structs::element::GfxElement>,
+    node_id: indextree::NodeId,
+    dx: f32, dy: f32,
+) {
+    // Move this node.
+    if let Some(node) = arena.get_mut(node_id) {
+        if let Some(area) = node.get_mut().glyph_area_mut() {
+            area.move_position(dx, dy);
+        }
+    }
+    // Recurse into children.
+    let mut child = arena.get(node_id).and_then(|n| n.first_child());
+    while let Some(cid) = child {
+        child = arena.get(cid).and_then(|n| n.next_sibling());
+        apply_delta_recursive(arena, cid, dx, dy);
+    }
+}
+
+/// Recursively apply delta, collect patches, via `first_child` /
+/// `next_sibling` — zero allocations per call (§B7).
+fn collect_patches_recursive(
+    arena: &mut indextree::Arena<baumhard::gfx_structs::element::GfxElement>,
+    node_id: indextree::NodeId,
+    dx: f32, dy: f32,
+    patches: &mut Vec<(usize, (f32, f32))>,
+) {
+    // Move this node and collect patch.
+    if let Some(node) = arena.get_mut(node_id) {
+        let elem = node.get_mut();
+        if let Some(area) = elem.glyph_area_mut() {
+            area.move_position(dx, dy);
+        }
+        let pos = elem.position();
+        patches.push((elem.unique_id(), (pos.x, pos.y)));
+    }
+    // Recurse into children.
+    let mut child = arena.get(node_id).and_then(|n| n.first_child());
+    while let Some(cid) = child {
+        child = arena.get(cid).and_then(|n| n.next_sibling());
+        collect_patches_recursive(arena, cid, dx, dy, patches);
     }
 }

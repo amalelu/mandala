@@ -47,7 +47,8 @@ mod tests_portals;
 mod tests_reparent;
 
 pub use hit_test::{
-    apply_drag_delta, apply_tree_highlights, hit_test, hit_test_edge,
+    apply_drag_delta, apply_drag_delta_and_collect_patches,
+    apply_tree_highlights, hit_test, hit_test_edge,
     point_in_node_aabb, rect_select,
 };
 pub use types::{
