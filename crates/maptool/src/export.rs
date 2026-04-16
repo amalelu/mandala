@@ -7,7 +7,7 @@
 //! their children surface at the same heading depth, so if the roots
 //! have no text the first-text generation becomes the `#` level.
 
-use baumhard::mindmap::model::{MindMap, MindNode};
+use baumhard::mindmap::model::{id_sort_key, MindMap, MindNode};
 use std::collections::HashMap;
 
 /// Convert `map` into a Markdown document containing only node text,
@@ -48,9 +48,9 @@ impl<'a> ChildIndex<'a> {
                 Some(pid) => by_parent.entry(pid.as_str()).or_default().push(node),
             }
         }
-        roots.sort_by_key(|n| n.index);
+        roots.sort_by_key(|n| id_sort_key(&n.id));
         for children in by_parent.values_mut() {
-            children.sort_by_key(|n| n.index);
+            children.sort_by_key(|n| id_sort_key(&n.id));
         }
         Self { roots, by_parent }
     }

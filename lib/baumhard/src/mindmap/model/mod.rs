@@ -211,7 +211,7 @@ impl MindMap {
 
 /// Extract the last segment of a Dewey-decimal ID as a numeric sort key.
 /// `"1.2.3"` → `3`, `"0"` → `0`. Falls back to 0 for non-numeric IDs.
-fn id_sort_key(id: &str) -> usize {
+pub fn id_sort_key(id: &str) -> usize {
     id.rsplit('.').next()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0)

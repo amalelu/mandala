@@ -192,10 +192,10 @@ impl SelectionState {
 }
 
 /// Return value of `MindMapDocument::apply_reparent`. Contains both the
-/// per-node parent/index entries and a full snapshot of the edges Vec so that
+/// per-node parent entries and a full snapshot of the edges Vec so that
 /// edge rewrites can be reversed wholesale on undo.
 #[derive(Clone, Debug)]
 pub struct ReparentUndoData {
-    pub entries: Vec<(String, Option<String>, i32)>,
+    pub entries: Vec<(String, Option<String>)>,
     pub old_edges: Vec<MindEdge>,
 }

@@ -91,8 +91,8 @@ pub fn hit_test_edge(canvas_pos: Vec2, map: &MindMap, tolerance: f32) -> Option<
         let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
 
         let path = connection::build_connection_path(
-            from_pos, from_size, edge.anchor_from,
-            to_pos, to_size, edge.anchor_to,
+            from_pos, from_size, &edge.anchor_from,
+            to_pos, to_size, &edge.anchor_to,
             &edge.control_points,
         );
         let dist = connection::distance_to_path(canvas_pos, &path);

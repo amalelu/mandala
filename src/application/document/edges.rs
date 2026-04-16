@@ -94,24 +94,24 @@ impl MindMapDocument {
     /// if the value changed, pushing an `EditEdge` undo snapshot and
     /// setting `dirty`. Returns `false` if the edge was not found or
     /// the anchor was already at the requested value.
-    pub fn set_edge_anchor(&mut self, edge_ref: &EdgeRef, is_from: bool, value: i32) -> bool {
+    pub fn set_edge_anchor(&mut self, edge_ref: &EdgeRef, is_from: bool, value: &str) -> bool {
         let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
             Some(i) => i,
             None => return false,
         };
         let current = if is_from {
-            self.mindmap.edges[idx].anchor_from
+            &self.mindmap.edges[idx].anchor_from
         } else {
-            self.mindmap.edges[idx].anchor_to
+            &self.mindmap.edges[idx].anchor_to
         };
         if current == value {
             return false;
         }
         let before = self.mindmap.edges[idx].clone();
         if is_from {
-            self.mindmap.edges[idx].anchor_from = value;
+            self.mindmap.edges[idx].anchor_from = value.to_string();
         } else {
-            self.mindmap.edges[idx].anchor_to = value;
+            self.mindmap.edges[idx].anchor_to = value.to_string();
         }
         self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
         self.dirty = true;
