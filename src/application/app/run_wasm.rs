@@ -145,11 +145,7 @@ wasm_bindgen_futures::spawn_local(async move {
     let height = canvas.height();
     renderer.process_decree(RenderDecree::SetSurfaceSize(size, height));
 
-    // Load mindmap through Document -> Tree + Scene -> Renderer flow.
-    // On WASM the map comes in over HTTP via `fetch_map_json` — the
-    // native filesystem path (`MindMapDocument::load`) cannot reach
-    // the browser origin. Failure is logged but non-fatal; the
-    // renderer still starts so rAF ticks and the page doesn't hang.
+    // std::fs is unavailable in the browser; fetch over the page origin instead.
     let mut doc_opt: Option<MindMapDocument> = None;
     let mut tree_opt: Option<MindMapTree> = None;
     // Local AppScene used only for the initial border tree
@@ -563,12 +559,8 @@ fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
         .unwrap();
 }
 
-/// HTTP-fetch a mindmap JSON file as a string. The browser-side
-/// equivalent of `std::fs::read_to_string`, used by the WASM init
-/// path because the bundled `maps/` directory is served over the
-/// page origin (see `web/index.html`'s `copy-dir`). All error legs
-/// stringify their `JsValue` payloads so the browser console shows
-/// what actually failed.
+/// HTTP-fetch a mindmap JSON file. Maps are bundled into the page
+/// origin by trunk's `copy-dir` directive in `web/index.html`.
 async fn fetch_map_json(url: &str) -> Result<String, String> {
     use wasm_bindgen::JsCast;
     let window = web_sys::window().ok_or("no global window")?;

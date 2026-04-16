@@ -185,9 +185,8 @@ impl MindMapDocument {
         doc
     }
 
-    /// Load a MindMap from a file path and create a Document.
-    /// Native-only — WASM builds cannot reach a filesystem; see
-    /// `from_json_str` for the browser-side construction path.
+    /// Load a MindMap from a file path. Native-only — WASM builds
+    /// must use `from_json_str` since the browser has no filesystem.
     pub fn load(path: &str) -> Result<Self, String> {
         loader::load_from_file(Path::new(path))
             .map(|map| Self::finalize(map, Some(path.to_string())))
@@ -198,12 +197,9 @@ impl MindMapDocument {
             })
     }
 
-    /// Construct a Document from an in-memory JSON string. The WASM
-    /// load path uses this after fetching the map over HTTP, since
-    /// `std::fs` is unavailable in the browser. `file_path` is the
-    /// origin tag stored on the document for save-back semantics —
-    /// pass the URL/path the JSON came from, or `None` for ad-hoc
-    /// JSON.
+    /// Construct a Document from an in-memory JSON string. `file_path`
+    /// is the origin tag stored for save-back; pass the URL/path the
+    /// JSON came from, or `None` for ad-hoc JSON.
     pub fn from_json_str(json: &str, file_path: Option<String>) -> Result<Self, String> {
         loader::load_from_str(json)
             .map(|map| Self::finalize(map, file_path))
@@ -213,10 +209,8 @@ impl MindMapDocument {
             })
     }
 
-    /// Shared post-parse pipeline used by both `load` (native file
-    /// I/O) and `from_json_str` (WASM HTTP fetch). Grows any
-    /// undersized node boxes to fit their text before the model is
-    /// handed to the tree/scene builders — see
+    /// Grow undersized node boxes to fit their text before the model
+    /// is handed to the tree/scene builders — see
     /// `grow_node_sizes_to_fit_text` for the invariants.
     fn finalize(mut map: MindMap, file_path: Option<String>) -> Self {
         info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
