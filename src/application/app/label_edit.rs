@@ -9,6 +9,7 @@ use winit::keyboard::Key;
 use baumhard::util::grapheme_chad;
 
 use crate::application::document::MindMapDocument;
+use crate::application::keybinds::{Action, InputContext, ResolvedKeybinds};
 use crate::application::renderer::Renderer;
 
 use super::text_edit::insert_caret;
@@ -103,20 +104,15 @@ pub(in crate::application::app) fn open_label_edit(
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
 }
 
-/// Session 6D + Phase 2.1: route a keystroke to the inline label
-/// editor. Escape discards, Enter commits, navigation keys move the
-/// grapheme cursor, Backspace/Delete remove a grapheme cluster
-/// (never a stray byte), printable characters insert at the cursor.
-///
-/// Mirrors [`handle_text_edit_key`] in shape: every text mutation
-/// goes through `grapheme_chad` so emoji and ZWJ clusters survive
-/// edits intact (CODE_CONVENTIONS §1). Multi-line is intentionally
-/// out of scope — labels are short, single-line; Enter commits, not
-/// inserts. Cursor navigation is constrained to the one row.
+/// Route a keystroke to the inline label editor. Cancel and commit
+/// are resolved through `action_for_context(InputContext::LabelEdit)`;
+/// navigation and character input stay as direct key checks (they
+/// are structural text-editing primitives, not rebindable actions).
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn handle_label_edit_key(
     key_name: &Option<String>,
     logical_key: &Key,
+    keybinds: &ResolvedKeybinds,
     label_edit_state: &mut LabelEditState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
@@ -124,11 +120,14 @@ pub(in crate::application::app) fn handle_label_edit_key(
     renderer: &mut Renderer,
 ) {
     let name = key_name.as_deref();
-    if name == Some("escape") {
+    let action = name.and_then(|n| {
+        keybinds.action_for_context(InputContext::LabelEdit, n, false, false, false)
+    });
+    if action == Some(Action::LabelEditCancel) {
         close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer);
         return;
     }
-    if name == Some("enter") {
+    if action == Some(Action::LabelEditCommit) {
         close_label_edit(true, doc, label_edit_state, mindmap_tree, app_scene, renderer);
         return;
     }

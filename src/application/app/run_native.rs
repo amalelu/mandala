@@ -581,6 +581,7 @@ app.event_loop.run(move |event, _window_target| {
                     handle_label_edit_key(
                         &key_name,
                         &logical_key,
+                        &keybinds,
                         &mut label_edit_state,
                         doc,
                         &mut mindmap_tree,
@@ -602,6 +603,7 @@ app.event_loop.run(move |event, _window_target| {
                     handle_text_edit_key(
                         &key_name,
                         &logical_key,
+                        &keybinds,
                         &mut text_edit_state,
                         doc,
                         &mut mindmap_tree,

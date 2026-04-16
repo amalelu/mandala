@@ -11,6 +11,7 @@ use winit::keyboard::Key;
 use baumhard::util::grapheme_chad;
 
 use crate::application::document::MindMapDocument;
+use crate::application::keybinds::{Action, InputContext, ResolvedKeybinds};
 use crate::application::renderer::Renderer;
 
 use super::super::rebuild_all;
@@ -322,6 +323,7 @@ pub(in crate::application::app) fn apply_text_edit_to_tree(
 pub(in crate::application::app) fn handle_text_edit_key(
     key_name: &Option<String>,
     logical_key: &Key,
+    keybinds: &ResolvedKeybinds,
     text_edit_state: &mut TextEditState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
@@ -329,7 +331,10 @@ pub(in crate::application::app) fn handle_text_edit_key(
     renderer: &mut Renderer,
 ) {
     let name = key_name.as_deref();
-    if name == Some("escape") {
+    let action = name.and_then(|n| {
+        keybinds.action_for_context(InputContext::TextEdit, n, false, false, false)
+    });
+    if action == Some(Action::TextEditCancel) {
         close_text_edit(false, doc, text_edit_state, mindmap_tree, app_scene, renderer);
         return;
     }

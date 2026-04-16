@@ -266,6 +266,7 @@ app.event_loop.run(move |event, _window_target| {
                 handle_text_edit_key(
                     &key_name,
                     logical_key,
+                    &keybinds,
                     &mut input.text_edit_state,
                     &mut input.document,
                     &mut input.mindmap_tree,
