@@ -132,11 +132,16 @@ features need a cross-platform story from the start — lives in
   `./test.sh --lint` adds an advisory `cargo fmt --check` +
   `cargo clippy` pass (never fails the run); `./test.sh --bench` also
   runs the criterion benches after tests pass.
-- **Build releases**: `./build.sh` builds the native binary; `./build.sh
-  --wasm` builds the WASM bundle via `trunk build --release` (requires
-  `trunk` on `PATH`). Both share `--debug` for dev profiles.
-- **Run the app**: `cargo run -- maps/testament.mindmap.json` (native) or
-  `trunk serve` (WASM).
+- **Build releases**: `./build.sh` cleans prior output and builds both
+  the native binary (`target/release/mandala`) and the WASM bundle
+  (`dist/` via `trunk build --release`) in one run. `--debug` builds
+  dev profile on both sides; `--fat` switches native to `release-lto`
+  (WASM still ships with trunk's `--release`). Requires `trunk` on
+  `PATH` and the `wasm32-unknown-unknown` target installed.
+- **Run the app**: `./run.sh [map.mindmap.json]` launches the release
+  binary and `trunk serve --release` in parallel; Ctrl+C stops both.
+  For one-off iteration use `cargo run -- maps/testament.mindmap.json`
+  (native) or `trunk serve` (WASM) directly.
 - **Target a specific test**: `cargo test -p baumhard --lib <pattern>` or
   `cargo test -p mandala --lib <pattern>`.
 - **Load a different mindmap**: the first positional CLI arg is the path
