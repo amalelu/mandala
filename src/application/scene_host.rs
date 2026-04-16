@@ -565,4 +565,102 @@ mod tests {
         app.unregister_canvas(CanvasRole::Portals);
         assert_eq!(app.canvas_signature(CanvasRole::Portals), None);
     }
+
+    #[test]
+    fn canvas_dispatch_full_rebuild_when_no_tree() {
+        let app = AppScene::new();
+        assert_eq!(
+            app.canvas_dispatch(CanvasRole::Borders, 42),
+            CanvasDispatch::FullRebuild,
+        );
+    }
+
+    #[test]
+    fn canvas_dispatch_full_rebuild_on_signature_mismatch() {
+        let mut app = AppScene::new();
+        let (tree, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        app.register_canvas(CanvasRole::Borders, tree, Vec2::ZERO);
+        app.set_canvas_signature(CanvasRole::Borders, 100);
+        assert_eq!(
+            app.canvas_dispatch(CanvasRole::Borders, 200),
+            CanvasDispatch::FullRebuild,
+        );
+    }
+
+    #[test]
+    fn canvas_dispatch_in_place_on_signature_match() {
+        let mut app = AppScene::new();
+        let (tree, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        app.register_canvas(CanvasRole::Borders, tree, Vec2::ZERO);
+        app.set_canvas_signature(CanvasRole::Borders, 42);
+        assert_eq!(
+            app.canvas_dispatch(CanvasRole::Borders, 42),
+            CanvasDispatch::InPlaceMutator,
+        );
+    }
+
+    #[test]
+    fn overlay_dispatch_full_rebuild_when_no_tree() {
+        let app = AppScene::new();
+        assert_eq!(
+            app.overlay_dispatch(OverlayRole::Console, 0),
+            OverlayDispatch::FullRebuild,
+        );
+    }
+
+    #[test]
+    fn overlay_dispatch_in_place_on_match() {
+        let mut app = AppScene::new();
+        let (tree, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        app.register_overlay(OverlayRole::ColorPicker, tree, Vec2::ZERO);
+        app.set_overlay_signature(OverlayRole::ColorPicker, 99);
+        assert_eq!(
+            app.overlay_dispatch(OverlayRole::ColorPicker, 99),
+            OverlayDispatch::InPlaceMutator,
+        );
+    }
+
+    #[test]
+    fn overlay_signature_cleared_on_unregister() {
+        let mut app = AppScene::new();
+        let (tree, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        app.register_overlay(OverlayRole::Console, tree, Vec2::ZERO);
+        app.set_overlay_signature(OverlayRole::Console, 55);
+        assert_eq!(app.overlay_signature(OverlayRole::Console), Some(55));
+
+        app.unregister_overlay(OverlayRole::Console);
+        assert_eq!(app.overlay_signature(OverlayRole::Console), None);
+    }
+
+    #[test]
+    fn hash_canvas_signature_deterministic() {
+        let key = ("node_a", "node_b", "default");
+        let h1 = hash_canvas_signature(&key);
+        let h2 = hash_canvas_signature(&key);
+        assert_eq!(h1, h2);
+
+        // Different input produces a different hash (with overwhelming probability)
+        let h3 = hash_canvas_signature(&("node_a", "node_b", "cross_link"));
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn canvas_ids_in_layer_order_returns_all_registered() {
+        let mut app = AppScene::new();
+        let (t1, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        let (t2, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        app.register_canvas(CanvasRole::Borders, t1, Vec2::ZERO);
+        app.register_canvas(CanvasRole::Connections, t2, Vec2::ZERO);
+        let ids = app.canvas_ids_in_layer_order();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn default_scene_has_no_registrations() {
+        let app = AppScene::default();
+        assert_eq!(app.canvas_scene().len(), 0);
+        assert_eq!(app.overlay_scene().len(), 0);
+        assert!(app.canvas_id(CanvasRole::Borders).is_none());
+        assert!(app.overlay_id(OverlayRole::Console).is_none());
+    }
 }
