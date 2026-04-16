@@ -13,14 +13,12 @@ use crate::application::widgets::color_picker_widget::load_spec;
 /// elements. Channels are resolved through `picker_channel`,
 /// which reads `widgets/color_picker.json`'s `mutator_spec`.
 ///
-/// Insertion order: title → hue ring (24 slots) → hint →
-/// sat bar (17 cells) → val bar (same) → preview → hex.
+/// Insertion order: hue ring (24 slots) → sat bar (17 cells) →
+/// val bar (same) → preview → hex.
 #[test]
 fn picker_channels_are_strictly_ascending() {
     let bands: &[(&str, usize, usize)] = &[
-        ("title", picker_channel("title", 0), 1),
         ("hue ring", picker_channel("hue_ring", 0), HUE_SLOT_COUNT),
-        ("hint", picker_channel("hint", 0), 1),
         ("sat bar", picker_channel("sat_bar", 0), SAT_CELL_COUNT),
         ("val bar", picker_channel("val_bar", 0), VAL_CELL_COUNT),
         ("preview", picker_channel("preview", 0), 1),

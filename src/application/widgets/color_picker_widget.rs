@@ -187,11 +187,11 @@ mod tests {
     }
 
     /// The `mutator_spec` block must parse into a Void root with the
-    /// seven expected Repeat children (title, hue_ring, hint, sat_bar,
-    /// val_bar, preview, hex) in declaration order, the right channel
-    /// bases, and the skip_indices for the crosshair bars. A drift
-    /// guard — any JSON renumbering that sneaks past surfaces here
-    /// rather than as a silent picker misalignment.
+    /// five expected Repeat children (hue_ring, sat_bar, val_bar,
+    /// preview, hex) in declaration order, the right channel bases,
+    /// and the skip_indices for the crosshair bars. A drift guard —
+    /// any JSON renumbering that sneaks past surfaces here rather
+    /// than as a silent picker misalignment.
     #[test]
     fn spec_mutator_spec_shape_matches_expectations() {
         use crate::application::mutator_builder::{CountSrc, MutatorNode};
@@ -201,9 +201,7 @@ mod tests {
         };
         assert_eq!(*channel, 0, "picker overlay root channel must be 0");
         let expected: &[(&str, usize, usize, &[usize])] = &[
-            ("title", 1, 1, &[]),
             ("hue_ring", 100, 24, &[]),
-            ("hint", 200, 1, &[]),
             ("sat_bar", 300, 17, &[8]),
             ("val_bar", 400, 17, &[8]),
             ("preview", 500, 1, &[]),
@@ -233,18 +231,18 @@ mod tests {
         }
     }
 
-    /// Total live picker cells = 1 title + 24 hue + 1 hint + 16 sat
-    /// + 16 val + 1 preview + 1 hex = 60. Pins the element-count
-    /// contract the mutator path relies on.
+    /// Total live picker cells = 24 hue + 16 sat + 16 val + 1 preview
+    /// + 1 hex = 58. Pins the element-count contract the mutator path
+    /// relies on.
     #[test]
-    fn spec_mutator_spec_total_live_cells_is_60() {
+    fn spec_mutator_spec_total_live_cells_is_58() {
         use crate::application::mutator_builder::{iter_section_channels, SectionContext};
         struct NoCtx;
         impl SectionContext for NoCtx {}
         let spec = load_spec();
         let mut out = Vec::new();
         iter_section_channels(&spec.mutator_spec, &NoCtx, &mut out);
-        assert_eq!(out.len(), 60);
+        assert_eq!(out.len(), 58);
     }
 
     /// `dynamic_mutator_spec` must mirror `mutator_spec`'s channel
@@ -282,13 +280,11 @@ mod tests {
         let MutatorNode::Void { children, .. } = &spec.dynamic_mutator_spec else {
             panic!("dynamic_mutator_spec root must be Void");
         };
-        // (section, expected dynamic field count). Title/hint = color
-        // only (1 + Operation). hue/sat/val/preview = color + scale
-        // (2 + Operation). hex = text + color (2 + Operation).
+        // (section, expected dynamic field count).
+        // hue/sat/val/preview = color + scale (2 + Operation).
+        // hex = text + color (2 + Operation).
         let expected: &[(&str, usize)] = &[
-            ("title", 2),
             ("hue_ring", 3),
-            ("hint", 2),
             ("sat_bar", 3),
             ("val_bar", 3),
             ("preview", 3),

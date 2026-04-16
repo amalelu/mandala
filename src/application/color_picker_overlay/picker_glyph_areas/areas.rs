@@ -64,10 +64,10 @@ impl PickerSection {
 
 impl PickerAreas {
     /// Allocate an empty table with the channel-ordered vector
-    /// pre-sized for the picker's fixed 60-cell payload.
+    /// pre-sized for the picker's fixed 58-cell payload.
     pub(super) fn new() -> Self {
         Self {
-            ordered: Vec::with_capacity(60),
+            ordered: Vec::with_capacity(58),
             title: [None; 1],
             hue_ring: [None; HUE_SLOT_COUNT],
             hint: [None; 1],
