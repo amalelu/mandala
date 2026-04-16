@@ -491,3 +491,75 @@ fn console_signature_shifts_on_scrollback_grow() {
         console_overlay_signature(&layout_two)
     );
 }
+
+/// 8fccc8e replaced two `.expect()` panics in
+/// `console_overlay_areas` with `let-else { log::warn!; continue; }`
+/// so a violated `scrollback_rows = min(scrollback.len(), MAX)`
+/// (or `completion_rows` mirror) invariant degrades the frame
+/// instead of aborting the process. Pin the degraded behaviour:
+/// artificially shorten the geometry's scrollback vec AFTER
+/// computing the layout so `scrollback_rows` (baked into the
+/// layout) exceeds `geometry.scrollback.len()`, then call
+/// `console_overlay_areas` and assert we return without panic.
+///
+/// A revert to `.expect()` would poison the test thread; the
+/// surviving return proves the defensive path still fires.
+#[test]
+fn console_overlay_areas_degrades_when_scrollback_shorter_than_layout_rows() {
+    baumhard::font::fonts::init();
+
+    let mut g = sample_console_geometry();
+    // Populate enough scrollback entries for the layout to reserve
+    // several rows, then truncate AFTER layout so the
+    // `scrollback_rows` count in the layout outruns the vec's length.
+    g.scrollback = (0..5)
+        .map(|i| ConsoleOverlayLine {
+            text: format!("line {i}"),
+            kind: ConsoleOverlayLineKind::Output,
+        })
+        .collect();
+    g.completions = Vec::new();
+    let layout = compute_console_frame_layout(&g, 1280.0, 720.0);
+    assert!(layout.scrollback_rows >= 1, "layout must reserve rows");
+
+    // Evict scrollback so layout.scrollback_rows > geometry.scrollback.len().
+    g.scrollback.clear();
+
+    let areas = {
+        let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+        console_overlay_areas(&g, &layout, &mut fs)
+    };
+    // Survival check: we got here without aborting. Every slot the
+    // degraded path skipped dropped out of the output, but the
+    // prompt / border / empty-completion slots still emit.
+    assert!(!areas.is_empty(), "non-scrollback slots still render");
+}
+
+/// Mirror guard for the completion-popup slot. Populate completions
+/// enough for the layout to reserve rows, clear the vec AFTER
+/// layout, then call `console_overlay_areas` and assert no panic.
+#[test]
+fn console_overlay_areas_degrades_when_completions_shorter_than_layout_rows() {
+    baumhard::font::fonts::init();
+
+    let mut g = sample_console_geometry();
+    g.scrollback = Vec::new();
+    g.completions = (0..3)
+        .map(|i| ConsoleOverlayCompletion {
+            text: format!("cand{i}"),
+            hint: None,
+        })
+        .collect();
+    g.selected_completion = Some(0);
+    let layout = compute_console_frame_layout(&g, 1280.0, 720.0);
+    assert!(layout.completion_rows >= 1, "layout must reserve rows");
+
+    g.completions.clear();
+    g.selected_completion = None;
+
+    let areas = {
+        let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+        console_overlay_areas(&g, &layout, &mut fs)
+    };
+    assert!(!areas.is_empty(), "non-completion slots still render");
+}

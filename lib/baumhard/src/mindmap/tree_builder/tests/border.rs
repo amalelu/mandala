@@ -248,3 +248,43 @@ fn border_identity_sequence_changes_on_show_frame_toggle() {
     assert_eq!(after, vec!["a".to_string()]);
     assert_ne!(before, after);
 }
+
+/// The `append_border_run` helper sizes its `ColorFontRegions`
+/// span to the text's grapheme-cluster count, not its codepoint
+/// count. Current production BorderGlyphSet only emits ASCII-range
+/// single-codepoint chars so the two counts agree there — this
+/// test exercises the helper directly with a ZWJ emoji so a
+/// future custom-border preset (or a revert to `.chars().count()`)
+/// regresses loudly. Mirrors the defensive comment on the
+/// grapheme-count site itself.
+#[test]
+fn append_border_run_region_sized_by_grapheme_cluster_count_not_codepoints() {
+    use crate::gfx_structs::tree::Tree;
+
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let parent = tree.arena.new_node(GfxElement::new_void_with_id(0, 0));
+    tree.root.append(parent, &mut tree.arena);
+
+    super::super::border::append_border_run(
+        &mut tree,
+        parent,
+        1,
+        1,
+        // 👨‍👩‍👧 — 5 codepoints joined by ZWJ, 1 grapheme cluster.
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        12.0,
+        (0.0, 0.0),
+        (100.0, 20.0),
+        [1.0, 1.0, 1.0, 1.0],
+    );
+
+    let run = parent.children(&tree.arena).next().unwrap();
+    let area = tree.arena.get(run).unwrap().get().glyph_area().unwrap();
+    let regions = area.regions.all_regions();
+    assert_eq!(regions.len(), 1);
+    assert_eq!(
+        regions[0].range.end - regions[0].range.start,
+        1,
+        "region must cover 1 grapheme cluster, not 5 codepoints"
+    );
+}
