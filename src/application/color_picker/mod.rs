@@ -41,8 +41,11 @@
 //! - [`layout`] — `ColorPickerLayout` (pure-function layout output).
 //! - [`compute`] / [`compute_sizing`] / [`compute_positions`] — the
 //!   three-stage `compute_color_picker_layout` pipeline.
+//! - [`clipboard`] — `HandlesCopy` / `HandlesPaste` / `HandlesCut`
+//!   implementations on `ColorPickerState`.
 //! - [`hit`] — `PickerHit`, `hit_test_picker`.
 
+mod clipboard;
 mod compute;
 mod compute_positions;
 mod compute_sizing;

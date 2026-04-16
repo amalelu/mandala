@@ -56,9 +56,7 @@
     "Void": {
       "channel": 0,
       "children": [
-        { "Repeat": { "section": "title",    "channel_base": 1,   "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "hue_ring", "channel_base": 100, "count": { "Literal": 24 }, "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
-        { "Repeat": { "section": "hint",     "channel_base": 200, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "sat_bar",  "channel_base": 300, "count": { "Literal": 17 }, "skip_indices": [8], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "val_bar",  "channel_base": 400, "count": { "Literal": 17 }, "skip_indices": [8], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "preview",  "channel_base": 500, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["Text", "position", "bounds", "scale", "line_height", "ColorFontRegions", "Outline", { "Operation": "Assign" }] }}}}},
@@ -67,14 +65,12 @@
     }
   },
 
-  "_dynamic_mutator_spec_comment": "Per-frame mutator spec — same channel layout as `mutator_spec`, but each section only emits the fields that actually change between hover / HSV / drag frames. Title and hint cells re-tint with the live preview color; hue/sat/val/preview cells re-tint and re-scale on hover; hex cell re-tints AND re-texts (the readout rebuilds per HSV). Position, bounds, line_height, and outline never change on a per-frame basis — they're set by the layout phase only.",
+  "_dynamic_mutator_spec_comment": "Per-frame mutator spec — same channel layout as `mutator_spec`, but each section only emits the fields that actually change between hover / HSV / drag frames. Hue/sat/val/preview cells re-tint and re-scale on hover; hex cell re-tints AND re-texts (the readout rebuilds per HSV). Position, bounds, line_height, and outline never change on a per-frame basis — they're set by the layout phase only.",
   "dynamic_mutator_spec": {
     "Void": {
       "channel": 0,
       "children": [
-        { "Repeat": { "section": "title",    "channel_base": 1,   "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["ColorFontRegions", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "hue_ring", "channel_base": 100, "count": { "Literal": 24 }, "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["ColorFontRegions", "scale", { "Operation": "Assign" }] }}}}},
-        { "Repeat": { "section": "hint",     "channel_base": 200, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["ColorFontRegions", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "sat_bar",  "channel_base": 300, "count": { "Literal": 17 }, "skip_indices": [8], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["ColorFontRegions", "scale", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "val_bar",  "channel_base": 400, "count": { "Literal": 17 }, "skip_indices": [8], "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["ColorFontRegions", "scale", { "Operation": "Assign" }] }}}}},
         { "Repeat": { "section": "preview",  "channel_base": 500, "count": { "Literal": 1 },  "template": { "Single": { "channel": "SectionIndex", "mutation": { "AreaDelta": ["ColorFontRegions", "scale", { "Operation": "Assign" }] }}}}},

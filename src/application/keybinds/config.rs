@@ -17,6 +17,7 @@ use super::resolved::ResolvedKeybinds;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindConfig {
+    // ── Document-level (global) ──────────────────────────────────
     pub undo: Vec<String>,
     pub enter_reparent_mode: Vec<String>,
     pub enter_connect_mode: Vec<String>,
@@ -28,27 +29,59 @@ pub struct KeybindConfig {
     pub edit_selection_clean: Vec<String>,
     pub open_console: Vec<String>,
     pub save_document: Vec<String>,
-    /// Font family name for the console overlay. Passed verbatim to
-    /// cosmic-text's `Family::Name`. Empty means "use the default
-    /// fallback chain", which is usually what you want unless you've
-    /// embedded a specific font.
+    pub copy: Vec<String>,
+    pub paste: Vec<String>,
+    pub cut: Vec<String>,
+
+    // ── Console ──────────────────────────────────────────────────
+    pub console_close: Vec<String>,
+    pub console_submit: Vec<String>,
+    pub console_tab_complete: Vec<String>,
+    pub console_history_up: Vec<String>,
+    pub console_history_down: Vec<String>,
+    pub console_cursor_left: Vec<String>,
+    pub console_cursor_right: Vec<String>,
+    pub console_cursor_home: Vec<String>,
+    pub console_cursor_end: Vec<String>,
+    pub console_delete_back: Vec<String>,
+    pub console_delete_forward: Vec<String>,
+    pub console_insert_space: Vec<String>,
+    pub console_clear_line: Vec<String>,
+    pub console_jump_start: Vec<String>,
+    pub console_jump_end: Vec<String>,
+    pub console_kill_to_start: Vec<String>,
+    pub console_kill_word: Vec<String>,
+
+    // ── Color Picker ─────────────────────────────────────────────
+    pub picker_cancel: Vec<String>,
+    pub picker_commit: Vec<String>,
+    pub picker_nudge_hue_down: Vec<String>,
+    pub picker_nudge_hue_up: Vec<String>,
+    pub picker_nudge_sat_down: Vec<String>,
+    pub picker_nudge_sat_up: Vec<String>,
+    pub picker_nudge_val_down: Vec<String>,
+    pub picker_nudge_val_up: Vec<String>,
+
+    // ── Label Editor ─────────────────────────────────────────────
+    pub label_edit_cancel: Vec<String>,
+    pub label_edit_commit: Vec<String>,
+
+    // ── Text Editor ──────────────────────────────────────────────
+    pub text_edit_cancel: Vec<String>,
+
+    // ── Style / metadata ─────────────────────────────────────────
+    /// Font family name for the console overlay.
     pub console_font: String,
-    /// Font size in pixels for the console overlay. The whole frame
-    /// scales with this value.
+    /// Font size in pixels for the console overlay.
     pub console_font_size: f32,
-    /// Map of key combo → custom mutation id. When the combo is
-    /// pressed and no built-in `Action` matches, the app looks up
-    /// the id in the merged mutation registry and applies it on the
-    /// currently-selected single node. Populated by hand in
-    /// `keybinds.json` or via the `mutate bind` console command
-    /// (which persists to a dedicated overlay file — see
-    /// `console::bindings_overlay`).
+    /// Map of key combo → custom mutation id.
     pub custom_mutation_bindings: HashMap<String, String>,
 }
 
 impl Default for KeybindConfig {
     fn default() -> Self {
         KeybindConfig {
+            // Document-level
             undo: vec!["Ctrl+Z".into(), "Undo".into()],
             enter_reparent_mode: vec!["Ctrl+P".into()],
             enter_connect_mode: vec!["Ctrl+D".into()],
@@ -60,6 +93,47 @@ impl Default for KeybindConfig {
             edit_selection_clean: vec!["Backspace".into()],
             open_console: vec!["/".into()],
             save_document: vec!["Ctrl+S".into()],
+            copy: vec!["Ctrl+C".into(), "Copy".into()],
+            paste: vec!["Ctrl+V".into(), "Paste".into()],
+            cut: vec!["Ctrl+X".into(), "Cut".into()],
+
+            // Console
+            console_close: vec!["Escape".into()],
+            console_submit: vec!["Enter".into()],
+            console_tab_complete: vec!["Tab".into()],
+            console_history_up: vec!["ArrowUp".into(), "Up".into()],
+            console_history_down: vec!["ArrowDown".into(), "Down".into()],
+            console_cursor_left: vec!["ArrowLeft".into(), "Left".into()],
+            console_cursor_right: vec!["ArrowRight".into(), "Right".into()],
+            console_cursor_home: vec!["Home".into()],
+            console_cursor_end: vec!["End".into()],
+            console_delete_back: vec!["Backspace".into()],
+            console_delete_forward: vec!["Delete".into()],
+            console_insert_space: vec!["Space".into()],
+            console_clear_line: vec!["Ctrl+C".into()],
+            console_jump_start: vec!["Ctrl+A".into()],
+            console_jump_end: vec!["Ctrl+E".into()],
+            console_kill_to_start: vec!["Ctrl+U".into()],
+            console_kill_word: vec!["Ctrl+W".into()],
+
+            // Color Picker
+            picker_cancel: vec!["Escape".into()],
+            picker_commit: vec!["Enter".into()],
+            picker_nudge_hue_down: vec!["h".into()],
+            picker_nudge_hue_up: vec!["Shift+h".into()],
+            picker_nudge_sat_down: vec!["s".into()],
+            picker_nudge_sat_up: vec!["Shift+s".into()],
+            picker_nudge_val_down: vec!["v".into()],
+            picker_nudge_val_up: vec!["Shift+v".into()],
+
+            // Label Editor
+            label_edit_cancel: vec!["Escape".into()],
+            label_edit_commit: vec!["Enter".into()],
+
+            // Text Editor
+            text_edit_cancel: vec!["Escape".into()],
+
+            // Style / metadata
             console_font: String::new(),
             console_font_size: 16.0,
             custom_mutation_bindings: HashMap::new(),
@@ -79,7 +153,8 @@ impl KeybindConfig {
     /// doesn't break the entire config.
     pub fn resolve(&self) -> ResolvedKeybinds {
         let mut binds: Vec<(Action, KeyBind)> = Vec::new();
-        let sets = [
+        let sets: &[(Action, &Vec<String>)] = &[
+            // Document-level
             (Action::Undo, &self.undo),
             (Action::EnterReparentMode, &self.enter_reparent_mode),
             (Action::EnterConnectMode, &self.enter_connect_mode),
@@ -91,11 +166,46 @@ impl KeybindConfig {
             (Action::EditSelectionClean, &self.edit_selection_clean),
             (Action::OpenConsole, &self.open_console),
             (Action::SaveDocument, &self.save_document),
+            (Action::Copy, &self.copy),
+            (Action::Paste, &self.paste),
+            (Action::Cut, &self.cut),
+            // Console
+            (Action::ConsoleClose, &self.console_close),
+            (Action::ConsoleSubmit, &self.console_submit),
+            (Action::ConsoleTabComplete, &self.console_tab_complete),
+            (Action::ConsoleHistoryUp, &self.console_history_up),
+            (Action::ConsoleHistoryDown, &self.console_history_down),
+            (Action::ConsoleCursorLeft, &self.console_cursor_left),
+            (Action::ConsoleCursorRight, &self.console_cursor_right),
+            (Action::ConsoleCursorHome, &self.console_cursor_home),
+            (Action::ConsoleCursorEnd, &self.console_cursor_end),
+            (Action::ConsoleDeleteBack, &self.console_delete_back),
+            (Action::ConsoleDeleteForward, &self.console_delete_forward),
+            (Action::ConsoleInsertSpace, &self.console_insert_space),
+            (Action::ConsoleClearLine, &self.console_clear_line),
+            (Action::ConsoleJumpStart, &self.console_jump_start),
+            (Action::ConsoleJumpEnd, &self.console_jump_end),
+            (Action::ConsoleKillToStart, &self.console_kill_to_start),
+            (Action::ConsoleKillWord, &self.console_kill_word),
+            // Color Picker
+            (Action::PickerCancel, &self.picker_cancel),
+            (Action::PickerCommit, &self.picker_commit),
+            (Action::PickerNudgeHueDown, &self.picker_nudge_hue_down),
+            (Action::PickerNudgeHueUp, &self.picker_nudge_hue_up),
+            (Action::PickerNudgeSatDown, &self.picker_nudge_sat_down),
+            (Action::PickerNudgeSatUp, &self.picker_nudge_sat_up),
+            (Action::PickerNudgeValDown, &self.picker_nudge_val_down),
+            (Action::PickerNudgeValUp, &self.picker_nudge_val_up),
+            // Label Editor
+            (Action::LabelEditCancel, &self.label_edit_cancel),
+            (Action::LabelEditCommit, &self.label_edit_commit),
+            // Text Editor
+            (Action::TextEditCancel, &self.text_edit_cancel),
         ];
         for (action, strings) in sets {
-            for s in strings {
+            for s in *strings {
                 match KeyBind::parse(s) {
-                    Ok(k) => binds.push((action, k)),
+                    Ok(k) => binds.push((*action, k)),
                     Err(e) => warn!("skipping invalid keybind '{}': {}", s, e),
                 }
             }

@@ -526,6 +526,8 @@ app.event_loop.run(move |event, _window_target| {
                     &key_name,
                     &logical_key,
                     modifiers.control_key(),
+                    modifiers.shift_key(),
+                    modifiers.alt_key(),
                     &mut console_state,
                     &mut console_history,
                     &mut label_edit_state,
@@ -551,7 +553,10 @@ app.event_loop.run(move |event, _window_target| {
                 let consumed = if let Some(doc) = document.as_mut() {
                     handle_color_picker_key(
                         &key_name,
-                        &logical_key,
+                        modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
+                        &keybinds,
                         &mut color_picker_state,
                         doc,
                         &mut mindmap_tree,
@@ -576,6 +581,10 @@ app.event_loop.run(move |event, _window_target| {
                     handle_label_edit_key(
                         &key_name,
                         &logical_key,
+                        modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
+                        &keybinds,
                         &mut label_edit_state,
                         doc,
                         &mut mindmap_tree,
@@ -597,6 +606,10 @@ app.event_loop.run(move |event, _window_target| {
                     handle_text_edit_key(
                         &key_name,
                         &logical_key,
+                        modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
+                        &keybinds,
                         &mut text_edit_state,
                         doc,
                         &mut mindmap_tree,
@@ -608,7 +621,8 @@ app.event_loop.run(move |event, _window_target| {
             }
 
             let action = key_name.as_deref().and_then(|k| {
-                keybinds.action_for(
+                keybinds.action_for_context(
+                    crate::application::keybinds::InputContext::Document,
                     k,
                     modifiers.control_key(),
                     modifiers.shift_key(),
@@ -747,6 +761,61 @@ app.event_loop.run(move |event, _window_target| {
                         }
                     }
                 }
+                Some(Action::Copy) | Some(Action::Cut) => {
+                    // Dispatch to the current selection's
+                    // HandlesCopy / HandlesCut. Today every
+                    // TargetView variant returns NotApplicable —
+                    // this arm exists so the keybind path is wired
+                    // and future impls only need to fill in the
+                    // TargetView arms.
+                    use crate::application::console::traits::{
+                        selection_targets, view_for, ClipboardContent,
+                        HandlesCopy, HandlesCut,
+                    };
+                    let is_cut = matches!(action, Some(Action::Cut));
+                    if let Some(doc) = document.as_mut() {
+                        let targets = selection_targets(&doc.selection);
+                        // First applicable target wins — multi-select
+                        // copy takes the first item that produces text.
+                        for tid in &targets {
+                            let mut view = view_for(doc, tid);
+                            let content = if is_cut {
+                                view.clipboard_cut()
+                            } else {
+                                view.clipboard_copy()
+                            };
+                            if let ClipboardContent::Text(text) = content {
+                                crate::application::clipboard::write_clipboard(&text);
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Action::Paste) => {
+                    // Dispatch to the current selection's
+                    // HandlesPaste. Today every TargetView variant
+                    // returns NotApplicable — wired for future
+                    // impls.
+                    use crate::application::console::traits::{
+                        selection_targets, view_for, HandlesPaste,
+                        Outcome,
+                    };
+                    if let Some(text) = crate::application::clipboard::read_clipboard() {
+                        if let Some(doc) = document.as_mut() {
+                            let targets = selection_targets(&doc.selection);
+                            let mut any_applied = false;
+                            for tid in &targets {
+                                let mut view = view_for(doc, tid);
+                                if let Outcome::Applied = view.clipboard_paste(&text) {
+                                    any_applied = true;
+                                }
+                            }
+                            if any_applied {
+                                rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
+                            }
+                        }
+                    }
+                }
                 Some(Action::SaveDocument) => {
                     // Quick-save to the document's bound file
                     // path. If no path is bound (e.g. after `new`
@@ -757,6 +826,7 @@ app.event_loop.run(move |event, _window_target| {
                         save_document_to_bound_path(doc, &mut console_state);
                     }
                 }
+                Some(_) => {}
                 None => {
                     // No built-in action matched — try the
                     // user-defined `custom_mutation_bindings`.

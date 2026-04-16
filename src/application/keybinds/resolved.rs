@@ -6,10 +6,11 @@ use std::collections::HashMap;
 
 use super::action::Action;
 use super::bind::KeyBind;
+use super::context::InputContext;
 
 /// The resolved form of a `KeybindConfig`: a flat list of `(Action,
-/// KeyBind)` pairs. Lookup is linear but the list is tiny (under a dozen
-/// entries), so a hash map would only add overhead.
+/// KeyBind)` pairs. Lookup is linear — the list is small enough
+/// (under 50 entries) that a hash map would only add overhead.
 #[derive(Debug, Clone)]
 pub struct ResolvedKeybinds {
     binds: Vec<(Action, KeyBind)>,
@@ -44,11 +45,40 @@ impl ResolvedKeybinds {
 
     /// Return the action bound to the given key event, if any. The caller
     /// passes the normalized key name (see `normalize_key_name`) and the
-    /// current modifier state.
+    /// current modifier state. Searches all actions regardless of context —
+    /// use `action_for_context` for context-aware resolution.
     pub fn action_for(&self, key: &str, ctrl: bool, shift: bool, alt: bool) -> Option<Action> {
         for (action, bind) in &self.binds {
             if bind.matches(key, ctrl, shift, alt) {
                 return Some(*action);
+            }
+        }
+        None
+    }
+
+    /// Resolve an action for a key event within a given input context.
+    /// Tries context-specific actions first. If the context allows
+    /// fallthrough and no context-specific action matched, tries
+    /// the parent context.
+    pub fn action_for_context(
+        &self,
+        context: InputContext,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> Option<Action> {
+        for (action, bind) in &self.binds {
+            if bind.matches(key, ctrl, shift, alt) && action.context() == context {
+                return Some(*action);
+            }
+        }
+        if context.falls_through() {
+            let parent = context.parent();
+            for (action, bind) in &self.binds {
+                if bind.matches(key, ctrl, shift, alt) && action.context() == parent {
+                    return Some(*action);
+                }
             }
         }
         None

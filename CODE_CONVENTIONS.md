@@ -109,6 +109,17 @@ the browser, the budget is the phone's, and the stutter is a bug.
   WASM-only code behind `#[cfg(target_arch = "wasm32")]`; everything
   else is shared and must compile for both. Platform abstraction uses
   `cfg` guards, not traits.
+- **New interactive features ship cross-platform from the start.**
+  When a feature genuinely belongs native-only (e.g. filesystem save
+  dialogs), the `cfg` guard sits at the module boundary and an entry
+  appears in `CLAUDE.md`'s "Dual-target status" section naming the
+  reason. "I'll add WASM later" is not a contract this repo
+  recognises — §4's "no half-features" rule applies to parity, not
+  just to individual features. `./test.sh`'s WASM type-check gate and
+  `./build.sh --wasm` are the local checks that keep this honest; CI
+  (`.github/workflows/test.yml`) runs the same gate on every push and
+  pull request so drift fails remotely when the local check is
+  skipped.
 
 ## §3 Architectural invariants
 

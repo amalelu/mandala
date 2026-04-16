@@ -1,0 +1,28 @@
+# Runs ./test.sh on every push and pull request. The script itself
+# owns the test logic (native cargo test + workspace-wide wasm32
+# cargo check); this workflow is a transport for invoking it so the
+# dual-target discipline in CODE_CONVENTIONS.md §2 is enforced
+# remotely, not just aspirationally locally.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run ./test.sh
+        run: ./test.sh

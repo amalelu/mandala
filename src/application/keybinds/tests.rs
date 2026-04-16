@@ -1,5 +1,6 @@
 //! Unit tests for keybinds — parsing, matching, default config,
-//! custom-mutation binding lifecycle, and JSON round-trip.
+//! custom-mutation binding lifecycle, JSON round-trip, and
+//! contextual resolution.
 
 use super::*;
 use std::collections::HashMap;
@@ -285,4 +286,310 @@ fn test_normalize_key_name() {
     assert_eq!(normalize_key_name("Escape"), "escape");
     assert_eq!(normalize_key_name("  Delete  "), "delete");
     assert_eq!(normalize_key_name("Z"), "z");
+}
+
+// ── Phase 1 + 2: component-scoped actions and contextual resolution ──
+
+#[test]
+fn test_default_config_has_console_actions() {
+    let resolved = KeybindConfig::default().resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "escape", false, false, false),
+        Some(Action::ConsoleClose),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "enter", false, false, false),
+        Some(Action::ConsoleSubmit),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "tab", false, false, false),
+        Some(Action::ConsoleTabComplete),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "c", true, false, false),
+        Some(Action::ConsoleClearLine),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "a", true, false, false),
+        Some(Action::ConsoleJumpStart),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "e", true, false, false),
+        Some(Action::ConsoleJumpEnd),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "u", true, false, false),
+        Some(Action::ConsoleKillToStart),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "w", true, false, false),
+        Some(Action::ConsoleKillWord),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "backspace", false, false, false),
+        Some(Action::ConsoleDeleteBack),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "space", false, false, false),
+        Some(Action::ConsoleInsertSpace),
+    );
+}
+
+#[test]
+fn test_default_config_has_picker_actions() {
+    let resolved = KeybindConfig::default().resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "escape", false, false, false),
+        Some(Action::PickerCancel),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "enter", false, false, false),
+        Some(Action::PickerCommit),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "h", false, false, false),
+        Some(Action::PickerNudgeHueDown),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "h", false, true, false),
+        Some(Action::PickerNudgeHueUp),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "s", false, false, false),
+        Some(Action::PickerNudgeSatDown),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "v", false, false, false),
+        Some(Action::PickerNudgeValDown),
+    );
+}
+
+#[test]
+fn test_default_config_has_label_edit_actions() {
+    let resolved = KeybindConfig::default().resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::LabelEdit, "escape", false, false, false),
+        Some(Action::LabelEditCancel),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::LabelEdit, "enter", false, false, false),
+        Some(Action::LabelEditCommit),
+    );
+}
+
+#[test]
+fn test_default_config_has_text_edit_actions() {
+    let resolved = KeybindConfig::default().resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::TextEdit, "escape", false, false, false),
+        Some(Action::TextEditCancel),
+    );
+}
+
+#[test]
+fn test_console_context_does_not_leak_document_actions() {
+    let resolved = KeybindConfig::default().resolve();
+    // Ctrl+Z is Undo in Document but should not resolve in Console
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "z", true, false, false),
+        None,
+    );
+    // "/" is OpenConsole in Document but should not resolve in Console
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "/", false, false, false),
+        None,
+    );
+}
+
+#[test]
+fn test_picker_context_falls_through_to_document() {
+    let resolved = KeybindConfig::default().resolve();
+    // Ctrl+Z is not a picker action, but color picker falls through
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "z", true, false, false),
+        Some(Action::Undo),
+    );
+    // "/" opens console — should fall through from picker
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "/", false, false, false),
+        Some(Action::OpenConsole),
+    );
+}
+
+#[test]
+fn test_picker_context_prefers_picker_action_over_document() {
+    let resolved = KeybindConfig::default().resolve();
+    // Escape is CancelMode at Document level but PickerCancel at picker level
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "escape", false, false, false),
+        Some(Action::PickerCancel),
+    );
+    // Enter is EditSelection at Document level but PickerCommit at picker level
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "enter", false, false, false),
+        Some(Action::PickerCommit),
+    );
+}
+
+#[test]
+fn test_label_edit_does_not_fall_through() {
+    let resolved = KeybindConfig::default().resolve();
+    // Ctrl+Z should not resolve in label edit (no fallthrough)
+    assert_eq!(
+        resolved.action_for_context(InputContext::LabelEdit, "z", true, false, false),
+        None,
+    );
+}
+
+#[test]
+fn test_text_edit_does_not_fall_through() {
+    let resolved = KeybindConfig::default().resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::TextEdit, "z", true, false, false),
+        None,
+    );
+}
+
+#[test]
+fn test_document_context_matches_action_for() {
+    let resolved = KeybindConfig::default().resolve();
+    // Document context should match all global actions the same as action_for
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "z", true, false, false),
+        resolved.action_for("z", true, false, false),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "escape", false, false, false),
+        resolved.action_for("escape", false, false, false),
+    );
+}
+
+#[test]
+fn test_action_context_assignment() {
+    assert_eq!(Action::Undo.context(), InputContext::Document);
+    assert_eq!(Action::Copy.context(), InputContext::Document);
+    assert_eq!(Action::ConsoleClose.context(), InputContext::Console);
+    assert_eq!(Action::ConsoleClearLine.context(), InputContext::Console);
+    assert_eq!(Action::PickerCancel.context(), InputContext::ColorPicker);
+    assert_eq!(Action::PickerNudgeHueDown.context(), InputContext::ColorPicker);
+    assert_eq!(Action::LabelEditCancel.context(), InputContext::LabelEdit);
+    assert_eq!(Action::TextEditCancel.context(), InputContext::TextEdit);
+}
+
+#[test]
+fn test_user_can_override_component_keybinds() {
+    let json = r#"{ "picker_nudge_hue_down": ["j"], "picker_nudge_hue_up": ["k"] }"#;
+    let cfg = KeybindConfig::from_json(json).unwrap();
+    let resolved = cfg.resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "j", false, false, false),
+        Some(Action::PickerNudgeHueDown),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "k", false, false, false),
+        Some(Action::PickerNudgeHueUp),
+    );
+    // Original "h" no longer bound to hue nudge
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "h", false, false, false),
+        None,
+    );
+}
+
+#[test]
+fn test_copy_paste_cut_fall_through_to_picker() {
+    let resolved = KeybindConfig::default().resolve();
+    // Copy/Paste/Cut are Document-level actions that fall through
+    // to the color picker context
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "c", true, false, false),
+        Some(Action::Copy),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "v", true, false, false),
+        Some(Action::Paste),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "x", true, false, false),
+        Some(Action::Cut),
+    );
+}
+
+#[test]
+fn test_partial_json_preserves_component_defaults() {
+    let json = r#"{ "undo": ["Ctrl+Y"] }"#;
+    let cfg = KeybindConfig::from_json(json).unwrap();
+    // Console defaults should still be present
+    assert_eq!(cfg.console_close, vec!["Escape"]);
+    assert_eq!(cfg.console_clear_line, vec!["Ctrl+C"]);
+    // Picker defaults should still be present
+    assert_eq!(cfg.picker_nudge_hue_down, vec!["h"]);
+}
+
+#[test]
+fn test_empty_binding_list_disables_action() {
+    let json = r#"{ "cancel_mode": [] }"#;
+    let cfg = KeybindConfig::from_json(json).unwrap();
+    let resolved = cfg.resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "escape", false, false, false),
+        None,
+    );
+}
+
+#[test]
+fn test_duplicate_key_in_same_context_first_wins() {
+    let json = r#"{
+        "console_close": ["Tab"],
+        "console_tab_complete": ["Tab"]
+    }"#;
+    let cfg = KeybindConfig::from_json(json).unwrap();
+    let resolved = cfg.resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "tab", false, false, false),
+        Some(Action::ConsoleClose),
+    );
+}
+
+#[test]
+fn test_action_for_context_document_filters_component_actions() {
+    let resolved = KeybindConfig::default().resolve();
+    // "tab" has no Document binding. action_for (global) returns
+    // ConsoleTabComplete, but action_for_context(Document) returns None.
+    assert_eq!(
+        resolved.action_for("tab", false, false, false),
+        Some(Action::ConsoleTabComplete),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "tab", false, false, false),
+        None,
+    );
+}
+
+#[test]
+fn test_json_roundtrip_all_contexts() {
+    let cfg = KeybindConfig::default();
+    let json = serde_json::to_string(&cfg).unwrap();
+    let parsed = KeybindConfig::from_json(&json).unwrap();
+    let resolved = parsed.resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "z", true, false, false),
+        Some(Action::Undo),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "escape", false, false, false),
+        Some(Action::ConsoleClose),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "h", false, false, false),
+        Some(Action::PickerNudgeHueDown),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::LabelEdit, "enter", false, false, false),
+        Some(Action::LabelEditCommit),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::TextEdit, "escape", false, false, false),
+        Some(Action::TextEditCancel),
+    );
 }

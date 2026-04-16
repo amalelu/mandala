@@ -145,7 +145,7 @@ wasm_bindgen_futures::spawn_local(async move {
     let height = canvas.height();
     renderer.process_decree(RenderDecree::SetSurfaceSize(size, height));
 
-    // Load mindmap through Document -> Tree + Scene -> Renderer flow
+    // std::fs is unavailable in the browser; fetch over the page origin instead.
     let mut doc_opt: Option<MindMapDocument> = None;
     let mut tree_opt: Option<MindMapTree> = None;
     // Local AppScene used only for the initial border tree
@@ -153,24 +153,33 @@ wasm_bindgen_futures::spawn_local(async move {
     // `app_scene` takes over for the live event loop.
     let mut init_app_scene =
         crate::application::scene_host::AppScene::new();
-    if let Ok(doc) = MindMapDocument::load(&mindmap_path) {
-        let mindmap_tree = doc.build_tree();
-        renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
-        renderer.fit_camera_to_tree(&mindmap_tree.tree);
+    match fetch_map_json(&mindmap_path).await {
+        Ok(json) => match MindMapDocument::from_json_str(&json, Some(mindmap_path.clone())) {
+            Ok(doc) => {
+                let mindmap_tree = doc.build_tree();
+                renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
+                renderer.fit_camera_to_tree(&mindmap_tree.tree);
 
-        let scene = doc.build_scene(renderer.camera_zoom());
-        update_connection_tree(&scene, &mut init_app_scene);
-        update_border_tree_static(&doc, &mut init_app_scene);
-        update_portal_tree(
-            &doc,
-            &std::collections::HashMap::new(),
-            &mut init_app_scene,
-            renderer,
-        );
-        update_connection_label_tree(&scene, &mut init_app_scene, renderer);
-        flush_canvas_scene_buffers(&mut init_app_scene, renderer);
-        tree_opt = Some(mindmap_tree);
-        doc_opt = Some(doc);
+                let scene = doc.build_scene(renderer.camera_zoom());
+                update_connection_tree(&scene, &mut init_app_scene);
+                update_border_tree_static(&doc, &mut init_app_scene);
+                update_portal_tree(
+                    &doc,
+                    &std::collections::HashMap::new(),
+                    &mut init_app_scene,
+                    &mut renderer,
+                );
+                update_connection_label_tree(&scene, &mut init_app_scene, &mut renderer);
+                flush_canvas_scene_buffers(&mut init_app_scene, &mut renderer);
+                tree_opt = Some(mindmap_tree);
+                doc_opt = Some(doc);
+            }
+            Err(e) => log::error!(
+                "WASM: failed to construct document from '{}': {}",
+                mindmap_path, e
+            ),
+        },
+        Err(e) => log::error!("WASM: failed to fetch '{}': {}", mindmap_path, e),
     }
 
     renderer.process_decree(RenderDecree::StartRender);
@@ -266,9 +275,14 @@ app.event_loop.run(move |event, _window_target| {
                 handle_text_edit_key(
                     &key_name,
                     logical_key,
+                    input.modifiers.control_key(),
+                    input.modifiers.shift_key(),
+                    input.modifiers.alt_key(),
+                    &keybinds,
                     &mut input.text_edit_state,
                     &mut input.document,
                     &mut input.mindmap_tree,
+                    &mut input.app_scene,
                     renderer,
                 );
                 suppress_for_events.set(input.text_edit_state.is_open());
@@ -277,7 +291,8 @@ app.event_loop.run(move |event, _window_target| {
 
             // Hotkey dispatch via keybinds.
             let action = key_name.as_deref().and_then(|k| {
-                keybinds.action_for(
+                keybinds.action_for_context(
+                    crate::application::keybinds::InputContext::Document,
                     k,
                     input.modifiers.control_key(),
                     input.modifiers.shift_key(),
@@ -317,6 +332,7 @@ app.event_loop.run(move |event, _window_target| {
                             &mut input.document,
                             &mut input.text_edit_state,
                             &mut input.mindmap_tree,
+                            &mut input.app_scene,
                             renderer,
                         );
                         suppress_for_events.set(input.text_edit_state.is_open());
@@ -413,6 +429,7 @@ app.event_loop.run(move |event, _window_target| {
                             &mut input.document,
                             &mut input.text_edit_state,
                             &mut input.mindmap_tree,
+                            &mut input.app_scene,
                             renderer,
                         );
                     } else {
@@ -428,6 +445,7 @@ app.event_loop.run(move |event, _window_target| {
                                 &mut input.document,
                                 &mut input.text_edit_state,
                                 &mut input.mindmap_tree,
+                                &mut input.app_scene,
                                 renderer,
                             );
                         }
@@ -480,6 +498,7 @@ app.event_loop.run(move |event, _window_target| {
                         &mut input.document,
                         &mut input.text_edit_state,
                         &mut input.mindmap_tree,
+                        &mut input.app_scene,
                         renderer,
                     );
                     suppress_for_events.set(false);
@@ -538,4 +557,29 @@ fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
         .unwrap()
         .request_animation_frame(f.as_ref().unchecked_ref())
         .unwrap();
+}
+
+/// HTTP-fetch a mindmap JSON file. Maps are bundled into the page
+/// origin by trunk's `copy-dir` directive in `web/index.html`.
+async fn fetch_map_json(url: &str) -> Result<String, String> {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window().ok_or("no global window")?;
+    let promise = window.fetch_with_str(url);
+    let resp_value = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("fetch failed: {:?}", e))?;
+    let resp: web_sys::Response = resp_value
+        .dyn_into()
+        .map_err(|_| "fetch did not return a Response".to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {} {}", resp.status(), resp.status_text()));
+    }
+    let text_promise = resp
+        .text()
+        .map_err(|e| format!("Response::text() failed: {:?}", e))?;
+    wasm_bindgen_futures::JsFuture::from(text_promise)
+        .await
+        .map_err(|e| format!("reading response body failed: {:?}", e))?
+        .as_string()
+        .ok_or_else(|| "response body was not a string".to_string())
 }

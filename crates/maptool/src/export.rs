@@ -234,13 +234,16 @@ mod tests {
     }
 
     #[test]
-    fn test_export_sibling_order_follows_dewey_id() {
-        // Sibling order follows the Dewey last segment: 0 < 1 < 2.
+    fn test_export_sibling_order_matches_index() {
+        // Sibling order comes from `id_sort_key` — the last
+        // Dewey-decimal segment. Ids are inserted out of sort order
+        // below; the walk must emit them in numeric-tail order (1, 2,
+        // 3) regardless of HashMap iteration.
         let map = make_map(vec![
             make_node("0", None, "Root"),
-            make_node("0.2", Some("0"), "Late"),
-            make_node("0.1", Some("0"), "Mid"),
-            make_node("0.0", Some("0"), "Early"),
+            make_node("0.3", Some("0"), "Late"),
+            make_node("0.2", Some("0"), "Mid"),
+            make_node("0.1", Some("0"), "Early"),
         ]);
         let out = mindmap_to_markdown(&map);
         let early = out.find("## Early\n").expect("early");

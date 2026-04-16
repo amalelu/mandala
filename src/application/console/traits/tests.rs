@@ -70,3 +70,30 @@ fn test_selection_targets_for_each_variant() {
     let out = selection_targets(&SelectionState::Portal(pr));
     assert!(matches!(out.as_slice(), [TargetId::Portal(_)]));
 }
+
+#[test]
+fn test_clipboard_content_variants() {
+    let text = ClipboardContent::Text("#ff0000".into());
+    assert!(matches!(text, ClipboardContent::Text(ref s) if s == "#ff0000"));
+
+    let empty = ClipboardContent::Empty;
+    assert!(matches!(empty, ClipboardContent::Empty));
+
+    let na = ClipboardContent::NotApplicable;
+    assert!(matches!(na, ClipboardContent::NotApplicable));
+}
+
+#[test]
+fn test_clipboard_content_eq() {
+    assert_eq!(
+        ClipboardContent::Text("#abc".into()),
+        ClipboardContent::Text("#abc".into()),
+    );
+    assert_ne!(
+        ClipboardContent::Text("#abc".into()),
+        ClipboardContent::Text("#def".into()),
+    );
+    assert_eq!(ClipboardContent::Empty, ClipboardContent::Empty);
+    assert_eq!(ClipboardContent::NotApplicable, ClipboardContent::NotApplicable);
+    assert_ne!(ClipboardContent::Empty, ClipboardContent::NotApplicable);
+}

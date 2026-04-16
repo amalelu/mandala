@@ -1,8 +1,7 @@
 //! Console line-editor: per-keystroke dispatch, completion-popup
 //! helpers, command execution, overlay rebuild, and history
-//! persistence. Split across five leaf modules:
+//! persistence. Split across four leaf modules:
 //!
-//! - [`keys`] — lowercase key-name constants the dispatcher matches.
 //! - [`dispatch`] — `handle_console_key`: the keystroke router.
 //! - [`completion`] — recompute / nav / accept for the popup.
 //! - [`exec`] — `execute_console_line` + Ctrl+S save.
@@ -17,7 +16,6 @@ mod completion;
 mod dispatch;
 mod exec;
 mod history;
-mod keys;
 
 pub(super) use dispatch::handle_console_key;
 pub(super) use exec::save_document_to_bound_path;

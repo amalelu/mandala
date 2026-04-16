@@ -264,17 +264,22 @@ use super::defaults::default_cross_link_edge;
         // Pick any node with at least one incident edge.
         let target = find_node_with_children_and_parent(&doc);
 
-        // Pick reference nodes that are not descendants of the target
-        // (otherwise they'd be cascade-renamed when the target's
-        // children are orphaned, invalidating the assertions below).
-        let descendants: std::collections::HashSet<String> =
-            doc.mindmap.all_descendants(&target).into_iter().collect();
+        // Exclude both the target *and* its subtree: `delete_node`
+        // cascade-renames descendants to fresh root ids, and rewrites
+        // every edge that references those descendants. If any of the
+        // picked ids is a descendant, the captured `a`/`b`/`c`/`d`
+        // strings below go stale and the post-delete edge assertions
+        // flake whenever HashMap iteration happens to put a descendant
+        // of `target` in the first four keys.
+        let target_prefix = format!("{}.", target);
         let other_ids: Vec<String> = doc.mindmap.nodes.keys()
-            .filter(|id| id.as_str() != target.as_str() && !descendants.contains(*id))
+            .filter(|id| {
+                id.as_str() != target.as_str() && !id.starts_with(&target_prefix)
+            })
             .take(4)
             .cloned()
             .collect();
-        assert!(other_ids.len() >= 4, "need at least 4 non-target nodes");
+        assert!(other_ids.len() >= 4, "need at least 4 non-target, non-descendant nodes");
         let a = other_ids[0].clone();
         let b = other_ids[1].clone();
         let c = other_ids[2].clone();

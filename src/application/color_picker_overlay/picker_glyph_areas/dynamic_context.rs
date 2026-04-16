@@ -170,8 +170,8 @@ fn val_colors_for(geometry: &ColorPickerOverlayGeometry) -> [CellColor; VAL_CELL
 /// Construction captures the handful of derived values that are
 /// genuinely shared across cells (preview color in both cosmic and
 /// RGB form, the precomputed sat/val base-color tables, the
-/// currently-selected sat/val cells, title/hint/hex text grapheme
-/// counts, the hex text itself). Each `field` call then dispatches
+/// currently-selected sat/val cells, the hex text and its grapheme
+/// count). Each `field` call then dispatches
 /// on section name and looks the color up by index — no per-cell
 /// `hsv_to_rgb`.
 ///
@@ -211,12 +211,6 @@ pub(super) struct PickerDynamicContext<'a> {
     /// Applied to the hovered cell's `scale` and the preview when
     /// commit-hovered.
     hover_scale: f32,
-    /// Grapheme-cluster count of the title text set by the layout
-    /// phase. Required so `ColorFontRegions::single_span` covers
-    /// exactly the same glyph range the target area currently holds.
-    title_count: usize,
-    /// Grapheme-cluster count of the hint footer text.
-    hint_count: usize,
     /// Current hex readout text (e.g. `#4af0a1`). Empty when the hex
     /// is invisible — `single_span(0, ...)` produces an empty region,
     /// same observable state as the layout path.
@@ -253,26 +247,6 @@ impl<'a> PickerDynamicContext<'a> {
         let val_colors = val_colors_for(geometry);
 
         let spec = load_spec();
-        let is_standalone = geometry.target_label.is_empty();
-        // Title / hint grapheme counts mirror the strings the layout
-        // phase writes into the target areas — we never produce the
-        // strings ourselves on the dynamic path (the dynamic spec
-        // doesn't include `Text` for these sections), only their
-        // length so `single_span` covers the same range.
-        let title_len = if is_standalone {
-            count_grapheme_clusters(&spec.title_template_standalone)
-        } else {
-            count_grapheme_clusters(
-                &spec
-                    .title_template_contextual
-                    .replace("{target_label}", geometry.target_label),
-            )
-        };
-        let hint_len = if is_standalone {
-            count_grapheme_clusters(&spec.hint_text_standalone)
-        } else {
-            count_grapheme_clusters(&spec.hint_text_contextual)
-        };
 
         let hex_text = if geometry.hex_visible {
             hsv_to_hex(geometry.hue_deg, geometry.sat, geometry.val)
@@ -291,8 +265,6 @@ impl<'a> PickerDynamicContext<'a> {
             current_sat_cell,
             current_val_cell,
             hover_scale: spec.geometry.hover_scale,
-            title_count: title_len,
-            hint_count: hint_len,
             hex_text,
             hex_count,
         }
@@ -311,8 +283,10 @@ impl<'a> PickerDynamicContext<'a> {
         let layout = self.layout;
         let hover = |matches_hover: bool| if matches_hover { self.hover_scale } else { 1.0 };
         match section {
-            PickerSection::Title | PickerSection::Hex => layout.font_size,
-            PickerSection::Hint => layout.font_size * 0.85,
+            PickerSection::Title | PickerSection::Hint => {
+                unreachable!("title/hint sections are not built")
+            }
+            PickerSection::Hex => layout.font_size,
             PickerSection::HueRing => {
                 let hovered = matches!(g.hovered_hit, Some(PickerHit::Hue(h)) if h == index);
                 layout.ring_font_size * hover(hovered)
@@ -398,8 +372,9 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
         // cell. No `hsv_to_rgb` calls on this hot loop.
         let g = self.geometry;
         let (count, color, font): (usize, cosmic_text::Color, Option<AppFont>) = match section {
-            PickerSection::Title => (self.title_count, self.preview_color, None),
-            PickerSection::Hint => (self.hint_count, self.preview_color, None),
+            PickerSection::Title | PickerSection::Hint => {
+                unreachable!("title/hint sections are not built")
+            }
             PickerSection::Hex => (self.hex_count, self.preview_color, None),
             PickerSection::HueRing => {
                 let entry = hue_ring_colors()[index];
