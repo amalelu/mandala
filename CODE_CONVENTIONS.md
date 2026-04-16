@@ -116,7 +116,10 @@ the browser, the budget is the phone's, and the stutter is a bug.
   reason. "I'll add WASM later" is not a contract this repo
   recognises — §4's "no half-features" rule applies to parity, not
   just to individual features. `./test.sh`'s WASM type-check gate and
-  `./build.sh --wasm` are the local checks that keep this honest.
+  `./build.sh --wasm` are the local checks that keep this honest; CI
+  (`.github/workflows/test.yml`) runs the same gate on every push and
+  pull request so drift fails remotely when the local check is
+  skipped.
 
 ## §3 Architectural invariants
 
