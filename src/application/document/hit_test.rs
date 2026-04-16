@@ -1,7 +1,11 @@
-//! Pure hit-test / rect-select / drag / highlight helpers. None
-//! live on `MindMapDocument` — they all take a `MindMapTree` /
-//! `MindMap` + screen coordinates and return pure values, so unit
-//! tests don't need a GPU or an event loop.
+//! Hit-test / rect-select / drag / highlight helpers. None live on
+//! `MindMapDocument` — they all take a `MindMapTree` / `MindMap` +
+//! screen coordinates and return values, so unit tests don't need a
+//! GPU or an event loop.
+//!
+//! `hit_test` takes `&mut MindMapTree` because the BVH descent may
+//! trigger a lazy subtree-AABB recomputation on the first call after
+//! a mutation. All other helpers remain read-only.
 
 use glam::Vec2;
 

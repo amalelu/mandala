@@ -406,15 +406,20 @@ fn spatial_descend(
 
 /// Recursive BVH descent helper for [`spatial_descend`]. Read-only
 /// arena traversal that collects the best (smallest-area) hit.
+///
+/// Uses `first_child` / `next_sibling` iteration to avoid
+/// allocating a `Vec` on every recursive call (§B7).
 fn spatial_descend_recurse(
     arena: &Arena<GfxElement>,
     node_id: NodeId,
     point: Vec2,
     best: &mut Option<(NodeId, f32)>,
 ) {
-    let children: Vec<NodeId> = node_id.children(arena).collect();
+    let mut child_opt = arena.get(node_id).and_then(|n| n.first_child());
 
-    for child_id in children {
+    while let Some(child_id) = child_opt {
+        child_opt = arena.get(child_id).and_then(|n| n.next_sibling());
+
         let Some(node) = arena.get(child_id) else {
             continue;
         };

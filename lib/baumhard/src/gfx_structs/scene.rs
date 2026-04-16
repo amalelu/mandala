@@ -176,9 +176,9 @@ impl Scene {
     /// Mutable borrow of just the tree. Builder-phase escape hatch.
     /// Mutations via the returned reference that touch GlyphArea
     /// position or bounds **must** call
-    /// [`Tree::invalidate_aabb_cache`] or the scene's hit-test
-    /// memo will drift; prefer [`Self::apply_mutator`] which
-    /// handles invalidation automatically.
+    /// [`Tree::invalidate_caches`] afterwards, or the scene's
+    /// hit-test memos will drift. Prefer [`Self::apply_mutator`]
+    /// which handles invalidation automatically.
     pub fn tree_mut(&mut self, id: SceneTreeId) -> Option<&mut Tree<GfxElement, GfxMutator>> {
         self.trees.get_mut(id.0).map(|e| &mut e.tree)
     }

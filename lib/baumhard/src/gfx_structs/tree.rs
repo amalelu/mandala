@@ -243,6 +243,9 @@ impl Tree<GfxElement, GfxMutator> {
     /// 2. If the child's own `GlyphArea` AABB contains `point` →
     ///    record it as a candidate (smallest-area wins).
     /// 3. Recurse into the child's children.
+    ///
+    /// Uses `first_child` / `next_sibling` iteration to avoid
+    /// allocating a `Vec` on every recursive call (§B7).
     fn bvh_descend(
         &self,
         node_id: NodeId,
@@ -250,15 +253,14 @@ impl Tree<GfxElement, GfxMutator> {
         slack: f32,
         best: &mut Option<(NodeId, f32)>,
     ) {
-        // Collect children into a local vec to avoid borrow conflicts
-        // with the arena (we need &self.arena for both iteration and
-        // node reads). Children count per node is small (typically
-        // single digits), so this is cheap.
-        let children: Vec<NodeId> = node_id
-            .children(&self.arena)
-            .collect();
+        let mut child_opt = self.arena.get(node_id).and_then(|n| n.first_child());
 
-        for child_id in children {
+        while let Some(child_id) = child_opt {
+            // Advance the sibling pointer before any borrows on
+            // the child — this lets us read the child's data
+            // without conflicting with the next-sibling lookup.
+            child_opt = self.arena.get(child_id).and_then(|n| n.next_sibling());
+
             let Some(node) = self.arena.get(child_id) else {
                 continue;
             };
@@ -330,6 +332,23 @@ impl Tree<GfxElement, GfxMutator> {
         computed
     }
 
+    /// Drop all cached spatial data (tree-level AABB and per-node
+    /// subtree AABBs). The next query will recompute from scratch.
+    ///
+    /// Call this after any direct arena mutation that bypasses the
+    /// `MutatorTree::apply_to` pipeline (e.g. builder-phase writes
+    /// through [`Scene::tree_mut`](crate::gfx_structs::scene::Scene::tree_mut)).
+    /// Mutations that go through the pipeline invalidate
+    /// automatically.
+    ///
+    /// O(1) — two `Cell` writes. The actual recomputation is
+    /// deferred to the next `ensure_subtree_aabbs` or
+    /// `descendants_aabb` call.
+    pub fn invalidate_caches(&self) {
+        self.aabb_cache.set(None);
+        self.subtree_aabbs_dirty.set(true);
+    }
+
     /// Ensure every node's `subtree_aabb` cache is fresh. If the
     /// tree has been mutated since the last computation, performs a
     /// bottom-up (post-order) pass that writes each node's
@@ -338,9 +357,9 @@ impl Tree<GfxElement, GfxMutator> {
     ///
     /// # Costs
     ///
-    /// O(n) on the first call after mutation (one `Vec` allocation
-    /// for post-order traversal + one write per node). O(1) on
-    /// subsequent calls while the cache is clean.
+    /// O(n) on the first call after mutation (zero allocations —
+    /// recursive post-order walk via first_child / next_sibling).
+    /// O(1) on subsequent calls while the cache is clean.
     pub fn ensure_subtree_aabbs(&mut self) {
         if !self.subtree_aabbs_dirty.get() {
             return;
@@ -350,53 +369,59 @@ impl Tree<GfxElement, GfxMutator> {
     }
 
     /// Bottom-up pass: compute and cache `subtree_aabb` for every
-    /// node in the arena. Post-order guarantees that children are
-    /// processed before their parents, so each parent can read its
-    /// children's already-computed subtree AABBs.
+    /// node in the arena. Recursive post-order guarantees that
+    /// children are processed before their parents, so each parent
+    /// can read its children's already-computed subtree AABBs.
+    ///
+    /// Zero allocations — uses recursive descent with `first_child`
+    /// / `next_sibling` iteration instead of collecting into a Vec
+    /// (§B7).
     fn compute_subtree_aabbs(&mut self) {
-        // Collect descendants in pre-order, then reverse for post-order.
-        let post_order: Vec<NodeId> = {
-            let mut ids: Vec<NodeId> = self.root.descendants(&self.arena).collect();
-            ids.reverse();
-            ids
-        };
-
-        for node_id in post_order {
-            // Start with this node's own AABB (if it has one).
-            let own_aabb = self.node_own_aabb(node_id);
-            let mut combined = own_aabb;
-
-            // Merge children's subtree AABBs (already computed due
-            // to post-order).
-            let mut child_id = self.arena.get(node_id)
-                .and_then(|n| n.first_child());
-            while let Some(cid) = child_id {
-                if let Some(child_aabb) = self.arena.get(cid)
-                    .and_then(|n| n.get().subtree_aabb())
-                {
-                    combined = Some(union_aabb(combined, child_aabb));
-                }
-                child_id = self.arena.get(cid).and_then(|n| n.next_sibling());
-            }
-
-            if let Some(node) = self.arena.get_mut(node_id) {
-                node.get_mut().set_subtree_aabb(combined);
-            }
-        }
+        let root = self.root;
+        Self::compute_subtree_aabb_recursive(&mut self.arena, root);
     }
 
-    /// Return the AABB of a single node's own renderable content
-    /// (position + render_bounds for `GlyphArea`, `None` otherwise).
-    /// Does not include descendants.
-    fn node_own_aabb(&self, node_id: NodeId) -> Option<(Vec2, Vec2)> {
-        let node = self.arena.get(node_id)?;
-        let area = node.get().glyph_area()?;
-        let bounds = area.render_bounds.to_vec2();
-        if bounds.x <= 0.0 || bounds.y <= 0.0 {
-            return None;
+    /// Recursive post-order helper: compute subtree AABB for
+    /// `node_id` by first recursing into all children, then merging
+    /// their results with this node's own AABB.
+    fn compute_subtree_aabb_recursive(
+        arena: &mut Arena<GfxElement>,
+        node_id: NodeId,
+    ) {
+        // 1. Recurse into children first (post-order).
+        let mut child_opt = arena.get(node_id).and_then(|n| n.first_child());
+        while let Some(cid) = child_opt {
+            child_opt = arena.get(cid).and_then(|n| n.next_sibling());
+            Self::compute_subtree_aabb_recursive(arena, cid);
         }
-        let pos = area.position.to_vec2();
-        Some((pos, pos + bounds))
+
+        // 2. Compute this node's own AABB.
+        let own_aabb = arena.get(node_id).and_then(|n| {
+            let area = n.get().glyph_area()?;
+            let bounds = area.render_bounds.to_vec2();
+            if bounds.x <= 0.0 || bounds.y <= 0.0 {
+                return None;
+            }
+            let pos = area.position.to_vec2();
+            Some((pos, pos + bounds))
+        });
+
+        // 3. Merge children's subtree AABBs (already computed).
+        let mut combined = own_aabb;
+        let mut child_opt = arena.get(node_id).and_then(|n| n.first_child());
+        while let Some(cid) = child_opt {
+            if let Some(child_aabb) = arena.get(cid)
+                .and_then(|n| n.get().subtree_aabb())
+            {
+                combined = Some(union_aabb(combined, child_aabb));
+            }
+            child_opt = arena.get(cid).and_then(|n| n.next_sibling());
+        }
+
+        // 4. Write the result.
+        if let Some(node) = arena.get_mut(node_id) {
+            node.get_mut().set_subtree_aabb(combined);
+        }
     }
 
     fn compute_descendants_aabb(&self) -> Option<(Vec2, Vec2)> {

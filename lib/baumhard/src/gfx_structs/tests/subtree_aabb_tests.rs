@@ -895,3 +895,137 @@ pub fn do_glyph_tree_event_mouse_carries_data() {
     let cloned = event.clone();
     assert_eq!(cloned.event_type, event.event_type);
 }
+
+// =====================================================================
+// Coverage gaps identified by code review
+// =====================================================================
+
+#[test]
+fn test_bvh_descend_skips_glyph_model_nodes() {
+    do_bvh_descend_skips_glyph_model_nodes();
+}
+
+/// GlyphModel nodes do not contribute to hit testing — only
+/// GlyphArea nodes have renderable AABB bounds. A tree with a
+/// GlyphModel sibling should not hit the model, even if the point
+/// is inside the model's subtree AABB.
+pub fn do_bvh_descend_skips_glyph_model_nodes() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let model = GfxElement::new_model_blank(0, 1);
+    let area = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("a", 14.0, 14.0, Vec2::new(100.0, 100.0), Vec2::new(50.0, 30.0)),
+        0,
+    );
+    let model_id = tree.arena.new_node(model);
+    let area_id = tree.arena.new_node(area);
+    tree.root.append(model_id, &mut tree.arena);
+    tree.root.append(area_id, &mut tree.arena);
+
+    // Point inside area → hits area, not model.
+    let hit = tree.descendant_at(Vec2::new(110.0, 110.0));
+    assert_eq!(hit, Some(area_id));
+
+    // Point outside both → miss.
+    assert!(tree.descendant_at(Vec2::new(0.0, 0.0)).is_none());
+}
+
+#[test]
+fn test_bvh_descend_point_on_exact_boundary() {
+    do_bvh_descend_point_on_exact_boundary();
+}
+
+/// Points exactly on the AABB boundary (min and max edges) are
+/// included — the containment check uses `>=` / `<=` (inclusive).
+pub fn do_bvh_descend_point_on_exact_boundary() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let area = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("b", 14.0, 14.0, Vec2::new(10.0, 20.0), Vec2::new(30.0, 40.0)),
+        0,
+    );
+    let id = tree.arena.new_node(area);
+    tree.root.append(id, &mut tree.arena);
+
+    // Exact min corner.
+    assert_eq!(tree.descendant_at(Vec2::new(10.0, 20.0)), Some(id));
+    // Exact max corner.
+    assert_eq!(tree.descendant_at(Vec2::new(40.0, 60.0)), Some(id));
+    // One pixel outside max.
+    assert!(tree.descendant_at(Vec2::new(40.01, 60.0)).is_none());
+    assert!(tree.descendant_at(Vec2::new(40.0, 60.01)).is_none());
+    // One pixel outside min.
+    assert!(tree.descendant_at(Vec2::new(9.99, 20.0)).is_none());
+}
+
+#[test]
+fn test_bvh_descend_point_in_subtree_aabb_but_outside_own_area() {
+    do_bvh_descend_point_in_subtree_aabb_but_outside_own_area();
+}
+
+/// A point can be inside a parent's subtree AABB (because a child
+/// extends beyond the parent's own area) but outside the parent's
+/// own renderable AABB. The BVH should find the child, not the
+/// parent.
+pub fn do_bvh_descend_point_in_subtree_aabb_but_outside_own_area() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let parent = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("p", 14.0, 14.0, Vec2::new(10.0, 10.0), Vec2::new(50.0, 20.0)),
+        0,
+    );
+    // Child is below and to the right of parent.
+    let child = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("c", 14.0, 14.0, Vec2::new(70.0, 50.0), Vec2::new(30.0, 20.0)),
+        0,
+    );
+    let parent_id = tree.arena.new_node(parent);
+    let child_id = tree.arena.new_node(child);
+    tree.root.append(parent_id, &mut tree.arena);
+    parent_id.append(child_id, &mut tree.arena);
+
+    // Point at (80, 55) is inside child but outside parent's own area.
+    let hit = tree.descendant_at(Vec2::new(80.0, 55.0));
+    assert_eq!(hit, Some(child_id), "should find child, not parent");
+
+    // Point at (20, 15) is inside parent but outside child.
+    let hit2 = tree.descendant_at(Vec2::new(20.0, 15.0));
+    assert_eq!(hit2, Some(parent_id));
+}
+
+#[test]
+fn test_spatial_descend_ignores_channel_mismatch() {
+    do_spatial_descend_ignores_channel_mismatch();
+}
+
+/// SpatialDescend delivers its event based on spatial position, not
+/// channel alignment. A node on channel 5 should still receive the
+/// event if the point is inside its bounds.
+pub fn do_spatial_descend_ignores_channel_mismatch() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let area = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("ch5", 14.0, 14.0, Vec2::new(0.0, 0.0), Vec2::new(50.0, 50.0)),
+        5, // channel 5 — different from SpatialDescend's channel 0
+    );
+
+    let received = Arc::new(AtomicBool::new(false));
+    let received_clone = received.clone();
+    let subscriber: EventSubscriber = Arc::new(Mutex::new(
+        move |_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {
+            received_clone.store(true, Ordering::SeqCst);
+        },
+    ));
+
+    let id = tree.arena.new_node(area);
+    tree.root.append(id, &mut tree.arena);
+    tree.arena.get_mut(id).unwrap().get_mut()
+        .subscribers_mut().push(subscriber);
+
+    // SpatialDescend with channel 0 should still find the channel-5 node.
+    let mtree = spatial_descend_mutator(25.0, 25.0);
+    let root = tree.root;
+    walk_tree_from(&mut tree, &mtree, root, mtree.root);
+
+    assert!(received.load(Ordering::SeqCst), "event should be delivered regardless of channel");
+}

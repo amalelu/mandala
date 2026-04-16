@@ -370,8 +370,8 @@ impl GfxElement {
     /// if one exists.
     ///
     /// * `GlyphArea` — looks up the region and returns its colour.
-    /// * `GlyphModel` — **panics** (not yet implemented).
-    /// * `Void` — returns `None`.
+    /// * `GlyphModel` / `Void` — returns `None` (no colour-font
+    ///   regions on these variants).
     ///
     /// O(1) region lookup (hash map).
     pub fn color_at_region(&self, range: Range) -> Option<FloatRgba> {
@@ -380,7 +380,7 @@ impl GfxElement {
                 .regions
                 .get(range)
                 .and_then(|region| region.color),
-            GfxElement::GlyphModel { .. } => panic!("Not yet implemented"),
+            GfxElement::GlyphModel { .. } => None,
             GfxElement::Void { .. } => None,
         }
     }
@@ -500,8 +500,17 @@ impl Flaggable for GfxElement {
 
 impl Debug for GfxElement {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        //todo
-        Ok(())
+        match self {
+            GfxElement::GlyphArea { channel, unique_id, glyph_area, .. } => {
+                write!(f, "GlyphArea(id={}, ch={}, text={:?})", unique_id, channel, glyph_area.text)
+            }
+            GfxElement::GlyphModel { channel, unique_id, .. } => {
+                write!(f, "GlyphModel(id={}, ch={})", unique_id, channel)
+            }
+            GfxElement::Void { channel, unique_id, .. } => {
+                write!(f, "Void(id={}, ch={})", unique_id, channel)
+            }
+        }
     }
 }
 

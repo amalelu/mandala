@@ -293,10 +293,11 @@ impl Mutation {
    }
 
    /// Apply this mutation directly to a [`GlyphArea`]. Panics if
-   /// called with a `Mutation::Event` (events must go through
-   /// [`apply_to`](Mutation::apply_to) on a full element). A model
-   /// variant is silently ignored (debug-logged). Cost: O(k) for
-   /// deltas, O(1) for commands.
+   /// called with a `Mutation::Event` (events go through
+   /// [`apply_to`](Mutation::apply_to) on a full element, not
+   /// directly to an area). A model variant or event is silently
+   /// ignored (debug-logged). Cost: O(k) for deltas, O(1) for
+   /// commands.
    pub fn apply_to_area(&self, area: &mut GlyphArea) {
       match self {
          AreaDelta(mutation) => mutation.apply_to(area),
@@ -306,15 +307,14 @@ impl Mutation {
          }
          Mutation::None => {}
          Event(_) => {
-            panic!("Events should not be applied directly to a GlyphArea!")
+            debug!("Event applied directly to GlyphArea — use Mutation::apply_to on a GfxElement instead.");
          }
       }
    }
 
-   /// Apply this mutation directly to a [`GlyphModel`]. Panics if
-   /// called with a `Mutation::Event`. An area variant is silently
-   /// ignored (debug-logged). Cost: O(k) for deltas, O(1) for
-   /// commands.
+   /// Apply this mutation directly to a [`GlyphModel`]. An area
+   /// variant or event is silently ignored (debug-logged). Cost:
+   /// O(k) for deltas, O(1) for commands.
    pub fn apply_to_model(&self, model: &mut GlyphModel) {
       match self {
          ModelDelta(mutation) => mutation.apply_to(model),
@@ -324,7 +324,7 @@ impl Mutation {
          }
          Mutation::None => {}
          Event(_) => {
-            panic!("Events should not be applied directly to a GlyphModel!")
+            debug!("Event applied directly to GlyphModel — use Mutation::apply_to on a GfxElement instead.");
          }
       }
    }

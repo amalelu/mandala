@@ -72,7 +72,10 @@ pub struct MindMapTree {
     /// `node_map` during tree construction. Enables O(1) lookup when
     /// the BVH descent returns a `NodeId` and the caller needs the
     /// corresponding mindmap node ID.
-    pub reverse_node_map: HashMap<NodeId, String>,
+    ///
+    /// Private to preserve forward-compatible API (§B10) — callers
+    /// use [`MindMapTree::mind_id_for_node`] instead.
+    reverse_node_map: HashMap<NodeId, String>,
 }
 
 /// Builds a `Tree<GfxElement, GfxMutator>` from a MindMap's
