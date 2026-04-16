@@ -32,14 +32,14 @@ use super::defaults::default_cross_link_edge;
     fn test_hit_test_direct_hit() {
         let mut tree = load_test_tree();
         // "Lord God" node (id: 348068464) — get its position from the tree
-        let node_id = tree.node_map.get("348068464").unwrap();
+        let node_id = tree.node_map.get("0").unwrap();
         let area = tree.tree.arena.get(*node_id).unwrap().get().glyph_area().unwrap();
         let center = Vec2::new(
             area.position.x.0 + area.render_bounds.x.0 / 2.0,
             area.position.y.0 + area.render_bounds.y.0 / 2.0,
         );
         let result = hit_test(center, &mut tree);
-        assert_eq!(result, Some("348068464".to_string()));
+        assert_eq!(result, Some("0".to_string()));
     }
 
     #[test]
@@ -55,7 +55,7 @@ use super::defaults::default_cross_link_edge;
         let mut tree = load_test_tree();
         // Find a parent-child pair where child is inside parent's bounds
         // "Lord God" (348068464) has children — find one whose bounds overlap
-        let parent_id_str = "348068464";
+        let parent_id_str = "0";
         let parent_size = {
             let nid = tree.node_map.get(parent_id_str).unwrap();
             let area = tree.tree.arena.get(*nid).unwrap().get().glyph_area().unwrap();
@@ -109,7 +109,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_apply_tree_highlights_via_walker() {
         let mut tree = load_test_tree();
-        let node_id = *tree.node_map.get("348068464").unwrap();
+        let node_id = *tree.node_map.get("0").unwrap();
 
         // Before highlight: original color (white)
         let area = tree.tree.arena.get(node_id).unwrap().get().glyph_area().unwrap();
@@ -119,7 +119,7 @@ use super::defaults::default_cross_link_edge;
         // Apply highlight via the new mutator-driven path.
         apply_tree_highlights(
             &mut tree,
-            std::iter::once(("348068464", HIGHLIGHT_COLOR)),
+            std::iter::once(("0", HIGHLIGHT_COLOR)),
         );
 
         // After highlight: cyan
@@ -136,7 +136,7 @@ use super::defaults::default_cross_link_edge;
 
         // Pick a different node and copy its regions before mutation.
         let other_id = tree.node_map.keys()
-            .find(|k| *k != "348068464")
+            .find(|k| *k != "0")
             .unwrap().clone();
         let other_node_id = *tree.node_map.get(&other_id).unwrap();
         let before = tree.tree.arena.get(other_node_id).unwrap().get()
@@ -144,7 +144,7 @@ use super::defaults::default_cross_link_edge;
 
         apply_tree_highlights(
             &mut tree,
-            std::iter::once(("348068464", HIGHLIGHT_COLOR)),
+            std::iter::once(("0", HIGHLIGHT_COLOR)),
         );
 
         let after = tree.tree.arena.get(other_node_id).unwrap().get()
@@ -158,13 +158,13 @@ use super::defaults::default_cross_link_edge;
         // previously-applied selection-cyan on the same node. Verify the
         // last-write-wins semantics of apply_tree_highlights.
         let mut tree = load_test_tree();
-        let node_id = *tree.node_map.get("348068464").unwrap();
+        let node_id = *tree.node_map.get("0").unwrap();
 
         apply_tree_highlights(
             &mut tree,
             vec![
-                ("348068464", HIGHLIGHT_COLOR),
-                ("348068464", REPARENT_SOURCE_COLOR),
+                ("0", HIGHLIGHT_COLOR),
+                ("0", REPARENT_SOURCE_COLOR),
             ],
         );
 
@@ -178,7 +178,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_move_subtree_updates_all_positions() {
         let mut doc = load_test_doc();
-        let node_id = "348068464"; // Lord God
+        let node_id = "0"; // Lord God
         let descendants = doc.mindmap.all_descendants(node_id);
         assert!(!descendants.is_empty(), "Lord God should have descendants");
 
@@ -205,7 +205,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_move_subtree_preserves_relative_positions() {
         let mut doc = load_test_doc();
-        let node_id = "348068464";
+        let node_id = "0";
         let descendants = doc.mindmap.all_descendants(node_id);
 
         // Record relative offsets from parent to each descendant
@@ -230,7 +230,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_move_single_only_affects_target() {
         let mut doc = load_test_doc();
-        let node_id = "348068464";
+        let node_id = "0";
         let descendants = doc.mindmap.all_descendants(node_id);
 
         // Record descendant positions before
@@ -261,7 +261,7 @@ use super::defaults::default_cross_link_edge;
     fn test_start_animation_records_instance_without_committing() {
     
         let mut doc = load_test_doc();
-        let node_id = "348068464".to_string();
+        let node_id = "0".to_string();
         let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
 
         let cm = make_test_mutation_with_timing(
@@ -298,7 +298,7 @@ use super::defaults::default_cross_link_edge;
     fn test_tick_animations_linear_midpoint_blend() {
     
         let mut doc = load_test_doc();
-        let node_id = "348068464".to_string();
+        let node_id = "0".to_string();
         let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
 
         let cm = make_test_mutation_with_timing(
@@ -332,7 +332,7 @@ use super::defaults::default_cross_link_edge;
     fn test_tick_animations_completes_and_clears() {
     
         let mut doc = load_test_doc();
-        let node_id = "348068464".to_string();
+        let node_id = "0".to_string();
         let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
 
         let cm = make_test_mutation_with_timing(
@@ -370,7 +370,7 @@ use super::defaults::default_cross_link_edge;
     fn test_fast_forward_then_undo_reverses_animation() {
     
         let mut doc = load_test_doc();
-        let node_id = "348068464".to_string();
+        let node_id = "0".to_string();
         let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
 
         let cm = make_test_mutation_with_timing(
@@ -418,7 +418,7 @@ use super::defaults::default_cross_link_edge;
     fn test_start_animation_re_trigger_mid_flight_is_noop() {
     
         let mut doc = load_test_doc();
-        let node_id = "348068464".to_string();
+        let node_id = "0".to_string();
         let cm = make_test_mutation_with_timing(
             "nudge-anim",
             TS::SelfOnly,
@@ -459,7 +459,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_move_returns_original_positions() {
         let mut doc = load_test_doc();
-        let node_id = "348068464";
+        let node_id = "0";
         let orig_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;
         let orig_y = doc.mindmap.nodes.get(node_id).unwrap().position.y;
 
@@ -472,7 +472,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_undo_restores_positions() {
         let mut doc = load_test_doc();
-        let node_id = "348068464";
+        let node_id = "0";
 
         // Record original positions
         let orig_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;
@@ -497,7 +497,7 @@ use super::defaults::default_cross_link_edge;
     fn test_apply_drag_delta() {
         let doc = load_test_doc();
         let mut tree = doc.build_tree();
-        let node_id = "348068464";
+        let node_id = "0";
 
         let tree_nid = *tree.node_map.get(node_id).unwrap();
         let orig_x = tree.tree.arena.get(tree_nid).unwrap().get().glyph_area().unwrap().position.x.0;
@@ -515,7 +515,7 @@ use super::defaults::default_cross_link_edge;
     fn test_apply_drag_delta_with_descendants() {
         let doc = load_test_doc();
         let mut tree = doc.build_tree();
-        let node_id = "348068464";
+        let node_id = "0";
 
         // Find a child of Lord God in the tree
         let child_ids: Vec<String> = doc.mindmap.all_descendants(node_id);
@@ -536,7 +536,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_dedup_subtree_roots() {
         let doc = load_test_doc();
-        let parent_id = "348068464"; // Lord God
+        let parent_id = "0"; // Lord God
         let descendants = doc.mindmap.all_descendants(parent_id);
         assert!(!descendants.is_empty());
         let child_id = &descendants[0];
@@ -551,7 +551,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_apply_move_multiple_no_double_movement() {
         let mut doc = load_test_doc();
-        let parent_id = "348068464";
+        let parent_id = "0";
         let descendants = doc.mindmap.all_descendants(parent_id);
         let child_id = &descendants[0];
 
@@ -570,7 +570,7 @@ use super::defaults::default_cross_link_edge;
     fn test_rect_select_finds_nodes_in_region() {
         let tree = load_test_tree();
         // Get position/bounds of "Lord God" to build a rect that contains it
-        let node_id = *tree.node_map.get("348068464").unwrap();
+        let node_id = *tree.node_map.get("0").unwrap();
         let area = tree.tree.arena.get(node_id).unwrap().get().glyph_area().unwrap();
         let x = area.position.x.0;
         let y = area.position.y.0;
@@ -583,7 +583,7 @@ use super::defaults::default_cross_link_edge;
             Vec2::new(x + w + 1.0, y + h + 1.0),
             &tree,
         );
-        assert!(hits.contains(&"348068464".to_string()), "Should find Lord God in rect");
+        assert!(hits.contains(&"0".to_string()), "Should find Lord God in rect");
     }
 
     #[test]

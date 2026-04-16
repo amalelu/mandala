@@ -9,7 +9,7 @@ use crate::mindmap::model::ControlPoint;
 fn test_anchor_top() {
     let pos = Vec2::new(100.0, 200.0);
     let size = Vec2::new(80.0, 40.0);
-    let pt = resolve_anchor_point(pos, size, 1, Vec2::ZERO);
+    let pt = resolve_anchor_point(pos, size, "top", Vec2::ZERO);
     assert_eq!(pt, Vec2::new(140.0, 200.0));
 }
 
@@ -17,7 +17,7 @@ fn test_anchor_top() {
 fn test_anchor_right() {
     let pos = Vec2::new(100.0, 200.0);
     let size = Vec2::new(80.0, 40.0);
-    let pt = resolve_anchor_point(pos, size, 2, Vec2::ZERO);
+    let pt = resolve_anchor_point(pos, size, "right", Vec2::ZERO);
     assert_eq!(pt, Vec2::new(180.0, 220.0));
 }
 
@@ -25,7 +25,7 @@ fn test_anchor_right() {
 fn test_anchor_bottom() {
     let pos = Vec2::new(100.0, 200.0);
     let size = Vec2::new(80.0, 40.0);
-    let pt = resolve_anchor_point(pos, size, 3, Vec2::ZERO);
+    let pt = resolve_anchor_point(pos, size, "bottom", Vec2::ZERO);
     assert_eq!(pt, Vec2::new(140.0, 240.0));
 }
 
@@ -33,7 +33,7 @@ fn test_anchor_bottom() {
 fn test_anchor_left() {
     let pos = Vec2::new(100.0, 200.0);
     let size = Vec2::new(80.0, 40.0);
-    let pt = resolve_anchor_point(pos, size, 4, Vec2::ZERO);
+    let pt = resolve_anchor_point(pos, size, "left", Vec2::ZERO);
     assert_eq!(pt, Vec2::new(100.0, 220.0));
 }
 
@@ -43,7 +43,7 @@ fn test_anchor_auto_picks_nearest() {
     let size = Vec2::new(100.0, 50.0);
     // Other node is far to the right -- should pick right edge midpoint
     let other = Vec2::new(500.0, 25.0);
-    let pt = resolve_anchor_point(pos, size, 0, other);
+    let pt = resolve_anchor_point(pos, size, "auto", other);
     assert_eq!(pt, Vec2::new(100.0, 25.0)); // right edge midpoint
 }
 
@@ -53,15 +53,15 @@ fn test_anchor_auto_picks_top() {
     let size = Vec2::new(100.0, 50.0);
     // Other node is above
     let other = Vec2::new(50.0, -500.0);
-    let pt = resolve_anchor_point(pos, size, 0, other);
+    let pt = resolve_anchor_point(pos, size, "auto", other);
     assert_eq!(pt, Vec2::new(50.0, 100.0)); // top edge midpoint
 }
 
 #[test]
 fn test_build_straight_path() {
     let path = build_connection_path(
-        Vec2::new(0.0, 0.0), Vec2::new(100.0, 50.0), 2,  // from: right anchor
-        Vec2::new(200.0, 0.0), Vec2::new(100.0, 50.0), 4, // to: left anchor
+        Vec2::new(0.0, 0.0), Vec2::new(100.0, 50.0), "right",  // from: right anchor
+        Vec2::new(200.0, 0.0), Vec2::new(100.0, 50.0), "left", // to: left anchor
         &[],
     );
     match path {
@@ -80,8 +80,8 @@ fn test_build_cubic_path() {
         ControlPoint { x: -50.0, y: 0.0 },
     ];
     let path = build_connection_path(
-        Vec2::new(0.0, 0.0), Vec2::new(100.0, 50.0), 2,
-        Vec2::new(300.0, 0.0), Vec2::new(100.0, 50.0), 4,
+        Vec2::new(0.0, 0.0), Vec2::new(100.0, 50.0), "right",
+        Vec2::new(300.0, 0.0), Vec2::new(100.0, 50.0), "left",
         &cps,
     );
     match path {
@@ -289,8 +289,8 @@ fn test_distance_to_cubic_bezier_perpendicular() {
 fn test_build_quadratic_promotion() {
     let cps = vec![ControlPoint { x: 0.0, y: 100.0 }];
     let path = build_connection_path(
-        Vec2::new(0.0, 0.0), Vec2::new(100.0, 50.0), 0,
-        Vec2::new(200.0, 0.0), Vec2::new(100.0, 50.0), 0,
+        Vec2::new(0.0, 0.0), Vec2::new(100.0, 50.0), "auto",
+        Vec2::new(200.0, 0.0), Vec2::new(100.0, 50.0), "auto",
         &cps,
     );
     match path {

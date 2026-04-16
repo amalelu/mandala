@@ -108,8 +108,8 @@ fn test_cache_preserves_unrelated_edge_under_drag() {
             synthetic_node("d", 400.0, 300.0, 40.0, 40.0, false),
         ],
         vec![
-            synthetic_edge("a", "b", 2, 4),
-            synthetic_edge("c", "d", 2, 4),
+            synthetic_edge("a", "b", "right", "left"),
+            synthetic_edge("c", "d", "right", "left"),
         ],
     );
     let mut cache = SceneConnectionCache::new();
@@ -168,7 +168,7 @@ fn test_cache_clip_reruns_against_fresh_aabbs() {
             // Blocker far above the connection — no clip effect yet.
             synthetic_node("c", 180.0, -500.0, 60.0, 40.0, false),
         ],
-        vec![synthetic_edge("a", "b", 2, 4)],
+        vec![synthetic_edge("a", "b", "right", "left")],
     );
 
     let mut cache = SceneConnectionCache::new();
@@ -222,8 +222,8 @@ fn test_connection_element_edge_key_always_populated() {
             synthetic_node("c", 0.0, 200.0, 40.0, 40.0, false),
         ],
         vec![
-            synthetic_edge("a", "b", 2, 4),
-            synthetic_edge("b", "c", 2, 4),
+            synthetic_edge("a", "b", "right", "left"),
+            synthetic_edge("b", "c", "right", "left"),
         ],
     );
     let mut cache = SceneConnectionCache::new();
@@ -277,7 +277,7 @@ fn test_fold_hidden_edge_does_not_populate_cache() {
     let mut b_child = synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false);
     b_child.parent_id = Some("a".to_string());
     a.folded = true; // hides b
-    let edge = synthetic_edge("a", "b", 2, 4);
+    let edge = synthetic_edge("a", "b", "right", "left");
     let map = synthetic_map(vec![a, b_child], vec![edge]);
 
     let mut cache = SceneConnectionCache::new();

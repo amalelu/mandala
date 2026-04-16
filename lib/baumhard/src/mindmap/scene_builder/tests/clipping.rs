@@ -15,7 +15,7 @@ fn test_scene_clips_connection_glyphs_inside_node() {
             synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
             synthetic_node("c", 180.0, 0.0, 60.0, 40.0, false),
         ],
-        vec![synthetic_edge("a", "b", 2, 4)], // right edge of A → left edge of B
+        vec![synthetic_edge("a", "b", "right", "left")], // right edge of A → left edge of B
     );
 
     let scene = build_scene(&map, 1.0);
@@ -48,7 +48,7 @@ fn test_scene_clips_connection_glyphs_in_frame_area() {
             synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
             synthetic_node("c", 180.0, 0.0, 60.0, 40.0, true),
         ],
-        vec![synthetic_edge("a", "b", 2, 4)],
+        vec![synthetic_edge("a", "b", "right", "left")],
     );
 
     let scene = build_scene(&map, 1.0);
@@ -81,7 +81,7 @@ fn test_scene_caps_survive_for_unframed_endpoints() {
     // B are unframed, the anchor point sits exactly on A's edge and
     // the cap should render there.
     use crate::mindmap::model::GlyphConnectionConfig;
-    let mut edge = synthetic_edge("a", "b", 2, 4);
+    let mut edge = synthetic_edge("a", "b", "right", "left");
     edge.glyph_connection = Some(GlyphConnectionConfig {
         body: "·".into(),
         cap_start: Some("►".into()),
@@ -114,7 +114,7 @@ fn test_scene_caps_clipped_for_framed_endpoints() {
     // frame-expanded clip AABB, so it should be dropped — otherwise
     // the cap would render in the visible border area.
     use crate::mindmap::model::GlyphConnectionConfig;
-    let mut edge = synthetic_edge("a", "b", 2, 4);
+    let mut edge = synthetic_edge("a", "b", "right", "left");
     edge.glyph_connection = Some(GlyphConnectionConfig {
         body: "·".into(),
         cap_start: Some("►".into()),

@@ -65,7 +65,7 @@ mod tests {
         }
         // Verify sorted by index
         for w in roots.windows(2) {
-            assert!(w[0].index <= w[1].index);
+            assert!(crate::mindmap::model::id_sort_key(&w[0].id) <= crate::mindmap::model::id_sort_key(&w[1].id));
         }
     }
 
@@ -75,14 +75,14 @@ mod tests {
         let map = load_from_file(&path).unwrap();
 
         // Lord God node
-        let children = map.children_of("348068464");
+        let children = map.children_of("0");
         assert!(!children.is_empty());
         for child in &children {
-            assert_eq!(child.parent_id.as_deref(), Some("348068464"));
+            assert_eq!(child.parent_id.as_deref(), Some("0"));
         }
         // Verify sorted by index
         for w in children.windows(2) {
-            assert!(w[0].index <= w[1].index);
+            assert!(crate::mindmap::model::id_sort_key(&w[0].id) <= crate::mindmap::model::id_sort_key(&w[1].id));
         }
     }
 
@@ -91,7 +91,7 @@ mod tests {
         let path = test_map_path();
         let map = load_from_file(&path).unwrap();
 
-        let node = map.nodes.get("348068464").unwrap();
+        let node = map.nodes.get("0").unwrap();
         assert_eq!(node.text, "Lord God");
         assert_eq!(node.text_runs.len(), 1);
         let run = &node.text_runs[0];
@@ -109,12 +109,13 @@ mod tests {
         let path = test_map_path();
         let map = load_from_file(&path).unwrap();
 
-        let root_node = map.nodes.get("348068464").unwrap();
+        let root_node = map.nodes.get("0").unwrap();
         let schema = root_node.color_schema.as_ref().unwrap();
         assert_eq!(schema.level, 0);
-        assert_eq!(schema.palette, "coral");
-        assert!(!schema.groups.is_empty());
-        assert_eq!(schema.groups[0].frame, "#30b082");
+        assert!(schema.palette.starts_with("coral"));
+        let palette = map.palettes.get(&schema.palette).unwrap();
+        assert!(!palette.groups.is_empty());
+        assert_eq!(palette.groups[0].frame, "#30b082");
     }
 
     #[test]
@@ -123,8 +124,8 @@ mod tests {
         let map = load_from_file(&path).unwrap();
 
         let edge = &map.edges[0];
-        assert_eq!(edge.from_id, "348068464");
-        assert_eq!(edge.to_id, "351582192");
+        assert_eq!(edge.from_id, "0");
+        assert_eq!(edge.to_id, "0.0");
         assert_eq!(edge.edge_type, "parent_child");
         assert!(edge.visible);
 
@@ -139,7 +140,7 @@ mod tests {
         let map = load_from_file(&path).unwrap();
 
         // Root schema node should resolve to level 0 group
-        let root_node = map.nodes.get("348068464").unwrap();
+        let root_node = map.nodes.get("0").unwrap();
         let colors = map.resolve_theme_colors(root_node).unwrap();
         assert_eq!(colors.frame, "#30b082");
     }
@@ -164,8 +165,8 @@ mod tests {
             let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
 
             let conn_path = connection::build_connection_path(
-                from_pos, from_size, edge.anchor_from,
-                to_pos, to_size, edge.anchor_to,
+                from_pos, from_size, &edge.anchor_from,
+                to_pos, to_size, &edge.anchor_to,
                 &edge.control_points,
             );
             match conn_path {
@@ -212,7 +213,7 @@ mod tests {
 
         assert!(map.custom_mutations.is_empty(), "Existing map should have no custom_mutations");
 
-        let node = map.nodes.get("348068464").unwrap();
+        let node = map.nodes.get("0").unwrap();
         assert!(node.trigger_bindings.is_empty(), "Existing node should have no trigger_bindings");
         assert!(node.inline_mutations.is_empty(), "Existing node should have no inline_mutations");
     }
@@ -316,11 +317,11 @@ mod tests {
         let map = load_from_file(&path).unwrap();
 
         // Root node has no parent, so it should never be hidden
-        let root = map.nodes.get("348068464").unwrap();
+        let root = map.nodes.get("0").unwrap();
         assert!(!map.is_hidden_by_fold(root));
 
         // A child of a non-folded parent should not be hidden
-        let children = map.children_of("348068464");
+        let children = map.children_of("0");
         assert!(!children.is_empty());
         // The root is not folded by default, so its children are visible
         assert!(!map.is_hidden_by_fold(children[0]));

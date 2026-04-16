@@ -14,7 +14,7 @@ fn test_anchor_kv_updates_edge_anchor() {
     let er = select_first_edge(&mut doc);
     let _ = run("anchor from=top", &mut doc);
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
-    assert_eq!(updated.anchor_from, 1);
+    assert_eq!(updated.anchor_from, "top");
 }
 
 #[test]

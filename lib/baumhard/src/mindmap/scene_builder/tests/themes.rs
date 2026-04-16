@@ -45,7 +45,7 @@ fn test_scene_connection_color_resolves_theme_variable() {
     let mut b = synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false);
     a.text = "".into(); // skip text element
     b.text = "".into();
-    let mut edge = synthetic_edge("a", "b", 2, 4);
+    let mut edge = synthetic_edge("a", "b", "right", "left");
     edge.color = "var(--edge)".into();
     let mut map = synthetic_map(vec![a, b], vec![edge]);
     let mut vars = HashMap::new();

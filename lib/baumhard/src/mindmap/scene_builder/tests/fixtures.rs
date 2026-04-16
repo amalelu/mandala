@@ -20,7 +20,6 @@ pub(super) fn synthetic_node(id: &str, x: f64, y: f64, w: f64, h: f64, show_fram
     MindNode {
         id: id.to_string(),
         parent_id: None,
-        index: 0,
         position: Position { x, y },
         size: Size { width: w, height: h },
         text: id.to_string(),
@@ -29,35 +28,36 @@ pub(super) fn synthetic_node(id: &str, x: f64, y: f64, w: f64, h: f64, show_fram
             background_color: "#000".into(),
             frame_color: "#fff".into(),
             text_color: "#fff".into(),
-            shape_type: 0,
+            shape: "rectangle".into(),
             corner_radius_percent: 0.0,
             frame_thickness: 1.0,
             show_frame,
             show_shadow: false,
             border: None,
         },
-        layout: NodeLayout { layout_type: 0, direction: 0, spacing: 0.0 },
+        layout: NodeLayout { layout_type: "map".into(), direction: "auto".into(), spacing: 0.0 },
         folded: false,
         notes: String::new(),
         color_schema: None,
+        channel: 0,
         trigger_bindings: vec![],
         inline_mutations: vec![],
     }
 }
 
-pub(super) fn synthetic_edge(from: &str, to: &str, anchor_from: i32, anchor_to: i32) -> MindEdge {
+pub(super) fn synthetic_edge(from: &str, to: &str, anchor_from: &str, anchor_to: &str) -> MindEdge {
     MindEdge {
         from_id: from.to_string(),
         to_id: to.to_string(),
         edge_type: "cross_link".to_string(),
         color: "#fff".to_string(),
         width: 1,
-        line_style: 0,
+        line_style: "solid".to_string(),
         visible: true,
         label: None,
         label_position_t: None,
-        anchor_from,
-        anchor_to,
+        anchor_from: anchor_from.to_string(),
+        anchor_to: anchor_to.to_string(),
         control_points: vec![],
         glyph_connection: None,
     }
@@ -79,6 +79,7 @@ pub(super) fn synthetic_map(nodes_vec: Vec<MindNode>, edges: Vec<MindEdge>) -> M
             theme_variables: HashMap::new(),
             theme_variants: HashMap::new(),
         },
+        palettes: HashMap::new(),
         nodes,
         edges,
         custom_mutations: vec![],
@@ -100,7 +101,7 @@ pub(super) fn two_node_edge_map() -> MindMap {
             synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
             synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
         ],
-        vec![synthetic_edge("a", "b", 2, 4)],
+        vec![synthetic_edge("a", "b", "right", "left")],
     )
 }
 
