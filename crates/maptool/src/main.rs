@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
+mod convert;
 mod export;
 
 const USAGE: &str = "\
@@ -44,7 +45,12 @@ Commands:
                                 their children surface at the same
                                 depth. Notes, fonts, and edges are
                                 ignored. Writes to stdout, or to
-                                <out.md> if a second path is given.";
+                                <out.md> if a second path is given.
+  convert --legacy <in.json> <out.json>
+                                Convert a legacy (miMind-derived) map
+                                to the current format: structural IDs,
+                                named enums, hoisted palettes, channel
+                                field.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -165,6 +171,21 @@ fn run(args: &[String]) -> Result<(), CliError> {
                     CliError::Io(format!("failed to write {path}: {e}"))
                 }),
             }
+        }
+        "convert" => {
+            if args.get(1).map(|s| s.as_str()) != Some("--legacy") {
+                return Err(CliError::Usage(
+                    "convert: expected --legacy flag".into(),
+                ));
+            }
+            let input = args
+                .get(2)
+                .ok_or_else(|| CliError::Usage("convert: missing <in.json>".into()))?;
+            let output = args
+                .get(3)
+                .ok_or_else(|| CliError::Usage("convert: missing <out.json>".into()))?;
+            convert::convert_legacy(Path::new(input), Path::new(output))
+                .map_err(CliError::Io)
         }
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
