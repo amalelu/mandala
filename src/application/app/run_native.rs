@@ -221,6 +221,7 @@ app.event_loop.run(move |event, _window_target| {
                 &mut last_click,
                 &mut hovered_node,
                 &mut mutation_throttle,
+                &mut picker_dirty,
             );
         }
         Event::WindowEvent {

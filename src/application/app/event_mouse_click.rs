@@ -31,6 +31,7 @@ pub(super) fn handle_mouse_input(
     last_click: &mut Option<LastClick>,
     hovered_node: &mut Option<String>,
     mutation_throttle: &mut MutationFrequencyThrottle,
+    picker_dirty: &mut bool,
 ) {
     // The console swallows mouse clicks as a close
     // gesture. Clicking anywhere while open dismisses
@@ -75,6 +76,7 @@ pub(super) fn handle_mouse_input(
                     mindmap_tree,
                     app_scene,
                     renderer,
+                    picker_dirty,
                 )
             } else {
                 true
