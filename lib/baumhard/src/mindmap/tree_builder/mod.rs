@@ -103,7 +103,7 @@ pub fn build_mindmap_tree(map: &MindMap) -> MindMapTree {
             continue;
         }
         let area = mindnode_to_glyph_area(root, vars);
-        let element = GfxElement::new_area_non_indexed_with_id(area, 0, id_counter);
+        let element = GfxElement::new_area_non_indexed_with_id(area, root.channel, id_counter);
         id_counter += 1;
 
         let node_id = tree.arena.new_node(element);
