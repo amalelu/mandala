@@ -813,6 +813,12 @@ app.event_loop.run(move |event, _window_target| {
                         save_document_to_bound_path(doc, &mut console_state);
                     }
                 }
+                Some(_) => {
+                    // Component-scoped action resolved at Document
+                    // level — should not happen in practice (the
+                    // modal handlers above claim their contexts
+                    // first). Ignore silently.
+                }
                 None => {
                     // No built-in action matched — try the
                     // user-defined `custom_mutation_bindings`.
