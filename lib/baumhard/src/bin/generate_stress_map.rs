@@ -218,7 +218,7 @@ fn parse_args() -> Result<Option<Config>, String> {
 
 /// A minimal styled node. Picks a frame color per depth level so the map is
 /// visually structured without needing theme variables.
-fn make_node(id: String, parent_id: Option<String>, index: i32, x: f64, y: f64, depth: usize) -> MindNode {
+fn make_node(id: String, parent_id: Option<String>, x: f64, y: f64, depth: usize) -> MindNode {
     let frame_palette = [
         "#30b082", "#b03080", "#3080b0", "#b08030", "#8030b0", "#30b0b0", "#b03030",
     ];
@@ -238,7 +238,6 @@ fn make_node(id: String, parent_id: Option<String>, index: i32, x: f64, y: f64, 
     MindNode {
         id: id.clone(),
         parent_id,
-        index,
         position: Position { x, y },
         size: Size {
             width: NODE_WIDTH,
@@ -250,7 +249,7 @@ fn make_node(id: String, parent_id: Option<String>, index: i32, x: f64, y: f64, 
             background_color: "#141414".to_string(),
             frame_color,
             text_color: "#ffffff".to_string(),
-            shape_type: 0,
+            shape: "rectangle".to_string(),
             corner_radius_percent: 10.0,
             frame_thickness: 4.0,
             show_frame: true,
@@ -258,13 +257,14 @@ fn make_node(id: String, parent_id: Option<String>, index: i32, x: f64, y: f64, 
             border: None,
         },
         layout: NodeLayout {
-            layout_type: 0,
-            direction: 0,
+            layout_type: "map".to_string(),
+            direction: "auto".to_string(),
             spacing: 50.0,
         },
         folded: false,
         notes: String::new(),
         color_schema: None,
+        channel: 0,
         trigger_bindings: Vec::new(),
         inline_mutations: Vec::new(),
     }
@@ -278,12 +278,12 @@ fn make_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
         edge_type: "parent_child".to_string(),
         color: "#4a7a9c".to_string(),
         width: 2,
-        line_style: 0,
+        line_style: "solid".to_string(),
         visible: true,
         label: None,
         label_position_t: None,
-        anchor_from: 0,
-        anchor_to: 0,
+        anchor_from: "auto".to_string(),
+        anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
     }
@@ -298,12 +298,12 @@ fn make_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
         edge_type: "cross_link".to_string(),
         color: "#aa88cc".to_string(),
         width: 3,
-        line_style: 0,
+        line_style: "solid".to_string(),
         visible: true,
         label: None,
         label_position_t: None,
-        anchor_from: 0,
-        anchor_to: 0,
+        anchor_from: "auto".to_string(),
+        anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
     }
@@ -319,7 +319,7 @@ fn gen_balanced(depth: usize, branching: usize) -> (Vec<MindNode>, Vec<MindEdge>
     let mut current_level: Vec<(usize, String)> = Vec::new();
     // Root.
     let root_id = "n0".to_string();
-    nodes.push(make_node(root_id.clone(), None, 0, 0.0, 0.0, 0));
+    nodes.push(make_node(root_id.clone(), None, 0.0, 0.0, 0));
     current_level.push((0, root_id));
     let mut next_id = 1usize;
     for d in 1..=depth {
@@ -334,7 +334,7 @@ fn gen_balanced(depth: usize, branching: usize) -> (Vec<MindNode>, Vec<MindEdge>
                 let x = level_left + col as f64 * COL_SPACING;
                 let id = format!("n{}", next_id);
                 next_id += 1;
-                nodes.push(make_node(id.clone(), Some(parent_id.clone()), b as i32, x, level_y, d));
+                nodes.push(make_node(id.clone(), Some(parent_id.clone()), x, level_y, d));
                 edges.push(make_parent_child_edge(parent_id, &id));
                 next_level.push((col, id));
             }
@@ -356,7 +356,7 @@ fn gen_skewed(nodes: usize) -> (Vec<MindNode>, Vec<MindEdge>) {
     // Half spine, half leaves (roughly). Ensures at least one spine node.
     let spine_len = (nodes / 2).max(1);
     // Root of the spine.
-    result_nodes.push(make_node("n0".to_string(), None, 0, 0.0, 0.0, 0));
+    result_nodes.push(make_node("n0".to_string(), None, 0.0, 0.0, 0));
     let mut next_id = 1usize;
     // Spine nodes after the root. Each one's parent is the previous spine node.
     // Positioned on a diagonal so successive spine nodes are visually far apart.
@@ -366,7 +366,7 @@ fn gen_skewed(nodes: usize) -> (Vec<MindNode>, Vec<MindEdge>) {
         next_id = i + 1;
         let x = i as f64 * COL_SPACING;
         let y = i as f64 * ROW_SPACING;
-        result_nodes.push(make_node(id.clone(), Some(parent_id.clone()), 0, x, y, i));
+        result_nodes.push(make_node(id.clone(), Some(parent_id.clone()), x, y, i));
         edges.push(make_parent_child_edge(&parent_id, &id));
     }
     // Leaves: attach one to each spine node until we hit the target count.
@@ -378,7 +378,7 @@ fn gen_skewed(nodes: usize) -> (Vec<MindNode>, Vec<MindEdge>) {
         let parent = &result_nodes[spine_idx];
         let x = parent.position.x + COL_SPACING;
         let y = parent.position.y;
-        result_nodes.push(make_node(id.clone(), Some(parent_id.clone()), 1, x, y, spine_idx + 1));
+        result_nodes.push(make_node(id.clone(), Some(parent_id.clone()), x, y, spine_idx + 1));
         edges.push(make_parent_child_edge(&parent_id, &id));
         next_id += 1;
         spine_idx += 1;
@@ -394,7 +394,7 @@ fn gen_star(nodes: usize) -> (Vec<MindNode>, Vec<MindEdge>) {
         return (result_nodes, edges);
     }
     // Root at origin.
-    result_nodes.push(make_node("n0".to_string(), None, 0, 0.0, 0.0, 0));
+    result_nodes.push(make_node("n0".to_string(), None, 0.0, 0.0, 0));
     let child_count = nodes.saturating_sub(1);
     if child_count == 0 {
         return (result_nodes, edges);
@@ -408,7 +408,7 @@ fn gen_star(nodes: usize) -> (Vec<MindNode>, Vec<MindEdge>) {
         let x = radius * angle.cos();
         let y = radius * angle.sin();
         let id = format!("n{}", i + 1);
-        result_nodes.push(make_node(id.clone(), Some("n0".to_string()), i as i32, x, y, 1));
+        result_nodes.push(make_node(id.clone(), Some("n0".to_string()), x, y, 1));
         edges.push(make_parent_child_edge("n0", &id));
     }
     (result_nodes, edges)
@@ -512,6 +512,7 @@ fn assemble_mindmap(name: &str, nodes: Vec<MindNode>, edges: Vec<MindEdge>) -> M
             theme_variables: HashMap::new(),
             theme_variants: HashMap::new(),
         },
+        palettes: HashMap::new(),
         nodes: node_map,
         edges,
         custom_mutations: Vec::new(),
@@ -529,12 +530,8 @@ fn run(cfg: Config) -> Result<(), String> {
     add_random_cross_links(&nodes, &mut edges, cfg.cross_links, &mut rng);
     add_longest_edges(&nodes, &mut edges, cfg.long_edges);
 
-    // Re-index each node to match its position in `nodes` so `index`
-    // roughly reflects creation order. Not strictly needed but it keeps the
-    // output tidy.
-    for (i, n) in nodes.iter_mut().enumerate() {
-        n.index = i as i32;
-    }
+    // IDs are already assigned structurally by the generators, so no
+    // re-indexing needed.
 
     let name = format!(
         "stress-{}-{}n-{}e",

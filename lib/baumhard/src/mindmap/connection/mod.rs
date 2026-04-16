@@ -47,29 +47,29 @@ pub enum ConnectionPath {
 ///
 /// - `node_pos`: top-left corner of the node
 /// - `node_size`: (width, height) of the node
-/// - `anchor`: 0=auto, 1=top, 2=right, 3=bottom, 4=left
+/// - `anchor`: "auto", "top", "right", "bottom", "left"
 /// - `other_center`: center of the other node (used for auto resolution)
 pub fn resolve_anchor_point(
     node_pos: Vec2,
     node_size: Vec2,
-    anchor: i32,
+    anchor: &str,
     other_center: Vec2,
 ) -> Vec2 {
     let half_w = node_size.x * 0.5;
     let half_h = node_size.y * 0.5;
 
     match anchor {
-        1 => Vec2::new(node_pos.x + half_w, node_pos.y),                    // Top
-        2 => Vec2::new(node_pos.x + node_size.x, node_pos.y + half_h),      // Right
-        3 => Vec2::new(node_pos.x + half_w, node_pos.y + node_size.y),      // Bottom
-        4 => Vec2::new(node_pos.x, node_pos.y + half_h),                    // Left
+        "top" => Vec2::new(node_pos.x + half_w, node_pos.y),
+        "right" => Vec2::new(node_pos.x + node_size.x, node_pos.y + half_h),
+        "bottom" => Vec2::new(node_pos.x + half_w, node_pos.y + node_size.y),
+        "left" => Vec2::new(node_pos.x, node_pos.y + half_h),
         _ => {
             // Auto: pick the edge midpoint closest to the other node's center
             let candidates = [
-                Vec2::new(node_pos.x + half_w, node_pos.y),                    // Top
-                Vec2::new(node_pos.x + node_size.x, node_pos.y + half_h),      // Right
-                Vec2::new(node_pos.x + half_w, node_pos.y + node_size.y),      // Bottom
-                Vec2::new(node_pos.x, node_pos.y + half_h),                    // Left
+                Vec2::new(node_pos.x + half_w, node_pos.y),
+                Vec2::new(node_pos.x + node_size.x, node_pos.y + half_h),
+                Vec2::new(node_pos.x + half_w, node_pos.y + node_size.y),
+                Vec2::new(node_pos.x, node_pos.y + half_h),
             ];
             candidates.into_iter()
                 .min_by(|a, b| {
@@ -96,10 +96,10 @@ fn node_center(pos: Vec2, size: Vec2) -> Vec2 {
 pub fn build_connection_path(
     from_pos: Vec2,
     from_size: Vec2,
-    anchor_from: i32,
+    anchor_from: &str,
     to_pos: Vec2,
     to_size: Vec2,
-    anchor_to: i32,
+    anchor_to: &str,
     control_points: &[ControlPoint],
 ) -> ConnectionPath {
     let from_center = node_center(from_pos, from_size);

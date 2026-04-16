@@ -16,6 +16,7 @@
 pub mod canvas;
 pub mod edge;
 pub mod node;
+pub mod palette;
 pub mod portal;
 
 pub use canvas::Canvas;
@@ -24,6 +25,7 @@ pub use node::{
     ColorGroup, ColorSchema, CustomBorderGlyphs, GlyphBorderConfig, MindNode, NodeLayout,
     NodeStyle, Position, Size, TextRun,
 };
+pub use palette::Palette;
 pub use portal::{column_letter_label, PortalPair, PORTAL_GLYPH_PRESETS};
 
 use std::collections::HashMap;
@@ -35,16 +37,17 @@ pub struct MindMap {
     pub version: String,
     pub name: String,
     pub canvas: Canvas,
+    /// Named color palettes referenced by nodes' color_schema.palette field.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub palettes: HashMap<String, Palette>,
     pub nodes: HashMap<String, MindNode>,
     pub edges: Vec<MindEdge>,
     /// Map-level custom mutation definitions, available to all nodes in this map.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_mutations: Vec<CustomMutation>,
-    /// Session 6E: portal pairs — matching glyph markers on two distant
-    /// nodes used as a lightweight alternative to cross-link edges when a
-    /// rendered line would clutter the map. Each pair contributes two
-    /// rendered markers (one per endpoint). Backward-compatible via
-    /// serde default: maps authored before 6E parse with an empty vec.
+    /// Portal pairs — matching glyph markers on two distant nodes used as
+    /// a lightweight alternative to cross-link edges when a rendered line
+    /// would clutter the map.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub portals: Vec<PortalPair>,
 }
@@ -66,6 +69,7 @@ impl MindMap {
                 theme_variables: HashMap::new(),
                 theme_variants: HashMap::new(),
             },
+            palettes: HashMap::new(),
             nodes: HashMap::new(),
             edges: Vec::new(),
             custom_mutations: Vec::new(),
@@ -73,33 +77,32 @@ impl MindMap {
         }
     }
 
-    /// Returns root nodes (nodes with no parent), sorted by index.
+    /// Returns root nodes (nodes with no parent), sorted by ID segment.
     pub fn root_nodes(&self) -> Vec<&MindNode> {
         let mut roots: Vec<&MindNode> = self.nodes.values()
             .filter(|n| n.parent_id.is_none())
             .collect();
-        roots.sort_by_key(|n| n.index);
+        roots.sort_by_key(|n| id_sort_key(&n.id));
         roots
     }
 
-    /// Returns children of a given node, sorted by index.
+    /// Returns children of a given node, sorted by ID segment.
     pub fn children_of(&self, parent_id: &str) -> Vec<&MindNode> {
         let mut children: Vec<&MindNode> = self.nodes.values()
             .filter(|n| n.parent_id.as_deref() == Some(parent_id))
             .collect();
-        children.sort_by_key(|n| n.index);
+        children.sort_by_key(|n| id_sort_key(&n.id));
         children
     }
 
-    /// Finds the color schema root for a themed node by walking up the parent chain.
-    /// Returns the schema root node (level 0 with non-empty groups).
+    /// Finds the color schema root for a themed node by walking up the
+    /// parent chain. Returns the first ancestor (or self) at level 0.
     pub fn find_schema_root<'a>(&'a self, node: &'a MindNode) -> Option<&'a MindNode> {
         if let Some(ref schema) = node.color_schema {
-            if schema.level == 0 && !schema.groups.is_empty() {
+            if schema.level == 0 {
                 return Some(node);
             }
         }
-        // Walk up the parent chain
         let mut current = node;
         loop {
             match current.parent_id.as_deref() {
@@ -109,7 +112,7 @@ impl MindMap {
                         None => return None,
                         Some(parent) => {
                             if let Some(ref schema) = parent.color_schema {
-                                if schema.level == 0 && !schema.groups.is_empty() {
+                                if schema.level == 0 {
                                     return Some(parent);
                                 }
                             }
@@ -192,20 +195,33 @@ impl MindMap {
         }
     }
 
-    /// Resolves the effective colors for a themed node.
-    /// Returns (background, frame, text, title) hex color strings.
+    /// Resolves the effective colors for a themed node by looking up
+    /// the palette from the top-level palettes map.
     pub fn resolve_theme_colors<'a>(&'a self, node: &'a MindNode) -> Option<&'a ColorGroup> {
         let schema = node.color_schema.as_ref()?;
-        let schema_root = self.find_schema_root(node)?;
-        let root_schema = schema_root.color_schema.as_ref()?;
+        let palette = self.palettes.get(&schema.palette)?;
         let level = schema.level as usize;
-        if level < root_schema.groups.len() {
-            Some(&root_schema.groups[level])
+        if level < palette.groups.len() {
+            Some(&palette.groups[level])
         } else {
-            // Wrap around if level exceeds groups
-            root_schema.groups.last()
+            palette.groups.last()
         }
     }
+}
+
+/// Extract the last segment of a Dewey-decimal ID as a numeric sort key.
+/// `"1.2.3"` → `3`, `"0"` → `0`. Falls back to 0 for non-numeric IDs.
+fn id_sort_key(id: &str) -> usize {
+    id.rsplit('.').next()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+/// Derive the parent ID from a Dewey-decimal node ID.
+/// `"1.2.3"` → `Some("1.2")`, `"0"` → `None` (root node).
+pub fn derive_parent_id(id: &str) -> Option<String> {
+    let dot = id.rfind('.')?;
+    Some(id[..dot].to_string())
 }
 
 #[cfg(test)]

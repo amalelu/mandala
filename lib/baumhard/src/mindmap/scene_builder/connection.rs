@@ -216,10 +216,10 @@ pub(super) fn build_connection_elements(
         let path = connection::build_connection_path(
             from_pos,
             from_size,
-            edge.anchor_from,
+            &edge.anchor_from,
             to_pos,
             to_size,
-            edge.anchor_to,
+            &edge.anchor_to,
             &edge.control_points,
         );
         let samples = connection::sample_path(&path, effective_spacing);
