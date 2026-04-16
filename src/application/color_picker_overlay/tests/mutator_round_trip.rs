@@ -13,9 +13,9 @@ use crate::application::color_picker_overlay::picker_glyph_areas::{
 };
 
 /// Spec-driven mutator output matches the picker's structural
-/// invariants: root `Void` on channel 0, 60 `Single` children
-/// (title + 24 hue + hint + 16 sat + 16 val + preview + hex), each
-/// carrying an `AreaDelta` with exactly 8 fields. Guards against
+/// invariants: root `Void` on channel 0, 58 `Single` children
+/// (24 hue + 16 sat + 16 val + preview + hex), each carrying an
+/// `AreaDelta` with exactly 8 fields. Guards against
 /// drift between `widgets/color_picker.json`'s `mutator_spec` block
 /// and the `mutator_builder` walker — if either side silently
 /// changes shape, the picker's registered tree alignment breaks and
@@ -38,7 +38,7 @@ fn picker_mutator_output_matches_spec_shape() {
         .children(&mt.arena)
         .map(|id| mt.arena.get(id).unwrap().get())
         .collect();
-    assert_eq!(children.len(), 60, "picker emits 60 live cells");
+    assert_eq!(children.len(), 58, "picker emits 58 live cells");
 
     for child in &children {
         assert!(
