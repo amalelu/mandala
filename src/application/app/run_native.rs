@@ -526,6 +526,8 @@ app.event_loop.run(move |event, _window_target| {
                     &key_name,
                     &logical_key,
                     modifiers.control_key(),
+                    modifiers.shift_key(),
+                    modifiers.alt_key(),
                     &mut console_state,
                     &mut console_history,
                     &mut label_edit_state,
