@@ -321,17 +321,21 @@ impl ColorFontRegions {
         self.regions.get(&ColorFontRegion::new_key_only(range))
     }
 
+    /// Test-only convenience: like [`Self::get`] but copies the region
+    /// out and panics when it is missing, with the full region table
+    /// dumped to `debug!` first to ease assertion debugging. **Not for
+    /// interactive paths** — production callers must use [`Self::get`]
+    /// and handle the `None` arm; CODE_CONVENTIONS §7 forbids panics
+    /// after the first frame.
     pub fn hard_get(&self, range: Range) -> ColorFontRegion {
-        debug!("Doing a hard_get on node, regions will follow:");
+        debug!("hard_get({}..{}); current regions:", range.start, range.end);
         for r in self.regions.iter() {
-            debug!("{} - {}", r.range.start, r.range.end);
+            debug!("  {}..{}", r.range.start, r.range.end);
         }
         *self
             .regions
             .get(&ColorFontRegion::new_key_only(range))
-            .expect(
-                "You tried real hard to get that region, but it didn't exist.. (seriously, fuck you)",
-            )
+            .expect("hard_get: requested range is not present in this region table")
     }
 
     pub fn remove_range(&mut self, range: Range) -> bool {

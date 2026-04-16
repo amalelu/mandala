@@ -193,7 +193,18 @@ impl Add for GlyphAreaField {
                 GlyphAreaField::Operation(_) => {}
             }
         }
-        panic!("Tried to add different types of GlyphBlockFields");
+        // Composing two fields of different variants is not a
+        // meaningful additive operation. Mutator chains are reachable
+        // from interactive paths (frame render, mutation drains), so
+        // CODE_CONVENTIONS §7 forbids panicking here. Warn loudly so
+        // the drift is visible in logs, then degrade by returning the
+        // rhs unchanged — the same "later mutation wins" rule the
+        // single-value-field branches above use for Outline.
+        log::warn!(
+            "GlyphAreaField::add called with mismatched variants; \
+             discarding lhs and returning rhs"
+        );
+        rhs
     }
 }
 
