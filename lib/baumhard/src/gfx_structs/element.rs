@@ -11,24 +11,64 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Formatter};
 
+/// Identifies a single field-level change to a [`GfxElement`].
+///
+/// Used by the mutator pipeline to describe which part of an element is
+/// being mutated. Each variant wraps the field enum of the corresponding
+/// inner type (`GlyphAreaField`, `GlyphModelField`) or targets
+/// element-level metadata (channel, id, flag). Cost: O(1) construction,
+/// no allocation beyond what the inner field enum carries.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum GfxElementField {
+    /// A field change targeting the inner [`GlyphArea`].
     GlyphArea(GlyphAreaField),
+    /// A field change targeting the inner [`GlyphModel`].
     GlyphModel(GlyphModelField),
+    /// A field change targeting a specific [`ColorFontRegion`](crate::core::primitives::ColorFontRegion)
+    /// within the given [`Range`].
     Region(Range, ColorFontRegionField),
+    /// Reassign the element's branch channel index.
     Channel(usize),
+    /// Reassign the element's unique id.
     Id(usize),
+    /// Toggle or set a [`Flag`] on the element.
     Flag(Flag),
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+/// Discriminant tag for [`GfxElement`] variants.
+///
+/// Returned by [`GfxElement::get_type`]. Useful for branching on the
+/// variant without destructuring the full enum. O(1), no allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GfxElementType {
+    /// The element wraps a [`GlyphArea`].
     GlyphArea,
+    /// The element wraps a [`GlyphModel`].
     GlyphModel,
+    /// The element is a placeholder void node.
     Void,
 }
 
+/// A node element in the Baumhard glyph tree.
+///
+/// Every node in a [`Tree<GfxElement, GfxMutator>`](crate::gfx_structs::tree::Tree)
+/// stores one `GfxElement`. The three variants cover the two renderable
+/// glyph types ([`GlyphArea`] for text regions, [`GlyphModel`] for
+/// composed glyph shapes) and a lightweight [`Void`](GfxElement::Void)
+/// placeholder used to pad tree structure without rendering cost.
+///
+/// All variants carry a `channel` (branch routing), a `unique_id`
+/// (application-assigned identity), a set of [`Flag`]s, and a list of
+/// [`EventSubscriber`] callbacks.
+///
+/// Cost: construction allocates a `Box` for the inner glyph type
+/// (except `Void`). Field access is O(1) with a single match.
 pub enum GfxElement {
+    /// A text region rendered through cosmic-text layout.
+    ///
+    /// Wraps a heap-allocated [`GlyphArea`] that owns the text content,
+    /// scale, position, colour-font regions, and hit-box. This is the
+    /// primary renderable element for mindmap nodes, labels, and borders.
     GlyphArea {
         glyph_area: Box<GlyphArea>,
         flags: FxHashSet<Flag>,
@@ -36,7 +76,11 @@ pub enum GfxElement {
         unique_id: usize,
         event_subscribers: Vec<EventSubscriber>,
     },
-    /// A [GlyphModel] typically needs a container (such as [GlyphArea]) in order to make sense
+    /// A composed glyph shape built from lines and components.
+    ///
+    /// Wraps a heap-allocated [`GlyphModel`]. Typically a child of a
+    /// [`GlyphArea`] node — the model provides the visual geometry while
+    /// the parent area supplies the text-layout context.
     GlyphModel {
         glyph_model: Box<GlyphModel>,
         flags: FxHashSet<Flag>,
@@ -44,8 +88,12 @@ pub enum GfxElement {
         unique_id: usize,
         event_subscribers: Vec<EventSubscriber>,
     },
-    /// A Void element is simply a tool to create trees where certain nodes are ignored
-    /// For the purpose of following some pattern, for example conforming to an existing mutator tree
+    /// A no-op placeholder node that produces no rendering output.
+    ///
+    /// Used to pad tree structure so that a mutator tree can target
+    /// specific positions without requiring a renderable element at
+    /// every slot. Carries only metadata (channel, id, flags,
+    /// subscribers) and no glyph payload.
     Void {
         channel: usize,
         unique_id: usize,
@@ -55,9 +103,23 @@ pub enum GfxElement {
 }
 
 impl GfxElement {
+    /// Create a [`GlyphArea`] element with `unique_id` defaulting to `0`.
+    ///
+    /// Convenience wrapper around [`new_area_non_indexed_with_id`](Self::new_area_non_indexed_with_id).
+    /// Allocates a `Box<GlyphArea>`. The element is *not* inserted into a
+    /// region index — callers that need indexing must register it
+    /// separately.
     pub fn new_area_non_indexed(section: GlyphArea, channel: usize) -> GfxElement {
         Self::new_area_non_indexed_with_id(section, channel, 0)
     }
+    /// Create a [`GlyphArea`] element with an explicit `unique_id`.
+    ///
+    /// * `section` — the [`GlyphArea`] payload (text, scale, position, bounds).
+    /// * `channel` — branch-routing index for the tree walker.
+    /// * `unique_id` — application-assigned identity for this element.
+    ///
+    /// Cost: one heap allocation (`Box<GlyphArea>`). Flags and
+    /// subscribers start empty.
     pub fn new_area_non_indexed_with_id(
         section: GlyphArea,
         channel: usize,
@@ -72,10 +134,21 @@ impl GfxElement {
         }
     }
 
+    /// Create a [`Void`](GfxElement::Void) placeholder with `unique_id`
+    /// defaulting to `0`.
+    ///
+    /// No heap allocation — `Void` carries only metadata.
     pub fn new_void(channel: usize) -> GfxElement {
         Self::new_void_with_id(channel, 0)
     }
 
+    /// Create a [`Void`](GfxElement::Void) placeholder with an explicit
+    /// `unique_id`.
+    ///
+    /// * `channel` — branch-routing index.
+    /// * `unique_id` — application-assigned identity.
+    ///
+    /// Cost: no heap allocation. Flags and subscribers start empty.
     pub fn new_void_with_id(channel: usize, unique_id: usize) -> GfxElement {
         GfxElement::Void {
             channel,
@@ -84,10 +157,22 @@ impl GfxElement {
             flags: Default::default(),
         }
     }
+    /// Create a [`GlyphModel`] element. Delegates to
+    /// [`new_model_non_indexed_with_id`](Self::new_model_non_indexed_with_id).
+    ///
+    /// Cost: one heap allocation (`Box<GlyphModel>`).
     pub fn new_model_non_indexed(model: GlyphModel, channel: usize, unique_id: usize) -> Self {
         Self::new_model_non_indexed_with_id(model, channel, unique_id)
     }
 
+    /// Create a [`GlyphModel`] element with an explicit `unique_id`.
+    ///
+    /// * `model` — the [`GlyphModel`] payload (lines, components, position).
+    /// * `channel` — branch-routing index.
+    /// * `unique_id` — application-assigned identity.
+    ///
+    /// Cost: one heap allocation (`Box<GlyphModel>`). Flags and
+    /// subscribers start empty.
     pub fn new_model_non_indexed_with_id(
         model: GlyphModel,
         channel: usize,
@@ -102,10 +187,22 @@ impl GfxElement {
         }
     }
 
+    /// Create a [`GlyphModel`] element with a default (empty) model.
+    /// Delegates to [`new_model_blank_with_id`](Self::new_model_blank_with_id).
+    ///
+    /// Cost: one heap allocation for the empty `Box<GlyphModel>`.
     pub fn new_model_blank(channel: usize, unique_id: usize) -> GfxElement {
         Self::new_model_blank_with_id(channel, unique_id)
     }
 
+    /// Create a [`GlyphModel`] element wrapping a default-constructed
+    /// [`GlyphModel::new()`].
+    ///
+    /// * `channel` — branch-routing index.
+    /// * `unique_id` — application-assigned identity.
+    ///
+    /// Cost: one heap allocation (`Box<GlyphModel>`). Flags and
+    /// subscribers start empty.
     pub fn new_model_blank_with_id(channel: usize, unique_id: usize) -> GfxElement {
         GfxElement::GlyphModel {
             glyph_model: Box::new(GlyphModel::new()),
@@ -116,6 +213,9 @@ impl GfxElement {
         }
     }
 
+    /// Return a mutable reference to this element's event-subscriber list.
+    ///
+    /// Works across all variants. O(1) — single match, no allocation.
     pub fn subscribers_mut(&mut self) -> &mut Vec<EventSubscriber> {
         match self {
             GfxElement::GlyphArea {
@@ -130,6 +230,9 @@ impl GfxElement {
         }
     }
 
+    /// Return a shared reference to this element's event-subscriber list.
+    ///
+    /// Works across all variants. O(1) — single match, no allocation.
     pub fn subscribers_as_ref(&self) -> &Vec<EventSubscriber> {
         match self {
             GfxElement::GlyphArea {
@@ -144,6 +247,11 @@ impl GfxElement {
         }
     }
 
+    /// Overwrite the element's `unique_id`.
+    ///
+    /// * `id` — the new identity value.
+    ///
+    /// Works across all variants. O(1), no allocation.
     pub fn set_unique_id(&mut self, id: usize) {
         match self {
             GfxElement::GlyphArea { unique_id, .. } => *unique_id = id,
@@ -152,6 +260,9 @@ impl GfxElement {
         }
     }
 
+    /// Return the discriminant tag for this element.
+    ///
+    /// O(1), no allocation. Useful for branching without destructuring.
     pub fn get_type(&self) -> GfxElementType {
         match self {
             GfxElement::GlyphArea { .. } => GfxElementType::GlyphArea,
@@ -160,6 +271,10 @@ impl GfxElement {
         }
     }
 
+    /// Return a mutable reference to the inner [`GlyphArea`], or `None`
+    /// if this element is not a `GlyphArea` variant.
+    ///
+    /// O(1) match, no allocation.
     pub fn glyph_area_mut(&mut self) -> Option<&mut GlyphArea> {
         match self {
             GfxElement::GlyphArea {
@@ -171,6 +286,10 @@ impl GfxElement {
         }
     }
 
+    /// Return a shared reference to the inner [`GlyphArea`], or `None`
+    /// if this element is not a `GlyphArea` variant.
+    ///
+    /// O(1) match, no allocation.
     pub fn glyph_area(&self) -> Option<&GlyphArea> {
         match self {
             GfxElement::GlyphArea {
@@ -182,6 +301,10 @@ impl GfxElement {
         }
     }
 
+    /// Return a shared reference to the inner [`GlyphModel`], or `None`
+    /// if this element is not a `GlyphModel` variant.
+    ///
+    /// O(1) match, no allocation.
     pub fn glyph_model(&self) -> Option<&GlyphModel> {
         match self {
             GfxElement::GlyphModel { glyph_model, .. } => Some(glyph_model),
@@ -189,6 +312,10 @@ impl GfxElement {
         }
     }
 
+    /// Return a mutable reference to the inner [`GlyphModel`], or `None`
+    /// if this element is not a `GlyphModel` variant.
+    ///
+    /// O(1) match, no allocation.
     pub fn glyph_model_mut(&mut self) -> Option<&mut GlyphModel> {
         match self {
             GfxElement::GlyphModel { glyph_model, .. } => Some(glyph_model),
@@ -196,6 +323,9 @@ impl GfxElement {
         }
     }
 
+    /// Return the application-assigned identity for this element.
+    ///
+    /// Works across all variants. O(1), no allocation.
     pub fn unique_id(&self) -> usize {
         match self {
             GfxElement::GlyphArea { unique_id, .. } => *unique_id,
@@ -204,6 +334,14 @@ impl GfxElement {
         }
     }
 
+    /// Return the world-space position of this element.
+    ///
+    /// * `GlyphArea` / `GlyphModel` — returns the stored position as a
+    ///   `Vec2`.
+    /// * `Void` — returns `Vec2::NAN` (void nodes have no spatial
+    ///   meaning).
+    ///
+    /// O(1), no allocation.
     pub fn position(&self) -> Vec2 {
         match self {
             GfxElement::GlyphArea {
@@ -215,6 +353,14 @@ impl GfxElement {
         }
     }
 
+    /// Return the colour stored in the colour-font region at `range`,
+    /// if one exists.
+    ///
+    /// * `GlyphArea` — looks up the region and returns its colour.
+    /// * `GlyphModel` — **panics** (not yet implemented).
+    /// * `Void` — returns `None`.
+    ///
+    /// O(1) region lookup (hash map).
     pub fn color_at_region(&self, range: Range) -> Option<FloatRgba> {
         match self {
             GfxElement::GlyphArea { glyph_area, .. } => glyph_area
@@ -226,6 +372,12 @@ impl GfxElement {
         }
     }
 
+    /// Set the world-space position of this element.
+    ///
+    /// * `GlyphArea` / `GlyphModel` — overwrites the stored position.
+    /// * `Void` — no-op (void nodes have no spatial meaning).
+    ///
+    /// O(1), no allocation.
     pub fn set_position(&mut self, position: Vec2) {
         match self {
             GfxElement::GlyphArea {
@@ -245,6 +397,11 @@ impl GfxElement {
         }
     }
 
+    /// Rotate this element's position clockwise around `pivot` by
+    /// `degrees`.
+    ///
+    /// Void elements (whose position is `NAN`) are skipped. Delegates to
+    /// [`clockwise_rotation_around_pivot`]. O(1), no allocation.
     pub fn rotate(&mut self, pivot: Vec2, degrees: f32) {
         let position = self.position();
         if !position.is_nan() {
