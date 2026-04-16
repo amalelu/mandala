@@ -551,8 +551,10 @@ app.event_loop.run(move |event, _window_target| {
                 let consumed = if let Some(doc) = document.as_mut() {
                     handle_color_picker_key(
                         &key_name,
-                        &logical_key,
                         modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
+                        &keybinds,
                         &mut color_picker_state,
                         doc,
                         &mut mindmap_tree,

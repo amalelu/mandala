@@ -1,13 +1,13 @@
-//! Keyboard dispatch for the open picker: Esc cancels (Contextual),
-//! Enter commits (Contextual) or applies-to-selection (Standalone),
-//! h/H ±15° hue, s/S ±0.1 sat, v/V ±0.1 val. Unmatched keys fall
-//! through to normal keybind dispatch.
-
-use winit::keyboard::Key;
+//! Keyboard dispatch for the open picker. Routes keystrokes through
+//! the contextual keybind resolver (`InputContext::ColorPicker`) so
+//! all picker keys are user-customizable. Unmatched keys fall
+//! through to the Document context via `InputContext::falls_through`.
 
 use crate::application::clipboard;
+use crate::application::color_picker::ColorPickerState;
 use crate::application::console::traits::{ClipboardContent, HandlesCopy, HandlesCut, HandlesPaste, Outcome};
 use crate::application::document::MindMapDocument;
+use crate::application::keybinds::{Action, InputContext, ResolvedKeybinds};
 use crate::application::renderer::Renderer;
 
 use super::commit::{
@@ -15,137 +15,121 @@ use super::commit::{
     commit_color_picker_to_selection,
 };
 
-/// Route a keystroke to the picker. Esc cancels (contextual only;
-/// ignored in standalone), Enter commits, h/H ±15° hue, s/S ±0.1
-/// sat, v/V ±0.1 val. Any other key falls through to normal
-/// keybind dispatch.
+/// Route a keystroke to the picker via `action_for_context`. Returns
+/// `true` if the key was consumed, `false` to let it fall through
+/// to the event loop's normal dispatch.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn handle_color_picker_key(
     key_name: &Option<String>,
-    logical_key: &Key,
     ctrl: bool,
-    state: &mut crate::application::color_picker::ColorPickerState,
+    shift: bool,
+    alt: bool,
+    keybinds: &ResolvedKeybinds,
+    state: &mut ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     picker_dirty: &mut bool,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) -> bool {
-    use crate::application::color_picker::ColorPickerState;
+    let name = match key_name.as_deref() {
+        Some(n) => n,
+        None => return false,
+    };
 
-    let name = key_name.as_deref();
+    let action = keybinds.action_for_context(
+        InputContext::ColorPicker, name, ctrl, shift, alt,
+    );
 
-    // Clipboard shortcuts — Ctrl+C / Ctrl+V / Ctrl+X. Checked before
-    // the character-key match below so Ctrl+V doesn't fall into the
-    // bare "v" (value nudge) arm.
-    if ctrl {
-        match name {
-            Some("c") => {
-                if let ClipboardContent::Text(hex) = state.clipboard_copy() {
-                    clipboard::write_clipboard(&hex);
-                }
-                return true;
+    match action {
+        Some(Action::Copy) => {
+            if let ClipboardContent::Text(hex) = state.clipboard_copy() {
+                clipboard::write_clipboard(&hex);
             }
-            Some("v") => {
-                if let Some(text) = clipboard::read_clipboard() {
-                    if let Outcome::Applied = state.clipboard_paste(&text) {
-                        apply_picker_preview(state, doc, picker_dirty);
-                    }
-                }
-                return true;
-            }
-            Some("x") => {
-                if let ClipboardContent::Text(hex) = state.clipboard_cut() {
-                    clipboard::write_clipboard(&hex);
-                }
-                return true;
-            }
-            _ => {}
+            true
         }
-    }
-
-    let is_standalone = state.is_standalone();
-    match name {
-        Some("escape") => {
-            if is_standalone {
-                // Standalone mode ignores Escape — the persistent
-                // palette only closes via `color picker off` from
-                // the console. Don't consume the key — let it
-                // flow through to normal keybind dispatch so the
-                // user can e.g. close the console if they've
-                // summoned it.
+        Some(Action::Paste) => {
+            if let Some(text) = clipboard::read_clipboard() {
+                if let Outcome::Applied = state.clipboard_paste(&text) {
+                    apply_picker_preview(state, doc, picker_dirty);
+                }
+            }
+            true
+        }
+        Some(Action::Cut) => {
+            if let ClipboardContent::Text(hex) = state.clipboard_cut() {
+                clipboard::write_clipboard(&hex);
+            }
+            true
+        }
+        Some(Action::PickerCancel) => {
+            if state.is_standalone() {
                 return false;
             }
             cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
-            return true;
+            true
         }
-        Some("enter") => {
-            if is_standalone {
-                // Standalone: Enter behaves like clicking ࿕ —
-                // applies the current HSV to the document
-                // selection, stays open.
+        Some(Action::PickerCommit) => {
+            if state.is_standalone() {
                 commit_color_picker_to_selection(
-                    state,
-                    doc,
-                    mindmap_tree,
-                    app_scene,
-                    renderer,
+                    state, doc, mindmap_tree, app_scene, renderer,
                 );
-                return true;
+            } else {
+                commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
             }
-            commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
-            return true;
+            true
         }
-        _ => {}
+        Some(Action::PickerNudgeHueDown) => {
+            nudge_picker(state, doc, picker_dirty, |h, _, _| {
+                *h = (*h - 15.0).rem_euclid(360.0);
+            })
+        }
+        Some(Action::PickerNudgeHueUp) => {
+            nudge_picker(state, doc, picker_dirty, |h, _, _| {
+                *h = (*h + 15.0).rem_euclid(360.0);
+            })
+        }
+        Some(Action::PickerNudgeSatDown) => {
+            nudge_picker(state, doc, picker_dirty, |_, s, _| {
+                *s = (*s - 0.1).clamp(0.0, 1.0);
+            })
+        }
+        Some(Action::PickerNudgeSatUp) => {
+            nudge_picker(state, doc, picker_dirty, |_, s, _| {
+                *s = (*s + 0.1).clamp(0.0, 1.0);
+            })
+        }
+        Some(Action::PickerNudgeValDown) => {
+            nudge_picker(state, doc, picker_dirty, |_, _, v| {
+                *v = (*v - 0.1).clamp(0.0, 1.0);
+            })
+        }
+        Some(Action::PickerNudgeValUp) => {
+            nudge_picker(state, doc, picker_dirty, |_, _, v| {
+                *v = (*v + 0.1).clamp(0.0, 1.0);
+            })
+        }
+        Some(_) => {
+            // A Document-level action fell through — let the event
+            // loop handle it via normal dispatch.
+            false
+        }
+        None => false,
     }
-    // Character keys: h/s/v nudges. Use logical_key to keep this
-    // case-sensitive (uppercase = bigger nudge). Non-matching
-    // characters fall through so the user can e.g. press `/` to
-    // open the console while the Standalone palette is active.
-    if let Key::Character(c) = logical_key {
-        let s = c.as_str();
-        let mut changed = false;
-        if let ColorPickerState::Open { hue_deg, sat, val, hover_preview, .. } = state {
-            match s {
-                "h" => {
-                    *hue_deg = (*hue_deg - 15.0).rem_euclid(360.0);
-                    changed = true;
-                }
-                "H" => {
-                    *hue_deg = (*hue_deg + 15.0).rem_euclid(360.0);
-                    changed = true;
-                }
-                "s" => {
-                    *sat = (*sat - 0.1).clamp(0.0, 1.0);
-                    changed = true;
-                }
-                "S" => {
-                    *sat = (*sat + 0.1).clamp(0.0, 1.0);
-                    changed = true;
-                }
-                "v" => {
-                    *val = (*val - 0.1).clamp(0.0, 1.0);
-                    changed = true;
-                }
-                "V" => {
-                    *val = (*val + 0.1).clamp(0.0, 1.0);
-                    changed = true;
-                }
-                _ => {}
-            }
-            if changed {
-                *hover_preview = None;
-            }
-        }
-        if changed {
-            apply_picker_preview(state, doc, picker_dirty);
-            return true;
-        }
-        // Character key but not one of ours — fall through.
-        return false;
+}
+
+fn nudge_picker(
+    state: &mut ColorPickerState,
+    doc: &mut MindMapDocument,
+    picker_dirty: &mut bool,
+    f: impl FnOnce(&mut f32, &mut f32, &mut f32),
+) -> bool {
+    if let ColorPickerState::Open { hue_deg, sat, val, hover_preview, .. } = state {
+        f(hue_deg, sat, val);
+        *hover_preview = None;
+        apply_picker_preview(state, doc, picker_dirty);
+        true
+    } else {
+        false
     }
-    // Any non-character key that didn't match an explicit arm
-    // above (arrow keys, function keys, modifier-only, etc.) —
-    // let it pass through to normal keybind dispatch.
-    false
 }
