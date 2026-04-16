@@ -315,3 +315,141 @@ use super::defaults::default_cross_link_edge;
         let restored_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;
         assert!((restored_x - orig_x).abs() < 0.001, "Undo should restore original position");
     }
+
+    // ----- Animation lifecycle tests (§T1 — fundamental) -----
+
+    fn make_animated_mutation(id: &str, duration_ms: u32) -> CM {
+        CM {
+            id: id.to_string(),
+            name: id.to_string(),
+            mutations: vec![
+                Mutation::area_command(GlyphAreaCommand::NudgeRight(100.0)),
+            ],
+            target_scope: TS::SelfOnly,
+            behavior: MB::Persistent,
+            predicate: None,
+            document_actions: vec![],
+            timing: Some(AnimationTiming {
+                duration_ms,
+                delay_ms: 0,
+                easing: Easing::Linear,
+                then: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_start_animation_creates_instance() {
+        let mut doc = load_test_doc();
+        let cm = make_animated_mutation("anim-1", 500);
+        let node_id = first_testament_node_id(&doc);
+        assert!(!doc.has_active_animations());
+
+        doc.start_animation(&cm, &node_id, 0);
+        assert!(doc.has_active_animations());
+        assert_eq!(doc.active_animations.len(), 1);
+        assert_eq!(doc.active_animations[0].target_id, node_id);
+    }
+
+    #[test]
+    fn test_start_animation_derives_to_snapshot_via_nudge() {
+        let mut doc = load_test_doc();
+        let cm = make_animated_mutation("anim-pos", 500);
+        let node_id = first_testament_node_id(&doc);
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        doc.start_animation(&cm, &node_id, 0);
+        let anim = &doc.active_animations[0];
+        let expected_to_x = orig_x + 100.0;
+        assert!(
+            (anim.to_node.position.x - expected_to_x).abs() < 0.001,
+            "to_node.x should be original + 100 (NudgeRight(100)); got {} expected {}",
+            anim.to_node.position.x, expected_to_x,
+        );
+        assert!(
+            (anim.from_node.position.x - orig_x).abs() < 0.001,
+            "from_node.x should match original",
+        );
+    }
+
+    #[test]
+    fn test_start_animation_no_op_for_zero_duration() {
+        let mut doc = load_test_doc();
+        let cm = make_animated_mutation("anim-zero", 0);
+        let node_id = first_testament_node_id(&doc);
+        doc.start_animation(&cm, &node_id, 0);
+        assert!(!doc.has_active_animations());
+    }
+
+    #[test]
+    fn test_start_animation_no_op_for_duplicate_in_flight() {
+        let mut doc = load_test_doc();
+        let cm = make_animated_mutation("anim-dup", 500);
+        let node_id = first_testament_node_id(&doc);
+        doc.start_animation(&cm, &node_id, 0);
+        doc.start_animation(&cm, &node_id, 100);
+        assert_eq!(doc.active_animations.len(), 1);
+    }
+
+    #[test]
+    fn test_tick_animations_advances_position() {
+        let mut doc = load_test_doc();
+        let cm = make_animated_mutation("anim-tick", 1000);
+        let node_id = first_testament_node_id(&doc);
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        doc.start_animation(&cm, &node_id, 0);
+        // Tick at 50% progress (500 ms into 1000 ms duration).
+        let advanced = doc.tick_animations(500, None);
+        assert!(advanced);
+
+        let current_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        // Linear easing at t=0.5: should be ~halfway.
+        let expected_mid = orig_x + 50.0;
+        assert!(
+            (current_x - expected_mid).abs() < 1.0,
+            "position.x at t=0.5 should be ~halfway; got {} expected ~{}",
+            current_x, expected_mid,
+        );
+    }
+
+    #[test]
+    fn test_tick_animations_completes_at_duration() {
+        let mut doc = load_test_doc();
+        let cm = make_animated_mutation("anim-end", 1000);
+        let node_id = first_testament_node_id(&doc);
+
+        doc.start_animation(&cm, &node_id, 0);
+        // Tick past the end.
+        let advanced = doc.tick_animations(1500, None);
+        assert!(advanced);
+        assert!(!doc.has_active_animations(), "animation should have drained");
+    }
+
+    #[test]
+    fn test_tick_animations_no_advance_on_empty() {
+        let mut doc = load_test_doc();
+        let advanced = doc.tick_animations(1000, None);
+        assert!(!advanced);
+    }
+
+    #[test]
+    fn test_fast_forward_animations_snaps_to_end() {
+        let mut doc = load_test_doc();
+        let cm = make_animated_mutation("anim-ff", 5000);
+        let node_id = first_testament_node_id(&doc);
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        doc.start_animation(&cm, &node_id, 0);
+        doc.fast_forward_animations(None);
+        assert!(!doc.has_active_animations());
+
+        // Without a tree, fast_forward writes the to_node.position
+        // directly into the model.
+        let final_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        let expected = orig_x + 100.0;
+        assert!(
+            (final_x - expected).abs() < 0.001,
+            "fast-forward should snap to to_node position",
+        );
+    }
