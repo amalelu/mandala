@@ -31,7 +31,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_hit_test_direct_hit() {
         let mut tree = load_test_tree();
-        // "Lord God" node (id: 348068464) — get its position from the tree
+        // "Lord God" node (id: 0) — get its position from the tree
         let node_id = tree.node_map.get("0").unwrap();
         let area = tree.tree.arena.get(*node_id).unwrap().get().glyph_area().unwrap();
         let center = Vec2::new(
@@ -54,7 +54,7 @@ use super::defaults::default_cross_link_edge;
     fn test_hit_test_returns_smallest_on_overlap() {
         let mut tree = load_test_tree();
         // Find a parent-child pair where child is inside parent's bounds
-        // "Lord God" (348068464) has children — find one whose bounds overlap
+        // "Lord God" (0) has children — find one whose bounds overlap
         let parent_id_str = "0";
         let parent_size = {
             let nid = tree.node_map.get(parent_id_str).unwrap();

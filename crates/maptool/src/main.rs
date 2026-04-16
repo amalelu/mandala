@@ -8,6 +8,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 mod convert;
 mod export;
+mod verify;
 
 const USAGE: &str = "\
 Usage: maptool <command> <map.json> <args...>
@@ -50,7 +51,14 @@ Commands:
                                 Convert a legacy (miMind-derived) map
                                 to the current format: structural IDs,
                                 named enums, hoisted palettes, channel
-                                field.";
+                                field.
+  verify <map.json>             Check the file against the format's
+                                structural invariants (parent_id
+                                consistency, Dewey IDs, edge and portal
+                                references, palette references, named
+                                enums, text-run bounds). Exit 0 if
+                                valid; nonzero with a list of
+                                violations otherwise.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -186,6 +194,27 @@ fn run(args: &[String]) -> Result<(), CliError> {
                 .ok_or_else(|| CliError::Usage("convert: missing <out.json>".into()))?;
             convert::convert_legacy(Path::new(input), Path::new(output))
                 .map_err(CliError::Io)
+        }
+        "verify" => {
+            let map_path = args
+                .get(1)
+                .ok_or_else(|| CliError::Usage("verify: missing <map.json>".into()))?;
+            let map = load_map(map_path)?;
+            let violations = verify::verify(&map);
+            if violations.is_empty() {
+                println!("{}: valid", map_path);
+                Ok(())
+            } else {
+                for v in &violations {
+                    eprintln!("{v}");
+                }
+                eprintln!("{} violation(s)", violations.len());
+                Err(CliError::NotFound(format!(
+                    "{} violation(s) in {}",
+                    violations.len(),
+                    map_path
+                )))
+            }
         }
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
@@ -784,6 +813,35 @@ mod tests {
             let args = as_strings(&[flag]);
             assert!(run(&args).is_ok(), "{flag} should succeed");
         }
+    }
+
+    #[test]
+    fn run_verify_on_testament_succeeds() {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.pop();
+        p.pop();
+        p.push("maps/testament.mindmap.json");
+        let args = as_strings(&["verify", p.to_str().unwrap()]);
+        assert!(run(&args).is_ok(), "testament map must verify clean");
+    }
+
+    #[test]
+    fn run_verify_flags_invalid_fixture() {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests/fixtures/invalid_sampler.mindmap.json");
+        let args = as_strings(&["verify", p.to_str().unwrap()]);
+        match run(&args) {
+            Err(CliError::NotFound(msg)) => {
+                assert!(msg.contains("violation"), "got: {msg}");
+            }
+            other => panic!("expected NotFound with violations, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_verify_missing_map_is_usage_error() {
+        let args = as_strings(&["verify"]);
+        assert!(matches!(run(&args), Err(CliError::Usage(_))));
     }
 
     // --- apply: fixture + tmpfile helpers ---------------------------

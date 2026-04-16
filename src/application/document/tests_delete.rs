@@ -264,11 +264,6 @@ use super::defaults::default_cross_link_edge;
         // Pick any node with at least one incident edge.
         let target = find_node_with_children_and_parent(&doc);
 
-        // Reset edges to a known layout: a mix of edges touching and
-        // not touching the target, spaced out so the bug's effect
-        // is visible. Use existing node ids so the edges are valid
-        // references (any two existing-but-not-target ids work).
-        //
         // Exclude both the target *and* its subtree: `delete_node`
         // cascade-renames descendants to fresh root ids, and rewrites
         // every edge that references those descendants. If any of the

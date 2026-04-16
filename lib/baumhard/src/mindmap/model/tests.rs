@@ -19,7 +19,7 @@ fn test_all_descendants() {
     let path = test_map_path();
     let map = loader::load_from_file(&path).unwrap();
 
-    // "Lord God" (348068464) has children — descendants should include them all
+    // "Lord God" (0) has children — descendants should include them all
     let children = map.children_of("0");
     assert!(!children.is_empty(), "Lord God should have children");
 

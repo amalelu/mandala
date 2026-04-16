@@ -102,7 +102,7 @@ mod tests {
         path
     }
 
-    /// Build a minimal `MindNode` with the given id/parent/index/text.
+    /// Build a minimal `MindNode` with the given id/parent/text.
     /// All the style/layout/position fields are filled with throwaway
     /// defaults — the export code never reads them.
     fn make_node(id: &str, parent_id: Option<&str>, text: &str) -> MindNode {

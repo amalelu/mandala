@@ -1,0 +1,94 @@
+{
+  "version": "1.0",
+  "name": "invalid_sampler",
+  "canvas": { "background_color": "#000000" },
+  "palettes": {
+    "empty_palette": { "groups": [] }
+  },
+  "nodes": {
+    "0": {
+      "id": "0",
+      "parent_id": null,
+      "position": { "x": 0.0, "y": 0.0 },
+      "size": { "width": 100.0, "height": 40.0 },
+      "text": "root",
+      "text_runs": [],
+      "style": {
+        "background_color": "#141414",
+        "frame_color": "#30b082",
+        "text_color": "#ffffff",
+        "shape": "oblong",
+        "corner_radius_percent": 0.0,
+        "frame_thickness": 0.0,
+        "show_frame": false,
+        "show_shadow": false
+      },
+      "layout": { "type": "map", "direction": "auto", "spacing": 0.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": { "palette": "nonexistent", "level": 0, "starts_at_root": true, "connections_colored": true },
+      "channel": 0
+    },
+    "0.0": {
+      "id": "0.0",
+      "parent_id": "ghost",
+      "position": { "x": 0.0, "y": 0.0 },
+      "size": { "width": 100.0, "height": 40.0 },
+      "text": "orphan",
+      "text_runs": [],
+      "style": {
+        "background_color": "#141414",
+        "frame_color": "#30b082",
+        "text_color": "#ffffff",
+        "shape": "rectangle",
+        "corner_radius_percent": 0.0,
+        "frame_thickness": 0.0,
+        "show_frame": false,
+        "show_shadow": false
+      },
+      "layout": { "type": "map", "direction": "auto", "spacing": 0.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": null,
+      "channel": 0
+    },
+    "1": {
+      "id": "DIFFERENT",
+      "parent_id": null,
+      "position": { "x": 0.0, "y": 0.0 },
+      "size": { "width": 100.0, "height": 40.0 },
+      "text": "key mismatch",
+      "text_runs": [],
+      "style": {
+        "background_color": "#141414",
+        "frame_color": "#30b082",
+        "text_color": "#ffffff",
+        "shape": "rectangle",
+        "corner_radius_percent": 0.0,
+        "frame_thickness": 0.0,
+        "show_frame": false,
+        "show_shadow": false
+      },
+      "layout": { "type": "map", "direction": "auto", "spacing": 0.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": null,
+      "channel": 0
+    }
+  },
+  "edges": [
+    {
+      "from_id": "0",
+      "to_id": "nowhere",
+      "type": "cross_link",
+      "color": "#ffffff",
+      "width": 2,
+      "line_style": "wiggly",
+      "visible": true,
+      "label": null,
+      "anchor_from": "auto",
+      "anchor_to": "diagonal",
+      "control_points": []
+    }
+  ]
+}
