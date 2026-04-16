@@ -2,12 +2,15 @@
 //! dispatches on. New keyboard interactions go here, then add a
 //! matching `KeybindConfig` field + default + binding-string list.
 
+use super::context::InputContext;
+
 /// High-level user actions that can be bound to keys. Add a new variant
 /// here when a new keyboard interaction is introduced, extend
 /// `KeybindConfig` with a matching field + default, and handle the variant
 /// in the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
+    // ── Document-level (global) ──────────────────────────────────
     /// Undo the last action on the document.
     Undo,
     /// Enter reparent mode for the currently selected nodes.
@@ -18,54 +21,130 @@ pub enum Action {
     DeleteSelection,
     /// Cancel the current mode (reparent / connect).
     CancelMode,
-    /// Create a new unattached (orphan) node at the cursor position. The
-    /// node starts with no parent so users can build a piece in isolation
-    /// and attach it with reparent mode (Ctrl+P) later.
+    /// Create a new unattached (orphan) node at the cursor position.
     CreateOrphanNode,
-    /// Detach every currently selected node from its parent, promoting it
-    /// to a root node. Each selected node's full subtree stays attached to
-    /// it — this only severs the link between the selection and its
-    /// former parent, not the selection and its children.
+    /// Detach every currently selected node from its parent.
     OrphanSelection,
     /// Open the inline text editor on the currently selected single node
-    /// with the node's existing text, cursor at end. Paired with
-    /// `EditSelectionClean` which opens with an empty buffer instead.
-    /// Only fires at the document level — the text-edit steal at the
-    /// top of keyboard dispatch means this action can't collide with
-    /// editor-mode Enter/Backspace.
+    /// with the node's existing text, cursor at end.
     EditSelection,
     /// Same as `EditSelection` but opens the editor with an empty buffer.
-    /// On commit the node's text is replaced wholesale — the "clean
-    /// slate" gesture: press Backspace on a selected node to retype it
-    /// from scratch.
     EditSelectionClean,
-    /// Open (or toggle) the CLI console. Suppressed while any other
-    /// keyboard-capturing modal is active (`LabelEditState`,
-    /// `ColorPickerState`, `TextEditState`). Pressing again while the
-    /// console is open closes it — symmetric with Esc and the shell
-    /// muscle memory around a toggle-open console.
+    /// Open (or toggle) the CLI console.
     OpenConsole,
-    /// Save the currently-open mindmap document to its bound file
-    /// path. If no `file_path` is set (e.g. after `new` without a
-    /// path), the action is a no-op aside from a status message —
-    /// the user has to invoke `save <path>` from the console first
-    /// to bind a target. WASM builds have no filesystem access, so
-    /// the action is logged and ignored there.
+    /// Save the currently-open mindmap document to its bound file path.
     SaveDocument,
-    /// Copy the focused component's clipboard representation to the
-    /// system clipboard. Dispatches through `HandlesCopy` on the
-    /// current selection's `TargetView`; modal components (color
-    /// picker, text editor, label editor) handle copy in their own
-    /// steal paths before this action fires.
+    /// Copy the focused component's clipboard representation.
     Copy,
-    /// Paste the system clipboard's text content into the focused
-    /// component. Dispatches through `HandlesPaste` on the current
-    /// selection's `TargetView`; modal components handle paste in
-    /// their own steal paths.
+    /// Paste the system clipboard's text content into the focused component.
     Paste,
-    /// Cut: copy the focused component's clipboard representation,
-    /// then clear or reset it. Dispatches through `HandlesCut` on
-    /// the current selection's `TargetView`; modal components handle
-    /// cut in their own steal paths.
+    /// Cut: copy then clear the focused component's clipboard representation.
     Cut,
+
+    // ── Console ──────────────────────────────────────────────────
+    /// Close the console (two-tier: dismiss popup first, then close).
+    ConsoleClose,
+    /// Submit the current console input line for execution.
+    ConsoleSubmit,
+    /// Cycle tab completions.
+    ConsoleTabComplete,
+    /// Walk history backward / navigate completion popup upward.
+    ConsoleHistoryUp,
+    /// Walk history forward / navigate completion popup downward.
+    ConsoleHistoryDown,
+    /// Move cursor one grapheme left.
+    ConsoleCursorLeft,
+    /// Move cursor one grapheme right.
+    ConsoleCursorRight,
+    /// Move cursor to start of input.
+    ConsoleCursorHome,
+    /// Move cursor to end of input.
+    ConsoleCursorEnd,
+    /// Delete grapheme before cursor.
+    ConsoleDeleteBack,
+    /// Delete grapheme after cursor.
+    ConsoleDeleteForward,
+    /// Insert a literal space (winit delivers Space as Named, not Character).
+    ConsoleInsertSpace,
+    /// Clear the current input line (shell Ctrl+C muscle-memory).
+    ConsoleClearLine,
+    /// Jump cursor to start of line (shell Ctrl+A).
+    ConsoleJumpStart,
+    /// Jump cursor to end of line (shell Ctrl+E).
+    ConsoleJumpEnd,
+    /// Kill from cursor to start of line (shell Ctrl+U).
+    ConsoleKillToStart,
+    /// Kill the word before cursor (shell Ctrl+W).
+    ConsoleKillWord,
+
+    // ── Color Picker ─────────────────────────────────────────────
+    /// Cancel the color picker (contextual mode only; ignored in standalone).
+    PickerCancel,
+    /// Commit the current color (contextual: close; standalone: apply to selection).
+    PickerCommit,
+    /// Nudge hue −15°.
+    PickerNudgeHueDown,
+    /// Nudge hue +15°.
+    PickerNudgeHueUp,
+    /// Nudge saturation −0.1.
+    PickerNudgeSatDown,
+    /// Nudge saturation +0.1.
+    PickerNudgeSatUp,
+    /// Nudge value −0.1.
+    PickerNudgeValDown,
+    /// Nudge value +0.1.
+    PickerNudgeValUp,
+
+    // ── Label Editor ─────────────────────────────────────────────
+    /// Cancel the inline label editor (discard changes).
+    LabelEditCancel,
+    /// Commit the inline label editor.
+    LabelEditCommit,
+
+    // ── Text Editor ──────────────────────────────────────────────
+    /// Cancel the inline text editor (discard changes).
+    TextEditCancel,
+}
+
+impl Action {
+    /// The input context this action belongs to. Used by the
+    /// contextual resolver to filter which actions are eligible
+    /// in a given modal state.
+    pub fn context(&self) -> InputContext {
+        match self {
+            Action::ConsoleClose
+            | Action::ConsoleSubmit
+            | Action::ConsoleTabComplete
+            | Action::ConsoleHistoryUp
+            | Action::ConsoleHistoryDown
+            | Action::ConsoleCursorLeft
+            | Action::ConsoleCursorRight
+            | Action::ConsoleCursorHome
+            | Action::ConsoleCursorEnd
+            | Action::ConsoleDeleteBack
+            | Action::ConsoleDeleteForward
+            | Action::ConsoleInsertSpace
+            | Action::ConsoleClearLine
+            | Action::ConsoleJumpStart
+            | Action::ConsoleJumpEnd
+            | Action::ConsoleKillToStart
+            | Action::ConsoleKillWord => InputContext::Console,
+
+            Action::PickerCancel
+            | Action::PickerCommit
+            | Action::PickerNudgeHueDown
+            | Action::PickerNudgeHueUp
+            | Action::PickerNudgeSatDown
+            | Action::PickerNudgeSatUp
+            | Action::PickerNudgeValDown
+            | Action::PickerNudgeValUp => InputContext::ColorPicker,
+
+            Action::LabelEditCancel
+            | Action::LabelEditCommit => InputContext::LabelEdit,
+
+            Action::TextEditCancel => InputContext::TextEdit,
+
+            _ => InputContext::Document,
+        }
+    }
 }

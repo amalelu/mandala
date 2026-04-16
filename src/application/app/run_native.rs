@@ -526,6 +526,8 @@ app.event_loop.run(move |event, _window_target| {
                     &key_name,
                     &logical_key,
                     modifiers.control_key(),
+                    modifiers.shift_key(),
+                    modifiers.alt_key(),
                     &mut console_state,
                     &mut console_history,
                     &mut label_edit_state,
@@ -551,8 +553,10 @@ app.event_loop.run(move |event, _window_target| {
                 let consumed = if let Some(doc) = document.as_mut() {
                     handle_color_picker_key(
                         &key_name,
-                        &logical_key,
                         modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
+                        &keybinds,
                         &mut color_picker_state,
                         doc,
                         &mut mindmap_tree,
@@ -577,6 +581,10 @@ app.event_loop.run(move |event, _window_target| {
                     handle_label_edit_key(
                         &key_name,
                         &logical_key,
+                        modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
+                        &keybinds,
                         &mut label_edit_state,
                         doc,
                         &mut mindmap_tree,
@@ -598,6 +606,10 @@ app.event_loop.run(move |event, _window_target| {
                     handle_text_edit_key(
                         &key_name,
                         &logical_key,
+                        modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
+                        &keybinds,
                         &mut text_edit_state,
                         doc,
                         &mut mindmap_tree,
@@ -609,7 +621,8 @@ app.event_loop.run(move |event, _window_target| {
             }
 
             let action = key_name.as_deref().and_then(|k| {
-                keybinds.action_for(
+                keybinds.action_for_context(
+                    crate::application::keybinds::InputContext::Document,
                     k,
                     modifiers.control_key(),
                     modifiers.shift_key(),
@@ -813,6 +826,7 @@ app.event_loop.run(move |event, _window_target| {
                         save_document_to_bound_path(doc, &mut console_state);
                     }
                 }
+                Some(_) => {}
                 None => {
                     // No built-in action matched — try the
                     // user-defined `custom_mutation_bindings`.

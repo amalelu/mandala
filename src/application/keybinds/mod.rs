@@ -31,6 +31,7 @@
 mod action;
 mod bind;
 mod config;
+mod context;
 mod resolved;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,5 +50,6 @@ pub use action::Action;
 #[allow(unused_imports)]
 pub use bind::{key_to_name, normalize_key_name, KeyBind};
 pub use config::KeybindConfig;
+pub use context::InputContext;
 pub use resolved::ResolvedKeybinds;
 

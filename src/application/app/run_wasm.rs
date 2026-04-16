@@ -266,6 +266,10 @@ app.event_loop.run(move |event, _window_target| {
                 handle_text_edit_key(
                     &key_name,
                     logical_key,
+                    input.modifiers.control_key(),
+                    input.modifiers.shift_key(),
+                    input.modifiers.alt_key(),
+                    &keybinds,
                     &mut input.text_edit_state,
                     &mut input.document,
                     &mut input.mindmap_tree,
@@ -277,7 +281,8 @@ app.event_loop.run(move |event, _window_target| {
 
             // Hotkey dispatch via keybinds.
             let action = key_name.as_deref().and_then(|k| {
-                keybinds.action_for(
+                keybinds.action_for_context(
+                    crate::application::keybinds::InputContext::Document,
                     k,
                     input.modifiers.control_key(),
                     input.modifiers.shift_key(),
