@@ -186,22 +186,42 @@ impl MindMapDocument {
     }
 
     /// Load a MindMap from a file path and create a Document.
+    /// Native-only — WASM builds cannot reach a filesystem; see
+    /// `from_json_str` for the browser-side construction path.
     pub fn load(path: &str) -> Result<Self, String> {
-        match loader::load_from_file(Path::new(path)) {
-            Ok(mut map) => {
-                info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
-                // Grow any undersized node boxes to fit their text
-                // before the model is handed to the tree/scene builders.
-                // See `grow_node_sizes_to_fit_text` for the invariants.
-                grow_node_sizes_to_fit_text(&mut map);
-                Ok(Self::from_mindmap(map, Some(path.to_string())))
-            }
-            Err(e) => {
+        loader::load_from_file(Path::new(path))
+            .map(|map| Self::finalize(map, Some(path.to_string())))
+            .map_err(|e| {
                 let msg = format!("Failed to load mindmap '{}': {}", path, e);
                 error!("{}", msg);
-                Err(msg)
-            }
-        }
+                msg
+            })
+    }
+
+    /// Construct a Document from an in-memory JSON string. The WASM
+    /// load path uses this after fetching the map over HTTP, since
+    /// `std::fs` is unavailable in the browser. `file_path` is the
+    /// origin tag stored on the document for save-back semantics —
+    /// pass the URL/path the JSON came from, or `None` for ad-hoc
+    /// JSON.
+    pub fn from_json_str(json: &str, file_path: Option<String>) -> Result<Self, String> {
+        loader::load_from_str(json)
+            .map(|map| Self::finalize(map, file_path))
+            .map_err(|e| {
+                error!("Failed to parse mindmap JSON: {}", e);
+                e
+            })
+    }
+
+    /// Shared post-parse pipeline used by both `load` (native file
+    /// I/O) and `from_json_str` (WASM HTTP fetch). Grows any
+    /// undersized node boxes to fit their text before the model is
+    /// handed to the tree/scene builders — see
+    /// `grow_node_sizes_to_fit_text` for the invariants.
+    fn finalize(mut map: MindMap, file_path: Option<String>) -> Self {
+        info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
+        grow_node_sizes_to_fit_text(&mut map);
+        Self::from_mindmap(map, file_path)
     }
 
     /// Construct an empty document, optionally bound to a target file
