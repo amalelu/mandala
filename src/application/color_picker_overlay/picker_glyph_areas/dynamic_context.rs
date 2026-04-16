@@ -82,7 +82,7 @@ fn hue_ring_colors() -> &'static [CellColor; HUE_SLOT_COUNT] {
 /// depend on that axis and skip its rebuild entirely. Bit-exact
 /// comparison means NaN fails to match itself (forcing a rebuild
 /// rather than a corrupt read).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct AxisKey(u32, u32);
 
 struct SatCache {
@@ -492,48 +492,70 @@ mod tests {
         }
     }
 
-    /// A `sat_colors` table is a pure function of `(hue, val)` — the
-    /// `sat` axis only shifts which cell is "selected" on the bar,
-    /// which doesn't touch the base-colour table. Two geometries
-    /// differing only in `sat` must produce bit-identical sat_colors.
+    /// The sat-bar base-color cache is keyed on `(hue, val)` — the
+    /// `sat` axis must NOT participate in the key, otherwise a
+    /// sat-slider scrub would re-populate the cache on every frame
+    /// (the perf regression d4a3126 fixed).
+    ///
+    /// Previous versions of this test asserted that two calls with
+    /// different `sat` produced identical output arrays. That's
+    /// tautological: `sat_colors_for` never reads `geometry.sat` in
+    /// the loop body (it uses `sat_cell_to_value(i)`), so the two
+    /// arrays are equal regardless of whether the cache key includes
+    /// `sat`. The real invariant is the key's *shape* — assert that
+    /// directly by reading the `SAT_CACHE` thread-local after each
+    /// call.
     #[test]
-    fn sat_colors_for_independent_of_sat_axis() {
-        // Evict any stale state first by probing an unrelated HSV.
-        let _ = sat_colors_for(&geom(123.0, 0.5, 0.5));
+    fn sat_cache_key_excludes_sat_axis() {
+        let hue = 60.0f32;
+        let val = 0.75f32;
 
-        let a = sat_colors_for(&geom(60.0, 0.25, 0.75));
-        let b = sat_colors_for(&geom(60.0, 0.90, 0.75));
-        for i in 0..SAT_CELL_COUNT {
-            if i == CROSSHAIR_CENTER_CELL {
-                continue;
-            }
-            assert_eq!(
-                a[i].rgb, b[i].rgb,
-                "sat_colors cell {} must not depend on sat axis",
-                i
-            );
-        }
+        // First call seats the cache with whatever HSV; inspect the
+        // stored key to prove it's AxisKey(hue, val) only.
+        let _ = sat_colors_for(&geom(hue, 0.25, val));
+        let key_after_first = SAT_CACHE.with(|cell| cell.borrow().as_ref().unwrap().key);
+        assert_eq!(
+            key_after_first,
+            AxisKey(hue.to_bits(), val.to_bits()),
+            "sat cache key must be (hue, val) — not include sat"
+        );
+
+        // Second call with different `sat` but same (hue, val) must
+        // not alter the cached key. If the cache were wrongly keyed
+        // on (hue, val, sat), the key would now carry the new sat
+        // bits and this assertion would fail.
+        let _ = sat_colors_for(&geom(hue, 0.90, val));
+        let key_after_second = SAT_CACHE.with(|cell| cell.borrow().as_ref().unwrap().key);
+        assert_eq!(
+            key_after_second, key_after_first,
+            "sat-only change must leave the cache key untouched"
+        );
     }
 
-    /// Mirror test on the val side: `val_colors` is a pure function
-    /// of `(hue, sat)`. Two geometries differing only in `val` must
-    /// produce bit-identical val_colors.
+    /// Mirror guard for the val-bar cache: keyed on `(hue, sat)`,
+    /// `val` axis absent. Same rationale as
+    /// [`sat_cache_key_excludes_sat_axis`] — observable arrays don't
+    /// depend on `geometry.val` either, so this has to assert the
+    /// key shape directly to have any teeth.
     #[test]
-    fn val_colors_for_independent_of_val_axis() {
-        let _ = val_colors_for(&geom(321.0, 0.5, 0.5));
+    fn val_cache_key_excludes_val_axis() {
+        let hue = 200.0f32;
+        let sat = 0.4f32;
 
-        let a = val_colors_for(&geom(200.0, 0.4, 0.1));
-        let b = val_colors_for(&geom(200.0, 0.4, 0.9));
-        for i in 0..VAL_CELL_COUNT {
-            if i == CROSSHAIR_CENTER_CELL {
-                continue;
-            }
-            assert_eq!(
-                a[i].rgb, b[i].rgb,
-                "val_colors cell {} must not depend on val axis",
-                i
-            );
-        }
+        let _ = val_colors_for(&geom(hue, sat, 0.1));
+        let key_after_first = VAL_CACHE.with(|cell| cell.borrow().as_ref().unwrap().key);
+        assert_eq!(
+            key_after_first,
+            AxisKey(hue.to_bits(), sat.to_bits()),
+            "val cache key must be (hue, sat) — not include val"
+        );
+
+        let _ = val_colors_for(&geom(hue, sat, 0.9));
+        let key_after_second = VAL_CACHE.with(|cell| cell.borrow().as_ref().unwrap().key);
+        assert_eq!(
+            key_after_second, key_after_first,
+            "val-only change must leave the cache key untouched"
+        );
     }
 
     /// Changing `hue_deg` invalidates the sat cache. A hue shift
