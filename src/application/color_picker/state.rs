@@ -177,6 +177,12 @@ pub enum ColorPickerState {
         /// diffed against the previous value to avoid redundant
         /// rebuilds.
         hovered_hit: Option<PickerHit>,
+        /// HSV triple being previewed on hover. `Some` while the
+        /// cursor is over a hue/sat/val cell; `None` otherwise. The
+        /// rendering pipeline uses this for visual feedback; the real
+        /// `hue_deg`/`sat`/`val` only change on click or keyboard
+        /// nudge.
+        hover_preview: Option<(f32, f32, f32)>,
         /// Pending error-flash animation request. Set when the user
         /// attempts an action that can't complete (e.g. clicking the
         /// center commit button in Standalone mode with no

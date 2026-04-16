@@ -72,7 +72,7 @@ pub(in crate::application::app) fn handle_color_picker_key(
     if let Key::Character(c) = logical_key {
         let s = c.as_str();
         let mut changed = false;
-        if let ColorPickerState::Open { hue_deg, sat, val, .. } = state {
+        if let ColorPickerState::Open { hue_deg, sat, val, hover_preview, .. } = state {
             match s {
                 "h" => {
                     *hue_deg = (*hue_deg - 15.0).rem_euclid(360.0);
@@ -99,6 +99,9 @@ pub(in crate::application::app) fn handle_color_picker_key(
                     changed = true;
                 }
                 _ => {}
+            }
+            if changed {
+                *hover_preview = None;
             }
         }
         if changed {
