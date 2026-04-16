@@ -46,6 +46,54 @@ impl Renderer {
         );
     }
 
+    /// Patch the canvas-space position of moved nodes' buffers in
+    /// place. Avoids reshaping text when only position changed (the
+    /// common case during a drag).
+    ///
+    /// For each `(unique_id, new_pos)` pair, looks up the existing
+    /// buffer by key and overwrites its `pos` field. Buffers for
+    /// nodes not in the patch set are left untouched — their shaped
+    /// text and position remain valid.
+    ///
+    /// # Costs
+    ///
+    /// O(patch_set_size) — no text shaping, no font-system lock, no
+    /// allocation. Each patch is a single hash lookup + field write.
+    pub fn patch_drag_positions(&mut self, patches: &[(usize, (f32, f32))]) {
+        for &(unique_id, new_pos) in patches {
+            let key = unique_id.to_string();
+            if let Some(buf) = self.mindmap_buffers.get_mut(&key) {
+                buf.pos = new_pos;
+            }
+        }
+    }
+
+    /// Rebuild only the `node_background_rects` from a tree, without
+    /// reshaping any text buffers. Used during drag to keep background
+    /// fills in sync with moved node positions.
+    ///
+    /// # Costs
+    ///
+    /// O(n) descendant walk, but no text shaping, no font-system
+    /// lock — just position and color reads from the arena.
+    pub fn rebuild_node_backgrounds_from_tree(
+        &mut self,
+        tree: &Tree<GfxElement, GfxMutator>,
+    ) {
+        self.node_background_rects.clear();
+        for descendant_id in tree.root().descendants(&tree.arena) {
+            let Some(node) = tree.arena.get(descendant_id) else { continue };
+            let Some(area) = node.get().glyph_area() else { continue };
+            if let Some(color) = area.background_color {
+                self.node_background_rects.push(super::NodeBackgroundRect {
+                    position: Vec2::new(area.position.x.0, area.position.y.0),
+                    size: Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
+                    color,
+                });
+            }
+        }
+    }
+
     /// Rebuild the screen-space buffer list for every tree the app
     /// has registered into [`crate::application::scene_host::AppScene`].
     /// Walks the scene in layer

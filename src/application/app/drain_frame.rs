@@ -33,10 +33,20 @@ pub(super) fn drain_moving_node(
         let work_start = Instant::now();
 
         if let Some(tree) = mindmap_tree.as_mut() {
+            // Position-only patch: move the dragged nodes in the
+            // arena and patch the renderer's existing text buffers
+            // in place. No text reshaping, no font-system lock.
+            let mut patches = Vec::new();
             for nid in node_ids {
-                apply_drag_delta(tree, nid, pending_delta.x, pending_delta.y, !individual);
+                apply_drag_delta_and_collect_patches(
+                    tree, nid,
+                    pending_delta.x, pending_delta.y,
+                    !individual,
+                    &mut patches,
+                );
             }
-            renderer.rebuild_buffers_from_tree(&tree.tree);
+            renderer.patch_drag_positions(&patches);
+            renderer.rebuild_node_backgrounds_from_tree(&tree.tree);
         }
 
         // Rebuild connections and borders with position offsets.
