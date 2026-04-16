@@ -525,3 +525,71 @@ fn test_partial_json_preserves_component_defaults() {
     // Picker defaults should still be present
     assert_eq!(cfg.picker_nudge_hue_down, vec!["h"]);
 }
+
+#[test]
+fn test_empty_binding_list_disables_action() {
+    let json = r#"{ "cancel_mode": [] }"#;
+    let cfg = KeybindConfig::from_json(json).unwrap();
+    let resolved = cfg.resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "escape", false, false, false),
+        None,
+    );
+}
+
+#[test]
+fn test_duplicate_key_in_same_context_first_wins() {
+    let json = r#"{
+        "console_close": ["Tab"],
+        "console_tab_complete": ["Tab"]
+    }"#;
+    let cfg = KeybindConfig::from_json(json).unwrap();
+    let resolved = cfg.resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "tab", false, false, false),
+        Some(Action::ConsoleClose),
+    );
+}
+
+#[test]
+fn test_action_for_context_document_filters_component_actions() {
+    let resolved = KeybindConfig::default().resolve();
+    // "tab" has no Document binding. action_for (global) returns
+    // ConsoleTabComplete, but action_for_context(Document) returns None.
+    assert_eq!(
+        resolved.action_for("tab", false, false, false),
+        Some(Action::ConsoleTabComplete),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "tab", false, false, false),
+        None,
+    );
+}
+
+#[test]
+fn test_json_roundtrip_all_contexts() {
+    let cfg = KeybindConfig::default();
+    let json = serde_json::to_string(&cfg).unwrap();
+    let parsed = KeybindConfig::from_json(&json).unwrap();
+    let resolved = parsed.resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "z", true, false, false),
+        Some(Action::Undo),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::Console, "escape", false, false, false),
+        Some(Action::ConsoleClose),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::ColorPicker, "h", false, false, false),
+        Some(Action::PickerNudgeHueDown),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::LabelEdit, "enter", false, false, false),
+        Some(Action::LabelEditCommit),
+    );
+    assert_eq!(
+        resolved.action_for_context(InputContext::TextEdit, "escape", false, false, false),
+        Some(Action::TextEditCancel),
+    );
+}

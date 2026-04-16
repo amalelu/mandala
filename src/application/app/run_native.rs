@@ -581,6 +581,9 @@ app.event_loop.run(move |event, _window_target| {
                     handle_label_edit_key(
                         &key_name,
                         &logical_key,
+                        modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
                         &keybinds,
                         &mut label_edit_state,
                         doc,
@@ -603,6 +606,9 @@ app.event_loop.run(move |event, _window_target| {
                     handle_text_edit_key(
                         &key_name,
                         &logical_key,
+                        modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
                         &keybinds,
                         &mut text_edit_state,
                         doc,
@@ -615,7 +621,8 @@ app.event_loop.run(move |event, _window_target| {
             }
 
             let action = key_name.as_deref().and_then(|k| {
-                keybinds.action_for(
+                keybinds.action_for_context(
+                    crate::application::keybinds::InputContext::Document,
                     k,
                     modifiers.control_key(),
                     modifiers.shift_key(),
@@ -819,12 +826,7 @@ app.event_loop.run(move |event, _window_target| {
                         save_document_to_bound_path(doc, &mut console_state);
                     }
                 }
-                Some(_) => {
-                    // Component-scoped action resolved at Document
-                    // level — should not happen in practice (the
-                    // modal handlers above claim their contexts
-                    // first). Ignore silently.
-                }
+                Some(_) => {}
                 None => {
                     // No built-in action matched — try the
                     // user-defined `custom_mutation_bindings`.

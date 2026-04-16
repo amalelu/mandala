@@ -323,6 +323,9 @@ pub(in crate::application::app) fn apply_text_edit_to_tree(
 pub(in crate::application::app) fn handle_text_edit_key(
     key_name: &Option<String>,
     logical_key: &Key,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
     keybinds: &ResolvedKeybinds,
     text_edit_state: &mut TextEditState,
     doc: &mut MindMapDocument,
@@ -332,7 +335,7 @@ pub(in crate::application::app) fn handle_text_edit_key(
 ) {
     let name = key_name.as_deref();
     let action = name.and_then(|n| {
-        keybinds.action_for_context(InputContext::TextEdit, n, false, false, false)
+        keybinds.action_for_context(InputContext::TextEdit, n, ctrl, shift, alt)
     });
     if action == Some(Action::TextEditCancel) {
         close_text_edit(false, doc, text_edit_state, mindmap_tree, app_scene, renderer);

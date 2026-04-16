@@ -9,8 +9,8 @@ use super::bind::KeyBind;
 use super::context::InputContext;
 
 /// The resolved form of a `KeybindConfig`: a flat list of `(Action,
-/// KeyBind)` pairs. Lookup is linear but the list is tiny (under a dozen
-/// entries), so a hash map would only add overhead.
+/// KeyBind)` pairs. Lookup is linear — the list is small enough
+/// (under 50 entries) that a hash map would only add overhead.
 #[derive(Debug, Clone)]
 pub struct ResolvedKeybinds {
     binds: Vec<(Action, KeyBind)>,

@@ -112,6 +112,9 @@ pub(in crate::application::app) fn open_label_edit(
 pub(in crate::application::app) fn handle_label_edit_key(
     key_name: &Option<String>,
     logical_key: &Key,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
     keybinds: &ResolvedKeybinds,
     label_edit_state: &mut LabelEditState,
     doc: &mut MindMapDocument,
@@ -121,7 +124,7 @@ pub(in crate::application::app) fn handle_label_edit_key(
 ) {
     let name = key_name.as_deref();
     let action = name.and_then(|n| {
-        keybinds.action_for_context(InputContext::LabelEdit, n, false, false, false)
+        keybinds.action_for_context(InputContext::LabelEdit, n, ctrl, shift, alt)
     });
     if action == Some(Action::LabelEditCancel) {
         close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer);
