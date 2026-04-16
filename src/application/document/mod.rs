@@ -42,6 +42,8 @@ mod tests_mutations;
 #[cfg(test)]
 mod tests_nodes;
 #[cfg(test)]
+mod tests_portals;
+#[cfg(test)]
 mod tests_reparent;
 
 pub use hit_test::{

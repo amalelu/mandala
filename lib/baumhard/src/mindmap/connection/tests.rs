@@ -521,3 +521,79 @@ fn point_at_t_clamps_out_of_range() {
     assert_eq!(point_at_t(&path, -10.0), Vec2::new(0.0, 0.0));
     assert_eq!(point_at_t(&path, 99.0), Vec2::new(100.0, 0.0));
 }
+
+// ── Bezier math (bezier.rs) ────────────────────────────────────────
+
+use super::bezier::{cubic_bezier_point, cubic_bezier_length, sample_cubic_bezier};
+use crate::util::geometry::almost_equal;
+
+#[test]
+fn test_bezier_point_at_endpoints() {
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(10.0, 50.0);
+    let p2 = Vec2::new(90.0, 50.0);
+    let p3 = Vec2::new(100.0, 0.0);
+
+    let start = cubic_bezier_point(0.0, p0, p1, p2, p3);
+    assert!(almost_equal(start.x, 0.0), "t=0 should return p0.x");
+    assert!(almost_equal(start.y, 0.0), "t=0 should return p0.y");
+
+    let end = cubic_bezier_point(1.0, p0, p1, p2, p3);
+    assert!(almost_equal(end.x, 100.0), "t=1 should return p3.x");
+    assert!(almost_equal(end.y, 0.0), "t=1 should return p3.y");
+}
+
+#[test]
+fn test_bezier_point_at_midpoint_is_influenced_by_controls() {
+    let p0 = Vec2::new(0.0, 0.0);
+    let p3 = Vec2::new(100.0, 0.0);
+
+    // Straight line (controls on the segment)
+    let mid_straight = cubic_bezier_point(0.5, p0, p0, p3, p3);
+    assert!(almost_equal(mid_straight.x, 50.0), "straight midpoint x");
+    assert!(almost_equal(mid_straight.y, 0.0), "straight midpoint y");
+
+    // Curved (controls above the line)
+    let p1 = Vec2::new(10.0, 80.0);
+    let p2 = Vec2::new(90.0, 80.0);
+    let mid_curved = cubic_bezier_point(0.5, p0, p1, p2, p3);
+    assert!(mid_curved.y > 30.0, "curved midpoint should be pulled up by control points; got {}", mid_curved.y);
+}
+
+#[test]
+fn test_bezier_length_straight_line() {
+    let a = Vec2::new(0.0, 0.0);
+    let b = Vec2::new(100.0, 0.0);
+    // Controls on the line make it degenerate into a straight segment
+    let length = cubic_bezier_length(a, a, b, b);
+    assert!(
+        (length - 100.0).abs() < 1.0,
+        "straight-line bezier should have length ~100; got {}",
+        length,
+    );
+}
+
+#[test]
+fn test_bezier_sample_produces_points() {
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(10.0, 50.0);
+    let p2 = Vec2::new(90.0, 50.0);
+    let p3 = Vec2::new(100.0, 0.0);
+    let spacing = 10.0;
+
+    let samples = sample_cubic_bezier(p0, p1, p2, p3, spacing);
+    assert!(samples.len() > 5, "a 100-unit curve at spacing 10 should produce >5 samples; got {}", samples.len());
+
+    // First sample should be at p0
+    assert!(almost_equal(samples[0].position.x, 0.0));
+    assert!(almost_equal(samples[0].position.y, 0.0));
+}
+
+#[test]
+fn test_bezier_sample_degenerate_returns_single_point() {
+    // A zero-length curve (all points identical)
+    let pt = Vec2::new(42.0, 42.0);
+    let samples = sample_cubic_bezier(pt, pt, pt, pt, 10.0);
+    assert_eq!(samples.len(), 1, "degenerate curve should produce single sample");
+    assert!(almost_equal(samples[0].position.x, 42.0));
+}

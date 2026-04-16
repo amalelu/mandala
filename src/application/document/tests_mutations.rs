@@ -254,6 +254,54 @@ use super::defaults::default_cross_link_edge;
     }
 
     #[test]
+    fn test_collect_affected_node_ids_parent() {
+        let doc = load_test_doc();
+        // Find a non-root node that has a parent
+        let child_id = doc.mindmap.nodes.values()
+            .find(|n| n.parent_id.is_some())
+            .map(|n| n.id.clone())
+            .expect("testament map has child nodes");
+        let parent_id = doc.mindmap.nodes.get(&child_id).unwrap().parent_id.clone().unwrap();
+
+        let ids = doc.collect_affected_node_ids(&child_id, &TS::Parent);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], parent_id);
+    }
+
+    #[test]
+    fn test_collect_affected_node_ids_parent_of_root_is_empty() {
+        let doc = load_test_doc();
+        // Root node (348068464) has no parent
+        let ids = doc.collect_affected_node_ids("348068464", &TS::Parent);
+        assert!(ids.is_empty(), "Root node has no parent; should return empty");
+    }
+
+    #[test]
+    fn test_collect_affected_node_ids_siblings() {
+        let doc = load_test_doc();
+        // Find a child node and verify its siblings list excludes itself
+        let child_id = doc.mindmap.nodes.values()
+            .find(|n| n.parent_id.is_some())
+            .map(|n| n.id.clone())
+            .expect("testament map has child nodes");
+        let parent_id = doc.mindmap.nodes.get(&child_id).unwrap().parent_id.clone().unwrap();
+        let all_children = doc.mindmap.children_of(&parent_id);
+
+        let ids = doc.collect_affected_node_ids(&child_id, &TS::Siblings);
+        // Siblings = parent's children minus self
+        assert_eq!(ids.len(), all_children.len() - 1);
+        assert!(!ids.contains(&child_id), "Siblings should not include self");
+    }
+
+    #[test]
+    fn test_collect_affected_node_ids_siblings_of_root_is_empty() {
+        let doc = load_test_doc();
+        // Root has no parent, so no siblings
+        let ids = doc.collect_affected_node_ids("348068464", &TS::Siblings);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
     fn test_apply_custom_mutation_persistent_sets_dirty() {
         let mut doc = load_test_doc();
         let cm = make_test_mutation("nudge", TS::SelfOnly);
