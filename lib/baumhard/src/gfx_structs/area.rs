@@ -114,13 +114,35 @@ pub enum GlyphAreaFieldType {
     ApplyOperation,
 }
 
+/// A single field delta for a [`GlyphArea`]. Each variant carries the
+/// new value (or addend, depending on the active [`ApplyOperation`])
+/// for one field of the area. Used inside [`DeltaGlyphArea`] and the
+/// mutator pipeline — the variant you pick determines which field is
+/// touched; all others are left alone.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub enum GlyphAreaField {
+    /// Replace or append to the area's text content. Under
+    /// `ApplyOperation::Assign` the string replaces the current text;
+    /// under `Add` it is concatenated.
     Text(String),
+    /// Font size in points. Under `Add`/`Subtract` the value is added
+    /// to / subtracted from the current scale; under `Assign` it
+    /// replaces outright.
     Scale(OrderedFloat<f32>),
+    /// Vertical spacing multiplier. Arithmetic follows the same
+    /// `Add`/`Subtract`/`Assign` contract as `Scale`.
     LineHeight(OrderedFloat<f32>),
+    /// World-space position of the area's anchor. Under `Add` the
+    /// vector is component-wise added (translation); under `Assign`
+    /// it teleports.
     Position(OrderedVec2),
+    /// Render bounds (width, height) in pixels. Under `Add` the
+    /// components grow; under `Assign` the bounds are replaced.
     Bounds(OrderedVec2),
+    /// Character-range colour / font runs. Under `Add` each run in
+    /// the delta is submitted (merged) into the existing set; under
+    /// `Assign` the entire set is replaced; under `Subtract` matching
+    /// runs are removed.
     ColorFontRegions(ColorFontRegions),
     /// Replace the area's [`GlyphArea::outline`]. `None` clears any
     /// previously-set halo; `Some(style)` enables one. Additive
@@ -128,6 +150,10 @@ pub enum GlyphAreaField {
     /// either on or off; combining two halo styles isn't
     /// meaningful).
     Outline(Option<OutlineStyle>),
+    /// Override the arithmetic operation that governs how all sibling
+    /// field deltas in the same [`DeltaGlyphArea`] are applied. Does
+    /// not modify the area itself — it is a control variant read by
+    /// [`GlyphArea::apply_operation`].
     Operation(ApplyOperation),
 }
 
@@ -515,47 +541,95 @@ impl GlyphArea {
 /////// GlyphAreaCommand Mutator ///////
 ///////////////////////////////////////
 
+/// Tag enum for [`GlyphAreaCommand`] — identifies the command kind
+/// without carrying payload. Used as a key in `HashSet`/`HashMap`
+/// look-ups where the caller needs to know *which* command was
+/// scheduled but not its parameters.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Eq, Hash, EnumIter, Display)]
 pub enum GlyphAreaCommandType {
+    /// Remove grapheme clusters from the front of the text.
     PopFront,
+    /// Remove grapheme clusters from the back of the text.
     PopBack,
+    /// Shift position left by a pixel delta.
     NudgeLeft,
+    /// Shift position right by a pixel delta.
     NudgeRight,
+    /// Shift position down by a pixel delta.
     NudgeDown,
+    /// Shift position up by a pixel delta.
     NudgeUp,
+    /// Teleport position to an absolute (x, y).
     MoveTo,
+    /// Increase font scale by a delta.
     GrowFont,
+    /// Decrease font scale by a delta.
     ShrinkFont,
+    /// Replace font scale with an absolute value.
     SetFontSize,
+    /// Replace the line-height multiplier.
     SetLineHeight,
+    /// Increase line-height by a delta.
     GrowLineHeight,
+    /// Decrease line-height by a delta.
     ShrinkLineHeight,
+    /// Replace render bounds with absolute (w, h).
     SetBounds,
+    /// Assign a font to a character range.
     SetRegionFont,
+    /// Assign a colour to a character range.
     SetRegionColor,
+    /// Remove the colour/font region at a character range.
     DeleteColorFontRegion,
+    /// Move an existing region's span to a new character range.
     ChangeRegionRange,
 }
 
+/// Imperative mutation command applied to a [`GlyphArea`] via its
+/// [`Applicable`] impl. Unlike [`DeltaGlyphArea`] (which is
+/// arithmetic — `Add`/`Assign`/`Subtract`), a command performs a
+/// single named operation whose semantics are fixed. All variants
+/// are O(1) except the `ColorFontRegion`-touching ones, which are
+/// O(n) in the number of existing regions.
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub enum GlyphAreaCommand {
+    /// Remove `n` grapheme clusters from the front of the text.
     PopFront(usize),
+    /// Remove `n` grapheme clusters from the back of the text.
     PopBack(usize),
+    /// Shift position left by the given pixel delta.
     NudgeLeft(f32),
+    /// Shift position right by the given pixel delta.
     NudgeRight(f32),
+    /// Shift position down by the given pixel delta.
     NudgeDown(f32),
+    /// Shift position up by the given pixel delta.
     NudgeUp(f32),
+    /// Teleport position to absolute `(x, y)`.
     MoveTo(f32, f32),
+    /// Increase font scale by a delta.
     GrowFont(f32),
+    /// Decrease font scale by a delta.
     ShrinkFont(f32),
+    /// Replace font scale with an absolute value.
     SetFontSize(f32),
+    /// Replace the line-height multiplier.
     SetLineHeight(f32),
+    /// Increase line-height by a delta.
     GrowLineHeight(f32),
+    /// Decrease line-height by a delta.
     ShrinkLineHeight(f32),
+    /// Replace render bounds with absolute `(w, h)`.
     SetBounds(f32, f32),
+    /// Assign a font to the given character range. O(n) in region count.
     SetRegionFont(Range, AppFont),
+    /// Assign a colour to the given character range. O(n) in region count.
     SetRegionColor(Range, FloatRgba),
+    /// Remove the colour/font region at the given character range.
+    /// O(n) in region count.
     DeleteColorFontRegion(Range),
+    /// Move an existing region from `current` to `new` range. O(n) in
+    /// region count.
     ChangeRegionRange(Range, Range),
 }
 

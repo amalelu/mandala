@@ -179,6 +179,32 @@ pub struct RegionParams {
 }
 
 impl RegionParams {
+    /// Construct a [`RegionParams`] for the given target grid density
+    /// and pixel resolution.
+    ///
+    /// # Grid adaptation algorithm
+    ///
+    /// The caller requests `target_region_factor` subdivisions per
+    /// axis (e.g. 10 → aim for a 10x10 grid). Because region
+    /// boundaries must land on exact pixel boundaries — no fractional
+    /// regions — the constructor finds the **closest divisor** of each
+    /// dimension to `target_region_factor` via
+    /// `calculate_actual_region_factor`. This means the effective
+    /// factor may differ from the target (and may differ between x
+    /// and y when the dimensions are not equal). Region pixel sizes
+    /// are then `resolution.N / effective_factor_N`.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that neither dimension is prime — prime dimensions have
+    /// only 1 and themselves as divisors, making fine-grained grids
+    /// impossible. Callers round prime dimensions to the nearest
+    /// composite before construction.
+    ///
+    /// # Costs
+    ///
+    /// O(sqrt(max(resolution.0, resolution.1))) for the divisor
+    /// search, plus 6 `RwLock::new` calls. No heap beyond the locks.
     pub fn new(target_region_factor: usize, resolution: (usize, usize)) -> Self {
         assert!(!is_prime(resolution.0));
         assert!(!is_prime(resolution.1));

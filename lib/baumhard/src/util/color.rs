@@ -241,9 +241,16 @@ pub struct Color {
     pub rgba: Rgba,
 }
 
+/// Component-wise wrapping division of two [`Color`]s. Uses
+/// `u8::wrapping_div` per channel. Wrapping was chosen over
+/// saturating because colour arithmetic in Baumhard is used for
+/// procedural palette generation where wrap-around produces
+/// artistically useful cycling; clamping would flatten the cycle.
 impl Div for Color {
     type Output = Color;
 
+    /// Divide each RGBA channel of `self` by the corresponding
+    /// channel of `rhs` using wrapping semantics. O(1), no heap.
     fn div(self, rhs: Self) -> Self::Output {
         let mut result = self[0].wrapping_div(rhs[0]);
         let mut output = [0; 4];
@@ -258,9 +265,17 @@ impl Div for Color {
     }
 }
 
+/// Component-wise wrapping multiplication of two [`Color`]s. Uses
+/// `u8::wrapping_mul` — overflow wraps modulo 256. Wrapping was
+/// chosen over saturating because colour arithmetic in Baumhard is
+/// used for procedural palette generation where wrap-around
+/// produces artistically useful cycling; clamping would flatten the
+/// cycle.
 impl Mul for Color {
     type Output = Color;
 
+    /// Multiply each RGBA channel of `self` by the corresponding
+    /// channel of `rhs` using wrapping semantics. O(1), no heap.
     fn mul(self, rhs: Self) -> Self::Output {
         let mut result = self[0].wrapping_mul(rhs[0]);
         let mut output = [0; 4];
@@ -275,9 +290,17 @@ impl Mul for Color {
     }
 }
 
+/// Component-wise wrapping subtraction of two [`Color`]s. Uses
+/// `u8::wrapping_sub` — underflow wraps modulo 256. Wrapping was
+/// chosen over saturating because colour arithmetic in Baumhard is
+/// used for procedural palette generation where wrap-around
+/// produces artistically useful cycling; clamping would flatten the
+/// cycle.
 impl Sub for Color {
     type Output = Color;
 
+    /// Subtract each RGBA channel of `rhs` from the corresponding
+    /// channel of `self` using wrapping semantics. O(1), no heap.
     fn sub(self, rhs: Self) -> Self::Output {
         let mut result = self[0].wrapping_sub(rhs[0]);
         let mut output = [0; 4];
@@ -292,9 +315,17 @@ impl Sub for Color {
     }
 }
 
+/// Component-wise wrapping addition of two [`Color`]s. Uses
+/// `u8::wrapping_add` — overflow wraps modulo 256. Wrapping was
+/// chosen over saturating because colour arithmetic in Baumhard is
+/// used for procedural palette generation where wrap-around
+/// produces artistically useful cycling; clamping would flatten the
+/// cycle.
 impl Add for Color {
     type Output = Color;
 
+    /// Add each RGBA channel of `rhs` to the corresponding channel
+    /// of `self` using wrapping semantics. O(1), no heap.
     fn add(self, rhs: Self) -> Self::Output {
         let mut result = self[0].wrapping_add(rhs[0]);
         let mut output = [0; 4];
@@ -342,10 +373,16 @@ impl Color {
         }
     }
 
+    /// Construct a [`Color`] from a `[u8; 4]` RGBA quad. O(1), no
+    /// conversion — the bytes are stored as-is.
     pub fn new_u8(rgba: &Rgba) -> Self {
         Color { rgba: *rgba }
     }
 
+    /// Construct a [`Color`] from a `[f32; 4]` RGBA quad (each
+    /// component in `[0.0, 1.0]`). Each channel is scaled to
+    /// `[0, 255]` via [`convert_f32_to_u8`] with rounding. O(1), no
+    /// heap.
     pub fn new_f32(float_rgba: &FloatRgba) -> Self {
         Color {
             rgba: convert_f32_to_u8(float_rgba),
