@@ -1,14 +1,15 @@
 //! `TargetView` — the enum that holds a mutable doc reference plus
-//! enough identity to find the component each iteration. All six
+//! enough identity to find the component each iteration. All
 //! capability-trait impls live here; selection materialization
 //! (`selection_targets`, `view_for`) sits with the view since each
 //! is a single-line constructor.
 
 use super::capabilities::{
-    AcceptsWheelColor, HasBgColor, HasBorderColor, HasFontSize, HasLabel, HasTextColor,
+    AcceptsWheelColor, HasBgColor, HasBorderColor, HasFontSize, HandlesCopy, HandlesCut,
+    HandlesPaste, HasLabel, HasTextColor,
 };
 use super::color_value::ColorValue;
-use super::outcome::Outcome;
+use super::outcome::{ClipboardContent, Outcome};
 use crate::application::console::constants::PORTAL_DEFAULT_COLOR;
 use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, SelectionState};
 
@@ -147,6 +148,24 @@ impl<'a> HasLabel for TargetView<'a> {
             TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_label(er, s)),
             _ => Outcome::NotApplicable,
         }
+    }
+}
+
+impl<'a> HandlesCopy for TargetView<'a> {
+    fn clipboard_copy(&self) -> ClipboardContent {
+        ClipboardContent::NotApplicable
+    }
+}
+
+impl<'a> HandlesPaste for TargetView<'a> {
+    fn clipboard_paste(&mut self, _content: &str) -> Outcome {
+        Outcome::NotApplicable
+    }
+}
+
+impl<'a> HandlesCut for TargetView<'a> {
+    fn clipboard_cut(&mut self) -> ClipboardContent {
+        ClipboardContent::NotApplicable
     }
 }
 

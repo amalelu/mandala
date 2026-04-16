@@ -28,6 +28,9 @@ pub struct KeybindConfig {
     pub edit_selection_clean: Vec<String>,
     pub open_console: Vec<String>,
     pub save_document: Vec<String>,
+    pub copy: Vec<String>,
+    pub paste: Vec<String>,
+    pub cut: Vec<String>,
     /// Font family name for the console overlay. Passed verbatim to
     /// cosmic-text's `Family::Name`. Empty means "use the default
     /// fallback chain", which is usually what you want unless you've
@@ -60,6 +63,9 @@ impl Default for KeybindConfig {
             edit_selection_clean: vec!["Backspace".into()],
             open_console: vec!["/".into()],
             save_document: vec!["Ctrl+S".into()],
+            copy: vec!["Ctrl+C".into(), "Copy".into()],
+            paste: vec!["Ctrl+V".into(), "Paste".into()],
+            cut: vec!["Ctrl+X".into(), "Cut".into()],
             console_font: String::new(),
             console_font_size: 16.0,
             custom_mutation_bindings: HashMap::new(),
@@ -91,6 +97,9 @@ impl KeybindConfig {
             (Action::EditSelectionClean, &self.edit_selection_clean),
             (Action::OpenConsole, &self.open_console),
             (Action::SaveDocument, &self.save_document),
+            (Action::Copy, &self.copy),
+            (Action::Paste, &self.paste),
+            (Action::Cut, &self.cut),
         ];
         for (action, strings) in sets {
             for s in strings {

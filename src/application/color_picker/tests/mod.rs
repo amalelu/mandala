@@ -17,6 +17,7 @@
 mod fixtures;
 
 mod cell_math;
+mod clipboard;
 mod crosshair;
 mod glyphs;
 mod hex;
