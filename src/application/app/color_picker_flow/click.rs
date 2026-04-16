@@ -11,12 +11,11 @@ use super::commit::{cancel_color_picker, commit_color_picker, commit_color_picke
 
 /// Click handler for the picker. Semantics:
 ///
-/// - **Hue / SatCell / ValCell / Chip** — preview only. The
-///   mouse-move handler already updated HSV on hover, so a click on
-///   a glyph is effectively a no-op at the model layer; it's the
-///   user affirming the current selection. Clicks here **do not**
-///   commit and **do not** close the wheel — users can click around
-///   freely and watch the preview update.
+/// - **Hue / SatCell / ValCell** — select the hovered value.
+///   Copies the cell's HSV component into the picker's selected
+///   `hue_deg`/`sat`/`val` and clears `hover_preview`. The wheel
+///   stays open — users can click around freely to build up a
+///   color before committing.
 /// - **Commit** (࿕) —
 ///   - Contextual: commit current HSV to the bound target, close.
 ///   - Standalone: apply current HSV to each item in the document
@@ -53,7 +52,8 @@ pub(in crate::application::app) fn handle_color_picker_click(
     renderer: &mut Renderer,
 ) -> bool {
     use crate::application::color_picker::{
-        hit_test_picker, ColorPickerState, PickerGesture, PickerHit,
+        hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value,
+        ColorPickerState, PickerGesture, PickerHit,
     };
 
     let hit = if let ColorPickerState::Open { layout: Some(layout), .. } = state {
@@ -86,11 +86,23 @@ pub(in crate::application::app) fn handle_color_picker_click(
             // Contextual mode: click outside cancels.
             cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
         }
-        PickerHit::Hue(_) | PickerHit::SatCell(_) | PickerHit::ValCell(_) => {
-            // Preview-only: the mouse-move handler already updated
-            // HSV as the cursor moved over the glyph, so clicking is
-            // a no-op at the model layer. Users can click freely to
-            // experiment without the picker closing.
+        PickerHit::Hue(slot) => {
+            if let ColorPickerState::Open { hue_deg, hover_preview, .. } = state {
+                *hue_deg = hue_slot_to_degrees(slot);
+                *hover_preview = None;
+            }
+        }
+        PickerHit::SatCell(i) => {
+            if let ColorPickerState::Open { sat, hover_preview, .. } = state {
+                *sat = sat_cell_to_value(i);
+                *hover_preview = None;
+            }
+        }
+        PickerHit::ValCell(i) => {
+            if let ColorPickerState::Open { val, hover_preview, .. } = state {
+                *val = val_cell_to_value(i);
+                *hover_preview = None;
+            }
         }
         PickerHit::Commit => {
             if is_standalone {

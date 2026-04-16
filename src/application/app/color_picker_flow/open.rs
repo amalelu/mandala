@@ -223,6 +223,7 @@ pub(in crate::application::app) fn open_picker_inner(
         size_scale: 1.0,
         gesture: None,
         hovered_hit: None,
+        hover_preview: None,
         pending_error_flash: false,
         last_dynamic_apply: None,
     };

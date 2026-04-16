@@ -151,12 +151,13 @@ pub(in crate::application::app) fn apply_picker_preview(
     use crate::application::document::ColorPickerPreview;
     use baumhard::util::color::hsv_to_hex;
 
-    let (handle, hue_deg, sat, val) = match state {
+    let (handle, eff_hue, eff_sat, eff_val) = match state {
         ColorPickerState::Open {
             mode,
             hue_deg,
             sat,
             val,
+            hover_preview,
             ..
         } => {
             let handle = match mode {
@@ -170,11 +171,12 @@ pub(in crate::application::app) fn apply_picker_preview(
                 // feedback without needing doc.color_picker_preview.
                 crate::application::color_picker::PickerMode::Standalone => None,
             };
-            (handle, *hue_deg, *sat, *val)
+            let (eh, es, ev) = hover_preview.unwrap_or((*hue_deg, *sat, *val));
+            (handle, eh, es, ev)
         }
         ColorPickerState::Closed => return,
     };
-    let hex = hsv_to_hex(hue_deg, sat, val);
+    let hex = hsv_to_hex(eff_hue, eff_sat, eff_val);
     if let Some(handle) = handle {
         match handle {
             PickerHandle::Edge(index) => {

@@ -1,7 +1,9 @@
 //! Mouse-move dispatch: feed active drag gestures on one branch,
-//! hit-test and update HSV / hovered_hit on the other. Delegates to
-//! `apply_picker_preview` when the HSV changes so the document's
-//! transient preview stays in sync with the hover color.
+//! hit-test and update hover_preview / hovered_hit on the other.
+//! Delegates to `apply_picker_preview` when the preview changes so
+//! the document's transient preview stays in sync with the hover
+//! color. The real `hue_deg`/`sat`/`val` only change on click or
+//! keyboard nudge — hover is purely visual.
 
 use crate::application::document::MindMapDocument;
 
@@ -14,9 +16,10 @@ use super::commit::apply_picker_preview;
 ///   `center = cursor + grab_offset`. Every layout position (ring,
 ///   bars, chips, backdrop) rebuilds against the new center via
 ///   `center_override`.
-/// - **Hover**: hit-test the cursor, update HSV / chip focus to match
-///   the hovered glyph (live preview), and record
-///   `hovered_hit` for the renderer's hover-grow effect.
+/// - **Hover**: hit-test the cursor, set `hover_preview` to the
+///   hovered cell's HSV (visual preview only — no mutation of the
+///   selected `hue_deg`/`sat`/`val`), and record `hovered_hit`
+///   for the renderer's hover-grow effect.
 ///
 /// Returns `true` when the picker consumed the move and the caller
 /// should stop dispatching it. Returns `false` when the move
@@ -122,6 +125,7 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
         sat,
         val,
         hovered_hit,
+        hover_preview,
         ..
     } = state
     {
@@ -143,29 +147,25 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
             state_changed = true;
         }
 
-        match hit {
+        // Compute the hover preview triple. The actual
+        // `hue_deg`/`sat`/`val` only change on click or keyboard
+        // nudge — hover just sets a transient preview the
+        // rendering pipeline reads for visual feedback.
+        let new_preview = match hit {
             PickerHit::Hue(slot) => {
-                let new_hue = hue_slot_to_degrees(slot);
-                if (*hue_deg - new_hue).abs() > f32::EPSILON {
-                    *hue_deg = new_hue;
-                    state_changed = true;
-                }
+                Some((hue_slot_to_degrees(slot), *sat, *val))
             }
             PickerHit::SatCell(i) => {
-                let new_sat = sat_cell_to_value(i);
-                if (*sat - new_sat).abs() > f32::EPSILON {
-                    *sat = new_sat;
-                    state_changed = true;
-                }
+                Some((*hue_deg, sat_cell_to_value(i), *val))
             }
             PickerHit::ValCell(i) => {
-                let new_val = val_cell_to_value(i);
-                if (*val - new_val).abs() > f32::EPSILON {
-                    *val = new_val;
-                    state_changed = true;
-                }
+                Some((*hue_deg, *sat, val_cell_to_value(i)))
             }
-            PickerHit::Commit | PickerHit::DragAnchor | PickerHit::Outside => {}
+            PickerHit::Commit | PickerHit::DragAnchor | PickerHit::Outside => None,
+        };
+        if *hover_preview != new_preview {
+            *hover_preview = new_preview;
+            state_changed = true;
         }
     }
 

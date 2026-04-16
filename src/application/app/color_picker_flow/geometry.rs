@@ -75,22 +75,26 @@ pub(in crate::application::app) fn compute_picker_geometry(
             center_override,
             size_scale,
             hovered_hit,
+            hover_preview,
             arm_top_ink_offsets,
             arm_bottom_ink_offsets,
             arm_left_ink_offsets,
             arm_right_ink_offsets,
             preview_ink_offset,
             ..
-        } => (
+        } => {
+            let (eff_hue, eff_sat, eff_val) =
+                hover_preview.unwrap_or((*hue_deg, *sat, *val));
+            (
             match mode {
                 crate::application::color_picker::PickerMode::Contextual { handle } => {
                     handle.label()
                 }
                 crate::application::color_picker::PickerMode::Standalone => "",
             },
-            *hue_deg,
-            *sat,
-            *val,
+            eff_hue,
+            eff_sat,
+            eff_val,
             *last_cursor_pos,
             *max_cell_advance,
             *max_ring_advance,
@@ -104,7 +108,7 @@ pub(in crate::application::app) fn compute_picker_geometry(
             *arm_left_ink_offsets,
             *arm_right_ink_offsets,
             *preview_ink_offset,
-        ),
+        )},
     };
 
     // Hex readout is visible when the cursor is inside the backdrop.
