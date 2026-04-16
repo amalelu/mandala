@@ -115,14 +115,11 @@ mistaken for "handled somewhere"):
 - `PlatformContext` runtime detection — always uses the compile-time
   `Desktop` / `Web` branch, never `Touch`.
 
-**The rule:** new interactive features need a cross-platform story
-from the start. If a feature genuinely belongs in the native-only
-set (e.g. filesystem save dialogs), the `cfg` guard sits at the module
-boundary and an entry appears in the list above. "I'll add WASM later"
-is not a contract this repo recognises — §4's "no half-features" rule
-applies to parity, not just to individual features. The `./test.sh`
-WASM type-check gate and `./build.sh --wasm` are the local checks that
-keep this honest.
+The prescriptive rule that goes with this list — new interactive
+features need a cross-platform story from the start — lives in
+`CODE_CONVENTIONS.md §2`. The local checks that enforce it
+(`./test.sh` WASM gate, `./build.sh --wasm`) are named under
+"Common tasks" below.
 
 ## Common tasks
 

@@ -80,13 +80,17 @@ fi
 # WASM type-check gate. Native tests can stay green while the WASM leg
 # rots silently (see CODE_CONVENTIONS.md §2); this catches shared-helper
 # signature drift, cfg-guard mistakes, and missing `wasm-bindgen` usage
-# before the next `trunk serve`. `cargo check` is deliberately cheap —
-# full `trunk build` belongs in ./build.sh. Skipped with a warning if the
-# wasm32 target isn't installed so contributors who haven't run
+# before the next `trunk serve`. Runs across the whole workspace so
+# baumhard's cross-platform discipline (`lib/baumhard/CONVENTIONS.md`)
+# is also enforced here — a native-only addition to baumhard would
+# otherwise fail the eventual `trunk build` without failing the tests.
+# `cargo check` is deliberately cheap — full `trunk build` belongs in
+# ./build.sh. Skipped with a warning if the wasm32 target isn't
+# installed so contributors who haven't run
 # `rustup target add wasm32-unknown-unknown` aren't punished.
 if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
   echo "== wasm32 check =="
-  cargo check --target wasm32-unknown-unknown -p mandala
+  cargo check --target wasm32-unknown-unknown --workspace
 else
   echo "== wasm32 check =="
   echo "(wasm32-unknown-unknown target not installed — skipping. Install with:"
