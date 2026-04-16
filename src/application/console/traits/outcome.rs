@@ -25,3 +25,18 @@ impl Outcome {
         if changed { Outcome::Applied } else { Outcome::Unchanged }
     }
 }
+
+/// Result of a copy or cut operation on a component. Parallels
+/// `Outcome` for operations that produce data instead of consuming it:
+/// `Text` ~ `Applied`, `Empty` ~ `Unchanged`, `NotApplicable` ~
+/// `NotApplicable`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClipboardContent {
+    /// The component produced text for the clipboard.
+    Text(String),
+    /// The component supports copy but has nothing to provide right
+    /// now (e.g. an empty text field).
+    Empty,
+    /// The component doesn't support copy/cut.
+    NotApplicable,
+}

@@ -43,6 +43,7 @@
 //!   three-stage `compute_color_picker_layout` pipeline.
 //! - [`hit`] — `PickerHit`, `hit_test_picker`.
 
+mod clipboard;
 mod compute;
 mod compute_positions;
 mod compute_sizing;

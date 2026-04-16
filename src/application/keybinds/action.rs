@@ -52,4 +52,20 @@ pub enum Action {
     /// to bind a target. WASM builds have no filesystem access, so
     /// the action is logged and ignored there.
     SaveDocument,
+    /// Copy the focused component's clipboard representation to the
+    /// system clipboard. Dispatches through `HandlesCopy` on the
+    /// current selection's `TargetView`; modal components (color
+    /// picker, text editor, label editor) handle copy in their own
+    /// steal paths before this action fires.
+    Copy,
+    /// Paste the system clipboard's text content into the focused
+    /// component. Dispatches through `HandlesPaste` on the current
+    /// selection's `TargetView`; modal components handle paste in
+    /// their own steal paths.
+    Paste,
+    /// Cut: copy the focused component's clipboard representation,
+    /// then clear or reset it. Dispatches through `HandlesCut` on
+    /// the current selection's `TargetView`; modal components handle
+    /// cut in their own steal paths.
+    Cut,
 }

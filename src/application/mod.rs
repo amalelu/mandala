@@ -1,4 +1,5 @@
 pub(crate) mod app;
+pub(crate) mod clipboard;
 pub(crate) mod color_picker;
 pub(crate) mod color_picker_overlay;
 pub(crate) mod common;

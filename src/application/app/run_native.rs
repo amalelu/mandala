@@ -552,6 +552,7 @@ app.event_loop.run(move |event, _window_target| {
                     handle_color_picker_key(
                         &key_name,
                         &logical_key,
+                        modifiers.control_key(),
                         &mut color_picker_state,
                         doc,
                         &mut mindmap_tree,
@@ -744,6 +745,59 @@ app.event_loop.run(move |event, _window_target| {
                                 &mut app_scene,
                                 &mut renderer,
                             );
+                        }
+                    }
+                }
+                Some(Action::Copy) | Some(Action::Cut) => {
+                    // Dispatch to the current selection's
+                    // HandlesCopy / HandlesCut. Today every
+                    // TargetView variant returns NotApplicable —
+                    // this arm exists so the keybind path is wired
+                    // and future impls only need to fill in the
+                    // TargetView arms.
+                    use crate::application::console::traits::{
+                        selection_targets, view_for, ClipboardContent,
+                        HandlesCopy, HandlesCut,
+                    };
+                    let is_cut = matches!(action, Some(Action::Cut));
+                    if let Some(doc) = document.as_mut() {
+                        let targets = selection_targets(&doc.selection);
+                        for tid in &targets {
+                            let mut view = view_for(doc, tid);
+                            let content = if is_cut {
+                                view.clipboard_cut()
+                            } else {
+                                view.clipboard_copy()
+                            };
+                            if let ClipboardContent::Text(text) = content {
+                                crate::application::clipboard::write_clipboard(&text);
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Action::Paste) => {
+                    // Dispatch to the current selection's
+                    // HandlesPaste. Today every TargetView variant
+                    // returns NotApplicable — wired for future
+                    // impls.
+                    use crate::application::console::traits::{
+                        selection_targets, view_for, HandlesPaste,
+                        Outcome,
+                    };
+                    if let Some(text) = crate::application::clipboard::read_clipboard() {
+                        if let Some(doc) = document.as_mut() {
+                            let targets = selection_targets(&doc.selection);
+                            let mut any_applied = false;
+                            for tid in &targets {
+                                let mut view = view_for(doc, tid);
+                                if let Outcome::Applied = view.clipboard_paste(&text) {
+                                    any_applied = true;
+                                }
+                            }
+                            if any_applied {
+                                rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
+                            }
                         }
                     }
                 }

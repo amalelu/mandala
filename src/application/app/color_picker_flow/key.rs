@@ -5,6 +5,8 @@
 
 use winit::keyboard::Key;
 
+use crate::application::clipboard;
+use crate::application::console::traits::{ClipboardContent, HandlesCopy, HandlesCut, HandlesPaste, Outcome};
 use crate::application::document::MindMapDocument;
 use crate::application::renderer::Renderer;
 
@@ -21,6 +23,7 @@ use super::commit::{
 pub(in crate::application::app) fn handle_color_picker_key(
     key_name: &Option<String>,
     logical_key: &Key,
+    ctrl: bool,
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
@@ -31,6 +34,36 @@ pub(in crate::application::app) fn handle_color_picker_key(
     use crate::application::color_picker::ColorPickerState;
 
     let name = key_name.as_deref();
+
+    // Clipboard shortcuts — Ctrl+C / Ctrl+V / Ctrl+X. Checked before
+    // the character-key match below so Ctrl+V doesn't fall into the
+    // bare "v" (value nudge) arm.
+    if ctrl {
+        match name {
+            Some("c") => {
+                if let ClipboardContent::Text(hex) = state.clipboard_copy() {
+                    clipboard::write_clipboard(&hex);
+                }
+                return true;
+            }
+            Some("v") => {
+                if let Some(text) = clipboard::read_clipboard() {
+                    if let Outcome::Applied = state.clipboard_paste(&text) {
+                        apply_picker_preview(state, doc, picker_dirty);
+                    }
+                }
+                return true;
+            }
+            Some("x") => {
+                if let ClipboardContent::Text(hex) = state.clipboard_cut() {
+                    clipboard::write_clipboard(&hex);
+                }
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     let is_standalone = state.is_standalone();
     match name {
         Some("escape") => {

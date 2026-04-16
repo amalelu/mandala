@@ -19,7 +19,7 @@
 //! Module split:
 //! - [`color_value`] — the `ColorValue` parser.
 //! - [`outcome`] — the per-trait-call `Outcome` result type.
-//! - [`capabilities`] — the six capability trait definitions.
+//! - [`capabilities`] — the nine capability trait definitions.
 //! - [`view`] — `TargetView` enum + per-trait impls + materialization.
 //! - [`dispatch`] — `apply_kvs` + `DispatchReport`.
 
@@ -33,11 +33,12 @@ mod view;
 mod tests;
 
 pub use capabilities::{
-    AcceptsWheelColor, HasBgColor, HasBorderColor, HasFontSize, HasLabel, HasTextColor,
+    AcceptsWheelColor, HasBgColor, HasBorderColor, HasFontSize, HandlesCopy, HandlesCut,
+    HasLabel, HasTextColor, HandlesPaste,
 };
 pub use color_value::ColorValue;
 pub use dispatch::{apply_kvs, DispatchReport};
-pub use outcome::Outcome;
+pub use outcome::{ClipboardContent, Outcome};
 // `TargetView` and `TargetId` are re-exported as part of the
 // public surface even when no in-tree caller imports them by name —
 // they're the return type / parameter type of `view_for` and the

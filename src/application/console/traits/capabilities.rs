@@ -5,7 +5,7 @@
 //! don't support that channel.
 
 use super::color_value::ColorValue;
-use super::outcome::Outcome;
+use super::outcome::{ClipboardContent, Outcome};
 
 /// Target supports setting its background / fill color.
 ///
@@ -65,4 +65,37 @@ pub trait HasLabel {
 /// component implementation, not with every caller.
 pub trait AcceptsWheelColor {
     fn apply_wheel_color(&mut self, c: ColorValue) -> Outcome;
+}
+
+/// Target supports producing a text representation when the user
+/// copies (Ctrl+C). The trait method is a pure data transformation —
+/// it reads the component's state and returns what should go on the
+/// clipboard. The caller (event loop) handles system clipboard I/O.
+///
+/// Components that don't support copy return
+/// `ClipboardContent::NotApplicable`. Components that support it but
+/// have nothing to give right now return `ClipboardContent::Empty`.
+pub trait HandlesCopy {
+    fn clipboard_copy(&self) -> ClipboardContent;
+}
+
+/// Target supports accepting text from the clipboard when the user
+/// pastes (Ctrl+V). Returns `Outcome` — the same result type the
+/// existing capability traits use — so the dispatcher can aggregate
+/// paste results the same way it aggregates color or font results.
+///
+/// The `content` parameter is the string read from the system
+/// clipboard by the event loop before the trait call. The trait
+/// method decides how to integrate it (parse a hex color, set node
+/// text, etc.) and reports the result.
+pub trait HandlesPaste {
+    fn clipboard_paste(&mut self, content: &str) -> Outcome;
+}
+
+/// Target supports producing a text representation *and* clearing or
+/// resetting its source state when the user cuts (Ctrl+X). For
+/// components where "clearing" doesn't apply (e.g. a color picker
+/// always shows a color), cut may behave identically to copy.
+pub trait HandlesCut {
+    fn clipboard_cut(&mut self) -> ClipboardContent;
 }

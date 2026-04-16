@@ -44,6 +44,7 @@ lazy_static = "1.5.0"
 num_cpus = "1.16.0"
 rustix = "0.38.28"
 pollster = "0.3.0"
+arboard = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
