@@ -1,3 +1,4 @@
+use glam::Vec2;
 use indextree::{Arena, Node, NodeId};
 use log::{debug, warn};
 use crate::gfx_structs::element::GfxElement;
@@ -5,6 +6,7 @@ use crate::gfx_structs::tree::{BranchChannel, MutatorTree, Tree};
 use crate::gfx_structs::mutator::{GfxMutator, Instruction};
 use crate::gfx_structs::predicate::Predicate;
 use crate::core::primitives::Applicable;
+use crate::util::ordered_vec2::OrderedVec2;
 
 /// The term 'terminator' here refers conceptually to a function that should run
 /// after a conditional loop is performed on the target tree (using an [Instruction])
@@ -129,6 +131,9 @@ fn process_instruction_node(
             )
         }
         Instruction::RotateWhile(_, _) => {}
+        Instruction::SpatialDescend(point) => {
+            spatial_descend(gfx_tree, mutator_tree, target_id, mutator_id, point);
+        }
     };
 }
 
@@ -341,5 +346,108 @@ fn apply_repeat_while_to_children(
         } else {
             break;
         }
+    }
+}
+
+// ── SpatialDescend ────────────────────────────────────────────────
+
+/// BVH-accelerated spatial descent: find the deepest, smallest-area
+/// `GlyphArea` node whose AABB contains `point`, then apply the
+/// instruction's attached mutation to it.
+///
+/// Mirrors [`Tree::descendant_at`] but operates inside the mutator
+/// pipeline — instead of returning a `NodeId`, it delivers the
+/// mutation to the hit node.
+///
+/// # Algorithm
+///
+/// 1. Ensure subtree AABBs are fresh.
+/// 2. Recursively descend from `target_id`: for each child, prune
+///    if its `subtree_aabb` does not contain the point.
+/// 3. Among all candidate nodes whose own AABB contains the point,
+///    pick the smallest by area (innermost-first convention).
+/// 4. Apply the instruction's attached mutation to that node.
+///
+/// If no node contains the point, the instruction is a no-op.
+fn spatial_descend(
+    gfx_tree: &mut Tree<GfxElement, GfxMutator>,
+    mutator_tree: &MutatorTree<GfxMutator>,
+    target_id: NodeId,
+    mutator_id: NodeId,
+    point: &OrderedVec2,
+) {
+    let point_vec = point.to_vec2();
+
+    // Ensure subtree AABBs are fresh before descent.
+    gfx_tree.ensure_subtree_aabbs();
+
+    // BVH descent to find the hit node.
+    let mut best: Option<(NodeId, f32)> = None;
+    spatial_descend_recurse(&gfx_tree.arena, target_id, point_vec, &mut best);
+
+    // Apply the instruction's mutation to the hit node.
+    let Some((hit_id, _)) = best else {
+        debug!("SpatialDescend: no node contains the point, no-op.");
+        return;
+    };
+    debug!("SpatialDescend: hit node {:?}, applying mutation.", hit_id);
+
+    // The instruction node's mutation (if any) is applied to the hit
+    // target, regardless of channel — the spatial match overrides
+    // channel alignment for event delivery.
+    let mutator = get_mutator(&mutator_tree.arena, mutator_id).get();
+    if let GfxMutator::Instruction { mutation, .. } = mutator {
+        if mutation.is_some() {
+            let target = get_target(&mut gfx_tree.arena, hit_id).get_mut();
+            mutation.apply_to(target);
+        }
+    }
+}
+
+/// Recursive BVH descent helper for [`spatial_descend`]. Read-only
+/// arena traversal that collects the best (smallest-area) hit.
+fn spatial_descend_recurse(
+    arena: &Arena<GfxElement>,
+    node_id: NodeId,
+    point: Vec2,
+    best: &mut Option<(NodeId, f32)>,
+) {
+    let children: Vec<NodeId> = node_id.children(arena).collect();
+
+    for child_id in children {
+        let Some(node) = arena.get(child_id) else {
+            continue;
+        };
+        let element = node.get();
+
+        // Prune: skip if subtree AABB doesn't contain point.
+        if let Some((st_min, st_max)) = element.subtree_aabb() {
+            if point.x < st_min.x || point.x > st_max.x
+                || point.y < st_min.y || point.y > st_max.y
+            {
+                continue;
+            }
+        } else {
+            continue;
+        }
+
+        // Check this node's own GlyphArea AABB.
+        if let Some(area) = element.glyph_area() {
+            let pos = area.position.to_vec2();
+            let bounds = area.render_bounds.to_vec2();
+            if bounds.x > 0.0 && bounds.y > 0.0
+                && point.x >= pos.x && point.x <= pos.x + bounds.x
+                && point.y >= pos.y && point.y <= pos.y + bounds.y
+            {
+                let size = bounds.x * bounds.y;
+                match *best {
+                    Some((_, best_size)) if best_size <= size => {}
+                    _ => *best = Some((child_id, size)),
+                }
+            }
+        }
+
+        // Recurse deeper.
+        spatial_descend_recurse(arena, child_id, point, best);
     }
 }

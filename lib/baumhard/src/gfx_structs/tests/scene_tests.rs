@@ -73,7 +73,7 @@ pub fn test_descendant_at_hits_single_area() {
 }
 
 pub fn do_descendant_at_hits_single_area() {
-    let (tree, leaf) = tree_with_area(Vec2::new(10.0, 10.0), Vec2::new(50.0, 50.0), 0);
+    let (mut tree, leaf) = tree_with_area(Vec2::new(10.0, 10.0), Vec2::new(50.0, 50.0), 0);
     assert_eq!(tree.descendant_at(Vec2::new(20.0, 20.0)), Some(leaf));
     assert_eq!(tree.descendant_at(Vec2::new(100.0, 100.0)), None);
 }
@@ -84,7 +84,7 @@ pub fn test_descendant_at_prefers_smallest() {
 }
 
 pub fn do_descendant_at_prefers_smallest() {
-    let (tree, _outer, inner) = tree_outer_inner();
+    let (mut tree, _outer, inner) = tree_outer_inner();
     // Point inside both: inner wins.
     assert_eq!(tree.descendant_at(Vec2::new(50.0, 50.0)), Some(inner));
     // Point only in outer.
@@ -99,7 +99,7 @@ pub fn test_descendant_at_returns_none_on_empty_tree() {
 
 pub fn do_descendant_at_returns_none_on_empty_tree() {
     fonts::init();
-    let tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
     assert_eq!(tree.descendant_at(Vec2::new(0.0, 0.0)), None);
 }
 
@@ -295,7 +295,7 @@ pub fn test_descendant_near_grants_slack() {
 }
 
 pub fn do_descendant_near_grants_slack() {
-    let (tree, leaf) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0), 0);
+    let (mut tree, leaf) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0), 0);
     // Just outside the AABB on the right.
     let pt = Vec2::new(15.0, 5.0);
     assert_eq!(tree.descendant_at(pt), None);

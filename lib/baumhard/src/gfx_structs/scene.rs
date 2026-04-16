@@ -252,17 +252,28 @@ impl Scene {
     /// [`crate::gfx_structs::util::regions::RegionIndexer`]).
     pub fn component_at(&mut self, point: Vec2) -> Option<(SceneTreeId, NodeId)> {
         self.ensure_layer_order();
-        for id in self.layer_order.iter().rev().copied() {
-            let Some(entry) = self.trees.get(id.0) else {
+        // Two-pass: first collect candidates via cheap AABB reject
+        // (shared borrow), then drill into the first hit via BVH
+        // descent (mutable borrow). This avoids holding &mut and &
+        // on self.trees simultaneously.
+        let candidates: Vec<(SceneTreeId, Vec2)> = self
+            .layer_order
+            .iter()
+            .rev()
+            .copied()
+            .filter_map(|id| {
+                let entry = self.trees.get(id.0)?;
+                if !entry.contains(point) {
+                    return None;
+                }
+                Some((id, point - entry.offset))
+            })
+            .collect();
+
+        for (id, local) in candidates {
+            let Some(entry) = self.trees.get_mut(id.0) else {
                 continue;
             };
-            // Cheap reject: the bbox check takes O(1) when the
-            // memo is warm, so misses are linear in tree count
-            // not in node count.
-            if !entry.contains(point) {
-                continue;
-            }
-            let local = point - entry.offset;
             if let Some(node_id) = entry.tree.descendant_at(local) {
                 return Some((id, node_id));
             }

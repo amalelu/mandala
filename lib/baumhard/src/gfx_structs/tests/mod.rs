@@ -8,3 +8,4 @@ pub mod scene_tests;
 pub mod camera_tests;
 pub mod element_tests;
 pub mod predicate_tests;
+pub mod subtree_aabb_tests;

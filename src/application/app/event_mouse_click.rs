@@ -140,7 +140,7 @@ pub(super) fn handle_mouse_input(
                     cursor_pos.0 as f32,
                     cursor_pos.1 as f32,
                 );
-                let hit_node = mindmap_tree.as_ref().and_then(|tree| {
+                let hit_node = mindmap_tree.as_mut().and_then(|tree| {
                     hit_test(canvas_pos, tree)
                 });
 

@@ -68,6 +68,11 @@ pub struct MindMapTree {
     pub tree: Tree<GfxElement, GfxMutator>,
     /// Maps MindNode ID → indextree NodeId for later lookup.
     pub node_map: HashMap<String, NodeId>,
+    /// Reverse map: indextree NodeId → MindNode ID. Built alongside
+    /// `node_map` during tree construction. Enables O(1) lookup when
+    /// the BVH descent returns a `NodeId` and the caller needs the
+    /// corresponding mindmap node ID.
+    pub reverse_node_map: HashMap<NodeId, String>,
 }
 
 /// Builds a `Tree<GfxElement, GfxMutator>` from a MindMap's
@@ -105,5 +110,20 @@ pub fn build_mindmap_tree(map: &MindMap) -> MindMapTree {
         build_children_recursive(map, &root.id, node_id, &mut tree, &mut node_map, &mut id_counter);
     }
 
-    MindMapTree { tree, node_map }
+    let reverse_node_map: HashMap<NodeId, String> = node_map
+        .iter()
+        .map(|(mind_id, &node_id)| (node_id, mind_id.clone()))
+        .collect();
+    MindMapTree { tree, node_map, reverse_node_map }
+}
+
+impl MindMapTree {
+    /// Look up the MindMap node ID for a given arena `NodeId`.
+    ///
+    /// O(1) hash lookup. Returns `None` if `node_id` does not
+    /// correspond to a MindNode (e.g. it is the void root or was
+    /// removed).
+    pub fn mind_id_for_node(&self, node_id: NodeId) -> Option<&str> {
+        self.reverse_node_map.get(&node_id).map(|s| s.as_str())
+    }
 }

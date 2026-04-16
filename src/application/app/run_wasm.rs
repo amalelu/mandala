@@ -381,7 +381,7 @@ app.event_loop.run(move |event, _window_target| {
 
                 // Hit test against nodes
                 let hit_node: Option<String> = input.mindmap_tree
-                    .as_ref()
+                    .as_mut()
                     .and_then(|tree| {
                         crate::application::document::hit_test(canvas_pos, tree)
                     });

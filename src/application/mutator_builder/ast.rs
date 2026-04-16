@@ -4,6 +4,7 @@
 use baumhard::core::primitives::ApplyOperation;
 use baumhard::gfx_structs::mutator::Instruction;
 use baumhard::gfx_structs::predicate::Predicate;
+use baumhard::util::ordered_vec2::OrderedVec2;
 use serde::Deserialize;
 
 /// One node in the mutator-tree DSL. Variants map 1:1 to `GfxMutator`
@@ -126,6 +127,7 @@ pub enum InstructionSpec {
     RepeatWhileAlwaysTrue,
     RepeatWhile(Predicate),
     RotateWhile(f32, Predicate),
+    SpatialDescend(OrderedVec2),
 }
 
 impl InstructionSpec {
@@ -136,6 +138,7 @@ impl InstructionSpec {
             }
             InstructionSpec::RepeatWhile(p) => Instruction::RepeatWhile(p),
             InstructionSpec::RotateWhile(a, p) => Instruction::RotateWhile(a, p),
+            InstructionSpec::SpatialDescend(point) => Instruction::SpatialDescend(point),
         }
     }
 }

@@ -56,9 +56,10 @@ impl <T: TreeNode + Clone> MutatorTree<T> {
 impl Applicable<Tree<GfxElement, GfxMutator>> for MutatorTree<GfxMutator> {
     fn apply_to(&self, target: &mut Tree<GfxElement, GfxMutator>) {
         // Any mutator may touch GlyphArea position or bounds; the
-        // safe default is to drop the bbox memo and let the next
-        // `descendants_aabb` call recompute. Cheap (one Cell write).
+        // safe default is to drop the bbox memos and let the next
+        // query recompute. Cheap (one Cell write each).
         target.aabb_cache.set(None);
+        target.subtree_aabbs_dirty.set(true);
         walk_tree_from(target, &self, target.root, self.root)
     }
 }
@@ -86,6 +87,10 @@ pub struct Tree<T: Clone, M: Applicable<T>> {
     /// Invalidated by [`MutatorTree::apply_to`] (and any
     /// `&mut self` op that touches GlyphArea positions or bounds).
     aabb_cache: Cell<Option<Option<(Vec2, Vec2)>>>,
+    /// When `true`, per-node `subtree_aabb` caches in the arena are
+    /// stale and must be recomputed before the next BVH query.
+    /// Set to `true` on construction and after any mutation.
+    subtree_aabbs_dirty: Cell<bool>,
 }
 
 impl Tree<GfxElement, GfxMutator> {
@@ -105,6 +110,7 @@ impl Tree<GfxElement, GfxMutator> {
             region_params: Some(region_params),
             region_index: Some(Rc::new(RegionIndexer::default())),
             aabb_cache: Cell::new(None),
+            subtree_aabbs_dirty: Cell::new(true),
         }
     }
 
@@ -126,6 +132,7 @@ impl Tree<GfxElement, GfxMutator> {
             region_params: Some(region_params),
             region_index: Some(Rc::new(RegionIndexer::default())),
             aabb_cache: Cell::new(None),
+            subtree_aabbs_dirty: Cell::new(true),
         }
     }
 
@@ -142,6 +149,7 @@ impl Tree<GfxElement, GfxMutator> {
             region_params: None,
             region_index: None,
             aabb_cache: Cell::new(None),
+            subtree_aabbs_dirty: Cell::new(true),
         }
     }
 
@@ -159,6 +167,7 @@ impl Tree<GfxElement, GfxMutator> {
             region_params: None,
             region_index: None,
             aabb_cache: Cell::new(None),
+            subtree_aabbs_dirty: Cell::new(true),
         }
     }
 
@@ -190,27 +199,29 @@ impl Tree<GfxElement, GfxMutator> {
         arena_utils::clone_subtree(target, target_root, &mut self.arena, self.root);
     }
 
-    /// Walks the arena looking for the smallest-AABB `GlyphArea`
-    /// descendant whose rectangle contains `point`. Returns its
-    /// [`NodeId`], or [`None`] if nothing matches.
+    /// Find the smallest-AABB `GlyphArea` descendant whose rectangle
+    /// contains `point`. Returns its [`NodeId`], or [`None`] if
+    /// nothing matches.
     ///
-    /// Equivalent to `descendant_near(point, 0.0)` — the legacy
-    /// app-side `hit_test` had no slack, and most renderer call
-    /// sites don't want any.
+    /// Equivalent to `descendant_near(point, 0.0)`.
+    ///
+    /// # Algorithm
+    ///
+    /// Uses a BVH (bounding-volume hierarchy) descent: each node's
+    /// cached `subtree_aabb` is checked before recursing into its
+    /// children. Subtrees whose aggregate AABB does not contain the
+    /// point are pruned entirely.
     ///
     /// # Costs
     ///
-    /// O(n) over the descendants of [`Self::root`]. No allocation.
-    /// [`GfxElement::GlyphModel`] and [`GfxElement::Void`] nodes are
-    /// skipped (they don't expose an AABB on `GlyphArea`). When
-    /// multiple areas contain the point, the smallest by area wins —
-    /// mirrors the "innermost first" convention used by the app-side
-    /// `hit_test` helpers this method replaces.
+    /// O(branching_factor × depth) when subtrees are spatially
+    /// disjoint; O(n) worst case when subtree AABBs fully overlap.
+    /// One `Vec` allocation on the first call after a mutation (for
+    /// the subtree AABB computation pass); O(1) on subsequent calls.
     ///
-    /// Intended for use by [`crate::gfx_structs::scene::Scene`] after
-    /// it has identified which tree covers the hit; each tree then
-    /// drills down to the concrete target using this method.
-    pub fn descendant_at(&self, point: Vec2) -> Option<NodeId> {
+    /// When multiple areas contain the point, the smallest by area
+    /// wins — the "innermost first" convention.
+    pub fn descendant_at(&mut self, point: Vec2) -> Option<NodeId> {
         self.descendant_near(point, 0.0)
     }
 
@@ -219,36 +230,83 @@ impl Tree<GfxElement, GfxMutator> {
     /// the containment test. Use for fuzzy hit-tests where the
     /// caller wants to forgive a stylus or fat-finger near-miss
     /// (e.g. edge handles, console close-buttons).
-    pub fn descendant_near(&self, point: Vec2, slack: f32) -> Option<NodeId> {
+    pub fn descendant_near(&mut self, point: Vec2, slack: f32) -> Option<NodeId> {
+        self.ensure_subtree_aabbs();
         let mut best: Option<(NodeId, f32)> = None;
-        for node_id in self.root.descendants(&self.arena) {
-            let Some(node) = self.arena.get(node_id) else {
+        self.bvh_descend(self.root, point, slack, &mut best);
+        best.map(|(id, _)| id)
+    }
+
+    /// Recursive BVH descent. For each child of `node_id`:
+    /// 1. If the child's `subtree_aabb` does not contain `point`
+    ///    (accounting for `slack`) → prune the entire subtree.
+    /// 2. If the child's own `GlyphArea` AABB contains `point` →
+    ///    record it as a candidate (smallest-area wins).
+    /// 3. Recurse into the child's children.
+    fn bvh_descend(
+        &self,
+        node_id: NodeId,
+        point: Vec2,
+        slack: f32,
+        best: &mut Option<(NodeId, f32)>,
+    ) {
+        // Collect children into a local vec to avoid borrow conflicts
+        // with the arena (we need &self.arena for both iteration and
+        // node reads). Children count per node is small (typically
+        // single digits), so this is cheap.
+        let children: Vec<NodeId> = node_id
+            .children(&self.arena)
+            .collect();
+
+        for child_id in children {
+            let Some(node) = self.arena.get(child_id) else {
                 continue;
             };
-            let Some(area) = node.get().glyph_area() else {
-                continue;
-            };
-            let pos = area.position.to_vec2();
-            let bounds = area.render_bounds.to_vec2();
-            if bounds.x <= 0.0 || bounds.y <= 0.0 {
-                continue;
+            let element = node.get();
+
+            // 1. Prune: skip if subtree AABB doesn't contain point.
+            if let Some((st_min, st_max)) = element.subtree_aabb() {
+                if point.x < st_min.x - slack
+                    || point.x > st_max.x + slack
+                    || point.y < st_min.y - slack
+                    || point.y > st_max.y + slack
+                {
+                    continue; // prune
+                }
+            } else {
+                continue; // no subtree AABB → no renderable content
             }
-            let min_x = pos.x - slack;
-            let min_y = pos.y - slack;
-            let max_x = pos.x + bounds.x + slack;
-            let max_y = pos.y + bounds.y + slack;
-            if point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y {
-                // Tie-break by *original* (un-slacked) area so a
-                // physically smaller element still wins when both
-                // would qualify after slack.
-                let size = bounds.x * bounds.y;
-                match best {
-                    Some((_, best_size)) if best_size <= size => {}
-                    _ => best = Some((node_id, size)),
+
+            // 2. Check this node's own GlyphArea AABB.
+            if let Some(area) = element.glyph_area() {
+                let pos = area.position.to_vec2();
+                let bounds = area.render_bounds.to_vec2();
+                if bounds.x > 0.0 && bounds.y > 0.0 {
+                    let min_x = pos.x - slack;
+                    let min_y = pos.y - slack;
+                    let max_x = pos.x + bounds.x + slack;
+                    let max_y = pos.y + bounds.y + slack;
+                    if point.x >= min_x
+                        && point.x <= max_x
+                        && point.y >= min_y
+                        && point.y <= max_y
+                    {
+                        // Tie-break by *original* (un-slacked) area
+                        // so a physically smaller element still wins.
+                        let size = bounds.x * bounds.y;
+                        match *best {
+                            Some((_, best_size)) if best_size <= size => {}
+                            _ => *best = Some((child_id, size)),
+                        }
+                    }
                 }
             }
+
+            // 3. Recurse into children (the subtree AABB test above
+            //    already proved that at least one descendant may contain
+            //    the point).
+            self.bvh_descend(child_id, point, slack, best);
         }
-        best.map(|(id, _)| id)
     }
 
     /// Conservative AABB covering every `GlyphArea` descendant of
@@ -270,6 +328,75 @@ impl Tree<GfxElement, GfxMutator> {
         let computed = self.compute_descendants_aabb();
         self.aabb_cache.set(Some(computed));
         computed
+    }
+
+    /// Ensure every node's `subtree_aabb` cache is fresh. If the
+    /// tree has been mutated since the last computation, performs a
+    /// bottom-up (post-order) pass that writes each node's
+    /// `subtree_aabb` as the union of its own AABB with its
+    /// children's subtree AABBs.
+    ///
+    /// # Costs
+    ///
+    /// O(n) on the first call after mutation (one `Vec` allocation
+    /// for post-order traversal + one write per node). O(1) on
+    /// subsequent calls while the cache is clean.
+    pub fn ensure_subtree_aabbs(&mut self) {
+        if !self.subtree_aabbs_dirty.get() {
+            return;
+        }
+        self.compute_subtree_aabbs();
+        self.subtree_aabbs_dirty.set(false);
+    }
+
+    /// Bottom-up pass: compute and cache `subtree_aabb` for every
+    /// node in the arena. Post-order guarantees that children are
+    /// processed before their parents, so each parent can read its
+    /// children's already-computed subtree AABBs.
+    fn compute_subtree_aabbs(&mut self) {
+        // Collect descendants in pre-order, then reverse for post-order.
+        let post_order: Vec<NodeId> = {
+            let mut ids: Vec<NodeId> = self.root.descendants(&self.arena).collect();
+            ids.reverse();
+            ids
+        };
+
+        for node_id in post_order {
+            // Start with this node's own AABB (if it has one).
+            let own_aabb = self.node_own_aabb(node_id);
+            let mut combined = own_aabb;
+
+            // Merge children's subtree AABBs (already computed due
+            // to post-order).
+            let mut child_id = self.arena.get(node_id)
+                .and_then(|n| n.first_child());
+            while let Some(cid) = child_id {
+                if let Some(child_aabb) = self.arena.get(cid)
+                    .and_then(|n| n.get().subtree_aabb())
+                {
+                    combined = Some(union_aabb(combined, child_aabb));
+                }
+                child_id = self.arena.get(cid).and_then(|n| n.next_sibling());
+            }
+
+            if let Some(node) = self.arena.get_mut(node_id) {
+                node.get_mut().set_subtree_aabb(combined);
+            }
+        }
+    }
+
+    /// Return the AABB of a single node's own renderable content
+    /// (position + render_bounds for `GlyphArea`, `None` otherwise).
+    /// Does not include descendants.
+    fn node_own_aabb(&self, node_id: NodeId) -> Option<(Vec2, Vec2)> {
+        let node = self.arena.get(node_id)?;
+        let area = node.get().glyph_area()?;
+        let bounds = area.render_bounds.to_vec2();
+        if bounds.x <= 0.0 || bounds.y <= 0.0 {
+            return None;
+        }
+        let pos = area.position.to_vec2();
+        Some((pos, pos + bounds))
     }
 
     fn compute_descendants_aabb(&self) -> Option<(Vec2, Vec2)> {
@@ -310,6 +437,22 @@ impl Tree<GfxElement, GfxMutator> {
             None
         }
     }
-
 }
 
+/// Return the smallest AABB enclosing both `base` (if `Some`) and
+/// `other`. When `base` is `None`, returns `other` unchanged.
+///
+/// O(1), no allocation. Used by [`Tree::compute_subtree_aabbs`] to
+/// merge a parent's own AABB with its children's subtree AABBs.
+fn union_aabb(base: Option<(Vec2, Vec2)>, other: (Vec2, Vec2)) -> (Vec2, Vec2) {
+    match base {
+        None => other,
+        Some((min_a, max_a)) => {
+            let (min_b, max_b) = other;
+            (
+                Vec2::new(min_a.x.min(min_b.x), min_a.y.min(min_b.y)),
+                Vec2::new(max_a.x.max(max_b.x), max_a.y.max(max_b.y)),
+            )
+        }
+    }
+}

@@ -138,6 +138,75 @@ pub fn do_unique_id_is_stable() {
     assert_eq!(second, third);
 }
 
+// ── subtree_aabb cache ─────────────────────────────────────────────
+
+#[test]
+fn test_subtree_aabb_defaults_to_none() {
+    do_subtree_aabb_defaults_to_none();
+}
+
+/// Freshly constructed elements have no cached subtree AABB.
+pub fn do_subtree_aabb_defaults_to_none() {
+    fonts::init();
+
+    let area = GlyphArea::new_with_str("x", 10.0, 10.0, Vec2::ZERO, Vec2::new(50.0, 10.0));
+    assert!(GfxElement::new_area_non_indexed(area, 0).subtree_aabb().is_none());
+    assert!(GfxElement::new_model_blank(0, 0).subtree_aabb().is_none());
+    assert!(GfxElement::new_void(0).subtree_aabb().is_none());
+}
+
+#[test]
+fn test_subtree_aabb_set_and_read() {
+    do_subtree_aabb_set_and_read();
+}
+
+/// Writing a subtree AABB via `set_subtree_aabb` makes it visible
+/// through `subtree_aabb()`. `invalidate_subtree_aabb` clears it.
+pub fn do_subtree_aabb_set_and_read() {
+    let mut elem = GfxElement::new_void(0);
+    let aabb = (Vec2::new(10.0, 20.0), Vec2::new(100.0, 200.0));
+
+    elem.set_subtree_aabb(Some(aabb));
+    assert_eq!(elem.subtree_aabb(), Some(aabb));
+
+    elem.invalidate_subtree_aabb();
+    assert!(elem.subtree_aabb().is_none());
+}
+
+#[test]
+fn test_subtree_aabb_survives_clone() {
+    do_subtree_aabb_survives_clone();
+}
+
+/// Cloning an element produces a fresh element with `subtree_aabb`
+/// defaulting to `None` — the cache is position-dependent and should
+/// not carry over to a clone placed in a different tree position.
+pub fn do_subtree_aabb_survives_clone() {
+    let mut elem = GfxElement::new_void(0);
+    elem.set_subtree_aabb(Some((Vec2::ZERO, Vec2::new(50.0, 50.0))));
+
+    let cloned = elem.clone();
+    // Cloned through the constructor which defaults to None — correct
+    // for a cache that is tree-position-dependent.
+    assert!(cloned.subtree_aabb().is_none());
+}
+
+#[test]
+fn test_subtree_aabb_ignored_in_eq() {
+    do_subtree_aabb_ignored_in_eq();
+}
+
+/// Two elements that differ only in their cached `subtree_aabb` are
+/// considered equal — the cache is not part of element identity.
+pub fn do_subtree_aabb_ignored_in_eq() {
+    let mut a = GfxElement::new_void_with_id(0, 42);
+    let mut b = GfxElement::new_void_with_id(0, 42);
+
+    a.set_subtree_aabb(Some((Vec2::ZERO, Vec2::new(100.0, 100.0))));
+    // b has no subtree_aabb set.
+    assert_eq!(a, b);
+}
+
 // ── event subscribers add and check ────────────────────────────────
 
 #[test]

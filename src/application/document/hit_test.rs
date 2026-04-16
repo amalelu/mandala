@@ -16,35 +16,19 @@ use baumhard::mindmap::tree_builder::MindMapTree;
 
 use super::types::EdgeRef;
 
-pub fn hit_test(canvas_pos: Vec2, tree: &MindMapTree) -> Option<String> {
-    let mut best: Option<(String, f32)> = None; // (node_id, area)
-
-    for (mind_id, &node_id) in &tree.node_map {
-        let node = match tree.tree.arena.get(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-        let area = match node.get().glyph_area() {
-            Some(a) => a,
-            None => continue,
-        };
-
-        let x = area.position.x.0;
-        let y = area.position.y.0;
-        let w = area.render_bounds.x.0;
-        let h = area.render_bounds.y.0;
-
-        if canvas_pos.x >= x && canvas_pos.x <= x + w
-            && canvas_pos.y >= y && canvas_pos.y <= y + h
-        {
-            let node_area = w * h;
-            if best.as_ref().map_or(true, |(_, best_area)| node_area < *best_area) {
-                best = Some((mind_id.clone(), node_area));
-            }
-        }
-    }
-
-    best.map(|(id, _)| id)
+/// Find the mindmap node ID under `canvas_pos` using BVH-accelerated
+/// tree descent. Returns the innermost (smallest-area) hit, or `None`.
+///
+/// # Costs
+///
+/// O(branching_factor × depth) when subtrees are spatially disjoint;
+/// O(n) worst case. One `Vec` allocation on the first call after a
+/// mutation (subtree AABB recomputation); O(1) on subsequent calls.
+pub fn hit_test(canvas_pos: Vec2, tree: &mut MindMapTree) -> Option<String> {
+    tree.tree
+        .descendant_at(canvas_pos)
+        .and_then(|nid| tree.mind_id_for_node(nid))
+        .map(|s| s.to_owned())
 }
 
 /// Is `canvas_pos` inside the AABB of node `node_id`? Reads the tree-side
