@@ -1240,55 +1240,24 @@ app.event_loop.run(move |event, _window_target| {
                             }
                         }
 
-                        // First frame of a drag? The scene_cache
-                        // was cleared at drag start so it is
-                        // still empty. Skip the incremental-
-                        // rebuild path and do a FULL renderer
-                        // rebuild: this guarantees the renderer's
-                        // per-edge buffer map matches the new
-                        // offset-applied scene exactly, rather
-                        // than reusing pre-drag shaped buffers
-                        // whose cap visibility / glyph count
-                        // might not align with the moved edge's
-                        // new layout. After this first frame,
-                        // the scene_cache is populated and the
-                        // incremental path below kicks in.
-                        let first_frame_of_drag = scene_cache.is_empty();
-
-                        // The dirty edge set = every edge touching
-                        // any moved node. The scene cache holds the
-                        // reverse index, so this is O(sum of edges-
-                        // per-moved-node), not O(edges in map).
-                        let mut dirty_edge_keys: std::collections::HashSet<
-                            baumhard::mindmap::scene_cache::EdgeKey
-                        > = std::collections::HashSet::new();
-                        for nid in offsets.keys() {
-                            for k in scene_cache.edges_touching(nid) {
-                                dirty_edge_keys.insert(k.clone());
-                            }
-                        }
-                        // Border-side dirty-node tracking
-                        // disappeared along with the legacy
-                        // `rebuild_border_buffers_keyed`
-                        // call — the tree-path border helper
-                        // takes the full `offsets` map and
-                        // rebuilds the canvas-scene tree
-                        // wholesale. Connection drag still
-                        // needs `dirty_edge_keys` for its
-                        // own incremental rebuild below.
-
+                        // The tree-path connection rebuild
+                        // currently re-shapes every edge each
+                        // frame. The per-edge incremental
+                        // shaping cache that would let us
+                        // narrow this to a "dirty" set
+                        // (computed from `scene_cache.
+                        // edges_touching(nid)` per moved node)
+                        // is a known regression tracked
+                        // separately; until it lands the full
+                        // rebuild below is correct, and we
+                        // skip the dead bookkeeping that would
+                        // feed it.
                         let scene = doc.build_scene_with_cache(
                             &offsets,
                             &mut scene_cache,
                             renderer.camera_zoom(),
                         );
 
-                        // Tree-path connection rebuild ignores
-                        // the dirty set today (Session 2f-perf
-                        // tracks the per-edge incremental
-                        // shaping cache). Both branches reduce
-                        // to the same call.
-                        let _ = (first_frame_of_drag, &dirty_edge_keys);
                         update_connection_tree(&scene, &mut app_scene);
                         // Borders go through the canvas-scene
                         // tree path; drag offsets land on the
@@ -1357,18 +1326,21 @@ app.event_loop.run(move |event, _window_target| {
                         );
                         scene_cache.invalidate_edge(&edge_key);
 
+                        // Single dirty edge — the one being
+                        // dragged. Once the tree-path gains
+                        // an incremental shaping cache (see
+                        // the matching note in the MovingNode
+                        // drain above), we'll thread this in
+                        // via `scene_cache.invalidate_edge`
+                        // already called above.
+                        let _ = edge_key;
                         let offsets: HashMap<String, (f32, f32)> = HashMap::new();
-                        let mut dirty_edge_keys: std::collections::HashSet<
-                            baumhard::mindmap::scene_cache::EdgeKey
-                        > = std::collections::HashSet::new();
-                        dirty_edge_keys.insert(edge_key);
 
                         let scene = doc.build_scene_with_cache(
                             &offsets,
                             &mut scene_cache,
                             renderer.camera_zoom(),
                         );
-                        let _ = &dirty_edge_keys;
                         update_connection_tree(&scene, &mut app_scene);
                         update_edge_handle_tree(&scene, &mut app_scene);
                         // Labels are rebuilt per frame so a

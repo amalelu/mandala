@@ -140,14 +140,15 @@ pub fn find_nth_line_grapheme_range(s: &str, n: usize) -> Option<(usize, usize)>
             last_line_start = idx;
             new_line = false;
         }
-        if graph == "\n" || graph == "" {
+        // Grapheme clusters yielded by `unicode_segmentation` are
+        // guaranteed non-empty, so a literal newline is the only
+        // line terminator we have to test for.
+        if graph == "\n" {
             if line_head == n {
-                // So it's time to move the line head up one tick
-                // but if the head is currently at n, then this is the last
-                // index in the line
+                // We're at the end of the requested line: emit the
+                // half-open range [last_line_start, idx).
                 return Some((last_line_start, idx));
             }
-            // otherwise
             new_line = true;
             line_head += 1;
         }
