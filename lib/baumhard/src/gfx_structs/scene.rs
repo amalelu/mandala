@@ -176,9 +176,9 @@ impl Scene {
     /// Mutable borrow of just the tree. Builder-phase escape hatch.
     /// Mutations via the returned reference that touch GlyphArea
     /// position or bounds **must** call
-    /// [`Tree::invalidate_aabb_cache`] or the scene's hit-test
-    /// memo will drift; prefer [`Self::apply_mutator`] which
-    /// handles invalidation automatically.
+    /// [`Tree::invalidate_caches`] afterwards, or the scene's
+    /// hit-test memos will drift. Prefer [`Self::apply_mutator`]
+    /// which handles invalidation automatically.
     pub fn tree_mut(&mut self, id: SceneTreeId) -> Option<&mut Tree<GfxElement, GfxMutator>> {
         self.trees.get_mut(id.0).map(|e| &mut e.tree)
     }
@@ -245,24 +245,40 @@ impl Scene {
     /// (O(1) when warm, O(descendants) once after each mutator).
     /// On a hit, one additional O(descendants) walk inside the
     /// matched tree via [`Tree::descendant_at`]. Misses cost only
-    /// the bbox check — they don't trigger the inner walk. No
-    /// allocation. The scene keeps no per-node spatial index —
-    /// that's the tree's responsibility if one is ever wired up
-    /// (see the unimplemented
-    /// [`crate::gfx_structs::util::regions::RegionIndexer`]).
+    /// the bbox check — they don't trigger the inner walk.
+    ///
+    /// # Precondition
+    ///
+    /// All pending mutations must be applied before calling this
+    /// method. The BVH caches are invalidated by
+    /// [`MutatorTree::apply_to`](crate::gfx_structs::tree::MutatorTree)
+    /// and lazily recomputed on the first query after mutation.
+    /// Calling `component_at` between a mutation and its
+    /// application may return stale results.
     pub fn component_at(&mut self, point: Vec2) -> Option<(SceneTreeId, NodeId)> {
         self.ensure_layer_order();
-        for id in self.layer_order.iter().rev().copied() {
-            let Some(entry) = self.trees.get(id.0) else {
+        // Two-pass: first collect candidates via cheap AABB reject
+        // (shared borrow), then drill into the first hit via BVH
+        // descent (mutable borrow). This avoids holding &mut and &
+        // on self.trees simultaneously.
+        let candidates: Vec<(SceneTreeId, Vec2)> = self
+            .layer_order
+            .iter()
+            .rev()
+            .copied()
+            .filter_map(|id| {
+                let entry = self.trees.get(id.0)?;
+                if !entry.contains(point) {
+                    return None;
+                }
+                Some((id, point - entry.offset))
+            })
+            .collect();
+
+        for (id, local) in candidates {
+            let Some(entry) = self.trees.get_mut(id.0) else {
                 continue;
             };
-            // Cheap reject: the bbox check takes O(1) when the
-            // memo is warm, so misses are linear in tree count
-            // not in node count.
-            if !entry.contains(point) {
-                continue;
-            }
-            let local = point - entry.offset;
             if let Some(node_id) = entry.tree.descendant_at(local) {
                 return Some((id, node_id));
             }

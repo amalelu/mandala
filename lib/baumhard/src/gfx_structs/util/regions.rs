@@ -103,6 +103,24 @@ impl RegionParams {
         }
     }
 
+    /// Return every region bucket that a pixel-space rectangle
+    /// overlaps.
+    ///
+    /// Both `start` and `end` are *inclusive* pixel coordinates.
+    /// Regions are returned in row-major order (left-to-right,
+    /// top-to-bottom).
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidParameters` if `start` is component-wise greater
+    ///   than `end`, or if either corner lies outside the current
+    ///   resolution.
+    ///
+    /// # Costs
+    ///
+    /// O(output) — one push per intersected region, no redundant
+    /// iteration. Two lock reads (`region_size`, `region_factor_x`)
+    /// plus the validation reads.
     pub fn calculate_regions_intersected_by_rectangle(
         &self,
         start: (usize, usize),
@@ -128,24 +146,22 @@ impl RegionParams {
             ));
         }
 
-        let mut output = Vec::new();
-        let mut head = start;
-        let total_regions = self.calc_num_regions()?;
-        loop {
-            let region = self.calculate_region_from_pixel(head)?;
-            if head.0 > end.0 || head.1 > end.1 {
-                if head.0 > end.0 && head.1 > end.1 {
-                    break;
-                }
-                head = self.calculate_pixel_from_region(region + 1)?;
-                continue;
-            }
-            output.push(region);
+        let region_size_x = self.read_region_size_x()?;
+        let region_size_y = self.read_region_size_y()?;
+        let factor_x = self.read_region_factor_x()?;
 
-            if region + 1 >= total_regions {
-                break;
+        let col_start = start.0 / region_size_x;
+        let col_end = end.0 / region_size_x;
+        let row_start = start.1 / region_size_y;
+        let row_end = end.1 / region_size_y;
+
+        let mut output = Vec::with_capacity(
+            (col_end - col_start + 1) * (row_end - row_start + 1),
+        );
+        for row in row_start..=row_end {
+            for col in col_start..=col_end {
+                output.push(row * factor_x + col);
             }
-            head = self.calculate_pixel_from_region(region + 1)?;
         }
         Ok(output)
     }

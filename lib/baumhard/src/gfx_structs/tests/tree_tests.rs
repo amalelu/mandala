@@ -1,3 +1,6 @@
+//! Tests for [`crate::gfx_structs::tree::Tree`] — arena operations,
+//! mutations, events, and subscriber dispatch (§T1).
+
 use crossbeam_channel::unbounded;
 use glam::Vec2;
 use indextree::{NodeId};

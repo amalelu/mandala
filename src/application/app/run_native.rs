@@ -289,7 +289,7 @@ app.event_loop.run(move |event, _window_target| {
             // target highlight. Skip the regular drag-state handling (no drag in
             // these modes).
             if matches!(app_mode, AppMode::Reparent { .. } | AppMode::Connect { .. }) {
-                let new_hover = mindmap_tree.as_ref().and_then(|tree| {
+                let new_hover = mindmap_tree.as_mut().and_then(|tree| {
                     let canvas_pos = renderer.screen_to_canvas(
                         cursor_pos.0 as f32, cursor_pos.1 as f32,
                     );
@@ -311,7 +311,7 @@ app.event_loop.run(move |event, _window_target| {
             // trigger bindings). Only recomputed when idle — during
             // a drag the cursor should stay as-is.
             if matches!(drag_state, DragState::None) {
-                let over_button = match (document.as_ref(), mindmap_tree.as_ref()) {
+                let over_button = match (document.as_ref(), mindmap_tree.as_mut()) {
                     (Some(doc), Some(tree)) => {
                         let canvas_pos = renderer.screen_to_canvas(
                             cursor_pos.0 as f32, cursor_pos.1 as f32,

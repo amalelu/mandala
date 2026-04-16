@@ -75,6 +75,11 @@ pub enum GfxElement {
         channel: usize,
         unique_id: usize,
         event_subscribers: Vec<EventSubscriber>,
+        /// Cached AABB covering this node and all its descendants.
+        /// Computed lazily by [`Tree::ensure_subtree_aabbs`] and
+        /// invalidated when a mutation touches the tree. Not
+        /// serialised — it is a runtime cache, not persistent state.
+        subtree_aabb: Option<(Vec2, Vec2)>,
     },
     /// A composed glyph shape built from lines and components.
     ///
@@ -87,6 +92,8 @@ pub enum GfxElement {
         channel: usize,
         unique_id: usize,
         event_subscribers: Vec<EventSubscriber>,
+        /// See [`GfxElement::GlyphArea::subtree_aabb`].
+        subtree_aabb: Option<(Vec2, Vec2)>,
     },
     /// A no-op placeholder node that produces no rendering output.
     ///
@@ -99,6 +106,8 @@ pub enum GfxElement {
         unique_id: usize,
         event_subscribers: Vec<EventSubscriber>,
         flags: FxHashSet<Flag>,
+        /// See [`GfxElement::GlyphArea::subtree_aabb`].
+        subtree_aabb: Option<(Vec2, Vec2)>,
     },
 }
 
@@ -131,6 +140,7 @@ impl GfxElement {
             channel,
             unique_id,
             event_subscribers: vec![],
+            subtree_aabb: None,
         }
     }
 
@@ -155,6 +165,7 @@ impl GfxElement {
             unique_id,
             event_subscribers: vec![],
             flags: Default::default(),
+            subtree_aabb: None,
         }
     }
     /// Create a [`GlyphModel`] element. Delegates to
@@ -184,6 +195,7 @@ impl GfxElement {
             channel,
             unique_id,
             event_subscribers: vec![],
+            subtree_aabb: None,
         }
     }
 
@@ -210,6 +222,7 @@ impl GfxElement {
             channel,
             unique_id,
             event_subscribers: vec![],
+            subtree_aabb: None,
         }
     }
 
@@ -357,8 +370,8 @@ impl GfxElement {
     /// if one exists.
     ///
     /// * `GlyphArea` — looks up the region and returns its colour.
-    /// * `GlyphModel` — **panics** (not yet implemented).
-    /// * `Void` — returns `None`.
+    /// * `GlyphModel` / `Void` — returns `None` (no colour-font
+    ///   regions on these variants).
     ///
     /// O(1) region lookup (hash map).
     pub fn color_at_region(&self, range: Range) -> Option<FloatRgba> {
@@ -367,7 +380,7 @@ impl GfxElement {
                 .regions
                 .get(range)
                 .and_then(|region| region.color),
-            GfxElement::GlyphModel { .. } => panic!("Not yet implemented"),
+            GfxElement::GlyphModel { .. } => None,
             GfxElement::Void { .. } => None,
         }
     }
@@ -407,6 +420,41 @@ impl GfxElement {
         if !position.is_nan() {
             self.set_position(clockwise_rotation_around_pivot(position, pivot, degrees));
         }
+    }
+
+    /// Return the cached subtree AABB covering this node and all its
+    /// descendants, or `None` if the cache has not been computed or has
+    /// been invalidated.
+    ///
+    /// The tuple is `(top_left, bottom_right)` in tree-local coordinates.
+    /// O(1), no allocation.
+    pub fn subtree_aabb(&self) -> Option<(Vec2, Vec2)> {
+        match self {
+            GfxElement::GlyphArea { subtree_aabb, .. }
+            | GfxElement::GlyphModel { subtree_aabb, .. }
+            | GfxElement::Void { subtree_aabb, .. } => *subtree_aabb,
+        }
+    }
+
+    /// Write the cached subtree AABB for this node.
+    ///
+    /// Called by [`Tree::compute_subtree_aabbs`] during the bottom-up
+    /// pass. Application code should not call this directly — use the
+    /// tree-level API instead.
+    ///
+    /// O(1), no allocation.
+    pub fn set_subtree_aabb(&mut self, aabb: Option<(Vec2, Vec2)>) {
+        match self {
+            GfxElement::GlyphArea { subtree_aabb, .. }
+            | GfxElement::GlyphModel { subtree_aabb, .. }
+            | GfxElement::Void { subtree_aabb, .. } => *subtree_aabb = aabb,
+        }
+    }
+
+    /// Clear the cached subtree AABB, forcing recomputation on next
+    /// access. O(1), no allocation.
+    pub fn invalidate_subtree_aabb(&mut self) {
+        self.set_subtree_aabb(None);
     }
 }
 
@@ -452,8 +500,17 @@ impl Flaggable for GfxElement {
 
 impl Debug for GfxElement {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        //todo
-        Ok(())
+        match self {
+            GfxElement::GlyphArea { channel, unique_id, glyph_area, .. } => {
+                write!(f, "GlyphArea(id={}, ch={}, text={:?})", unique_id, channel, glyph_area.text)
+            }
+            GfxElement::GlyphModel { channel, unique_id, .. } => {
+                write!(f, "GlyphModel(id={}, ch={})", unique_id, channel)
+            }
+            GfxElement::Void { channel, unique_id, .. } => {
+                write!(f, "Void(id={}, ch={})", unique_id, channel)
+            }
+        }
     }
 }
 

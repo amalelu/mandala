@@ -1,4 +1,5 @@
 use log::debug;
+use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use strum_macros::Display;
 use crate::gfx_structs::element::GfxElement;
@@ -8,6 +9,7 @@ use crate::gfx_structs::tree::{BranchChannel, TreeEventConsumer, TreeNode};
 use crate::gfx_structs::mutator::Mutation::{AreaCommand, AreaDelta, Event, ModelCommand, ModelDelta};
 use crate::gfx_structs::predicate::Predicate;
 use crate::core::primitives::Applicable;
+use crate::util::ordered_vec2::OrderedVec2;
 
 /// A control-flow directive attached to a [`GfxMutator::Instruction`]
 /// node. Instructions govern *how* the tree walker processes the
@@ -30,6 +32,29 @@ pub enum Instruction {
    /// (no-op); the variant exists so the mutator language can be
    /// extended without breaking serialised trees.
    RotateWhile(f32, Predicate),
+   /// Descend the target tree using per-node subtree AABBs to find
+   /// the deepest node whose own AABB contains the given point.
+   /// Prunes branches whose subtree AABB does not contain the point.
+   /// When the target node is found, the instruction's attached
+   /// mutation (typically a [`Mutation::Event`] carrying a
+   /// [`MouseEventData`]) is applied to it. If no node contains the
+   /// point, the instruction is a no-op.
+   ///
+   /// This is the tree-walker counterpart of
+   /// [`Tree::descendant_at`](crate::gfx_structs::tree::Tree::descendant_at):
+   /// where `descendant_at` returns a `NodeId`, `SpatialDescend`
+   /// delivers a mutation to the hit node through the mutator
+   /// pipeline.
+   ///
+   /// Unlike [`RepeatWhile`](Instruction::RepeatWhile), spatial
+   /// descent bypasses channel alignment — the mutation is delivered
+   /// to whichever node the point lands on, regardless of its
+   /// channel. This is intentional: spatial routing targets the
+   /// visually correct node, not a structurally aligned one.
+   ///
+   /// Costs: O(branching_factor × depth) when subtrees are spatially
+   /// disjoint; O(n) worst case with fully overlapping subtrees.
+   SpatialDescend(OrderedVec2),
 }
 
 /// Discriminant returned by [`GfxMutator::get_type`] for fast
@@ -62,10 +87,10 @@ pub enum MutatorType {
 pub struct GlyphTreeEventInstance {
    /// The kind of event being delivered.
    pub event_type: GlyphTreeEvent,
-   // This will just be millis since the application was launched in order to handle sequences
-   // todo but we should handle rollover too, it will not be difficult and will only be relevant after 50 days
    /// Milliseconds since application launch — used to order and
-   /// deduplicate event sequences.
+   /// deduplicate event sequences. Wraps after ~50 days; callers
+   /// that sequence events across long sessions should account for
+   /// rollover.
    pub event_time_millis: usize,
 }
 
@@ -80,6 +105,34 @@ impl GlyphTreeEventInstance {
    }
 }
 
+/// Payload carried by [`GlyphTreeEvent::MouseEvent`]. Contains the
+/// canvas-space coordinates of the mouse interaction so that the
+/// receiving element (or its [`EventSubscriber`](crate::gfx_structs::tree::EventSubscriber))
+/// knows *where* the event occurred.
+///
+/// Uses [`OrderedFloat`] so the struct is `Eq + Hash`, consistent
+/// with other position types in baumhard (`OrderedVec2`, etc.).
+///
+/// Cost: 8 bytes, `Copy`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct MouseEventData {
+    /// Canvas-space X coordinate.
+    pub x: OrderedFloat<f32>,
+    /// Canvas-space Y coordinate.
+    pub y: OrderedFloat<f32>,
+}
+
+impl MouseEventData {
+    /// Create a new payload from raw `f32` coordinates.
+    /// O(1), no allocation.
+    pub fn new(x: f32, y: f32) -> Self {
+        Self {
+            x: OrderedFloat(x),
+            y: OrderedFloat(y),
+        }
+    }
+}
+
 /// The kind of event a [`GlyphTreeEventInstance`] carries. Each
 /// variant represents a category of stimulus that an element's
 /// [`EventSubscriber`](crate::gfx_structs::tree::EventSubscriber)
@@ -89,8 +142,8 @@ impl GlyphTreeEventInstance {
 pub enum GlyphTreeEvent {
    /// Keyboard input events
    KeyboardEvent,
-   /// Mouse input events
-   MouseEvent,
+   /// Mouse input events with canvas-space coordinates.
+   MouseEvent(MouseEventData),
    /// Events that are defined by the software application
    AppEvent,
    /// The recipient should start preparing to shut down now
@@ -246,10 +299,11 @@ impl Mutation {
    }
 
    /// Apply this mutation directly to a [`GlyphArea`]. Panics if
-   /// called with a `Mutation::Event` (events must go through
-   /// [`apply_to`](Mutation::apply_to) on a full element). A model
-   /// variant is silently ignored (debug-logged). Cost: O(k) for
-   /// deltas, O(1) for commands.
+   /// called with a `Mutation::Event` (events go through
+   /// [`apply_to`](Mutation::apply_to) on a full element, not
+   /// directly to an area). A model variant or event is silently
+   /// ignored (debug-logged). Cost: O(k) for deltas, O(1) for
+   /// commands.
    pub fn apply_to_area(&self, area: &mut GlyphArea) {
       match self {
          AreaDelta(mutation) => mutation.apply_to(area),
@@ -259,15 +313,14 @@ impl Mutation {
          }
          Mutation::None => {}
          Event(_) => {
-            panic!("Events should not be applied directly to a GlyphArea!")
+            debug!("Event applied directly to GlyphArea — use Mutation::apply_to on a GfxElement instead.");
          }
       }
    }
 
-   /// Apply this mutation directly to a [`GlyphModel`]. Panics if
-   /// called with a `Mutation::Event`. An area variant is silently
-   /// ignored (debug-logged). Cost: O(k) for deltas, O(1) for
-   /// commands.
+   /// Apply this mutation directly to a [`GlyphModel`]. An area
+   /// variant or event is silently ignored (debug-logged). Cost:
+   /// O(k) for deltas, O(1) for commands.
    pub fn apply_to_model(&self, model: &mut GlyphModel) {
       match self {
          ModelDelta(mutation) => mutation.apply_to(model),
@@ -277,7 +330,7 @@ impl Mutation {
          }
          Mutation::None => {}
          Event(_) => {
-            panic!("Events should not be applied directly to a GlyphModel!")
+            debug!("Event applied directly to GlyphModel — use Mutation::apply_to on a GfxElement instead.");
          }
       }
    }

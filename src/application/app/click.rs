@@ -225,7 +225,7 @@ pub(super) fn handle_connect_target_click(
     *hovered_node = None;
 
     // Hit-test the cursor position against the current tree.
-    let target: Option<String> = mindmap_tree.as_ref().and_then(|tree| {
+    let target: Option<String> = mindmap_tree.as_mut().and_then(|tree| {
         let canvas_pos = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
         hit_test(canvas_pos, tree)
     });
@@ -270,7 +270,7 @@ pub(super) fn handle_reparent_target_click(
     *hovered_node = None;
 
     // Hit-test the cursor position against the current tree.
-    let target: Option<String> = mindmap_tree.as_ref().and_then(|tree| {
+    let target: Option<String> = mindmap_tree.as_mut().and_then(|tree| {
         let canvas_pos = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
         hit_test(canvas_pos, tree)
     });

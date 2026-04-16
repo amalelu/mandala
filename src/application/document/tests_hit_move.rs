@@ -30,7 +30,7 @@ use super::defaults::default_cross_link_edge;
 
     #[test]
     fn test_hit_test_direct_hit() {
-        let tree = load_test_tree();
+        let mut tree = load_test_tree();
         // "Lord God" node (id: 348068464) — get its position from the tree
         let node_id = tree.node_map.get("348068464").unwrap();
         let area = tree.tree.arena.get(*node_id).unwrap().get().glyph_area().unwrap();
@@ -38,21 +38,21 @@ use super::defaults::default_cross_link_edge;
             area.position.x.0 + area.render_bounds.x.0 / 2.0,
             area.position.y.0 + area.render_bounds.y.0 / 2.0,
         );
-        let result = hit_test(center, &tree);
+        let result = hit_test(center, &mut tree);
         assert_eq!(result, Some("348068464".to_string()));
     }
 
     #[test]
     fn test_hit_test_miss() {
-        let tree = load_test_tree();
+        let mut tree = load_test_tree();
         // A point far away from any node
-        let result = hit_test(Vec2::new(-99999.0, -99999.0), &tree);
+        let result = hit_test(Vec2::new(-99999.0, -99999.0), &mut tree);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_hit_test_returns_smallest_on_overlap() {
-        let tree = load_test_tree();
+        let mut tree = load_test_tree();
         // Find a parent-child pair where child is inside parent's bounds
         // "Lord God" (348068464) has children — find one whose bounds overlap
         let parent_id_str = "348068464";
@@ -62,26 +62,31 @@ use super::defaults::default_cross_link_edge;
             area.render_bounds.x.0 * area.render_bounds.y.0
         };
 
-        // Find any child node that's smaller and test its center
-        for (mind_id, &nid) in &tree.node_map {
-            if mind_id == parent_id_str { continue; }
-            let a = match tree.tree.arena.get(nid).and_then(|n| n.get().glyph_area()) {
-                Some(a) => a,
-                None => continue,
-            };
-            let child_size = a.render_bounds.x.0 * a.render_bounds.y.0;
-            let child_center = Vec2::new(
-                a.position.x.0 + a.render_bounds.x.0 / 2.0,
-                a.position.y.0 + a.render_bounds.y.0 / 2.0,
-            );
-            if child_size < parent_size
-                && point_in_node_aabb(child_center, parent_id_str, &tree)
-            {
-                let result = hit_test(child_center, &tree);
-                assert_eq!(result, Some(mind_id.clone()),
-                    "Should select smaller child node, not parent");
-                return;
-            }
+        // Collect candidate (mind_id, center) pairs first to release
+        // the immutable borrow on tree.node_map before calling
+        // hit_test (which needs &mut tree).
+        let candidate: Option<(String, Vec2)> = tree.node_map.iter()
+            .filter(|(id, _)| id.as_str() != parent_id_str)
+            .find_map(|(mind_id, &nid)| {
+                let a = tree.tree.arena.get(nid)?.get().glyph_area()?;
+                let child_size = a.render_bounds.x.0 * a.render_bounds.y.0;
+                let child_center = Vec2::new(
+                    a.position.x.0 + a.render_bounds.x.0 / 2.0,
+                    a.position.y.0 + a.render_bounds.y.0 / 2.0,
+                );
+                if child_size < parent_size
+                    && point_in_node_aabb(child_center, parent_id_str, &tree)
+                {
+                    Some((mind_id.clone(), child_center))
+                } else {
+                    None
+                }
+            });
+
+        if let Some((expected_id, center)) = candidate {
+            let result = hit_test(center, &mut tree);
+            assert_eq!(result, Some(expected_id),
+                "Should select smaller child node, not parent");
         }
         // If no overlap found in test data, that's OK — test is structural
     }
