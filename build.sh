@@ -10,6 +10,7 @@ echo $EXCLUDE_PATTERN
 BUILD_DIR="target"
 PROFILE="release"
 HELP=false
+WASM=false
 
 # Parse parameters
 for arg in "$@"; do
@@ -24,6 +25,10 @@ for arg in "$@"; do
 	;;
         --fat)
         PROFILE="release-lto"
+        shift
+        ;;
+        --wasm)
+        WASM=true
         shift
         ;;
         --help)
@@ -45,6 +50,8 @@ display_help() {
     echo "Options:"
     echo "  --dir=<path>    Specify the build directory. Default is 'target'."
     echo "  --fat           Build using the 'release-lto' profile."
+    echo "  --wasm          Build the WASM target via trunk instead of the native binary."
+    echo "                  Respects --debug (dev build) vs. default (release build)."
     echo "  --help          Display this help text."
 }
 
@@ -52,6 +59,30 @@ display_help() {
 if [ "$HELP" = true ]; then
     display_help
     exit 0
+fi
+
+# WASM build path. Delegates to `trunk`, which reads Trunk.toml and
+# emits to `dist/`. Per CODE_CONVENTIONS.md §8, cross-platform changes
+# are expected to verify here before landing; making the flag first-class
+# means the check is one command, not a recipe to remember.
+if [ "$WASM" = true ]; then
+    if ! command -v trunk >/dev/null 2>&1; then
+        echo "Error: 'trunk' not found on PATH."
+        echo "Install with: cargo install trunk"
+        exit 1
+    fi
+    if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+        echo "Error: wasm32-unknown-unknown target not installed."
+        echo "Install with: rustup target add wasm32-unknown-unknown"
+        exit 1
+    fi
+    echo "Building WASM target via trunk..."
+    if [ "$PROFILE" = "debug" ]; then
+        trunk build
+    else
+        trunk build --release
+    fi
+    exit $?
 fi
 
 # Create the build directory
