@@ -1,6 +1,18 @@
+//! Grapheme-cluster aware text utilities. Mandala's text editing,
+//! console scrollback, and label rendering all flow through these
+//! helpers so emoji, combining marks, and CJK glyphs round-trip
+//! correctly. Reach for these primitives from the application crate
+//! rather than indexing a `String` by byte offset — the latter
+//! splits a 👨‍👩‍👧 ZWJ sequence on the first edit and the rest of the
+//! pipeline silently corrupts.
+
 use log::error;
 use unicode_segmentation::UnicodeSegmentation;
 
+/// Borrow the slice from `byte_index` up to (not including) the next
+/// `\n`, or to the end of `s` if no newline follows. `byte_index` must
+/// land on a UTF-8 char boundary; passing a mid-codepoint byte panics
+/// like any other `String` slice. O(n) on the search distance.
 pub(crate) fn slice_to_newline(s: &str, byte_index: usize) -> &str {
     let end_byte_index = s[byte_index..]
         .find('\n')
@@ -9,12 +21,23 @@ pub(crate) fn slice_to_newline(s: &str, byte_index: usize) -> &str {
     &s[byte_index..end_byte_index]
 }
 
-/// For each grapheme-cluster in source, replace the corresponding grapheme-cluster in target
-/// Or if source is larger than target, append the grapheme-clusters that does not have a corresponding one
-/// Ignores everything after first newline
-/// Returns: If the string that was inserted was larger than the original string
-/// Some(end_index_of_line, num_grapheme_clusters_added) which can be used to adjust regions
-/// otherwise, if the inserted string was smaller or equal None
+/// Replace `target`'s graphemes from `g_index` up to (and not past) the
+/// next newline with the graphemes in `source`. If `source` is longer
+/// than the existing line tail, the extras are appended; if shorter,
+/// the surplus tail beyond `source`'s length is preserved (only the
+/// overlapping prefix is overwritten). Stops at the first `\n` in
+/// either string — multi-line replacement is intentionally outside
+/// this helper's scope.
+///
+/// Returns `Some((g_index, extra))` when the replacement *grew* the
+/// line by `extra` graphemes (the caller uses this to shift any
+/// downstream `ColorFontRegions` ranges). Returns `None` when the
+/// replacement fit entirely within the existing line tail.
+///
+/// Cost: two `count_grapheme_clusters` walks plus one
+/// `replace_substring` (which itself allocates a fresh `Vec<u8>` —
+/// a known hot-path allocation tracked alongside the rest of the
+/// "no-alloc text edit" work).
 pub fn replace_graphemes_until_newline(
     target: &mut String,
     g_index: usize,
@@ -44,10 +67,19 @@ pub fn replace_graphemes_until_newline(
     }
 }
 
+/// Return the byte offset of the `index`-th *char* (Unicode scalar
+/// value). Returns `None` if `index` is out of bounds. O(n) over
+/// `s.char_indices()`. Prefer [`find_byte_index_of_grapheme`] unless
+/// you are specifically working with scalar offsets — chars split
+/// grapheme clusters on emoji.
 pub fn find_byte_index_of_char(s: &str, index: usize) -> Option<usize> {
     s.char_indices().nth(index).map(|(byte_idx, _)| byte_idx)
 }
 
+/// Return the byte offset of the `index`-th grapheme cluster in `s`.
+/// Returns `None` if `index` is out of bounds. O(n) over
+/// `s.graphemes(true)`. This is the grapheme-correct counterpart to
+/// `char_indices().nth(index)`.
 pub fn find_byte_index_of_grapheme(s: &str, index: usize) -> Option<usize> {
     let mut byte_index = 0;
     for (i, grapheme) in s.graphemes(true).enumerate() {
@@ -77,6 +109,16 @@ fn find_index_after_nth_grapheme(str: &str, n: usize) -> Option<usize> {
     Some(byte_index)
 }
 
+/// Return the byte offset where the `n`-th grapheme cluster starts.
+/// `n = 0` returns `Some(0)` for non-empty strings. Returns `None`
+/// when `n` exceeds the grapheme count. O(n) over
+/// `s.grapheme_indices(true)`.
+///
+/// Functionally equivalent to [`find_byte_index_of_grapheme`] but
+/// uses `grapheme_indices` for the scan. Exists because early callers
+/// predated the other function; both are kept for call-site clarity
+/// (one says "byte index of grapheme #n", the other says "nth cluster
+/// byte index").
 pub fn nth_grapheme_cluster_byte_index(s: &str, n: usize) -> Option<usize> {
     let mut index = 0;
     for (i, (start, _)) in s.grapheme_indices(true).enumerate() {
@@ -110,6 +152,16 @@ fn replace_substring(s: &mut String, i: usize, n: usize, source: &str) {
     }
 }
 
+/// Grapheme-aware analogue of `String::split_off`. Splits `original`
+/// at grapheme cluster index `at`, leaving the prefix in `original`
+/// and returning the suffix as an owned `String`. If `at` reaches or
+/// exceeds the grapheme count, returns an empty `String` and leaves
+/// `original` unchanged.
+///
+/// Cost: O(n) grapheme walk + two `concat` calls (the implementation
+/// collects through a `Vec<&str>` and rebuilds both halves). Allocates
+/// the new prefix and the returned suffix; the original buffer is
+/// reassigned.
 pub fn split_off_graphemes(original: &mut String, at: usize) -> String {
     let graphemes = original.graphemes(true).collect::<Vec<&str>>();
 
@@ -124,10 +176,20 @@ pub fn split_off_graphemes(original: &mut String, at: usize) -> String {
     right_str
 }
 
+/// Number of newline-separated lines in `s`. The trailing line counts
+/// even when `s` does not end in `\n`, so an empty string yields 1.
+/// O(n) byte scan; no allocation.
 pub fn count_number_lines(s: &str) -> usize {
     s.as_bytes().iter().filter(|&&c| c == b'\n').count() + 1
 }
 
+/// Grapheme-cluster span of the `n`-th newline-separated line in `s`,
+/// returned as a half-open `(start_grapheme, end_grapheme)` range.
+/// `n = 0` is the first line. Returns `None` if `s` is empty or `n`
+/// is past the last line.
+///
+/// Cost: O(n) grapheme walk plus a final `s.graphemes(true).count()`
+/// when the last line is requested.
 pub fn find_nth_line_grapheme_range(s: &str, n: usize) -> Option<(usize, usize)> {
     if s.len() == 0 {
         return None;
@@ -140,14 +202,15 @@ pub fn find_nth_line_grapheme_range(s: &str, n: usize) -> Option<(usize, usize)>
             last_line_start = idx;
             new_line = false;
         }
-        if graph == "\n" || graph == "" {
+        // Grapheme clusters yielded by `unicode_segmentation` are
+        // guaranteed non-empty, so a literal newline is the only
+        // line terminator we have to test for.
+        if graph == "\n" {
             if line_head == n {
-                // So it's time to move the line head up one tick
-                // but if the head is currently at n, then this is the last
-                // index in the line
+                // We're at the end of the requested line: emit the
+                // half-open range [last_line_start, idx).
                 return Some((last_line_start, idx));
             }
-            // otherwise
             new_line = true;
             line_head += 1;
         }
@@ -158,6 +221,11 @@ pub fn find_nth_line_grapheme_range(s: &str, n: usize) -> Option<(usize, usize)>
     Some((last_line_start, s.graphemes(true).count()))
 }
 
+/// Byte span of the `n`-th newline-separated line in `s`, returned as
+/// `(start_byte, end_byte)`. `n = 0` is the first line. Returns
+/// `None` if `s` is empty or `n` is past the last line.
+///
+/// Cost: O(n) byte-level walk via `char_indices()`. No allocation.
 pub fn find_nth_line_byte_range(s: &str, n: usize) -> Option<(usize, usize)> {
     if s.len() == 0 {
         return None;
@@ -188,21 +256,27 @@ pub fn find_nth_line_byte_range(s: &str, n: usize) -> Option<(usize, usize)> {
     Some((last_line_start, s.len()))
 }
 
+/// Append `n` newline characters to `s`. Convenience wrapper around
+/// `str::repeat` + `push_str`; O(n) for the repeat allocation.
 pub fn insert_new_lines(s: &mut String, n: usize) {
     let newlines = "\n".repeat(n);
     s.push_str(&newlines);
 }
 
+/// Append `n` spaces to `s`. O(n) allocation for the repeat string.
 pub fn push_spaces(s: &mut String, n: usize) {
     let spaces = " ".repeat(n);
     s.push_str(&spaces);
 }
 
+/// Insert `n` spaces at grapheme-cluster index `idx`. If `idx` is
+/// past the string's grapheme count the spaces are appended. O(n)
+/// grapheme walk + O(len) `String::insert_str` shift.
 pub fn insert_spaces(s: &mut String, idx: usize, n: usize) {
     let spaces = " ".repeat(n);
     let maybe = nth_grapheme_cluster_byte_index(s, idx);
-    if let Some(T) = maybe {
-        s.insert_str(T, &spaces);
+    if let Some(byte_offset) = maybe {
+        s.insert_str(byte_offset, &spaces);
     } else {
         push_spaces(s, n);
     }
@@ -239,6 +313,8 @@ pub fn delete_grapheme_at(s: &mut String, idx: usize) {
     s.replace_range(start..end, "");
 }
 
+/// Number of extended grapheme clusters in `s`. O(n) walk; no
+/// allocation.
 pub fn count_grapheme_clusters(s: &str) -> usize {
     s.graphemes(true).count()
 }
@@ -348,6 +424,10 @@ pub fn scalar_display_width(c: char) -> usize {
     1
 }
 
+/// Remove the last `n` grapheme clusters from `s` (a "Backspace ×n"
+/// on the edit cursor at the end of the string). If `s` contains
+/// fewer than `n` clusters the string is cleared entirely. O(n)
+/// reverse grapheme walk; no allocation (truncates in place).
 pub fn delete_back_unicode(s: &mut String, n: usize) {
     let mut char_count = 0;
     let mut grapheme_count = 0;
@@ -367,6 +447,10 @@ pub fn delete_back_unicode(s: &mut String, n: usize) {
     s.truncate(new_len);
 }
 
+/// Remove the first `n` grapheme clusters from `s` (a "Delete ×n" at
+/// the beginning of the string). If `s` contains fewer than `n`
+/// clusters the string is cleared entirely. O(n) forward grapheme
+/// walk + O(len) drain. No allocation (edits in place).
 pub fn delete_front_unicode(s: &mut String, n: usize) {
     let mut char_count = 0;
     let mut grapheme_count = 0;

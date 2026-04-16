@@ -4,7 +4,7 @@
 //! and isn't interleaved with buffer rebuilds / hit tests / setup.
 
 use cosmic_text::Color;
-use glam::{Mat4, Quat, Vec2, Vec3};
+use glam::Vec2;
 use glyphon::{Resolution, TextArea, TextBounds};
 use log::{debug, error};
 use wgpu::StoreOp;
@@ -361,16 +361,6 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         self.atlas.trim();
-    }
-
-    #[inline]
-    fn create_transformation_matrix(rotx: f32, roty: f32, rotz: f32) -> [f32; 16] {
-        let rotation = Quat::from_rotation_x(rotx)
-            .mul_quat(Quat::from_rotation_y(roty))
-            .mul_quat(Quat::from_rotation_z(rotz));
-
-        let transform = Mat4::from_rotation_translation(rotation, Vec3::ZERO);
-        transform.to_cols_array()
     }
 }
 

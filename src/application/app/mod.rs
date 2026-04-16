@@ -13,6 +13,8 @@ mod color_picker_flow;
 #[cfg(not(target_arch = "wasm32"))]
 mod console_input;
 #[cfg(not(target_arch = "wasm32"))]
+mod drain_frame;
+#[cfg(not(target_arch = "wasm32"))]
 mod edge_drag;
 #[cfg(not(target_arch = "wasm32"))]
 mod label_edit;

@@ -1,3 +1,15 @@
+//! Core primitives shared across the Baumhard crate.
+//!
+//! This module defines the foundational data types that every higher-level
+//! abstraction in Baumhard rests on: character-range colour/font regions
+//! ([`ColorFontRegions`], [`ColorFontRegion`]), the arithmetic operation
+//! enum ([`ApplyOperation`]), spatial anchoring ([`Anchor`],
+//! [`AnchorPoint`], [`AnchorTarget`]), element flags ([`Flag`]), and the
+//! [`Applicable`] trait that the mutation pipeline dispatches through.
+//!
+//! Nothing in this module touches the GPU, the font system, or the arena
+//! — it is pure data + O(n)-or-better algorithms over sorted sets.
+
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
@@ -321,17 +333,21 @@ impl ColorFontRegions {
         self.regions.get(&ColorFontRegion::new_key_only(range))
     }
 
+    /// Test-only convenience: like [`Self::get`] but copies the region
+    /// out and panics if the range is not present, with the full region
+    /// table dumped to `debug!` first to ease assertion debugging. **Not for
+    /// interactive paths** — production callers must use [`Self::get`]
+    /// and handle the `None` arm; CODE_CONVENTIONS §7 forbids panics
+    /// after the first frame.
     pub fn hard_get(&self, range: Range) -> ColorFontRegion {
-        debug!("Doing a hard_get on node, regions will follow:");
+        debug!("hard_get({}..{}); current regions:", range.start, range.end);
         for r in self.regions.iter() {
-            debug!("{} - {}", r.range.start, r.range.end);
+            debug!("  {}..{}", r.range.start, r.range.end);
         }
         *self
             .regions
             .get(&ColorFontRegion::new_key_only(range))
-            .expect(
-                "You tried real hard to get that region, but it didn't exist.. (seriously, fuck you)",
-            )
+            .expect("hard_get: requested range is not present in this region table")
     }
 
     pub fn remove_range(&mut self, range: Range) -> bool {
@@ -352,13 +368,35 @@ impl Default for ColorFontRegions {
 use strum_macros::{EnumString, Display};
 use crate::util::ordered_vec2::OrderedVec2;
 
+/// Selects the arithmetic used when a [`DeltaGlyphArea`](crate::gfx_structs::area::DeltaGlyphArea)
+/// is applied to a [`GlyphArea`](crate::gfx_structs::area::GlyphArea).
+/// Every field delta in the same `DeltaGlyphArea` shares one
+/// `ApplyOperation`, so the caller chooses "add this offset" vs.
+/// "replace outright" vs. "remove" once for the whole batch.
 #[derive(Clone, Copy, Eq, PartialEq, Debug, EnumString, Display, Serialize, Deserialize)]
 pub enum ApplyOperation {
+    /// Additive merge: `target += delta`. For numeric fields this is
+    /// ordinary addition; for text it is concatenation; for region
+    /// sets it submits (merges) each delta region into the existing
+    /// set.
     Add,
+    /// Wholesale replacement: `target = delta`. The previous value is
+    /// discarded entirely.
     Assign,
+    /// Reset to default: `target = T::default()`. The delta's payload
+    /// is ignored — the semantic is "clear whatever is there."
     Delete,
+    /// Subtractive merge: `target -= delta`. For numeric fields this
+    /// is ordinary subtraction; for region sets it removes each
+    /// matching delta region from the existing set.
     Subtract,
+    /// Component-wise multiplication: `target *= delta`. Meaningful
+    /// for numeric fields; not currently defined for text or region
+    /// sets.
     Multiply,
+    /// Identity / skip: do nothing. Useful as a sentinel when a
+    /// mutator must carry an operation variant but the caller does
+    /// not want any effect.
     Noop,
 }
 
@@ -494,8 +532,28 @@ impl Anchor {
 }
 
 impl Default for Anchor {
+    /// Centre-on-parent: the element's centre is pinned to its
+    /// immediate parent's centre with zero pixel offset.
+    ///
+    /// The three-way constraint is:
+    /// 1. **Target** — `AnchorTarget::Parent { generation_offset: 0 }`
+    ///    (the immediate parent, not a grandparent).
+    /// 2. **Target point** — `AnchorPoint::Center(0)` (the parent's
+    ///    geometric centre, no pixel nudge).
+    /// 3. **Self point** — `AnchorPoint::Center(0)` (the element's own
+    ///    centre, no pixel nudge).
+    ///
+    /// Together these mean "stack my centre on my parent's centre" —
+    /// the most common starting layout for new tree nodes before the
+    /// scene builder repositions them.
     fn default() -> Self {
-        Anchor::new(AnchorTarget::Parent { generation_offset: 0 }, AnchorPoint::Center(0), AnchorPoint::Center(0))
+        Anchor::new(
+            AnchorTarget::Parent {
+                generation_offset: 0,
+            },
+            AnchorPoint::Center(0),
+            AnchorPoint::Center(0),
+        )
     }
 }
 

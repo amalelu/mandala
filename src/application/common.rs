@@ -13,7 +13,7 @@ pub enum InputMode {
     MappedToInstruction,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RenderDecree {
     Noop,
     DisplayFps,
@@ -96,5 +96,50 @@ impl PollTimer {
     pub fn expire_in(&mut self, duration: Duration) {
         self.instant = Instant::now();
         self.duration = duration;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn test_stopwatch_measures_elapsed() {
+        let watch = StopWatch::new_start();
+        thread::sleep(Duration::from_millis(10));
+        let elapsed = watch.stop();
+        assert!(
+            elapsed >= Duration::from_millis(5),
+            "StopWatch should measure at least 5ms after sleeping 10ms; got {:?}",
+            elapsed,
+        );
+    }
+
+    #[test]
+    fn test_poll_timer_immediately_is_expired() {
+        let timer = PollTimer::immediately();
+        assert!(timer.is_expired(), "PollTimer::immediately() should be expired right away");
+    }
+
+    #[test]
+    fn test_poll_timer_far_future_not_expired() {
+        let timer = PollTimer::new(Duration::from_secs(60));
+        assert!(!timer.is_expired(), "PollTimer with 60s duration should not expire instantly");
+    }
+
+    #[test]
+    fn test_poll_timer_expire_in_resets() {
+        let mut timer = PollTimer::immediately();
+        assert!(timer.is_expired());
+        timer.expire_in(Duration::from_secs(60));
+        assert!(!timer.is_expired(), "expire_in should reset the timer with a new duration");
+    }
+
+    #[test]
+    fn test_render_decree_default_is_noop() {
+        let decree: RenderDecree = RenderDecree::default();
+        assert_eq!(decree, RenderDecree::Noop);
     }
 }

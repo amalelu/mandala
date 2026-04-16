@@ -373,10 +373,22 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
                 return GlyphAreaField::Text(self.hex_text.clone());
             }
             CellField::ColorFontRegions => {}
-            other => panic!(
-                "picker dynamic context does not produce field {other:?}; \
-                 dynamic spec should only list Text / scale / ColorFontRegions / Operation"
-            ),
+            other => {
+                // Per CODE_CONVENTIONS §7 the picker overlay is an
+                // interactive path and must not abort the process.
+                // The dynamic spec is pinned by a test
+                // (`spec_dynamic_mutator_spec_per_section_fields_are_slim`)
+                // so reaching here means a future spec drift —
+                // log loudly, degrade the cell to an empty colour
+                // region, and keep the frame alive.
+                log::error!(
+                    "picker dynamic context received unsupported field {other:?}; \
+                     dynamic spec should only list Text / scale / ColorFontRegions / Operation"
+                );
+                return GlyphAreaField::ColorFontRegions(
+                    ColorFontRegions::single_span(0, None, None),
+                );
+            }
         }
 
         // Color + grapheme count + optional font pin per section.
