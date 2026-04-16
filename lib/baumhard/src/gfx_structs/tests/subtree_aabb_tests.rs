@@ -425,3 +425,473 @@ pub fn do_spatial_descend_finds_innermost_node() {
     assert!(child_received.load(Ordering::SeqCst), "child subscriber should fire");
     assert!(!left_received.load(Ordering::SeqCst), "parent subscriber should NOT fire");
 }
+
+// =====================================================================
+// Extreme edge cases — subtree AABB computation
+// =====================================================================
+
+/// Build a deep chain: root → a → b → c → d → e (5 levels deep),
+/// only the leaf has a GlyphArea.
+fn build_deep_chain() -> Tree<GfxElement, GfxMutator> {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let mut parent = tree.root;
+    // 4 void nodes, then 1 area leaf at the bottom.
+    for _ in 0..4 {
+        let void = tree.arena.new_node(GfxElement::new_void(0));
+        parent.append(void, &mut tree.arena);
+        parent = void;
+    }
+    let leaf = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("deep", 14.0, 14.0, Vec2::new(100.0, 100.0), Vec2::new(20.0, 10.0)),
+        0,
+    );
+    let leaf_id = tree.arena.new_node(leaf);
+    parent.append(leaf_id, &mut tree.arena);
+    tree
+}
+
+/// Build a wide tree: root has 20 children, each a GlyphArea at
+/// different x positions, no children of their own.
+fn build_wide_tree() -> Tree<GfxElement, GfxMutator> {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    for i in 0..20_u32 {
+        let area = GfxElement::new_area_non_indexed(
+            GlyphArea::new_with_str(
+                &format!("n{}", i),
+                14.0, 14.0,
+                Vec2::new(i as f32 * 50.0, 0.0),
+                Vec2::new(30.0, 20.0),
+            ),
+            0,
+        );
+        let id = tree.arena.new_node(area);
+        tree.root.append(id, &mut tree.arena);
+    }
+    tree
+}
+
+#[test]
+fn test_subtree_aabb_deep_chain_propagates_to_root() {
+    do_subtree_aabb_deep_chain_propagates_to_root();
+}
+
+/// In a deep chain of void nodes with one leaf at the bottom, every
+/// ancestor's subtree AABB covers the leaf's bounds.
+pub fn do_subtree_aabb_deep_chain_propagates_to_root() {
+    let mut tree = build_deep_chain();
+    tree.ensure_subtree_aabbs();
+
+    let leaf_aabb = (Vec2::new(100.0, 100.0), Vec2::new(120.0, 110.0));
+
+    // Walk from root down — every node's subtree AABB should equal
+    // the leaf's AABB (since the leaf is the only renderable).
+    let mut node = tree.root;
+    loop {
+        let aabb = tree.arena.get(node).unwrap().get().subtree_aabb();
+        if tree.arena.get(node).unwrap().first_child().is_some() {
+            assert_eq!(
+                aabb,
+                Some(leaf_aabb),
+                "ancestor's subtree AABB should equal leaf's"
+            );
+            node = tree.arena.get(node).unwrap().first_child().unwrap();
+        } else {
+            // Leaf node — subtree AABB equals own AABB.
+            assert_eq!(aabb, Some(leaf_aabb));
+            break;
+        }
+    }
+}
+
+#[test]
+fn test_subtree_aabb_wide_tree_root_covers_all_children() {
+    do_subtree_aabb_wide_tree_root_covers_all_children();
+}
+
+/// Root's subtree AABB covers the full horizontal extent of all 20
+/// children.
+pub fn do_subtree_aabb_wide_tree_root_covers_all_children() {
+    let mut tree = build_wide_tree();
+    tree.ensure_subtree_aabbs();
+
+    let root_aabb = tree.arena.get(tree.root).unwrap().get().subtree_aabb()
+        .expect("root should have AABB");
+    // First child at x=0, last child at x=950+30=980.
+    assert!(root_aabb.0.x <= 0.0);
+    assert!(root_aabb.1.x >= 980.0);
+    assert!(root_aabb.0.y <= 0.0);
+    assert!(root_aabb.1.y >= 20.0);
+}
+
+#[test]
+fn test_subtree_aabb_single_area_node() {
+    do_subtree_aabb_single_area_node();
+}
+
+/// A tree with just the void root and one area child: the root's
+/// subtree AABB equals the child's AABB.
+pub fn do_subtree_aabb_single_area_node() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let area = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("sole", 14.0, 14.0, Vec2::new(50.0, 60.0), Vec2::new(40.0, 30.0)),
+        0,
+    );
+    let id = tree.arena.new_node(area);
+    tree.root.append(id, &mut tree.arena);
+
+    tree.ensure_subtree_aabbs();
+    let root_aabb = tree.arena.get(tree.root).unwrap().get().subtree_aabb().unwrap();
+    assert_eq!(root_aabb, (Vec2::new(50.0, 60.0), Vec2::new(90.0, 90.0)));
+}
+
+#[test]
+fn test_subtree_aabb_zero_bounds_area_ignored() {
+    do_subtree_aabb_zero_bounds_area_ignored();
+}
+
+/// A GlyphArea with zero-size bounds (0x0) is treated as having no
+/// renderable AABB — it doesn't contribute to subtree AABBs.
+pub fn do_subtree_aabb_zero_bounds_area_ignored() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let area = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("zero", 14.0, 14.0, Vec2::new(100.0, 100.0), Vec2::new(0.0, 0.0)),
+        0,
+    );
+    let id = tree.arena.new_node(area);
+    tree.root.append(id, &mut tree.arena);
+
+    tree.ensure_subtree_aabbs();
+    assert!(tree.arena.get(tree.root).unwrap().get().subtree_aabb().is_none());
+}
+
+#[test]
+fn test_subtree_aabb_negative_position() {
+    do_subtree_aabb_negative_position();
+}
+
+/// Nodes with negative positions are handled correctly — the AABB
+/// min values go negative.
+pub fn do_subtree_aabb_negative_position() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let area = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("neg", 14.0, 14.0, Vec2::new(-50.0, -30.0), Vec2::new(100.0, 60.0)),
+        0,
+    );
+    let id = tree.arena.new_node(area);
+    tree.root.append(id, &mut tree.arena);
+
+    tree.ensure_subtree_aabbs();
+    let aabb = tree.arena.get(tree.root).unwrap().get().subtree_aabb().unwrap();
+    assert_eq!(aabb, (Vec2::new(-50.0, -30.0), Vec2::new(50.0, 30.0)));
+}
+
+// =====================================================================
+// Extreme edge cases — BVH descent
+// =====================================================================
+
+#[test]
+fn test_descendant_at_deep_chain_finds_leaf() {
+    do_descendant_at_deep_chain_finds_leaf();
+}
+
+/// BVH descent through a 5-level-deep void chain correctly finds the
+/// leaf at the bottom.
+pub fn do_descendant_at_deep_chain_finds_leaf() {
+    let mut tree = build_deep_chain();
+    let hit = tree.descendant_at(Vec2::new(105.0, 105.0));
+    assert!(hit.is_some(), "should find the leaf at (100,100)+(20,10)");
+}
+
+#[test]
+fn test_descendant_at_deep_chain_miss() {
+    do_descendant_at_deep_chain_miss();
+}
+
+/// BVH descent on a deep chain misses when the point is outside the
+/// leaf's bounds.
+pub fn do_descendant_at_deep_chain_miss() {
+    let mut tree = build_deep_chain();
+    assert!(tree.descendant_at(Vec2::new(0.0, 0.0)).is_none());
+}
+
+#[test]
+fn test_descendant_at_wide_tree_finds_correct_child() {
+    do_descendant_at_wide_tree_finds_correct_child();
+}
+
+/// In a 20-child wide tree, BVH descent finds the exact child whose
+/// AABB contains the point, not any of the 19 others.
+pub fn do_descendant_at_wide_tree_finds_correct_child() {
+    let mut tree = build_wide_tree();
+
+    // Point inside child 10: pos = (500, 0), bounds = (30, 20).
+    let hit = tree.descendant_at(Vec2::new(510.0, 10.0));
+    assert!(hit.is_some());
+
+    // Verify it's child index 10 (not 9 or 11).
+    let children: Vec<_> = tree.root.children(&tree.arena).collect();
+    assert_eq!(hit.unwrap(), children[10]);
+}
+
+#[test]
+fn test_descendant_at_wide_tree_between_children_is_miss() {
+    do_descendant_at_wide_tree_between_children_is_miss();
+}
+
+/// A point in the gap between two wide-tree children is a miss.
+pub fn do_descendant_at_wide_tree_between_children_is_miss() {
+    let mut tree = build_wide_tree();
+    // Gap: child 5 ends at x=280 (250+30), child 6 starts at x=300.
+    // Point at (290, 10) is in the gap.
+    assert!(tree.descendant_at(Vec2::new(290.0, 10.0)).is_none());
+}
+
+#[test]
+fn test_descendant_at_overlapping_siblings() {
+    do_descendant_at_overlapping_siblings();
+}
+
+/// When two sibling nodes overlap spatially, the smaller-area
+/// sibling wins (innermost-first convention).
+pub fn do_descendant_at_overlapping_siblings() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+
+    let big = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("big", 14.0, 14.0, Vec2::new(0.0, 0.0), Vec2::new(200.0, 200.0)),
+        0,
+    );
+    let small = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("sm", 14.0, 14.0, Vec2::new(50.0, 50.0), Vec2::new(20.0, 20.0)),
+        1,
+    );
+
+    let big_id = tree.arena.new_node(big);
+    let small_id = tree.arena.new_node(small);
+    tree.root.append(big_id, &mut tree.arena);
+    tree.root.append(small_id, &mut tree.arena);
+
+    // Point inside both — small wins.
+    let hit = tree.descendant_at(Vec2::new(55.0, 55.0));
+    assert_eq!(hit, Some(small_id));
+
+    // Point inside big only.
+    let hit2 = tree.descendant_at(Vec2::new(5.0, 5.0));
+    assert_eq!(hit2, Some(big_id));
+}
+
+#[test]
+fn test_descendant_near_negative_coords() {
+    do_descendant_near_negative_coords();
+}
+
+/// BVH descent works with negative coordinates.
+pub fn do_descendant_near_negative_coords() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let area = GfxElement::new_area_non_indexed(
+        GlyphArea::new_with_str("neg", 14.0, 14.0, Vec2::new(-100.0, -50.0), Vec2::new(40.0, 30.0)),
+        0,
+    );
+    let id = tree.arena.new_node(area);
+    tree.root.append(id, &mut tree.arena);
+
+    assert_eq!(tree.descendant_at(Vec2::new(-80.0, -40.0)), Some(id));
+    assert!(tree.descendant_at(Vec2::new(0.0, 0.0)).is_none());
+}
+
+// =====================================================================
+// Extreme edge cases — SpatialDescend
+// =====================================================================
+
+#[test]
+fn test_spatial_descend_deep_chain_delivers_to_leaf() {
+    do_spatial_descend_deep_chain_delivers_to_leaf();
+}
+
+/// SpatialDescend through a deep void chain delivers the event to
+/// the leaf at the bottom, not to any intermediate void.
+pub fn do_spatial_descend_deep_chain_delivers_to_leaf() {
+    let mut tree = build_deep_chain();
+
+    let received = Arc::new(AtomicBool::new(false));
+    let received_clone = received.clone();
+    let subscriber: EventSubscriber = Arc::new(Mutex::new(
+        move |_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {
+            received_clone.store(true, Ordering::SeqCst);
+        },
+    ));
+
+    // Find the leaf (deepest non-void).
+    let mut node = tree.root;
+    loop {
+        let child = tree.arena.get(node).unwrap().first_child();
+        if let Some(cid) = child {
+            node = cid;
+        } else {
+            break;
+        }
+    }
+    tree.arena.get_mut(node).unwrap().get_mut()
+        .subscribers_mut().push(subscriber);
+
+    let mtree = spatial_descend_mutator(105.0, 105.0);
+    let root = tree.root;
+    walk_tree_from(&mut tree, &mtree, root, mtree.root);
+
+    assert!(received.load(Ordering::SeqCst), "leaf subscriber should fire");
+}
+
+#[test]
+fn test_spatial_descend_wide_tree_hits_correct_child() {
+    do_spatial_descend_wide_tree_hits_correct_child();
+}
+
+/// SpatialDescend on a wide tree delivers the event to the correct
+/// child (index 15) and not to any of the other 19.
+pub fn do_spatial_descend_wide_tree_hits_correct_child() {
+    let mut tree = build_wide_tree();
+
+    let hit_ids: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Attach a subscriber to every child that records which child fired.
+    let children: Vec<_> = tree.root.children(&tree.arena).collect();
+    for (i, &cid) in children.iter().enumerate() {
+        let hit_ids_clone = hit_ids.clone();
+        let sub: EventSubscriber = Arc::new(Mutex::new(
+            move |_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {
+                hit_ids_clone.lock().unwrap().push(i);
+            },
+        ));
+        tree.arena.get_mut(cid).unwrap().get_mut()
+            .subscribers_mut().push(sub);
+    }
+
+    // Point inside child 15: pos=(750,0), bounds=(30,20).
+    let mtree = spatial_descend_mutator(760.0, 10.0);
+    let root = tree.root;
+    walk_tree_from(&mut tree, &mtree, root, mtree.root);
+
+    let ids = hit_ids.lock().unwrap();
+    assert_eq!(*ids, vec![15], "only child 15 should have received the event");
+}
+
+#[test]
+fn test_spatial_descend_no_mutation_is_noop() {
+    do_spatial_descend_no_mutation_is_noop();
+}
+
+/// A SpatialDescend instruction with `Mutation::None` as its
+/// payload finds the node but applies nothing — no crash, no
+/// subscriber fire.
+pub fn do_spatial_descend_no_mutation_is_noop() {
+    let mut tree = build_test_tree();
+
+    let received = Arc::new(AtomicBool::new(false));
+    let received_clone = received.clone();
+    let subscriber: EventSubscriber = Arc::new(Mutex::new(
+        move |_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {
+            received_clone.store(true, Ordering::SeqCst);
+        },
+    ));
+    let right_id = tree.root.children(&tree.arena).nth(1).unwrap();
+    tree.arena.get_mut(right_id).unwrap().get_mut()
+        .subscribers_mut().push(subscriber);
+
+    // SpatialDescend with Mutation::None — no event to deliver.
+    let instruction = GfxMutator::Instruction {
+        instruction: Instruction::SpatialDescend(OrderedVec2::new_f32(210.0, 210.0)),
+        channel: 0,
+        mutation: Mutation::None,
+    };
+    let mtree = MutatorTree::new_with(instruction);
+    let root = tree.root;
+    walk_tree_from(&mut tree, &mtree, root, mtree.root);
+
+    // Mutation::None is_some() returns false, so no subscriber fires.
+    assert!(!received.load(Ordering::SeqCst));
+}
+
+// =====================================================================
+// MouseEventData
+// =====================================================================
+
+#[test]
+fn test_mouse_event_data_new_and_fields() {
+    do_mouse_event_data_new_and_fields();
+}
+
+/// `MouseEventData::new` stores the coordinates correctly and the
+/// struct is `Eq` + `Clone`.
+pub fn do_mouse_event_data_new_and_fields() {
+    let a = MouseEventData::new(42.5, -10.0);
+    let b = MouseEventData::new(42.5, -10.0);
+    let c = MouseEventData::new(0.0, 0.0);
+
+    assert_eq!(a.x.0, 42.5_f32);
+    assert_eq!(a.y.0, -10.0_f32);
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+    assert_eq!(a.clone(), a);
+}
+
+#[test]
+fn test_mouse_event_data_zero() {
+    do_mouse_event_data_zero();
+}
+
+/// Zero coordinates are valid.
+pub fn do_mouse_event_data_zero() {
+    let d = MouseEventData::new(0.0, 0.0);
+    assert_eq!(d.x.0, 0.0_f32);
+    assert_eq!(d.y.0, 0.0_f32);
+}
+
+#[test]
+fn test_mouse_event_data_extreme_values() {
+    do_mouse_event_data_extreme_values();
+}
+
+/// Extreme float values (large, tiny, negative) are preserved.
+pub fn do_mouse_event_data_extreme_values() {
+    let d = MouseEventData::new(f32::MAX, f32::MIN);
+    assert_eq!(d.x.0, f32::MAX);
+    assert_eq!(d.y.0, f32::MIN);
+
+    let tiny = MouseEventData::new(f32::MIN_POSITIVE, -f32::MIN_POSITIVE);
+    assert_eq!(tiny.x.0, f32::MIN_POSITIVE);
+    assert_eq!(tiny.y.0, -f32::MIN_POSITIVE);
+}
+
+#[test]
+fn test_glyph_tree_event_mouse_carries_data() {
+    do_glyph_tree_event_mouse_carries_data();
+}
+
+/// `GlyphTreeEvent::MouseEvent(data)` carries its payload through
+/// a `GlyphTreeEventInstance` round-trip.
+pub fn do_glyph_tree_event_mouse_carries_data() {
+    let data = MouseEventData::new(100.0, 200.0);
+    let event = GlyphTreeEventInstance::new(
+        GlyphTreeEvent::MouseEvent(data),
+        12345,
+    );
+
+    assert_eq!(event.event_time_millis, 12345);
+    match &event.event_type {
+        GlyphTreeEvent::MouseEvent(d) => {
+            assert_eq!(d.x.0, 100.0_f32);
+            assert_eq!(d.y.0, 200.0_f32);
+        }
+        other => panic!("expected MouseEvent, got {:?}", other),
+    }
+
+    // Clone preserves the payload.
+    let cloned = event.clone();
+    assert_eq!(cloned.event_type, event.event_type);
+}
