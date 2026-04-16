@@ -1,6 +1,7 @@
 pub mod simd;
 pub mod geometry;
 pub mod grapheme_chad;
+pub mod color_conversion;
 pub mod color;
 pub mod palettes;
 pub mod arena_utils;
