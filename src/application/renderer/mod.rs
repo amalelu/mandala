@@ -1,12 +1,14 @@
 mod borders;
-mod buffers;
 mod color_picker;
 mod console_geometry;
 mod console_pass;
 mod decree;
 mod hit;
+mod overlay_dispatch;
 mod pipeline;
 mod render;
+mod scene_buffers;
+mod tree_buffers;
 mod tree_walker;
 
 use render::glyph_position_in_viewport;
