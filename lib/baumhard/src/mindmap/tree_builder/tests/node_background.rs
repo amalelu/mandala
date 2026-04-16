@@ -6,7 +6,7 @@ use super::super::*;
 #[test]
 fn test_background_color_opaque_hex_populates_field() {
     let mut map = synthetic_map(
-        vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+        vec![synthetic_node("n", None, 0.0, 0.0)],
         vec![],
     );
     map.nodes.get_mut("n").unwrap().style.background_color = "#ff8800".into();
@@ -18,7 +18,7 @@ fn test_background_color_opaque_hex_populates_field() {
 #[test]
 fn test_background_color_empty_string_becomes_none() {
     let mut map = synthetic_map(
-        vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+        vec![synthetic_node("n", None, 0.0, 0.0)],
         vec![],
     );
     map.nodes.get_mut("n").unwrap().style.background_color = "".into();
@@ -30,7 +30,7 @@ fn test_background_color_empty_string_becomes_none() {
 #[test]
 fn test_background_color_fully_transparent_becomes_none() {
     let mut map = synthetic_map(
-        vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+        vec![synthetic_node("n", None, 0.0, 0.0)],
         vec![],
     );
     // `#00000000` is the conventional "no fill" opt-out.
@@ -43,7 +43,7 @@ fn test_background_color_fully_transparent_becomes_none() {
 #[test]
 fn test_background_color_resolves_theme_variable() {
     let mut map = synthetic_map(
-        vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+        vec![synthetic_node("n", None, 0.0, 0.0)],
         vec![],
     );
     map.canvas
@@ -58,7 +58,7 @@ fn test_background_color_resolves_theme_variable() {
 #[test]
 fn test_background_color_malformed_hex_degrades_to_none() {
     let mut map = synthetic_map(
-        vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+        vec![synthetic_node("n", None, 0.0, 0.0)],
         vec![],
     );
     // `hex_to_rgba_safe` degrades unknown/bad strings to the
@@ -74,7 +74,7 @@ fn test_background_color_malformed_hex_degrades_to_none() {
 #[test]
 fn test_background_color_three_digit_hex_works() {
     let mut map = synthetic_map(
-        vec![synthetic_node("n", None, 0, 0.0, 0.0)],
+        vec![synthetic_node("n", None, 0.0, 0.0)],
         vec![],
     );
     // `#000` is the default in all the synthetic nodes above, and

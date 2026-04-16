@@ -47,16 +47,12 @@ use super::defaults::default_cross_link_edge;
     fn test_apply_reparent_single_node_updates_parent_and_index() {
         let mut doc = load_test_doc();
         let (new_parent, source) = find_reparent_pair(&doc);
-        let expected_index = doc.mindmap.children_of(&new_parent)
-            .iter().map(|n| n.index).max().map(|m| m + 1).unwrap_or(0);
-
         let undo = doc.apply_reparent(&[source.clone()], Some(&new_parent));
         assert_eq!(undo.entries.len(), 1, "should have one undo entry");
 
         let node = doc.mindmap.nodes.get(&source).unwrap();
         assert_eq!(node.parent_id.as_deref(), Some(new_parent.as_str()),
             "parent_id should now point to new parent");
-        assert_eq!(node.index, expected_index, "index should be max+1 of new siblings");
     }
 
     #[test]
@@ -124,9 +120,6 @@ use super::defaults::default_cross_link_edge;
             .expect("testament should have another candidate source")
             .clone();
 
-        let start_index = doc.mindmap.children_of(&new_parent)
-            .iter().map(|n| n.index).max().map(|m| m + 1).unwrap_or(0);
-
         let sources = vec![first_source.clone(), second_source.clone()];
         let undo = doc.apply_reparent(&sources, Some(&new_parent));
         assert_eq!(undo.entries.len(), 2, "both sources should be reparented");
@@ -135,9 +128,6 @@ use super::defaults::default_cross_link_edge;
         let n2 = doc.mindmap.nodes.get(&second_source).unwrap();
         assert_eq!(n1.parent_id.as_deref(), Some(new_parent.as_str()));
         assert_eq!(n2.parent_id.as_deref(), Some(new_parent.as_str()));
-        // Indices should be start_index and start_index+1, preserving argument order
-        assert_eq!(n1.index, start_index);
-        assert_eq!(n2.index, start_index + 1);
     }
 
     #[test]
@@ -149,15 +139,11 @@ use super::defaults::default_cross_link_edge;
             .map(|n| n.id.clone())
             .expect("testament should have at least one non-root node");
 
-        let expected_index = doc.mindmap.root_nodes()
-            .iter().map(|n| n.index).max().map(|m| m + 1).unwrap_or(0);
-
         let undo = doc.apply_reparent(&[source.clone()], None);
         assert_eq!(undo.entries.len(), 1);
 
         let node = doc.mindmap.nodes.get(&source).unwrap();
         assert_eq!(node.parent_id, None, "should be promoted to root");
-        assert_eq!(node.index, expected_index);
     }
 
     #[test]
@@ -180,7 +166,6 @@ use super::defaults::default_cross_link_edge;
         };
 
         let orig_parent = doc.mindmap.nodes.get(&grandparent).unwrap().parent_id.clone();
-        let orig_index = doc.mindmap.nodes.get(&grandparent).unwrap().index;
 
         // Try to reparent grandparent under grandchild — should be silently rejected
         let undo = doc.apply_reparent(&[grandparent.clone()], Some(&grandchild));
@@ -189,7 +174,6 @@ use super::defaults::default_cross_link_edge;
         // State should be unchanged
         let gp = doc.mindmap.nodes.get(&grandparent).unwrap();
         assert_eq!(gp.parent_id, orig_parent);
-        assert_eq!(gp.index, orig_index);
     }
 
     #[test]
@@ -209,7 +193,6 @@ use super::defaults::default_cross_link_edge;
         let mut doc = load_test_doc();
         let (new_parent, source) = find_reparent_pair(&doc);
         let orig_parent = doc.mindmap.nodes.get(&source).unwrap().parent_id.clone();
-        let orig_index = doc.mindmap.nodes.get(&source).unwrap().index;
         let orig_edges_snapshot = doc.mindmap.edges.clone();
 
         let undo_data = doc.apply_reparent(&[source.clone()], Some(&new_parent));
@@ -228,7 +211,6 @@ use super::defaults::default_cross_link_edge;
         assert!(doc.undo());
         let restored = doc.mindmap.nodes.get(&source).unwrap();
         assert_eq!(restored.parent_id, orig_parent);
-        assert_eq!(restored.index, orig_index);
 
         // Edges should also be restored bit-for-bit
         assert_eq!(doc.mindmap.edges.len(), orig_edges_snapshot.len(),

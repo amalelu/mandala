@@ -47,12 +47,12 @@ use super::defaults::default_cross_link_edge;
             edge_type: "cross_link".into(),
             color: "#fff".into(),
             width: 1,
-            line_style: 0,
+            line_style: "solid".to_string(),
             visible: true,
             label: None,
             label_position_t: None,
-            anchor_from: 0,
-            anchor_to: 0,
+            anchor_from: "auto".to_string(),
+            anchor_to: "auto".to_string(),
             control_points: vec![],
             glyph_connection: None,
         };
@@ -202,10 +202,10 @@ use super::defaults::default_cross_link_edge;
         // Capture pre-delete state to compare after undo.
         let orig_node = doc.mindmap.nodes.get(&target).cloned().unwrap();
         let orig_edges = doc.mindmap.edges.clone();
-        let orig_child_state: Vec<(String, Option<String>, i32)> = doc.mindmap
+        let orig_child_state: Vec<(String, Option<String>)> = doc.mindmap
             .children_of(&target)
             .iter()
-            .map(|n| (n.id.clone(), n.parent_id.clone(), n.index))
+            .map(|n| (n.id.clone(), n.parent_id.clone()))
             .collect();
 
         let undo = doc.delete_node(&target).unwrap();
@@ -236,13 +236,11 @@ use super::defaults::default_cross_link_edge;
                 "edge at index {} should match after undo", i,
             );
         }
-        // Children are re-attached with original parent_id + index.
-        for (cid, old_parent, old_idx) in orig_child_state {
+        // Children are re-attached with original parent_id.
+        for (cid, old_parent) in orig_child_state {
             let child = doc.mindmap.nodes.get(&cid).unwrap();
             assert_eq!(child.parent_id, old_parent,
                 "child {} parent_id should be restored", cid);
-            assert_eq!(child.index, old_idx,
-                "child {} index should be restored", cid);
         }
     }
 
@@ -284,12 +282,12 @@ use super::defaults::default_cross_link_edge;
             edge_type: etype.to_string(),
             color: "#ffffff".to_string(),
             width: 1,
-            line_style: 0,
+            line_style: "solid".to_string(),
             visible: true,
             label: None,
             label_position_t: None,
-            anchor_from: 0,
-            anchor_to: 0,
+            anchor_from: "auto".to_string(),
+            anchor_to: "auto".to_string(),
             control_points: Vec::new(),
             glyph_connection: None,
         };

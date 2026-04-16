@@ -8,8 +8,8 @@ use crate::mindmap::border::{BORDER_APPROX_CHAR_WIDTH_FRAC, BORDER_CORNER_OVERLA
 fn border_tree_has_one_void_parent_per_framed_node() {
     let map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
@@ -34,8 +34,8 @@ fn border_tree_has_one_void_parent_per_framed_node() {
 fn border_tree_skips_nodes_with_show_frame_false() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
@@ -50,8 +50,8 @@ fn border_tree_skips_nodes_with_show_frame_false() {
 fn border_tree_skips_folded_nodes() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("parent", None, 0, 0.0, 0.0),
-            synthetic_node("child", Some("parent"), 0, 0.0, 100.0),
+            synthetic_node("parent", None, 0.0, 0.0),
+            synthetic_node("child", Some("parent"), 0.0, 100.0),
         ],
         vec![],
     );
@@ -64,7 +64,7 @@ fn border_tree_skips_folded_nodes() {
 
 #[test]
 fn border_tree_applies_drag_offset() {
-    let map = synthetic_map(vec![synthetic_node("a", None, 0, 0.0, 0.0)], vec![]);
+    let map = synthetic_map(vec![synthetic_node("a", None, 0.0, 0.0)], vec![]);
     let mut offsets: HashMap<String, (f32, f32)> = HashMap::new();
     offsets.insert("a".into(), (50.0, 25.0));
     let tree = build_border_tree(&map, &offsets);
@@ -98,7 +98,7 @@ fn border_tree_applies_drag_offset() {
 
 #[test]
 fn border_tree_resolves_frame_color_through_theme_vars() {
-    let mut map = synthetic_map(vec![synthetic_node("a", None, 0, 0.0, 0.0)], vec![]);
+    let mut map = synthetic_map(vec![synthetic_node("a", None, 0.0, 0.0)], vec![]);
     // Theme variable keys include the leading `--`, matching
     // the CSS-ish `var(--name)` syntax used in mindmap JSON.
     map.canvas
@@ -128,7 +128,7 @@ fn border_tree_run_channels_are_stable_1_to_4() {
     // Top=1, Bottom=2, Left=3, Right=4. Stability matters
     // because mutator trees target runs by channel.
     use crate::gfx_structs::tree::BranchChannel;
-    let map = synthetic_map(vec![synthetic_node("a", None, 0, 0.0, 0.0)], vec![]);
+    let map = synthetic_map(vec![synthetic_node("a", None, 0.0, 0.0)], vec![]);
     let tree = build_border_tree(&map, &HashMap::new());
     let parent = tree.root.children(&tree.arena).next().unwrap();
     let runs: Vec<_> = parent.children(&tree.arena).collect();
@@ -152,9 +152,9 @@ fn border_parent_channels_are_sorted_index_based() {
     // Three framed nodes; lexicographic order is a, b, c.
     let map = synthetic_map(
         vec![
-            synthetic_node("c", None, 0, 0.0, 0.0),
-            synthetic_node("a", None, 1, 100.0, 0.0),
-            synthetic_node("b", None, 2, 200.0, 0.0),
+            synthetic_node("c", None, 0.0, 0.0),
+            synthetic_node("a", None, 100.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
@@ -179,8 +179,8 @@ fn border_mutator_round_trip_matches_full_rebuild() {
 
     let map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
@@ -233,8 +233,8 @@ fn border_mutator_round_trip_matches_full_rebuild() {
 fn border_identity_sequence_changes_on_show_frame_toggle() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );

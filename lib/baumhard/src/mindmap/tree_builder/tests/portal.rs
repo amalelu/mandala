@@ -7,8 +7,8 @@ use super::super::*;
 fn portal_tree_emits_two_markers_per_pair() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
@@ -28,9 +28,9 @@ fn portal_tree_emits_two_markers_per_pair() {
 fn portal_tree_skips_pair_with_folded_endpoint() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("parent", None, 0, 0.0, 0.0),
-            synthetic_node("child", Some("parent"), 0, 0.0, 100.0),
-            synthetic_node("other", None, 1, 200.0, 0.0),
+            synthetic_node("parent", None, 0.0, 0.0),
+            synthetic_node("child", Some("parent"), 0.0, 100.0),
+            synthetic_node("other", None, 200.0, 0.0),
         ],
         vec![],
     );
@@ -47,8 +47,8 @@ fn portal_tree_skips_pair_with_folded_endpoint() {
 fn portal_tree_selection_overrides_color() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
@@ -87,9 +87,9 @@ fn portal_tree_selection_overrides_color() {
 fn portal_pair_channels_are_strictly_ascending() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
-            synthetic_node("c", None, 2, 400.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
+            synthetic_node("c", None, 400.0, 0.0),
         ],
         vec![],
     );
@@ -118,8 +118,8 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
     use crate::core::primitives::Applicable;
     let mut map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
@@ -170,10 +170,10 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
 fn portal_identity_sequence_drops_folded_pairs() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
-            synthetic_node("parent", None, 2, 400.0, 0.0),
-            synthetic_node("child", Some("parent"), 0, 0.0, 100.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
+            synthetic_node("parent", None, 400.0, 0.0),
+            synthetic_node("child", Some("parent"), 0.0, 100.0),
         ],
         vec![],
     );
@@ -211,8 +211,8 @@ fn portal_identity_sequence_drops_folded_pairs() {
 fn portal_marker_region_sized_by_grapheme_cluster_count_not_codepoints() {
     let mut map = synthetic_map(
         vec![
-            synthetic_node("a", None, 0, 0.0, 0.0),
-            synthetic_node("b", None, 1, 200.0, 0.0),
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
