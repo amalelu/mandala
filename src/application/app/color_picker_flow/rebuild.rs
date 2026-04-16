@@ -35,7 +35,11 @@ pub(in crate::application::app) fn rebuild_color_picker_overlay(
 ) {
     use crate::application::color_picker::{ColorPickerState, PickerDynamicApplyKey};
     use crate::application::scene_host::OverlayRole;
-    let Some((geometry, layout_changed)) = compute_picker_geometry(state, renderer) else {
+    let surface_size = (
+        renderer.surface_width() as f32,
+        renderer.surface_height() as f32,
+    );
+    let Some((geometry, layout_changed)) = compute_picker_geometry(state, surface_size) else {
         renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
         return;
     };

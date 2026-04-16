@@ -165,10 +165,10 @@ wasm_bindgen_futures::spawn_local(async move {
             &doc,
             &std::collections::HashMap::new(),
             &mut init_app_scene,
-            renderer,
+            &mut renderer,
         );
-        update_connection_label_tree(&scene, &mut init_app_scene, renderer);
-        flush_canvas_scene_buffers(&mut init_app_scene, renderer);
+        update_connection_label_tree(&scene, &mut init_app_scene, &mut renderer);
+        flush_canvas_scene_buffers(&mut init_app_scene, &mut renderer);
         tree_opt = Some(mindmap_tree);
         doc_opt = Some(doc);
     }
@@ -273,6 +273,7 @@ app.event_loop.run(move |event, _window_target| {
                     &mut input.text_edit_state,
                     &mut input.document,
                     &mut input.mindmap_tree,
+                    &mut input.app_scene,
                     renderer,
                 );
                 suppress_for_events.set(input.text_edit_state.is_open());
@@ -322,6 +323,7 @@ app.event_loop.run(move |event, _window_target| {
                             &mut input.document,
                             &mut input.text_edit_state,
                             &mut input.mindmap_tree,
+                            &mut input.app_scene,
                             renderer,
                         );
                         suppress_for_events.set(input.text_edit_state.is_open());
@@ -418,6 +420,7 @@ app.event_loop.run(move |event, _window_target| {
                             &mut input.document,
                             &mut input.text_edit_state,
                             &mut input.mindmap_tree,
+                            &mut input.app_scene,
                             renderer,
                         );
                     } else {
@@ -433,6 +436,7 @@ app.event_loop.run(move |event, _window_target| {
                                 &mut input.document,
                                 &mut input.text_edit_state,
                                 &mut input.mindmap_tree,
+                                &mut input.app_scene,
                                 renderer,
                             );
                         }
@@ -485,6 +489,7 @@ app.event_loop.run(move |event, _window_target| {
                         &mut input.document,
                         &mut input.text_edit_state,
                         &mut input.mindmap_tree,
+                        &mut input.app_scene,
                         renderer,
                     );
                     suppress_for_events.set(false);

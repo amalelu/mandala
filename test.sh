@@ -12,7 +12,9 @@ usage() {
   cat <<'EOF'
 Usage: ./test.sh [--coverage] [--lint] [--bench] [--help]
 
-  (no flags)   Run the full test suite across baumhard + mandala.
+  (no flags)   Run the full test suite across baumhard + mandala, then
+               type-check the WASM target so cross-platform drift fails
+               the run instead of sneaking into a merge.
   --coverage   Run the suite under cargo-llvm-cov and emit HTML + LCOV.
   --lint       Also run cargo fmt --check and cargo clippy (advisory, never fails the run).
   --bench      Also run cargo bench after tests pass.
@@ -73,4 +75,24 @@ fi
 if [ "$BENCH" -eq 1 ]; then
   echo "== benches =="
   cargo bench -p baumhard -p mandala
+fi
+
+# WASM type-check gate. Native tests can stay green while the WASM leg
+# rots silently (see CODE_CONVENTIONS.md §2); this catches shared-helper
+# signature drift, cfg-guard mistakes, and missing `wasm-bindgen` usage
+# before the next `trunk serve`. Runs across the whole workspace so
+# baumhard's cross-platform discipline (`lib/baumhard/CONVENTIONS.md`)
+# is also enforced here — a native-only addition to baumhard would
+# otherwise fail the eventual `trunk build` without failing the tests.
+# `cargo check` is deliberately cheap — full `trunk build` belongs in
+# ./build.sh. Skipped with a warning if the wasm32 target isn't
+# installed so contributors who haven't run
+# `rustup target add wasm32-unknown-unknown` aren't punished.
+if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+  echo "== wasm32 check =="
+  cargo check --target wasm32-unknown-unknown --workspace
+else
+  echo "== wasm32 check =="
+  echo "(wasm32-unknown-unknown target not installed — skipping. Install with:"
+  echo "    rustup target add wasm32-unknown-unknown)"
 fi
