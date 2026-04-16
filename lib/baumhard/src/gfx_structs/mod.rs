@@ -1,6 +1,8 @@
 pub mod tree;
 pub mod predicate;
 pub mod model;
+pub mod area_fields;
+pub mod area_mutators;
 pub mod area;
 pub mod tree_walker;
 pub mod element;
