@@ -30,6 +30,14 @@ borders, connection paths — is laid out as positioned font glyphs.
 - **`TEST_CONVENTIONS.md`** — testing philosophy, where to put tests, the
   `do_*()` benchmark-reuse pattern, and what we deliberately don't do
   (no mocks, no snapshots, no GPU tests).
+- **`format/`** — the `.mindmap.json` format specification, split by
+  concept: structural Dewey-decimal IDs, named enums, palettes,
+  channels, text runs, validation invariants, migration from legacy.
+  Read this before changing the data model.
+- **`crates/maptool/`** — CLI tool for working with `.mindmap.json`
+  files: `show`, `grep`, `apply`, `export`, `convert --legacy`
+  (migration from miMind-derived format), and `verify` (structural
+  validation).
 - **`lib/baumhard/src/mindmap/`** — the data model, loaders, scene
   builders, and the tree bridge. Most interesting logic lives here.
 - **`src/application/`** — the app shell: event loop, document state,
@@ -83,6 +91,10 @@ borders, connection paths — is laid out as positioned font glyphs.
   positioned font glyphs via cosmic-text. There are no rectangle shaders;
   if you want a new visual element, think about how to express it as
   characters first.
+- **Dewey-decimal IDs** — node IDs encode tree position (`"0"`,
+  `"0.1"`, `"1.2.3"`). Sibling order is the last segment. `parent_id`
+  caches the parent for O(1) lookup. See `format/ids.md` for the full
+  rationale. IDs do not currently cascade on reparent (known drift).
 - **Single-parent tree** — `MindNode.parent_id: Option<String>` is the
   hierarchy. Non-hierarchical relationships use arbitrary edges with
   `edge_type: "cross_link"`. Don't introduce multi-parent shapes.

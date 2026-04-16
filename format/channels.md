@@ -1,6 +1,6 @@
 # Channels
 
-Every node carries a `channel: usize` field (default 0). The channel is an
+Every node carries a `channel` integer field (default 0). The channel is an
 index that determines which mutators apply to the node when a mutation
 tree walks the baumhard tree.
 

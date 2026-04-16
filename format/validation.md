@@ -72,8 +72,8 @@ catches the typo.
 
 ### Text runs
 
-- If non-empty, runs are ordered by ascending `start`
-- Runs do not overlap
+- Runs do not overlap (which implies ascending `start` order for
+  well-formed runs)
 - Each run's `start < end`
 - `end` is within the text's code-point count
 
@@ -91,7 +91,10 @@ painful to diagnose after the fact.
   unbounded). Zero-size nodes are rare but not forbidden.
 - **ID stability after reparent**: Dewey IDs can drift from parent_id
   after a runtime reparent (documented in [ids.md](./ids.md)). Verify
-  accepts the drift — it's expected.
+  **does** flag ID/parent_id mismatches — saving a reparented map and
+  running verify will report the drift as a violation. This is
+  intentional: the on-disk format should be consistent, even if the
+  runtime allows transient drift.
 - **Referential integrity of `trigger_bindings.mutation_id`**: if a
   binding references a mutation ID that doesn't exist, the binding is a
   no-op at runtime. Verify could be extended to flag this; currently it

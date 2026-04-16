@@ -271,7 +271,7 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_collect_affected_node_ids_parent_of_root_is_empty() {
         let doc = load_test_doc();
-        // Root node (348068464) has no parent
+        // Root node (0) has no parent
         let ids = doc.collect_affected_node_ids("0", &TS::Parent);
         assert!(ids.is_empty(), "Root node has no parent; should return empty");
     }

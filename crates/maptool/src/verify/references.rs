@@ -89,4 +89,45 @@ mod tests {
         let v = check(&map);
         assert!(v.iter().any(|x| x.category == "references" && x.message.contains("to_id")));
     }
+
+    fn portal(a: &str, b: &str, label: &str) -> baumhard::mindmap::model::PortalPair {
+        baumhard::mindmap::model::PortalPair {
+            endpoint_a: a.to_string(),
+            endpoint_b: b.to_string(),
+            label: label.to_string(),
+            glyph: "\u{25C8}".to_string(),
+            color: "#ffffff".to_string(),
+            font_size_pt: 16.0,
+            font: None,
+        }
+    }
+
+    #[test]
+    fn valid_portal_clean() {
+        let mut map = MindMap::new_blank("t");
+        map.nodes.insert("0".into(), node("0", None));
+        map.nodes.insert("1".into(), node("1", None));
+        map.portals.push(portal("0", "1", "A"));
+        assert!(check(&map).is_empty());
+    }
+
+    #[test]
+    fn dangling_portal_endpoint_flagged() {
+        let mut map = MindMap::new_blank("t");
+        map.nodes.insert("0".into(), node("0", None));
+        map.portals.push(portal("0", "ghost", "A"));
+        let v = check(&map);
+        assert!(v.iter().any(|x| x.category == "references" && x.message.contains("endpoint_b")));
+    }
+
+    #[test]
+    fn duplicate_portal_label_flagged() {
+        let mut map = MindMap::new_blank("t");
+        map.nodes.insert("0".into(), node("0", None));
+        map.nodes.insert("1".into(), node("1", None));
+        map.portals.push(portal("0", "1", "A"));
+        map.portals.push(portal("1", "0", "A"));
+        let v = check(&map);
+        assert!(v.iter().any(|x| x.category == "references" && x.message.contains("duplicate")));
+    }
 }

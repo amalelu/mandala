@@ -5,10 +5,10 @@
 use super::*;
 use super::tests_common::{load_test_doc, first_testament_node_id};
 
-/// Find a second node id distinct from the root (348068464).
+/// Find a second node id distinct from the root (0).
 fn second_testament_node_id(doc: &MindMapDocument) -> String {
     doc.mindmap.nodes.keys()
-        .find(|k| k.as_str() != "348068464")
+        .find(|k| k.as_str() != "0")
         .expect("testament map has more than one node")
         .clone()
 }

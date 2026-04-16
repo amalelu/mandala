@@ -57,7 +57,7 @@ Hoisting palettes solves this:
    `style` (background_color, frame_color, text_color)
 2. Look up `schema.palette` in `map.palettes`
 3. Index into `palette.groups` by `schema.level`. If the level exceeds
-   the group count, fall back to the last group (a deliberate wrap).
+   the group count, clamp to the last group.
 
 If the palette name doesn't exist in the map, `resolve_theme_colors`
 returns `None` and the renderer falls back to the node's plain `style`

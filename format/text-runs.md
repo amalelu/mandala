@@ -33,8 +33,8 @@ No noise. No need to declare a run that just repeats the style.
 
 When `text_runs` is non-empty:
 
-- Runs must be ordered by ascending `start`
-- Runs must not overlap: each run's `end <= next.start`
+- Runs must not overlap: each run's `end` must be `<= next.start`
+  (which implies ascending `start` order for well-formed runs)
 - `start < end` for every run
 - `start` and `end` are measured in **Unicode code points** (Rust's
   `char` count) — not bytes, not grapheme clusters

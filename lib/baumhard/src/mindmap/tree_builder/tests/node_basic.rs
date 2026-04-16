@@ -46,7 +46,7 @@ fn test_glyph_area_properties() {
     let map = loader::load_from_file(&path).unwrap();
     let result = build_mindmap_tree(&map);
 
-    // Check "Lord God" node (id: 348068464)
+    // Check "Lord God" node (id: 0)
     let lord_god = map.nodes.get("0").unwrap();
     let node_id = result.node_map.get("0").unwrap();
     let element = result.tree.arena.get(*node_id).unwrap().get();

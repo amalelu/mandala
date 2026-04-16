@@ -43,8 +43,9 @@ structure; `parent_id` caches it for O(1) parent lookup without string
 parsing.
 
 The two must agree. For any non-root node:
-- `derive_parent_id(node.id)` must equal `Some(node.parent_id)`
-- `parent_id == None` iff the ID has no dot
+- The Dewey-derived parent (everything before the last dot) must equal
+  `parent_id`
+- `parent_id` is null iff the ID has no dot (root node)
 
 `maptool verify` checks this invariant.
 
