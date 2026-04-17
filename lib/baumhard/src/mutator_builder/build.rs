@@ -60,12 +60,14 @@ pub fn iter_section_channels<C: SectionContext + ?Sized>(
                 out.push((section.clone(), i, channel_base + i));
             }
         }
-        MutatorNode::Void { children, .. } | MutatorNode::Instruction { children, .. } => {
+        MutatorNode::Void { children, .. }
+        | MutatorNode::Instruction { children, .. }
+        | MutatorNode::Macro { children, .. } => {
             for child in children {
                 iter_section_channels(child, ctx, out);
             }
         }
-        MutatorNode::Single { .. } | MutatorNode::Macro { .. } => {}
+        MutatorNode::Single { .. } => {}
     }
 }
 
@@ -81,7 +83,8 @@ fn node_children(node: &MutatorNode) -> &[MutatorNode] {
     match node {
         MutatorNode::Void { children, .. } => children,
         MutatorNode::Instruction { children, .. } => children,
-        MutatorNode::Single { .. } | MutatorNode::Macro { .. } | MutatorNode::Repeat { .. } => &[],
+        MutatorNode::Macro { children, .. } => children,
+        MutatorNode::Single { .. } | MutatorNode::Repeat { .. } => &[],
     }
 }
 
@@ -114,7 +117,10 @@ fn materialize_node<C: SectionContext + ?Sized>(
             let m = materialize_mutation(mutation, ctx, iter);
             GfxMutator::new(m, ch)
         }
-        MutatorNode::Macro { channel, mutations } => match mutations {
+        MutatorNode::Macro {
+            channel, mutations, ..
+        } => match mutations {
+            MutationListSrc::Literal(list) => GfxMutator::new_macro(list.clone(), *channel),
             MutationListSrc::Runtime(label) => {
                 GfxMutator::new_macro(ctx.mutation_list(label), *channel)
             }

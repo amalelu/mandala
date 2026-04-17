@@ -447,7 +447,11 @@ use super::defaults::default_cross_link_edge;
         CM {
             id: id.to_string(),
             name: id.to_string(),
-            mutations: vec![Mutation::area_command(GlyphAreaCommand::NudgeRight(10.0))],
+            description: String::new(),
+            contexts: vec![],
+            mutator: Some(baumhard::mindmap::custom_mutation::scope::self_only(vec![
+                Mutation::area_command(GlyphAreaCommand::NudgeRight(10.0)),
+            ])),
             target_scope: scope,
             behavior: MB::Persistent,
             predicate: None,

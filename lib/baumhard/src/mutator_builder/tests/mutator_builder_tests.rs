@@ -299,6 +299,7 @@ fn macro_pulls_mutation_list_from_runtime_context() {
     let node = MutatorNode::Macro {
         channel: 0,
         mutations: MutationListSrc::Runtime("scope_mutations".into()),
+        children: vec![],
     };
     let ctx = MacroCtx;
     let mt = build(&node, &ctx);
@@ -331,6 +332,7 @@ fn instruction_with_children_mirrors_scope_topology() {
         children: vec![MutatorNode::Macro {
             channel: 0,
             mutations: MutationListSrc::Runtime("leaf".into()),
+            children: vec![],
         }],
     };
     let mt = build(&node, &ScopeCtx);

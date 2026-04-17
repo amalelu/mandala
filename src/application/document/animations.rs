@@ -192,8 +192,18 @@ impl MindMapDocument {
         // GlyphArea command vocabulary so animation receives the same
         // final state instant-mode would have landed on — there's
         // only one source of truth for "what does this mutation do".
+        // Extract the flat Mutation list from the mutator AST for the
+        // scratch-node replay. MutatorNode shapes with runtime holes
+        // (size-aware mutations) can't be previewed against a single
+        // model node — the scratch stays at `from` and the animation
+        // lerps to whatever the mutator produces at completion.
         let mut scratch = from_node.clone();
-        apply_position_mutations_to_node(&cm.mutations, &mut scratch);
+        let flat = cm
+            .mutator
+            .as_ref()
+            .and_then(baumhard::mindmap::custom_mutation::flat_mutations)
+            .unwrap_or_default();
+        apply_position_mutations_to_node(&flat, &mut scratch);
         let to_node = scratch;
 
         self.active_animations.push(AnimationInstance {

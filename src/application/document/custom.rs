@@ -4,7 +4,8 @@
 //! plumbing.
 
 use baumhard::mindmap::custom_mutation::{
-    apply_mutations_to_element, CustomMutation, DocumentAction, MutationBehavior, TargetScope,
+    apply_mutations_to_element, flat_mutations, CustomMutation, DocumentAction, MutationBehavior,
+    TargetScope,
 };
 use baumhard::mindmap::model::MindNode;
 use baumhard::mindmap::tree_builder::MindMapTree;
@@ -100,87 +101,28 @@ impl MindMapDocument {
         changed
     }
 
-    /// Apply mutations to the Baumhard tree based on target scope.
+    /// Apply a custom mutation's payload to the Baumhard tree, iterating
+    /// every affected model node and applying the flat `Vec<Mutation>`
+    /// extracted from the MutatorNode to each target element. Mutations
+    /// without a `mutator` (document-actions-only) are no-ops here —
+    /// [`Self::apply_document_actions`] handles their canvas effects
+    /// separately. Mutations whose MutatorNode can't be reduced to a
+    /// flat list (runtime-hole-bearing, size-aware) are skipped at this
+    /// layer; a later session wires the richer `mutator_builder::build`
+    /// path for those.
     fn apply_to_tree(
         &self,
         custom: &CustomMutation,
         node_id: &str,
         tree: &mut MindMapTree,
     ) {
-        match custom.target_scope {
-            TargetScope::SelfOnly => {
-                if let Some(&nid) = tree.node_map.get(node_id) {
-                    if let Some(node) = tree.tree.arena.get_mut(nid) {
-                        apply_mutations_to_element(&custom.mutations, node.get_mut());
-                    }
-                }
-            }
-            TargetScope::Children => {
-                let child_ids: Vec<String> = self.mindmap.children_of(node_id)
-                    .iter().map(|n| n.id.clone()).collect();
-                for cid in &child_ids {
-                    if let Some(&nid) = tree.node_map.get(cid.as_str()) {
-                        if let Some(node) = tree.tree.arena.get_mut(nid) {
-                            apply_mutations_to_element(&custom.mutations, node.get_mut());
-                        }
-                    }
-                }
-            }
-            TargetScope::Descendants => {
-                let desc_ids = self.mindmap.all_descendants(node_id);
-                for did in &desc_ids {
-                    if let Some(&nid) = tree.node_map.get(did.as_str()) {
-                        if let Some(node) = tree.tree.arena.get_mut(nid) {
-                            apply_mutations_to_element(&custom.mutations, node.get_mut());
-                        }
-                    }
-                }
-            }
-            TargetScope::SelfAndDescendants => {
-                // Self
-                if let Some(&nid) = tree.node_map.get(node_id) {
-                    if let Some(node) = tree.tree.arena.get_mut(nid) {
-                        apply_mutations_to_element(&custom.mutations, node.get_mut());
-                    }
-                }
-                // Descendants
-                let desc_ids = self.mindmap.all_descendants(node_id);
-                for did in &desc_ids {
-                    if let Some(&nid) = tree.node_map.get(did.as_str()) {
-                        if let Some(node) = tree.tree.arena.get_mut(nid) {
-                            apply_mutations_to_element(&custom.mutations, node.get_mut());
-                        }
-                    }
-                }
-            }
-            TargetScope::Parent => {
-                if let Some(parent_id) = self.mindmap.nodes.get(node_id)
-                    .and_then(|n| n.parent_id.as_deref())
-                {
-                    let pid = parent_id.to_string();
-                    if let Some(&nid) = tree.node_map.get(pid.as_str()) {
-                        if let Some(node) = tree.tree.arena.get_mut(nid) {
-                            apply_mutations_to_element(&custom.mutations, node.get_mut());
-                        }
-                    }
-                }
-            }
-            TargetScope::Siblings => {
-                if let Some(parent_id) = self.mindmap.nodes.get(node_id)
-                    .and_then(|n| n.parent_id.as_deref())
-                {
-                    let sibling_ids: Vec<String> = self.mindmap.children_of(parent_id)
-                        .iter()
-                        .filter(|n| n.id != node_id)
-                        .map(|n| n.id.clone())
-                        .collect();
-                    for sid in &sibling_ids {
-                        if let Some(&nid) = tree.node_map.get(sid.as_str()) {
-                            if let Some(node) = tree.tree.arena.get_mut(nid) {
-                                apply_mutations_to_element(&custom.mutations, node.get_mut());
-                            }
-                        }
-                    }
+        let Some(mutator) = custom.mutator.as_ref() else { return };
+        let Some(mutations) = flat_mutations(mutator) else { return };
+        let affected = self.collect_affected_node_ids(node_id, &custom.target_scope);
+        for id in &affected {
+            if let Some(&nid) = tree.node_map.get(id.as_str()) {
+                if let Some(node) = tree.tree.arena.get_mut(nid) {
+                    apply_mutations_to_element(&mutations, node.get_mut());
                 }
             }
         }
