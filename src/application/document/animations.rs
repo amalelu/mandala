@@ -51,34 +51,70 @@ fn apply_position_mutations_to_node(
     }
 }
 
+/// Source layer a registered mutation came from. Reported by
+/// `mutation help <id>` so authors know which file to edit and which
+/// layer an override is winning from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MutationSource {
+    /// Shipped with the binary via `assets/mutations/application.json`.
+    App,
+    /// Loaded from the user's `mutations.json` (XDG path on native,
+    /// `?mutations=` or localStorage on WASM).
+    User,
+    /// Declared in the currently-loaded map's `custom_mutations` array.
+    Map,
+    /// Declared on a specific node's `inline_mutations` array.
+    Inline,
+}
+
 impl MindMapDocument {
     /// Build the mutation registry from map-level and inline node mutations.
     /// Inline mutations override map-level mutations with the same id.
     pub fn build_mutation_registry(&mut self) {
-        self.build_mutation_registry_with_user(&[]);
+        self.build_mutation_registry_with_app_and_user(&[], &[]);
     }
 
-    /// Variant that also accepts a slice of user-defined mutations
-    /// (from `$XDG_CONFIG_HOME/mandala/mutations.json`). Precedence
-    /// is user < map < inline: user mutations are inserted first, so
-    /// map and inline entries with the same id overwrite them.
+    /// Variant retained for callers that already supply a user slice.
+    /// Delegates to the four-source builder with an empty app slice.
     pub fn build_mutation_registry_with_user(
         &mut self,
         user_mutations: &[CustomMutation],
     ) {
+        self.build_mutation_registry_with_app_and_user(&[], user_mutations);
+    }
+
+    /// Build the registry from all four sources, in ascending
+    /// precedence: application bundle < user file < map < inline.
+    /// Later writers override earlier ones with the same `id`, so
+    /// the inline-on-node shape wins last and the app bundle is the
+    /// most easily overridable layer.
+    pub fn build_mutation_registry_with_app_and_user(
+        &mut self,
+        app_mutations: &[CustomMutation],
+        user_mutations: &[CustomMutation],
+    ) {
         self.mutation_registry.clear();
-        // User-defined mutations (lowest precedence).
+        self.mutation_sources.clear();
+        for cm in app_mutations {
+            self.mutation_registry.insert(cm.id.clone(), cm.clone());
+            self.mutation_sources
+                .insert(cm.id.clone(), MutationSource::App);
+        }
         for cm in user_mutations {
             self.mutation_registry.insert(cm.id.clone(), cm.clone());
+            self.mutation_sources
+                .insert(cm.id.clone(), MutationSource::User);
         }
-        // Map-level mutations (overrides user).
         for cm in &self.mindmap.custom_mutations {
             self.mutation_registry.insert(cm.id.clone(), cm.clone());
+            self.mutation_sources
+                .insert(cm.id.clone(), MutationSource::Map);
         }
-        // Inline node mutations (highest — overrides map and user).
         for node in self.mindmap.nodes.values() {
             for cm in &node.inline_mutations {
                 self.mutation_registry.insert(cm.id.clone(), cm.clone());
+                self.mutation_sources
+                    .insert(cm.id.clone(), MutationSource::Inline);
             }
         }
     }

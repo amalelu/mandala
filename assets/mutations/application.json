@@ -1,0 +1,30 @@
+{
+  "_comment": "Application-bundled mutations shipped inside the mandala binary. Parsed by src/application/document/mutations_loader/builtin.rs at startup. Each entry here uses the legacy { mutations + target_scope } shape, which the backward-compat deserializer in lib/baumhard/src/mindmap/custom_mutation/serialized.rs transparently translates into a MutatorNode. This keeps pure-data entries terse; the fully explicit mutator-AST shape is also accepted (see format/mutations.md).",
+
+  "mutations": [
+    {
+      "id": "grow-font-2pt",
+      "name": "Grow Font 2pt",
+      "description": "Increase font size by 2 points on the selected node and all descendants.",
+      "contexts": ["map.node"],
+      "mutations": [{"AreaCommand": {"GrowFont": 2.0}}],
+      "target_scope": "SelfAndDescendants"
+    },
+    {
+      "id": "shrink-font-2pt",
+      "name": "Shrink Font 2pt",
+      "description": "Decrease font size by 2 points on the selected node and all descendants.",
+      "contexts": ["map.node"],
+      "mutations": [{"AreaCommand": {"ShrinkFont": 2.0}}],
+      "target_scope": "SelfAndDescendants"
+    },
+    {
+      "id": "nudge-right-50",
+      "name": "Nudge Right 50px",
+      "description": "Shift the selected node 50 pixels to the right, leaving its descendants in place.",
+      "contexts": ["map.tree"],
+      "mutations": [{"AreaCommand": {"NudgeRight": 50.0}}],
+      "target_scope": "SelfOnly"
+    }
+  ]
+}

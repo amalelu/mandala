@@ -15,11 +15,12 @@ use baumhard::mindmap::loader;
 use baumhard::mindmap::scene_builder::{self, RenderScene};
 use baumhard::mindmap::tree_builder::{self, MindMapTree};
 
-mod animations;
+pub mod animations;
 mod custom;
 mod defaults;
 mod edges;
 mod hit_test;
+pub mod mutations_loader;
 mod nodes;
 mod topology;
 mod types;
@@ -61,8 +62,15 @@ pub struct MindMapDocument {
     pub dirty: bool,
     pub selection: SelectionState,
     pub undo_stack: Vec<UndoAction>,
-    /// Registry of all available custom mutations (global + map + inline, keyed by id).
+    /// Registry of all available custom mutations (app + user + map +
+    /// inline, keyed by id). Later layers override earlier — see
+    /// [`Self::build_mutation_registry_with_app_and_user`].
     pub mutation_registry: HashMap<String, CustomMutation>,
+    /// Which source layer won the registry slot for each id. Populated
+    /// alongside `mutation_registry` so `mutation help <id>` can
+    /// report "source: app / user / map / inline" without re-walking
+    /// the layers.
+    pub mutation_sources: HashMap<String, animations::MutationSource>,
     /// Tracks active toggle mutations per node: (node_id, mutation_id).
     pub active_toggles: HashSet<(String, String)>,
     /// Currently-running animations. Each instance carries the
@@ -177,6 +185,7 @@ impl MindMapDocument {
             selection: SelectionState::None,
             undo_stack: Vec::new(),
             mutation_registry: HashMap::new(),
+            mutation_sources: HashMap::new(),
             active_toggles: HashSet::new(),
             label_edit_preview: None,
             color_picker_preview: None,

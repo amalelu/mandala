@@ -57,7 +57,12 @@ let mut app_scene = crate::application::scene_host::AppScene::new();
 
 match MindMapDocument::load(&app.options.mindmap_path) {
     Ok(mut doc) => {
-        doc.build_mutation_registry();
+        // Four-source mutation registry: app bundle (shipped in the
+        // binary) < user file ($XDG_CONFIG_HOME/mandala/mutations.json)
+        // < map (in the .mindmap.json) < inline (on individual nodes).
+        let (app_mutations, user_mutations) =
+            crate::application::document::mutations_loader::load_app_and_user(None);
+        doc.build_mutation_registry_with_app_and_user(&app_mutations, &user_mutations);
         // Canvas background: resolve through theme
         // variables so `"var(--bg)"` works, then hand off
         // to the renderer as the render-pass clear color.

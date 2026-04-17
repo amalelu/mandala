@@ -26,6 +26,7 @@ pub(super) fn load_test_doc() -> MindMapDocument {
         selection: SelectionState::None,
         undo_stack: Vec::new(),
         mutation_registry: HashMap::new(),
+        mutation_sources: HashMap::new(),
         active_toggles: HashSet::new(),
         label_edit_preview: None,
         color_picker_preview: None,
