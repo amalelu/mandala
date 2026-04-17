@@ -63,6 +63,10 @@ match MindMapDocument::load(&app.options.mindmap_path) {
         let (app_mutations, user_mutations) =
             crate::application::document::mutations_loader::load_app_and_user(None);
         doc.build_mutation_registry_with_app_and_user(&app_mutations, &user_mutations);
+        // Rust-backed handlers for mutations too structural for a
+        // pure-data `flat_mutations` reach (flower-layout,
+        // tree-cascade, …).
+        crate::application::document::mutations::register_builtin_handlers(&mut doc);
         // Canvas background: resolve through theme
         // variables so `"var(--bg)"` works, then hand off
         // to the renderer as the render-pass clear color.

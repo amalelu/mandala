@@ -20,6 +20,7 @@ mod custom;
 mod defaults;
 mod edges;
 mod hit_test;
+pub mod mutations;
 pub mod mutations_loader;
 mod nodes;
 mod topology;
@@ -71,6 +72,14 @@ pub struct MindMapDocument {
     /// report "source: app / user / map / inline" without re-walking
     /// the layers.
     pub mutation_sources: HashMap<String, animations::MutationSource>,
+    /// Per-mutation-id imperative handlers. When a handler is
+    /// registered for a mutation's id, `apply_custom_mutation`
+    /// delegates to it instead of the default flat-apply path — the
+    /// seam size-aware / layout-generating / otherwise-Rust-computed
+    /// mutations plug into. Handlers mutate the MindMap model
+    /// directly; `target_scope` tells the undo path which nodes to
+    /// snapshot before the handler runs.
+    pub mutation_handlers: HashMap<String, mutations::DynamicMutationHandler>,
     /// Tracks active toggle mutations per node: (node_id, mutation_id).
     pub active_toggles: HashSet<(String, String)>,
     /// Currently-running animations. Each instance carries the
@@ -186,6 +195,7 @@ impl MindMapDocument {
             undo_stack: Vec::new(),
             mutation_registry: HashMap::new(),
             mutation_sources: HashMap::new(),
+            mutation_handlers: HashMap::new(),
             active_toggles: HashSet::new(),
             label_edit_preview: None,
             color_picker_preview: None,

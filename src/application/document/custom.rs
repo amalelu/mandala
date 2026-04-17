@@ -37,23 +37,29 @@ impl MindMapDocument {
             return;
         }
 
-        // Persistent: snapshot, apply to tree, sync to model
+        // Persistent: snapshot, apply, sync/push undo.
         let affected_ids = self.collect_affected_node_ids(node_id, &custom.target_scope);
-        let snapshots: Vec<(String, MindNode)> = affected_ids.iter()
-            .filter_map(|id| {
-                self.mindmap.nodes.get(id).map(|n| (id.clone(), n.clone()))
-            })
+        let snapshots: Vec<(String, MindNode)> = affected_ids
+            .iter()
+            .filter_map(|id| self.mindmap.nodes.get(id).map(|n| (id.clone(), n.clone())))
             .collect();
 
-        self.apply_to_tree(custom, node_id, tree);
-
-        // Sync tree state back to model for affected nodes
-        for id in &affected_ids {
-            self.sync_node_from_tree(id, tree);
+        // If a dynamic handler is registered for this mutation, it's
+        // authoritative — mutates the model directly and the tree
+        // rebuild on the next frame picks up the new state. Skip the
+        // tree-apply + tree-to-model sync path entirely for these.
+        if let Some(handler) = self.mutation_handlers.get(&custom.id).copied() {
+            handler(self, node_id);
+        } else {
+            self.apply_to_tree(custom, node_id, tree);
+            for id in &affected_ids {
+                self.sync_node_from_tree(id, tree);
+            }
         }
 
         if !snapshots.is_empty() {
-            self.undo_stack.push(UndoAction::CustomMutation { node_snapshots: snapshots });
+            self.undo_stack
+                .push(UndoAction::CustomMutation { node_snapshots: snapshots });
             self.dirty = true;
         }
     }

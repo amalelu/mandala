@@ -25,6 +25,22 @@
       "contexts": ["map.tree"],
       "mutations": [{"AreaCommand": {"NudgeRight": 50.0}}],
       "target_scope": "SelfOnly"
+    },
+    {
+      "id": "flower-layout",
+      "name": "Flower Layout",
+      "description": "Arrange the selected node's direct children in a circle around it. The radius scales with child sizes so the result reads as a flower.",
+      "contexts": ["map.tree"],
+      "mutations": [],
+      "target_scope": "Children"
+    },
+    {
+      "id": "tree-cascade",
+      "name": "Tree Cascade",
+      "description": "Arrange the selected node's descendants as a top-down tree. Each level sits below the previous, with siblings spread horizontally.",
+      "contexts": ["map.tree"],
+      "mutations": [],
+      "target_scope": "Descendants"
     }
   ]
 }
