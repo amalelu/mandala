@@ -25,8 +25,10 @@ fn test_edge_handles_straight_edge_emits_midpoint() {
     let scene = build_scene_with_cache(
         &map,
         &HashMap::new(),
-        Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
-        None,
+        SceneSelectionContext {
+            edge: Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            ..Default::default()
+        },
         None,
         None,
         &mut cache,
@@ -61,8 +63,10 @@ fn test_edge_handles_curved_edge_emits_control_points_not_midpoint() {
     let scene = build_scene_with_cache(
         &map,
         &HashMap::new(),
-        Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
-        None,
+        SceneSelectionContext {
+            edge: Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            ..Default::default()
+        },
         None,
         None,
         &mut cache,
@@ -91,8 +95,10 @@ fn test_edge_handles_cubic_edge_emits_both_control_points() {
     let scene = build_scene_with_cache(
         &map,
         &HashMap::new(),
-        Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
-        None,
+        SceneSelectionContext {
+            edge: Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            ..Default::default()
+        },
         None,
         None,
         &mut cache,
@@ -124,8 +130,10 @@ fn test_edge_handle_control_point_position_is_absolute_canvas() {
     let scene = build_scene_with_cache(
         &map,
         &HashMap::new(),
-        Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
-        None,
+        SceneSelectionContext {
+            edge: Some((&edge.from_id, &edge.to_id, &edge.edge_type)),
+            ..Default::default()
+        },
         None,
         None,
         &mut cache,

@@ -150,6 +150,7 @@ pub(in crate::application::app) fn update_portal_tree(
 ) {
     use crate::application::document::ColorPickerPreview;
     use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
+    use baumhard::mindmap::scene_builder::SelectedPortalLabel;
     use baumhard::mindmap::tree_builder::{
         build_portal_mutator_tree_from_pairs, build_portal_tree_from_pairs,
         portal_identity_sequence, portal_pair_data, PortalColorPreviewRef, SelectedEdgeRef,
@@ -162,6 +163,8 @@ pub(in crate::application::app) fn update_portal_tree(
     let selected: Option<SelectedEdgeRef> = selected_owned
         .as_ref()
         .map(|(f, t, ty)| (f.as_str(), t.as_str(), ty.as_str()));
+    let selected_portal_label: Option<SelectedPortalLabel> =
+        doc.selection.selected_portal_label_scene_ref();
 
     // The picker preview fans out to the portal pass whenever the
     // previewed edge is portal-mode. No separate Portal variant on
@@ -174,7 +177,13 @@ pub(in crate::application::app) fn update_portal_tree(
         _ => None,
     };
 
-    let pairs = portal_pair_data(&doc.mindmap, offsets, selected, preview);
+    let pairs = portal_pair_data(
+        &doc.mindmap,
+        offsets,
+        selected,
+        selected_portal_label,
+        preview,
+    );
     let signature = hash_canvas_signature(&portal_identity_sequence(&pairs));
 
     match app_scene.canvas_dispatch(CanvasRole::Portals, signature) {

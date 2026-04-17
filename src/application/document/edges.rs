@@ -7,8 +7,8 @@
 use glam::Vec2;
 
 use baumhard::mindmap::model::{
-    is_portal_edge, Canvas, GlyphConnectionConfig, MindEdge, DISPLAY_MODE_LINE,
-    DISPLAY_MODE_PORTAL, PORTAL_GLYPH_PRESETS,
+    is_portal_edge, portal_endpoint_state_mut, Canvas, GlyphConnectionConfig, MindEdge,
+    PortalEndpointState, DISPLAY_MODE_LINE, DISPLAY_MODE_PORTAL, PORTAL_GLYPH_PRESETS,
 };
 use baumhard::mindmap::scene_builder;
 
@@ -557,4 +557,138 @@ impl MindMapDocument {
         Some(self.mindmap.edges.len() - 1)
     }
 
+    // ========================================================================
+    // Portal label mutations — per-endpoint overrides for a portal-mode edge.
+    // Each helper follows the same pattern as `set_edge_color` /
+    // `set_edge_label`: locate the edge, clone the pre-edit snapshot, mutate
+    // the per-endpoint `PortalEndpointState`, push `UndoAction::EditEdge`,
+    // set `dirty`. The caller passes the `endpoint_node_id` identifying
+    // *which* of the two endpoints is being targeted — this must equal
+    // either `edge.from_id` or `edge.to_id`; other values return `false`
+    // unchanged.
+    // ========================================================================
+
+    /// Set (or clear, with `color = None`) the per-endpoint color
+    /// override on a portal-mode edge's label. Returns `true` if
+    /// the value changed. No-op if the edge isn't found or the
+    /// endpoint id doesn't match either side. Rolls back a newly
+    /// installed empty `PortalEndpointState` when clearing a color
+    /// would leave the state entirely default, so an unchanged
+    /// selection doesn't leave undo droppings.
+    pub fn set_portal_label_color(
+        &mut self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+        color: Option<&str>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let slot = match portal_endpoint_state_mut(
+            &mut self.mindmap.edges[idx],
+            endpoint_node_id,
+        ) {
+            Some(s) => s,
+            None => return false,
+        };
+        let current = slot.as_ref().and_then(|s| s.color.clone());
+        let new_val = color.map(|s| s.to_string());
+        if current == new_val {
+            return false;
+        }
+        match new_val {
+            Some(c) => {
+                slot.get_or_insert_with(PortalEndpointState::default).color = Some(c);
+            }
+            None => {
+                if let Some(existing) = slot.as_mut() {
+                    existing.color = None;
+                    if existing == &PortalEndpointState::default() {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set (or clear, with `t = None`) the per-endpoint
+    /// `border_t` position on a portal-mode edge's label.
+    /// Returns `true` if the value changed. `t` is wrapped into
+    /// the canonical `[0, 4)` perimeter parameter; callers can
+    /// pass any finite value and get the canonical wrap for free.
+    pub fn set_portal_label_border_t(
+        &mut self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+        t: Option<f32>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let wrapped = t.map(baumhard::mindmap::portal_geometry::wrap_border_t);
+        let before = self.mindmap.edges[idx].clone();
+        let slot = match portal_endpoint_state_mut(
+            &mut self.mindmap.edges[idx],
+            endpoint_node_id,
+        ) {
+            Some(s) => s,
+            None => return false,
+        };
+        let current = slot.as_ref().and_then(|s| s.border_t);
+        let matched = match (current, wrapped) {
+            (None, None) => true,
+            (Some(a), Some(b)) => (a - b).abs() < f32::EPSILON,
+            _ => false,
+        };
+        if matched {
+            return false;
+        }
+        match wrapped {
+            Some(t) => {
+                slot.get_or_insert_with(PortalEndpointState::default).border_t = Some(t);
+            }
+            None => {
+                if let Some(existing) = slot.as_mut() {
+                    existing.border_t = None;
+                    if existing == &PortalEndpointState::default() {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Read the resolved portal label color for one endpoint.
+    /// Walks the cascade — per-endpoint override >
+    /// `glyph_connection.color` > `edge.color` — and returns the
+    /// resolved string (with `var(--name)` references already
+    /// expanded through the theme variable map). Used by clipboard
+    /// copy: the user expects `copy` on a portal label to produce
+    /// a real hex they can paste elsewhere, even when no override
+    /// is set.
+    pub fn resolve_portal_label_color(
+        &self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+    ) -> Option<String> {
+        let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
+        let endpoint_state =
+            baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
+        let style = baumhard::mindmap::scene_builder::portal::resolve_portal_endpoint_style(
+            edge,
+            endpoint_state,
+            &self.mindmap.canvas,
+            None,
+        );
+        Some(style.color)
+    }
 }

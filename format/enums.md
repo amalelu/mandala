@@ -96,12 +96,16 @@ non-hierarchical connections between any two nodes.
 ```
 
 `"line"` renders the edge as the usual path between endpoints.
-`"portal"` renders the edge as two floating glyph markers — one
-above each endpoint node's top-right corner — without a line
-between them. Portal-mode edges are orthogonal to `edge.type`:
-either `parent_child` or `cross_link` can be rendered as a portal.
-Double-clicking a marker navigates the camera to the opposite
-endpoint.
+`"portal"` renders the edge as two glyph labels — one attached to
+each endpoint node's border — without a line between them.
+Portal-mode edges are orthogonal to `edge.type`: either
+`parent_child` or `cross_link` can be rendered as a portal.
+Single-clicking a portal label selects that specific label for
+color / copy / paste / cut operations (see `portal-labels.md` for
+the per-endpoint state). Double-clicking navigates the camera to
+the opposite endpoint. Dragging a label along the node's border
+pins it to a user-chosen position; without a drag, each label
+auto-orients toward its partner endpoint.
 
 ## Unknown values
 

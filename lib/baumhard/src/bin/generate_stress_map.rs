@@ -287,6 +287,8 @@ fn make_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
         control_points: Vec::new(),
         glyph_connection: None,
         display_mode: None,
+        portal_from: None,
+        portal_to: None,
     }
 }
 
@@ -308,6 +310,8 @@ fn make_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
         control_points: Vec::new(),
         glyph_connection: None,
         display_mode: None,
+        portal_from: None,
+        portal_to: None,
     }
 }
 

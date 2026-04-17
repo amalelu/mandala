@@ -99,8 +99,10 @@ fn selected_portal_edge_rendered_with_highlight_color() {
     let scene = build_scene_with_cache(
         &map,
         &HashMap::new(),
-        Some(("a", "b", "cross_link")),
-        None,
+        SceneSelectionContext {
+            edge: Some(("a", "b", "cross_link")),
+            ..Default::default()
+        },
         None,
         None,
         &mut cache,
@@ -112,7 +114,12 @@ fn selected_portal_edge_rendered_with_highlight_color() {
 }
 
 #[test]
-fn portal_marker_position_is_above_top_right_of_node() {
+fn portal_marker_points_at_partner_endpoint() {
+    // Post-directional-default: the marker sits on the owning
+    // node's border at the point facing its partner endpoint,
+    // not floated above a fixed corner. Partner "b" is to the
+    // south-east of "a", so a's marker anchors on the
+    // right / bottom side.
     let nodes = vec![
         synthetic_node("a", 100.0, 200.0, 80.0, 40.0, false),
         synthetic_node("b", 500.0, 500.0, 80.0, 40.0, false),
@@ -120,29 +127,33 @@ fn portal_marker_position_is_above_top_right_of_node() {
     let mut map = synthetic_map(nodes, vec![]);
     map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
     let scene = build_scene(&map, 1.0);
-    // Find the marker keyed to endpoint "a".
     let marker_a = scene
         .portal_elements
         .iter()
         .find(|e| e.endpoint_node_id == "a")
         .expect("marker for endpoint a");
-    // Node "a" sits at (100, 200) with size (80, 40). The marker
-    // should float above the node's top edge (y < 200) and be
-    // horizontally clustered on the right half of the node.
+    // Center of marker AABB should sit outside the node's right
+    // or bottom side (the two sides facing partner b). Check that
+    // the marker lives outside the node AABB in at least one axis.
+    let marker_cx = marker_a.position.0 + marker_a.bounds.0 * 0.5;
+    let marker_cy = marker_a.position.1 + marker_a.bounds.1 * 0.5;
+    let right_edge = 100.0 + 80.0;
+    let bottom_edge = 200.0 + 40.0;
     assert!(
-        marker_a.position.1 < 200.0,
-        "marker y {} should be above node top 200",
-        marker_a.position.1
-    );
-    assert!(
-        marker_a.position.0 > 100.0 + 80.0 * 0.5,
-        "marker x {} should be on the right half of the node",
-        marker_a.position.0
+        marker_cx > right_edge || marker_cy > bottom_edge,
+        "marker ({marker_cx}, {marker_cy}) should be right or below node AABB"
     );
 }
 
 #[test]
 fn portal_marker_follows_drag_offsets() {
+    // When the owning node is offset during a drag, the marker
+    // moves with it. The relationship between marker shift and
+    // node shift is not strict equality because the directional
+    // default also uses the partner's position (which is
+    // unchanged here), but the marker stays anchored to the
+    // moved node's border — so its delta has the same sign and
+    // similar magnitude in each axis.
     let nodes = vec![
         synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
         synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
@@ -150,8 +161,6 @@ fn portal_marker_follows_drag_offsets() {
     let mut map = synthetic_map(nodes, vec![]);
     map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
 
-    // Build a baseline scene with no offsets, then an offset scene
-    // and assert the marker moved by exactly the offset amount.
     let baseline = build_scene(&map, 1.0);
     let baseline_a = baseline
         .portal_elements
@@ -170,8 +179,13 @@ fn portal_marker_follows_drag_offsets() {
 
     let dx = dragged_a.position.0 - baseline_a.position.0;
     let dy = dragged_a.position.1 - baseline_a.position.1;
-    assert!((dx - 100.0).abs() < 0.01, "marker x should shift by +100, got {dx}");
-    assert!((dy - 50.0).abs() < 0.01, "marker y should shift by +50, got {dy}");
+    // Partner stays to the right → marker stays on a's right
+    // edge, x shifts by roughly the node's x offset. y shift is
+    // somewhere between 0 and the node's y offset depending on
+    // whether the anchor slid vertically to face the new partner
+    // direction.
+    assert!(dx > 50.0, "marker x should follow node rightward, got {dx}");
+    assert!(dy >= -10.0 && dy <= 60.0, "marker y shift {dy} within node move range");
 }
 
 #[test]
@@ -209,8 +223,10 @@ fn portal_color_preview_wins_over_selection() {
     let scene = build_scene_with_cache(
         &map,
         &HashMap::new(),
-        Some(("a", "b", "cross_link")),
-        None,
+        SceneSelectionContext {
+            edge: Some(("a", "b", "cross_link")),
+            ..Default::default()
+        },
         None,
         Some(preview),
         &mut cache,

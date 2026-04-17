@@ -218,6 +218,8 @@ fn synthetic_edge_with_label(label: Option<&str>, pos: Option<f32>) -> MindEdge 
         control_points: Vec::new(),
         glyph_connection: None,
         display_mode: None,
+        portal_from: None,
+        portal_to: None,
     }
 }
 

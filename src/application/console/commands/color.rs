@@ -129,6 +129,17 @@ fn picker_target_for(
             // alias because "fill" reads more natural there.
             Some(ColorTarget::Edge(er.clone()))
         }
+        SelectionState::PortalLabel(s) => {
+            // Portal label: the single selectable glyph attached
+            // to one endpoint. The console `color` verb targets
+            // the per-endpoint override; the axis is irrelevant
+            // (labels have one color field, same as edges), so
+            // we just return the edge-ref form — the commit path
+            // writes to the per-endpoint state keyed by
+            // `endpoint_node_id`.
+            let _ = s;
+            Some(ColorTarget::Edge(s.edge_ref()))
+        }
         SelectionState::None => None,
     }
 }

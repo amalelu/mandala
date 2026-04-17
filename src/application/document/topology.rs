@@ -164,6 +164,12 @@ impl MindMapDocument {
             SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
             SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
             SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
+            // Delete on a portal-label selection targets the owning
+            // edge — the label is a render form of the edge, and
+            // deleting one marker would leave a dangling half-edge.
+            // Consistent with the user's mental model: "delete this
+            // portal" = "delete the edge that made it".
+            SelectionState::PortalLabel(s) => Some(DelKind::Edge(s.edge_ref())),
             SelectionState::None => None,
         };
         match kind {

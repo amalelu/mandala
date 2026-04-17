@@ -62,6 +62,8 @@ pub(super) fn synthetic_edge(from: &str, to: &str, anchor_from: &str, anchor_to:
         control_points: vec![],
         glyph_connection: None,
         display_mode: None,
+        portal_from: None,
+        portal_to: None,
     }
 }
 
@@ -130,5 +132,7 @@ pub(super) fn synthetic_portal_edge(a: &str, b: &str, color: &str) -> MindEdge {
             ..GlyphConnectionConfig::default()
         }),
         display_mode: Some(DISPLAY_MODE_PORTAL.to_string()),
+        portal_from: None,
+        portal_to: None,
     }
 }
