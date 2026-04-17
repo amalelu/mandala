@@ -312,10 +312,25 @@ pub(super) fn handle_mouse_input(
                     },
                     None => None,
                 };
+                // Portal-label drag capture. Takes precedence
+                // over `hit_node` at threshold-cross time so
+                // pressing a marker and dragging slides the label
+                // along its owning node's border rather than
+                // moving the node itself. Captured regardless of
+                // current selection — grabbing a marker is a
+                // valid first action, not just a follow-up to a
+                // prior click.
+                let hit_portal_label = match &portal_hit {
+                    Some((key, endpoint)) if hit_node.is_none() => {
+                        Some((key.clone(), endpoint.clone()))
+                    }
+                    _ => None,
+                };
                 *drag_state = DragState::Pending {
                     start_pos: cursor_pos,
                     hit_node,
                     hit_edge_handle,
+                    hit_portal_label,
                 };
             } else {
                 // Released
@@ -491,6 +506,25 @@ pub(super) fn handle_mouse_input(
                                     before: original,
                                 });
                                 doc.dirty = true;
+                            }
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                        }
+                        mutation_throttle.reset();
+                    }
+                    DragState::DraggingPortalLabel { edge_ref, original, .. } => {
+                        // Per-frame CursorMoved already mutated the
+                        // edge. Commit with a single EditEdge undo
+                        // carrying the pre-drag snapshot, matching
+                        // the DraggingEdgeHandle release path.
+                        if let Some(doc) = document.as_mut() {
+                            if let Some(idx) = doc.edge_index(&edge_ref) {
+                                if doc.mindmap.edges[idx] != original {
+                                    doc.undo_stack.push(UndoAction::EditEdge {
+                                        index: idx,
+                                        before: original,
+                                    });
+                                    doc.dirty = true;
+                                }
                             }
                             rebuild_all(doc, mindmap_tree, app_scene, renderer);
                         }

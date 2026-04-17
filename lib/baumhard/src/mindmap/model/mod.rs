@@ -19,8 +19,9 @@ pub mod palette;
 
 pub use canvas::Canvas;
 pub use edge::{
-    is_portal_edge, ControlPoint, GlyphConnectionConfig, MindEdge, DISPLAY_MODE_LINE,
-    DISPLAY_MODE_PORTAL, PORTAL_GLYPH_PRESETS,
+    is_portal_edge, portal_endpoint_state, portal_endpoint_state_mut, ControlPoint,
+    GlyphConnectionConfig, MindEdge, PortalEndpointState, DISPLAY_MODE_LINE, DISPLAY_MODE_PORTAL,
+    PORTAL_GLYPH_PRESETS,
 };
 pub use node::{
     ColorGroup, ColorSchema, CustomBorderGlyphs, GlyphBorderConfig, MindNode, NodeLayout,

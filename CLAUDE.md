@@ -88,11 +88,18 @@ what works where.
   full keyboard flow (cursor, delete, insert, multi-line), click-outside
   to commit, Esc to cancel. Shared implementation under
   `src/application/app/text_edit/`.
-- Portal-mode edges (`display_mode = "portal"`): two glyph markers,
-  one per endpoint. Single-click a marker selects the owning edge;
-  **double-click pans the camera to the opposite endpoint**. Dispatch
-  wired in both `event_mouse_click.rs` (native) and `run_wasm.rs` via
-  the shared `ClickHit::PortalMarker` path.
+- Portal-mode edges (`display_mode = "portal"`): two glyph labels,
+  one per endpoint. Each label defaults to facing its partner
+  endpoint and can carry a per-endpoint `PortalEndpointState`
+  (`color` override + `border_t` pinned position). Single-click a
+  marker selects that specific label as `SelectionState::PortalLabel`;
+  **double-click pans the camera to the opposite endpoint**. The
+  glyph-wheel color picker, clipboard copy/paste/cut, and the
+  `color` console verb all route to the per-endpoint color
+  override when a portal label is selected (clipboard ops operate
+  on the resolved hex). See `format/portal-labels.md` for the
+  full spec. Dispatch wired in both `event_mouse_click.rs` (native)
+  and `run_wasm.rs` via the shared `ClickHit::PortalMarker` path.
 - Action dispatch for `Undo`, `CreateOrphanNode`, `OrphanSelection`,
   `DeleteSelection`, `EditSelection`, `EditSelectionClean`, `CancelMode`.
 - Keybind config loading (native: CLI arg + XDG; WASM: `?keybinds=…`
@@ -105,8 +112,8 @@ what works where.
   `performance.now()`).
 
 **Native-only today** (each is a roadmap-scale gap, not a style choice):
-- Drag gestures: pan, move-node, edge-handle, rect-select — the entire
-  `DragState` enum is native-gated.
+- Drag gestures: pan, move-node, edge-handle, portal-label, rect-select
+  — the entire `DragState` enum is native-gated.
 - `AppMode::{Reparent, Connect}` — the mode state machine plus its
   hover preview and click routing.
 - Modals: CLI console (`/` trigger), glyph-wheel color picker, edge

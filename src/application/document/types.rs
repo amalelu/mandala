@@ -8,6 +8,7 @@
 use baumhard::mindmap::animation::AnimationTiming;
 use baumhard::mindmap::custom_mutation::CustomMutation;
 use baumhard::mindmap::model::{MindEdge, MindNode};
+use baumhard::mindmap::scene_cache::EdgeKey;
 
 /// Selection highlight color: bright cyan [R, G, B, A]
 pub const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
@@ -95,17 +96,24 @@ impl EdgeRef {
     }
 }
 
-/// Tracks what is currently selected in the document. Node and
-/// edge selection are mutually exclusive — selecting one kind clears
-/// any prior selection of the other. Portal-mode edges use the
-/// `Edge` variant; there is no separate portal selection state
-/// because a portal is a render form, not a distinct entity.
+/// Tracks what is currently selected in the document. The
+/// variants are mutually exclusive — selecting one kind clears
+/// any prior selection of the others. Portal-mode edges have two
+/// selectable forms: selecting the edge body (impossible today,
+/// since a portal-mode edge has no visible body — but structurally
+/// available via console) goes through `Edge`; selecting a single
+/// portal label (the glyph attached to one endpoint node) goes
+/// through `PortalLabel`, which carries the endpoint identity
+/// alongside the owning edge.
 #[derive(Clone, Debug)]
 pub enum SelectionState {
     None,
     Single(String),
     Multi(Vec<String>),
     Edge(EdgeRef),
+    /// One endpoint's portal label on a portal-mode edge. See
+    /// [`PortalLabelSel`] for field documentation.
+    PortalLabel(PortalLabelSel),
 }
 
 impl SelectionState {
@@ -115,6 +123,7 @@ impl SelectionState {
             SelectionState::Single(id) => id == node_id,
             SelectionState::Multi(ids) => ids.contains(&node_id.to_string()),
             SelectionState::Edge(_) => false,
+            SelectionState::PortalLabel(_) => false,
         }
     }
 
@@ -124,15 +133,81 @@ impl SelectionState {
             SelectionState::Single(id) => vec![id.as_str()],
             SelectionState::Multi(ids) => ids.iter().map(|s| s.as_str()).collect(),
             SelectionState::Edge(_) => vec![],
+            SelectionState::PortalLabel(_) => vec![],
         }
     }
 
-    /// Returns the selected edge, if any.
+    /// Returns the selected edge, if any. A `PortalLabel`
+    /// selection does **not** report through this accessor —
+    /// portal-label selection is a distinct state and whole-edge
+    /// operations (recolor the edge body, etc.) should treat it
+    /// as "nothing selected".
     pub fn selected_edge(&self) -> Option<&EdgeRef> {
         match self {
             SelectionState::Edge(e) => Some(e),
             _ => None,
         }
+    }
+
+    /// Borrow the inner `PortalLabelSel` for a `PortalLabel`
+    /// selection, or `None` for any other variant.
+    /// Complements `selected_edge` — the two are mutually
+    /// exclusive so at most one returns `Some` for any given
+    /// state.
+    pub fn selected_portal_label(&self) -> Option<&PortalLabelSel> {
+        match self {
+            SelectionState::PortalLabel(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// A cached `EdgeKey` borrow for the selected portal label,
+    /// if any, suitable for building a
+    /// [`baumhard::mindmap::scene_builder::SelectedPortalLabel`]
+    /// without allocating a fresh key per frame. `EdgeKey` and
+    /// `EdgeRef` share the same `(from, to, type)` shape — we
+    /// store the key form inside `SelectionState::PortalLabel`
+    /// specifically so this borrow path is trivial.
+    pub fn selected_portal_label_scene_ref(
+        &self,
+    ) -> Option<baumhard::mindmap::scene_builder::SelectedPortalLabel<'_>> {
+        let PortalLabelSel { edge_key, endpoint_node_id } = match self {
+            SelectionState::PortalLabel(s) => s,
+            _ => return None,
+        };
+        Some(baumhard::mindmap::scene_builder::SelectedPortalLabel {
+            edge_key,
+            endpoint_node_id: endpoint_node_id.as_str(),
+        })
+    }
+}
+
+/// Inner state for [`SelectionState::PortalLabel`]. Stored as a
+/// named struct rather than two tuple-variant fields so the
+/// `selected_portal_label_scene_ref` accessor can return a single
+/// borrow without re-parsing the selection variant.
+#[derive(Clone, Debug)]
+pub struct PortalLabelSel {
+    /// Owning edge — kept as an `EdgeKey` (not `EdgeRef`) so the
+    /// scene builder's `SelectedPortalLabel` can borrow it
+    /// directly. Callers that need the `EdgeRef` form
+    /// reconstruct it via [`PortalLabelSel::edge_ref`].
+    pub edge_key: EdgeKey,
+    /// Node id the selected marker sits against (identical to the
+    /// endpoint id produced by the portal hit test).
+    pub endpoint_node_id: String,
+}
+
+impl PortalLabelSel {
+    /// `EdgeRef` form of the owning edge. Freshly allocated each
+    /// call — the document mutation layer uses `EdgeRef` pervasively,
+    /// and one conversion per user action is negligible.
+    pub fn edge_ref(&self) -> EdgeRef {
+        EdgeRef::new(
+            self.edge_key.from_id.as_str(),
+            self.edge_key.to_id.as_str(),
+            self.edge_key.edge_type.as_str(),
+        )
     }
 }
 

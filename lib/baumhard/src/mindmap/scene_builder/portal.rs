@@ -1,76 +1,201 @@
 //! Portal marker emission. One `PortalElement` per endpoint per
-//! edge with `display_mode = "portal"` (so two markers per such edge),
-//! floated above each endpoint node's top-right corner. Edges whose
+//! edge with `display_mode = "portal"` (so two markers per such
+//! edge), attached to its owning node's border at the point that
+//! faces the opposite endpoint (the directional default, overridden
+//! by a user-dragged `PortalEndpointState.border_t`). Edges whose
 //! endpoints are missing or hidden by fold are skipped silently.
-//! Color resolves through the theme variable map.
 //!
-//! Color-preview override wins on the previewed edge so live
-//! color-picker feedback is visible on both markers; selection
-//! override is the second-priority source (cyan highlight).
+//! Color resolution cascade, per-endpoint:
+//!
+//! 1. Color-picker live preview on this edge (wins over everything
+//!    else so the wheel drag is visible).
+//! 2. Selection highlight (cyan) — applied either to both markers
+//!    when the whole edge is selected, or to just one marker when
+//!    a single portal label is selected via `selected_portal_label`.
+//! 3. `PortalEndpointState.color` — per-endpoint override set by
+//!    the wheel / paste / console when just this label is the
+//!    target.
+//! 4. `GlyphConnectionConfig.color` (edge-level override).
+//! 5. `MindEdge.color` (final fallback, always present in the
+//!    model).
+//!
+//! All five stages go through `resolve_var` so `var(--name)`
+//! references render correctly.
 
 use std::collections::HashMap;
 
-use crate::mindmap::model::{is_portal_edge, GlyphConnectionConfig, MindMap};
+use glam::Vec2;
+
+use crate::mindmap::model::{
+    is_portal_edge, portal_endpoint_state, Canvas, GlyphConnectionConfig, MindEdge, MindMap,
+    PortalEndpointState, PORTAL_GLYPH_PRESETS,
+};
+use crate::mindmap::portal_geometry::{
+    border_outward_normal, border_point_at, default_border_t,
+};
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color::resolve_var;
 
 use super::{PortalColorPreview, PortalElement};
 
-/// Default portal marker font size when no `glyph_connection` override
-/// is set. A hair larger than body text (which defaults to 12pt) so
-/// the marker reads clearly next to the node it sits above without
-/// dominating it.
-pub(crate) const DEFAULT_PORTAL_MARKER_FONT_SIZE_PT: f32 = 16.0;
+/// Default portal marker font size when no `glyph_connection`
+/// override is set. Bumped from the 12pt line-body default so the
+/// marker reads as a label (several visible pixels of glyph strokes)
+/// rather than a hairline dot.
+pub(crate) const DEFAULT_PORTAL_MARKER_FONT_SIZE_PT: f32 = 20.0;
 
-/// Resolved rendering params for one portal-mode edge's markers. The
-/// connection cascade (edge-override → canvas default → hardcoded
-/// default) gives us `glyph_connection.body` as the marker glyph, and
-/// `font` / `font_size_pt` / `color` for typography. When neither
-/// override nor canvas default sets a size, fall back to
-/// `DEFAULT_PORTAL_MARKER_FONT_SIZE_PT` rather than the line body
-/// default (12pt), since markers read better a bit larger.
-pub(crate) struct ResolvedPortalStyle {
+/// Minimum effective font size for a portal marker regardless of
+/// the resolved `glyph_connection.font_size_pt`. Used to rescue
+/// edges that were flipped from line to portal mode and inherited a
+/// tiny body font size (e.g. 8pt line text becoming an invisible
+/// 8pt marker) — the label still needs to read at a glance.
+pub(crate) const MIN_PORTAL_MARKER_FONT_SIZE_PT: f32 = 14.0;
+
+/// Padding between a portal label and the owning node's border,
+/// expressed as a fraction of the marker's font size. Tuned so the
+/// label sits just outside the border glyph without visually
+/// merging into it.
+pub(crate) const PORTAL_OUTSET_FRAC: f32 = 0.35;
+
+/// Default line-body glyph shape — a literal middle dot. When an
+/// edge is flipped to portal mode without an explicit glyph, the
+/// resolved body is this character, which renders as a hairline
+/// dot at portal scale. Detecting it lets us substitute a visible
+/// portal-marker preset glyph instead.
+const LINE_BODY_DEFAULT_GLYPH: &str = "\u{00B7}";
+
+/// Identifies the currently selected portal label, if any. Passed
+/// through the scene / tree build so the selected marker picks up
+/// the cyan highlight independently of its sibling on the same
+/// edge. Distinct from `selected_edge`: whole-edge selection
+/// highlights *both* markers, per-label selection highlights just
+/// one.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectedPortalLabel<'a> {
+    pub edge_key: &'a EdgeKey,
+    pub endpoint_node_id: &'a str,
+}
+
+/// Resolved rendering params for one portal-mode edge's marker on
+/// one endpoint. The per-endpoint `color` cascade is materialized
+/// into an absolute string here; position math happens in the
+/// caller so it can compose geometry from the owning node + partner.
+#[derive(Debug, Clone)]
+pub struct ResolvedPortalStyle {
     pub glyph: String,
     pub color: String,
     pub font: Option<String>,
     pub font_size_pt: f32,
 }
 
-pub(crate) fn resolve_portal_style(
-    edge: &crate::mindmap::model::MindEdge,
-    canvas: &crate::mindmap::model::Canvas,
+/// Resolve the per-endpoint portal marker style. Merges the color
+/// cascade (preview > whole-edge-select > per-label-select >
+/// per-endpoint override > edge-level override > edge.color) and
+/// picks a visible glyph + font size.
+///
+/// `raw_color_override` is the preview / selection hex already
+/// resolved by the caller; `None` means "no transient override".
+pub fn resolve_portal_endpoint_style(
+    edge: &MindEdge,
+    endpoint_state: Option<&PortalEndpointState>,
+    canvas: &Canvas,
     raw_color_override: Option<&str>,
 ) -> ResolvedPortalStyle {
     let cfg = GlyphConnectionConfig::resolved_for(edge, canvas);
-    // Marker font-size fallback: when an edge is flipped to portal-mode
-    // and has *no* `glyph_connection` override (so the resolved size
-    // came from the canvas default or the hardcoded 12pt line default),
-    // bump the marker to 16pt so it reads clearly next to the node.
-    // Any explicit `edge.glyph_connection.font_size_pt` — including a
-    // user-chosen 12pt — is respected as-is; the heuristic does not
-    // second-guess an explicit value.
+
+    // Font-size floor. When the resolved size is below the visual
+    // readability floor (as happens for any edge that inherited a
+    // small body font), pull it up; otherwise respect the user's
+    // explicit choice.
     let font_size_pt = if edge.glyph_connection.is_none() {
         DEFAULT_PORTAL_MARKER_FONT_SIZE_PT
     } else {
-        cfg.font_size_pt
+        cfg.font_size_pt.max(MIN_PORTAL_MARKER_FONT_SIZE_PT)
     };
+
+    // Glyph fallback. The line-body default (middle dot) renders
+    // as a hairline at any reasonable marker size, so an edge
+    // flipped to portal mode without a chosen glyph would appear
+    // invisible. Substitute the first preset so every portal label
+    // has a recognizable shape out of the box.
+    let glyph = if cfg.body == LINE_BODY_DEFAULT_GLYPH {
+        PORTAL_GLYPH_PRESETS
+            .first()
+            .copied()
+            .unwrap_or(LINE_BODY_DEFAULT_GLYPH)
+            .to_string()
+    } else {
+        cfg.body.clone()
+    };
+
+    // Color cascade. Preview and selection overrides (passed via
+    // `raw_color_override`) always win so live feedback is visible.
     let raw_color: &str = raw_color_override
+        .or_else(|| endpoint_state.and_then(|s| s.color.as_deref()))
         .or(cfg.color.as_deref())
         .unwrap_or(&edge.color);
+
     ResolvedPortalStyle {
-        glyph: cfg.body.clone(),
+        glyph,
         color: resolve_var(raw_color, &canvas.theme_variables).to_string(),
         font: cfg.font.clone(),
         font_size_pt,
     }
 }
 
-/// Emit two portal markers per visible portal-mode edge.
+/// Per-endpoint layout result: the top-left AABB corner plus its
+/// extent, derived from `border_t` (user override) or the
+/// directional default. The owning node's position + size have
+/// already been offset-adjusted by the caller.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PortalLabelLayout {
+    pub top_left: Vec2,
+    pub bounds: Vec2,
+}
+
+/// Compute the portal label position for one endpoint. `owner_pos`
+/// / `owner_size` are the owning node's canvas-space rectangle
+/// (with any in-progress drag offset already applied).
+/// `partner_center` is used to compute the directional default
+/// when `endpoint_state.border_t` is absent.
+pub(crate) fn layout_portal_label(
+    owner_pos: Vec2,
+    owner_size: Vec2,
+    partner_center: Vec2,
+    endpoint_state: Option<&PortalEndpointState>,
+    font_size_pt: f32,
+) -> PortalLabelLayout {
+    let bounds = Vec2::new(font_size_pt * 1.4, font_size_pt * 1.4);
+    let t = endpoint_state
+        .and_then(|s| s.border_t)
+        .unwrap_or_else(|| default_border_t(owner_pos, owner_size, partner_center));
+    let anchor = border_point_at(owner_pos, owner_size, t);
+    let normal = border_outward_normal(t);
+    let outset = font_size_pt * PORTAL_OUTSET_FRAC;
+    // Translate from anchor to AABB top-left: shift by half-extent
+    // toward the label origin, then outward along the normal so the
+    // label sits just outside the border.
+    let top_left = Vec2::new(
+        anchor.x - bounds.x * 0.5 + normal.x * (bounds.x * 0.5 + outset),
+        anchor.y - bounds.y * 0.5 + normal.y * (bounds.y * 0.5 + outset),
+    );
+    PortalLabelLayout { top_left, bounds }
+}
+
+/// Center of a node in canvas space, used as the partner reference
+/// for the directional-default computation.
+pub(crate) fn node_center(pos: Vec2, size: Vec2) -> Vec2 {
+    Vec2::new(pos.x + size.x * 0.5, pos.y + size.y * 0.5)
+}
+
+/// Emit one portal marker per endpoint of every visible portal-mode
+/// edge.
 pub(super) fn build_portal_elements(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
+    selected_portal_label: Option<SelectedPortalLabel<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
 ) -> Vec<PortalElement> {
     let mut portal_elements: Vec<PortalElement> = Vec::new();
@@ -94,12 +219,9 @@ pub(super) fn build_portal_elements(
             continue;
         }
         let edge_key = EdgeKey::from_edge(edge);
-        let is_selected = selected_edge.map_or(false, |(f, t, ty)| {
+        let is_edge_selected = selected_edge.map_or(false, |(f, t, ty)| {
             f == edge.from_id && t == edge.to_id && ty == edge.edge_type
         });
-        // Color-picker preview beats selection on the previewed edge
-        // so the user's live feedback is visible on both markers —
-        // the same rule as the edge body path.
         let preview_for_this_edge: Option<&str> = portal_color_preview.and_then(|p| {
             if *p.edge_key == edge_key {
                 Some(p.color)
@@ -107,35 +229,51 @@ pub(super) fn build_portal_elements(
                 None
             }
         });
-        let raw_color_override: Option<&str> = if let Some(p) = preview_for_this_edge {
-            Some(p)
-        } else if is_selected {
-            Some(SELECTION_HIGHLIGHT_HEX)
-        } else {
-            None
-        };
-        let style = resolve_portal_style(edge, &map.canvas, raw_color_override);
 
-        for endpoint in [node_a, node_b] {
-            let (ox, oy) = offsets.get(&endpoint.id).copied().unwrap_or((0.0, 0.0));
-            let node_x = endpoint.position.x as f32 + ox;
-            let node_y = endpoint.position.y as f32 + oy;
-            let node_w = endpoint.size.width as f32;
+        let endpoints = [(node_a, node_b), (node_b, node_a)];
+        for (owner, partner) in endpoints {
+            let (ox, oy) = offsets.get(&owner.id).copied().unwrap_or((0.0, 0.0));
+            let owner_pos = Vec2::new(owner.position.x as f32 + ox, owner.position.y as f32 + oy);
+            let owner_size = Vec2::new(owner.size.width as f32, owner.size.height as f32);
+            let (px, py) = offsets.get(&partner.id).copied().unwrap_or((0.0, 0.0));
+            let partner_pos = Vec2::new(
+                partner.position.x as f32 + px,
+                partner.position.y as f32 + py,
+            );
+            let partner_size = Vec2::new(partner.size.width as f32, partner.size.height as f32);
 
-            // Loose square AABB sized from the glyph font; matches the
-            // connection-label sizing heuristic (≈0.6 × font_size per
-            // char, one char wide for the single marker glyph).
-            let bounds_w = style.font_size_pt * 1.4;
-            let bounds_h = style.font_size_pt * 1.4;
-            // Float the marker just above the node's top-right corner.
-            let top_left = (node_x + node_w - bounds_w * 0.9, node_y - bounds_h - 8.0);
+            let endpoint_state = portal_endpoint_state(edge, &owner.id);
+            let is_this_label_selected = selected_portal_label.map_or(false, |s| {
+                *s.edge_key == edge_key && s.endpoint_node_id == owner.id
+            });
+            let raw_color_override: Option<&str> = if let Some(p) = preview_for_this_edge {
+                Some(p)
+            } else if is_edge_selected || is_this_label_selected {
+                Some(SELECTION_HIGHLIGHT_HEX)
+            } else {
+                None
+            };
+
+            let style = resolve_portal_endpoint_style(
+                edge,
+                endpoint_state,
+                &map.canvas,
+                raw_color_override,
+            );
+            let layout = layout_portal_label(
+                owner_pos,
+                owner_size,
+                node_center(partner_pos, partner_size),
+                endpoint_state,
+                style.font_size_pt,
+            );
 
             portal_elements.push(PortalElement {
                 edge_key: edge_key.clone(),
-                endpoint_node_id: endpoint.id.clone(),
+                endpoint_node_id: owner.id.clone(),
                 glyph: style.glyph.clone(),
-                position: top_left,
-                bounds: (bounds_w, bounds_h),
+                position: (layout.top_left.x, layout.top_left.y),
+                bounds: (layout.bounds.x, layout.bounds.y),
                 color: style.color.clone(),
                 font: style.font.clone(),
                 font_size_pt: style.font_size_pt,

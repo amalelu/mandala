@@ -22,6 +22,7 @@ use super::connection::build_connection_elements;
 use super::label::build_label_elements;
 use super::node_pass::build_node_elements;
 use super::portal::build_portal_elements;
+use super::portal::SelectedPortalLabel;
 use super::{EdgeColorPreview, PortalColorPreview, RenderScene};
 
 /// Builds a RenderScene from a MindMap, determining which nodes and borders
@@ -36,6 +37,7 @@ pub fn build_scene(map: &MindMap, camera_zoom: f32) -> RenderScene {
     build_scene_with_cache(
         map,
         &HashMap::new(),
+        None,
         None,
         None,
         None,
@@ -56,7 +58,7 @@ pub fn build_scene_with_offsets(
 ) -> RenderScene {
     let mut scratch = SceneConnectionCache::new();
     build_scene_with_cache(
-        map, offsets, None, None, None, None, &mut scratch, camera_zoom,
+        map, offsets, None, None, None, None, None, &mut scratch, camera_zoom,
     )
 }
 
@@ -75,6 +77,7 @@ pub fn build_scene_with_offsets_selection_and_overrides(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
+    selected_portal_label: Option<SelectedPortalLabel<'_>>,
     label_edit_override: Option<(&EdgeKey, &str)>,
     edge_color_preview: Option<EdgeColorPreview<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
@@ -85,6 +88,7 @@ pub fn build_scene_with_offsets_selection_and_overrides(
         map,
         offsets,
         selected_edge,
+        selected_portal_label,
         label_edit_override,
         edge_color_preview,
         portal_color_preview,
@@ -110,6 +114,7 @@ pub fn build_scene_with_cache(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
+    selected_portal_label: Option<SelectedPortalLabel<'_>>,
     label_edit_override: Option<(&EdgeKey, &str)>,
     edge_color_preview: Option<EdgeColorPreview<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
@@ -157,6 +162,7 @@ pub fn build_scene_with_cache(
         map,
         offsets,
         selected_edge,
+        selected_portal_label,
         portal_color_preview,
     );
 

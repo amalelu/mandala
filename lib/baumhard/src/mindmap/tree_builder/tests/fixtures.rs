@@ -131,6 +131,8 @@ pub(super) fn synthetic_portal_edge(a: &str, b: &str, color: &str) -> MindEdge {
             ..GlyphConnectionConfig::default()
         }),
         display_mode: Some(DISPLAY_MODE_PORTAL.into()),
+        portal_from: None,
+        portal_to: None,
     }
 }
 

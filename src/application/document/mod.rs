@@ -49,7 +49,7 @@ pub use hit_test::{
     point_in_node_aabb, rect_select,
 };
 pub use types::{
-    AnimationInstance, EdgeRef, SelectionState, HIGHLIGHT_COLOR,
+    AnimationInstance, EdgeRef, PortalLabelSel, SelectionState, HIGHLIGHT_COLOR,
     REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 pub use undo_action::UndoAction;
@@ -281,6 +281,7 @@ impl MindMapDocument {
         &self,
     ) -> (
         Option<(&str, &str, &str)>,
+        Option<scene_builder::SelectedPortalLabel<'_>>,
         Option<(&baumhard::mindmap::scene_cache::EdgeKey, &str)>,
         Option<scene_builder::EdgeColorPreview<'_>>,
         Option<scene_builder::PortalColorPreview<'_>>,
@@ -289,6 +290,7 @@ impl MindMapDocument {
             .selection
             .selected_edge()
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
+        let selected_portal_label = self.selection.selected_portal_label_scene_ref();
         let label_edit = self
             .label_edit_preview
             .as_ref()
@@ -306,7 +308,7 @@ impl MindMapDocument {
             ),
             None => (None, None),
         };
-        (sel, label_edit, edge_preview, portal_preview)
+        (sel, selected_portal_label, label_edit, edge_preview, portal_preview)
     }
 
     /// Cache-aware scene build. The drag drain in `app.rs` calls this
@@ -325,12 +327,13 @@ impl MindMapDocument {
         cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
         camera_zoom: f32,
     ) -> RenderScene {
-        let (sel, label_edit, edge_preview, portal_preview) =
+        let (sel, selected_portal_label, label_edit, edge_preview, portal_preview) =
             self.assemble_scene_overrides();
         scene_builder::build_scene_with_cache(
             &self.mindmap,
             offsets,
             sel,
+            selected_portal_label,
             label_edit,
             edge_preview,
             portal_preview,
@@ -348,12 +351,13 @@ impl MindMapDocument {
     /// build so live interaction previews are visible on any scene
     /// that flows through this entry point.
     pub fn build_scene_with_selection(&self, camera_zoom: f32) -> RenderScene {
-        let (sel, label_edit, edge_preview, portal_preview) =
+        let (sel, selected_portal_label, label_edit, edge_preview, portal_preview) =
             self.assemble_scene_overrides();
         scene_builder::build_scene_with_offsets_selection_and_overrides(
             &self.mindmap,
             &HashMap::new(),
             sel,
+            selected_portal_label,
             label_edit,
             edge_preview,
             portal_preview,

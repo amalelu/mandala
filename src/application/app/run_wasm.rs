@@ -105,6 +105,14 @@ enum PendingClick {
     None,
     Empty,
     Node(String),
+    /// Cursor landed on a portal marker at mouse-down. Committed
+    /// at mouse-up into a `SelectionState::PortalLabel`. Carries
+    /// both the owning-edge key and the endpoint id the marker
+    /// belongs to, matching the native click dispatch surface.
+    PortalMarker {
+        edge_key: baumhard::mindmap::scene_cache::EdgeKey,
+        endpoint_node_id: String,
+    },
 }
 struct WasmInputState {
     document: MindMapDocument,
@@ -502,9 +510,18 @@ app.event_loop.run(move |event, _window_target| {
                     return;
                 }
 
-                input.pending_click = match hit_node.clone() {
-                    Some(id) => PendingClick::Node(id),
-                    None => PendingClick::Empty,
+                input.pending_click = match (hit_node.clone(), portal_hit.clone()) {
+                    (Some(id), _) => PendingClick::Node(id),
+                    // Portal-marker click — committed to
+                    // `SelectionState::PortalLabel` on mouse-up.
+                    // Double-click already fired above so a
+                    // pending marker click can only mean "select
+                    // this label".
+                    (None, Some((key, endpoint))) => PendingClick::PortalMarker {
+                        edge_key: key,
+                        endpoint_node_id: endpoint,
+                    },
+                    (None, None) => PendingClick::Empty,
                 };
                 input.last_click = Some(LastClick {
                     time: now,
@@ -556,6 +573,15 @@ app.event_loop.run(move |event, _window_target| {
                 // Plain selection click
                 input.document.selection = match pending {
                     PendingClick::Node(node_id) => SelectionState::Single(node_id),
+                    PendingClick::PortalMarker {
+                        edge_key,
+                        endpoint_node_id,
+                    } => SelectionState::PortalLabel(
+                        crate::application::document::PortalLabelSel {
+                            edge_key,
+                            endpoint_node_id,
+                        },
+                    ),
                     _ => SelectionState::None,
                 };
                 let mut renderer_borrow = renderer_for_events.borrow_mut();

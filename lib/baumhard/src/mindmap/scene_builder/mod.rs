@@ -237,7 +237,7 @@ mod connection;
 mod edge_handle;
 mod label;
 mod node_pass;
-pub(crate) mod portal;
+pub mod portal;
 
 #[cfg(test)]
 mod tests;
@@ -247,3 +247,4 @@ pub use builder::{
     build_scene_with_offsets_selection_and_overrides,
 };
 pub use edge_handle::build_edge_handles;
+pub use portal::SelectedPortalLabel;

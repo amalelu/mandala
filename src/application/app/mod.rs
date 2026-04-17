@@ -25,6 +25,8 @@ mod edge_drag;
 #[cfg(not(target_arch = "wasm32"))]
 mod event_mouse_click;
 #[cfg(not(target_arch = "wasm32"))]
+mod portal_label_drag;
+#[cfg(not(target_arch = "wasm32"))]
 mod label_edit;
 #[cfg(not(target_arch = "wasm32"))]
 mod run_native;
@@ -65,6 +67,8 @@ use console_input::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use edge_drag::apply_edge_handle_drag;
+#[cfg(not(target_arch = "wasm32"))]
+use portal_label_drag::apply_portal_label_drag;
 #[cfg(not(target_arch = "wasm32"))]
 use label_edit::{handle_label_edit_key, open_label_edit, LabelEditState};
 
@@ -308,6 +312,18 @@ enum DragState {
         /// `hit_node` — clicking a handle always wins over clicking
         /// the node behind it.
         hit_edge_handle: Option<(EdgeRef, baumhard::mindmap::scene_builder::EdgeHandleKind)>,
+        /// If the cursor landed on a portal marker at mouse-down,
+        /// this records `(edge_key, endpoint_node_id)` so a drag
+        /// past threshold transitions to `DraggingPortalLabel`.
+        /// Takes precedence over `hit_node` — the marker sits
+        /// above a node, but clicking the marker is "grab this
+        /// label," not "move this node." Independent of
+        /// `hit_edge_handle` because portal-mode edges don't
+        /// expose edge-handles in the first place.
+        hit_portal_label: Option<(
+            baumhard::mindmap::scene_cache::EdgeKey,
+            String,
+        )>,
     },
     /// Dragging to pan the camera (started on empty space).
     Panning,
@@ -355,6 +371,21 @@ enum DragState {
         start_canvas: Vec2,
         /// Canvas-space corner at current cursor position.
         current_canvas: Vec2,
+    },
+    /// Dragging a portal label along its owning node's border.
+    /// The cursor drags in free canvas space and each drain frame
+    /// snaps that position to the nearest border point, mutating
+    /// the edge's `portal_from` / `portal_to.border_t` in place.
+    /// On release a single `UndoAction::EditEdge` is pushed
+    /// carrying the pre-drag edge snapshot, mirroring the
+    /// `DraggingEdgeHandle` commit path.
+    DraggingPortalLabel {
+        edge_ref: EdgeRef,
+        endpoint_node_id: String,
+        /// Full pre-drag `MindEdge` snapshot, used both for
+        /// `UndoAction::EditEdge` at release and to skip undo
+        /// entries when the drag didn't actually move `border_t`.
+        original: baumhard::mindmap::model::MindEdge,
     },
 }
 

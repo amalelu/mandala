@@ -363,15 +363,92 @@ app.event_loop.run(move |event, _window_target| {
                     *total_delta += delta;
                     *pending_delta += delta;
                 }
-                DragState::Pending { start_pos, hit_node, hit_edge_handle } => {
+                DragState::DraggingPortalLabel { edge_ref, endpoint_node_id, .. } => {
+                    // Portal label drag writes `border_t` per
+                    // mouse-move event directly — the state is
+                    // a single `f32` on the edge, and the only
+                    // visual consumer is the portal tree, which
+                    // rebuilds cheaply (O(portal-mode edges)).
+                    // No throttle / drain needed: this path is
+                    // strictly cheaper than the DraggingEdgeHandle
+                    // equivalent (which samples a Bezier).
+                    let cursor_canvas = renderer.screen_to_canvas(
+                        cursor_pos.0 as f32, cursor_pos.1 as f32,
+                    );
+                    let edge_ref = edge_ref.clone();
+                    let endpoint_node_id = endpoint_node_id.clone();
+                    if let Some(doc) = document.as_mut() {
+                        let changed = apply_portal_label_drag(
+                            doc,
+                            &edge_ref,
+                            &endpoint_node_id,
+                            cursor_canvas,
+                        );
+                        if changed {
+                            update_portal_tree(
+                                doc,
+                                &std::collections::HashMap::new(),
+                                &mut app_scene,
+                                &mut renderer,
+                            );
+                            flush_canvas_scene_buffers(&mut app_scene, &mut renderer);
+                        }
+                    }
+                }
+                DragState::Pending { start_pos, hit_node, hit_edge_handle, hit_portal_label } => {
                     let dist_x = cursor_pos.0 - start_pos.0;
                     let dist_y = cursor_pos.1 - start_pos.1;
                     if dist_x * dist_x + dist_y * dist_y > 25.0 {
                         // Past threshold — decide what kind of drag
-                        // this is. Handle grabs take precedence over
-                        // node hits so that clicking a control-point
-                        // handle that happens to overlap a node
-                        // still enters the reshape flow.
+                        // this is. Portal-label drags take highest
+                        // precedence (the user pressed directly on a
+                        // label glyph); then edge-handle grabs;
+                        // then node drags; then shift rect-select;
+                        // then pan. The order mirrors click
+                        // ambiguity — clicking a label always wins
+                        // over clicking the node it sits on.
+                        if let Some((edge_key, endpoint)) = hit_portal_label.take() {
+                            if let Some(doc) = document.as_mut() {
+                                // Promote selection to the label
+                                // being dragged (so the edge stays
+                                // highlighted through the drag
+                                // and so the release-path undo /
+                                // color-wheel dispatch see the
+                                // correct target).
+                                let edge_ref = crate::application::document::EdgeRef::new(
+                                    &edge_key.from_id,
+                                    &edge_key.to_id,
+                                    &edge_key.edge_type,
+                                );
+                                let original = doc
+                                    .mindmap
+                                    .edges
+                                    .iter()
+                                    .find(|e| edge_ref.matches(e))
+                                    .cloned();
+                                if let Some(original) = original {
+                                    doc.selection = SelectionState::PortalLabel(
+                                        crate::application::document::PortalLabelSel {
+                                            edge_key,
+                                            endpoint_node_id: endpoint.clone(),
+                                        },
+                                    );
+                                    scene_cache.clear();
+                                    drag_state = DragState::DraggingPortalLabel {
+                                        edge_ref,
+                                        endpoint_node_id: endpoint,
+                                        original,
+                                    };
+                                    rebuild_all(
+                                        doc,
+                                        &mut mindmap_tree,
+                                        &mut app_scene,
+                                        &mut renderer,
+                                    );
+                                    return;
+                                }
+                            }
+                        }
                         if let Some((edge_ref, handle_kind)) = hit_edge_handle.take() {
                             // Grab the pre-edit snapshot + start
                             // position so the drain loop can do

@@ -4,6 +4,7 @@ pub mod loader;
 pub mod border;
 pub mod connection;
 pub mod custom_mutation;
+pub mod portal_geometry;
 pub mod scene_builder;
 pub mod scene_cache;
 pub mod tree_builder;

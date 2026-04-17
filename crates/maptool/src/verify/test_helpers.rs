@@ -57,5 +57,7 @@ pub fn edge(from: &str, to: &str) -> MindEdge {
         control_points: vec![],
         glyph_connection: None,
         display_mode: None,
+        portal_from: None,
+        portal_to: None,
     }
 }

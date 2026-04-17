@@ -56,6 +56,8 @@ use super::defaults::default_cross_link_edge;
             control_points: vec![],
             glyph_connection: None,
             display_mode: None,
+            portal_from: None,
+            portal_to: None,
         };
         assert!(edge_ref.matches(&edge));
 
@@ -301,6 +303,8 @@ use super::defaults::default_cross_link_edge;
             control_points: Vec::new(),
             glyph_connection: None,
             display_mode: None,
+            portal_from: None,
+            portal_to: None,
         };
 
         // Edge layout: [a→b, a→target, c→d, target→d, b→c]

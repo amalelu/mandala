@@ -42,6 +42,85 @@ pub struct MindEdge {
     /// in serialized JSON when the default holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_mode: Option<String>,
+    /// Per-endpoint state for the `from_id` portal label. Only
+    /// meaningful when `display_mode = "portal"`. `None` means "no
+    /// overrides" — the marker inherits edge color and its default
+    /// directional position. See [`PortalEndpointState`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal_from: Option<PortalEndpointState>,
+    /// Per-endpoint state for the `to_id` portal label. Same shape
+    /// and inheritance rules as [`MindEdge::portal_from`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal_to: Option<PortalEndpointState>,
+}
+
+/// Per-endpoint overrides for a portal-mode edge's marker (the
+/// "portal label" attached to one of the two endpoint nodes). All
+/// fields are optional and absent by default — an edge freshly
+/// flipped to portal mode has `portal_from = portal_to = None` and
+/// both markers inherit from the edge's base color + a directional
+/// default position pointing at the opposite endpoint.
+///
+/// Color cascade (highest-priority first): `PortalEndpointState.color`
+/// → `MindEdge.glyph_connection.color` → `MindEdge.color` → theme
+/// variable resolution. Mirrors the edge-body color cascade so the
+/// two markers and the (absent) line stay visually consistent when
+/// the user recolors the whole edge.
+///
+/// Position: `border_t` parameterizes a point on the owning node's
+/// border perimeter, clockwise from top-left, in `[0.0, 4.0)` where
+/// each unit covers one side (0–1 top, 1–2 right, 2–3 bottom, 3–4
+/// left). `None` means "auto" — recompute each frame from the
+/// direction of the partner endpoint, so the label always faces
+/// its counterpart until the user drags it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PortalEndpointState {
+    /// Color override as `#RRGGBB` or `var(--name)`. `None` = inherit
+    /// from the edge color cascade. Cleared by "cut" on the portal
+    /// label, set by wheel / paste / console commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Position along the owning node's border perimeter,
+    /// parameterized in `[0.0, 4.0)` clockwise from top-left. `None`
+    /// = auto-orient toward the partner endpoint. Set by drag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_t: Option<f32>,
+}
+
+/// Return the endpoint state for the `endpoint_node_id` side of
+/// `edge`. `endpoint_node_id` must equal either `edge.from_id`
+/// (returns `portal_from`) or `edge.to_id` (returns `portal_to`);
+/// any other value returns `None` — callers pass the id from a
+/// click-hit that already knows which side it's on.
+pub fn portal_endpoint_state<'a>(
+    edge: &'a MindEdge,
+    endpoint_node_id: &str,
+) -> Option<&'a PortalEndpointState> {
+    if endpoint_node_id == edge.from_id {
+        edge.portal_from.as_ref()
+    } else if endpoint_node_id == edge.to_id {
+        edge.portal_to.as_ref()
+    } else {
+        None
+    }
+}
+
+/// Mutable counterpart to [`portal_endpoint_state`]. Returns a
+/// mutable reference to the `Option` so the caller can either set
+/// fields on an existing state, install a new one via
+/// `Option::get_or_insert_with(Default::default)`, or clear the
+/// override with `Option::take()` — all three forms stay ergonomic.
+pub fn portal_endpoint_state_mut<'a>(
+    edge: &'a mut MindEdge,
+    endpoint_node_id: &str,
+) -> Option<&'a mut Option<PortalEndpointState>> {
+    if endpoint_node_id == edge.from_id {
+        Some(&mut edge.portal_from)
+    } else if endpoint_node_id == edge.to_id {
+        Some(&mut edge.portal_to)
+    } else {
+        None
+    }
 }
 
 /// Sentinel `display_mode` value for portal-mode rendering. Stored

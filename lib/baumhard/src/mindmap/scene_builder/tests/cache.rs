@@ -10,7 +10,7 @@ use glam::Vec2;
 fn test_cache_populated_on_first_build() {
     let map = two_node_edge_map();
     let mut cache = SceneConnectionCache::new();
-    let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
     assert_eq!(scene.connection_elements.len(), 1);
     assert_eq!(cache.len(), 1);
@@ -29,7 +29,7 @@ fn test_cache_hit_preserves_sample_identity() {
     // it would have overwritten our mutation with fresh geometry.
     let map = two_node_edge_map();
     let mut cache = SceneConnectionCache::new();
-    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
     // Mutate the cached entry so we can see whether build #2 read it.
     let key = EdgeKey::new("a", "b", "cross_link");
@@ -49,7 +49,7 @@ fn test_cache_hit_preserves_sample_identity() {
         },
     );
 
-    let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
     assert_eq!(second.connection_elements.len(), 1);
     let conn = &second.connection_elements[0];
     assert_eq!(conn.body_glyph, "SENTINEL",
@@ -67,7 +67,7 @@ fn test_cache_invalidated_on_endpoint_offset() {
     // sentinel we stashed in the cache.
     let map = two_node_edge_map();
     let mut cache = SceneConnectionCache::new();
-    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
     let key = EdgeKey::new("a", "b", "cross_link");
     cache.insert(
@@ -85,7 +85,7 @@ fn test_cache_invalidated_on_endpoint_offset() {
 
     let mut offsets = HashMap::new();
     offsets.insert("a".to_string(), (10.0, 0.0));
-    let second = build_scene_with_cache(&map, &offsets, None, None, None, None, &mut cache, 1.0);
+    let second = build_scene_with_cache(&map, &offsets, None, None, None, None, None, &mut cache, 1.0);
     let conn = &second.connection_elements[0];
     assert_ne!(conn.body_glyph, "SENTINEL",
         "endpoint-moved edge should have been re-sampled");
@@ -113,7 +113,7 @@ fn test_cache_preserves_unrelated_edge_under_drag() {
         ],
     );
     let mut cache = SceneConnectionCache::new();
-    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
     let cd_key = EdgeKey::new("c", "d", "cross_link");
     cache.insert(
@@ -131,7 +131,7 @@ fn test_cache_preserves_unrelated_edge_under_drag() {
 
     let mut offsets = HashMap::new();
     offsets.insert("a".to_string(), (5.0, 0.0));
-    let second = build_scene_with_cache(&map, &offsets, None, None, None, None, &mut cache, 1.0);
+    let second = build_scene_with_cache(&map, &offsets, None, None, None, None, None, &mut cache, 1.0);
 
     // Find the c↔d connection element and verify it came from the
     // cache unchanged.
@@ -172,7 +172,7 @@ fn test_cache_clip_reruns_against_fresh_aabbs() {
     );
 
     let mut cache = SceneConnectionCache::new();
-    let first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
     let first_count = first.connection_elements[0].glyph_positions.len();
 
     // Now move `c` into the middle of the connection — use a drag
@@ -181,7 +181,7 @@ fn test_cache_clip_reruns_against_fresh_aabbs() {
     // notice `c`'s new position.
     let mut offsets = HashMap::new();
     offsets.insert("c".to_string(), (0.0, 500.0));
-    let second = build_scene_with_cache(&map, &offsets, None, None, None, None, &mut cache, 1.0);
+    let second = build_scene_with_cache(&map, &offsets, None, None, None, None, None, &mut cache, 1.0);
     let second_count = second.connection_elements[0].glyph_positions.len();
     assert!(second_count < first_count,
         "moving c through the edge should reduce post-clip glyph count: {} → {}",
@@ -189,7 +189,7 @@ fn test_cache_clip_reruns_against_fresh_aabbs() {
 
     // Now move `c` back out of the way via a model edit + full rebuild.
     map.nodes.get_mut("c").unwrap().position.y = -500.0;
-    let third = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let third = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
     assert_eq!(third.connection_elements[0].glyph_positions.len(), first_count);
 }
 
@@ -197,13 +197,13 @@ fn test_cache_clip_reruns_against_fresh_aabbs() {
 fn test_cache_evicts_deleted_edges() {
     let mut map = two_node_edge_map();
     let mut cache = SceneConnectionCache::new();
-    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
     let key = EdgeKey::new("a", "b", "cross_link");
     assert!(cache.get(&key).is_some());
 
     // Remove the edge from the model and rebuild.
     map.edges.clear();
-    let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
     assert!(second.connection_elements.is_empty());
     assert!(cache.get(&key).is_none(),
         "deleted edge should be evicted from cache");
@@ -227,7 +227,7 @@ fn test_connection_element_edge_key_always_populated() {
         ],
     );
     let mut cache = SceneConnectionCache::new();
-    let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
     assert_eq!(scene.connection_elements.len(), 2);
     let ab = EdgeKey::new("a", "b", "cross_link");
     let bc = EdgeKey::new("b", "c", "cross_link");
@@ -246,8 +246,8 @@ fn test_second_cache_hit_produces_identical_output() {
     // a fresh build would.
     let map = two_node_edge_map();
     let mut cache = SceneConnectionCache::new();
-    let first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
-    let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
+    let second = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
 
     assert_eq!(
         first.connection_elements.len(),
@@ -281,7 +281,7 @@ fn test_fold_hidden_edge_does_not_populate_cache() {
     let map = synthetic_map(vec![a, b_child], vec![edge]);
 
     let mut cache = SceneConnectionCache::new();
-    let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let scene = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
     assert!(scene.connection_elements.is_empty(),
         "folded edge should be skipped");
     assert!(cache.is_empty(),
@@ -296,7 +296,7 @@ fn test_cache_selection_change_does_not_invalidate() {
     // selection override.
     let map = two_node_edge_map();
     let mut cache = SceneConnectionCache::new();
-    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, &mut cache, 1.0);
+    let _first = build_scene_with_cache(&map, &HashMap::new(), None, None, None, None, None, &mut cache, 1.0);
     let key = EdgeKey::new("a", "b", "cross_link");
     let stored_color = cache.get(&key).unwrap().color.clone();
 
@@ -319,6 +319,7 @@ fn test_cache_selection_change_does_not_invalidate() {
         &map,
         &HashMap::new(),
         Some(("a", "b", "cross_link")),
+        None,
         None,
         None,
         None,
