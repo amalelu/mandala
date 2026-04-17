@@ -48,10 +48,9 @@ pub(in crate::application::app) fn close_color_picker_standalone(
 }
 
 /// Commit the picker's currently-previewed HSV value via the regular
-/// `set_edge_color` / `set_portal_color` / `set_node_*_color` path —
-/// a single undo entry is pushed and `ensure_glyph_connection` runs
-/// its fork-on-first-edit only at this moment (never during hover).
-/// Close the modal.
+/// `set_edge_color` / `set_node_*_color` path — a single undo entry
+/// is pushed and `ensure_glyph_connection` runs its fork-on-first-edit
+/// only at this moment (never during hover). Close the modal.
 ///
 /// The picker only commits concrete HSV hex values now that the
 /// theme-variable chip row has been retired; theme-variable editing

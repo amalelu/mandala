@@ -81,19 +81,19 @@ pub enum PickerGesture {
 /// Modal state for the glyph-wheel color picker.
 ///
 /// The previous revision of this struct also stored a
-/// `snapshot: UndoAction` so a pre-picker clone of the edited
-/// edge/portal could be restored on cancel. That snapshot is no
-/// longer needed: preview is now a purely visual substitution via
+/// `snapshot: UndoAction` so a pre-picker clone of the edited edge
+/// could be restored on cancel. That snapshot is no longer needed:
+/// preview is now a purely visual substitution via
 /// `MindMapDocument::color_picker_preview`, so cancel just clears
-/// the preview and commit calls `set_edge_color` /
-/// `set_portal_color` once on the final HSV — the committed model
-/// is untouched during hover and the fork-on-first-edit semantics
-/// of `ensure_glyph_connection` only fire on commit.
+/// the preview and commit calls `set_edge_color` once on the final
+/// HSV — the committed model is untouched during hover and the
+/// fork-on-first-edit semantics of `ensure_glyph_connection` only
+/// fire on commit.
 ///
 /// Hot path design: the target handle (when present) is captured at
 /// open time inside [`PickerMode::Contextual`] so the hover handler
 /// can push `(target_index, hex)` into the document preview without
-/// re-resolving any `EdgeRef` / `PortalRef`.
+/// re-resolving any `EdgeRef`.
 #[derive(Debug, Clone)]
 pub enum ColorPickerState {
     Closed,

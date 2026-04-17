@@ -87,13 +87,14 @@ pub struct MindMapDocument {
     /// scene-level substitution.
     pub label_edit_preview: Option<(baumhard::mindmap::scene_cache::EdgeKey, String)>,
     /// Transient color-picker hover preview. When `Some(...)`, the
-    /// scene builder substitutes the preview color for the edge or
-    /// portal under the wheel — overriding both the resolved
-    /// `config.color` and any selection highlight on the previewed
-    /// element so the user sees the live HSV value on the element
-    /// being edited. Commit (`set_edge_color` / `set_portal_color`)
-    /// and cancel both clear the preview; neither the committed
-    /// model nor the undo stack is touched during hover.
+    /// scene builder substitutes the preview color for the edge
+    /// under the wheel — overriding both the resolved `config.color`
+    /// and any selection highlight on the previewed edge so the user
+    /// sees the live HSV value on the element being edited. Fans out
+    /// to the portal pass automatically for edges with
+    /// `display_mode = "portal"`. Commit (`set_edge_color`) and
+    /// cancel both clear the preview; neither the committed model
+    /// nor the undo stack is touched during hover.
     pub color_picker_preview: Option<ColorPickerPreview>,
 }
 

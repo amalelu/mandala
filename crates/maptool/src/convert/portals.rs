@@ -23,8 +23,10 @@ use std::path::Path;
 
 /// Read `input_path`, convert any `portals[]` entries into
 /// portal-mode edges appended to `edges[]`, and write the result to
-/// `output_path`. In-place migrations (input == output) are fine —
-/// the read completes before the write begins.
+/// `output_path`. In-place migrations (input == output) are fine:
+/// the read completes before the write begins, and the write uses
+/// a temp-file + rename so a kill mid-write leaves the original
+/// intact rather than truncated.
 pub fn convert_portals(input_path: &Path, output_path: &Path) -> Result<(), String> {
     let content = std::fs::read_to_string(input_path)
         .map_err(|e| format!("failed to read {}: {e}", input_path.display()))?;
@@ -42,8 +44,7 @@ pub fn convert_portals(input_path: &Path, output_path: &Path) -> Result<(), Stri
             // No portals field, or an unexpected shape: pass through.
             let json = serde_json::to_string_pretty(&root)
                 .map_err(|e| format!("failed to serialize: {e}"))?;
-            std::fs::write(output_path, &json)
-                .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
+            write_atomic(output_path, &json)?;
             return Ok(());
         }
     };
@@ -72,9 +73,15 @@ pub fn convert_portals(input_path: &Path, output_path: &Path) -> Result<(), Stri
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // An empty `glyph` string would render as a zero-width marker
+        // that's impossible to click. Treat `""` the same as missing
+        // and fall back to the default marker glyph — a legacy file
+        // carrying an empty glyph is almost certainly a bug in
+        // whatever tool wrote it.
         let glyph = obj
             .get("glyph")
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .unwrap_or("\u{25C8}") // ◈ default
             .to_string();
         let color = obj
@@ -121,11 +128,40 @@ pub fn convert_portals(input_path: &Path, output_path: &Path) -> Result<(), Stri
 
     let json = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("failed to serialize: {e}"))?;
-    std::fs::write(output_path, &json)
-        .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
+    write_atomic(output_path, &json)?;
 
     eprintln!("converted {} portal(s) to portal-mode edges", converted);
     Ok(())
+}
+
+/// Write `contents` to `path` atomically via a sibling temp file +
+/// rename. Mirrors the helper in `main.rs` but returns `String`
+/// errors to match this module's `Result<(), String>` API. Rename is
+/// atomic on POSIX within the same filesystem, so a kill mid-write
+/// leaves the original file intact instead of truncated — the
+/// property `convert --portals` needs to support safe in-place
+/// migration (input == output).
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("invalid path: {}", path.display()))?
+        .to_string_lossy();
+    let tmp_path = dir.join(format!(
+        ".{}.maptool.{}.tmp",
+        file_name,
+        std::process::id()
+    ));
+    std::fs::write(&tmp_path, contents)
+        .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!(
+            "failed to rename {} -> {}: {e}",
+            tmp_path.display(),
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -145,6 +181,54 @@ mod tests {
         convert_portals(src.path(), dst.path()).unwrap();
         let out: Value = serde_json::from_str(&std::fs::read_to_string(dst.path()).unwrap()).unwrap();
         assert!(out.get("portals").is_none());
+    }
+
+    #[test]
+    fn empty_glyph_falls_back_to_default_marker() {
+        // A legacy portal with `glyph: ""` would migrate to an edge
+        // with an empty `glyph_connection.body`, rendering as a
+        // zero-width marker that's impossible to interact with.
+        // The converter substitutes the default marker instead.
+        let mut src = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            src,
+            r##"{{"version":"1.0","name":"t",
+              "canvas":{{"background_color":"#000","default_border":null,"default_connection":null,"theme_variables":{{}},"theme_variants":{{}}}},
+              "nodes":{{}},"edges":[],
+              "portals":[{{"endpoint_a":"0","endpoint_b":"1","label":"A","glyph":"","color":"#ff0","font_size_pt":16.0}}]
+            }}"##
+        )
+        .unwrap();
+        let dst = tempfile::NamedTempFile::new().unwrap();
+        convert_portals(src.path(), dst.path()).unwrap();
+        let out: Value =
+            serde_json::from_str(&std::fs::read_to_string(dst.path()).unwrap()).unwrap();
+        let body = &out.get("edges").unwrap().as_array().unwrap()[0]["glyph_connection"]["body"];
+        assert_eq!(body.as_str().unwrap(), "\u{25C8}");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_tmp_file_on_success() {
+        // The atomic writer stages a `.<name>.maptool.<pid>.tmp`
+        // file and renames it; after success the dir should only
+        // contain the final output.
+        let mut src = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            src,
+            r##"{{"version":"1.0","name":"t","canvas":{{"background_color":"#000","default_border":null,"default_connection":null,"theme_variables":{{}},"theme_variants":{{}}}},"nodes":{{}},"edges":[]}}"##
+        )
+        .unwrap();
+        let dst = tempfile::NamedTempFile::new().unwrap();
+        convert_portals(src.path(), dst.path()).unwrap();
+        let dir = dst.path().parent().unwrap();
+        let file_name = dst.path().file_name().unwrap().to_string_lossy().to_string();
+        let pid = std::process::id();
+        let leftover = dir.join(format!(".{file_name}.maptool.{pid}.tmp"));
+        assert!(
+            !leftover.exists(),
+            "atomic writer left a temp file behind: {}",
+            leftover.display()
+        );
     }
 
     #[test]

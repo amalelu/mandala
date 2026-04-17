@@ -43,16 +43,14 @@ pub(crate) fn resolve_portal_style(
     raw_color_override: Option<&str>,
 ) -> ResolvedPortalStyle {
     let cfg = GlyphConnectionConfig::resolved_for(edge, canvas);
-    // If the config's font_size_pt is still the hardcoded line default,
-    // bump it to the portal default so markers aren't hard to read.
-    // Users who set an explicit size on an edge keep that value.
-    let default_line_size = GlyphConnectionConfig::default().font_size_pt;
-    let font_size_pt = if (cfg.font_size_pt - default_line_size).abs() < f32::EPSILON
-        && edge
-            .glyph_connection
-            .as_ref()
-            .map_or(true, |c| (c.font_size_pt - default_line_size).abs() < f32::EPSILON)
-    {
+    // Marker font-size fallback: when an edge is flipped to portal-mode
+    // and has *no* `glyph_connection` override (so the resolved size
+    // came from the canvas default or the hardcoded 12pt line default),
+    // bump the marker to 16pt so it reads clearly next to the node.
+    // Any explicit `edge.glyph_connection.font_size_pt` — including a
+    // user-chosen 12pt — is respected as-is; the heuristic does not
+    // second-guess an explicit value.
+    let font_size_pt = if edge.glyph_connection.is_none() {
         DEFAULT_PORTAL_MARKER_FONT_SIZE_PT
     } else {
         cfg.font_size_pt

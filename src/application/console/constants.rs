@@ -11,17 +11,11 @@
 // ---------------------------------------------------------------
 //
 // Resolved at scene-build time by `baumhard::util::color::resolve_var`.
-// Used by both `color` (edge) and `portal` command families.
+// Used by the `color` command's chip row and the theme-swap trigger.
 
 pub const VAR_ACCENT: &str = "var(--accent)";
 pub const VAR_EDGE: &str = "var(--edge)";
 pub const VAR_FG: &str = "var(--fg)";
-
-/// Default portal marker color when no override is set. Pre-existing
-/// value that lives in `baumhard::mindmap::model::PORTAL_GLYPH_PRESETS`
-/// era code; mirrored here so `portal color reset` sets it back
-/// exactly.
-pub const PORTAL_DEFAULT_COLOR: &str = "#aa88cc";
 
 // ---------------------------------------------------------------
 // Edge type names
