@@ -52,9 +52,9 @@ fn resolve_cap(endpoint_from: bool, name: &str) -> Option<Option<&'static str>> 
 }
 
 fn execute_cap(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    let er = match &eff.document.selection {
-        SelectionState::Edge(e) => e.clone(),
-        _ => return ExecResult::err("no edge selected"),
+    let er = match eff.document.selection.selected_edge_or_portal_edge() {
+        Some(e) => e,
+        None => return ExecResult::err("no edge selected"),
     };
     let kvs: Vec<(String, String)> = args
         .kvs()

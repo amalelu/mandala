@@ -37,13 +37,15 @@ use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color::resolve_var;
 
-use super::{PortalColorPreview, PortalElement};
+use super::{PortalColorPreview, PortalElement, PortalTextElement, PortalTextEditOverride};
 
 /// Default portal marker font size when no `glyph_connection`
-/// override is set. Bumped from the 12pt line-body default so the
-/// marker reads as a label (several visible pixels of glyph strokes)
-/// rather than a hairline dot.
-pub(crate) const DEFAULT_PORTAL_MARKER_FONT_SIZE_PT: f32 = 20.0;
+/// override is set. Matches the creation-time default in
+/// `document::defaults::default_portal_edge` so an edge flipped
+/// from line to portal mode (inheriting the canvas / hardcoded
+/// default) and a freshly-created portal edge read at the same
+/// visual scale.
+pub(crate) const DEFAULT_PORTAL_MARKER_FONT_SIZE_PT: f32 = 50.0;
 
 /// Minimum effective font size for a portal marker regardless of
 /// the resolved `glyph_connection.font_size_pt`. Used to rescue
@@ -189,14 +191,75 @@ pub(crate) fn node_center(pos: Vec2, size: Vec2) -> Vec2 {
     Vec2::new(pos.x + size.x * 0.5, pos.y + size.y * 0.5)
 }
 
+/// Padding between a portal icon and its adjacent text label,
+/// as a fraction of the icon font size. Tuned so the text sits
+/// slightly outside the icon AABB without colliding with it.
+pub(crate) const PORTAL_TEXT_PADDING_FRAC: f32 = 0.25;
+
+/// Layout result for a portal text label: top-left AABB corner
+/// and extent in canvas space. Sits outward of the icon along
+/// the border normal so the text always extends away from the
+/// owning node rather than toward it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PortalTextLayout {
+    pub top_left: Vec2,
+    pub bounds: Vec2,
+}
+
+/// Compute the AABB for a portal text label, given the icon
+/// layout and the border parameter driving the outward normal.
+/// Text extends from the icon's outward edge away from the node
+/// along the normal, with width scaled by grapheme count using
+/// the same `char_count × font_size × 0.6` heuristic connection
+/// labels use.
+pub(crate) fn layout_portal_text(
+    icon: PortalLabelLayout,
+    owner_pos: Vec2,
+    owner_size: Vec2,
+    partner_center: Vec2,
+    endpoint_state: Option<&PortalEndpointState>,
+    font_size_pt: f32,
+    text: &str,
+) -> PortalTextLayout {
+    // Approximate grapheme count (cheap proxy for shaped
+    // width — cosmic-text will reshape on render anyway). Empty
+    // strings get a minimum 1-char-wide slot so the buffer is
+    // never zero-sized, matching the connection-label helper.
+    let char_count = text.chars().count().max(1) as f32;
+    let bounds = Vec2::new(char_count * font_size_pt * 0.6, font_size_pt * 1.3);
+    let t = endpoint_state
+        .and_then(|s| s.border_t)
+        .unwrap_or_else(|| default_border_t(owner_pos, owner_size, partner_center));
+    let normal = border_outward_normal(t);
+    let padding = font_size_pt * PORTAL_TEXT_PADDING_FRAC;
+    // Icon center as the anchor for text placement. Text AABB
+    // is positioned so its inner edge sits one padding beyond
+    // the icon's outer edge along the outward normal, with
+    // perpendicular centering on the icon.
+    let icon_center = Vec2::new(
+        icon.top_left.x + icon.bounds.x * 0.5,
+        icon.top_left.y + icon.bounds.y * 0.5,
+    );
+    let outward_offset = icon.bounds.x * 0.5 + padding + bounds.x * 0.5;
+    let text_center = icon_center + normal * outward_offset;
+    let top_left = Vec2::new(
+        text_center.x - bounds.x * 0.5,
+        text_center.y - bounds.y * 0.5,
+    );
+    PortalTextLayout { top_left, bounds }
+}
+
 /// Emit one portal marker per endpoint of every visible portal-mode
-/// edge.
+/// edge. Each marker carries its icon glyph and (when the endpoint
+/// state sets `text` or the text-edit preview targets this
+/// endpoint) a companion text label.
 pub(super) fn build_portal_elements(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
+    portal_text_edit: Option<PortalTextEditOverride<'_>>,
 ) -> Vec<PortalElement> {
     let mut portal_elements: Vec<PortalElement> = Vec::new();
 
@@ -268,6 +331,38 @@ pub(super) fn build_portal_elements(
                 style.font_size_pt,
             );
 
+            // Inline text-edit preview beats the committed
+            // state so the user sees their buffer live as they
+            // type. Falls back to the endpoint's committed
+            // `text` otherwise. An empty preview buffer renders
+            // as an empty string (not absent) so the label AABB
+            // stays present while the user clears it.
+            let resolved_text: Option<String> = match portal_text_edit {
+                Some(p) if *p.edge_key == edge_key && p.endpoint_node_id == owner.id => {
+                    Some(p.buffer.to_string())
+                }
+                _ => endpoint_state.and_then(|s| s.text.clone()),
+            };
+            let text_element = resolved_text.map(|text| {
+                let text_layout = layout_portal_text(
+                    layout,
+                    owner_pos,
+                    owner_size,
+                    node_center(partner_pos, partner_size),
+                    endpoint_state,
+                    style.font_size_pt,
+                    &text,
+                );
+                PortalTextElement {
+                    text,
+                    position: (text_layout.top_left.x, text_layout.top_left.y),
+                    bounds: (text_layout.bounds.x, text_layout.bounds.y),
+                    color: style.color.clone(),
+                    font: style.font.clone(),
+                    font_size_pt: style.font_size_pt,
+                }
+            });
+
             portal_elements.push(PortalElement {
                 edge_key: edge_key.clone(),
                 endpoint_node_id: owner.id.clone(),
@@ -277,6 +372,7 @@ pub(super) fn build_portal_elements(
                 color: style.color.clone(),
                 font: style.font.clone(),
                 font_size_pt: style.font_size_pt,
+                text: text_element,
             });
         }
     }

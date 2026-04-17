@@ -667,6 +667,70 @@ impl MindMapDocument {
         true
     }
 
+    /// Set (or clear, with `text = None`) the per-endpoint text
+    /// label on a portal-mode edge. Empty strings are normalized
+    /// to `None` so hit-test / render / serde only see one
+    /// "absent" form. Returns `true` if the value changed.
+    pub fn set_portal_label_text(
+        &mut self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+        text: Option<String>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let normalized = match text {
+            Some(s) if s.is_empty() => None,
+            other => other,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let slot = match portal_endpoint_state_mut(
+            &mut self.mindmap.edges[idx],
+            endpoint_node_id,
+        ) {
+            Some(s) => s,
+            None => return false,
+        };
+        let current = slot.as_ref().and_then(|s| s.text.clone());
+        if current == normalized {
+            return false;
+        }
+        match normalized {
+            Some(t) => {
+                slot.get_or_insert_with(PortalEndpointState::default).text = Some(t);
+            }
+            None => {
+                if let Some(existing) = slot.as_mut() {
+                    existing.text = None;
+                    if existing == &PortalEndpointState::default() {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Read the current portal label text for one endpoint, if
+    /// any. Returns the concrete string (not the hex-color
+    /// cascade like [`Self::resolve_portal_label_color`]) —
+    /// portal text has no inheritance cascade, it's either set
+    /// on the endpoint or absent.
+    pub fn portal_label_text(
+        &self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+    ) -> Option<String> {
+        let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
+        let state =
+            baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id)?;
+        state.text.clone()
+    }
+
     /// Read the resolved portal label color for one endpoint.
     /// Walks the cascade — per-endpoint override >
     /// `glyph_connection.color` > `edge.color` — and returns the

@@ -15,13 +15,19 @@ fn portal_tree_emits_two_markers_per_edge() {
     );
     map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
-    let result = build_portal_tree(&map, &HashMap::new(), None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None);
     let pairs: Vec<NodeId> = result.tree.root.children(&result.tree.arena).collect();
     assert_eq!(pairs.len(), 1);
 
-    let markers: Vec<NodeId> = pairs[0].children(&result.tree.arena).collect();
-    assert_eq!(markers.len(), 2);
-    // Hitboxes: one entry per (edge, endpoint).
+    // New shape: pair → endpoint void → [icon, text]. Two endpoints
+    // per edge, each with two GlyphArea children (icon + text).
+    let endpoint_voids: Vec<NodeId> = pairs[0].children(&result.tree.arena).collect();
+    assert_eq!(endpoint_voids.len(), 2);
+    for ev in &endpoint_voids {
+        let leaves: Vec<NodeId> = ev.children(&result.tree.arena).collect();
+        assert_eq!(leaves.len(), 2, "icon + text under each endpoint void");
+    }
+    // Hitboxes: one entry per (edge, endpoint) — spans icon + text.
     assert_eq!(result.hitboxes.len(), 2);
 }
 
@@ -40,7 +46,7 @@ fn portal_tree_skips_edge_with_folded_endpoint() {
     // skipped wholesale because is_hidden_by_fold(child) is true.
     map.edges
         .push(synthetic_portal_edge("child", "other", "#00ff00"));
-    let result = build_portal_tree(&map, &HashMap::new(), None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None);
     assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
     assert!(result.hitboxes.is_empty());
 }
@@ -61,7 +67,7 @@ fn portal_tree_skips_line_mode_edges() {
     line_edge.display_mode = None;
     map.edges.push(line_edge);
 
-    let result = build_portal_tree(&map, &HashMap::new(), None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None);
     assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
     assert!(result.hitboxes.is_empty());
 }
@@ -78,15 +84,19 @@ fn portal_tree_selection_overrides_color() {
     map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
     let selected = Some(("a", "b", "cross_link"));
-    let result = build_portal_tree(&map, &HashMap::new(), selected, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), selected, None, None, None);
 
-    // Each marker's GlyphArea should carry the cyan color, not red.
+    // Walk pair → endpoint void → [icon, text]. Only the icon
+    // GlyphArea carries a color region (the text area is empty
+    // when no text is set). Assert the icon color on each endpoint
+    // got the cyan override, not the red edge color.
     let pair = result.tree.root.children(&result.tree.arena).next().unwrap();
-    for marker in pair.children(&result.tree.arena) {
+    for endpoint_void in pair.children(&result.tree.arena) {
+        let icon_leaf = endpoint_void.children(&result.tree.arena).next().unwrap();
         let area = result
             .tree
             .arena
-            .get(marker)
+            .get(icon_leaf)
             .unwrap()
             .get()
             .glyph_area()
@@ -119,7 +129,7 @@ fn portal_pair_channels_are_strictly_ascending() {
     map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
     map.edges.push(synthetic_portal_edge("b", "c", "#00ff00"));
 
-    let pairs = portal_pair_data(&map, &HashMap::new(), None, None, None);
+    let pairs = portal_pair_data(&map, &HashMap::new(), None, None, None, None);
     assert_eq!(pairs.len(), 2);
     let channels: Vec<usize> = pairs.iter().map(|p| p.pair_channel).collect();
     let mut prev = 0;
@@ -148,38 +158,46 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
     map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
     // State A: no offsets, no selection.
-    let mut tree_a = build_portal_tree(&map, &HashMap::new(), None, None, None).tree;
+    let mut tree_a = build_portal_tree(&map, &HashMap::new(), None, None, None, None).tree;
 
     // State B: drag offset on `b`, plus selection.
     let mut offsets = HashMap::new();
     offsets.insert("b".to_string(), (10.0, -5.0));
     let selected = Some(("a", "b", "cross_link"));
 
-    let mutator = build_portal_mutator_tree(&map, &offsets, selected, None, None);
+    let mutator = build_portal_mutator_tree(&map, &offsets, selected, None, None, None);
     mutator.mutator.apply_to(&mut tree_a);
 
-    let expected = build_portal_tree(&map, &offsets, selected, None, None).tree;
+    let expected = build_portal_tree(&map, &offsets, selected, None, None, None).tree;
 
     // Walk both: per pair, per slot, GlyphArea fields (text,
     // position, bounds, scale, line_height, regions, outline)
     // must match.
+    // Walk three levels: pair → endpoint voids → [icon, text].
     let actual_pairs: Vec<NodeId> = tree_a.root.children(&tree_a.arena).collect();
     let expected_pairs: Vec<NodeId> = expected.root.children(&expected.arena).collect();
     assert_eq!(actual_pairs.len(), expected_pairs.len());
     for (a_pair, e_pair) in actual_pairs.iter().zip(expected_pairs.iter()) {
-        let a_markers: Vec<NodeId> = a_pair.children(&tree_a.arena).collect();
-        let e_markers: Vec<NodeId> = e_pair.children(&expected.arena).collect();
-        assert_eq!(a_markers.len(), e_markers.len());
-        for (a_m, e_m) in a_markers.iter().zip(e_markers.iter()) {
-            let a_area = tree_a.arena.get(*a_m).unwrap().get().glyph_area().unwrap();
-            let e_area = expected.arena.get(*e_m).unwrap().get().glyph_area().unwrap();
-            assert_eq!(a_area.text, e_area.text);
-            assert_eq!(a_area.position, e_area.position);
-            assert_eq!(a_area.render_bounds, e_area.render_bounds);
-            assert_eq!(a_area.scale, e_area.scale);
-            assert_eq!(a_area.line_height, e_area.line_height);
-            assert_eq!(a_area.regions, e_area.regions);
-            assert_eq!(a_area.outline, e_area.outline);
+        let a_endpoints: Vec<NodeId> = a_pair.children(&tree_a.arena).collect();
+        let e_endpoints: Vec<NodeId> = e_pair.children(&expected.arena).collect();
+        assert_eq!(a_endpoints.len(), e_endpoints.len());
+        for (a_ep, e_ep) in a_endpoints.iter().zip(e_endpoints.iter()) {
+            let a_leaves: Vec<NodeId> = a_ep.children(&tree_a.arena).collect();
+            let e_leaves: Vec<NodeId> = e_ep.children(&expected.arena).collect();
+            assert_eq!(a_leaves.len(), e_leaves.len());
+            for (a_leaf, e_leaf) in a_leaves.iter().zip(e_leaves.iter()) {
+                let a_area =
+                    tree_a.arena.get(*a_leaf).unwrap().get().glyph_area().unwrap();
+                let e_area =
+                    expected.arena.get(*e_leaf).unwrap().get().glyph_area().unwrap();
+                assert_eq!(a_area.text, e_area.text);
+                assert_eq!(a_area.position, e_area.position);
+                assert_eq!(a_area.render_bounds, e_area.render_bounds);
+                assert_eq!(a_area.scale, e_area.scale);
+                assert_eq!(a_area.line_height, e_area.line_height);
+                assert_eq!(a_area.regions, e_area.regions);
+                assert_eq!(a_area.outline, e_area.outline);
+            }
         }
     }
 }
@@ -203,7 +221,7 @@ fn portal_identity_sequence_drops_folded_pairs() {
     map.edges
         .push(synthetic_portal_edge("b", "child", "#00ff00"));
 
-    let pairs_before = portal_pair_data(&map, &HashMap::new(), None, None, None);
+    let pairs_before = portal_pair_data(&map, &HashMap::new(), None, None, None, None);
     assert_eq!(
         portal_identity_sequence(&pairs_before),
         vec![
@@ -213,7 +231,7 @@ fn portal_identity_sequence_drops_folded_pairs() {
     );
 
     map.nodes.get_mut("parent").unwrap().folded = true;
-    let pairs_after = portal_pair_data(&map, &HashMap::new(), None, None, None);
+    let pairs_after = portal_pair_data(&map, &HashMap::new(), None, None, None, None);
     assert_eq!(
         portal_identity_sequence(&pairs_after),
         vec![EdgeKey::new("a", "b", "cross_link")]
@@ -245,10 +263,12 @@ fn portal_marker_region_sized_by_grapheme_cluster_count_not_codepoints() {
     }
     map.edges.push(edge);
 
-    let result = build_portal_tree(&map, &HashMap::new(), None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None);
     let pair = result.tree.root.children(&result.tree.arena).next().unwrap();
-    let marker = pair.children(&result.tree.arena).next().unwrap();
-    let area = glyph_area_of(&result.tree, marker);
+    // Descend pair → endpoint void → icon leaf.
+    let endpoint_void = pair.children(&result.tree.arena).next().unwrap();
+    let icon_leaf = endpoint_void.children(&result.tree.arena).next().unwrap();
+    let area = glyph_area_of(&result.tree, icon_leaf);
     let regions = area.regions.all_regions();
     assert_eq!(regions.len(), 1, "portal marker should emit one region");
     // 5 codepoints joined by ZWJ render as a single grapheme cluster.

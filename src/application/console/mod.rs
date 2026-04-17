@@ -74,6 +74,12 @@ pub struct ConsoleEffects<'a> {
     /// the inline label editor on the given edge.
     pub open_label_edit: Option<EdgeRef>,
     /// If set when `execute` returns, the dispatcher transitions to
+    /// the inline portal-text editor on the given
+    /// `(edge_ref, endpoint_node_id)` pair. Mutually exclusive
+    /// with `open_label_edit` — `label edit` picks one or the
+    /// other based on the current selection variant.
+    pub open_portal_text_edit: Option<(EdgeRef, String)>,
+    /// If set when `execute` returns, the dispatcher transitions to
     /// the glyph-wheel color picker in **contextual** mode on the
     /// given target. Commit writes to that target and closes; Esc /
     /// outside-click cancel.
@@ -107,6 +113,7 @@ impl<'a> ConsoleEffects<'a> {
         Self {
             document,
             open_label_edit: None,
+            open_portal_text_edit: None,
             open_color_picker: None,
             open_color_picker_standalone: false,
             close_color_picker: false,

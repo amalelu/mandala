@@ -210,6 +210,202 @@ pub(in crate::application::app) fn close_label_edit(
     rebuild_all(doc, mindmap_tree, app_scene, renderer);
 }
 
+/// Inline-edit state for a portal label's text. Parallel to
+/// [`LabelEditState`] but keyed to `(edge_ref, endpoint_node_id)`
+/// — portal labels are per-endpoint, so the editor needs both
+/// parts of the identity. Routes keystrokes through
+/// `route_label_edit_key` just like the edge-label editor so
+/// grapheme semantics (emoji / ZWJ backspace, arrow-key walking)
+/// behave identically.
+///
+/// Mutually exclusive with `LabelEditState`: the event loop's
+/// keystroke routing checks the portal editor first (rarer form
+/// so the short-circuit is usually cheap), then falls through
+/// to the edge-label editor.
+#[derive(Debug, Clone)]
+pub(in crate::application::app) enum PortalTextEditState {
+    Closed,
+    Open {
+        edge_ref: crate::application::document::EdgeRef,
+        endpoint_node_id: String,
+        /// The in-progress buffer. Committed to
+        /// `PortalEndpointState.text` on Enter; discarded on
+        /// Escape.
+        buffer: String,
+        /// Cursor position as a grapheme-cluster index into
+        /// `buffer`. Same invariant as `LabelEditState::Open`.
+        cursor_grapheme_pos: usize,
+        /// The endpoint's text value at the moment edit mode
+        /// opened. Used to restore state on Escape and to skip
+        /// undo entries on unchanged commit.
+        original: Option<String>,
+    },
+}
+
+impl PortalTextEditState {
+    pub(in crate::application::app) fn is_open(&self) -> bool {
+        matches!(self, PortalTextEditState::Open { .. })
+    }
+}
+
+/// Transition into inline portal-text edit mode for the given
+/// endpoint. Seeds the buffer from the endpoint's current text,
+/// installs a preview override on the document so the caret
+/// shows up immediately, and runs a portal-tree update so the
+/// caret renders on the next frame.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::application::app) fn open_portal_text_edit(
+    edge_ref: &crate::application::document::EdgeRef,
+    endpoint_node_id: &str,
+    doc: &mut MindMapDocument,
+    state: &mut PortalTextEditState,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    // Verify the edge + endpoint still exist before entering
+    // edit mode. If either vanished between the selection and
+    // the open gesture (e.g. an undo raced with EditSelection),
+    // silently return rather than install a stale editor.
+    let edge = match doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)) {
+        Some(e) => e,
+        None => return,
+    };
+    if endpoint_node_id != edge.from_id && endpoint_node_id != edge.to_id {
+        return;
+    }
+    let original =
+        baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id)
+            .and_then(|s| s.text.clone());
+    let buffer = original.clone().unwrap_or_default();
+    let cursor_grapheme_pos = grapheme_chad::count_grapheme_clusters(&buffer);
+    *state = PortalTextEditState::Open {
+        edge_ref: edge_ref.clone(),
+        endpoint_node_id: endpoint_node_id.to_string(),
+        buffer: buffer.clone(),
+        cursor_grapheme_pos,
+        original,
+    };
+    let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+        &edge_ref.from_id,
+        &edge_ref.to_id,
+        &edge_ref.edge_type,
+    );
+    doc.portal_text_edit_preview = Some((
+        edge_key,
+        endpoint_node_id.to_string(),
+        insert_caret(&buffer, cursor_grapheme_pos),
+    ));
+    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
+}
+
+/// Route a keystroke to the inline portal-text editor. Mirrors
+/// `handle_label_edit_key` — commit / cancel resolve through
+/// `InputContext::LabelEdit` (shared with the edge-label editor
+/// since the two editors use the same key semantics) and
+/// navigation / character input go through the shared
+/// `route_label_edit_key` router.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::application::app) fn handle_portal_text_edit_key(
+    key_name: &Option<String>,
+    logical_key: &Key,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    keybinds: &ResolvedKeybinds,
+    state: &mut PortalTextEditState,
+    doc: &mut MindMapDocument,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    let name = key_name.as_deref();
+    let action = name.and_then(|n| {
+        keybinds.action_for_context(InputContext::LabelEdit, n, ctrl, shift, alt)
+    });
+    if action == Some(Action::LabelEditCancel) {
+        close_portal_text_edit(false, doc, state, mindmap_tree, app_scene, renderer);
+        return;
+    }
+    if action == Some(Action::LabelEditCommit) {
+        close_portal_text_edit(true, doc, state, mindmap_tree, app_scene, renderer);
+        return;
+    }
+
+    let Some((buffer, cursor)) = (match state {
+        PortalTextEditState::Open {
+            buffer,
+            cursor_grapheme_pos,
+            ..
+        } => Some((buffer, cursor_grapheme_pos)),
+        PortalTextEditState::Closed => None,
+    }) else {
+        return;
+    };
+
+    let typed = match logical_key {
+        Key::Character(c) => Some(c.as_str()),
+        _ => None,
+    };
+    if !route_label_edit_key(name, typed, buffer, cursor) {
+        return;
+    }
+
+    if let PortalTextEditState::Open {
+        edge_ref,
+        endpoint_node_id,
+        buffer,
+        cursor_grapheme_pos,
+        ..
+    } = state
+    {
+        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+            &edge_ref.from_id,
+            &edge_ref.to_id,
+            &edge_ref.edge_type,
+        );
+        doc.portal_text_edit_preview = Some((
+            edge_key,
+            endpoint_node_id.clone(),
+            insert_caret(buffer, *cursor_grapheme_pos),
+        ));
+        update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
+    }
+}
+
+/// Close the inline portal-text editor. If `commit` is true,
+/// writes the buffer to `PortalEndpointState.text` (with undo
+/// entry) when the value actually differs from the pre-edit
+/// original. Restores the pre-edit state on cancel.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::application::app) fn close_portal_text_edit(
+    commit: bool,
+    doc: &mut MindMapDocument,
+    state: &mut PortalTextEditState,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    let (edge_ref, endpoint_node_id, buffer, original) =
+        match std::mem::replace(state, PortalTextEditState::Closed) {
+            PortalTextEditState::Open {
+                edge_ref,
+                endpoint_node_id,
+                buffer,
+                original,
+                ..
+            } => (edge_ref, endpoint_node_id, buffer, original),
+            PortalTextEditState::Closed => return,
+        };
+    doc.portal_text_edit_preview = None;
+    if commit {
+        let new_val = if buffer.is_empty() { None } else { Some(buffer) };
+        if new_val != original {
+            doc.set_portal_label_text(&edge_ref, &endpoint_node_id, new_val);
+        }
+    }
+    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+}
+
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {

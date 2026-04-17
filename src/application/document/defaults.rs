@@ -132,7 +132,13 @@ pub(super) fn default_portal_edge(
         control_points: Vec::new(),
         glyph_connection: Some(GlyphConnectionConfig {
             body: glyph.to_string(),
-            font_size_pt: 16.0,
+            // Portal markers are labels, not body glyphs — 50pt
+            // reads as a clearly-legible badge next to the node,
+            // in line with the (bumped) `DEFAULT_PORTAL_MARKER_FONT_SIZE_PT`
+            // fallback the scene builder uses for edges flipped
+            // into portal mode without an explicit connection
+            // override.
+            font_size_pt: 50.0,
             ..GlyphConnectionConfig::default()
         }),
         display_mode: Some(DISPLAY_MODE_PORTAL.to_string()),

@@ -40,6 +40,16 @@ Each side has the same shape:
 | ---------- | ------------------ | --------- | ---------------------------------------- |
 | `color`    | `#rrggbb` / `#rrggbbaa` / `var(--name)` | inherit | Color override for this label only. |
 | `border_t` | `f32`, `[0, 4)`    | auto      | Position along the owning node's border. |
+| `text`     | string             | absent    | Text label rendered next to the icon.    |
+
+The `text` field — when present — renders as a sibling glyph
+area next to the portal marker icon, positioned outward of the
+icon along the border normal so the text extends away from the
+owning node (never back toward it). Text inherits the icon's
+color + font cascade; there's no separate text-color field.
+Authored via `label text="…"` or `label edit` on a portal-label
+selection (same console verbs that author edge labels —
+dispatch splits on the current selection variant).
 
 ## Color cascade
 

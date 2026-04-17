@@ -150,6 +150,37 @@ pub struct PortalElement {
     pub font: Option<String>,
     /// Font size in points.
     pub font_size_pt: f32,
+    /// Optional text label attached to the marker. When set, the
+    /// renderer emits a companion glyph area adjacent to the
+    /// icon (outward along the border normal) using the same
+    /// color + font cascade. Absent when `PortalEndpointState.text`
+    /// is `None` or the user is previewing the edit buffer via
+    /// the label-edit override and the buffer is empty.
+    pub text: Option<PortalTextElement>,
+}
+
+/// Companion text element for a portal marker. Always paired
+/// with a [`PortalElement`] — carries its own AABB so the
+/// renderer can shape the text glyphs and the app can hit-test
+/// against the text region independently from the icon.
+#[derive(Debug, Clone)]
+pub struct PortalTextElement {
+    /// Resolved text string (possibly substituted by the
+    /// inline-edit preview buffer at scene-build time).
+    pub text: String,
+    /// Top-left corner of the text AABB in canvas coordinates.
+    pub position: (f32, f32),
+    /// Width and height of the text AABB — sized from grapheme
+    /// count × font size via the same heuristic connection
+    /// labels use.
+    pub bounds: (f32, f32),
+    /// Resolved color (hex). Matches the icon color — portal
+    /// text inherits the icon's color cascade.
+    pub color: String,
+    /// Optional font family override, mirroring the icon.
+    pub font: Option<String>,
+    /// Font size in points — same as the icon.
+    pub font_size_pt: f32,
 }
 
 /// Session 6D: a text label attached to a connection edge. Rendered
@@ -244,7 +275,8 @@ mod tests;
 
 pub use builder::{
     build_scene, build_scene_with_cache, build_scene_with_offsets,
-    build_scene_with_offsets_selection_and_overrides, SceneSelectionContext,
+    build_scene_with_offsets_selection_and_overrides, PortalTextEditOverride,
+    SceneSelectionContext,
 };
 pub use edge_handle::build_edge_handles;
 pub use portal::SelectedPortalLabel;

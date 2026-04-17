@@ -177,12 +177,29 @@ pub(in crate::application::app) fn update_portal_tree(
         _ => None,
     };
 
+    // Portal text-edit preview mirrors the existing
+    // `label_edit_preview`: when the inline portal-text editor is
+    // open, its buffer substitutes for the committed
+    // `PortalEndpointState.text` on the named endpoint so edits
+    // render live.
+    let portal_text_edit = doc
+        .portal_text_edit_preview
+        .as_ref()
+        .map(|(key, endpoint, buffer)| {
+            baumhard::mindmap::scene_builder::PortalTextEditOverride {
+                edge_key: key,
+                endpoint_node_id: endpoint.as_str(),
+                buffer: buffer.as_str(),
+            }
+        });
+
     let pairs = portal_pair_data(
         &doc.mindmap,
         offsets,
         selected,
         selected_portal_label,
         preview,
+        portal_text_edit,
     );
     let signature = hash_canvas_signature(&portal_identity_sequence(&pairs));
 

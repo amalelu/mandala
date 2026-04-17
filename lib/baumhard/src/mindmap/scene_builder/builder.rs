@@ -50,6 +50,23 @@ pub struct SceneSelectionContext<'a> {
     /// in-progress buffer + caret for the committed label text
     /// on the named edge, so label edits render live.
     pub label_edit: Option<(&'a EdgeKey, &'a str)>,
+    /// Inline portal-text editor override — substitutes the
+    /// in-progress buffer for the committed
+    /// `PortalEndpointState.text` on the named (edge, endpoint)
+    /// pair, same pattern as `label_edit` but keyed to a portal
+    /// endpoint instead of an edge path.
+    pub portal_text_edit: Option<PortalTextEditOverride<'a>>,
+}
+
+/// Substitution pair for the portal-text inline edit preview.
+/// Carries the `(edge_key, endpoint_node_id)` identity of the
+/// target portal label plus the current buffer contents to be
+/// rendered in place of the committed `PortalEndpointState.text`.
+#[derive(Debug, Clone, Copy)]
+pub struct PortalTextEditOverride<'a> {
+    pub edge_key: &'a EdgeKey,
+    pub endpoint_node_id: &'a str,
+    pub buffer: &'a str,
 }
 
 /// Builds a RenderScene from a MindMap, determining which nodes and borders
@@ -151,6 +168,7 @@ pub fn build_scene_with_cache(
         edge: selected_edge,
         portal_label: selected_portal_label,
         label_edit: label_edit_override,
+        portal_text_edit,
     } = selection;
     // The per-edge sample spacing depends on the effective font size,
     // which depends on `camera_zoom`. Flush cached samples if the
@@ -188,13 +206,16 @@ pub fn build_scene_with_cache(
     );
 
     // Portal pass — two markers per visible portal-mode edge,
-    // colored by preview > selection > edge color.
+    // colored by preview > selection > edge color. Text labels
+    // for each endpoint reflect the committed `text` plus the
+    // inline-edit buffer preview when the editor is open.
     let portal_elements = build_portal_elements(
         map,
         offsets,
         selected_edge,
         selected_portal_label,
         portal_color_preview,
+        portal_text_edit,
     );
 
     RenderScene {

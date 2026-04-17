@@ -7,25 +7,22 @@
 //!   edge between its line form (rendered path) and its portal form
 //!   (two floating markers, no line). Portal-mode edges reuse
 //!   `glyph_connection.body` as the marker glyph.
-//! - **Portal creation:** `edge portal` with two nodes selected
-//!   creates a portal-mode edge between them (picks a marker glyph
-//!   from the `PORTAL_GLYPH_PRESETS` rotation).
 //! - **Path reset:** `edge reset=<straight|style>` clears control
 //!   points (straight) or per-edge glyph overrides (style).
 //!
-//! Absorbed the former `connection` command pre-refactor; the
-//! portal-specific `portal` command was folded in during the
-//! portals-as-display-mode refactor.
+//! Portal-mode edges are created by first building a line edge
+//! (Connect mode / Ctrl+D) and then flipping with
+//! `edge display_mode=portal` — the same two-step flow that covers
+//! any display-mode change, so there's no dedicated creation verb
+//! on this command.
 
 use super::Command;
 use crate::application::console::completion::{prefix_filter, Completion, CompletionContext, CompletionState};
 use crate::application::console::constants::{EDGE_TYPE_CROSS_LINK, EDGE_TYPE_PARENT_CHILD};
 use crate::application::console::parser::Args;
-use crate::application::console::predicates::edge_selected_or_two_nodes;
+use crate::application::console::predicates::edge_or_portal_label_selected;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
-use crate::application::document::{EdgeRef, SelectionState};
 
-pub const VERBS: &[&str] = &["portal"];
 pub const KEYS: &[&str] = &["type", "reset", "display_mode"];
 pub const EDGE_TYPES: &[&str] = &[EDGE_TYPE_CROSS_LINK, EDGE_TYPE_PARENT_CHILD];
 pub const RESETS: &[&str] = &["straight", "style"];
@@ -37,12 +34,10 @@ pub const DISPLAY_MODES: &[&str] = &[
 pub const COMMAND: Command = Command {
     name: "edge",
     aliases: &[],
-    summary: "Create portal edges, convert edge type, switch display mode, or reset path/style",
-    usage: "edge portal   |   edge type=<cross_link|parent_child>   |   edge display_mode=<line|portal>   |   edge reset=<straight|style>",
+    summary: "Convert edge type, switch display mode, or reset path/style",
+    usage: "edge type=<cross_link|parent_child>   |   edge display_mode=<line|portal>   |   edge reset=<straight|style>",
     tags: &[
         "edge",
-        "portal",
-        "create",
         "type",
         "reset",
         "straight",
@@ -53,26 +48,13 @@ pub const COMMAND: Command = Command {
         "line",
         "link",
     ],
-    applicable: edge_selected_or_two_nodes,
+    applicable: edge_or_portal_label_selected,
     complete: complete_edge,
     execute: execute_edge,
 };
 
 fn complete_edge(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
     match &state.context {
-        CompletionContext::Token { index: 0 } => {
-            let mut out = prefix_filter(VERBS, state.partial);
-            for k in KEYS {
-                if k.starts_with(state.partial) {
-                    out.push(Completion {
-                        text: format!("{}=", k),
-                        display: format!("{}=", k),
-                        hint: None,
-                    });
-                }
-            }
-            out
-        }
         CompletionContext::Token { .. } => KEYS
             .iter()
             .filter(|k| k.starts_with(state.partial))
@@ -96,46 +78,26 @@ fn complete_edge(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completi
 }
 
 fn execute_edge(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    // Positional verbs first. `edge portal` with two nodes selected
-    // creates a new portal-mode edge between them.
-    if let Some("portal") = args.positional(0) {
-        let (a, b) = match &eff.document.selection {
-            SelectionState::Multi(ids) if ids.len() == 2 => (ids[0].clone(), ids[1].clone()),
-            _ => {
-                return ExecResult::err(
-                    "edge portal requires exactly two nodes selected",
-                )
-            }
-        };
-        return match eff.document.create_portal_edge(&a, &b) {
-            Some(idx) => {
-                eff.document
-                    .undo_stack
-                    .push(crate::application::document::UndoAction::CreateEdge { index: idx });
-                eff.document.selection = SelectionState::Edge(EdgeRef::new(a, b, "cross_link"));
-                eff.document.dirty = true;
-                ExecResult::ok_msg("portal edge created")
-            }
-            None => ExecResult::err(
-                "could not create portal edge (same node, unknown node, or duplicate)",
-            ),
-        };
-    }
-
     let kvs: Vec<(String, String)> = args
         .kvs()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     if kvs.is_empty() {
         return ExecResult::err(
-            "usage: edge portal   |   edge type=<...>   |   edge display_mode=<...>   |   edge reset=<straight|style>",
+            "usage: edge type=<...>   |   edge display_mode=<...>   |   edge reset=<straight|style>",
         );
     }
 
-    // All remaining kv operations require an edge selected.
-    let er = match &eff.document.selection {
-        SelectionState::Edge(e) => e.clone(),
-        _ => return ExecResult::err("no edge selected"),
+    // All kv operations target the currently-selected edge. A
+    // portal-label selection resolves to its owning edge, so
+    // `edge display_mode=line` works after clicking a portal
+    // marker — without this branch, the user would lose the
+    // ability to un-portal an edge they just put into portal
+    // mode (the click-to-select path only yields `PortalLabel`
+    // once an edge is in portal mode).
+    let er = match eff.document.selection.selected_edge_or_portal_edge() {
+        Some(e) => e,
+        None => return ExecResult::err("no edge selected"),
     };
 
     let mut messages: Vec<String> = Vec::new();
