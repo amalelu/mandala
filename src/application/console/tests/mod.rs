@@ -15,6 +15,7 @@
 
 mod apply_kvs;
 mod applicability;
+mod clipboard;
 mod commands;
 mod completion;
 mod fixtures;
