@@ -277,6 +277,48 @@ use super::defaults::default_cross_link_edge;
         assert!(baumhard::mindmap::model::is_portal_edge(&doc.mindmap.edges[i2]));
     }
 
+    /// Undoing a freshly-created-and-selected edge clears the
+    /// selection too — otherwise `SelectionState::Edge(er)` lingers
+    /// pointing at an edge the map no longer contains, and scene
+    /// builds + the color picker open against a dangling ref.
+    /// Mirrors the long-standing `CreateNode` undo behaviour.
+    #[test]
+    fn undo_create_edge_clears_matching_selection() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let idx = doc.create_cross_link_edge(&a, &b).unwrap();
+        doc.undo_stack.push(UndoAction::CreateEdge { index: idx });
+        let er = EdgeRef::new(&a, &b, "cross_link");
+        doc.selection = SelectionState::Edge(er);
+
+        assert!(doc.undo());
+        assert!(matches!(doc.selection, SelectionState::None));
+    }
+
+    /// And: undoing a CreateEdge that did *not* match the current
+    /// selection leaves the selection alone — only the matching
+    /// ref triggers the clear.
+    #[test]
+    fn undo_create_edge_preserves_nonmatching_selection() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let idx = doc.create_cross_link_edge(&a, &b).unwrap();
+        doc.undo_stack.push(UndoAction::CreateEdge { index: idx });
+        // Select some other node (not the edge we're about to undo).
+        let other = doc.mindmap.nodes.keys().next().unwrap().clone();
+        doc.selection = SelectionState::Single(other.clone());
+
+        assert!(doc.undo());
+        match doc.selection {
+            SelectionState::Single(ref id) => assert_eq!(id, &other),
+            ref s => panic!("expected single selection preserved, got {:?}", s),
+        }
+    }
+
     #[test]
     fn portal_edge_set_display_mode_toggles_visual() {
         let mut doc = load_test_doc();

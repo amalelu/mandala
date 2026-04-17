@@ -39,7 +39,20 @@ impl MindMapDocument {
                 }
                 UndoAction::CreateEdge { index } => {
                     if index < self.mindmap.edges.len() {
-                        self.mindmap.edges.remove(index);
+                        let removed = self.mindmap.edges.remove(index);
+                        // If the selection points at the edge we just
+                        // removed, clear it — otherwise the selection
+                        // dangles at a triple no edge in the map
+                        // matches, and subsequent scene builds silently
+                        // render nothing highlighted while the
+                        // `selected_edge()` lookup keeps returning the
+                        // stale ref. Mirrors the `CreateNode` branch
+                        // below.
+                        if let SelectionState::Edge(ref er) = self.selection {
+                            if er.matches(&removed) {
+                                self.selection = SelectionState::None;
+                            }
+                        }
                     }
                 }
                 UndoAction::EditEdge { index, before } => {
