@@ -56,5 +56,6 @@ pub fn edge(from: &str, to: &str) -> MindEdge {
         anchor_to: "auto".into(),
         control_points: vec![],
         glyph_connection: None,
+        display_mode: None,
     }
 }

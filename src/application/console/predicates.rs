@@ -24,16 +24,30 @@ pub fn edge_selected(ctx: &ConsoleContext) -> bool {
     matches!(ctx.document.selection, SelectionState::Edge(_))
 }
 
-pub fn portal_selected(ctx: &ConsoleContext) -> bool {
-    matches!(ctx.document.selection, SelectionState::Portal(_))
-}
-
 pub fn two_nodes_selected(ctx: &ConsoleContext) -> bool {
     matches!(&ctx.document.selection, SelectionState::Multi(ids) if ids.len() == 2)
 }
 
-pub fn edge_or_portal_selected(ctx: &ConsoleContext) -> bool {
-    edge_selected(ctx) || portal_selected(ctx)
+/// True when the current selection is an edge with
+/// `display_mode = "portal"`. Used by the console to scope
+/// portal-only actions (like `edge portal` create) and filter
+/// completion.
+pub fn portal_edge_selected(ctx: &ConsoleContext) -> bool {
+    let er = match &ctx.document.selection {
+        SelectionState::Edge(e) => e,
+        _ => return false,
+    };
+    ctx.document
+        .mindmap
+        .edges
+        .iter()
+        .find(|e| er.matches(e))
+        .map(baumhard::mindmap::model::is_portal_edge)
+        .unwrap_or(false)
+}
+
+pub fn edge_selected_or_two_nodes(ctx: &ConsoleContext) -> bool {
+    edge_selected(ctx) || two_nodes_selected(ctx)
 }
 
 /// `color pick` is applicable for both edges and portals — each
@@ -208,30 +222,16 @@ pub fn edge_conversion_would_duplicate(ctx: &ConsoleContext, new_type: &str) -> 
 }
 
 // ============================================================
-// Portal resolved-config queries
+// Portal-mode edge resolved-config queries
 // ============================================================
 
-pub fn with_selected_portal<F, R>(ctx: &ConsoleContext, default: R, f: F) -> R
-where
-    F: FnOnce(&baumhard::mindmap::model::PortalPair) -> R,
-{
-    let pref = match &ctx.document.selection {
-        SelectionState::Portal(p) => p,
-        _ => return default,
-    };
-    ctx.document
-        .mindmap
-        .portals
-        .iter()
-        .find(|p| pref.matches(p))
-        .map(f)
-        .unwrap_or(default)
-}
-
-pub fn portal_glyph_is(ctx: &ConsoleContext, glyph: &str) -> bool {
-    with_selected_portal(ctx, false, |p| p.glyph == glyph)
-}
-
-pub fn portal_color_is(ctx: &ConsoleContext, color: &str) -> bool {
-    with_selected_portal(ctx, false, |p| p.color == color)
+/// True when the selected edge is a portal-mode edge and its
+/// resolved `glyph_connection.body` equals `glyph`. Mirrors
+/// `body_is` but targeted at the portal-mode subset so palette
+/// entries can highlight the active marker preset.
+pub fn portal_marker_is(ctx: &ConsoleContext, glyph: &str) -> bool {
+    if !portal_edge_selected(ctx) {
+        return false;
+    }
+    effective_body_glyph(ctx).map(|g| g == glyph).unwrap_or(false)
 }

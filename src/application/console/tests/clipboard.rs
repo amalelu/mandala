@@ -51,7 +51,21 @@ fn node_paste_replaces_text_and_pushes_undo() {
 fn node_paste_unchanged_text_reports_unchanged() {
     let mut doc = load_test_doc();
     let nid = doc.mindmap.nodes.keys().next().unwrap().clone();
-    let original = doc.mindmap.nodes.get(&nid).unwrap().text.clone();
+    // Pre-trim the node's text. The paste handler trims trailing
+    // whitespace (paragraph-copy ergonomics); pasting raw `original`
+    // on a node whose text happens to end in whitespace would
+    // report `Applied`, and HashMap iteration order picks the
+    // "first" node non-deterministically. Normalising first pins
+    // the assertion to the round-trip we actually care about.
+    let original = doc
+        .mindmap
+        .nodes
+        .get(&nid)
+        .unwrap()
+        .text
+        .trim_end()
+        .to_string();
+    doc.set_node_text(&nid, original.clone());
     let tid = TargetId::Node(nid);
     let mut view = view_for(&mut doc, &tid);
     assert_eq!(view.clipboard_paste(&original), Outcome::Unchanged);
@@ -137,79 +151,9 @@ fn edge_cut_returns_label_and_clears_it() {
     assert!(edge.label.is_none());
 }
 
-// ── Portal ───────────────────────────────────────────────────────
-
-fn create_test_portal(doc: &mut crate::application::document::MindMapDocument)
-    -> crate::application::document::PortalRef
-{
-    let nodes: Vec<String> = doc.mindmap.nodes.keys().take(2).cloned().collect();
-    assert!(nodes.len() >= 2, "fixture needs at least two nodes");
-    doc.apply_create_portal(&nodes[0], &nodes[1]).unwrap()
-}
-
-#[test]
-fn portal_copy_returns_color_string() {
-    let mut doc = load_test_doc();
-    let pr = create_test_portal(&mut doc);
-    let tid = TargetId::Portal(pr);
-    let view = view_for(&mut doc, &tid);
-    match view.clipboard_copy() {
-        ClipboardContent::Text(c) => assert!(c.starts_with('#'), "expected hex, got {}", c),
-        other => panic!("expected Text, got {:?}", other),
-    }
-}
-
-#[test]
-fn portal_paste_accepts_hex_and_sets_color() {
-    let mut doc = load_test_doc();
-    let pr = create_test_portal(&mut doc);
-    let tid = TargetId::Portal(pr.clone());
-    let outcome = {
-        let mut view = view_for(&mut doc, &tid);
-        view.clipboard_paste("#abcdef")
-    };
-    assert_eq!(outcome, Outcome::Applied);
-    let portal = doc.mindmap.portals.iter().find(|p| pr.matches(p)).unwrap();
-    assert_eq!(portal.color, "#abcdef");
-}
-
-#[test]
-fn portal_paste_accepts_var_reference() {
-    let mut doc = load_test_doc();
-    let pr = create_test_portal(&mut doc);
-    let tid = TargetId::Portal(pr.clone());
-    let outcome = {
-        let mut view = view_for(&mut doc, &tid);
-        view.clipboard_paste("var(--accent)")
-    };
-    assert_eq!(outcome, Outcome::Applied);
-    let portal = doc.mindmap.portals.iter().find(|p| pr.matches(p)).unwrap();
-    assert_eq!(portal.color, "var(--accent)");
-}
-
-#[test]
-fn portal_paste_rejects_non_color_text() {
-    let mut doc = load_test_doc();
-    let pr = create_test_portal(&mut doc);
-    let tid = TargetId::Portal(pr);
-    let mut view = view_for(&mut doc, &tid);
-    match view.clipboard_paste("not a color") {
-        Outcome::Invalid(msg) => assert!(msg.contains("not a color")),
-        other => panic!("expected Invalid, got {:?}", other),
-    }
-}
-
-#[test]
-fn portal_cut_returns_color_and_resets_to_default() {
-    use crate::application::console::constants::PORTAL_DEFAULT_COLOR;
-    let mut doc = load_test_doc();
-    let pr = create_test_portal(&mut doc);
-    let tid = TargetId::Portal(pr.clone());
-    let cut = {
-        let mut view = view_for(&mut doc, &tid);
-        view.clipboard_cut()
-    };
-    assert!(matches!(cut, ClipboardContent::Text(_)));
-    let portal = doc.mindmap.portals.iter().find(|p| pr.matches(p)).unwrap();
-    assert_eq!(portal.color, PORTAL_DEFAULT_COLOR);
-}
+// Portal-mode edges now flow through the same `TargetId::Edge`
+// path as line-mode edges — copy / paste / cut semantics on a
+// portal edge use its label (none by default) and fall back to
+// the common edge-color path for color edits, so the dedicated
+// portal clipboard tests folded into the edge block above and
+// were deleted during the portals-as-display-mode refactor.

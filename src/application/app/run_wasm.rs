@@ -408,10 +408,31 @@ app.event_loop.run(move |event, _window_target| {
                     .node_id()
                     .map(|id| hit_node.as_deref() == Some(id))
                     .unwrap_or(false);
+                // WASM mirrors the native dispatch: build a ClickHit
+                // that covers node / portal-marker / empty, and
+                // route double-click on a portal marker to a camera
+                // jump. The portal hit test runs only when the node
+                // hit test misses, same as native.
+                let portal_hit = if hit_node.is_none() {
+                    let mut renderer_borrow = renderer_for_events.borrow_mut();
+                    renderer_borrow
+                        .as_ref()
+                        .and_then(|r| r.hit_test_portal(canvas_pos))
+                } else {
+                    None
+                };
+                let click_hit: ClickHit = match (&hit_node, &portal_hit) {
+                    (Some(id), _) => ClickHit::Node(id.clone()),
+                    (None, Some((key, ep))) => ClickHit::PortalMarker {
+                        edge: key.clone(),
+                        endpoint: ep.clone(),
+                    },
+                    (None, None) => ClickHit::Empty,
+                };
                 let is_dblclick = !already_editing_same_target
                     && input.last_click
                         .as_ref()
-                        .map(|prev| is_double_click(prev, now, input.cursor_pos, &hit_node))
+                        .map(|prev| is_double_click(prev, now, input.cursor_pos, &click_hit))
                         .unwrap_or(false);
 
                 if is_dblclick {
@@ -420,34 +441,61 @@ app.event_loop.run(move |event, _window_target| {
                     let mut renderer_borrow = renderer_for_events.borrow_mut();
                     let Some(renderer) = renderer_borrow.as_mut() else { return; };
 
-                    if let Some(ref node_id) = hit_node {
-                        let nid = node_id.clone();
-                        input.document.selection = SelectionState::Single(nid.clone());
-                        rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
-                        open_text_edit(
-                            &nid, false,
-                            &mut input.document,
-                            &mut input.text_edit_state,
-                            &mut input.mindmap_tree,
-                            &mut input.app_scene,
-                            renderer,
-                        );
-                    } else {
-                        let allow_create = !matches!(
-                            input.document.selection,
-                            SelectionState::Edge(_) | SelectionState::Portal(_)
-                        );
-                        if allow_create {
-                            let new_id = input.document.create_orphan_and_select(canvas_pos);
+                    match &click_hit {
+                        ClickHit::Node(node_id) => {
+                            let nid = node_id.clone();
+                            input.document.selection = SelectionState::Single(nid.clone());
                             rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                             open_text_edit(
-                                &new_id, true,
+                                &nid, false,
                                 &mut input.document,
                                 &mut input.text_edit_state,
                                 &mut input.mindmap_tree,
                                 &mut input.app_scene,
                                 renderer,
                             );
+                        }
+                        ClickHit::PortalMarker { edge, endpoint } => {
+                            let other_id = if *endpoint == edge.from_id {
+                                edge.to_id.clone()
+                            } else {
+                                edge.from_id.clone()
+                            };
+                            if let Some(node) = input.document.mindmap.nodes.get(&other_id) {
+                                let target = glam::Vec2::new(
+                                    node.position.x as f32
+                                        + node.size.width as f32 * 0.5,
+                                    node.position.y as f32
+                                        + node.size.height as f32 * 0.5,
+                                );
+                                renderer.set_camera_center(target);
+                            }
+                            input.document.selection = SelectionState::Edge(
+                                crate::application::document::EdgeRef::new(
+                                    &edge.from_id,
+                                    &edge.to_id,
+                                    &edge.edge_type,
+                                ),
+                            );
+                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                        }
+                        ClickHit::Empty => {
+                            let allow_create = !matches!(
+                                input.document.selection,
+                                SelectionState::Edge(_)
+                            );
+                            if allow_create {
+                                let new_id = input.document.create_orphan_and_select(canvas_pos);
+                                rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                                open_text_edit(
+                                    &new_id, true,
+                                    &mut input.document,
+                                    &mut input.text_edit_state,
+                                    &mut input.mindmap_tree,
+                                    &mut input.app_scene,
+                                    renderer,
+                                );
+                            }
                         }
                     }
                     suppress_for_events.set(input.text_edit_state.is_open());
@@ -461,7 +509,7 @@ app.event_loop.run(move |event, _window_target| {
                 input.last_click = Some(LastClick {
                     time: now,
                     screen_pos: input.cursor_pos,
-                    hit: hit_node,
+                    hit: click_hit,
                 });
             } else {
                 // --- Left mouse Released ---

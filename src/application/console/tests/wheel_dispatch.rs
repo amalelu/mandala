@@ -10,7 +10,7 @@ use super::fixtures::{load_test_doc, select_first_edge};
 use crate::application::console::traits::{
     view_for, AcceptsWheelColor, ColorValue, Outcome, TargetId,
 };
-use crate::application::document::PortalRef;
+use crate::application::document::EdgeRef;
 
 /// A node under the wheel takes its color on the **background fill**.
 /// Asserted via `style.background_color` after dispatch.
@@ -56,24 +56,31 @@ fn wheel_color_on_edge_paints_line() {
     assert_eq!(effective, "#445566");
 }
 
-/// A portal under the wheel returns `NotApplicable` today —
-/// portals aren't Baumhard-native yet, so the standalone wheel
-/// deliberately does nothing on portal selections until the port
-/// lands. Regression guard so the deferred state is visible to
-/// anyone changing the trait impl.
+/// A portal-mode edge under the wheel behaves exactly like a
+/// line-mode edge — same `TargetId::Edge` dispatch, same
+/// `apply_wheel_color` → `set_border_color` route, same sink on
+/// `MindEdge.color` (via the glyph_connection override). The only
+/// visual difference is where that color lands (markers vs. line),
+/// which is a rendering concern outside the trait's scope.
 #[test]
-fn wheel_color_on_portal_is_not_applicable() {
+fn wheel_color_on_portal_mode_edge_paints_through_edge_path() {
     let mut doc = load_test_doc();
-    // Build a synthetic portal ref — even if the testament map has
-    // no portals, the dispatch returns NotApplicable before it
-    // tries to look the portal up.
-    let pr = PortalRef {
-        label: "A".into(),
-        endpoint_a: "x".into(),
-        endpoint_b: "y".into(),
+    let mut ids = doc.mindmap.nodes.keys().cloned();
+    let a = ids.next().unwrap();
+    let b = ids.next().unwrap();
+    doc.create_portal_edge(&a, &b).unwrap();
+    let er = EdgeRef::new(&a, &b, "cross_link");
+    let tid = TargetId::Edge(er.clone());
+    let outcome = {
+        let mut view = view_for(&mut doc, &tid);
+        view.apply_wheel_color(ColorValue::Hex("#778899".into()))
     };
-    let tid = TargetId::Portal(pr);
-    let mut view = view_for(&mut doc, &tid);
-    let outcome = view.apply_wheel_color(ColorValue::Hex("#778899".into()));
-    assert_eq!(outcome, Outcome::NotApplicable);
+    assert_eq!(outcome, Outcome::Applied);
+    let edge = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let effective = edge
+        .glyph_connection
+        .as_ref()
+        .and_then(|gc| gc.color.clone())
+        .unwrap_or_else(|| edge.color.clone());
+    assert_eq!(effective, "#778899");
 }

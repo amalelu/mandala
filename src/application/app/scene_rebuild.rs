@@ -152,22 +152,23 @@ pub(in crate::application::app) fn update_portal_tree(
     use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
     use baumhard::mindmap::tree_builder::{
         build_portal_mutator_tree_from_pairs, build_portal_tree_from_pairs,
-        portal_identity_sequence, portal_pair_data, PortalColorPreviewRef, SelectedPortalRef,
+        portal_identity_sequence, portal_pair_data, PortalColorPreviewRef, SelectedEdgeRef,
     };
 
     let selected_owned = doc
         .selection
-        .selected_portal()
-        .map(|p| (p.label.clone(), p.endpoint_a.clone(), p.endpoint_b.clone()));
-    let selected: Option<SelectedPortalRef> = selected_owned
+        .selected_edge()
+        .map(|e| (e.from_id.clone(), e.to_id.clone(), e.edge_type.clone()));
+    let selected: Option<SelectedEdgeRef> = selected_owned
         .as_ref()
-        .map(|(l, a, b)| (l.as_str(), a.as_str(), b.as_str()));
+        .map(|(f, t, ty)| (f.as_str(), t.as_str(), ty.as_str()));
 
+    // The picker preview fans out to the portal pass whenever the
+    // previewed edge is portal-mode. No separate Portal variant on
+    // `ColorPickerPreview` — the `Edge` key is enough.
     let preview: Option<PortalColorPreviewRef> = match &doc.color_picker_preview {
-        Some(ColorPickerPreview::Portal { key, color }) => Some(PortalColorPreviewRef {
-            label: key.label.as_str(),
-            endpoint_a: key.endpoint_a.as_str(),
-            endpoint_b: key.endpoint_b.as_str(),
+        Some(ColorPickerPreview::Edge { key, color }) => Some(PortalColorPreviewRef {
+            edge_key: key,
             color: color.as_str(),
         }),
         _ => None,

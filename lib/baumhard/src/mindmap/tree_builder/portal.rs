@@ -1,7 +1,8 @@
-//! Portal tree builder — one `GlyphArea` per (portal-pair ×
+//! Portal tree builder — one `GlyphArea` per (portal-mode edge ×
 //! endpoint). Mirrors the legacy `scene_builder::PortalElement`
-//! emission rule: each `PortalPair` produces two markers, one
-//! floating above each endpoint node's top-right corner.
+//! emission rule: each edge with `display_mode = "portal"` produces
+//! two markers, one floating above each endpoint node's top-right
+//! corner.
 
 use std::collections::HashMap;
 
@@ -12,45 +13,43 @@ use crate::gfx_structs::area::GlyphArea;
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::tree::Tree;
-use crate::mindmap::model::{MindMap, MindNode};
+use crate::mindmap::model::{is_portal_edge, MindMap, MindNode};
+use crate::mindmap::scene_builder::portal::resolve_portal_style;
+use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color;
 
-/// Identifier for the currently selected portal pair, used to
-/// route the cyan highlight color to the right two markers.
-/// Tuple is `(label, endpoint_a, endpoint_b)` matching
-/// [`crate::mindmap::scene_cache::PortalRefKey`]'s ordering.
-pub type SelectedPortalRef<'a> = (&'a str, &'a str, &'a str);
+/// Identifier for the currently selected edge, used to route the
+/// cyan highlight color to the two markers of a selected portal-mode
+/// edge. Tuple is `(from_id, to_id, edge_type)` matching the
+/// `EdgeKey` shape elsewhere.
+pub type SelectedEdgeRef<'a> = (&'a str, &'a str, &'a str);
 
-/// Optional live preview of one portal pair's color, mirroring
-/// `scene_builder::PortalColorPreview`. Wins over selection on
-/// the previewed pair so the live HSV feedback is visible on
-/// both markers.
+/// Optional live preview of one portal-mode edge's color, mirroring
+/// `scene_builder::PortalColorPreview`. Wins over selection on the
+/// previewed edge so the live HSV feedback is visible on both
+/// markers.
 #[derive(Debug, Clone, Copy)]
 pub struct PortalColorPreviewRef<'a> {
-    pub label: &'a str,
-    pub endpoint_a: &'a str,
-    pub endpoint_b: &'a str,
+    pub edge_key: &'a EdgeKey,
     pub color: &'a str,
 }
 
 /// Result of [`build_portal_tree`]. Bundles the tree with the
 /// AABB-per-marker map the legacy `hit_test_portal` path needs
-/// while it's still running. Session 5 wires hit-testing
-/// through `Scene::component_at` and this auxiliary map goes
-/// away.
+/// while it's still running.
 pub struct PortalTree {
     pub tree: Tree<GfxElement, GfxMutator>,
-    /// `((label, endpoint_a, endpoint_b), endpoint_node_id) → AABB`.
-    pub hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)>,
+    /// `(edge_key, endpoint_node_id) → AABB`.
+    pub hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
 }
 
-/// Identity tuple for one portal pair: `(label, endpoint_a,
-/// endpoint_b)`. Used to compare two consecutive
-/// [`portal_pair_data`] outputs and decide whether a registered
-/// portal tree's structure still matches — the prerequisite for
-/// the in-place [`build_portal_mutator_tree`] path.
-pub type PortalIdentity = (String, String, String);
+/// Identity tuple for one portal-mode edge: the `EdgeKey` of the
+/// owning edge. Used to compare two consecutive [`portal_pair_data`]
+/// outputs and decide whether a registered portal tree's structure
+/// still matches — the prerequisite for the in-place
+/// [`build_portal_mutator_tree`] path.
+pub type PortalIdentity = EdgeKey;
 
 /// Per-pair output of [`portal_pair_data`]. Single source of truth
 /// for portal layout consumed by both [`build_portal_tree`] (initial
@@ -70,108 +69,106 @@ pub struct PortalPairData {
     pub endpoints: [(usize, GlyphArea, (Vec2, Vec2), String); 2],
 }
 
-/// Compute the visible-portal-pair layout for the given map state.
+/// Compute the visible portal-mode-edge layout for the given map state.
 ///
 /// Single source of truth shared by [`build_portal_tree`] and
 /// [`build_portal_mutator_tree`] so the two paths cannot drift.
-/// Pairs are returned in `MindMap.portals` order, skipping any pair
-/// whose endpoint is hidden by a folded ancestor (mirrors
-/// `scene_builder::build_scene`).
+/// Edges are visited in `MindMap.edges` order, filtered to
+/// `display_mode = "portal"`, skipping any whose endpoint is hidden
+/// by a folded ancestor (mirrors `scene_builder::build_scene`).
 ///
 /// # Costs
 ///
-/// O(visible portal-pairs). Allocates a `Vec` plus two
-/// `ColorFontRegions` per pair. Color resolution uses
-/// [`color::resolve_var`] for `var(--name)` references.
+/// O(portal-mode edges). Allocates a `Vec` plus two
+/// `ColorFontRegions` per edge. Color resolution uses
+/// [`color::resolve_var`] for `var(--name)` references via
+/// `resolve_portal_style`.
 pub fn portal_pair_data(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
-    selected_portal: Option<SelectedPortalRef>,
+    selected_edge: Option<SelectedEdgeRef>,
     color_preview: Option<PortalColorPreviewRef>,
 ) -> Vec<PortalPairData> {
-    let vars = &map.canvas.theme_variables;
     let mut pairs: Vec<PortalPairData> = Vec::new();
     let mut pair_channel: usize = 1;
 
-    for portal in &map.portals {
-        let Some(node_a) = map.nodes.get(&portal.endpoint_a) else {
+    for edge in &map.edges {
+        if !is_portal_edge(edge) {
+            continue;
+        }
+        if !edge.visible {
+            continue;
+        }
+        let Some(node_a) = map.nodes.get(&edge.from_id) else {
             continue;
         };
-        let Some(node_b) = map.nodes.get(&portal.endpoint_b) else {
+        let Some(node_b) = map.nodes.get(&edge.to_id) else {
             continue;
         };
         if map.is_hidden_by_fold(node_a) || map.is_hidden_by_fold(node_b) {
             continue;
         }
 
-        let is_selected = selected_portal.map_or(false, |(l, a, b)| {
-            l == portal.label && a == portal.endpoint_a && b == portal.endpoint_b
+        let edge_key = EdgeKey::from_edge(edge);
+        let is_selected = selected_edge.map_or(false, |(f, t, ty)| {
+            f == edge.from_id && t == edge.to_id && ty == edge.edge_type
         });
-        let preview_for_this_portal: Option<&str> = color_preview.and_then(|p| {
-            if p.label == portal.label
-                && p.endpoint_a == portal.endpoint_a
-                && p.endpoint_b == portal.endpoint_b
-            {
+        let preview_for_this_edge: Option<&str> = color_preview.and_then(|p| {
+            if *p.edge_key == edge_key {
                 Some(p.color)
             } else {
                 None
             }
         });
-        let raw_color: &str = if let Some(p) = preview_for_this_portal {
-            p
+        let raw_color_override: Option<&str> = if let Some(p) = preview_for_this_edge {
+            Some(p)
         } else if is_selected {
-            SELECTION_HIGHLIGHT_HEX
+            Some(SELECTION_HIGHLIGHT_HEX)
         } else {
-            portal.color.as_str()
+            None
         };
-        let color_hex = color::resolve_var(raw_color, vars);
-        let color_rgba =
-            color::hex_to_rgba_safe(color_hex, [0.92, 0.92, 0.92, 1.0]);
+        let style = resolve_portal_style(edge, &map.canvas, raw_color_override);
+        let color_rgba = color::hex_to_rgba_safe(&style.color, [0.92, 0.92, 0.92, 1.0]);
 
-        let identity: PortalIdentity = (
-            portal.label.clone(),
-            portal.endpoint_a.clone(),
-            portal.endpoint_b.clone(),
-        );
+        let make_endpoint =
+            |slot: usize, endpoint: &MindNode| -> (usize, GlyphArea, (Vec2, Vec2), String) {
+                let (ox, oy) = offsets.get(&endpoint.id).copied().unwrap_or((0.0, 0.0));
+                let node_x = endpoint.position.x as f32 + ox;
+                let node_y = endpoint.position.y as f32 + oy;
+                let node_w = endpoint.size.width as f32;
 
-        let make_endpoint = |slot: usize, endpoint: &MindNode| -> (usize, GlyphArea, (Vec2, Vec2), String) {
-            let (ox, oy) = offsets.get(&endpoint.id).copied().unwrap_or((0.0, 0.0));
-            let node_x = endpoint.position.x as f32 + ox;
-            let node_y = endpoint.position.y as f32 + oy;
-            let node_w = endpoint.size.width as f32;
+                let bounds_w = style.font_size_pt * 1.4;
+                let bounds_h = style.font_size_pt * 1.4;
+                let top_left = Vec2::new(
+                    node_x + node_w - bounds_w * 0.9,
+                    node_y - bounds_h - 8.0,
+                );
 
-            let bounds_w = portal.font_size_pt * 1.4;
-            let bounds_h = portal.font_size_pt * 1.4;
-            let top_left = Vec2::new(
-                node_x + node_w - bounds_w * 0.9,
-                node_y - bounds_h - 8.0,
-            );
+                let mut area = GlyphArea::new_with_str(
+                    &style.glyph,
+                    style.font_size_pt,
+                    style.font_size_pt,
+                    top_left,
+                    Vec2::new(bounds_w, bounds_h),
+                );
+                let cluster_count =
+                    crate::util::grapheme_chad::count_grapheme_clusters(&style.glyph);
+                if cluster_count > 0 {
+                    let mut regions = ColorFontRegions::new_empty();
+                    regions.submit_region(ColorFontRegion::new(
+                        Range::new(0, cluster_count),
+                        None,
+                        Some(color_rgba),
+                    ));
+                    area.regions = regions;
+                }
 
-            let mut area = GlyphArea::new_with_str(
-                &portal.glyph,
-                portal.font_size_pt,
-                portal.font_size_pt,
-                top_left,
-                Vec2::new(bounds_w, bounds_h),
-            );
-            let cluster_count =
-                crate::util::grapheme_chad::count_grapheme_clusters(&portal.glyph);
-            if cluster_count > 0 {
-                let mut regions = ColorFontRegions::new_empty();
-                regions.submit_region(ColorFontRegion::new(
-                    Range::new(0, cluster_count),
-                    None,
-                    Some(color_rgba),
-                ));
-                area.regions = regions;
-            }
-
-            let max = top_left + Vec2::new(bounds_w, bounds_h);
-            (slot, area, (top_left, max), endpoint.id.clone())
-        };
+                let max = top_left + Vec2::new(bounds_w, bounds_h);
+                (slot, area, (top_left, max), endpoint.id.clone())
+            };
 
         pairs.push(PortalPairData {
-            identity,
+            identity: edge_key,
             pair_channel,
             endpoints: [make_endpoint(1, node_a), make_endpoint(2, node_b)],
         });
@@ -184,9 +181,9 @@ pub fn portal_pair_data(
 /// Identity sequence for a slice of [`PortalPairData`]. Compared
 /// element-wise against a cached sequence to decide whether the
 /// in-place [`build_portal_mutator_tree`] path is sound — if the
-/// sequences disagree, a portal was added, removed, or reordered
-/// (or an endpoint folded), and the caller must fall back to
-/// [`build_portal_tree`] to rebuild the arena.
+/// sequences disagree, a portal-mode edge was added, removed, or
+/// reordered (or an endpoint folded), and the caller must fall back
+/// to [`build_portal_tree`] to rebuild the arena.
 pub fn portal_identity_sequence(pairs: &[PortalPairData]) -> Vec<PortalIdentity> {
     pairs.iter().map(|p| p.identity.clone()).collect()
 }
@@ -197,30 +194,30 @@ pub fn portal_identity_sequence(pairs: &[PortalPairData]) -> Vec<PortalIdentity>
 ///
 /// ```text
 /// Void (root)
-/// ├── Void (per portal pair — channel = pair index, 1-based)
+/// ├── Void (per portal-mode edge — channel = visible-portal index, 1-based)
 /// │   ├── GlyphArea (endpoint A marker, channel = 1)
 /// │   └── GlyphArea (endpoint B marker, channel = 2)
 /// ├── Void (next pair) ...
 /// ```
 ///
-/// Pairs are emitted in `MindMap.portals` order (which is a
-/// `Vec`, deterministic). Markers attached to folded nodes are
-/// skipped, mirroring `scene_builder::build_scene`.
+/// Pairs are emitted in `MindMap.edges` order filtered to portal
+/// mode (which is a `Vec`, deterministic). Markers attached to
+/// folded nodes are skipped, mirroring `scene_builder::build_scene`.
 ///
 /// # Costs
 ///
-/// O(visible portal-pairs × 2). Allocates one tree arena plus
-/// the auxiliary `hitboxes` HashMap. Internally calls
+/// O(portal-mode edges × 2). Allocates one tree arena plus the
+/// auxiliary `hitboxes` HashMap. Internally calls
 /// [`portal_pair_data`] — both this initial-build path and the
 /// in-place [`build_portal_mutator_tree`] path share that helper
 /// so they cannot drift.
 pub fn build_portal_tree(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
-    selected_portal: Option<SelectedPortalRef>,
+    selected_edge: Option<SelectedEdgeRef>,
     color_preview: Option<PortalColorPreviewRef>,
 ) -> PortalTree {
-    let pairs = portal_pair_data(map, offsets, selected_portal, color_preview);
+    let pairs = portal_pair_data(map, offsets, selected_edge, color_preview);
     build_portal_tree_from_pairs(&pairs)
 }
 
@@ -228,11 +225,10 @@ pub fn build_portal_tree(
 /// pair data. Use this when the caller already called
 /// [`portal_pair_data`] for the dispatch check between full-rebuild
 /// and the in-place [`build_portal_mutator_tree_from_pairs`] path —
-/// avoids re-walking `MindMap.portals` twice per frame.
+/// avoids re-walking `MindMap.edges` twice per frame.
 pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)> =
-        HashMap::new();
+    let mut hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
     // `unique_id` (the second arg to the `_with_id` constructors) is
     // monotonically increasing per element across the whole tree;
     // it's a debug / hit-test affordance independent of the channel
@@ -273,7 +269,7 @@ pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
 /// in-place path).
 pub struct PortalMutator {
     pub mutator: crate::gfx_structs::tree::MutatorTree<GfxMutator>,
-    pub hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)>,
+    pub hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
 }
 
 /// Build a [`MutatorTree`](crate::gfx_structs::tree::MutatorTree)
@@ -297,10 +293,10 @@ pub struct PortalMutator {
 pub fn build_portal_mutator_tree(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
-    selected_portal: Option<SelectedPortalRef>,
+    selected_edge: Option<SelectedEdgeRef>,
     color_preview: Option<PortalColorPreviewRef>,
 ) -> PortalMutator {
-    let pairs = portal_pair_data(map, offsets, selected_portal, color_preview);
+    let pairs = portal_pair_data(map, offsets, selected_edge, color_preview);
     build_portal_mutator_tree_from_pairs(&pairs)
 }
 
@@ -315,8 +311,7 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
     use crate::gfx_structs::tree::MutatorTree;
 
     let mut mt: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::new_void(0));
-    let mut hitboxes: HashMap<((String, String, String), String), (Vec2, Vec2)> =
-        HashMap::new();
+    let mut hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
 
     for pair in pairs {
         let pair_node = mt.arena.new_node(GfxMutator::new_void(pair.pair_channel));
@@ -347,4 +342,3 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
 
     PortalMutator { mutator: mt, hitboxes }
 }
-

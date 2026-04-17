@@ -6,6 +6,9 @@ mod cleanup;
 mod enums;
 mod ids;
 mod palettes;
+mod portals;
+
+pub use portals::convert_portals;
 
 use serde_json::Value;
 use std::path::Path;

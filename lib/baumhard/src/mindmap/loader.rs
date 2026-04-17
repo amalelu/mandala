@@ -9,7 +9,24 @@ pub fn load_from_file(path: &Path) -> Result<MindMap, String> {
 }
 
 pub fn load_from_str(json: &str) -> Result<MindMap, String> {
-    serde_json::from_str(json)
+    // Pre-refactor maps stored portals in a separate `portals[]` array.
+    // Post-refactor portals are edges with `display_mode = "portal"`,
+    // and the `portals` field no longer exists on `MindMap`. Reject
+    // legacy files with a clear pointer to `maptool convert --portals`
+    // so a stale file doesn't silently drop its portals — serde would
+    // otherwise ignore the unknown field.
+    let raw: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| format!("Failed to parse mindmap JSON: {}", e))?;
+    if let Some(arr) = raw.get("portals").and_then(|p| p.as_array()) {
+        if !arr.is_empty() {
+            return Err(
+                "legacy `portals` field present; run `maptool convert --portals <file>` \
+                 to migrate to portal-mode edges"
+                    .to_string(),
+            );
+        }
+    }
+    serde_json::from_value(raw)
         .map_err(|e| format!("Failed to parse mindmap JSON: {}", e))
 }
 

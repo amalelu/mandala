@@ -1,13 +1,13 @@
 //! Data structures pulled out of the pre-split `document.rs`:
 //! the animation runtime record, the ref types (`EdgeRef`,
-//! `PortalRef`, `ReparentUndoData`), the selection state enum,
-//! the reparent-highlight constants, and `HIGHLIGHT_COLOR`.
+//! `ReparentUndoData`), the selection state enum, the
+//! reparent-highlight constants, and `HIGHLIGHT_COLOR`.
 //! No methods on `MindMapDocument` live here — those are
 //! sharded across the other submodules.
 
 use baumhard::mindmap::animation::AnimationTiming;
 use baumhard::mindmap::custom_mutation::CustomMutation;
-use baumhard::mindmap::model::{MindEdge, MindNode, PortalPair};
+use baumhard::mindmap::model::{MindEdge, MindNode};
 
 /// Selection highlight color: bright cyan [R, G, B, A]
 pub const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
@@ -95,62 +95,17 @@ impl EdgeRef {
     }
 }
 
-/// Session 6E: stable identity of a portal pair. Mirrors `EdgeRef` —
-/// portals have no numeric id, but the auto-assigned `label` plus the
-/// two endpoint node ids form a unique triple within a single
-/// `MindMap`. `PortalRef` is the document-layer form; the rendering
-/// scene builder uses a parallel `scene_builder::PortalRefKey` type
-/// so it can own the triple without depending on the application
-/// layer.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PortalRef {
-    pub label: String,
-    pub endpoint_a: String,
-    pub endpoint_b: String,
-}
-
-impl PortalRef {
-    pub fn new(
-        label: impl Into<String>,
-        endpoint_a: impl Into<String>,
-        endpoint_b: impl Into<String>,
-    ) -> Self {
-        Self {
-            label: label.into(),
-            endpoint_a: endpoint_a.into(),
-            endpoint_b: endpoint_b.into(),
-        }
-    }
-
-    /// Returns true if this ref identifies the given `PortalPair`.
-    pub fn matches(&self, portal: &PortalPair) -> bool {
-        self.label == portal.label
-            && self.endpoint_a == portal.endpoint_a
-            && self.endpoint_b == portal.endpoint_b
-    }
-
-    pub fn from_portal(portal: &PortalPair) -> Self {
-        Self {
-            label: portal.label.clone(),
-            endpoint_a: portal.endpoint_a.clone(),
-            endpoint_b: portal.endpoint_b.clone(),
-        }
-    }
-}
-
-/// Tracks what is currently selected in the document. Node, edge,
-/// and portal selection are mutually exclusive — selecting one kind
-/// clears any prior selection of the others.
+/// Tracks what is currently selected in the document. Node and
+/// edge selection are mutually exclusive — selecting one kind clears
+/// any prior selection of the other. Portal-mode edges use the
+/// `Edge` variant; there is no separate portal selection state
+/// because a portal is a render form, not a distinct entity.
 #[derive(Clone, Debug)]
 pub enum SelectionState {
     None,
     Single(String),
     Multi(Vec<String>),
     Edge(EdgeRef),
-    /// Session 6E: a portal pair is currently selected. The renderer
-    /// draws both of its marker glyphs in the cyan highlight color, and
-    /// Delete/Ctrl+Z target this portal.
-    Portal(PortalRef),
 }
 
 impl SelectionState {
@@ -160,7 +115,6 @@ impl SelectionState {
             SelectionState::Single(id) => id == node_id,
             SelectionState::Multi(ids) => ids.contains(&node_id.to_string()),
             SelectionState::Edge(_) => false,
-            SelectionState::Portal(_) => false,
         }
     }
 
@@ -170,7 +124,6 @@ impl SelectionState {
             SelectionState::Single(id) => vec![id.as_str()],
             SelectionState::Multi(ids) => ids.iter().map(|s| s.as_str()).collect(),
             SelectionState::Edge(_) => vec![],
-            SelectionState::Portal(_) => vec![],
         }
     }
 
@@ -178,14 +131,6 @@ impl SelectionState {
     pub fn selected_edge(&self) -> Option<&EdgeRef> {
         match self {
             SelectionState::Edge(e) => Some(e),
-            _ => None,
-        }
-    }
-
-    /// Session 6E: returns the selected portal pair, if any.
-    pub fn selected_portal(&self) -> Option<&PortalRef> {
-        match self {
-            SelectionState::Portal(p) => Some(p),
             _ => None,
         }
     }

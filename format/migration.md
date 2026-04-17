@@ -11,7 +11,24 @@ Earlier development iterations used a miMind-derived format with:
 Mandala no longer reads that format. A one-shot migration tool converts
 legacy files to the current format.
 
-## The command
+## Also: migrating portals into edges
+
+An earlier revision stored portals in a separate top-level
+`portals[]` array. That parallel hierarchy has been folded into the
+`edges[]` array — portals are now edges with
+`display_mode = "portal"`. The current loader refuses to read a
+file that still carries a non-empty `portals[]`; migrate with:
+
+```
+maptool convert --portals <input.json> <output.json>
+```
+
+Input and output may be the same path (the read completes before
+the write begins). Each legacy `PortalPair` becomes a `MindEdge`
+with `edge_type = "cross_link"`, `display_mode = "portal"`, and the
+original glyph / color / font carried into `glyph_connection`.
+
+## The legacy-format command
 
 ```
 maptool convert --legacy <input.json> <output.json>
@@ -24,8 +41,8 @@ the current format. The input is never modified.
 
 1. **Assigns Dewey-decimal IDs** by walking the tree (using `parent_id` +
    the old `index` field for sibling order). Rewrites every reference —
-   edge `from_id`/`to_id`, portal `endpoint_a`/`endpoint_b`, and the
-   HashMap keys.
+   edge `from_id`/`to_id` (covers both line-mode and portal-mode edges;
+   post-refactor portals live in the edges array) and the HashMap keys.
 2. **Converts integer enums to named strings** for `shape_type` →
    `shape`, `layout.type`, `layout.direction`, `line_style`,
    `anchor_from`, `anchor_to`. Unknown integer values fall back to

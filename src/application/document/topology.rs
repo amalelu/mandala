@@ -8,7 +8,7 @@ use glam::Vec2;
 use baumhard::mindmap::model::{MindEdge, Position};
 
 use super::defaults::{default_cross_link_edge, default_orphan_node, default_parent_child_edge};
-use super::types::{EdgeRef, PortalRef, ReparentUndoData, SelectionState};
+use super::types::{EdgeRef, ReparentUndoData, SelectionState};
 use super::undo_action::UndoAction;
 use super::MindMapDocument;
 
@@ -106,13 +106,6 @@ impl MindMapDocument {
             }
         }
 
-        // Update portal references.
-        for portal in &mut self.mindmap.portals {
-            for (old, new) in &renames {
-                if portal.endpoint_a == *old { portal.endpoint_a = new.clone(); }
-                if portal.endpoint_b == *old { portal.endpoint_b = new.clone(); }
-            }
-        }
     }
 
     /// Create a new unattached (orphan) node at the given canvas position.
@@ -157,17 +150,18 @@ impl MindMapDocument {
         true
     }
 
-    /// Delete whatever is currently selected.
+    /// Delete whatever is currently selected. Edge deletion covers
+    /// both line-mode and portal-mode edges — they're the same entity
+    /// under `display_mode`, so one `DeleteEdge` undo variant handles
+    /// both forms.
     pub fn apply_delete_selection(&mut self) -> bool {
         enum DelKind {
             Edge(EdgeRef),
-            Portal(PortalRef),
             Node(String),
             Nodes(Vec<String>),
         }
         let kind = match &self.selection {
             SelectionState::Edge(e) => Some(DelKind::Edge(e.clone())),
-            SelectionState::Portal(p) => Some(DelKind::Portal(p.clone())),
             SelectionState::Single(id) => Some(DelKind::Node(id.clone())),
             SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
             SelectionState::None => None,
@@ -178,12 +172,6 @@ impl MindMapDocument {
                     self.undo_stack.push(UndoAction::DeleteEdge { index, edge });
                     self.selection = SelectionState::None;
                     self.dirty = true;
-                    return true;
-                }
-            }
-            Some(DelKind::Portal(pref)) => {
-                if self.apply_delete_portal(&pref).is_some() {
-                    self.selection = SelectionState::None;
                     return true;
                 }
             }

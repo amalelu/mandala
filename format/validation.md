@@ -36,12 +36,10 @@ depends on which code path runs, a reliability nightmare.
 ### References
 
 - Every edge's `from_id` and `to_id` exist in `nodes`
-- Every portal's `endpoint_a` and `endpoint_b` exist in `nodes`
-- Portal labels are unique within the map
 
 **Why**: dangling references silently disappear at render time — the
-connection or portal just doesn't draw, with no indication that something
-was lost.
+connection just doesn't draw, with no indication that something was
+lost. Applies uniformly to line-mode and portal-mode edges.
 
 ### Palettes
 
@@ -63,6 +61,7 @@ any level.
 - `edge.anchor_from` and `anchor_to` are one of `"auto"`, `"top"`,
   `"right"`, `"bottom"`, `"left"`
 - `edge.type` is one of `"parent_child"`, `"cross_link"`
+- `edge.display_mode` (if present) is one of `"line"`, `"portal"`
 
 See [enums.md](./enums.md) for the complete lists.
 

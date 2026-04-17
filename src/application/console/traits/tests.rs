@@ -51,7 +51,7 @@ fn test_outcome_applied_helper() {
 
 #[test]
 fn test_selection_targets_for_each_variant() {
-    use crate::application::document::{EdgeRef, PortalRef};
+    use crate::application::document::EdgeRef;
     assert!(selection_targets(&SelectionState::None).is_empty());
 
     let ids = vec!["a".to_string(), "b".to_string()];
@@ -61,14 +61,6 @@ fn test_selection_targets_for_each_variant() {
     let er = EdgeRef::new("a", "b", "cross_link");
     let out = selection_targets(&SelectionState::Edge(er));
     assert!(matches!(out.as_slice(), [TargetId::Edge(_)]));
-
-    let pr = PortalRef {
-        label: "A".into(),
-        endpoint_a: "x".into(),
-        endpoint_b: "y".into(),
-    };
-    let out = selection_targets(&SelectionState::Portal(pr));
-    assert!(matches!(out.as_slice(), [TargetId::Portal(_)]));
 }
 
 #[test]

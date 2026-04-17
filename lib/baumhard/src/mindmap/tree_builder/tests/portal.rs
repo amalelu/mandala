@@ -1,10 +1,11 @@
-//! Portal tree builder tests — marker emission, fold filtering, selection highlight, ascending channels, mutator round-trip, identity sequence.
+//! Portal tree builder tests — marker emission, fold filtering, selection highlight, ascending channels, mutator round-trip, identity sequence. Edges with `display_mode = "portal"` drive the portal pass.
 
 use super::fixtures::*;
 use super::super::*;
+use crate::mindmap::scene_cache::EdgeKey;
 
 #[test]
-fn portal_tree_emits_two_markers_per_pair() {
+fn portal_tree_emits_two_markers_per_edge() {
     let mut map = synthetic_map(
         vec![
             synthetic_node("a", None, 0.0, 0.0),
@@ -12,7 +13,7 @@ fn portal_tree_emits_two_markers_per_pair() {
         ],
         vec![],
     );
-    map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+    map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
     let result = build_portal_tree(&map, &HashMap::new(), None, None);
     let pairs: Vec<NodeId> = result.tree.root.children(&result.tree.arena).collect();
@@ -20,12 +21,12 @@ fn portal_tree_emits_two_markers_per_pair() {
 
     let markers: Vec<NodeId> = pairs[0].children(&result.tree.arena).collect();
     assert_eq!(markers.len(), 2);
-    // Hitboxes: one entry per (pair, endpoint).
+    // Hitboxes: one entry per (edge, endpoint).
     assert_eq!(result.hitboxes.len(), 2);
 }
 
 #[test]
-fn portal_tree_skips_pair_with_folded_endpoint() {
+fn portal_tree_skips_edge_with_folded_endpoint() {
     let mut map = synthetic_map(
         vec![
             synthetic_node("parent", None, 0.0, 0.0),
@@ -35,14 +36,36 @@ fn portal_tree_skips_pair_with_folded_endpoint() {
         vec![],
     );
     map.nodes.get_mut("parent").unwrap().folded = true;
-    // Pair endpoints: hidden child + visible other. Should be
+    // Portal endpoints: hidden child + visible other. Should be
     // skipped wholesale because is_hidden_by_fold(child) is true.
-    map.portals
-        .push(synthetic_portal("Y", "child", "other", "#00ff00"));
+    map.edges
+        .push(synthetic_portal_edge("child", "other", "#00ff00"));
     let result = build_portal_tree(&map, &HashMap::new(), None, None);
     assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
     assert!(result.hitboxes.is_empty());
 }
+
+#[test]
+fn portal_tree_skips_line_mode_edges() {
+    // A `cross_link` edge without portal display_mode must render
+    // through the connection pipeline, not the portal pass. The
+    // portal tree should ignore it entirely.
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 200.0, 0.0),
+        ],
+        vec![],
+    );
+    let mut line_edge = synthetic_portal_edge("a", "b", "#ff0000");
+    line_edge.display_mode = None;
+    map.edges.push(line_edge);
+
+    let result = build_portal_tree(&map, &HashMap::new(), None, None);
+    assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
+    assert!(result.hitboxes.is_empty());
+}
+
 #[test]
 fn portal_tree_selection_overrides_color() {
     let mut map = synthetic_map(
@@ -52,9 +75,9 @@ fn portal_tree_selection_overrides_color() {
         ],
         vec![],
     );
-    map.portals.push(synthetic_portal("Z", "a", "b", "#ff0000"));
+    map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
-    let selected = Some(("Z", "a", "b"));
+    let selected = Some(("a", "b", "cross_link"));
     let result = build_portal_tree(&map, &HashMap::new(), selected, None);
 
     // Each marker's GlyphArea should carry the cyan color, not red.
@@ -93,8 +116,8 @@ fn portal_pair_channels_are_strictly_ascending() {
         ],
         vec![],
     );
-    map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
-    map.portals.push(synthetic_portal("Y", "b", "c", "#00ff00"));
+    map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
+    map.edges.push(synthetic_portal_edge("b", "c", "#00ff00"));
 
     let pairs = portal_pair_data(&map, &HashMap::new(), None, None);
     assert_eq!(pairs.len(), 2);
@@ -107,12 +130,11 @@ fn portal_pair_channels_are_strictly_ascending() {
 }
 
 /// Round-trip: building a tree at state A and then applying the
-/// Applying the mutator computed from state B to a tree built
-/// from state A must produce a tree whose per-channel GlyphAreas
-/// match what `build_portal_tree(B)` would produce directly.
-/// Pins the canonical §B2 "mutation, not rebuild" promise — the
-/// in-place path's observable output is identical to a full
-/// rebuild's.
+/// mutator computed from state B to a tree built from state A must
+/// produce a tree whose per-channel GlyphAreas match what
+/// `build_portal_tree(B)` would produce directly. Pins the
+/// canonical §B2 "mutation, not rebuild" promise — the in-place
+/// path's observable output is identical to a full rebuild's.
 #[test]
 fn portal_mutator_round_trip_matches_full_rebuild() {
     use crate::core::primitives::Applicable;
@@ -123,7 +145,7 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
         ],
         vec![],
     );
-    map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
+    map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
     // State A: no offsets, no selection.
     let mut tree_a = build_portal_tree(&map, &HashMap::new(), None, None).tree;
@@ -131,7 +153,7 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
     // State B: drag offset on `b`, plus selection.
     let mut offsets = HashMap::new();
     offsets.insert("b".to_string(), (10.0, -5.0));
-    let selected = Some(("X", "a", "b"));
+    let selected = Some(("a", "b", "cross_link"));
 
     let mutator = build_portal_mutator_tree(&map, &offsets, selected, None);
     mutator.mutator.apply_to(&mut tree_a);
@@ -162,7 +184,7 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
     }
 }
 
-/// Folding a node drops its outgoing portals from
+/// Folding a node drops its outgoing portal-mode edges from
 /// `portal_identity_sequence` so the dispatcher in
 /// `update_portal_tree` takes the full-rebuild path instead of the
 /// in-place mutator path (the mutator assumes a fixed slot count).
@@ -177,16 +199,16 @@ fn portal_identity_sequence_drops_folded_pairs() {
         ],
         vec![],
     );
-    map.portals.push(synthetic_portal("X", "a", "b", "#ff0000"));
-    map.portals
-        .push(synthetic_portal("Y", "b", "child", "#00ff00"));
+    map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
+    map.edges
+        .push(synthetic_portal_edge("b", "child", "#00ff00"));
 
     let pairs_before = portal_pair_data(&map, &HashMap::new(), None, None);
     assert_eq!(
         portal_identity_sequence(&pairs_before),
         vec![
-            ("X".into(), "a".into(), "b".into()),
-            ("Y".into(), "b".into(), "child".into()),
+            EdgeKey::new("a", "b", "cross_link"),
+            EdgeKey::new("b", "child", "cross_link"),
         ]
     );
 
@@ -194,7 +216,7 @@ fn portal_identity_sequence_drops_folded_pairs() {
     let pairs_after = portal_pair_data(&map, &HashMap::new(), None, None);
     assert_eq!(
         portal_identity_sequence(&pairs_after),
-        vec![("X".into(), "a".into(), "b".into())]
+        vec![EdgeKey::new("a", "b", "cross_link")]
     );
 }
 
@@ -216,9 +238,12 @@ fn portal_marker_region_sized_by_grapheme_cluster_count_not_codepoints() {
         ],
         vec![],
     );
-    let mut portal = synthetic_portal("X", "a", "b", "#ff0000");
-    portal.glyph = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".into(); // 👨‍👩‍👧
-    map.portals.push(portal);
+    let mut edge = synthetic_portal_edge("a", "b", "#ff0000");
+    // Override the glyph body with a ZWJ sequence emoji.
+    if let Some(cfg) = edge.glyph_connection.as_mut() {
+        cfg.body = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".into(); // 👨‍👩‍👧
+    }
+    map.edges.push(edge);
 
     let result = build_portal_tree(&map, &HashMap::new(), None, None);
     let pair = result.tree.root.children(&result.tree.arena).next().unwrap();

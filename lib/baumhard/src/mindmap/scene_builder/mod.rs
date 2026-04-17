@@ -18,7 +18,7 @@
 //!   and the `point_inside_any_node` clip predicate.
 //! - [`label`] — connection labels with the inline-edit override
 //!   + synthesize-if-empty pass.
-//! - [`portal`] — two markers per visible `PortalPair`.
+//! - [`portal`] — two markers per edge with `display_mode = "portal"`.
 //! - [`edge_handle`] — `build_edge_handles` helper (re-exported
 //!   for external callers that hit-test handles without building
 //!   a full scene).
@@ -46,11 +46,14 @@ pub struct EdgeColorPreview<'a> {
 }
 
 /// Portal equivalent of `EdgeColorPreview`. Matched against the
-/// portal's `(label, endpoint_a, endpoint_b)` triple via
-/// `PortalRefKey`.
+/// portal-mode edge's `EdgeKey`. A portal-mode edge and a line-mode
+/// edge with identical endpoints and `edge_type` would share the
+/// same key; since `display_mode` is not part of `EdgeKey`, that
+/// collision never occurs in practice — portal and line edges with
+/// matching endpoints are distinct by `edge_type`.
 #[derive(Debug, Clone, Copy)]
 pub struct PortalColorPreview<'a> {
-    pub portal_key: &'a PortalRefKey,
+    pub edge_key: &'a EdgeKey,
     pub color: &'a str,
 }
 
@@ -115,22 +118,22 @@ pub struct ConnectionElement {
     pub color: String,
 }
 
-/// Session 6E: a portal marker — one half of a `PortalPair` rendered
-/// as a single glyph above the top-right corner of one of its two
-/// endpoint nodes. Each `PortalPair` emits two `PortalElement`s per
-/// scene build (one per endpoint).
+/// A portal marker — one half of a portal-mode edge rendered as a
+/// single glyph above the top-right corner of one of its two endpoint
+/// nodes. Each edge with `display_mode = "portal"` emits two
+/// `PortalElement`s per scene build (one per endpoint).
 ///
 /// Like `ConnectionLabelElement`, portal markers are cheap to rebuild
 /// from scratch every frame (≤ two glyphs per portal, portal counts
 /// stay in the dozens) so there is no per-portal cache.
 pub struct PortalElement {
-    /// Stable identity of the owning pair — used by the renderer's
-    /// keyed buffer map so selection highlighting and hit-testing
-    /// can find the portal from an `app.rs`-side `PortalRef`.
-    pub portal_ref: PortalRefKey,
+    /// Stable identity of the owning edge — the same `EdgeKey` the
+    /// connection pipeline would use for this edge's line form, so
+    /// selection, color picker, and hit-testing share one key space.
+    pub edge_key: EdgeKey,
     /// Which of the two endpoints this marker is drawn next to.
-    /// The renderer keys its buffer map by `(portal_ref, endpoint_node_id)`
-    /// so the two markers of one pair are stored separately.
+    /// The renderer keys its buffer map by `(edge_key, endpoint_node_id)`
+    /// so the two markers of one edge are stored separately.
     pub endpoint_node_id: String,
     /// The visible glyph string, e.g. `"◈"`.
     pub glyph: String,
@@ -140,52 +143,13 @@ pub struct PortalElement {
     pub bounds: (f32, f32),
     /// Resolved color (hex) — `var(--name)` references already expanded
     /// through the theme variable map. Overridden to the cyan highlight
-    /// color at emission time when the portal is selected.
+    /// color at emission time when the edge is selected.
     pub color: String,
     /// Optional font family override. `None` falls back to the
     /// renderer's default font.
     pub font: Option<String>,
     /// Font size in points.
     pub font_size_pt: f32,
-}
-
-/// Stable identity of a portal pair — `(label, endpoint_a, endpoint_b)`.
-/// Mirrors the `EdgeKey` role for edges: portals have no numeric id,
-/// but the auto-assigned label plus the two endpoint node ids form a
-/// unique triple within a single `MindMap`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PortalRefKey {
-    pub label: String,
-    pub endpoint_a: String,
-    pub endpoint_b: String,
-}
-
-impl PortalRefKey {
-    pub fn new(
-        label: impl Into<String>,
-        endpoint_a: impl Into<String>,
-        endpoint_b: impl Into<String>,
-    ) -> Self {
-        Self {
-            label: label.into(),
-            endpoint_a: endpoint_a.into(),
-            endpoint_b: endpoint_b.into(),
-        }
-    }
-
-    pub fn from_portal(p: &crate::mindmap::model::PortalPair) -> Self {
-        Self {
-            label: p.label.clone(),
-            endpoint_a: p.endpoint_a.clone(),
-            endpoint_b: p.endpoint_b.clone(),
-        }
-    }
-
-    pub fn matches(&self, p: &crate::mindmap::model::PortalPair) -> bool {
-        self.label == p.label
-            && self.endpoint_a == p.endpoint_a
-            && self.endpoint_b == p.endpoint_b
-    }
 }
 
 /// Session 6D: a text label attached to a connection edge. Rendered
@@ -273,7 +237,7 @@ mod connection;
 mod edge_handle;
 mod label;
 mod node_pass;
-mod portal;
+pub(crate) mod portal;
 
 #[cfg(test)]
 mod tests;

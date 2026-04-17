@@ -43,6 +43,11 @@ pub(super) fn build_label_elements(
         if !edge.visible {
             continue;
         }
+        // Portal-mode edges have no path, so no label position along
+        // a path — skip them here.
+        if crate::mindmap::model::is_portal_edge(edge) {
+            continue;
+        }
         let from_node = match map.nodes.get(&edge.from_id) {
             Some(n) => n,
             None => continue,

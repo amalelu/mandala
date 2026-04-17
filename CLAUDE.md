@@ -88,6 +88,11 @@ what works where.
   full keyboard flow (cursor, delete, insert, multi-line), click-outside
   to commit, Esc to cancel. Shared implementation under
   `src/application/app/text_edit/`.
+- Portal-mode edges (`display_mode = "portal"`): two glyph markers,
+  one per endpoint. Single-click a marker selects the owning edge;
+  **double-click pans the camera to the opposite endpoint**. Dispatch
+  wired in both `event_mouse_click.rs` (native) and `run_wasm.rs` via
+  the shared `ClickHit::PortalMarker` path.
 - Action dispatch for `Undo`, `CreateOrphanNode`, `OrphanSelection`,
   `DeleteSelection`, `EditSelection`, `EditSelectionClean`, `CancelMode`.
 - Keybind config loading (native: CLI arg + XDG; WASM: `?keybinds=…`

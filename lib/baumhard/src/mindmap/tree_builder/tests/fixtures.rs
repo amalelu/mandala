@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::mindmap::model::{
-    Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, PortalPair, Position, Size,
+    Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
+    DISPLAY_MODE_PORTAL, GlyphConnectionConfig,
 };
 
 pub(super) fn test_map_path() -> PathBuf {
@@ -65,7 +66,6 @@ pub(super) fn synthetic_map(nodes_vec: Vec<MindNode>, edges: Vec<MindEdge>) -> M
         nodes,
         edges,
         custom_mutations: vec![],
-        portals: vec![],
     }
 }
 
@@ -106,15 +106,31 @@ pub(super) fn mk_star_map(n: usize) -> MindMap {
 /// scaffold becomes the natural place to plug a wall-clock bench if
 /// needed later, and this test proves the builder is linearly
 
-pub(super) fn synthetic_portal(label: &str, a: &str, b: &str, color: &str) -> PortalPair {
-    PortalPair {
-        endpoint_a: a.into(),
-        endpoint_b: b.into(),
-        label: label.into(),
-        glyph: "◈".into(),
+/// Build a portal-mode edge from `a` to `b` with the given color.
+/// Mirrors the `synthetic_portal` helper that seeded the pre-refactor
+/// `PortalPair` fixtures — now returns a `MindEdge` with
+/// `display_mode = "portal"`, `glyph_connection.body = "◈"`, and the
+/// 16pt portal marker size.
+pub(super) fn synthetic_portal_edge(a: &str, b: &str, color: &str) -> MindEdge {
+    MindEdge {
+        from_id: a.into(),
+        to_id: b.into(),
+        edge_type: "cross_link".into(),
         color: color.into(),
-        font_size_pt: 16.0,
-        font: None,
+        width: 3,
+        line_style: "solid".into(),
+        visible: true,
+        label: None,
+        label_position_t: None,
+        anchor_from: "auto".into(),
+        anchor_to: "auto".into(),
+        control_points: vec![],
+        glyph_connection: Some(GlyphConnectionConfig {
+            body: "◈".into(),
+            font_size_pt: 16.0,
+            ..GlyphConnectionConfig::default()
+        }),
+        display_mode: Some(DISPLAY_MODE_PORTAL.into()),
     }
 }
 

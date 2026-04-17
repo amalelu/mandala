@@ -1,16 +1,18 @@
 //! What the picker is currently editing, and how to resolve / read
-//! the live color off the document for that target. Three target
-//! classes today — `Edge`, `Portal`, `Node{axis}` — each carried as
-//! a palette-to-picker handoff value (`ColorTarget`) and then as a
-//! resolved, stable handle (`PickerHandle`) once the picker is open.
+//! the live color off the document for that target. Two target
+//! classes today — `Edge` (covers both line-mode and portal-mode
+//! edges, since portals are a `display_mode` on the same entity)
+//! and `Node{axis}` — each carried as a palette-to-picker handoff
+//! value (`ColorTarget`) and then as a resolved, stable handle
+//! (`PickerHandle`) once the picker is open.
 
 use baumhard::util::color::{hex_to_hsv_safe, resolve_var};
 
-use crate::application::document::{EdgeRef, MindMapDocument, PortalRef};
+use crate::application::document::{EdgeRef, MindMapDocument};
 
 /// Which visual axis on a node the picker should write to when the
-/// target is a node. Edges / portals don't need this — they have one
-/// color field each.
+/// target is a node. Edges don't need this — they have one color
+/// field (plus an optional `glyph_connection.color` override).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeColorAxis {
     Bg,
@@ -25,27 +27,27 @@ pub enum NodeColorAxis {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColorTarget {
     Edge(EdgeRef),
-    Portal(PortalRef),
     Node { id: String, axis: NodeColorAxis },
 }
 
 /// Resolved handle carried inside `ColorPickerState::Open`. For
-/// edges and portals it indexes into the live `Vec`; for nodes it
-/// carries the id + axis directly. One enum instead of `kind +
-/// target_index` + a parallel optional id field.
+/// edges it indexes into the live `Vec`; for nodes it carries the
+/// id + axis directly. One enum instead of `kind + target_index` +
+/// a parallel optional id field.
 #[derive(Clone, Debug)]
 pub enum PickerHandle {
     Edge(usize),
-    Portal(usize),
     Node { id: String, axis: NodeColorAxis },
 }
 
 impl PickerHandle {
-    /// Short label for the picker title bar.
+    /// Short label for the picker title bar. Portal-mode edges and
+    /// line-mode edges both read as "edge" here — the display mode
+    /// is already visible in the canvas, so repeating it in the
+    /// picker chrome would be noise.
     pub fn label(&self) -> &'static str {
         match self {
             PickerHandle::Edge(_) => "edge",
-            PickerHandle::Portal(_) => "portal",
             PickerHandle::Node { .. } => "node",
         }
     }
@@ -53,19 +55,17 @@ impl PickerHandle {
     pub fn kind(&self) -> TargetKind {
         match self {
             PickerHandle::Edge(_) => TargetKind::Edge,
-            PickerHandle::Portal(_) => TargetKind::Portal,
             PickerHandle::Node { .. } => TargetKind::Node,
         }
     }
 }
 
 /// Coarse target kind for legacy call-sites that only need to
-/// distinguish edges / portals / nodes without caring about the
-/// concrete id or axis.
+/// distinguish edges / nodes without caring about the concrete id
+/// or axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetKind {
     Edge,
-    Portal,
     Node,
 }
 
@@ -74,7 +74,6 @@ impl TargetKind {
     pub fn label(&self) -> &'static str {
         match self {
             TargetKind::Edge => "edge",
-            TargetKind::Portal => "portal",
             TargetKind::Node => "node",
         }
     }
@@ -82,10 +81,10 @@ impl TargetKind {
 
 impl ColorTarget {
     /// Resolve the target ref to a concrete [`PickerHandle`]. Returns
-    /// `None` if the underlying edge / portal / node was deleted
-    /// between the open trigger and the picker-open call (should
-    /// never happen in practice because the modal holds the event
-    /// loop, but defensive).
+    /// `None` if the underlying edge / node was deleted between the
+    /// open trigger and the picker-open call (should never happen in
+    /// practice because the modal holds the event loop, but
+    /// defensive).
     pub fn resolve(self, doc: &MindMapDocument) -> Option<PickerHandle> {
         match self {
             ColorTarget::Edge(er) => doc
@@ -94,12 +93,6 @@ impl ColorTarget {
                 .iter()
                 .position(|e| er.matches(e))
                 .map(PickerHandle::Edge),
-            ColorTarget::Portal(pr) => doc
-                .mindmap
-                .portals
-                .iter()
-                .position(|p| pr.matches(p))
-                .map(PickerHandle::Portal),
             ColorTarget::Node { id, axis } => doc
                 .mindmap
                 .nodes
@@ -126,9 +119,6 @@ pub fn current_color_at(
                     .and_then(|gc| gc.color.clone())
                     .unwrap_or_else(|| e.color.clone()),
             )
-        }
-        PickerHandle::Portal(index) => {
-            doc.mindmap.portals.get(*index).map(|p| p.color.clone())
         }
         PickerHandle::Node { id, axis } => {
             let n = doc.mindmap.nodes.get(id)?;

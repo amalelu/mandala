@@ -146,22 +146,39 @@ pub(super) fn handle_mouse_input(
                     hit_test(canvas_pos, tree)
                 });
 
-                // Session 7A: double-click detection.
-                // If this press within the double-click
-                // window matches the previous one (same
-                // hit target, within time + distance),
-                // open the node text editor — double-click
-                // on a node edits it; on empty space (and
-                // no edge/portal selected) creates a new
-                // orphan and edits that.
+                // Double-click detection. If this press within the
+                // double-click window matches the previous one (same
+                // hit target, within time + distance), dispatch:
+                //  - Double-click on a node → open the text editor.
+                //  - Double-click on a portal marker → pan the camera
+                //    to the OTHER endpoint of the portal-mode edge.
+                //  - Double-click on empty space (and no edge
+                //    selected) → create a new orphan and edit it.
                 //
-                // Guard: if the editor is already open on
-                // the same hit target, DO NOT re-open it
-                // — that would silently discard the
-                // in-progress buffer. Let the press fall
-                // through; the corresponding release
+                // Guard: if the editor is already open on the same
+                // hit target, DO NOT re-open it — that would
+                // silently discard the in-progress buffer. Let the
+                // press fall through; the corresponding release
                 // will be swallowed as click-inside.
                 let now = now_ms();
+                // Resolve the "what was hit" used by double-click
+                // detection. Node hits beat portal hits (a node
+                // under a portal marker is the more common target);
+                // no hit at all is `Empty` — still meaningful for
+                // empty-canvas double-click.
+                let portal_hit = if hit_node.is_none() {
+                    renderer.hit_test_portal(canvas_pos)
+                } else {
+                    None
+                };
+                let click_hit: ClickHit = match (&hit_node, &portal_hit) {
+                    (Some(id), _) => ClickHit::Node(id.clone()),
+                    (None, Some((key, ep))) => ClickHit::PortalMarker {
+                        edge: key.clone(),
+                        endpoint: ep.clone(),
+                    },
+                    (None, None) => ClickHit::Empty,
+                };
                 let already_editing_same_target = text_edit_state
                     .node_id()
                     .map(|id| hit_node.as_deref() == Some(id))
@@ -169,60 +186,28 @@ pub(super) fn handle_mouse_input(
                 let is_dblclick = !already_editing_same_target
                     && last_click
                         .as_ref()
-                        .map(|prev| is_double_click(prev, now, cursor_pos, &hit_node))
+                        .map(|prev| is_double_click(prev, now, cursor_pos, &click_hit))
                         .unwrap_or(false);
                 if is_dblclick {
                     *last_click = None;
-                    if let Some(ref node_id) = hit_node {
-                        if let Some(doc) = document.as_mut() {
-                            let nid = node_id.clone();
-                            doc.selection = SelectionState::Single(nid.clone());
-                            // rebuild_all first so the
-                            // selection highlight color
-                            // regions are applied to the
-                            // tree. open_text_edit's
-                            // subsequent apply_text_edit_to_tree
-                            // only touches the Text field
-                            // of the target node's
-                            // GlyphArea (via
-                            // DeltaGlyphArea's selective
-                            // field application) so the
-                            // highlight regions survive
-                            // untouched. If you ever add
-                            // more fields to the caret
-                            // delta, revisit this.
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
-                            open_text_edit(
-                                &nid,
-                                false,
-                                doc,
-                                text_edit_state,
-                                mindmap_tree,
-                                app_scene,
-                                renderer,
-                            );
-                        }
-                        return;
-                    } else {
-                        // Empty space: only create an
-                        // orphan if no edge/portal was
-                        // selected (otherwise the user
-                        // was probably aiming at the
-                        // selected edge/portal).
-                        let allow_create = document
-                            .as_ref()
-                            .map(|d| !matches!(
-                                d.selection,
-                                SelectionState::Edge(_) | SelectionState::Portal(_)
-                            ))
-                            .unwrap_or(false);
-                        if allow_create {
+                    match &click_hit {
+                        ClickHit::Node(node_id) => {
                             if let Some(doc) = document.as_mut() {
-                                let new_id = doc.create_orphan_and_select(canvas_pos);
+                                let nid = node_id.clone();
+                                doc.selection = SelectionState::Single(nid.clone());
+                                // rebuild_all first so the selection
+                                // highlight color regions are
+                                // applied to the tree. open_text_edit's
+                                // subsequent apply_text_edit_to_tree
+                                // only touches the Text field of the
+                                // target node's GlyphArea (via
+                                // DeltaGlyphArea's selective field
+                                // application) so the highlight
+                                // regions survive untouched.
                                 rebuild_all(doc, mindmap_tree, app_scene, renderer);
                                 open_text_edit(
-                                    &new_id,
-                                    true,
+                                    &nid,
+                                    false,
                                     doc,
                                     text_edit_state,
                                     mindmap_tree,
@@ -232,12 +217,78 @@ pub(super) fn handle_mouse_input(
                             }
                             return;
                         }
+                        ClickHit::PortalMarker { edge, endpoint } => {
+                            // Portal double-click: pan the camera to
+                            // the node "on the other side" of the
+                            // portal-mode edge. The hit endpoint is
+                            // the node this marker sits above; the
+                            // opposite endpoint is the navigation
+                            // target.
+                            let other_id = if *endpoint == edge.from_id {
+                                edge.to_id.clone()
+                            } else {
+                                edge.from_id.clone()
+                            };
+                            if let Some(doc) = document.as_ref() {
+                                if let Some(node) = doc.mindmap.nodes.get(&other_id) {
+                                    let target = glam::Vec2::new(
+                                        node.position.x as f32
+                                            + node.size.width as f32 * 0.5,
+                                        node.position.y as f32
+                                            + node.size.height as f32 * 0.5,
+                                    );
+                                    renderer.set_camera_center(target);
+                                }
+                            }
+                            if let Some(doc) = document.as_mut() {
+                                // Keep the edge selected after the
+                                // jump so the user can cmd+. to
+                                // jump back (via undo on the
+                                // camera) or edit the portal
+                                // in-place via the console.
+                                doc.selection = SelectionState::Edge(
+                                    crate::application::document::EdgeRef::new(
+                                        &edge.from_id,
+                                        &edge.to_id,
+                                        &edge.edge_type,
+                                    ),
+                                );
+                                rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            }
+                            return;
+                        }
+                        ClickHit::Empty => {
+                            // Empty space: only create an orphan if
+                            // no edge was selected (otherwise the
+                            // user was probably aiming at the
+                            // selected edge).
+                            let allow_create = document
+                                .as_ref()
+                                .map(|d| !matches!(d.selection, SelectionState::Edge(_)))
+                                .unwrap_or(false);
+                            if allow_create {
+                                if let Some(doc) = document.as_mut() {
+                                    let new_id = doc.create_orphan_and_select(canvas_pos);
+                                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                                    open_text_edit(
+                                        &new_id,
+                                        true,
+                                        doc,
+                                        text_edit_state,
+                                        mindmap_tree,
+                                        app_scene,
+                                        renderer,
+                                    );
+                                }
+                                return;
+                            }
+                        }
                     }
                 }
                 *last_click = Some(LastClick {
                     time: now,
                     screen_pos: cursor_pos,
-                    hit: hit_node.clone(),
+                    hit: click_hit,
                 });
 
                 // If an edge is currently selected, check

@@ -158,7 +158,6 @@ mod tests {
             nodes: map_nodes,
             edges: Vec::new(),
             custom_mutations: Vec::new(),
-            portals: Vec::new(),
         }
     }
 

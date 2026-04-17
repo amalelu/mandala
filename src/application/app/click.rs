@@ -78,9 +78,7 @@ pub(super) fn handle_click(
             // Shift+click on an edge selection promotes the clicked node
             // to a fresh single selection (no edge multi-select).
             match &doc.selection {
-                SelectionState::None
-                | SelectionState::Edge(_)
-                | SelectionState::Portal(_) => {
+                SelectionState::None | SelectionState::Edge(_) => {
                     doc.selection = SelectionState::Single(id.clone());
                 }
                 SelectionState::Single(existing) => {
@@ -110,14 +108,19 @@ pub(super) fn handle_click(
             // Node miss — fall through: first try portal markers
             // (small glyphs floating above the top-right corner of
             // their endpoint nodes), then edge hit testing, then
-            // finally deselect.
+            // finally deselect. A portal-marker click selects its
+            // owning edge (as `SelectionState::Edge`); double-click
+            // is handled separately by the event loop and pans the
+            // camera to the opposite endpoint.
             let canvas_pos = renderer.screen_to_canvas(
                 cursor_pos.0 as f32, cursor_pos.1 as f32,
             );
-            if let Some(pkey) = renderer.hit_test_portal(canvas_pos) {
-                doc.selection = SelectionState::Portal(
-                    crate::application::document::PortalRef::new(
-                        pkey.label, pkey.endpoint_a, pkey.endpoint_b,
+            if let Some((edge_key, _endpoint)) = renderer.hit_test_portal(canvas_pos) {
+                doc.selection = SelectionState::Edge(
+                    crate::application::document::EdgeRef::new(
+                        edge_key.from_id,
+                        edge_key.to_id,
+                        edge_key.edge_type,
                     ),
                 );
             } else {

@@ -24,10 +24,20 @@ fn test_applicability_anchor_visible_with_edge() {
 }
 
 #[test]
-fn test_applicability_portal_always_true() {
-    let doc = load_test_doc();
+fn test_applicability_edge_requires_edge_or_two_nodes() {
+    // Portals are now edges; the standalone `portal` command went
+    // away and its verbs folded into `edge`. The `edge` command is
+    // applicable when either an edge is selected (for type /
+    // display_mode / reset kvs) or exactly two nodes are selected
+    // (for `edge portal` creation).
+    let mut doc = load_test_doc();
+    // With nothing selected, not applicable.
     let ctx = ConsoleContext::from_document(&doc);
-    let cmd = command_by_name("portal").unwrap();
+    let cmd = command_by_name("edge").unwrap();
+    assert!(!(cmd.applicable)(&ctx));
+    // With an edge selected, applicable.
+    let _ = select_first_edge(&mut doc);
+    let ctx = ConsoleContext::from_document(&doc);
     assert!((cmd.applicable)(&ctx));
 }
 

@@ -255,12 +255,6 @@ pub(in crate::application::app) fn seed_initial_preview(
                 doc.color_picker_preview = Some(ColorPickerPreview::Edge { key, color: hex });
             }
         }
-        PickerHandle::Portal(index) => {
-            if let Some(portal) = doc.mindmap.portals.get(*index) {
-                let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
-                doc.color_picker_preview = Some(ColorPickerPreview::Portal { key, color: hex });
-            }
-        }
         PickerHandle::Node { .. } => {
             // Node preview not yet plumbed through the scene
             // builder — commit-only for v1. The picker still opens

@@ -9,15 +9,16 @@
 //! fallback: h/H nudges hue, s/S sat, v/V value, Tab cycles chips, Enter
 //! commits, Esc cancels.
 //!
-//! v1 wires the picker to two color-bearing fields whose document setters
-//! already exist: `MindEdge.color` (via `set_edge_color`) and
-//! `PortalPair.color` (via `set_portal_color`). Node colors and
-//! theme-variable editing become a follow-up session.
+//! The picker wires to `MindEdge.color` (via `set_edge_color`) and the
+//! three node colour axes. Portal-mode edges flow through the same
+//! `set_edge_color` sink as line-mode edges — portals are a render mode
+//! on the same entity, so there's no separate portal setter. Node
+//! colors and theme-variable editing become a follow-up session.
 //!
 //! Live preview uses direct in-place model mutation during hover —
-//! mirroring `apply_edge_handle_drag` in `app.rs`. The pre-picker snapshot
-//! is captured at open time, so cancel restores it without touching the
-//! undo stack and commit pushes a single `EditEdge` / `EditPortal` entry.
+//! mirroring `apply_edge_handle_drag` in `app.rs`. The pre-picker
+//! snapshot is captured at open time, so cancel restores it without
+//! touching the undo stack and commit pushes a single `EditEdge` entry.
 //!
 //! Pure-function layout (`compute_color_picker_layout`) and hit-testing
 //! (`hit_test_picker`) are extracted so unit tests don't need a GPU.

@@ -52,6 +52,14 @@ Commands:
                                 to the current format: structural IDs,
                                 named enums, hoisted palettes, channel
                                 field.
+  convert --portals <in.json> <out.json>
+                                Migrate a pre-refactor map whose
+                                portals live in a top-level portals
+                                array to the unified form (portals
+                                are edges with display_mode portal).
+                                Input and output paths may be the
+                                same file (the read completes
+                                before the write).
   verify <map.json>             Check the file against the format's
                                 structural invariants (parent_id
                                 consistency, Dewey IDs, edge and portal
@@ -181,19 +189,31 @@ fn run(args: &[String]) -> Result<(), CliError> {
             }
         }
         "convert" => {
-            if args.get(1).map(|s| s.as_str()) != Some("--legacy") {
-                return Err(CliError::Usage(
-                    "convert: expected --legacy flag".into(),
-                ));
+            match args.get(1).map(|s| s.as_str()) {
+                Some("--legacy") => {
+                    let input = args.get(2).ok_or_else(|| {
+                        CliError::Usage("convert: missing <in.json>".into())
+                    })?;
+                    let output = args.get(3).ok_or_else(|| {
+                        CliError::Usage("convert: missing <out.json>".into())
+                    })?;
+                    convert::convert_legacy(Path::new(input), Path::new(output))
+                        .map_err(CliError::Io)
+                }
+                Some("--portals") => {
+                    let input = args.get(2).ok_or_else(|| {
+                        CliError::Usage("convert: missing <in.json>".into())
+                    })?;
+                    let output = args.get(3).ok_or_else(|| {
+                        CliError::Usage("convert: missing <out.json>".into())
+                    })?;
+                    convert::convert_portals(Path::new(input), Path::new(output))
+                        .map_err(CliError::Io)
+                }
+                _ => Err(CliError::Usage(
+                    "convert: expected --legacy or --portals flag".into(),
+                )),
             }
-            let input = args
-                .get(2)
-                .ok_or_else(|| CliError::Usage("convert: missing <in.json>".into()))?;
-            let output = args
-                .get(3)
-                .ok_or_else(|| CliError::Usage("convert: missing <out.json>".into()))?;
-            convert::convert_legacy(Path::new(input), Path::new(output))
-                .map_err(CliError::Io)
         }
         "verify" => {
             let map_path = args

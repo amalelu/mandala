@@ -3,15 +3,19 @@
 //! capability-trait impls live here; selection materialization
 //! (`selection_targets`, `view_for`) sits with the view since each
 //! is a single-line constructor.
+//!
+//! Post-refactor there are two target shapes: `Node` and `Edge`.
+//! Portal-mode edges go through the `Edge` shape just like
+//! line-mode edges — `display_mode` is a render flag, not a
+//! separate entity, so trait dispatch doesn't split on it.
 
 use super::capabilities::{
-    AcceptsWheelColor, HasBgColor, HasBorderColor, HasFontSize, HandlesCopy, HandlesCut,
-    HandlesPaste, HasLabel, HasTextColor,
+    AcceptsWheelColor, HandlesCopy, HandlesCut, HandlesPaste, HasBgColor, HasBorderColor,
+    HasFontSize, HasLabel, HasTextColor,
 };
 use super::color_value::ColorValue;
 use super::outcome::{ClipboardContent, Outcome};
-use crate::application::console::constants::PORTAL_DEFAULT_COLOR;
-use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, SelectionState};
+use crate::application::document::{EdgeRef, MindMapDocument, SelectionState};
 
 /// A mutable view into one selected component, holding the doc ref
 /// plus enough identity to find the component each time. Built fresh
@@ -20,7 +24,6 @@ use crate::application::document::{EdgeRef, MindMapDocument, PortalRef, Selectio
 pub enum TargetView<'a> {
     Node { doc: &'a mut MindMapDocument, id: String },
     Edge { doc: &'a mut MindMapDocument, er: EdgeRef },
-    Portal { doc: &'a mut MindMapDocument, pr: PortalRef },
 }
 
 impl<'a> TargetView<'a> {
@@ -29,7 +32,6 @@ impl<'a> TargetView<'a> {
         match self {
             TargetView::Node { .. } => "node",
             TargetView::Edge { .. } => "edge",
-            TargetView::Portal { .. } => "portal",
         }
     }
 }
@@ -65,10 +67,6 @@ impl<'a> HasBgColor for TargetView<'a> {
             TargetView::Node { doc, id } => {
                 Outcome::applied(doc.set_node_bg_color(id, color_as_string(&c, "#141414")))
             }
-            TargetView::Portal { doc, pr } => {
-                let color = color_as_string(&c, PORTAL_DEFAULT_COLOR);
-                Outcome::applied(doc.set_portal_color(pr, &color))
-            }
             TargetView::Edge { .. } => Outcome::NotApplicable,
         }
     }
@@ -83,7 +81,6 @@ impl<'a> HasTextColor for TargetView<'a> {
             TargetView::Edge { doc, er } => Outcome::applied(
                 doc.set_edge_color(er, edge_color_as_override(&c).as_deref()),
             ),
-            TargetView::Portal { .. } => Outcome::NotApplicable,
         }
     }
 }
@@ -97,8 +94,6 @@ impl<'a> HasBorderColor for TargetView<'a> {
             TargetView::Edge { doc, er } => Outcome::applied(
                 doc.set_edge_color(er, edge_color_as_override(&c).as_deref()),
             ),
-            // Portals don't have a separate border from their fill.
-            TargetView::Portal { .. } => Outcome::NotApplicable,
         }
     }
 }
@@ -111,7 +106,6 @@ impl<'a> HasFontSize for TargetView<'a> {
         match self {
             TargetView::Node { doc, id } => Outcome::applied(doc.set_node_font_size(id, pt)),
             TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_font_size(er, pt)),
-            TargetView::Portal { .. } => Outcome::NotApplicable,
         }
     }
 }
@@ -129,15 +123,10 @@ impl<'a> AcceptsWheelColor for TargetView<'a> {
             // `set_border_color` (which is the same sink as
             // `set_text_color` on edges — `MindEdge.color` drives
             // both the line and the label; there is no separate
-            // bg / text / border on an edge). Picking `border` as
-            // the name reads more honestly than `text`: the edge
-            // *is* the line.
+            // bg / text / border on an edge). Works identically
+            // for portal-mode edges, where the same color drives
+            // the two marker glyphs.
             TargetView::Edge { .. } => self.set_border_color(c),
-            // Portals aren't Baumhard-native yet — holding on this
-            // arm until they are. When portals migrate, this
-            // becomes `self.set_bg_color(c)` (portals have a single
-            // color field that behaves as a fill).
-            TargetView::Portal { .. } => Outcome::NotApplicable,
         }
     }
 }
@@ -169,12 +158,6 @@ impl<'a> HandlesCopy for TargetView<'a> {
                 Some(t) => ClipboardContent::Text(t),
                 None => ClipboardContent::Empty,
             },
-            // Portal copy = the portal's current color string (a hex
-            // or `var(--…)` reference). Always present in the model.
-            TargetView::Portal { doc, pr } => match read_portal_color(doc, pr) {
-                Some(c) => ClipboardContent::Text(c),
-                None => ClipboardContent::NotApplicable,
-            },
         }
     }
 }
@@ -201,18 +184,6 @@ impl<'a> HandlesPaste for TargetView<'a> {
                     Some(trimmed.to_string())
                 };
                 Outcome::applied(doc.set_edge_label(er, label))
-            }
-            // Paste sets the portal color, but only after validating
-            // the input is a `#RRGGBB` hex or a `var(--name)` ref.
-            // Non-color text would otherwise silently corrupt the
-            // model (the renderer falls back to default but the
-            // saved file would carry junk).
-            TargetView::Portal { doc, pr } => {
-                let trimmed = content.trim();
-                if !is_color_string(trimmed) {
-                    return Outcome::Invalid(format!("not a color: {}", trimmed));
-                }
-                Outcome::applied(doc.set_portal_color(pr, trimmed))
             }
         }
     }
@@ -241,17 +212,6 @@ impl<'a> HandlesCut for TargetView<'a> {
                     _ => ClipboardContent::Empty,
                 }
             }
-            // Portal cut returns the color and resets to the
-            // PORTAL_DEFAULT_COLOR — there's no "no color" state
-            // (the field is required), so cut means "back to default".
-            TargetView::Portal { doc, pr } => {
-                let color = match read_portal_color(doc, pr) {
-                    Some(c) => c,
-                    None => return ClipboardContent::NotApplicable,
-                };
-                doc.set_portal_color(pr, PORTAL_DEFAULT_COLOR);
-                ClipboardContent::Text(color)
-            }
         }
     }
 }
@@ -261,28 +221,6 @@ fn read_edge_label(doc: &MindMapDocument, er: &EdgeRef) -> Option<String> {
     doc.mindmap.edges.get(idx).and_then(|e| e.label.clone())
 }
 
-fn read_portal_color(doc: &MindMapDocument, pr: &PortalRef) -> Option<String> {
-    doc.mindmap
-        .portals
-        .iter()
-        .find(|p| pr.matches(p))
-        .map(|p| p.color.clone())
-}
-
-/// Accept `#RGB`, `#RRGGBB`, `#RRGGBBAA`, or `var(--name)`. Conservative
-/// — anything else round-trips through `Outcome::Invalid` rather than
-/// being silently written to the model.
-fn is_color_string(s: &str) -> bool {
-    if s.starts_with("var(--") && s.ends_with(')') {
-        return true;
-    }
-    if !s.starts_with('#') {
-        return false;
-    }
-    let hex = &s[1..];
-    matches!(hex.len(), 3 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 /// Snapshot the selection into a list of target identities the
 /// dispatcher can iterate over. Returns owned strings / refs so the
 /// caller can build a fresh `TargetView` per iteration (aliasing-
@@ -290,7 +228,6 @@ fn is_color_string(s: &str) -> bool {
 pub enum TargetId {
     Node(String),
     Edge(EdgeRef),
-    Portal(PortalRef),
 }
 
 pub fn selection_targets(sel: &SelectionState) -> Vec<TargetId> {
@@ -299,7 +236,6 @@ pub fn selection_targets(sel: &SelectionState) -> Vec<TargetId> {
         SelectionState::Single(id) => vec![TargetId::Node(id.clone())],
         SelectionState::Multi(ids) => ids.iter().cloned().map(TargetId::Node).collect(),
         SelectionState::Edge(er) => vec![TargetId::Edge(er.clone())],
-        SelectionState::Portal(pr) => vec![TargetId::Portal(pr.clone())],
     }
 }
 
@@ -309,6 +245,5 @@ pub fn view_for<'a>(doc: &'a mut MindMapDocument, id: &TargetId) -> TargetView<'
     match id {
         TargetId::Node(nid) => TargetView::Node { doc, id: nid.clone() },
         TargetId::Edge(er) => TargetView::Edge { doc, er: er.clone() },
-        TargetId::Portal(pr) => TargetView::Portal { doc, pr: pr.clone() },
     }
 }

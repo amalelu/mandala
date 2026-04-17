@@ -39,7 +39,20 @@ impl MindMapDocument {
                 }
                 UndoAction::CreateEdge { index } => {
                     if index < self.mindmap.edges.len() {
-                        self.mindmap.edges.remove(index);
+                        let removed = self.mindmap.edges.remove(index);
+                        // If the selection points at the edge we just
+                        // removed, clear it — otherwise the selection
+                        // dangles at a triple no edge in the map
+                        // matches, and subsequent scene builds silently
+                        // render nothing highlighted while the
+                        // `selected_edge()` lookup keeps returning the
+                        // stale ref. Mirrors the `CreateNode` branch
+                        // below.
+                        if let SelectionState::Edge(ref er) = self.selection {
+                            if er.matches(&removed) {
+                                self.selection = SelectionState::None;
+                            }
+                        }
                     }
                 }
                 UndoAction::EditEdge { index, before } => {
@@ -67,25 +80,6 @@ impl MindMapDocument {
                 }
                 UndoAction::CanvasSnapshot { canvas } => {
                     self.mindmap.canvas = canvas;
-                }
-                UndoAction::CreatePortal { index } => {
-                    if index < self.mindmap.portals.len() {
-                        let removed = self.mindmap.portals.remove(index);
-                        if let SelectionState::Portal(ref pref) = self.selection {
-                            if pref.matches(&removed) {
-                                self.selection = SelectionState::None;
-                            }
-                        }
-                    }
-                }
-                UndoAction::DeletePortal { index, portal } => {
-                    let idx = index.min(self.mindmap.portals.len());
-                    self.mindmap.portals.insert(idx, portal);
-                }
-                UndoAction::EditPortal { index, before } => {
-                    if index < self.mindmap.portals.len() {
-                        self.mindmap.portals[index] = before;
-                    }
                 }
                 UndoAction::DeleteNode { node, removed_edges, orphaned_children } => {
                     let restored_id = node.id.clone();

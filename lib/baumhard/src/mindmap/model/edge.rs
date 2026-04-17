@@ -33,7 +33,52 @@ pub struct MindEdge {
     /// composes a connection from default glyphs based on the edge direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glyph_connection: Option<GlyphConnectionConfig>,
+    /// How the edge renders. `None` or `Some("line")` → the usual path
+    /// from one endpoint to the other. `Some("portal")` → two floating
+    /// glyph markers, one above each endpoint node, without a line
+    /// between them. Portal mode is the lightweight visual link for
+    /// far-apart nodes — clicking a marker selects the edge, double-
+    /// clicking navigates the camera to the opposite endpoint. Absent
+    /// in serialized JSON when the default holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_mode: Option<String>,
 }
+
+/// Sentinel `display_mode` value for portal-mode rendering. Stored
+/// as a named string in JSON (per `format/enums.md`) so the vocabulary
+/// can grow without breaking old readers.
+pub const DISPLAY_MODE_PORTAL: &str = "portal";
+
+/// Sentinel `display_mode` value for standard line rendering — the
+/// default when the field is absent. Emitted only when callers need a
+/// non-`None` opt-in to the default; normal creation leaves
+/// `display_mode = None`.
+pub const DISPLAY_MODE_LINE: &str = "line";
+
+/// True if this edge renders as a portal (two glyph markers) rather
+/// than a line. Portals reuse `edge.glyph_connection.body` as the
+/// marker glyph, `edge.color` (and optionally `glyph_connection.color`)
+/// as the marker color, and `glyph_connection.{font, font_size_pt}`
+/// for typography — no portal-specific fields exist.
+pub fn is_portal_edge(edge: &MindEdge) -> bool {
+    matches!(edge.display_mode.as_deref(), Some(DISPLAY_MODE_PORTAL))
+}
+
+/// Rotation palette used by `MindMapDocument::create_portal_edge` to
+/// pick a distinct default marker glyph for each new portal edge
+/// without forcing the user to choose up front. Indexed by
+/// `(visible portal-edge count) % PORTAL_GLYPH_PRESETS.len()` at
+/// creation time.
+pub const PORTAL_GLYPH_PRESETS: &[&str] = &[
+    "\u{25C8}", // ◈ white diamond containing black small diamond
+    "\u{25C6}", // ◆ black diamond
+    "\u{2B21}", // ⬡ white hexagon
+    "\u{2B22}", // ⬢ black hexagon
+    "\u{25C9}", // ◉ fisheye
+    "\u{2756}", // ❖ black diamond minus white X
+    "\u{2726}", // ✦ black four pointed star
+    "\u{2727}", // ✧ white four pointed star
+];
 
 /// Configures how a connection between nodes is rendered using font glyphs.
 /// Connections are composed of repeating body glyphs and optional end caps,

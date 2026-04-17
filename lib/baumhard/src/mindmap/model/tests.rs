@@ -1,5 +1,5 @@
-//! Mindmap-model tests: ancestry, portals, connection config
-//! resolution, label position round-trips. Kept in a sibling file so
+//! Mindmap-model tests: ancestry, connection config resolution, label
+//! position + display_mode round-trips. Kept in a sibling file so
 //! the `mod.rs` itself reads purely as the public surface.
 
 use super::*;
@@ -217,6 +217,7 @@ fn synthetic_edge_with_label(label: Option<&str>, pos: Option<f32>) -> MindEdge 
         anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
+        display_mode: None,
     }
 }
 
@@ -306,139 +307,43 @@ fn resolved_for_falls_back_to_hardcoded_default() {
 }
 
 // ============================================================
-// Session 6E — portal data model tests
+// display_mode (portals as an edge render mode)
 // ============================================================
 
-fn synthetic_empty_map() -> MindMap {
-    MindMap {
-        version: "1".to_string(),
-        name: "test".to_string(),
-        canvas: Canvas {
-            background_color: "#000".to_string(),
-            default_border: None,
-            default_connection: None,
-            theme_variables: std::collections::HashMap::new(),
-            theme_variants: std::collections::HashMap::new(),
-        },
-        palettes: std::collections::HashMap::new(),
-        nodes: std::collections::HashMap::new(),
-        edges: Vec::new(),
-        custom_mutations: Vec::new(),
-        portals: Vec::new(),
-    }
-}
-
 #[test]
-fn column_letter_label_sequence() {
-    assert_eq!(column_letter_label(1), "A");
-    assert_eq!(column_letter_label(2), "B");
-    assert_eq!(column_letter_label(26), "Z");
-    assert_eq!(column_letter_label(27), "AA");
-    assert_eq!(column_letter_label(28), "AB");
-    assert_eq!(column_letter_label(52), "AZ");
-    assert_eq!(column_letter_label(53), "BA");
-    assert_eq!(column_letter_label(702), "ZZ");
-    assert_eq!(column_letter_label(703), "AAA");
-}
-
-#[test]
-fn portal_pair_round_trips_through_json() {
-    let portal = PortalPair {
-        endpoint_a: "node-1".to_string(),
-        endpoint_b: "node-2".to_string(),
-        label: "A".to_string(),
-        glyph: "\u{25C8}".to_string(),
-        color: "var(--accent)".to_string(),
-        font_size_pt: 18.0,
-        font: Some("LiberationSans".to_string()),
-    };
-    let json = serde_json::to_string(&portal).unwrap();
-    assert!(json.contains("node-1"));
-    assert!(json.contains("\"label\":\"A\""));
-    let back: PortalPair = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.endpoint_a, "node-1");
-    assert_eq!(back.endpoint_b, "node-2");
-    assert_eq!(back.label, "A");
-    assert_eq!(back.color, "var(--accent)");
-    assert_eq!(back.font_size_pt, 18.0);
-    assert_eq!(back.font.as_deref(), Some("LiberationSans"));
-}
-
-#[test]
-fn portal_pair_font_size_defaults_when_missing() {
-    // A portal authored without `font_size_pt` must deserialize with the
-    // default 16.0 so older saved maps keep working when this field is
-    // added post-hoc.
+fn display_mode_absent_defaults_to_none() {
+    // Pre-refactor maps wrote no `display_mode` field. `#[serde(default)]`
+    // must deserialize those edges with `None` so they keep rendering
+    // as lines.
     let json = r##"{
-        "endpoint_a":"a","endpoint_b":"b",
-        "label":"A","glyph":"\u25C8","color":"#aa88cc"
+        "from_id":"a","to_id":"b","type":"cross_link",
+        "color":"#fff","width":1,"line_style":"solid","visible":true,
+        "label":null,"anchor_from":"auto","anchor_to":"auto","control_points":[]
     }"##;
-    let portal: PortalPair = serde_json::from_str(json).unwrap();
-    assert_eq!(portal.font_size_pt, 16.0);
-    assert_eq!(portal.font, None);
+    let edge: MindEdge = serde_json::from_str(json).unwrap();
+    assert_eq!(edge.display_mode, None);
+    assert!(!is_portal_edge(&edge));
 }
 
 #[test]
-fn portals_missing_deserializes_empty() {
-    // Maps authored before Session 6E omit the `portals` field
-    // entirely. `#[serde(default)]` must give them an empty vec so
-    // they keep loading cleanly.
-    let map = loader::load_from_file(&test_map_path()).unwrap();
-    assert!(map.portals.is_empty(), "pre-6E maps should have no portals");
+fn display_mode_portal_round_trips_through_json() {
+    let mut edge = synthetic_edge_with_label(None, None);
+    edge.display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+    let json = serde_json::to_string(&edge).unwrap();
+    assert!(json.contains("\"display_mode\":\"portal\""), "json: {json}");
+    let back: MindEdge = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.display_mode.as_deref(), Some(DISPLAY_MODE_PORTAL));
+    assert!(is_portal_edge(&back));
 }
 
 #[test]
-fn portals_empty_vec_skipped_in_serialize() {
-    // A fresh map with no portals must not write the field so the
-    // on-disk JSON shape for existing maps is byte-stable.
-    let map = synthetic_empty_map();
-    let json = serde_json::to_string(&map).unwrap();
+fn display_mode_none_omitted_in_serialize() {
+    let edge = synthetic_edge_with_label(None, None);
+    let json = serde_json::to_string(&edge).unwrap();
     assert!(
-        !json.contains("\"portals\""),
-        "empty portals should not appear in JSON: {json}"
+        !json.contains("display_mode"),
+        "None should be omitted per skip_serializing_if: {json}"
     );
-}
-
-#[test]
-fn next_portal_label_picks_lowest_unused() {
-    let mut map = synthetic_empty_map();
-    assert_eq!(map.next_portal_label(), "A");
-
-    map.portals.push(PortalPair {
-        endpoint_a: "x".to_string(), endpoint_b: "y".to_string(),
-        label: "A".to_string(), glyph: "\u{25C8}".to_string(),
-        color: "#aa88cc".to_string(), font_size_pt: 16.0, font: None,
-    });
-    assert_eq!(map.next_portal_label(), "B");
-
-    // Fill in "B" — next should be "C".
-    map.portals.push(PortalPair {
-        endpoint_a: "x".to_string(), endpoint_b: "y".to_string(),
-        label: "B".to_string(), glyph: "\u{25C6}".to_string(),
-        color: "#aa88cc".to_string(), font_size_pt: 16.0, font: None,
-    });
-    assert_eq!(map.next_portal_label(), "C");
-
-    // Skip "C", use "D" — the gap at "C" should be reused first.
-    map.portals.last_mut().unwrap().label = "D".to_string();
-    assert_eq!(map.next_portal_label(), "B");
-}
-
-#[test]
-fn next_portal_label_wraps_to_double_letter() {
-    let mut map = synthetic_empty_map();
-    // Fill A..Z.
-    for n in 1u64..=26 {
-        map.portals.push(PortalPair {
-            endpoint_a: "x".to_string(), endpoint_b: "y".to_string(),
-            label: column_letter_label(n),
-            glyph: "\u{25C8}".to_string(),
-            color: "#aa88cc".to_string(),
-            font_size_pt: 16.0,
-            font: None,
-        });
-    }
-    assert_eq!(map.next_portal_label(), "AA");
 }
 
 #[test]

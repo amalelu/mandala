@@ -127,7 +127,6 @@ use super::defaults::default_cross_link_edge;
             nodes,
             edges: Vec::new(),
             custom_mutations: Vec::new(),
-            portals: Vec::new(),
         }
     }
 
@@ -185,184 +184,213 @@ use super::defaults::default_cross_link_edge;
     }
 
     // =====================================================================
-    // Session 6E — portal mutation tests
+    // Portal-mode edge mutation tests
+    //
+    // Portals are edges with `display_mode = Some("portal")`. These
+    // tests cover the create / delete / edit / undo chain through
+    // the unified edge pipeline.
     // =====================================================================
 
     #[test]
-    fn portal_create_success_assigns_first_label() {
+    fn portal_edge_create_success_picks_first_glyph() {
         let mut doc = load_test_doc();
         let mut iter = doc.mindmap.nodes.keys();
         let a = iter.next().unwrap().clone();
         let b = iter.next().unwrap().clone();
 
-        let pref = doc.apply_create_portal(&a, &b).expect("should succeed");
-        assert_eq!(pref.label, "A");
-        assert_eq!(pref.endpoint_a, a);
-        assert_eq!(pref.endpoint_b, b);
-        assert_eq!(doc.mindmap.portals.len(), 1);
-        assert_eq!(doc.mindmap.portals[0].label, "A");
-        assert!(doc.dirty);
+        let idx = doc.create_portal_edge(&a, &b).expect("should succeed");
+        let edge = &doc.mindmap.edges[idx];
+        assert_eq!(edge.from_id, a);
+        assert_eq!(edge.to_id, b);
+        assert_eq!(edge.edge_type, "cross_link");
+        assert!(baumhard::mindmap::model::is_portal_edge(edge));
+        assert_eq!(
+            edge.glyph_connection.as_ref().unwrap().body,
+            PORTAL_GLYPH_PRESETS[0]
+        );
     }
 
     #[test]
-    fn portal_create_assigns_sequential_labels_a_b_c() {
-        let mut doc = load_test_doc();
-        let mut iter = doc.mindmap.nodes.keys();
-        let a = iter.next().unwrap().clone();
-        let b = iter.next().unwrap().clone();
-        let c = iter.next().unwrap().clone();
-
-        let p1 = doc.apply_create_portal(&a, &b).unwrap();
-        let p2 = doc.apply_create_portal(&b, &c).unwrap();
-        let p3 = doc.apply_create_portal(&a, &c).unwrap();
-        assert_eq!(p1.label, "A");
-        assert_eq!(p2.label, "B");
-        assert_eq!(p3.label, "C");
-    }
-
-    #[test]
-    fn portal_create_assigns_rotating_glyphs() {
+    fn portal_edge_create_rotates_glyph_presets() {
         let mut doc = load_test_doc();
         let mut iter = doc.mindmap.nodes.keys();
         let a = iter.next().unwrap().clone();
         let b = iter.next().unwrap().clone();
         let c = iter.next().unwrap().clone();
 
-        doc.apply_create_portal(&a, &b).unwrap();
-        doc.apply_create_portal(&b, &c).unwrap();
-        assert_eq!(doc.mindmap.portals[0].glyph, PORTAL_GLYPH_PRESETS[0]);
-        assert_eq!(doc.mindmap.portals[1].glyph, PORTAL_GLYPH_PRESETS[1]);
+        let i1 = doc.create_portal_edge(&a, &b).unwrap();
+        let i2 = doc.create_portal_edge(&b, &c).unwrap();
+        assert_eq!(
+            doc.mindmap.edges[i1].glyph_connection.as_ref().unwrap().body,
+            PORTAL_GLYPH_PRESETS[0]
+        );
+        assert_eq!(
+            doc.mindmap.edges[i2].glyph_connection.as_ref().unwrap().body,
+            PORTAL_GLYPH_PRESETS[1]
+        );
     }
 
     #[test]
-    fn portal_create_rejects_self_portal() {
+    fn portal_edge_create_rejects_self() {
         let mut doc = load_test_doc();
         let id = doc.mindmap.nodes.keys().next().unwrap().clone();
-        let result = doc.apply_create_portal(&id, &id);
-        assert!(result.is_err());
-        assert!(doc.mindmap.portals.is_empty());
+        assert!(doc.create_portal_edge(&id, &id).is_none());
     }
 
     #[test]
-    fn portal_create_rejects_unknown_node() {
+    fn portal_edge_create_rejects_unknown_node() {
         let mut doc = load_test_doc();
         let known = doc.mindmap.nodes.keys().next().unwrap().clone();
-        assert!(doc.apply_create_portal(&known, "does_not_exist").is_err());
-        assert!(doc.apply_create_portal("does_not_exist", &known).is_err());
-        assert!(doc.mindmap.portals.is_empty());
+        assert!(doc.create_portal_edge(&known, "does_not_exist").is_none());
+        assert!(doc.create_portal_edge("does_not_exist", &known).is_none());
     }
 
     #[test]
-    fn portal_undo_create_removes_portal() {
+    fn portal_edge_delete_and_undo_restore_index() {
         let mut doc = load_test_doc();
         let mut iter = doc.mindmap.nodes.keys();
         let a = iter.next().unwrap().clone();
         let b = iter.next().unwrap().clone();
+        let c = iter.next().unwrap().clone();
 
-        let pref = doc.apply_create_portal(&a, &b).unwrap();
-        doc.selection = SelectionState::Portal(pref);
-        assert_eq!(doc.mindmap.portals.len(), 1);
+        let i1 = doc.create_portal_edge(&a, &b).unwrap();
+        let i2 = doc.create_portal_edge(&b, &c).unwrap();
+        let _i3 = doc.create_portal_edge(&a, &c).unwrap();
+        doc.undo_stack.push(UndoAction::CreateEdge { index: i1 });
+        doc.undo_stack.push(UndoAction::CreateEdge { index: i2 });
+        let before_len = doc.mindmap.edges.len();
+
+        let er_middle = EdgeRef::new(
+            doc.mindmap.edges[i2].from_id.clone(),
+            doc.mindmap.edges[i2].to_id.clone(),
+            doc.mindmap.edges[i2].edge_type.clone(),
+        );
+        let (rem_idx, rem) = doc.remove_edge(&er_middle).expect("should delete");
+        doc.undo_stack.push(UndoAction::DeleteEdge {
+            index: rem_idx,
+            edge: rem,
+        });
+        assert_eq!(doc.mindmap.edges.len(), before_len - 1);
+
         assert!(doc.undo());
-        assert!(doc.mindmap.portals.is_empty());
-        // Undoing a CreatePortal that was selected should clear the selection.
+        assert_eq!(doc.mindmap.edges.len(), before_len);
+        assert!(baumhard::mindmap::model::is_portal_edge(&doc.mindmap.edges[i2]));
+    }
+
+    /// Undoing a freshly-created-and-selected edge clears the
+    /// selection too — otherwise `SelectionState::Edge(er)` lingers
+    /// pointing at an edge the map no longer contains, and scene
+    /// builds + the color picker open against a dangling ref.
+    /// Mirrors the long-standing `CreateNode` undo behaviour.
+    #[test]
+    fn undo_create_edge_clears_matching_selection() {
+        let mut doc = load_test_doc();
+        let mut iter = doc.mindmap.nodes.keys();
+        let a = iter.next().unwrap().clone();
+        let b = iter.next().unwrap().clone();
+        let idx = doc.create_cross_link_edge(&a, &b).unwrap();
+        doc.undo_stack.push(UndoAction::CreateEdge { index: idx });
+        let er = EdgeRef::new(&a, &b, "cross_link");
+        doc.selection = SelectionState::Edge(er);
+
+        assert!(doc.undo());
         assert!(matches!(doc.selection, SelectionState::None));
     }
 
+    /// And: undoing a CreateEdge that did *not* match the current
+    /// selection leaves the selection alone — only the matching
+    /// ref triggers the clear.
     #[test]
-    fn portal_delete_and_undo_restore_original_index() {
+    fn undo_create_edge_preserves_nonmatching_selection() {
         let mut doc = load_test_doc();
         let mut iter = doc.mindmap.nodes.keys();
         let a = iter.next().unwrap().clone();
         let b = iter.next().unwrap().clone();
-        let c = iter.next().unwrap().clone();
+        let idx = doc.create_cross_link_edge(&a, &b).unwrap();
+        doc.undo_stack.push(UndoAction::CreateEdge { index: idx });
+        // Select some other node (not the edge we're about to undo).
+        let other = doc.mindmap.nodes.keys().next().unwrap().clone();
+        doc.selection = SelectionState::Single(other.clone());
 
-        let p1 = doc.apply_create_portal(&a, &b).unwrap();
-        let p2 = doc.apply_create_portal(&b, &c).unwrap();
-        let _p3 = doc.apply_create_portal(&a, &c).unwrap();
-        assert_eq!(doc.mindmap.portals.len(), 3);
-
-        // Delete the middle portal.
-        let removed = doc.apply_delete_portal(&p2).expect("should delete");
-        assert_eq!(removed.label, "B");
-        assert_eq!(doc.mindmap.portals.len(), 2);
-
-        // Undo should slot it back at its original middle index.
         assert!(doc.undo());
-        assert_eq!(doc.mindmap.portals.len(), 3);
-        assert_eq!(doc.mindmap.portals[1].label, "B");
-        // And the other portals should still be intact.
-        assert_eq!(doc.mindmap.portals[0].label, p1.label);
+        match doc.selection {
+            SelectionState::Single(ref id) => assert_eq!(id, &other),
+            ref s => panic!("expected single selection preserved, got {:?}", s),
+        }
     }
 
     #[test]
-    fn portal_edit_glyph_and_undo_restores_before() {
+    fn portal_edge_set_display_mode_toggles_visual() {
         let mut doc = load_test_doc();
         let mut iter = doc.mindmap.nodes.keys();
         let a = iter.next().unwrap().clone();
         let b = iter.next().unwrap().clone();
 
-        let pref = doc.apply_create_portal(&a, &b).unwrap();
-        let original_glyph = doc.mindmap.portals[0].glyph.clone();
-        assert!(doc.set_portal_glyph(&pref, "\u{2B22}"));
-        assert_eq!(doc.mindmap.portals[0].glyph, "\u{2B22}");
+        let idx = doc.create_portal_edge(&a, &b).unwrap();
+        let er = EdgeRef::new(&a, &b, "cross_link");
+        assert!(baumhard::mindmap::model::is_portal_edge(&doc.mindmap.edges[idx]));
+
+        // Switch to line — marker glyph stays in glyph_connection.body
+        // but the edge now renders as a connection path.
+        assert!(doc.set_edge_display_mode(&er, "line"));
+        assert!(!baumhard::mindmap::model::is_portal_edge(&doc.mindmap.edges[idx]));
         assert!(doc.undo());
-        assert_eq!(doc.mindmap.portals[0].glyph, original_glyph);
+        assert!(baumhard::mindmap::model::is_portal_edge(&doc.mindmap.edges[idx]));
     }
 
     #[test]
-    fn portal_edit_color_and_undo_restores_before() {
+    fn portal_edge_set_color_via_generic_edge_api() {
+        // `set_edge_color` is the same sink whether the edge is a
+        // line or a portal. Portal markers read the resolved color
+        // from `glyph_connection.color` (override) or `edge.color`
+        // (fallback), so setting the override steers the marker.
         let mut doc = load_test_doc();
         let mut iter = doc.mindmap.nodes.keys();
         let a = iter.next().unwrap().clone();
         let b = iter.next().unwrap().clone();
 
-        let pref = doc.apply_create_portal(&a, &b).unwrap();
-        let original_color = doc.mindmap.portals[0].color.clone();
-        assert!(doc.set_portal_color(&pref, "var(--accent)"));
-        assert_eq!(doc.mindmap.portals[0].color, "var(--accent)");
+        let idx = doc.create_portal_edge(&a, &b).unwrap();
+        let er = EdgeRef::new(&a, &b, "cross_link");
+        assert!(doc.set_edge_color(&er, Some("var(--accent)")));
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .glyph_connection
+                .as_ref()
+                .unwrap()
+                .color
+                .as_deref(),
+            Some("var(--accent)")
+        );
         assert!(doc.undo());
-        assert_eq!(doc.mindmap.portals[0].color, original_color);
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .glyph_connection
+                .as_ref()
+                .unwrap()
+                .color
+                .as_deref(),
+            None
+        );
     }
 
     #[test]
-    fn portal_delete_returns_none_for_unknown_ref() {
-        let mut doc = load_test_doc();
-        let ghost = PortalRef::new("Z", "ghost_a", "ghost_b");
-        assert!(doc.apply_delete_portal(&ghost).is_none());
-    }
-
-    #[test]
-    fn portal_next_label_reuses_gap_after_delete() {
-        let mut doc = load_test_doc();
-        let mut iter = doc.mindmap.nodes.keys();
-        let a = iter.next().unwrap().clone();
-        let b = iter.next().unwrap().clone();
-        let c = iter.next().unwrap().clone();
-
-        let _ = doc.apply_create_portal(&a, &b).unwrap();
-        let p2 = doc.apply_create_portal(&b, &c).unwrap();
-        let _ = doc.apply_create_portal(&a, &c).unwrap();
-        // Delete the middle ("B").
-        doc.apply_delete_portal(&p2).unwrap();
-        // Next creation should reuse "B" since it is now the lowest unused.
-        let d = doc.apply_create_portal(&b, &c).unwrap();
-        assert_eq!(d.label, "B");
-    }
-
-    #[test]
-    fn selection_state_portal_is_not_node_selection() {
+    fn portal_edge_selection_uses_edge_variant() {
         let mut doc = load_test_doc();
         let mut iter = doc.mindmap.nodes.keys();
         let a = iter.next().unwrap().clone();
         let b = iter.next().unwrap().clone();
-        let pref = doc.apply_create_portal(&a, &b).unwrap();
-        doc.selection = SelectionState::Portal(pref.clone());
+        let idx = doc.create_portal_edge(&a, &b).unwrap();
+        let er = EdgeRef::new(
+            doc.mindmap.edges[idx].from_id.clone(),
+            doc.mindmap.edges[idx].to_id.clone(),
+            doc.mindmap.edges[idx].edge_type.clone(),
+        );
+        doc.selection = SelectionState::Edge(er.clone());
 
         assert!(!doc.selection.is_selected(&a));
         assert!(!doc.selection.is_selected(&b));
         assert!(doc.selection.selected_ids().is_empty());
-        assert_eq!(doc.selection.selected_portal(), Some(&pref));
-        assert_eq!(doc.selection.selected_edge(), None);
+        assert_eq!(doc.selection.selected_edge(), Some(&er));
     }
 
     // -----------------------------------------------------------------
