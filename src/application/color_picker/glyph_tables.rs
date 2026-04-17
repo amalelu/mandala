@@ -49,7 +49,7 @@ pub const HUE_SLOT_COUNT: usize = 24;
 pub fn picker_channel(section: &str, index: usize) -> usize {
     static CACHE: OnceLock<std::collections::HashMap<(String, usize), usize>> = OnceLock::new();
     let map = CACHE.get_or_init(|| {
-        use crate::application::mutator_builder::{iter_section_channels, SectionContext};
+        use baumhard::mutator_builder::{iter_section_channels, SectionContext};
         struct NoCtx;
         impl SectionContext for NoCtx {}
         let mut out = Vec::new();

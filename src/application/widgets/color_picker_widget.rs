@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use baumhard::font::fonts::AppFont;
 use serde::Deserialize;
 
-use crate::application::mutator_builder::MutatorNode;
+use baumhard::mutator_builder::MutatorNode;
 
 /// Top-level spec — one file describes the whole widget. All
 /// `Vec<String>` fields are read as slices by the renderer and never
@@ -61,7 +61,7 @@ pub struct ColorPickerWidgetSpec {
     /// Declarative mutator-tree shape for the picker overlay's
     /// **layout phase** — full per-cell field set, applied on layout
     /// changes only (initial open, viewport resize, RMB size_scale
-    /// drag). Walked by `crate::application::mutator_builder` at
+    /// drag). Walked by `baumhard::mutator_builder` at
     /// apply time to produce a `MutatorTree<GfxMutator>` covering
     /// every variable field on every cell. See the JSON file's
     /// `_mutator_spec_comment` for the on-disk contract.
@@ -194,7 +194,7 @@ mod tests {
     /// than as a silent picker misalignment.
     #[test]
     fn spec_mutator_spec_shape_matches_expectations() {
-        use crate::application::mutator_builder::{CountSrc, MutatorNode};
+        use baumhard::mutator_builder::{CountSrc, MutatorNode};
         let spec = load_spec();
         let MutatorNode::Void { channel, children } = &spec.mutator_spec else {
             panic!("mutator_spec root must be a Void");
@@ -236,7 +236,7 @@ mod tests {
     /// relies on.
     #[test]
     fn spec_mutator_spec_total_live_cells_is_58() {
-        use crate::application::mutator_builder::{iter_section_channels, SectionContext};
+        use baumhard::mutator_builder::{iter_section_channels, SectionContext};
         struct NoCtx;
         impl SectionContext for NoCtx {}
         let spec = load_spec();
@@ -254,7 +254,7 @@ mod tests {
     /// in-place update.
     #[test]
     fn spec_dynamic_mutator_spec_channel_layout_mirrors_layout_spec() {
-        use crate::application::mutator_builder::{iter_section_channels, SectionContext};
+        use baumhard::mutator_builder::{iter_section_channels, SectionContext};
         struct NoCtx;
         impl SectionContext for NoCtx {}
         let spec = load_spec();
@@ -275,7 +275,7 @@ mod tests {
     /// silent perf regression on the picker hot path.
     #[test]
     fn spec_dynamic_mutator_spec_per_section_fields_are_slim() {
-        use crate::application::mutator_builder::{CellField, MutationSrc, MutatorNode};
+        use baumhard::mutator_builder::{CellField, MutationSrc, MutatorNode};
         let spec = load_spec();
         let MutatorNode::Void { children, .. } = &spec.dynamic_mutator_spec else {
             panic!("dynamic_mutator_spec root must be Void");

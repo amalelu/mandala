@@ -3,13 +3,22 @@
 //! methods their AST actually exercises; the others default to
 //! `unreachable!()` so misuse is loud at runtime.
 
-use baumhard::gfx_structs::area::{GlyphArea, GlyphAreaField};
-use baumhard::gfx_structs::mutator::Mutation;
+use crate::gfx_structs::area::{GlyphArea, GlyphAreaField};
+use crate::gfx_structs::mutator::Mutation;
 
 use super::ast::CellField;
 
+/// Runtime look-up surface for the mutator builder. Each method
+/// corresponds to one runtime-sourced AST variant; consumers implement
+/// only those their `MutatorNode` exercises.
+///
+/// The default implementations panic loudly via `unreachable!()` so a
+/// misused AST fails immediately rather than silently producing wrong
+/// mutator trees.
 pub trait SectionContext {
     /// Resolve a runtime cell count for `Repeat { count: Runtime(_) }`.
+    ///
+    /// Cost: consumer-defined, typically O(1) via a small HashMap.
     fn count(&self, _name: &str) -> usize {
         unreachable!("section context does not supply runtime counts")
     }
@@ -18,6 +27,8 @@ pub trait SectionContext {
     /// `MutationSrc::AreaDelta` inside a `Repeat` *unless* the
     /// consumer overrides [`field`](Self::field) — see that method's
     /// docs for the slim-context opt-out.
+    ///
+    /// Cost: consumer-defined. Typically a slice index.
     fn area(&self, _section: &str, _index: usize) -> &GlyphArea {
         unreachable!("section context does not supply per-section areas")
     }

@@ -2,10 +2,13 @@
 //! the builder against a stub `SectionContext` so we don't need any
 //! picker / widget / GPU state.
 
-use super::*;
-use baumhard::core::primitives::{ApplyOperation, ColorFontRegions};
-use baumhard::gfx_structs::area::GlyphArea;
-use baumhard::gfx_structs::tree::BranchChannel;
+use crate::core::primitives::{ApplyOperation, ColorFontRegions};
+use crate::gfx_structs::area::GlyphArea;
+use crate::gfx_structs::tree::BranchChannel;
+use crate::mutator_builder::{
+    build, iter_section_channels, CellField, ChannelSrc, CountSrc, InstructionSpec,
+    MutationListSrc, MutationSrc, MutatorNode, SectionContext,
+};
 use glam::Vec2;
 use std::collections::HashMap;
 
@@ -213,12 +216,12 @@ fn repeat_runtime_count_consults_context() {
 // =============================================================
 // Non-Repeat tree shapes — exercise the variants the picker spec
 // doesn't use but that the AST has to carry for the named
-// extensibility trajectory (console overlay, scope topologies in
-// `lib/baumhard`, future script-API mutators).
+// extensibility trajectory (console overlay, scope topologies,
+// future script-API mutators).
 // =============================================================
 
-use baumhard::gfx_structs::mutator::{GfxMutator, Instruction, Mutation, MutatorType};
-use baumhard::gfx_structs::predicate::Predicate;
+use crate::gfx_structs::mutator::{GfxMutator, Instruction, Mutation, MutatorType};
+use crate::gfx_structs::predicate::Predicate;
 
 /// Tree rooted at a `Void` with no children produces an empty root.
 #[test]
@@ -477,8 +480,9 @@ fn area_delta_outside_repeat_panics() {
 
 // =============================================================
 // JSON roundtrip — the AST's load-bearing purpose is deserializing
-// from `widgets/*.json`. Drift in serde renames / variant shapes
-// must surface here rather than silently at picker-open time.
+// from JSON (widgets, custom mutations, future user scripts). Drift
+// in serde renames / variant shapes must surface here rather than
+// silently at picker-open time.
 // =============================================================
 
 /// A compact MutatorNode literal round-trips through serde_json

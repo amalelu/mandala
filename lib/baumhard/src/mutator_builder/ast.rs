@@ -1,10 +1,10 @@
 //! AST types for the mutator-tree DSL. See `super` for the high-level
-//! tour; this file is the type-level wire format the JSON parses into.
+//! tour; this file is the type-level wire format that JSON parses into.
 
-use baumhard::core::primitives::ApplyOperation;
-use baumhard::gfx_structs::mutator::Instruction;
-use baumhard::gfx_structs::predicate::Predicate;
-use baumhard::util::ordered_vec2::OrderedVec2;
+use crate::core::primitives::ApplyOperation;
+use crate::gfx_structs::mutator::Instruction;
+use crate::gfx_structs::predicate::Predicate;
+use crate::util::ordered_vec2::OrderedVec2;
 use serde::Deserialize;
 
 /// One node in the mutator-tree DSL. Variants map 1:1 to `GfxMutator`
@@ -61,14 +61,20 @@ pub enum MutatorNode {
 /// `SectionIndex` resolves to `channel_base + iter_index`.
 #[derive(Debug, Clone, Deserialize)]
 pub enum ChannelSrc {
+    /// A baked-in channel index.
     Literal(usize),
+    /// The iteration's channel (`channel_base + iter_index`). Only
+    /// meaningful inside a [`MutatorNode::Repeat`] template.
     SectionIndex,
 }
 
 /// Static or runtime-supplied cell count.
 #[derive(Debug, Clone, Deserialize)]
 pub enum CountSrc {
+    /// Count baked into the AST at deserialize time.
     Literal(usize),
+    /// Count fetched from [`SectionContext::count`] at apply time
+    /// under the given label.
     Runtime(String),
 }
 
@@ -118,15 +124,18 @@ pub enum CellField {
     Operation(ApplyOperation),
 }
 
-/// Serializable shadow of `baumhard::gfx_structs::mutator::Instruction`.
+/// Serializable shadow of [`Instruction`].
 /// `RepeatWhileAlwaysTrue` is spelled out as a named variant to avoid
 /// forcing every caller to serialize a full always-true `Predicate`.
 #[derive(Debug, Clone, Deserialize)]
 pub enum InstructionSpec {
     /// `Instruction::RepeatWhile(Predicate::always_true())`.
     RepeatWhileAlwaysTrue,
+    /// `Instruction::RepeatWhile(predicate)`.
     RepeatWhile(Predicate),
+    /// `Instruction::RotateWhile(angle, predicate)`.
     RotateWhile(f32, Predicate),
+    /// `Instruction::SpatialDescend(point)`.
     SpatialDescend(OrderedVec2),
 }
 

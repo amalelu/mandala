@@ -17,7 +17,7 @@ use crate::application::color_picker_overlay::picker_glyph_areas::{
 /// (24 hue + 16 sat + 16 val + preview + hex), each carrying an
 /// `AreaDelta` with exactly 8 fields. Guards against
 /// drift between `widgets/color_picker.json`'s `mutator_spec` block
-/// and the `mutator_builder` walker — if either side silently
+/// and the `baumhard::mutator_builder` walker — if either side silently
 /// changes shape, the picker's registered tree alignment breaks and
 /// this test fires first.
 #[test]
