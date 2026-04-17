@@ -50,18 +50,15 @@ pub struct SceneSelectionContext<'a> {
     /// in-progress buffer + caret for the committed label text
     /// on the named edge, so label edits render live.
     pub label_edit: Option<(&'a EdgeKey, &'a str)>,
-    /// Inline portal-text editor override — substitutes the
-    /// in-progress buffer for the committed
-    /// `PortalEndpointState.text` on the named (edge, endpoint)
-    /// pair, same pattern as `label_edit` but keyed to a portal
-    /// endpoint instead of an edge path.
-    pub portal_text_edit: Option<PortalTextEditOverride<'a>>,
 }
 
 /// Substitution pair for the portal-text inline edit preview.
 /// Carries the `(edge_key, endpoint_node_id)` identity of the
 /// target portal label plus the current buffer contents to be
 /// rendered in place of the committed `PortalEndpointState.text`.
+/// Consumed by the tree-builder path (the live portal render
+/// pipeline), not by the scene builder — portal text never
+/// materialized through `RenderScene.portal_elements`.
 #[derive(Debug, Clone, Copy)]
 pub struct PortalTextEditOverride<'a> {
     pub edge_key: &'a EdgeKey,
@@ -168,7 +165,6 @@ pub fn build_scene_with_cache(
         edge: selected_edge,
         portal_label: selected_portal_label,
         label_edit: label_edit_override,
-        portal_text_edit,
     } = selection;
     // The per-edge sample spacing depends on the effective font size,
     // which depends on `camera_zoom`. Flush cached samples if the
@@ -205,17 +201,18 @@ pub fn build_scene_with_cache(
         camera_zoom,
     );
 
-    // Portal pass — two markers per visible portal-mode edge,
-    // colored by preview > selection > edge color. Text labels
-    // for each endpoint reflect the committed `text` plus the
-    // inline-edit buffer preview when the editor is open.
+    // Portal pass — one marker per endpoint of every visible
+    // portal-mode edge, colored by preview > selection > edge
+    // color. Text labels do not go through this path; the tree
+    // builder (`tree_builder::portal`) is the live portal
+    // renderer and emits text as sibling GlyphAreas under each
+    // endpoint's subtree.
     let portal_elements = build_portal_elements(
         map,
         offsets,
         selected_edge,
         selected_portal_label,
         portal_color_preview,
-        portal_text_edit,
     );
 
     RenderScene {

@@ -305,18 +305,10 @@ impl MindMapDocument {
             .label_edit_preview
             .as_ref()
             .map(|(k, s)| (k, s.as_str()));
-        let portal_text_edit = self.portal_text_edit_preview.as_ref().map(|(k, ep, buf)| {
-            scene_builder::PortalTextEditOverride {
-                edge_key: k,
-                endpoint_node_id: ep.as_str(),
-                buffer: buf.as_str(),
-            }
-        });
         let selection = scene_builder::SceneSelectionContext {
             edge,
             portal_label,
             label_edit,
-            portal_text_edit,
         };
         let (edge_preview, portal_preview) = match &self.color_picker_preview {
             Some(ColorPickerPreview::Edge { key, color }) => (

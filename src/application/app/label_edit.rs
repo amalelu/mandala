@@ -322,6 +322,37 @@ pub(in crate::application::app) fn handle_portal_text_edit_key(
     let action = name.and_then(|n| {
         keybinds.action_for_context(InputContext::LabelEdit, n, ctrl, shift, alt)
     });
+
+    // If the edge disappeared or flipped out of portal mode
+    // while the editor was open (e.g. an Undo popped the edge,
+    // or a console command switched `display_mode` to line),
+    // close the editor without committing. Without this guard a
+    // commit would silently no-op via `set_portal_label_text`'s
+    // edge-not-found path, and the preview would keep re-
+    // installing a dangling buffer on every keystroke.
+    let edge_still_valid = match state {
+        PortalTextEditState::Open {
+            edge_ref,
+            endpoint_node_id,
+            ..
+        } => doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .map(|e| {
+                baumhard::mindmap::model::is_portal_edge(e)
+                    && (endpoint_node_id == &e.from_id
+                        || endpoint_node_id == &e.to_id)
+            })
+            .unwrap_or(false),
+        PortalTextEditState::Closed => return,
+    };
+    if !edge_still_valid {
+        close_portal_text_edit(false, doc, state, mindmap_tree, app_scene, renderer);
+        return;
+    }
+
     if action == Some(Action::LabelEditCancel) {
         close_portal_text_edit(false, doc, state, mindmap_tree, app_scene, renderer);
         return;

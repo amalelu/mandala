@@ -37,7 +37,7 @@ use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color::resolve_var;
 
-use super::{PortalColorPreview, PortalElement, PortalTextElement, PortalTextEditOverride};
+use super::{PortalColorPreview, PortalElement};
 
 /// Default portal marker font size when no `glyph_connection`
 /// override is set. Matches the creation-time default in
@@ -249,17 +249,19 @@ pub(crate) fn layout_portal_text(
     PortalTextLayout { top_left, bounds }
 }
 
-/// Emit one portal marker per endpoint of every visible portal-mode
-/// edge. Each marker carries its icon glyph and (when the endpoint
-/// state sets `text` or the text-edit preview targets this
-/// endpoint) a companion text label.
+/// Emit one `PortalElement` per endpoint of every visible
+/// portal-mode edge. Only covers the marker icon — per-endpoint
+/// text labels (the adjacent-glyph concept) render exclusively
+/// through the tree-builder path (`tree_builder::portal`), which
+/// is the live portal render pipeline; the scene-level path
+/// exists for tests and stringly-typed inspection, not for the
+/// GPU.
 pub(super) fn build_portal_elements(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
-    portal_text_edit: Option<PortalTextEditOverride<'_>>,
 ) -> Vec<PortalElement> {
     let mut portal_elements: Vec<PortalElement> = Vec::new();
 
@@ -331,38 +333,6 @@ pub(super) fn build_portal_elements(
                 style.font_size_pt,
             );
 
-            // Inline text-edit preview beats the committed
-            // state so the user sees their buffer live as they
-            // type. Falls back to the endpoint's committed
-            // `text` otherwise. An empty preview buffer renders
-            // as an empty string (not absent) so the label AABB
-            // stays present while the user clears it.
-            let resolved_text: Option<String> = match portal_text_edit {
-                Some(p) if *p.edge_key == edge_key && p.endpoint_node_id == owner.id => {
-                    Some(p.buffer.to_string())
-                }
-                _ => endpoint_state.and_then(|s| s.text.clone()),
-            };
-            let text_element = resolved_text.map(|text| {
-                let text_layout = layout_portal_text(
-                    layout,
-                    owner_pos,
-                    owner_size,
-                    node_center(partner_pos, partner_size),
-                    endpoint_state,
-                    style.font_size_pt,
-                    &text,
-                );
-                PortalTextElement {
-                    text,
-                    position: (text_layout.top_left.x, text_layout.top_left.y),
-                    bounds: (text_layout.bounds.x, text_layout.bounds.y),
-                    color: style.color.clone(),
-                    font: style.font.clone(),
-                    font_size_pt: style.font_size_pt,
-                }
-            });
-
             portal_elements.push(PortalElement {
                 edge_key: edge_key.clone(),
                 endpoint_node_id: owner.id.clone(),
@@ -372,7 +342,6 @@ pub(super) fn build_portal_elements(
                 color: style.color.clone(),
                 font: style.font.clone(),
                 font_size_pt: style.font_size_pt,
-                text: text_element,
             });
         }
     }

@@ -276,15 +276,27 @@ pub fn portal_pair_data(
             }
 
             // Combined hitbox: rectangular union of icon + text
-            // AABBs. Clicking anywhere in this rect dispatches
-            // as a click on this portal label — icon and text
-            // behave as one target.
+            // AABBs when text is present, so clicking anywhere in
+            // that rect dispatches as a click on this portal label
+            // (icon and text behave as one target). Empty-string
+            // text slots are always emitted to keep mutator
+            // channels stable, but their AABB is a 1-char-wide
+            // reserved region that shouldn't be clickable — a
+            // text-less portal would otherwise grow a phantom
+            // ~30×65 px hot zone beside the icon at default font
+            // size. Use the icon AABB alone in that case.
             let icon_min = icon_layout.top_left;
             let icon_max = icon_layout.top_left + icon_layout.bounds;
-            let text_min = text_layout.top_left;
-            let text_max = text_layout.top_left + text_layout.bounds;
-            let hitbox_min = Vec2::new(icon_min.x.min(text_min.x), icon_min.y.min(text_min.y));
-            let hitbox_max = Vec2::new(icon_max.x.max(text_max.x), icon_max.y.max(text_max.y));
+            let (hitbox_min, hitbox_max) = if text_string.is_empty() {
+                (icon_min, icon_max)
+            } else {
+                let text_min = text_layout.top_left;
+                let text_max = text_layout.top_left + text_layout.bounds;
+                (
+                    Vec2::new(icon_min.x.min(text_min.x), icon_min.y.min(text_min.y)),
+                    Vec2::new(icon_max.x.max(text_max.x), icon_max.y.max(text_max.y)),
+                )
+            };
 
             EndpointAreas {
                 icon: icon_area,
