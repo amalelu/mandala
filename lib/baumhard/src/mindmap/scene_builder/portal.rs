@@ -47,13 +47,6 @@ use super::{PortalColorPreview, PortalElement};
 /// visual scale.
 pub(crate) const DEFAULT_PORTAL_MARKER_FONT_SIZE_PT: f32 = 50.0;
 
-/// Minimum effective font size for a portal marker regardless of
-/// the resolved `glyph_connection.font_size_pt`. Used to rescue
-/// edges that were flipped from line to portal mode and inherited a
-/// tiny body font size (e.g. 8pt line text becoming an invisible
-/// 8pt marker) — the label still needs to read at a glance.
-pub(crate) const MIN_PORTAL_MARKER_FONT_SIZE_PT: f32 = 14.0;
-
 /// Padding between a portal label and the owning node's border,
 /// expressed as a fraction of the marker's font size. Tuned so the
 /// label sits just outside the border glyph without visually
@@ -93,8 +86,18 @@ pub struct ResolvedPortalStyle {
 
 /// Resolve the per-endpoint portal marker style. Merges the color
 /// cascade (preview > whole-edge-select > per-label-select >
-/// per-endpoint override > edge-level override > edge.color) and
-/// picks a visible glyph + font size.
+/// per-endpoint override > edge-level override > edge.color),
+/// picks a visible glyph, and produces a **canvas-space**
+/// font size already compensated for camera zoom the same way
+/// line-mode connections do (see
+/// [`GlyphConnectionConfig::effective_font_size_pt`]): the
+/// renderer scales every glyph by `camera.zoom` at draw time, so
+/// at zoom = 0.5 a portal the user wants to read at 50pt on
+/// screen needs a 100pt canvas-space glyph. The clamp into
+/// `[min_font_size_pt, max_font_size_pt]` runs on the
+/// screen-space size, then we divide back through zoom — same
+/// formula line connections use so portals LOD identically as
+/// the user zooms out.
 ///
 /// `raw_color_override` is the preview / selection hex already
 /// resolved by the caller; `None` means "no transient override".
@@ -103,18 +106,27 @@ pub fn resolve_portal_endpoint_style(
     endpoint_state: Option<&PortalEndpointState>,
     canvas: &Canvas,
     raw_color_override: Option<&str>,
+    camera_zoom: f32,
 ) -> ResolvedPortalStyle {
     let cfg = GlyphConnectionConfig::resolved_for(edge, canvas);
 
-    // Font-size floor. When the resolved size is below the visual
-    // readability floor (as happens for any edge that inherited a
-    // small body font), pull it up; otherwise respect the user's
-    // explicit choice.
-    let font_size_pt = if edge.glyph_connection.is_none() {
+    // Base (unclamped, pre-zoom) font size. When the edge carries
+    // no `glyph_connection` override, fall back to the portal
+    // default so markers read at a consistent badge size even on
+    // edges flipped from line to portal mode without an explicit
+    // marker font setting.
+    let base_font_size = if edge.glyph_connection.is_none() {
         DEFAULT_PORTAL_MARKER_FONT_SIZE_PT
     } else {
-        cfg.font_size_pt.max(MIN_PORTAL_MARKER_FONT_SIZE_PT)
+        cfg.font_size_pt
     };
+    // Zoom-clamp — identical to `GlyphConnectionConfig::effective_font_size_pt`,
+    // inlined so we can substitute the portal default when there's
+    // no per-edge glyph_connection config.
+    let z = camera_zoom.max(f32::EPSILON);
+    let target_screen =
+        (base_font_size * z).clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
+    let font_size_pt = target_screen / z;
 
     // Glyph fallback. The line-body default (middle dot) renders
     // as a hairline at any reasonable marker size, so an edge
@@ -262,6 +274,7 @@ pub(super) fn build_portal_elements(
     selected_edge: Option<(&str, &str, &str)>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
+    camera_zoom: f32,
 ) -> Vec<PortalElement> {
     let mut portal_elements: Vec<PortalElement> = Vec::new();
 
@@ -324,6 +337,7 @@ pub(super) fn build_portal_elements(
                 endpoint_state,
                 &map.canvas,
                 raw_color_override,
+                camera_zoom,
             );
             let layout = layout_portal_label(
                 owner_pos,

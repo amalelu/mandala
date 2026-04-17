@@ -200,6 +200,7 @@ pub(in crate::application::app) fn update_portal_tree(
         selected_portal_label,
         preview,
         portal_text_edit,
+        renderer.camera_zoom(),
     );
     let signature = hash_canvas_signature(&portal_identity_sequence(&pairs));
 

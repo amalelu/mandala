@@ -142,6 +142,7 @@ pub fn portal_pair_data(
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     color_preview: Option<PortalColorPreviewRef>,
     portal_text_edit: Option<PortalTextEditOverride<'_>>,
+    camera_zoom: f32,
 ) -> Vec<PortalPairData> {
     let mut pairs: Vec<PortalPairData> = Vec::new();
     let mut pair_channel: usize = 1;
@@ -203,6 +204,7 @@ pub fn portal_pair_data(
                 endpoint_state,
                 &map.canvas,
                 raw_color_override,
+                camera_zoom,
             );
             let icon_layout = layout_portal_label(
                 owner_pos,
@@ -338,6 +340,7 @@ pub fn build_portal_tree(
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     color_preview: Option<PortalColorPreviewRef>,
     portal_text_edit: Option<PortalTextEditOverride<'_>>,
+    camera_zoom: f32,
 ) -> PortalTree {
     let pairs = portal_pair_data(
         map,
@@ -346,6 +349,7 @@ pub fn build_portal_tree(
         selected_portal_label,
         color_preview,
         portal_text_edit,
+        camera_zoom,
     );
     build_portal_tree_from_pairs(&pairs)
 }
@@ -416,6 +420,7 @@ pub fn build_portal_mutator_tree(
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     color_preview: Option<PortalColorPreviewRef>,
     portal_text_edit: Option<PortalTextEditOverride<'_>>,
+    camera_zoom: f32,
 ) -> PortalMutator {
     let pairs = portal_pair_data(
         map,
@@ -424,6 +429,7 @@ pub fn build_portal_mutator_tree(
         selected_portal_label,
         color_preview,
         portal_text_edit,
+        camera_zoom,
     );
     build_portal_mutator_tree_from_pairs(&pairs)
 }

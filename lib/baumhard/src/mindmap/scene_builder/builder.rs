@@ -213,6 +213,7 @@ pub fn build_scene_with_cache(
         selected_edge,
         selected_portal_label,
         portal_color_preview,
+        camera_zoom,
     );
 
     RenderScene {

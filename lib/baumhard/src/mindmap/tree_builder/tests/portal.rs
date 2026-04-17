@@ -15,7 +15,7 @@ fn portal_tree_emits_two_markers_per_edge() {
     );
     map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
-    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
     let pairs: Vec<NodeId> = result.tree.root.children(&result.tree.arena).collect();
     assert_eq!(pairs.len(), 1);
 
@@ -46,7 +46,7 @@ fn portal_tree_skips_edge_with_folded_endpoint() {
     // skipped wholesale because is_hidden_by_fold(child) is true.
     map.edges
         .push(synthetic_portal_edge("child", "other", "#00ff00"));
-    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
     assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
     assert!(result.hitboxes.is_empty());
 }
@@ -67,7 +67,7 @@ fn portal_tree_skips_line_mode_edges() {
     line_edge.display_mode = None;
     map.edges.push(line_edge);
 
-    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
     assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
     assert!(result.hitboxes.is_empty());
 }
@@ -84,7 +84,7 @@ fn portal_tree_selection_overrides_color() {
     map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
     let selected = Some(("a", "b", "cross_link"));
-    let result = build_portal_tree(&map, &HashMap::new(), selected, None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), selected, None, None, None, 1.0);
 
     // Walk pair → endpoint void → [icon, text]. Only the icon
     // GlyphArea carries a color region (the text area is empty
@@ -129,7 +129,7 @@ fn portal_pair_channels_are_strictly_ascending() {
     map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
     map.edges.push(synthetic_portal_edge("b", "c", "#00ff00"));
 
-    let pairs = portal_pair_data(&map, &HashMap::new(), None, None, None, None);
+    let pairs = portal_pair_data(&map, &HashMap::new(), None, None, None, None, 1.0);
     assert_eq!(pairs.len(), 2);
     let channels: Vec<usize> = pairs.iter().map(|p| p.pair_channel).collect();
     let mut prev = 0;
@@ -158,17 +158,17 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
     map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
 
     // State A: no offsets, no selection.
-    let mut tree_a = build_portal_tree(&map, &HashMap::new(), None, None, None, None).tree;
+    let mut tree_a = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0).tree;
 
     // State B: drag offset on `b`, plus selection.
     let mut offsets = HashMap::new();
     offsets.insert("b".to_string(), (10.0, -5.0));
     let selected = Some(("a", "b", "cross_link"));
 
-    let mutator = build_portal_mutator_tree(&map, &offsets, selected, None, None, None);
+    let mutator = build_portal_mutator_tree(&map, &offsets, selected, None, None, None, 1.0);
     mutator.mutator.apply_to(&mut tree_a);
 
-    let expected = build_portal_tree(&map, &offsets, selected, None, None, None).tree;
+    let expected = build_portal_tree(&map, &offsets, selected, None, None, None, 1.0).tree;
 
     // Walk both: per pair, per slot, GlyphArea fields (text,
     // position, bounds, scale, line_height, regions, outline)
@@ -221,7 +221,7 @@ fn portal_identity_sequence_drops_folded_pairs() {
     map.edges
         .push(synthetic_portal_edge("b", "child", "#00ff00"));
 
-    let pairs_before = portal_pair_data(&map, &HashMap::new(), None, None, None, None);
+    let pairs_before = portal_pair_data(&map, &HashMap::new(), None, None, None, None, 1.0);
     assert_eq!(
         portal_identity_sequence(&pairs_before),
         vec![
@@ -231,7 +231,7 @@ fn portal_identity_sequence_drops_folded_pairs() {
     );
 
     map.nodes.get_mut("parent").unwrap().folded = true;
-    let pairs_after = portal_pair_data(&map, &HashMap::new(), None, None, None, None);
+    let pairs_after = portal_pair_data(&map, &HashMap::new(), None, None, None, None, 1.0);
     assert_eq!(
         portal_identity_sequence(&pairs_after),
         vec![EdgeKey::new("a", "b", "cross_link")]
@@ -263,7 +263,7 @@ fn portal_marker_region_sized_by_grapheme_cluster_count_not_codepoints() {
     }
     map.edges.push(edge);
 
-    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None);
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
     let pair = result.tree.root.children(&result.tree.arena).next().unwrap();
     // Descend pair → endpoint void → icon leaf.
     let endpoint_void = pair.children(&result.tree.arena).next().unwrap();

@@ -747,11 +747,14 @@ impl MindMapDocument {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
         let endpoint_state =
             baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
+        // Camera zoom is irrelevant for color resolution — pass
+        // 1.0 so the font-size clamp path doesn't branch oddly.
         let style = baumhard::mindmap::scene_builder::portal::resolve_portal_endpoint_style(
             edge,
             endpoint_state,
             &self.mindmap.canvas,
             None,
+            1.0,
         );
         Some(style.color)
     }
