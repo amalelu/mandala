@@ -84,12 +84,6 @@ impl ResolvedKeybinds {
         None
     }
 
-    /// Returns true if the given key event is bound to the given action.
-    /// Convenience for the event loop.
-    pub fn is(&self, action: Action, key: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
-        self.action_for(key, ctrl, shift, alt) == Some(action)
-    }
-
     /// Return the custom-mutation id bound to the given key event,
     /// if any. Called after `action_for` returns `None` — built-in
     /// actions win on a collision.

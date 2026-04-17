@@ -14,6 +14,7 @@
 
 mod completion;
 mod dispatch;
+mod edit;
 mod exec;
 mod history;
 
