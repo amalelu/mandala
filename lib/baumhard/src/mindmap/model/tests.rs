@@ -153,7 +153,12 @@ fn effective_font_size_zoomed_out_floors_to_min() {
 
 #[test]
 fn effective_font_size_zoomed_in_ceils_to_max() {
-    let cfg = GlyphConnectionConfig::default();
+    // Configure an explicit smaller ceiling so this test exercises
+    // the clamp behavior without tracking the default cap.
+    let cfg = GlyphConnectionConfig {
+        max_font_size_pt: 24.0,
+        ..GlyphConnectionConfig::default()
+    };
     // At zoom = 2.0: base * zoom = 24 (right at the cap) → canvas
     // = 24 / 2 = 12.
     let got = cfg.effective_font_size_pt(2.0);

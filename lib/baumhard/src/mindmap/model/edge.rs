@@ -85,6 +85,14 @@ pub struct PortalEndpointState {
     /// = auto-orient toward the partner endpoint. Set by drag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_t: Option<f32>,
+    /// Per-endpoint text label, rendered as a sibling glyph next
+    /// to the portal marker icon. `None` = no text (icon
+    /// renders alone). Independent from `MindEdge.label` — edge
+    /// labels sit along the connection path and only apply to
+    /// line-mode edges; portal text labels attach to their own
+    /// endpoint marker and work only for portal-mode edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// Return the endpoint state for the `endpoint_node_id` side of
@@ -208,7 +216,13 @@ pub struct GlyphConnectionConfig {
 fn default_connection_body() -> String { "\u{00B7}".to_string() } // middle dot ·
 fn default_connection_font_size() -> f32 { 12.0 }
 fn default_connection_min_font_size() -> f32 { 8.0 }
-fn default_connection_max_font_size() -> f32 { 24.0 }
+// 128pt is enough for billboard-sized portal labels on a
+// widescreen display while keeping a typo (`font size=10000`)
+// from eating the whole viewport silently. Existing maps that
+// serialize their own `max_font_size_pt` keep their saved value
+// through serde; only freshly-constructed `GlyphConnectionConfig`
+// values pick up this ceiling.
+fn default_connection_max_font_size() -> f32 { 128.0 }
 
 impl Default for GlyphConnectionConfig {
     fn default() -> Self {

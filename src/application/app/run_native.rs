@@ -112,6 +112,7 @@ let mut console_state = ConsoleState::Closed;
 // `load_console_history` / `save_console_history`.
 let mut console_history: Vec<String> = load_console_history();
 let mut label_edit_state = LabelEditState::Closed;
+let mut portal_text_edit_state = PortalTextEditState::Closed;
 let mut text_edit_state = TextEditState::Closed;
 let mut color_picker_state =
     crate::application::color_picker::ColorPickerState::Closed;
@@ -608,6 +609,7 @@ app.event_loop.run(move |event, _window_target| {
                     &mut console_state,
                     &mut console_history,
                     &mut label_edit_state,
+                    &mut portal_text_edit_state,
                     &mut color_picker_state,
                     &mut document,
                     &mut mindmap_tree,
@@ -663,6 +665,29 @@ app.event_loop.run(move |event, _window_target| {
                         modifiers.alt_key(),
                         &keybinds,
                         &mut label_edit_state,
+                        doc,
+                        &mut mindmap_tree,
+                        &mut app_scene,
+                        &mut renderer,
+                    );
+                }
+                return;
+            }
+
+            // Inline portal-text edit modal — parallel to the
+            // edge label editor but keyed to
+            // `(edge_ref, endpoint_node_id)`. Same keystroke
+            // routing via `InputContext::LabelEdit`.
+            if portal_text_edit_state.is_open() {
+                if let Some(doc) = document.as_mut() {
+                    handle_portal_text_edit_key(
+                        &key_name,
+                        &logical_key,
+                        modifiers.control_key(),
+                        modifiers.shift_key(),
+                        modifiers.alt_key(),
+                        &keybinds,
+                        &mut portal_text_edit_state,
                         doc,
                         &mut mindmap_tree,
                         &mut app_scene,
@@ -822,19 +847,40 @@ app.event_loop.run(move |event, _window_target| {
                     // these never fire while the editor is already
                     // open, so Enter/Backspace stay literal inside
                     // the editor.
+                    //
+                    // Portal-label selection routes to the
+                    // inline portal-text editor instead — same
+                    // action, different target type. `*Clean`
+                    // still opens on empty text because
+                    // portal labels don't distinguish the two
+                    // (they're short, a retype is one shift-esc
+                    // followed by Enter anyway).
                     let clean = matches!(a, Action::EditSelectionClean);
                     if let Some(doc) = document.as_mut() {
-                        if let SelectionState::Single(id) = &doc.selection {
-                            let nid = id.clone();
-                            open_text_edit(
-                                &nid,
-                                clean,
-                                doc,
-                                &mut text_edit_state,
-                                &mut mindmap_tree,
-                                &mut app_scene,
-                                &mut renderer,
-                            );
+                        match doc.selection.clone() {
+                            SelectionState::Single(id) => {
+                                open_text_edit(
+                                    &id,
+                                    clean,
+                                    doc,
+                                    &mut text_edit_state,
+                                    &mut mindmap_tree,
+                                    &mut app_scene,
+                                    &mut renderer,
+                                );
+                            }
+                            SelectionState::PortalLabel(s) => {
+                                let er = s.edge_ref();
+                                open_portal_text_edit(
+                                    &er,
+                                    &s.endpoint_node_id,
+                                    doc,
+                                    &mut portal_text_edit_state,
+                                    &mut app_scene,
+                                    &mut renderer,
+                                );
+                            }
+                            _ => {}
                         }
                     }
                 }

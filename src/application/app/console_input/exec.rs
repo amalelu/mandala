@@ -13,7 +13,9 @@ use super::super::color_picker_flow::{
     close_color_picker_standalone, open_color_picker_contextual,
     open_color_picker_standalone,
 };
-use super::super::{open_label_edit, rebuild_all, LabelEditState};
+use super::super::{
+    open_label_edit, open_portal_text_edit, rebuild_all, LabelEditState, PortalTextEditState,
+};
 use super::{push_scrollback_error, push_scrollback_output};
 
 /// Parse and execute a console line. Drains deferred modal handoffs
@@ -28,6 +30,7 @@ pub(in crate::application::app) fn execute_console_line(
     line: &str,
     console_state: &mut ConsoleState,
     label_edit_state: &mut LabelEditState,
+    portal_text_edit_state: &mut PortalTextEditState,
     color_picker_state: &mut ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
@@ -53,6 +56,7 @@ pub(in crate::application::app) fn execute_console_line(
     let mut effects = ConsoleEffects::new(doc);
     let result = (cmd.execute)(&Args::new(&args), &mut effects);
     let label_edit_req = effects.open_label_edit.take();
+    let portal_text_edit_req = effects.open_portal_text_edit.take();
     let color_picker_req = effects.open_color_picker.take();
     let color_picker_standalone_req = effects.open_color_picker_standalone;
     let color_picker_close_req = effects.close_color_picker;
@@ -82,6 +86,7 @@ pub(in crate::application::app) fn execute_console_line(
         *doc = new_doc;
         *mindmap_tree = None;
         *label_edit_state = LabelEditState::Closed;
+        *portal_text_edit_state = PortalTextEditState::Closed;
         *color_picker_state = ColorPickerState::Closed;
     }
 
@@ -91,6 +96,17 @@ pub(in crate::application::app) fn execute_console_line(
 
     if let Some(er) = label_edit_req {
         open_label_edit(&er, doc, label_edit_state, app_scene, renderer);
+        *console_state = ConsoleState::Closed;
+        renderer.rebuild_console_overlay_buffers(app_scene, None);
+    } else if let Some((er, endpoint)) = portal_text_edit_req {
+        open_portal_text_edit(
+            &er,
+            &endpoint,
+            doc,
+            portal_text_edit_state,
+            app_scene,
+            renderer,
+        );
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(app_scene, None);
     } else if let Some(target) = color_picker_req {

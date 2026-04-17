@@ -1,10 +1,27 @@
-//! Portal tree builder — one `GlyphArea` per (portal-mode edge ×
-//! endpoint). Mirrors the [`scene_builder::portal`] emission rule:
-//! each edge with `display_mode = "portal"` produces two markers,
-//! anchored to their owning node's border at the directional
-//! default (or user-dragged `border_t`). Color, glyph, and font
-//! size come from [`scene_builder::portal::resolve_portal_endpoint_style`]
-//! so this path cannot drift from the scene-emission path.
+//! Portal tree builder — one subtree per (portal-mode edge ×
+//! endpoint). Each endpoint subtree carries an **icon** glyph
+//! (the portal marker) and a **text** glyph (the endpoint's
+//! text label — empty string when no text is set). The text is
+//! a sibling of the icon under a per-endpoint `Void` parent so
+//! the baumhard tree shape encodes the "text belongs to this
+//! portal symbol" relationship structurally.
+//!
+//! ```text
+//! root
+//! └── Void (pair_channel = visible-portal index)
+//!     ├── Void (endpoint_channel = 1, for from_id)
+//!     │   ├── GlyphArea slot=1 (icon)
+//!     │   └── GlyphArea slot=2 (text)
+//!     └── Void (endpoint_channel = 2, for to_id)
+//!         ├── GlyphArea slot=1 (icon)
+//!         └── GlyphArea slot=2 (text)
+//! ```
+//!
+//! Mirrors the [`scene_builder::portal`] emission rule: color,
+//! glyph, font size, and text all resolve through
+//! [`scene_builder::portal::resolve_portal_endpoint_style`] plus
+//! the `layout_portal_label` / `layout_portal_text` helpers so
+//! the scene-path and tree-path cannot drift.
 //!
 //! [`scene_builder::portal`]: crate::mindmap::scene_builder::portal
 //! [`scene_builder::portal::resolve_portal_endpoint_style`]: crate::mindmap::scene_builder::portal::resolve_portal_endpoint_style
@@ -20,8 +37,10 @@ use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::tree::Tree;
 use crate::mindmap::model::{is_portal_edge, portal_endpoint_state, MindMap, MindNode};
 use crate::mindmap::scene_builder::portal::{
-    layout_portal_label, node_center, resolve_portal_endpoint_style, SelectedPortalLabel,
+    layout_portal_label, layout_portal_text, node_center, resolve_portal_endpoint_style,
+    SelectedPortalLabel,
 };
+use crate::mindmap::scene_builder::PortalTextEditOverride;
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color;
@@ -44,11 +63,17 @@ pub struct PortalColorPreviewRef<'a> {
 }
 
 /// Result of [`build_portal_tree`]. Bundles the tree with the
-/// AABB-per-marker map the legacy `hit_test_portal` path needs
-/// while it's still running.
+/// hitbox map the renderer consults for click dispatch. One
+/// hitbox per endpoint, spanning both the icon AABB and the
+/// text AABB — clicking the text behaves identically to
+/// clicking the icon (both select the same portal label).
 pub struct PortalTree {
     pub tree: Tree<GfxElement, GfxMutator>,
-    /// `(edge_key, endpoint_node_id) → AABB`.
+    /// `(edge_key, endpoint_node_id) → (min, max)` spanning the
+    /// union of icon + text AABBs. Renderer keys this into its
+    /// portal hit-test map so click dispatch finds the endpoint
+    /// under the cursor regardless of which half of the label
+    /// was hit.
     pub hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
 }
 
@@ -59,39 +84,65 @@ pub struct PortalTree {
 /// [`build_portal_mutator_tree`] path.
 pub type PortalIdentity = EdgeKey;
 
-/// Per-pair output of [`portal_pair_data`]. Single source of truth
-/// for portal layout consumed by both [`build_portal_tree`] (initial
-/// build) and [`build_portal_mutator_tree`] (in-place §B2 update).
+/// Per-endpoint tree-build output: the icon + text glyph areas
+/// at their per-slot channels, the endpoint id, and a combined
+/// AABB for hit testing. Each field is computed from the same
+/// source of truth (`layout_portal_label` + `layout_portal_text`)
+/// so the scene and tree paths cannot drift.
+#[derive(Clone, Debug)]
+pub struct EndpointAreas {
+    /// Icon glyph area (always slot channel 1 under the
+    /// endpoint void parent).
+    pub icon: GlyphArea,
+    /// Text glyph area (always slot channel 2). Text is the
+    /// empty string when the endpoint has no committed text
+    /// and no inline-edit override — the slot is always
+    /// present to keep the channel layout stable across
+    /// text-set / text-absent frames, letting the mutator-tree
+    /// in-place update path keep working.
+    pub text: GlyphArea,
+    /// Endpoint node id (identical to one of `edge.from_id` /
+    /// `edge.to_id`). Used by the renderer to key per-endpoint
+    /// hitboxes and to route click dispatch.
+    pub endpoint_node_id: String,
+    /// Combined AABB spanning both icon and text. Stored on the
+    /// pair so the renderer's hit-test map sees one rect per
+    /// endpoint — makes clicks on the text behave identically
+    /// to clicks on the icon.
+    pub hitbox: (Vec2, Vec2),
+}
+
+/// Per-pair output of [`portal_pair_data`]. Single source of
+/// truth for portal layout consumed by both
+/// [`build_portal_tree`] (initial build) and
+/// [`build_portal_mutator_tree`] (in-place update).
 ///
-/// `pair_channel` is sequential by visible-portal index — stable
-/// across two calls **iff** their visible-portal sequences are
-/// identical (same identities in the same order). Callers detect
-/// drift by comparing identity slices and fall back to a full
-/// rebuild when they disagree.
+/// `pair_channel` is sequential by visible-portal index —
+/// stable across two calls **iff** their visible-portal
+/// sequences are identical (same identities in the same order).
+/// Callers detect drift by comparing identity slices and fall
+/// back to a full rebuild when they disagree.
 #[derive(Clone, Debug)]
 pub struct PortalPairData {
     pub identity: PortalIdentity,
     pub pair_channel: usize,
-    /// Per endpoint: `(slot_channel, area, hitbox, endpoint_node_id)`.
-    /// Slot channels are `1` and `2`, fixed by tree-shape contract.
-    pub endpoints: [(usize, GlyphArea, (Vec2, Vec2), String); 2],
+    /// Per endpoint, in canonical order: index 0 = `from_id`,
+    /// index 1 = `to_id`. Endpoint-void channels are 1 and 2
+    /// respectively, fixed by the tree-shape contract.
+    pub endpoints: [EndpointAreas; 2],
 }
 
-/// Compute the visible portal-mode-edge layout for the given map
-/// state. Single source of truth shared by [`build_portal_tree`]
-/// and [`build_portal_mutator_tree`] so the two paths cannot drift.
-///
-/// # Costs
-///
-/// O(portal-mode edges). Allocates a `Vec` plus two
-/// `ColorFontRegions` per edge. Color resolution delegates to
-/// `resolve_portal_endpoint_style`.
+/// Compute the visible portal-mode-edge layout for the given
+/// map state. Single source of truth shared by
+/// [`build_portal_tree`] and [`build_portal_mutator_tree`].
 pub fn portal_pair_data(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<SelectedEdgeRef>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     color_preview: Option<PortalColorPreviewRef>,
+    portal_text_edit: Option<PortalTextEditOverride<'_>>,
+    camera_zoom: f32,
 ) -> Vec<PortalPairData> {
     let mut pairs: Vec<PortalPairData> = Vec::new();
     let mut pair_channel: usize = 1;
@@ -125,76 +176,139 @@ pub fn portal_pair_data(
             }
         });
 
-        let make_endpoint =
-            |slot: usize, owner: &MindNode, partner: &MindNode|
-                -> (usize, GlyphArea, (Vec2, Vec2), String) {
-                let (ox, oy) = offsets.get(&owner.id).copied().unwrap_or((0.0, 0.0));
-                let owner_pos =
-                    Vec2::new(owner.position.x as f32 + ox, owner.position.y as f32 + oy);
-                let owner_size = Vec2::new(owner.size.width as f32, owner.size.height as f32);
-                let (px, py) = offsets.get(&partner.id).copied().unwrap_or((0.0, 0.0));
-                let partner_pos = Vec2::new(
-                    partner.position.x as f32 + px,
-                    partner.position.y as f32 + py,
-                );
-                let partner_size =
-                    Vec2::new(partner.size.width as f32, partner.size.height as f32);
+        let make_endpoint = |owner: &MindNode, partner: &MindNode| -> EndpointAreas {
+            let (ox, oy) = offsets.get(&owner.id).copied().unwrap_or((0.0, 0.0));
+            let owner_pos =
+                Vec2::new(owner.position.x as f32 + ox, owner.position.y as f32 + oy);
+            let owner_size = Vec2::new(owner.size.width as f32, owner.size.height as f32);
+            let (px, py) = offsets.get(&partner.id).copied().unwrap_or((0.0, 0.0));
+            let partner_pos =
+                Vec2::new(partner.position.x as f32 + px, partner.position.y as f32 + py);
+            let partner_size =
+                Vec2::new(partner.size.width as f32, partner.size.height as f32);
 
-                let endpoint_state = portal_endpoint_state(edge, &owner.id);
-                let is_this_label_selected = selected_portal_label.map_or(false, |s| {
-                    *s.edge_key == edge_key && s.endpoint_node_id == owner.id
-                });
-                let raw_color_override: Option<&str> = if let Some(p) = preview_for_this_edge {
-                    Some(p)
-                } else if is_edge_selected || is_this_label_selected {
-                    Some(SELECTION_HIGHLIGHT_HEX)
-                } else {
-                    None
-                };
-
-                let style = resolve_portal_endpoint_style(
-                    edge,
-                    endpoint_state,
-                    &map.canvas,
-                    raw_color_override,
-                );
-                let layout = layout_portal_label(
-                    owner_pos,
-                    owner_size,
-                    node_center(partner_pos, partner_size),
-                    endpoint_state,
-                    style.font_size_pt,
-                );
-                let color_rgba =
-                    color::hex_to_rgba_safe(&style.color, [0.92, 0.92, 0.92, 1.0]);
-
-                let mut area = GlyphArea::new_with_str(
-                    &style.glyph,
-                    style.font_size_pt,
-                    style.font_size_pt,
-                    layout.top_left,
-                    layout.bounds,
-                );
-                let cluster_count =
-                    crate::util::grapheme_chad::count_grapheme_clusters(&style.glyph);
-                if cluster_count > 0 {
-                    let mut regions = ColorFontRegions::new_empty();
-                    regions.submit_region(ColorFontRegion::new(
-                        Range::new(0, cluster_count),
-                        None,
-                        Some(color_rgba),
-                    ));
-                    area.regions = regions;
-                }
-
-                let max = layout.top_left + layout.bounds;
-                (slot, area, (layout.top_left, max), owner.id.clone())
+            let endpoint_state = portal_endpoint_state(edge, &owner.id);
+            let is_this_label_selected = selected_portal_label.map_or(false, |s| {
+                *s.edge_key == edge_key && s.endpoint_node_id == owner.id
+            });
+            let raw_color_override: Option<&str> = if let Some(p) = preview_for_this_edge {
+                Some(p)
+            } else if is_edge_selected || is_this_label_selected {
+                Some(SELECTION_HIGHLIGHT_HEX)
+            } else {
+                None
             };
 
-        let endpoints = [
-            make_endpoint(1, node_a, node_b),
-            make_endpoint(2, node_b, node_a),
-        ];
+            let style = resolve_portal_endpoint_style(
+                edge,
+                endpoint_state,
+                &map.canvas,
+                raw_color_override,
+                camera_zoom,
+            );
+            let icon_layout = layout_portal_label(
+                owner_pos,
+                owner_size,
+                node_center(partner_pos, partner_size),
+                endpoint_state,
+                style.font_size_pt,
+            );
+            let color_rgba =
+                color::hex_to_rgba_safe(&style.color, [0.92, 0.92, 0.92, 1.0]);
+
+            // Inline edit preview wins over the committed `text`
+            // so the user sees their buffer live. Empty string
+            // (not absent) when neither source carries text —
+            // the slot is always emitted so the mutator-tree
+            // channel layout stays stable frame-to-frame.
+            let text_string = match portal_text_edit {
+                Some(p) if *p.edge_key == edge_key && p.endpoint_node_id == owner.id => {
+                    p.buffer.to_string()
+                }
+                _ => endpoint_state
+                    .and_then(|s| s.text.clone())
+                    .unwrap_or_default(),
+            };
+            let text_layout = layout_portal_text(
+                icon_layout,
+                owner_pos,
+                owner_size,
+                node_center(partner_pos, partner_size),
+                endpoint_state,
+                style.font_size_pt,
+                &text_string,
+            );
+
+            let mut icon_area = GlyphArea::new_with_str(
+                &style.glyph,
+                style.font_size_pt,
+                style.font_size_pt,
+                icon_layout.top_left,
+                icon_layout.bounds,
+            );
+            let icon_clusters =
+                crate::util::grapheme_chad::count_grapheme_clusters(&style.glyph);
+            if icon_clusters > 0 {
+                let mut regions = ColorFontRegions::new_empty();
+                regions.submit_region(ColorFontRegion::new(
+                    Range::new(0, icon_clusters),
+                    None,
+                    Some(color_rgba),
+                ));
+                icon_area.regions = regions;
+            }
+
+            let mut text_area = GlyphArea::new_with_str(
+                &text_string,
+                style.font_size_pt,
+                style.font_size_pt,
+                text_layout.top_left,
+                text_layout.bounds,
+            );
+            let text_clusters =
+                crate::util::grapheme_chad::count_grapheme_clusters(&text_string);
+            if text_clusters > 0 {
+                let mut regions = ColorFontRegions::new_empty();
+                regions.submit_region(ColorFontRegion::new(
+                    Range::new(0, text_clusters),
+                    None,
+                    Some(color_rgba),
+                ));
+                text_area.regions = regions;
+            }
+
+            // Combined hitbox: rectangular union of icon + text
+            // AABBs when text is present, so clicking anywhere in
+            // that rect dispatches as a click on this portal label
+            // (icon and text behave as one target). Empty-string
+            // text slots are always emitted to keep mutator
+            // channels stable, but their AABB is a 1-char-wide
+            // reserved region that shouldn't be clickable — a
+            // text-less portal would otherwise grow a phantom
+            // ~30×65 px hot zone beside the icon at default font
+            // size. Use the icon AABB alone in that case.
+            let icon_min = icon_layout.top_left;
+            let icon_max = icon_layout.top_left + icon_layout.bounds;
+            let (hitbox_min, hitbox_max) = if text_string.is_empty() {
+                (icon_min, icon_max)
+            } else {
+                let text_min = text_layout.top_left;
+                let text_max = text_layout.top_left + text_layout.bounds;
+                (
+                    Vec2::new(icon_min.x.min(text_min.x), icon_min.y.min(text_min.y)),
+                    Vec2::new(icon_max.x.max(text_max.x), icon_max.y.max(text_max.y)),
+                )
+            };
+
+            EndpointAreas {
+                icon: icon_area,
+                text: text_area,
+                endpoint_node_id: owner.id.clone(),
+                hitbox: (hitbox_min, hitbox_max),
+            }
+        };
+
+        let endpoints = [make_endpoint(node_a, node_b), make_endpoint(node_b, node_a)];
         pairs.push(PortalPairData {
             identity: edge_key,
             pair_channel,
@@ -213,6 +327,11 @@ pub fn portal_identity_sequence(pairs: &[PortalPairData]) -> Vec<PortalIdentity>
     pairs.iter().map(|p| p.identity.clone()).collect()
 }
 
+// Tree-shape channel constants — fixed by contract so the
+// mutator path can align against the initial build.
+const ICON_SLOT: usize = 1;
+const TEXT_SLOT: usize = 2;
+
 /// Build a baumhard tree of every visible portal marker.
 pub fn build_portal_tree(
     map: &MindMap,
@@ -220,6 +339,8 @@ pub fn build_portal_tree(
     selected_edge: Option<SelectedEdgeRef>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     color_preview: Option<PortalColorPreviewRef>,
+    portal_text_edit: Option<PortalTextEditOverride<'_>>,
+    camera_zoom: f32,
 ) -> PortalTree {
     let pairs = portal_pair_data(
         map,
@@ -227,6 +348,8 @@ pub fn build_portal_tree(
         selected_edge,
         selected_portal_label,
         color_preview,
+        portal_text_edit,
+        camera_zoom,
     );
     build_portal_tree_from_pairs(&pairs)
 }
@@ -246,18 +369,34 @@ pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
         unique_id += 1;
         tree.root.append(pair_root, &mut tree.arena);
 
-        for (slot, area, hitbox, endpoint_id) in pair.endpoints.iter() {
-            let element = GfxElement::new_area_non_indexed_with_id(
-                area.clone(),
-                *slot,
+        for (endpoint_idx, ep) in pair.endpoints.iter().enumerate() {
+            let endpoint_channel = endpoint_idx + 1;
+            let endpoint_void = tree.arena.new_node(GfxElement::new_void_with_id(
+                endpoint_channel,
                 unique_id,
-            );
+            ));
             unique_id += 1;
-            let leaf = tree.arena.new_node(element);
-            pair_root.append(leaf, &mut tree.arena);
+            pair_root.append(endpoint_void, &mut tree.arena);
+
+            let icon_leaf = tree.arena.new_node(GfxElement::new_area_non_indexed_with_id(
+                ep.icon.clone(),
+                ICON_SLOT,
+                unique_id,
+            ));
+            unique_id += 1;
+            endpoint_void.append(icon_leaf, &mut tree.arena);
+
+            let text_leaf = tree.arena.new_node(GfxElement::new_area_non_indexed_with_id(
+                ep.text.clone(),
+                TEXT_SLOT,
+                unique_id,
+            ));
+            unique_id += 1;
+            endpoint_void.append(text_leaf, &mut tree.arena);
+
             hitboxes.insert(
-                (pair.identity.clone(), endpoint_id.clone()),
-                *hitbox,
+                (pair.identity.clone(), ep.endpoint_node_id.clone()),
+                ep.hitbox,
             );
         }
     }
@@ -280,6 +419,8 @@ pub fn build_portal_mutator_tree(
     selected_edge: Option<SelectedEdgeRef>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     color_preview: Option<PortalColorPreviewRef>,
+    portal_text_edit: Option<PortalTextEditOverride<'_>>,
+    camera_zoom: f32,
 ) -> PortalMutator {
     let pairs = portal_pair_data(
         map,
@@ -287,6 +428,8 @@ pub fn build_portal_mutator_tree(
         selected_edge,
         selected_portal_label,
         color_preview,
+        portal_text_edit,
+        camera_zoom,
     );
     build_portal_mutator_tree_from_pairs(&pairs)
 }
@@ -306,25 +449,32 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
         let pair_node = mt.arena.new_node(GfxMutator::new_void(pair.pair_channel));
         mt.root.append(pair_node, &mut mt.arena);
 
-        for (slot, area, hitbox, endpoint_id) in pair.endpoints.iter() {
-            let delta = DeltaGlyphArea::new(vec![
-                GlyphAreaField::Text(area.text.clone()),
-                GlyphAreaField::position(area.position.x.0, area.position.y.0),
-                GlyphAreaField::bounds(area.render_bounds.x.0, area.render_bounds.y.0),
-                GlyphAreaField::scale(area.scale.0),
-                GlyphAreaField::line_height(area.line_height.0),
-                GlyphAreaField::ColorFontRegions(area.regions.clone()),
-                GlyphAreaField::Outline(area.outline.clone()),
-                GlyphAreaField::Operation(ApplyOperation::Assign),
-            ]);
-            let leaf = mt.arena.new_node(GfxMutator::new(
-                Mutation::AreaDelta(Box::new(delta)),
-                *slot,
-            ));
-            pair_node.append(leaf, &mut mt.arena);
+        for (endpoint_idx, ep) in pair.endpoints.iter().enumerate() {
+            let endpoint_channel = endpoint_idx + 1;
+            let endpoint_void = mt.arena.new_node(GfxMutator::new_void(endpoint_channel));
+            pair_node.append(endpoint_void, &mut mt.arena);
+
+            for (slot, area) in [(ICON_SLOT, &ep.icon), (TEXT_SLOT, &ep.text)] {
+                let delta = DeltaGlyphArea::new(vec![
+                    GlyphAreaField::Text(area.text.clone()),
+                    GlyphAreaField::position(area.position.x.0, area.position.y.0),
+                    GlyphAreaField::bounds(area.render_bounds.x.0, area.render_bounds.y.0),
+                    GlyphAreaField::scale(area.scale.0),
+                    GlyphAreaField::line_height(area.line_height.0),
+                    GlyphAreaField::ColorFontRegions(area.regions.clone()),
+                    GlyphAreaField::Outline(area.outline.clone()),
+                    GlyphAreaField::Operation(ApplyOperation::Assign),
+                ]);
+                let leaf = mt.arena.new_node(GfxMutator::new(
+                    Mutation::AreaDelta(Box::new(delta)),
+                    slot,
+                ));
+                endpoint_void.append(leaf, &mut mt.arena);
+            }
+
             hitboxes.insert(
-                (pair.identity.clone(), endpoint_id.clone()),
-                *hitbox,
+                (pair.identity.clone(), ep.endpoint_node_id.clone()),
+                ep.hitbox,
             );
         }
     }

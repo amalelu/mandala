@@ -70,7 +70,10 @@ use edge_drag::apply_edge_handle_drag;
 #[cfg(not(target_arch = "wasm32"))]
 use portal_label_drag::apply_portal_label_drag;
 #[cfg(not(target_arch = "wasm32"))]
-use label_edit::{handle_label_edit_key, open_label_edit, LabelEditState};
+use label_edit::{
+    handle_label_edit_key, handle_portal_text_edit_key, open_label_edit,
+    open_portal_text_edit, LabelEditState, PortalTextEditState,
+};
 
 /// Cross-platform monotonic clock returning milliseconds since first call.
 /// Native: uses `Instant` (guaranteed monotonic). WASM: uses

@@ -40,17 +40,12 @@ use crate::util::color::resolve_var;
 use super::{PortalColorPreview, PortalElement};
 
 /// Default portal marker font size when no `glyph_connection`
-/// override is set. Bumped from the 12pt line-body default so the
-/// marker reads as a label (several visible pixels of glyph strokes)
-/// rather than a hairline dot.
-pub(crate) const DEFAULT_PORTAL_MARKER_FONT_SIZE_PT: f32 = 20.0;
-
-/// Minimum effective font size for a portal marker regardless of
-/// the resolved `glyph_connection.font_size_pt`. Used to rescue
-/// edges that were flipped from line to portal mode and inherited a
-/// tiny body font size (e.g. 8pt line text becoming an invisible
-/// 8pt marker) — the label still needs to read at a glance.
-pub(crate) const MIN_PORTAL_MARKER_FONT_SIZE_PT: f32 = 14.0;
+/// override is set. Matches the creation-time default in
+/// `document::defaults::default_portal_edge` so an edge flipped
+/// from line to portal mode (inheriting the canvas / hardcoded
+/// default) and a freshly-created portal edge read at the same
+/// visual scale.
+pub(crate) const DEFAULT_PORTAL_MARKER_FONT_SIZE_PT: f32 = 50.0;
 
 /// Padding between a portal label and the owning node's border,
 /// expressed as a fraction of the marker's font size. Tuned so the
@@ -91,8 +86,18 @@ pub struct ResolvedPortalStyle {
 
 /// Resolve the per-endpoint portal marker style. Merges the color
 /// cascade (preview > whole-edge-select > per-label-select >
-/// per-endpoint override > edge-level override > edge.color) and
-/// picks a visible glyph + font size.
+/// per-endpoint override > edge-level override > edge.color),
+/// picks a visible glyph, and produces a **canvas-space**
+/// font size already compensated for camera zoom the same way
+/// line-mode connections do (see
+/// [`GlyphConnectionConfig::effective_font_size_pt`]): the
+/// renderer scales every glyph by `camera.zoom` at draw time, so
+/// at zoom = 0.5 a portal the user wants to read at 50pt on
+/// screen needs a 100pt canvas-space glyph. The clamp into
+/// `[min_font_size_pt, max_font_size_pt]` runs on the
+/// screen-space size, then we divide back through zoom — same
+/// formula line connections use so portals LOD identically as
+/// the user zooms out.
 ///
 /// `raw_color_override` is the preview / selection hex already
 /// resolved by the caller; `None` means "no transient override".
@@ -101,18 +106,27 @@ pub fn resolve_portal_endpoint_style(
     endpoint_state: Option<&PortalEndpointState>,
     canvas: &Canvas,
     raw_color_override: Option<&str>,
+    camera_zoom: f32,
 ) -> ResolvedPortalStyle {
     let cfg = GlyphConnectionConfig::resolved_for(edge, canvas);
 
-    // Font-size floor. When the resolved size is below the visual
-    // readability floor (as happens for any edge that inherited a
-    // small body font), pull it up; otherwise respect the user's
-    // explicit choice.
-    let font_size_pt = if edge.glyph_connection.is_none() {
+    // Base (unclamped, pre-zoom) font size. When the edge carries
+    // no `glyph_connection` override, fall back to the portal
+    // default so markers read at a consistent badge size even on
+    // edges flipped from line to portal mode without an explicit
+    // marker font setting.
+    let base_font_size = if edge.glyph_connection.is_none() {
         DEFAULT_PORTAL_MARKER_FONT_SIZE_PT
     } else {
-        cfg.font_size_pt.max(MIN_PORTAL_MARKER_FONT_SIZE_PT)
+        cfg.font_size_pt
     };
+    // Zoom-clamp — identical to `GlyphConnectionConfig::effective_font_size_pt`,
+    // inlined so we can substitute the portal default when there's
+    // no per-edge glyph_connection config.
+    let z = camera_zoom.max(f32::EPSILON);
+    let target_screen =
+        (base_font_size * z).clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
+    let font_size_pt = target_screen / z;
 
     // Glyph fallback. The line-body default (middle dot) renders
     // as a hairline at any reasonable marker size, so an edge
@@ -189,14 +203,78 @@ pub(crate) fn node_center(pos: Vec2, size: Vec2) -> Vec2 {
     Vec2::new(pos.x + size.x * 0.5, pos.y + size.y * 0.5)
 }
 
-/// Emit one portal marker per endpoint of every visible portal-mode
-/// edge.
+/// Padding between a portal icon and its adjacent text label,
+/// as a fraction of the icon font size. Tuned so the text sits
+/// slightly outside the icon AABB without colliding with it.
+pub(crate) const PORTAL_TEXT_PADDING_FRAC: f32 = 0.25;
+
+/// Layout result for a portal text label: top-left AABB corner
+/// and extent in canvas space. Sits outward of the icon along
+/// the border normal so the text always extends away from the
+/// owning node rather than toward it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PortalTextLayout {
+    pub top_left: Vec2,
+    pub bounds: Vec2,
+}
+
+/// Compute the AABB for a portal text label, given the icon
+/// layout and the border parameter driving the outward normal.
+/// Text extends from the icon's outward edge away from the node
+/// along the normal, with width scaled by grapheme count using
+/// the same `char_count × font_size × 0.6` heuristic connection
+/// labels use.
+pub(crate) fn layout_portal_text(
+    icon: PortalLabelLayout,
+    owner_pos: Vec2,
+    owner_size: Vec2,
+    partner_center: Vec2,
+    endpoint_state: Option<&PortalEndpointState>,
+    font_size_pt: f32,
+    text: &str,
+) -> PortalTextLayout {
+    // Approximate grapheme count (cheap proxy for shaped
+    // width — cosmic-text will reshape on render anyway). Empty
+    // strings get a minimum 1-char-wide slot so the buffer is
+    // never zero-sized, matching the connection-label helper.
+    let char_count = text.chars().count().max(1) as f32;
+    let bounds = Vec2::new(char_count * font_size_pt * 0.6, font_size_pt * 1.3);
+    let t = endpoint_state
+        .and_then(|s| s.border_t)
+        .unwrap_or_else(|| default_border_t(owner_pos, owner_size, partner_center));
+    let normal = border_outward_normal(t);
+    let padding = font_size_pt * PORTAL_TEXT_PADDING_FRAC;
+    // Icon center as the anchor for text placement. Text AABB
+    // is positioned so its inner edge sits one padding beyond
+    // the icon's outer edge along the outward normal, with
+    // perpendicular centering on the icon.
+    let icon_center = Vec2::new(
+        icon.top_left.x + icon.bounds.x * 0.5,
+        icon.top_left.y + icon.bounds.y * 0.5,
+    );
+    let outward_offset = icon.bounds.x * 0.5 + padding + bounds.x * 0.5;
+    let text_center = icon_center + normal * outward_offset;
+    let top_left = Vec2::new(
+        text_center.x - bounds.x * 0.5,
+        text_center.y - bounds.y * 0.5,
+    );
+    PortalTextLayout { top_left, bounds }
+}
+
+/// Emit one `PortalElement` per endpoint of every visible
+/// portal-mode edge. Only covers the marker icon — per-endpoint
+/// text labels (the adjacent-glyph concept) render exclusively
+/// through the tree-builder path (`tree_builder::portal`), which
+/// is the live portal render pipeline; the scene-level path
+/// exists for tests and stringly-typed inspection, not for the
+/// GPU.
 pub(super) fn build_portal_elements(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
+    camera_zoom: f32,
 ) -> Vec<PortalElement> {
     let mut portal_elements: Vec<PortalElement> = Vec::new();
 
@@ -259,6 +337,7 @@ pub(super) fn build_portal_elements(
                 endpoint_state,
                 &map.canvas,
                 raw_color_override,
+                camera_zoom,
             );
             let layout = layout_portal_label(
                 owner_pos,
