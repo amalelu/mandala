@@ -25,6 +25,33 @@ use super::portal::build_portal_elements;
 use super::portal::SelectedPortalLabel;
 use super::{EdgeColorPreview, PortalColorPreview, RenderScene};
 
+/// Bundle of "what is the user currently pointing at?" inputs
+/// threaded into the scene build. Groups the three selection-
+/// like overrides (whole-edge select, per-label select, inline
+/// label-edit substitution) so [`build_scene_with_cache`] and
+/// siblings stay readable; the in-flight color previews stay
+/// separate because they're hover-state, not selection-state.
+///
+/// Empty context (all three fields `None`) is the common case —
+/// use [`SceneSelectionContext::default`] instead of spelling
+/// out `SceneSelectionContext { edge: None, .. }` at call sites.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SceneSelectionContext<'a> {
+    /// Whole edge selection — applies the cyan highlight to both
+    /// markers of a portal-mode edge (or the body glyphs of a
+    /// line-mode edge). Tuple is `(from_id, to_id, edge_type)`.
+    pub edge: Option<(&'a str, &'a str, &'a str)>,
+    /// Per-label selection — applies the cyan highlight to just
+    /// one endpoint's marker on a portal-mode edge. Mutually
+    /// exclusive with `edge` by construction on the caller side
+    /// (`SelectionState` is an enum).
+    pub portal_label: Option<SelectedPortalLabel<'a>>,
+    /// Inline edge-label editor override — substitutes the
+    /// in-progress buffer + caret for the committed label text
+    /// on the named edge, so label edits render live.
+    pub label_edit: Option<(&'a EdgeKey, &'a str)>,
+}
+
 /// Builds a RenderScene from a MindMap, determining which nodes and borders
 /// are visible (accounting for fold state) and extracting their layout data.
 ///
@@ -37,9 +64,7 @@ pub fn build_scene(map: &MindMap, camera_zoom: f32) -> RenderScene {
     build_scene_with_cache(
         map,
         &HashMap::new(),
-        None,
-        None,
-        None,
+        SceneSelectionContext::default(),
         None,
         None,
         &mut scratch,
@@ -58,27 +83,32 @@ pub fn build_scene_with_offsets(
 ) -> RenderScene {
     let mut scratch = SceneConnectionCache::new();
     build_scene_with_cache(
-        map, offsets, None, None, None, None, None, &mut scratch, camera_zoom,
+        map,
+        offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut scratch,
+        camera_zoom,
     )
 }
 
-/// Cache-less wrapper that threads transient interaction overrides:
+/// Cache-less wrapper that threads selection + transient
+/// interaction overrides:
 ///
-/// - `label_edit_override`: inline label-edit buffer + caret
-///   substitution for a single edge.
-/// - `edge_color_preview`: color-picker hover preview for a single
-///   edge, beats selection on the previewed edge.
-/// - `portal_color_preview`: same, but routes to the portal pass
-///   for edges with `display_mode = "portal"`.
+/// - `selection`: whole-edge, per-label, or inline-label-edit
+///   overrides — see [`SceneSelectionContext`].
+/// - `edge_color_preview`: color-picker hover preview for a
+///   single edge, beats selection on the previewed edge.
+/// - `portal_color_preview`: same, but routes to the portal
+///   pass for edges with `display_mode = "portal"`.
 ///
-/// Prefer [`build_scene_with_cache`] on the hot drag path — this
-/// variant allocates a throwaway cache per call.
+/// Prefer [`build_scene_with_cache`] on the hot drag path —
+/// this variant allocates a throwaway cache per call.
 pub fn build_scene_with_offsets_selection_and_overrides(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
-    selected_edge: Option<(&str, &str, &str)>,
-    selected_portal_label: Option<SelectedPortalLabel<'_>>,
-    label_edit_override: Option<(&EdgeKey, &str)>,
+    selection: SceneSelectionContext<'_>,
     edge_color_preview: Option<EdgeColorPreview<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
     camera_zoom: f32,
@@ -87,9 +117,7 @@ pub fn build_scene_with_offsets_selection_and_overrides(
     build_scene_with_cache(
         map,
         offsets,
-        selected_edge,
-        selected_portal_label,
-        label_edit_override,
+        selection,
         edge_color_preview,
         portal_color_preview,
         &mut scratch,
@@ -113,14 +141,17 @@ pub fn build_scene_with_offsets_selection_and_overrides(
 pub fn build_scene_with_cache(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
-    selected_edge: Option<(&str, &str, &str)>,
-    selected_portal_label: Option<SelectedPortalLabel<'_>>,
-    label_edit_override: Option<(&EdgeKey, &str)>,
+    selection: SceneSelectionContext<'_>,
     edge_color_preview: Option<EdgeColorPreview<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
     cache: &mut SceneConnectionCache,
     camera_zoom: f32,
 ) -> RenderScene {
+    let SceneSelectionContext {
+        edge: selected_edge,
+        portal_label: selected_portal_label,
+        label_edit: label_edit_override,
+    } = selection;
     // The per-edge sample spacing depends on the effective font size,
     // which depends on `camera_zoom`. Flush cached samples if the
     // incoming zoom differs from the one the cache was built at, so

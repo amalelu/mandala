@@ -515,10 +515,19 @@ pub(super) fn handle_mouse_input(
                         // Per-frame CursorMoved already mutated the
                         // edge. Commit with a single EditEdge undo
                         // carrying the pre-drag snapshot, matching
-                        // the DraggingEdgeHandle release path.
+                        // the DraggingEdgeHandle release path. The
+                        // no-op check only compares the two fields
+                        // this drag can touch (`portal_from` /
+                        // `portal_to`) — whole-edge `PartialEq`
+                        // would also read `control_points`, whose
+                        // derived float equality is fragile under
+                        // NaN and unrelated to the drag outcome.
                         if let Some(doc) = document.as_mut() {
                             if let Some(idx) = doc.edge_index(&edge_ref) {
-                                if doc.mindmap.edges[idx] != original {
+                                let current = &doc.mindmap.edges[idx];
+                                if current.portal_from != original.portal_from
+                                    || current.portal_to != original.portal_to
+                                {
                                     doc.undo_stack.push(UndoAction::EditEdge {
                                         index: idx,
                                         before: original,

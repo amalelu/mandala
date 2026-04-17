@@ -99,9 +99,10 @@ fn selected_portal_edge_rendered_with_highlight_color() {
     let scene = build_scene_with_cache(
         &map,
         &HashMap::new(),
-        Some(("a", "b", "cross_link")),
-        None,
-        None,
+        SceneSelectionContext {
+            edge: Some(("a", "b", "cross_link")),
+            ..Default::default()
+        },
         None,
         None,
         &mut cache,
@@ -222,9 +223,10 @@ fn portal_color_preview_wins_over_selection() {
     let scene = build_scene_with_cache(
         &map,
         &HashMap::new(),
-        Some(("a", "b", "cross_link")),
-        None,
-        None,
+        SceneSelectionContext {
+            edge: Some(("a", "b", "cross_link")),
+            ..Default::default()
+        },
         None,
         Some(preview),
         &mut cache,

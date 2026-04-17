@@ -41,12 +41,17 @@ pub const BORDER_T_PERIOD: f32 = 4.0;
 /// Wrap a raw `border_t` into the canonical `[0.0, 4.0)` range.
 /// Handles both overflow (drag past bottom-left wraps back to
 /// top-left) and negative values (e.g. a right-to-left drag that
-/// momentarily dips below zero). Pure arithmetic — no Vec2s.
+/// momentarily dips below zero). Non-finite inputs (NaN /
+/// infinity) fall back to `0.0` — no caller path produces them in
+/// practice, but a guard is cheaper than propagating NaN into
+/// glyph positions and debugging the resulting blank render.
 pub fn wrap_border_t(t: f32) -> f32 {
-    let m = t.rem_euclid(BORDER_T_PERIOD);
+    if !t.is_finite() {
+        return 0.0;
+    }
     // `rem_euclid` guarantees `m >= 0` and `m < BORDER_T_PERIOD`
     // for finite inputs, so no extra clamp is needed here.
-    m
+    t.rem_euclid(BORDER_T_PERIOD)
 }
 
 /// Convert a canonical `t ∈ [0.0, 4.0)` to a canvas-space point on
@@ -144,6 +149,18 @@ pub fn default_border_t(owner_pos: Vec2, owner_size: Vec2, partner_center: Vec2)
 /// return the `t` of the closest border point (so dragging the
 /// label *into* the node snaps it to the nearest edge, matching
 /// the user's intent of "put the label on *this* side").
+///
+/// Corner handling: inputs exactly at a corner are equidistant
+/// from two sides; the nested `min` + first-match branch below is
+/// deterministic but arbitrary (top wins over right, right over
+/// bottom, bottom over left). The `1.0 - f32::EPSILON` clamp on
+/// each per-side fraction keeps returned `t` strictly inside the
+/// side range — a corner drag snaps to the counter-clockwise side
+/// rather than the clockwise one, so `border_outward_normal`
+/// downstream picks a well-defined single normal. Visually
+/// indistinguishable (one epsilon of canvas space), but it keeps
+/// the outward-normal direction stable instead of flipping on
+/// sub-pixel cursor jitter.
 pub fn nearest_border_t(node_pos: Vec2, node_size: Vec2, point: Vec2) -> f32 {
     // Clamp the point onto the rectangle (interior points snap to
     // the nearest edge, exterior points project onto the closest

@@ -604,6 +604,14 @@ app.event_loop.run(move |event, _window_target| {
             if let (Some(input), Some(renderer)) =
                 (input_borrow.as_mut(), renderer_borrow.as_mut())
             {
+                // A zoom mid-click invalidates the pending selection:
+                // the canvas coord the user pressed over has shifted
+                // to a new screen position, so committing the pending
+                // click on the eventual mouse-up would select whatever
+                // now sits under the release cursor — not what the
+                // user pressed on. Clear it so release falls through
+                // to empty-click handling.
+                input.pending_click = PendingClick::None;
                 renderer.process_decree(RenderDecree::CameraZoom {
                     screen_x: input.cursor_pos.0 as f32,
                     screen_y: input.cursor_pos.1 as f32,

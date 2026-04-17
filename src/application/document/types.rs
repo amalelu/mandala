@@ -98,13 +98,21 @@ impl EdgeRef {
 
 /// Tracks what is currently selected in the document. The
 /// variants are mutually exclusive — selecting one kind clears
-/// any prior selection of the others. Portal-mode edges have two
-/// selectable forms: selecting the edge body (impossible today,
-/// since a portal-mode edge has no visible body — but structurally
-/// available via console) goes through `Edge`; selecting a single
-/// portal label (the glyph attached to one endpoint node) goes
-/// through `PortalLabel`, which carries the endpoint identity
-/// alongside the owning edge.
+/// any prior selection of the others, enforced by construction
+/// (every write to `document.selection` replaces the whole enum
+/// value; there's no additive "add this to the selection" API
+/// for variants of different kinds). Downstream code can rely on
+/// `Edge` and `PortalLabel` in particular never being active at
+/// the same moment: the scene builder uses that invariant when
+/// it picks which cyan highlight to apply (both-markers for
+/// `Edge`, single-marker for `PortalLabel`).
+///
+/// Portal-mode edges have two selectable forms: selecting the
+/// edge body (currently reachable only through the console)
+/// goes through `Edge`; selecting a single portal label (the
+/// glyph attached to one endpoint node) goes through
+/// `PortalLabel`, which carries the endpoint identity alongside
+/// the owning edge.
 #[derive(Clone, Debug)]
 pub enum SelectionState {
     None,
@@ -186,6 +194,18 @@ impl SelectionState {
 /// named struct rather than two tuple-variant fields so the
 /// `selected_portal_label_scene_ref` accessor can return a single
 /// borrow without re-parsing the selection variant.
+///
+/// **Why `EdgeKey` instead of `EdgeRef`?** Every other selection
+/// variant that references an edge uses `EdgeRef` (e.g.
+/// `SelectionState::Edge`). `PortalLabel` intentionally deviates:
+/// the scene builder's `SelectedPortalLabel<'_>` borrows an
+/// `&EdgeKey`, and storing the key form directly lets
+/// [`SelectionState::selected_portal_label_scene_ref`] hand out a
+/// zero-copy borrow each frame. Converting in the other direction
+/// is cheap — [`Self::edge_ref`] rebuilds an `EdgeRef` from the
+/// three strings. The asymmetry is a deliberate hot-path trade:
+/// per-frame scene builds stay allocation-free; the much rarer
+/// document-mutation path pays one conversion.
 #[derive(Clone, Debug)]
 pub struct PortalLabelSel {
     /// Owning edge — kept as an `EdgeKey` (not `EdgeRef`) so the
