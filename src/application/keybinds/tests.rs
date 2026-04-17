@@ -219,6 +219,57 @@ fn test_open_console_default_bound_to_slash() {
 }
 
 #[test]
+fn test_open_console_in_document_context() {
+    // After the context-aware dispatch redesign, the event loop
+    // calls `action_for_context(Document, "/", …)` — not the bare
+    // `action_for("/")`. Covers the `/` → console regression that
+    // motivated this branch. Add the bare-resolver test sibling
+    // above, this one locks the path the event loop actually walks.
+    let resolved = KeybindConfig::default().resolve();
+    assert_eq!(
+        resolved.action_for_context(InputContext::Document, "/", false, false, false),
+        Some(Action::OpenConsole),
+    );
+}
+
+#[test]
+fn test_all_document_defaults_resolve_via_action_for_context() {
+    // Parametric coverage for every default Document-context
+    // binding under the new resolver. Catches any regression that
+    // slips past the single-action tests above.
+    let r = KeybindConfig::default().resolve();
+    let doc = InputContext::Document;
+    let cases: &[(Action, &str, bool, bool, bool)] = &[
+        (Action::Undo, "z", true, false, false),
+        (Action::Undo, "undo", false, false, false),
+        (Action::EnterReparentMode, "p", true, false, false),
+        (Action::EnterConnectMode, "d", true, false, false),
+        (Action::DeleteSelection, "delete", false, false, false),
+        (Action::CancelMode, "escape", false, false, false),
+        (Action::CreateOrphanNode, "n", true, false, false),
+        (Action::OrphanSelection, "o", true, false, false),
+        (Action::EditSelection, "enter", false, false, false),
+        (Action::EditSelectionClean, "backspace", false, false, false),
+        (Action::OpenConsole, "/", false, false, false),
+        (Action::SaveDocument, "s", true, false, false),
+        (Action::Copy, "c", true, false, false),
+        (Action::Copy, "copy", false, false, false),
+        (Action::Paste, "v", true, false, false),
+        (Action::Paste, "paste", false, false, false),
+        (Action::Cut, "x", true, false, false),
+        (Action::Cut, "cut", false, false, false),
+    ];
+    for (action, key, ctrl, shift, alt) in cases {
+        assert_eq!(
+            r.action_for_context(doc, key, *ctrl, *shift, *alt),
+            Some(*action),
+            "expected {:?} for key={:?} ctrl={} shift={} alt={}",
+            action, key, ctrl, shift, alt,
+        );
+    }
+}
+
+#[test]
 fn test_save_document_default_bound_to_ctrl_s() {
     let cfg = KeybindConfig::default();
     let resolved = cfg.resolve();

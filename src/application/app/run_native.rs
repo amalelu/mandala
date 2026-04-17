@@ -826,7 +826,13 @@ app.event_loop.run(move |event, _window_target| {
                         save_document_to_bound_path(doc, &mut console_state);
                     }
                 }
-                Some(_) => {}
+                Some(a) => {
+                    // A component-scoped action leaked into Document
+                    // dispatch — should not happen now that we resolve
+                    // through `action_for_context(Document, …)`. Log
+                    // so we notice if a regression slips back in.
+                    log::debug!("unhandled Document action: {:?}", a);
+                }
                 None => {
                     // No built-in action matched — try the
                     // user-defined `custom_mutation_bindings`.
