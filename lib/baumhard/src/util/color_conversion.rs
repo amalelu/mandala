@@ -148,7 +148,7 @@ pub fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 
 /// Convert HSV → `#RRGGBB` hex string (no alpha). Canonical path for
 /// the color picker commit: quantize an HSV triple into the same hex
-/// string shape stored in `MindEdge.color` / `PortalPair.color`.
+/// string shape stored in `MindEdge.color`.
 pub fn hsv_to_hex(h: f32, s: f32, v: f32) -> String {
     let [r, g, b] = hsv_to_rgb(h, s, v);
     let u = convert_f32_to_u8(&[r, g, b, 1.0]);

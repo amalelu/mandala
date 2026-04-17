@@ -286,6 +286,7 @@ fn make_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
         anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
+        display_mode: None,
     }
 }
 
@@ -306,6 +307,7 @@ fn make_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
         anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
+        display_mode: None,
     }
 }
 
@@ -516,7 +518,6 @@ fn assemble_mindmap(name: &str, nodes: Vec<MindNode>, edges: Vec<MindEdge>) -> M
         nodes: node_map,
         edges,
         custom_mutations: Vec::new(),
-        portals: Vec::new(),
     }
 }
 

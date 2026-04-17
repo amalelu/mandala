@@ -89,6 +89,20 @@ intermediate lookup table.
 its parent (one per non-root node). `cross_link` edges are arbitrary
 non-hierarchical connections between any two nodes.
 
+### `edge.display_mode`
+
+```
+"line" (default, absent in JSON), "portal"
+```
+
+`"line"` renders the edge as the usual path between endpoints.
+`"portal"` renders the edge as two floating glyph markers — one
+above each endpoint node's top-right corner — without a line
+between them. Portal-mode edges are orthogonal to `edge.type`:
+either `parent_child` or `cross_link` can be rendered as a portal.
+Double-clicking a marker navigates the camera to the opposite
+endpoint.
+
 ## Unknown values
 
 Renderer code matches on the known strings with a default fallback. An

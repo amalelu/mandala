@@ -1,6 +1,6 @@
-//! Reference invariants: edges and portals must point to nodes that exist.
-
-use std::collections::HashSet;
+//! Reference invariants: every edge's endpoints must point to nodes
+//! that exist in the map. Applies uniformly to line-mode and
+//! portal-mode edges (since portals are now an edge display mode).
 
 use baumhard::mindmap::model::MindMap;
 
@@ -22,35 +22,6 @@ pub fn check(map: &MindMap) -> Vec<Violation> {
                 category: "references",
                 location: format!("edge[{}]", i),
                 message: format!("to_id {:?} is not a node", edge.to_id),
-            });
-        }
-    }
-
-    for (i, portal) in map.portals.iter().enumerate() {
-        if !map.nodes.contains_key(&portal.endpoint_a) {
-            out.push(Violation {
-                category: "references",
-                location: format!("portal[{}]", i),
-                message: format!("endpoint_a {:?} is not a node", portal.endpoint_a),
-            });
-        }
-        if !map.nodes.contains_key(&portal.endpoint_b) {
-            out.push(Violation {
-                category: "references",
-                location: format!("portal[{}]", i),
-                message: format!("endpoint_b {:?} is not a node", portal.endpoint_b),
-            });
-        }
-    }
-
-    // Portal label uniqueness
-    let mut seen_labels: HashSet<&str> = HashSet::new();
-    for (i, portal) in map.portals.iter().enumerate() {
-        if !seen_labels.insert(&portal.label) {
-            out.push(Violation {
-                category: "references",
-                location: format!("portal[{}]", i),
-                message: format!("duplicate portal label {:?}", portal.label),
             });
         }
     }
@@ -78,7 +49,9 @@ mod tests {
         map.nodes.insert("0".into(), node("0", None));
         map.edges.push(edge("ghost", "0"));
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == "references" && x.message.contains("from_id") && x.message.contains("ghost")));
+        assert!(v.iter().any(|x| x.category == "references"
+            && x.message.contains("from_id")
+            && x.message.contains("ghost")));
     }
 
     #[test]
@@ -90,44 +63,17 @@ mod tests {
         assert!(v.iter().any(|x| x.category == "references" && x.message.contains("to_id")));
     }
 
-    fn portal(a: &str, b: &str, label: &str) -> baumhard::mindmap::model::PortalPair {
-        baumhard::mindmap::model::PortalPair {
-            endpoint_a: a.to_string(),
-            endpoint_b: b.to_string(),
-            label: label.to_string(),
-            glyph: "\u{25C8}".to_string(),
-            color: "#ffffff".to_string(),
-            font_size_pt: 16.0,
-            font: None,
-        }
-    }
-
+    /// A portal-mode edge with a dangling endpoint is flagged the same
+    /// way as any other edge — `display_mode` doesn't affect
+    /// reference validation.
     #[test]
-    fn valid_portal_clean() {
+    fn dangling_portal_mode_edge_endpoint_flagged() {
         let mut map = MindMap::new_blank("t");
         map.nodes.insert("0".into(), node("0", None));
-        map.nodes.insert("1".into(), node("1", None));
-        map.portals.push(portal("0", "1", "A"));
-        assert!(check(&map).is_empty());
-    }
-
-    #[test]
-    fn dangling_portal_endpoint_flagged() {
-        let mut map = MindMap::new_blank("t");
-        map.nodes.insert("0".into(), node("0", None));
-        map.portals.push(portal("0", "ghost", "A"));
+        let mut e = edge("0", "ghost");
+        e.display_mode = Some(baumhard::mindmap::model::DISPLAY_MODE_PORTAL.to_string());
+        map.edges.push(e);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == "references" && x.message.contains("endpoint_b")));
-    }
-
-    #[test]
-    fn duplicate_portal_label_flagged() {
-        let mut map = MindMap::new_blank("t");
-        map.nodes.insert("0".into(), node("0", None));
-        map.nodes.insert("1".into(), node("1", None));
-        map.portals.push(portal("0", "1", "A"));
-        map.portals.push(portal("1", "0", "A"));
-        let v = check(&map);
-        assert!(v.iter().any(|x| x.category == "references" && x.message.contains("duplicate")));
+        assert!(v.iter().any(|x| x.category == "references" && x.message.contains("to_id")));
     }
 }

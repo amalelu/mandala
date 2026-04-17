@@ -5,7 +5,8 @@
 use std::path::PathBuf;
 
 use crate::mindmap::model::{
-    Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, PortalPair, Position, Size,
+    Canvas, GlyphConnectionConfig, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position,
+    Size, DISPLAY_MODE_PORTAL,
 };
 
 pub(super) fn test_map_path() -> PathBuf {
@@ -60,6 +61,7 @@ pub(super) fn synthetic_edge(from: &str, to: &str, anchor_from: &str, anchor_to:
         anchor_to: anchor_to.to_string(),
         control_points: vec![],
         glyph_connection: None,
+        display_mode: None,
     }
 }
 
@@ -83,7 +85,6 @@ pub(super) fn synthetic_map(nodes_vec: Vec<MindNode>, edges: Vec<MindEdge>) -> M
         nodes,
         edges,
         custom_mutations: vec![],
-        portals: vec![],
     }
 }
 
@@ -105,14 +106,29 @@ pub(super) fn two_node_edge_map() -> MindMap {
     )
 }
 
-pub(super) fn synthetic_portal(label: &str, a: &str, b: &str, color: &str) -> PortalPair {
-    PortalPair {
-        endpoint_a: a.to_string(),
-        endpoint_b: b.to_string(),
-        label: label.to_string(),
-        glyph: "\u{25C8}".to_string(),
+/// Build a portal-mode edge between `a` and `b` with the given color.
+/// Post-refactor portals are edges with `display_mode = "portal"` —
+/// this helper mirrors the per-shape sizing the pre-refactor
+/// `synthetic_portal` used (16pt marker, ◈ glyph body).
+pub(super) fn synthetic_portal_edge(a: &str, b: &str, color: &str) -> MindEdge {
+    MindEdge {
+        from_id: a.to_string(),
+        to_id: b.to_string(),
+        edge_type: "cross_link".to_string(),
         color: color.to_string(),
-        font_size_pt: 16.0,
-        font: None,
+        width: 3,
+        line_style: "solid".to_string(),
+        visible: true,
+        label: None,
+        label_position_t: None,
+        anchor_from: "auto".to_string(),
+        anchor_to: "auto".to_string(),
+        control_points: vec![],
+        glyph_connection: Some(GlyphConnectionConfig {
+            body: "\u{25C8}".to_string(),
+            font_size_pt: 16.0,
+            ..GlyphConnectionConfig::default()
+        }),
+        display_mode: Some(DISPLAY_MODE_PORTAL.to_string()),
     }
 }

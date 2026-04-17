@@ -56,7 +56,7 @@ pub use portal::{
     build_portal_mutator_tree, build_portal_mutator_tree_from_pairs, build_portal_tree,
     build_portal_tree_from_pairs, portal_identity_sequence, portal_pair_data,
     PortalColorPreviewRef, PortalIdentity, PortalMutator, PortalPairData, PortalTree,
-    SelectedPortalRef,
+    SelectedEdgeRef,
 };
 
 use node::{build_children_recursive, mindnode_to_glyph_area};

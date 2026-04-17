@@ -1,32 +1,32 @@
 //! Mindmap data model — the types the loader deserializes from
-//! `.mindmap.json` and the document layer mutates. Split across four
+//! `.mindmap.json` and the document layer mutates. Split across three
 //! leaf modules so each concern stays skimmable:
 //!
 //! - [`canvas`] — [`Canvas`]: the per-map rendering context.
 //! - [`node`] — [`MindNode`] and everything that travels with it
 //!   ([`NodeStyle`], [`GlyphBorderConfig`], [`ColorSchema`], ...).
 //! - [`edge`] — [`MindEdge`], [`GlyphConnectionConfig`],
-//!   [`ControlPoint`].
-//! - [`portal`] — [`PortalPair`] and the column-letter label generator.
+//!   [`ControlPoint`], plus portal-mode helpers (portals are now a
+//!   `display_mode` on edges rather than a separate entity).
 //!
 //! This module owns the top-level [`MindMap`] struct plus its impl
-//! (root / ancestry / descendant / portal-label queries), and the
-//! model-level tests.
+//! (root / ancestry / descendant queries), and the model-level tests.
 
 pub mod canvas;
 pub mod edge;
 pub mod node;
 pub mod palette;
-pub mod portal;
 
 pub use canvas::Canvas;
-pub use edge::{ControlPoint, GlyphConnectionConfig, MindEdge};
+pub use edge::{
+    is_portal_edge, ControlPoint, GlyphConnectionConfig, MindEdge, DISPLAY_MODE_LINE,
+    DISPLAY_MODE_PORTAL, PORTAL_GLYPH_PRESETS,
+};
 pub use node::{
     ColorGroup, ColorSchema, CustomBorderGlyphs, GlyphBorderConfig, MindNode, NodeLayout,
     NodeStyle, Position, Size, TextRun,
 };
 pub use palette::Palette;
-pub use portal::{column_letter_label, PortalPair, PORTAL_GLYPH_PRESETS};
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
@@ -45,11 +45,6 @@ pub struct MindMap {
     /// Map-level custom mutation definitions, available to all nodes in this map.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_mutations: Vec<CustomMutation>,
-    /// Portal pairs — matching glyph markers on two distant nodes used as
-    /// a lightweight alternative to cross-link edges when a rendered line
-    /// would clutter the map.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub portals: Vec<PortalPair>,
 }
 
 impl MindMap {
@@ -73,7 +68,6 @@ impl MindMap {
             nodes: HashMap::new(),
             edges: Vec::new(),
             custom_mutations: Vec::new(),
-            portals: Vec::new(),
         }
     }
 
@@ -142,28 +136,6 @@ impl MindMap {
             current = self.nodes.get(pid).and_then(|n| n.parent_id.as_deref());
         }
         false
-    }
-
-    /// Session 6E: return the lowest unused portal label in column-letter
-    /// order: "A", "B", ..., "Z", "AA", "AB", ..., "AZ", "BA", ...
-    ///
-    /// Walks the existing `portals` vec, collects the used labels into a
-    /// set, then emits labels lazily until one is not in the set. Used
-    /// by `MindMapDocument::apply_create_portal` so deleting portal "B"
-    /// and creating a new one reuses "B" rather than jumping to "D".
-    pub fn next_portal_label(&self) -> String {
-        use std::collections::HashSet;
-        let used: HashSet<&str> = self.portals.iter().map(|p| p.label.as_str()).collect();
-        // Lazy column-letter generator: 1 → "A", 26 → "Z", 27 → "AA", ...
-        // (matching the Excel column naming scheme).
-        let mut n: u64 = 1;
-        loop {
-            let label = column_letter_label(n);
-            if !used.contains(label.as_str()) {
-                return label;
-            }
-            n += 1;
-        }
     }
 
     /// Resolves the effective colors for a themed node by looking up

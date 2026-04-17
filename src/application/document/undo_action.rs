@@ -3,7 +3,7 @@
 //! `undo()` dispatch lives in `undo.rs` and branches on these
 //! variants.
 
-use baumhard::mindmap::model::{Canvas, MindEdge, MindNode, NodeStyle, PortalPair, Position, TextRun};
+use baumhard::mindmap::model::{Canvas, MindEdge, MindNode, NodeStyle, Position, TextRun};
 
 /// An undoable action that can be reversed.
 #[derive(Clone, Debug)]
@@ -61,18 +61,6 @@ pub enum UndoAction {
     /// the whole thing is cheaper than tracking field-level diffs, and
     /// trivially correct.
     CanvasSnapshot { canvas: Canvas },
-    /// Session 6E: a new portal pair was created via
-    /// `apply_create_portal`. Undo removes the portal at `index`
-    /// (assumes LIFO undo order so the index is still valid).
-    CreatePortal { index: usize },
-    /// Session 6E: a portal pair was deleted via
-    /// `apply_delete_portal`. Undo re-inserts `portal` at `index` in
-    /// `mindmap.portals`.
-    DeletePortal { index: usize, portal: PortalPair },
-    /// Session 6E: a portal pair was edited in place (glyph, color,
-    /// or any other field change via `apply_edit_portal`). Undo
-    /// replaces `mindmap.portals[index]` with the `before` snapshot.
-    EditPortal { index: usize, before: PortalPair },
     /// A node was deleted. Restored by re-inserting the node, re-inserting
     /// every edge that touched it at its original `mindmap.edges` index,
     /// and restoring the `parent_id` of every child that was orphaned by

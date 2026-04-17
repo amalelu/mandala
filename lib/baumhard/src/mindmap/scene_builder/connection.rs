@@ -57,6 +57,13 @@ pub(super) fn build_connection_elements(
         if !edge.visible {
             continue;
         }
+        // Portal-mode edges render as markers in the portal pass,
+        // not as a path. Skip them here so the connection pipeline
+        // (sampling, clipping, edge handles, labels) never touches
+        // an edge that has no line form.
+        if crate::mindmap::model::is_portal_edge(edge) {
+            continue;
+        }
         let from_node = match map.nodes.get(&edge.from_id) {
             Some(n) => n,
             None => continue,

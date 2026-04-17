@@ -76,7 +76,9 @@ reparent cheap and undo simple.
 
 **When IDs *do* cascade**: on `delete_node`, when children are orphaned
 (promoted to root), the subtree's IDs are rewritten to reflect their new
-position. Edges and portals are updated. Undo reverses the rename.
+position. Edges are updated (portal-mode edges cascade through the same
+path as line-mode edges — they're the same entity). Undo reverses the
+rename.
 
 ## ID assignment for new nodes
 

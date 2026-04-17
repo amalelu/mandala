@@ -5,6 +5,12 @@
 //! assembled into a `RenderScene`. The selected-edge handle
 //! emission rides inside the connection pass (delegating to
 //! [`super::edge_handle::build_edge_handles`]).
+//!
+//! Portal-mode edges are routed to the portal pass and skipped by
+//! the connection and label passes; line-mode edges take the usual
+//! connection → label → edge-handle path. `selected_edge` is shared
+//! between both pipelines so a selected edge highlights cyan
+//! whichever form it renders as.
 
 use std::collections::HashMap;
 
@@ -34,7 +40,6 @@ pub fn build_scene(map: &MindMap, camera_zoom: f32) -> RenderScene {
         None,
         None,
         None,
-        None,
         &mut scratch,
         camera_zoom,
     )
@@ -51,7 +56,7 @@ pub fn build_scene_with_offsets(
 ) -> RenderScene {
     let mut scratch = SceneConnectionCache::new();
     build_scene_with_cache(
-        map, offsets, None, None, None, None, None, &mut scratch, camera_zoom,
+        map, offsets, None, None, None, None, &mut scratch, camera_zoom,
     )
 }
 
@@ -61,7 +66,8 @@ pub fn build_scene_with_offsets(
 ///   substitution for a single edge.
 /// - `edge_color_preview`: color-picker hover preview for a single
 ///   edge, beats selection on the previewed edge.
-/// - `portal_color_preview`: same, for portals.
+/// - `portal_color_preview`: same, but routes to the portal pass
+///   for edges with `display_mode = "portal"`.
 ///
 /// Prefer [`build_scene_with_cache`] on the hot drag path — this
 /// variant allocates a throwaway cache per call.
@@ -69,7 +75,6 @@ pub fn build_scene_with_offsets_selection_and_overrides(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
-    selected_portal: Option<(&str, &str, &str)>,
     label_edit_override: Option<(&EdgeKey, &str)>,
     edge_color_preview: Option<EdgeColorPreview<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
@@ -80,7 +85,6 @@ pub fn build_scene_with_offsets_selection_and_overrides(
         map,
         offsets,
         selected_edge,
-        selected_portal,
         label_edit_override,
         edge_color_preview,
         portal_color_preview,
@@ -106,7 +110,6 @@ pub fn build_scene_with_cache(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<(&str, &str, &str)>,
-    selected_portal: Option<(&str, &str, &str)>,
     label_edit_override: Option<(&EdgeKey, &str)>,
     edge_color_preview: Option<EdgeColorPreview<'_>>,
     portal_color_preview: Option<PortalColorPreview<'_>>,
@@ -148,12 +151,12 @@ pub fn build_scene_with_cache(
         camera_zoom,
     );
 
-    // Portal pass — two markers per visible pair, colored by
-    // preview > selection > portal default.
+    // Portal pass — two markers per visible portal-mode edge,
+    // colored by preview > selection > edge color.
     let portal_elements = build_portal_elements(
         map,
         offsets,
-        selected_portal,
+        selected_edge,
         portal_color_preview,
     );
 

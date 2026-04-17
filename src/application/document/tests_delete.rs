@@ -55,6 +55,7 @@ use super::defaults::default_cross_link_edge;
             anchor_to: "auto".to_string(),
             control_points: vec![],
             glyph_connection: None,
+            display_mode: None,
         };
         assert!(edge_ref.matches(&edge));
 
@@ -299,6 +300,7 @@ use super::defaults::default_cross_link_edge;
             anchor_to: "auto".to_string(),
             control_points: Vec::new(),
             glyph_connection: None,
+            display_mode: None,
         };
 
         // Edge layout: [a→b, a→target, c→d, target→d, b→c]

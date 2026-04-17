@@ -21,7 +21,6 @@ mod defaults;
 mod edges;
 mod hit_test;
 mod nodes;
-mod portals;
 mod topology;
 mod types;
 mod undo;
@@ -42,8 +41,6 @@ mod tests_mutations;
 #[cfg(test)]
 mod tests_nodes;
 #[cfg(test)]
-mod tests_portals;
-#[cfg(test)]
 mod tests_reparent;
 
 pub use hit_test::{
@@ -52,7 +49,7 @@ pub use hit_test::{
     point_in_node_aabb, rect_select,
 };
 pub use types::{
-    AnimationInstance, EdgeRef, PortalRef, SelectionState, HIGHLIGHT_COLOR,
+    AnimationInstance, EdgeRef, SelectionState, HIGHLIGHT_COLOR,
     REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 pub use undo_action::UndoAction;
@@ -102,15 +99,18 @@ pub struct MindMapDocument {
 
 /// Transient visual-only substitution of a color-pickerable element's
 /// color. Read by `build_scene_*` and consumed by `scene_builder`'s
-/// `EdgeColorPreview` / `PortalColorPreview` threaded params.
+/// `EdgeColorPreview` and `PortalColorPreview` threaded params.
+///
+/// One variant handles every edge — including portal-mode edges —
+/// because both routes key by the same `EdgeKey`. The scene pipeline
+/// fans the preview out: the connection pass picks it up as
+/// `EdgeColorPreview` when the edge renders as a line; the portal
+/// pass picks it up as `PortalColorPreview` when the edge has
+/// `display_mode = "portal"`.
 #[derive(Debug, Clone)]
 pub enum ColorPickerPreview {
     Edge {
         key: baumhard::mindmap::scene_cache::EdgeKey,
-        color: String,
-    },
-    Portal {
-        key: baumhard::mindmap::scene_builder::PortalRefKey,
         color: String,
     },
 }
@@ -266,17 +266,19 @@ impl MindMapDocument {
         scene_builder::build_scene_with_offsets(&self.mindmap, offsets, camera_zoom)
     }
 
-    /// The five transient scene-builder overrides every "build_scene_*"
+    /// The four transient scene-builder overrides every "build_scene_*"
     /// entry point on this document threads through to
-    /// `baumhard::mindmap::scene_builder`: selected edge / portal
-    /// (highlight), label-edit preview (live caret on an inline-edited
-    /// edge label), and the two halves of the colour-picker hover
-    /// preview (edge or portal HSV mid-drag). Borrowed from `&self`,
-    /// so the returned tuple lives as long as `self`.
+    /// `baumhard::mindmap::scene_builder`: selected edge (highlight —
+    /// routed to either the connection or portal pass based on the
+    /// edge's `display_mode`), label-edit preview (live caret on an
+    /// inline-edited edge label), and the colour-picker hover preview
+    /// (fanned out to both `EdgeColorPreview` and `PortalColorPreview`
+    /// so a portal-mode edge under the wheel picks it up on the
+    /// marker pass). Borrowed from `&self`, so the returned tuple
+    /// lives as long as `self`.
     fn assemble_scene_overrides(
         &self,
     ) -> (
-        Option<(&str, &str, &str)>,
         Option<(&str, &str, &str)>,
         Option<(&baumhard::mindmap::scene_cache::EdgeKey, &str)>,
         Option<scene_builder::EdgeColorPreview<'_>>,
@@ -286,30 +288,24 @@ impl MindMapDocument {
             .selection
             .selected_edge()
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
-        let portal_sel = self
-            .selection
-            .selected_portal()
-            .map(|p| (p.label.as_str(), p.endpoint_a.as_str(), p.endpoint_b.as_str()));
         let label_edit = self
             .label_edit_preview
             .as_ref()
             .map(|(k, s)| (k, s.as_str()));
-        let edge_preview = match &self.color_picker_preview {
-            Some(ColorPickerPreview::Edge { key, color }) => {
-                Some(scene_builder::EdgeColorPreview { edge_key: key, color: color.as_str() })
-            }
-            _ => None,
-        };
-        let portal_preview = match &self.color_picker_preview {
-            Some(ColorPickerPreview::Portal { key, color }) => {
-                Some(scene_builder::PortalColorPreview {
-                    portal_key: key,
+        let (edge_preview, portal_preview) = match &self.color_picker_preview {
+            Some(ColorPickerPreview::Edge { key, color }) => (
+                Some(scene_builder::EdgeColorPreview {
+                    edge_key: key,
                     color: color.as_str(),
-                })
-            }
-            _ => None,
+                }),
+                Some(scene_builder::PortalColorPreview {
+                    edge_key: key,
+                    color: color.as_str(),
+                }),
+            ),
+            None => (None, None),
         };
-        (sel, portal_sel, label_edit, edge_preview, portal_preview)
+        (sel, label_edit, edge_preview, portal_preview)
     }
 
     /// Cache-aware scene build. The drag drain in `app.rs` calls this
@@ -328,13 +324,12 @@ impl MindMapDocument {
         cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
         camera_zoom: f32,
     ) -> RenderScene {
-        let (sel, portal_sel, label_edit, edge_preview, portal_preview) =
+        let (sel, label_edit, edge_preview, portal_preview) =
             self.assemble_scene_overrides();
         scene_builder::build_scene_with_cache(
             &self.mindmap,
             offsets,
             sel,
-            portal_sel,
             label_edit,
             edge_preview,
             portal_preview,
@@ -352,13 +347,12 @@ impl MindMapDocument {
     /// build so live interaction previews are visible on any scene
     /// that flows through this entry point.
     pub fn build_scene_with_selection(&self, camera_zoom: f32) -> RenderScene {
-        let (sel, portal_sel, label_edit, edge_preview, portal_preview) =
+        let (sel, label_edit, edge_preview, portal_preview) =
             self.assemble_scene_overrides();
         scene_builder::build_scene_with_offsets_selection_and_overrides(
             &self.mindmap,
             &HashMap::new(),
             sel,
-            portal_sel,
             label_edit,
             edge_preview,
             portal_preview,

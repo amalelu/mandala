@@ -1,12 +1,14 @@
 //! Per-command execution tests: anchor / body / cap / spacing /
-//! color / label / edge / font / portal / help. Each test runs a
-//! single command line through `parse → execute` and asserts the
-//! observable model effect.
+//! color / label / edge / font / help. Each test runs a single
+//! command line through `parse → execute` and asserts the
+//! observable model effect. Portal-specific creation / glyph
+//! commands now live under `edge` (`edge portal`, `edge body=…`)
+//! and are covered in this file alongside the other `edge` cases.
 
 use super::fixtures::{load_test_doc, run, select_first_edge};
 use crate::application::console::parser::{parse, Args, ParseResult};
 use crate::application::console::{ConsoleEffects, ExecResult};
-use crate::application::document::{PortalRef, SelectionState};
+use crate::application::document::{EdgeRef, SelectionState};
 
 #[test]
 fn test_anchor_kv_updates_edge_anchor() {
@@ -138,18 +140,21 @@ fn test_color_text_no_value_on_edge_opens_picker_on_edge() {
     assert!(matches!(eff.open_color_picker, Some(ColorTarget::Edge(_))));
 }
 
-/// `color text` on a portal is nonsensical (portals have no text
-/// axis) — reject with a helpful error.
+/// `color text` on a portal-mode edge routes through the same
+/// `set_edge_color` sink line-mode edges use (there's only one
+/// color field). Applied, not rejected — the user's mental model
+/// doesn't distinguish "text color of an edge" from "color of an
+/// edge" because edges have one color.
 #[test]
-fn test_color_text_no_value_on_portal_errors() {
+fn test_color_text_on_portal_edge_applies() {
     let mut doc = load_test_doc();
     let mut ids = doc.mindmap.nodes.keys().cloned();
     let a = ids.next().unwrap();
     let b = ids.next().unwrap();
-    let pref = doc.apply_create_portal(&a, &b).unwrap();
-    doc.selection = SelectionState::Portal(pref);
-    let result = run("color text", &mut doc);
-    assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
+    let _idx = doc.create_portal_edge(&a, &b).unwrap();
+    doc.selection = SelectionState::Edge(EdgeRef::new(&a, &b, "cross_link"));
+    let result = run("color text=#112233", &mut doc);
+    assert!(matches!(result, ExecResult::Ok(_)), "got {:?}", result);
 }
 
 #[test]
@@ -246,35 +251,49 @@ fn test_edge_type_parent_child_updates_edge() {
 }
 
 #[test]
-fn test_portal_create_with_two_nodes_selected() {
+fn test_edge_portal_with_two_nodes_selected() {
     let mut doc = load_test_doc();
     let mut ids = doc.mindmap.nodes.keys().cloned();
     let a = ids.next().unwrap();
     let b = ids.next().unwrap();
-    doc.selection = SelectionState::Multi(vec![a, b]);
-    let _ = run("portal create", &mut doc);
-    assert!(matches!(doc.selection, SelectionState::Portal(_)));
-    assert_eq!(doc.mindmap.portals.len(), 1);
+    doc.selection = SelectionState::Multi(vec![a.clone(), b.clone()]);
+    let _ = run("edge portal", &mut doc);
+    // Post-refactor: portal creation yields a SelectionState::Edge
+    // whose matching edge has `display_mode = "portal"`.
+    assert!(matches!(doc.selection, SelectionState::Edge(_)));
+    let edge = doc
+        .mindmap
+        .edges
+        .iter()
+        .find(|e| e.from_id == a && e.to_id == b)
+        .expect("portal edge must exist");
+    assert!(baumhard::mindmap::model::is_portal_edge(edge));
 }
 
 #[test]
-fn test_portal_create_errors_without_two_node_selection() {
+fn test_edge_portal_errors_without_two_node_selection() {
     let mut doc = load_test_doc();
     doc.selection = SelectionState::None;
-    let result = run("portal create", &mut doc);
+    let result = run("edge portal", &mut doc);
     assert!(matches!(result, ExecResult::Err(_)));
 }
 
 #[test]
-fn test_portal_glyph_hexagon_updates_marker() {
+fn test_edge_display_mode_portal_then_line_toggles() {
     let mut doc = load_test_doc();
     let mut ids = doc.mindmap.nodes.keys().cloned();
     let a = ids.next().unwrap();
     let b = ids.next().unwrap();
-    let pref: PortalRef = doc.apply_create_portal(&a, &b).unwrap();
-    doc.selection = SelectionState::Portal(pref);
-    let _ = run("portal glyph=hexagon", &mut doc);
-    assert_eq!(doc.mindmap.portals[0].glyph, "\u{2B21}");
+    let _ = doc.create_portal_edge(&a, &b).unwrap();
+    doc.selection = SelectionState::Edge(EdgeRef::new(&a, &b, "cross_link"));
+    let _ = run("edge display_mode=line", &mut doc);
+    let edge = doc
+        .mindmap
+        .edges
+        .iter()
+        .find(|e| e.from_id == a && e.to_id == b)
+        .unwrap();
+    assert!(!baumhard::mindmap::model::is_portal_edge(edge));
 }
 
 #[test]

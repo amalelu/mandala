@@ -13,6 +13,7 @@ const DIRECTIONS: &[&str] = &["auto", "up", "down", "left", "right", "balanced"]
 const LINE_STYLES: &[&str] = &["solid", "dashed"];
 const ANCHORS: &[&str] = &["auto", "top", "right", "bottom", "left"];
 const EDGE_TYPES: &[&str] = &["parent_child", "cross_link"];
+const DISPLAY_MODES: &[&str] = &["line", "portal"];
 
 pub fn check(map: &MindMap) -> Vec<Violation> {
     let mut out = Vec::new();
@@ -29,6 +30,9 @@ pub fn check(map: &MindMap) -> Vec<Violation> {
         check_value(&mut out, &loc, "line_style", &edge.line_style, LINE_STYLES);
         check_value(&mut out, &loc, "anchor_from", &edge.anchor_from, ANCHORS);
         check_value(&mut out, &loc, "anchor_to", &edge.anchor_to, ANCHORS);
+        if let Some(mode) = edge.display_mode.as_deref() {
+            check_value(&mut out, &loc, "display_mode", mode, DISPLAY_MODES);
+        }
     }
 
     out
@@ -82,5 +86,30 @@ mod tests {
         map.edges.push(e);
         let v = check(&map);
         assert!(v.iter().any(|x| x.category == "enums" && x.message.contains("diagonal")));
+    }
+
+    #[test]
+    fn unknown_display_mode_flagged() {
+        let mut map = MindMap::new_blank("t");
+        map.nodes.insert("0".into(), node("0", None));
+        map.nodes.insert("1".into(), node("1", None));
+        let mut e = edge("0", "1");
+        e.display_mode = Some("projection".into());
+        map.edges.push(e);
+        let v = check(&map);
+        assert!(v
+            .iter()
+            .any(|x| x.category == "enums" && x.message.contains("projection")));
+    }
+
+    #[test]
+    fn portal_display_mode_is_valid() {
+        let mut map = MindMap::new_blank("t");
+        map.nodes.insert("0".into(), node("0", None));
+        map.nodes.insert("1".into(), node("1", None));
+        let mut e = edge("0", "1");
+        e.display_mode = Some("portal".into());
+        map.edges.push(e);
+        assert!(check(&map).is_empty());
     }
 }

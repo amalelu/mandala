@@ -127,6 +127,28 @@ const EDGE_HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
 
 
 /// Tracks the previous left-click in screen space so a second click
+/// What a single click targeted. Used by [`LastClick`] + the
+/// double-click detector so a portal-marker double-click (navigate)
+/// is distinguishable from a node double-click (edit text) and from
+/// empty-space double-click (create orphan). Two clicks "match" as
+/// a double-click only when they have the same `ClickHit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClickHit {
+    /// No node and no portal marker under the cursor. Empty-canvas
+    /// double-click creates a new orphan unless an edge is selected.
+    Empty,
+    /// Cursor is inside node `id`'s AABB.
+    Node(String),
+    /// Cursor is inside a portal marker. `edge` identifies the
+    /// owning portal-mode edge; `endpoint` is the node the hit
+    /// marker sits above (the double-click pan target is the
+    /// *other* endpoint).
+    PortalMarker {
+        edge: baumhard::mindmap::scene_cache::EdgeKey,
+        endpoint: String,
+    },
+}
+
 /// within a short time + distance window is recognized as a
 /// double-click. Double-click fires on the second `Pressed` event,
 /// not the second release. `time` is `f64` milliseconds from the
@@ -135,10 +157,10 @@ const EDGE_HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
 struct LastClick {
     time: f64,
     screen_pos: (f64, f64),
-    /// Which node, if any, the first click landed on. Two clicks with
-    /// the same `hit` (both `Some(id)` for the same id, or both
-    /// `None`) qualify as a double-click.
-    hit: Option<String>,
+    /// What the first click landed on. Two clicks whose `hit`
+    /// values are equal (see [`ClickHit::PartialEq`]) qualify as a
+    /// double-click.
+    hit: ClickHit,
 }
 
 /// Double-click window in milliseconds. Matches GNOME/winit convention.
@@ -155,7 +177,7 @@ fn is_double_click(
     prev: &LastClick,
     new_time_ms: f64,
     new_screen_pos: (f64, f64),
-    new_hit: &Option<String>,
+    new_hit: &ClickHit,
 ) -> bool {
     let elapsed = new_time_ms - prev.time;
     if elapsed < 0.0 || elapsed >= DOUBLE_CLICK_MS {

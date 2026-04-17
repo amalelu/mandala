@@ -122,22 +122,12 @@ fn picker_target_for(
             })
         }
         SelectionState::Edge(er) => {
-            // Edge has one color; `border` maps to it, `text`
-            // also currently maps to it (edge label + line share
-            // `MindEdge.color`), `bg` isn't meaningful for edges
-            // — reject.
-            match verb {
-                "bg" => None,
-                _ => Some(ColorTarget::Edge(er.clone())),
-            }
-        }
-        SelectionState::Portal(pr) => {
-            // Portal has one color; `bg` and `pick` map to it,
-            // `text` / `border` aren't meaningful — reject.
-            match verb {
-                "bg" | "pick" => Some(ColorTarget::Portal(pr.clone())),
-                _ => None,
-            }
+            // Edges (line-mode or portal-mode) have one color
+            // field. `border` maps to it, `text` also currently
+            // maps to it (edge label + line share `MindEdge.color`),
+            // and for portal-mode edges `bg` is accepted as an
+            // alias because "fill" reads more natural there.
+            Some(ColorTarget::Edge(er.clone()))
         }
         SelectionState::None => None,
     }

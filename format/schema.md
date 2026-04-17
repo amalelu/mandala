@@ -12,8 +12,7 @@ Complete field reference for every type in `.mindmap.json`.
   "palettes": { ... },
   "nodes": { ... },
   "edges": [ ... ],
-  "custom_mutations": [ ... ],
-  "portals": [ ... ]
+  "custom_mutations": [ ... ]
 }
 ```
 
@@ -24,9 +23,8 @@ Complete field reference for every type in `.mindmap.json`.
 | `canvas` | object | yes | Canvas rendering context |
 | `palettes` | object | no | Named color palettes keyed by name |
 | `nodes` | object | yes | Node map keyed by ID |
-| `edges` | array | yes | Ordered edge records (can be empty) |
+| `edges` | array | yes | Ordered edge records (can be empty). Portals are edges with `display_mode = "portal"` — no separate top-level collection. |
 | `custom_mutations` | array | no | Map-level reusable mutations |
-| `portals` | array | no | Portal pairs for lightweight cross-links |
 
 ## Canvas
 
@@ -211,29 +209,32 @@ strings. The `groups` array is indexed by the node's `color_schema.level`.
 | `anchor_to` | string | Which side of the target node |
 | `control_points` | array | Bezier offsets for curved edges |
 | `glyph_connection` | object\|null | Per-edge glyph rendering override |
+| `display_mode` | string\|null | `"line"` (default, absent) or `"portal"`. Portal-mode edges render as two glyph markers above each endpoint instead of a line; double-click a marker to jump to the other endpoint. |
 
-## Portal
+### Portal-mode edges
+
+Portal-mode edges use `display_mode = "portal"` and reuse
+`glyph_connection.body` as the marker glyph, `edge.color` as the
+marker color, and `glyph_connection.{font, font_size_pt}` for
+typography. No separate portal struct — a portal is an edge
+rendered differently.
 
 ```json
 {
-  "endpoint_a": "0.3",
-  "endpoint_b": "1.7.2",
-  "label": "A",
-  "glyph": "◈",
+  "from_id": "0.3",
+  "to_id": "1.7.2",
+  "type": "cross_link",
   "color": "#30b082",
-  "font_size_pt": 16.0,
-  "font": null
+  "width": 3,
+  "line_style": "solid",
+  "visible": true,
+  "anchor_from": "auto",
+  "anchor_to": "auto",
+  "control_points": [],
+  "glyph_connection": { "body": "◈", "font_size_pt": 16.0 },
+  "display_mode": "portal"
 }
 ```
-
-| Field | Type | Notes |
-|---|---|---|
-| `endpoint_a`, `endpoint_b` | string | Node IDs |
-| `label` | string | Auto-assigned Excel-style column letter ("A", "B", ..., "AA") |
-| `glyph` | string | Marker glyph (from `PORTAL_GLYPH_PRESETS` by default) |
-| `color` | string | `#RRGGBB` or `var(--name)` |
-| `font_size_pt` | number | Marker size |
-| `font` | string\|null | Optional font family override |
 
 ## GlyphBorderConfig
 

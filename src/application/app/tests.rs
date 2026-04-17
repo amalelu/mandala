@@ -15,13 +15,13 @@ fn test_double_click_same_target_within_window_fires() {
     let prev = LastClick {
         time: 1000.0,
         screen_pos: (100.0, 100.0),
-        hit: Some("node-a".to_string()),
+        hit: ClickHit::Node("node-a".to_string()),
     };
     assert!(is_double_click(
         &prev,
         1100.0,
         (101.0, 100.0),
-        &Some("node-a".to_string()),
+        &ClickHit::Node("node-a".to_string()),
     ));
 }
 
@@ -30,13 +30,13 @@ fn test_double_click_different_targets_does_not_fire() {
     let prev = LastClick {
         time: 1000.0,
         screen_pos: (100.0, 100.0),
-        hit: Some("node-a".to_string()),
+        hit: ClickHit::Node("node-a".to_string()),
     };
     assert!(!is_double_click(
         &prev,
         1100.0,
         (100.0, 100.0),
-        &Some("node-b".to_string()),
+        &ClickHit::Node("node-b".to_string()),
     ));
 }
 
@@ -45,10 +45,10 @@ fn test_double_click_too_far_apart_does_not_fire() {
     let prev = LastClick {
         time: 1000.0,
         screen_pos: (100.0, 100.0),
-        hit: None,
+        hit: ClickHit::Empty,
     };
     // Distance = sqrt(20² + 0²) = 20px → dist² = 400, threshold = 256.
-    assert!(!is_double_click(&prev, 1100.0, (120.0, 100.0), &None));
+    assert!(!is_double_click(&prev, 1100.0, (120.0, 100.0), &ClickHit::Empty));
 }
 
 #[test]
@@ -56,9 +56,9 @@ fn test_double_click_expired_does_not_fire() {
     let prev = LastClick {
         time: 1000.0,
         screen_pos: (100.0, 100.0),
-        hit: None,
+        hit: ClickHit::Empty,
     };
-    assert!(!is_double_click(&prev, 1500.0, (100.0, 100.0), &None));
+    assert!(!is_double_click(&prev, 1500.0, (100.0, 100.0), &ClickHit::Empty));
 }
 
 #[test]
@@ -68,9 +68,9 @@ fn test_double_click_empty_space_both_misses_fires() {
     let prev = LastClick {
         time: 1000.0,
         screen_pos: (50.0, 50.0),
-        hit: None,
+        hit: ClickHit::Empty,
     };
-    assert!(is_double_click(&prev, 1150.0, (52.0, 51.0), &None));
+    assert!(is_double_click(&prev, 1150.0, (52.0, 51.0), &ClickHit::Empty));
 }
 
 #[test]
@@ -79,9 +79,9 @@ fn test_double_click_exact_boundary_does_not_fire() {
     let prev = LastClick {
         time: 1000.0,
         screen_pos: (100.0, 100.0),
-        hit: None,
+        hit: ClickHit::Empty,
     };
-    assert!(!is_double_click(&prev, 1400.0, (100.0, 100.0), &None));
+    assert!(!is_double_click(&prev, 1400.0, (100.0, 100.0), &ClickHit::Empty));
 }
 
 #[test]
@@ -89,9 +89,9 @@ fn test_double_click_just_under_boundary_fires() {
     let prev = LastClick {
         time: 1000.0,
         screen_pos: (100.0, 100.0),
-        hit: None,
+        hit: ClickHit::Empty,
     };
-    assert!(is_double_click(&prev, 1399.0, (100.0, 100.0), &None));
+    assert!(is_double_click(&prev, 1399.0, (100.0, 100.0), &ClickHit::Empty));
 }
 
 // -----------------------------------------------------------------

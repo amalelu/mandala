@@ -129,7 +129,6 @@ fn targets_kind_label(targets: &[TargetId]) -> &'static str {
             }
         }
         Some(TargetId::Edge(_)) => "edge",
-        Some(TargetId::Portal(_)) => "portal",
         None => "selection",
     }
 }

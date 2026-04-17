@@ -67,7 +67,7 @@ use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;
 use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
 use baumhard::gfx_structs::camera::Camera2D;
-use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement, PortalRefKey};
+use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement};
 use baumhard::mindmap::scene_cache::EdgeKey;
 use glam::Vec2;
 
@@ -181,19 +181,20 @@ pub struct Renderer {
     /// inline click-to-edit. Stored as `(min, max)` canvas-space
     /// corners so the hit test is a pair of comparisons per edge.
     connection_label_hitboxes: FxHashMap<EdgeKey, (Vec2, Vec2)>,
-    /// Session 6E: per-endpoint portal marker buffers, keyed by
-    /// `(portal_ref, endpoint_node_id)` so each of the two marker
-    /// glyphs of a pair is stored separately. Rebuilt every scene
+    /// Per-endpoint portal marker buffers, keyed by `(edge_key,
+    /// endpoint_node_id)` so each of the two marker glyphs of a
+    /// portal-mode edge is stored separately. Rebuilt every scene
     /// build from the `portal_elements` field of `RenderScene`.
     /// Portal counts stay in the dozens so a keyed cache is enough;
     /// no incremental rebuild path is warranted.
-    portal_buffers: FxHashMap<(PortalRefKey, String), MindMapTextBuffer>,
-    /// Session 6E: AABB hitbox for each rendered portal marker,
-    /// keyed by `(portal_ref, endpoint_node_id)`. Populated alongside
+    portal_buffers: FxHashMap<(EdgeKey, String), MindMapTextBuffer>,
+    /// AABB hitbox for each rendered portal marker, keyed by
+    /// `(edge_key, endpoint_node_id)`. Populated alongside
     /// `portal_buffers`; consulted by `hit_test_portal` when the
     /// `handle_click` dispatcher needs to resolve a click on a
-    /// portal glyph to a `PortalRefKey`.
-    portal_hitboxes: FxHashMap<(PortalRefKey, String), (Vec2, Vec2)>,
+    /// portal glyph to an `EdgeKey` + the endpoint the marker sits
+    /// above (the double-click jump target is the *other* endpoint).
+    portal_hitboxes: FxHashMap<(EdgeKey, String), (Vec2, Vec2)>,
     /// Session 6C: command palette overlay buffers. Rendered above
     /// everything else in screen coordinates. Populated only when
     /// the palette is open; cleared otherwise.

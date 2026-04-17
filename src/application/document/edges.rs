@@ -6,9 +6,13 @@
 
 use glam::Vec2;
 
-use baumhard::mindmap::model::{Canvas, GlyphConnectionConfig, MindEdge};
+use baumhard::mindmap::model::{
+    is_portal_edge, Canvas, GlyphConnectionConfig, MindEdge, DISPLAY_MODE_LINE,
+    DISPLAY_MODE_PORTAL, PORTAL_GLYPH_PRESETS,
+};
 use baumhard::mindmap::scene_builder;
 
+use super::defaults::default_portal_edge;
 use super::types::{EdgeRef, SelectionState};
 use super::undo_action::UndoAction;
 use super::MindMapDocument;
@@ -481,6 +485,76 @@ impl MindMapDocument {
         self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
         self.dirty = true;
         true
+    }
+
+    /// Switch an edge's `display_mode` between `"line"` and `"portal"`.
+    /// `None` / `"line"` → the usual path form; `"portal"` → two
+    /// glyph markers above each endpoint, no line between. Unknown
+    /// values are rejected with `false`. Returns `false` on no-op
+    /// (value already matches, edge not found). Undoes via the
+    /// standard `EditEdge { index, before }` path.
+    pub fn set_edge_display_mode(&mut self, edge_ref: &EdgeRef, mode: &str) -> bool {
+        if mode != DISPLAY_MODE_LINE && mode != DISPLAY_MODE_PORTAL {
+            return false;
+        }
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let current_is_portal = is_portal_edge(&self.mindmap.edges[idx]);
+        let want_portal = mode == DISPLAY_MODE_PORTAL;
+        if current_is_portal == want_portal {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        self.mindmap.edges[idx].display_mode = if want_portal {
+            Some(DISPLAY_MODE_PORTAL.to_string())
+        } else {
+            None
+        };
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Create a new portal-mode edge between two nodes. Validation
+    /// mirrors `create_cross_link_edge` — rejects self-edges, missing
+    /// endpoints, and duplicate `(from, to, cross_link)` triples. The
+    /// marker glyph is picked by rotating `PORTAL_GLYPH_PRESETS` via
+    /// the count of existing portal-mode edges, so successive portal
+    /// creations look distinct at a glance. Returns the new edge's
+    /// index on success.
+    pub fn create_portal_edge(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+    ) -> Option<usize> {
+        if source_id == target_id {
+            return None;
+        }
+        if !self.mindmap.nodes.contains_key(source_id)
+            || !self.mindmap.nodes.contains_key(target_id)
+        {
+            return None;
+        }
+        let exists = self.mindmap.edges.iter().any(|e| {
+            e.edge_type == "cross_link"
+                && e.from_id == source_id
+                && e.to_id == target_id
+        });
+        if exists {
+            return None;
+        }
+        let portal_count = self
+            .mindmap
+            .edges
+            .iter()
+            .filter(|e| is_portal_edge(e))
+            .count();
+        let glyph = PORTAL_GLYPH_PRESETS[portal_count % PORTAL_GLYPH_PRESETS.len()];
+        let edge = default_portal_edge(source_id, target_id, glyph);
+        self.mindmap.edges.push(edge);
+        Some(self.mindmap.edges.len() - 1)
     }
 
 }

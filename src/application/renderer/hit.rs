@@ -8,7 +8,7 @@
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;
-use baumhard::mindmap::scene_builder::{PortalRefKey, RenderScene};
+use baumhard::mindmap::scene_builder::RenderScene;
 use baumhard::mindmap::scene_cache::EdgeKey;
 use glam::Vec2;
 
@@ -78,38 +78,25 @@ impl Renderer {
         }
     }
 
-    /// Replace the portal-hitbox map wholesale.
-    ///
-    /// Used by the `update_portal_tree` helper in `app.rs` once
-    /// portal rendering migrated to the canvas-scene tree path:
-    /// the tree builder owns geometry computation and emits both
-    /// the tree and the AABBs, then hands the AABBs over via
-    /// this setter so [`Self::hit_test_portal`] keeps working.
-    /// Will go away in Session 5 when portal hit-testing routes
-    /// through `Scene::component_at`.
+    /// Replace the portal-hitbox map wholesale. Called from
+    /// `update_portal_tree` every time the portal tree is rebuilt
+    /// or mutated — the tree builder owns the AABB computation and
+    /// hands the map over via this setter so [`Self::hit_test_portal`]
+    /// keeps working.
     pub fn set_portal_hitboxes(
         &mut self,
-        hitboxes: std::collections::HashMap<
-            (
-                (String, String, String),
-                String,
-            ),
-            (Vec2, Vec2),
-        >,
+        hitboxes: std::collections::HashMap<(EdgeKey, String), (Vec2, Vec2)>,
     ) {
         self.portal_hitboxes.clear();
-        for (((label, endpoint_a, endpoint_b), endpoint_node_id), bbox) in hitboxes {
-            let key = (
-                PortalRefKey::new(label, endpoint_a, endpoint_b),
-                endpoint_node_id,
-            );
-            self.portal_hitboxes.insert(key, bbox);
-        }
+        self.portal_hitboxes.extend(hitboxes);
     }
 
-    /// Session 6E: hit-test portal markers at `canvas_pos`. Returns
-    /// the `PortalRefKey` of the first marker whose AABB contains
-    /// the point, or `None` if no marker is hit.
+    /// Hit-test portal markers at `canvas_pos`. Returns the
+    /// `(EdgeKey, endpoint_node_id)` of the first marker whose AABB
+    /// contains the point, or `None` if no marker is hit. The
+    /// endpoint id is the node the hit marker sits above — the app
+    /// uses the *other* endpoint as the double-click navigation
+    /// target.
     ///
     /// Linear scan — portal counts stay in the dozens so a spatial
     /// index is not worth the maintenance cost. Consulted from
@@ -117,17 +104,31 @@ impl Renderer {
     /// before the edge hit test so clicks on a marker floating above
     /// a node's top-right corner don't accidentally fall through to
     /// an edge beneath.
-    pub fn hit_test_portal(&self, canvas_pos: Vec2) -> Option<PortalRefKey> {
-        for ((key, _endpoint), (min, max)) in &self.portal_hitboxes {
+    pub fn hit_test_portal(&self, canvas_pos: Vec2) -> Option<(EdgeKey, String)> {
+        for ((key, endpoint), (min, max)) in &self.portal_hitboxes {
             if canvas_pos.x >= min.x
                 && canvas_pos.x <= max.x
                 && canvas_pos.y >= min.y
                 && canvas_pos.y <= max.y
             {
-                return Some(key.clone());
+                return Some((key.clone(), endpoint.clone()));
             }
         }
         None
+    }
+
+    /// Pan the camera so `target` (canvas coordinates) is centred
+    /// on the viewport at the current zoom. Used by the portal
+    /// double-click handler to jump to the other side of a portal
+    /// edge. Sets both viewport-dirty flags so the next frame
+    /// rebuilds the connection buffers at the new pan.
+    pub fn set_camera_center(&mut self, target: Vec2) {
+        self.camera.apply_mutation(
+            &baumhard::gfx_structs::camera::CameraMutation::SetPosition { canvas_pos: target },
+        );
+        self.connection_buffers.clear();
+        self.connection_viewport_dirty = true;
+        self.connection_geometry_dirty = true;
     }
 
     /// Fit the camera to show a Baumhard tree's content.

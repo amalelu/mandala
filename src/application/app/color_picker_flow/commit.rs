@@ -106,18 +106,6 @@ pub(in crate::application::app) fn commit_color_picker(
                 doc.set_edge_color(&er, Some(&hex));
             }
         }
-        PickerHandle::Portal(index) => {
-            let pr = doc.mindmap.portals.get(index).map(|p| {
-                crate::application::document::PortalRef::new(
-                    p.label.clone(),
-                    p.endpoint_a.clone(),
-                    p.endpoint_b.clone(),
-                )
-            });
-            if let Some(pr) = pr {
-                doc.set_portal_color(&pr, &hex);
-            }
-        }
         PickerHandle::Node { id, axis } => match axis {
             NodeColorAxis::Bg => {
                 doc.set_node_bg_color(&id, hex);
@@ -184,13 +172,6 @@ pub(in crate::application::app) fn apply_picker_preview(
                     let key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
                     doc.color_picker_preview =
                         Some(ColorPickerPreview::Edge { key, color: hex });
-                }
-            }
-            PickerHandle::Portal(index) => {
-                if let Some(portal) = doc.mindmap.portals.get(index) {
-                    let key = baumhard::mindmap::scene_builder::PortalRefKey::from_portal(portal);
-                    doc.color_picker_preview =
-                        Some(ColorPickerPreview::Portal { key, color: hex });
                 }
             }
             PickerHandle::Node { .. } => {

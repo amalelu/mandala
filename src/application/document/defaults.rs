@@ -23,6 +23,7 @@ pub(super) fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge 
         anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
+        display_mode: None,
     }
 }
 
@@ -97,5 +98,39 @@ pub(super) fn default_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
         anchor_to: "auto".to_string(),
         control_points: Vec::new(),
         glyph_connection: None,
+        display_mode: None,
+    }
+}
+
+/// Build a default-styled portal-mode edge. Like `default_cross_link_edge`,
+/// but with `display_mode = Some("portal")` and a `glyph_connection` that
+/// carries the chosen marker glyph. Callers rotate `glyph_preset_index`
+/// through `PORTAL_GLYPH_PRESETS.len()` to pick distinct glyphs per
+/// portal without forcing the user to choose up front.
+pub(super) fn default_portal_edge(
+    from_id: &str,
+    to_id: &str,
+    glyph: &str,
+) -> MindEdge {
+    use baumhard::mindmap::model::{GlyphConnectionConfig, DISPLAY_MODE_PORTAL};
+    MindEdge {
+        from_id: from_id.to_string(),
+        to_id: to_id.to_string(),
+        edge_type: "cross_link".to_string(),
+        color: "#aa88cc".to_string(),
+        width: 3,
+        line_style: "solid".to_string(),
+        visible: true,
+        label: None,
+        label_position_t: None,
+        anchor_from: "auto".to_string(),
+        anchor_to: "auto".to_string(),
+        control_points: Vec::new(),
+        glyph_connection: Some(GlyphConnectionConfig {
+            body: glyph.to_string(),
+            font_size_pt: 16.0,
+            ..GlyphConnectionConfig::default()
+        }),
+        display_mode: Some(DISPLAY_MODE_PORTAL.to_string()),
     }
 }
