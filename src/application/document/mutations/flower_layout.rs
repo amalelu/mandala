@@ -61,27 +61,35 @@ mod tests {
     use super::*;
     use crate::application::document::MindMapDocument;
 
+    /// Pinned testament fixture. Node `"1"` has four direct children
+    /// (`1.0`, `1.1`, `1.2`, `1.3`) by construction; if that changes
+    /// the expectation surfaces here rather than via a silent first-
+    /// match drift. §T4 fixture discipline.
+    const FIXTURE_PARENT_ID: &str = "1";
+    const FIXTURE_MIN_CHILDREN: usize = 4;
+
     fn test_doc_with_children() -> (MindMapDocument, String, Vec<String>) {
         let path = format!(
             "{}/maps/testament.mindmap.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let doc = MindMapDocument::load(&path).expect("testament loads");
-        // Find a node with at least 2 direct children.
-        let target_id = doc
-            .mindmap
-            .nodes
-            .keys()
-            .find(|id| doc.mindmap.children_of(id).len() >= 2)
-            .expect("testament has a node with children")
-            .clone();
         let child_ids: Vec<String> = doc
             .mindmap
-            .children_of(&target_id)
+            .children_of(FIXTURE_PARENT_ID)
             .iter()
             .map(|n| n.id.clone())
             .collect();
-        (doc, target_id, child_ids)
+        assert!(
+            child_ids.len() >= FIXTURE_MIN_CHILDREN,
+            "fixture drift: testament node '{}' expected to have \u{2265}{} \
+             direct children, found {}. Pin a different parent id or \
+             update FIXTURE_MIN_CHILDREN.",
+            FIXTURE_PARENT_ID,
+            FIXTURE_MIN_CHILDREN,
+            child_ids.len()
+        );
+        (doc, FIXTURE_PARENT_ID.to_string(), child_ids)
     }
 
     #[test]

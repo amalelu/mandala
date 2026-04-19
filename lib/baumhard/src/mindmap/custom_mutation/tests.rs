@@ -83,6 +83,64 @@ fn legacy_json_with_only_document_actions_loads_with_no_mutator() {
     assert_eq!(cm.document_actions.len(), 1);
 }
 
+/// Full round-trip on real-world legacy shape: load
+/// `theme_demo.mindmap.json` (three document-actions-only
+/// mutations in the pre-unification shape), save it to a temp
+/// file through the canonical on-save path, reload, and assert
+/// every `custom_mutation` still reflects the source file's
+/// semantic content. Guards the silent upgrade-on-save contract
+/// the review flagged — a user opening + saving a legacy map
+/// should never lose information.
+#[test]
+fn legacy_theme_demo_map_round_trips_through_canonical_save() {
+    use crate::mindmap::loader::{load_from_file, save_to_file};
+    use std::path::PathBuf;
+
+    let repo_root: PathBuf = [env!("CARGO_MANIFEST_DIR"), "..", ".."]
+        .iter()
+        .collect();
+    let src_path = repo_root.join("maps").join("theme_demo.mindmap.json");
+    // Some test runners may not have access to the full repo tree
+    // (e.g. crate-scoped cargo test); skip gracefully rather than
+    // fail a CI environment that doesn't ship the fixture.
+    if !src_path.exists() {
+        return;
+    }
+
+    let original = load_from_file(&src_path).expect("legacy theme_demo loads");
+    assert!(
+        !original.custom_mutations.is_empty(),
+        "fixture expected to have custom_mutations"
+    );
+
+    // Save to a temp file using the canonical on-save path.
+    let tmp_path = std::env::temp_dir()
+        .join("mandala_test_theme_demo_roundtrip.mindmap.json");
+    save_to_file(&tmp_path, &original).expect("save_to_file succeeds");
+
+    // Reload and compare field-by-field on every custom_mutation.
+    let reloaded = load_from_file(&tmp_path).expect("canonical reloads");
+    assert_eq!(
+        reloaded.custom_mutations.len(),
+        original.custom_mutations.len()
+    );
+    for (before, after) in original
+        .custom_mutations
+        .iter()
+        .zip(reloaded.custom_mutations.iter())
+    {
+        assert_eq!(before.id, after.id);
+        assert_eq!(before.name, after.name);
+        assert_eq!(before.target_scope, after.target_scope);
+        assert_eq!(before.document_actions, after.document_actions);
+        // The synthesized `mutator` is stable across the round-trip:
+        // legacy had no `mutations` to translate, so `None` persists.
+        assert_eq!(before.mutator.is_none(), after.mutator.is_none());
+    }
+
+    let _ = std::fs::remove_file(&tmp_path);
+}
+
 #[test]
 fn matches_context_hits_exact_and_dotted_descendants() {
     let mut cm = sample("x");

@@ -435,4 +435,55 @@ mod tests {
             other => panic!("expected Ok with node id, got {:?}", other),
         }
     }
+
+    /// End-to-end: applying a persistent mutation through the
+    /// console verb pushes an undo entry, mutates the model, and
+    /// sets `dirty`. Calling `undo()` reverses the mutation and
+    /// leaves the doc clean relative to the pre-apply state. §T1
+    /// fundamental — every user-facing mutation path gets an undo
+    /// round-trip test.
+    #[test]
+    fn apply_pushes_undo_mutates_model_and_round_trips() {
+        let mut doc = fixture_doc(
+            vec![(
+                "nudge-right-5",
+                make_cm("nudge-right-5", vec!["map.node"], "Nudge 5px right"),
+            )],
+            vec![],
+        );
+        let node_id = doc.mindmap.nodes.keys().next().unwrap().clone();
+        let before_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        let before_undo_len = doc.undo_stack.len();
+
+        let line = format!("mutation apply nudge-right-5 {}", node_id);
+        match run(&line, &mut doc) {
+            ExecResult::Ok(_) => {}
+            other => panic!("expected Ok, got {:?}", other),
+        }
+
+        // A persistent mutation must have pushed exactly one undo
+        // entry and set the dirty flag; the model must reflect the
+        // nudge (our fixture CM moves x by +1.0).
+        assert_eq!(doc.undo_stack.len(), before_undo_len + 1);
+        assert!(doc.dirty, "dirty flag must be set after apply");
+        let after_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        assert!(
+            (after_x - before_x - 1.0).abs() < 1e-6,
+            "expected position.x to grow by 1.0 (got {} → {})",
+            before_x,
+            after_x
+        );
+
+        // `undo()` pops the entry and restores the pre-apply position.
+        let popped = doc.undo();
+        assert!(popped, "undo must report success");
+        assert_eq!(doc.undo_stack.len(), before_undo_len);
+        let restored_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        assert!(
+            (restored_x - before_x).abs() < 1e-6,
+            "undo must restore the original position (got {} → {})",
+            after_x,
+            restored_x
+        );
+    }
 }

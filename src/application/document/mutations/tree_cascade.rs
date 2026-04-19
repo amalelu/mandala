@@ -59,20 +59,29 @@ mod tests {
     use super::*;
     use crate::application::document::MindMapDocument;
 
+    /// Pinned testament fixture. Node `"1"` has four direct children;
+    /// reuses the same pin as the flower_layout tests so a fixture
+    /// restructure surfaces consistently. §T4 fixture discipline.
+    const FIXTURE_PARENT_ID: &str = "1";
+    const FIXTURE_MIN_CHILDREN: usize = 4;
+
     fn test_doc() -> (MindMapDocument, String) {
         let path = format!(
             "{}/maps/testament.mindmap.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let doc = MindMapDocument::load(&path).expect("testament loads");
-        let target = doc
-            .mindmap
-            .nodes
-            .keys()
-            .find(|id| doc.mindmap.children_of(id).len() >= 2)
-            .expect("testament has branching nodes")
-            .clone();
-        (doc, target)
+        let count = doc.mindmap.children_of(FIXTURE_PARENT_ID).len();
+        assert!(
+            count >= FIXTURE_MIN_CHILDREN,
+            "fixture drift: testament node '{}' expected to have \u{2265}{} \
+             direct children, found {}. Pin a different parent id or \
+             update FIXTURE_MIN_CHILDREN.",
+            FIXTURE_PARENT_ID,
+            FIXTURE_MIN_CHILDREN,
+            count
+        );
+        (doc, FIXTURE_PARENT_ID.to_string())
     }
 
     #[test]

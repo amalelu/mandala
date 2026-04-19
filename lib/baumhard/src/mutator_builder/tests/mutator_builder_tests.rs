@@ -608,3 +608,78 @@ fn json_instruction_spec_map_children_materializes_correctly() {
     let inst = instruction.clone().into_instruction();
     assert!(matches!(inst, Instruction::MapChildren));
 }
+
+// =============================================================
+// Full serialize ↔ deserialize round-trips — catches accidental
+// serde field renames / shape drift that a one-way parse test
+// would miss. Authored in response to a code-review finding that
+// existing JSON tests only parsed, never re-emitted.
+// =============================================================
+
+/// Helper: round-trip a MutatorNode through serde_json and assert
+/// the result parses back to a structurally identical value. Uses
+/// `serde_json::Value` for comparison so field-order drift doesn't
+/// spuriously fail.
+fn assert_mutator_node_json_round_trips(node: &MutatorNode) {
+    let first = serde_json::to_string(node).expect("first serialize");
+    let reparsed: MutatorNode = serde_json::from_str(&first).expect("reparse");
+    let second = serde_json::to_string(&reparsed).expect("second serialize");
+    let v1: serde_json::Value = serde_json::from_str(&first).unwrap();
+    let v2: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(v1, v2, "MutatorNode JSON drifted across round-trip");
+}
+
+#[test]
+fn json_round_trip_macro_with_literal_mutations_preserves_shape() {
+    use crate::gfx_structs::area::GlyphAreaCommand;
+    use crate::gfx_structs::mutator::Mutation;
+    // The pure-data shape that scope::self_only produces — a Macro
+    // on channel 0 carrying a `MutationListSrc::Literal` list.
+    let node = MutatorNode::Macro {
+        channel: 0,
+        mutations: MutationListSrc::Literal(vec![
+            Mutation::area_command(GlyphAreaCommand::NudgeRight(3.0)),
+            Mutation::area_command(GlyphAreaCommand::GrowFont(1.5)),
+        ]),
+        children: vec![],
+    };
+    assert_mutator_node_json_round_trips(&node);
+}
+
+#[test]
+fn json_round_trip_instruction_map_children_preserves_shape() {
+    let node = MutatorNode::Instruction {
+        channel: 7,
+        instruction: InstructionSpec::MapChildren,
+        mutation: MutationSrc::None,
+        children: vec![MutatorNode::Single {
+            channel: ChannelSrc::Literal(3),
+            mutation: MutationSrc::None,
+        }],
+    };
+    assert_mutator_node_json_round_trips(&node);
+}
+
+#[test]
+fn json_round_trip_repeat_inside_map_children_preserves_shape() {
+    // The canonical declarative size-aware layout shape — Repeat
+    // under MapChildren, with SectionIndex channels and an
+    // AreaDelta template. The Repeat-composition test relies on
+    // this exact serde layout.
+    let node = MutatorNode::Instruction {
+        channel: 0,
+        instruction: InstructionSpec::MapChildren,
+        mutation: MutationSrc::None,
+        children: vec![MutatorNode::Repeat {
+            section: "children".into(),
+            channel_base: 0,
+            count: CountSrc::Runtime("children".into()),
+            skip_indices: vec![],
+            template: Box::new(MutatorNode::Single {
+                channel: ChannelSrc::SectionIndex,
+                mutation: MutationSrc::AreaDelta(vec![CellField::position]),
+            }),
+        }],
+    };
+    assert_mutator_node_json_round_trips(&node);
+}
