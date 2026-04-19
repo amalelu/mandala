@@ -241,8 +241,8 @@ fn help(args: &Args, eff: &ConsoleEffects) -> ExecResult {
     ExecResult::Lines(lines)
 }
 
-fn source_label(s: &crate::application::document::animations::MutationSource) -> &'static str {
-    use crate::application::document::animations::MutationSource::*;
+fn source_label(s: &crate::application::document::mutations_loader::MutationSource) -> &'static str {
+    use crate::application::document::mutations_loader::MutationSource::*;
     match s {
         App => "app",
         User => "user",
@@ -255,7 +255,7 @@ fn source_label(s: &crate::application::document::animations::MutationSource) ->
 mod tests {
     use super::*;
     use crate::application::console::parser::tokenize;
-    use crate::application::document::animations::MutationSource;
+    use crate::application::document::mutations_loader::MutationSource;
     use baumhard::mindmap::custom_mutation::{
         CustomMutation, MutationBehavior, TargetScope,
     };

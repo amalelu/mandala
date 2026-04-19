@@ -63,9 +63,16 @@ pub fn descendants(mutations: Vec<Mutation>) -> MutatorNode {
 /// each descendant via the walker's repeat-while semantics). Mirrors
 /// the topology the (now-deleted) `build_mutator_tree_for_scope`
 /// function emitted.
+///
+/// The `mutations` list is cloned once into the root Macro and the
+/// ownership-moved original passes to the nested Macro. The two
+/// copies are independent payloads on the wire (round-tripping
+/// through serde); at apply time they trigger the same `Mutation`
+/// on the anchor and on every descendant via separate walker steps.
 pub fn self_and_descendants(mutations: Vec<Mutation>) -> MutatorNode {
     MutatorNode::Macro {
         channel: 0,
+        // First copy: the root Macro applies this list to the anchor.
         mutations: MutationListSrc::Literal(mutations.clone()),
         children: vec![MutatorNode::Instruction {
             channel: 0,
@@ -73,6 +80,8 @@ pub fn self_and_descendants(mutations: Vec<Mutation>) -> MutatorNode {
             mutation: MutationSrc::None,
             children: vec![MutatorNode::Macro {
                 channel: 0,
+                // Second copy (moved): the RepeatWhile body applies
+                // this list to every descendant.
                 mutations: MutationListSrc::Literal(mutations),
                 children: vec![],
             }],

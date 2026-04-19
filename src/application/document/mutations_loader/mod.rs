@@ -23,6 +23,28 @@ pub mod platform_web;
 
 use baumhard::mindmap::custom_mutation::CustomMutation;
 
+/// Source layer a registered mutation came from. The
+/// `build_mutation_registry_with_app_and_user` method stamps a
+/// `MutationSource` into `MindMapDocument::mutation_sources`
+/// alongside every registry write, so `mutation help <id>` can
+/// report which layer won the id — critical for authors debugging
+/// override precedence.
+///
+/// Variants are in ascending precedence: `App` is the lowest layer
+/// (most easily overridable), `Inline` is the highest (wins last).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MutationSource {
+    /// Shipped with the binary via `assets/mutations/application.json`.
+    App,
+    /// Loaded from the user's `mutations.json` (XDG path on native,
+    /// `?mutations=` query param or `localStorage` on WASM).
+    User,
+    /// Declared in the currently-loaded map's `custom_mutations` array.
+    Map,
+    /// Declared on a specific node's `inline_mutations` array.
+    Inline,
+}
+
 /// Load the two slices the registry builder expects — application
 /// mutations (bundled with the binary) and user mutations (from the
 /// local config file on native; from query/localStorage on WASM).

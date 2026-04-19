@@ -347,6 +347,14 @@ fn zip_map_children(
         // Force-apply the mutator to its paired target, then capture
         // the instruction (if the mutator is an Instruction) so the
         // subsequent recursive dispatch has no arena borrows live.
+        //
+        // We clone the Instruction here — not reborrow — because the
+        // follow-up `process_instruction_node` call takes
+        // `&mut gfx_tree` and would alias the read-only borrow we
+        // hold on `mutator_tree.arena` via `m`. The clone is cheap:
+        // Instruction is a small enum (no large payloads), and the
+        // branch only fires on the minority of child mutators that
+        // are themselves Instructions.
         let forwarded_instruction: Option<Instruction> = {
             let m = get_mutator(&mutator_tree.arena, mutator_child_id).get();
             let t = get_target(&mut gfx_tree.arena, target_child_id).get_mut();

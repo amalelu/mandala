@@ -11,6 +11,7 @@ use baumhard::mindmap::custom_mutation::{CustomMutation, PlatformContext, Trigge
 use baumhard::mindmap::model::MindNode;
 use baumhard::mindmap::tree_builder::MindMapTree;
 
+use super::mutations_loader::MutationSource;
 use super::types::AnimationInstance;
 use super::MindMapDocument;
 
@@ -51,21 +52,11 @@ fn apply_position_mutations_to_node(
     }
 }
 
-/// Source layer a registered mutation came from. Reported by
-/// `mutation help <id>` so authors know which file to edit and which
-/// layer an override is winning from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MutationSource {
-    /// Shipped with the binary via `assets/mutations/application.json`.
-    App,
-    /// Loaded from the user's `mutations.json` (XDG path on native,
-    /// `?mutations=` or localStorage on WASM).
-    User,
-    /// Declared in the currently-loaded map's `custom_mutations` array.
-    Map,
-    /// Declared on a specific node's `inline_mutations` array.
-    Inline,
-}
+// `MutationSource` lives in `mutations_loader::MutationSource` —
+// imported here via `use` at the top so registry-building can stamp
+// source layers into `self.mutation_sources` alongside the registry
+// writes. Keeping the type in the loader module groups it with the
+// precedence definition it's inseparable from.
 
 impl MindMapDocument {
     /// Build the mutation registry from map-level and inline node mutations.
