@@ -113,13 +113,19 @@ what works where.
 - Mutation framework: the `CustomMutation` carrier
   (`baumhard::mindmap::custom_mutation`), the four-source loader
   (`src/application/document/mutations_loader/` — app bundle + user
-  file with platform-split `platform_{desktop,web}.rs`), the
-  `MutatorNode` AST + `SectionContext` trait + `build` walker
-  (`baumhard::mutator_builder`), and the imperative
-  `DynamicMutationHandler` seam for size-aware layouts
+  source, with platform-split `platform_{desktop,web}.rs` for the
+  user layer: XDG file on native, `?mutations=` query param +
+  `localStorage` on WASM), the `MutatorNode` AST +
+  `SectionContext` trait + `build` walker
+  (`baumhard::mutator_builder`), the channel-bypassing
+  `Instruction::MapChildren` walker primitive for per-index
+  targeting, and the imperative `DynamicMutationHandler` seam for
+  size-aware layouts
   (`src/application/document/mutations/{flower_layout,tree_cascade}.rs`).
-  The `mutation` console verb (list / apply / help) lives under the
-  native-only console today (see below). See `format/mutations.md`.
+  Both `run_native.rs` and `run_wasm.rs` wire the loader +
+  handler registry at document-load time. The `mutation` console
+  verb (list / apply / help) lives under the console modal which
+  is still native-only (see below). See `format/mutations.md`.
 
 **Native-only today** (each is a roadmap-scale gap, not a style choice):
 - Drag gestures: pan, move-node, edge-handle, portal-label, rect-select

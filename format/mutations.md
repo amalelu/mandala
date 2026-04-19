@@ -115,11 +115,17 @@ filters to entries whose contexts include anything starting with
 
 ## `target_scope`
 
-Tells the undo path which model nodes to snapshot before the
-mutation runs. The mutator payload is responsible for actually
-performing the edits; this field scopes the snapshot window.
+Scopes the **undo snapshot and model-sync** windows, **not** the
+mutator payload's reach. The mutator AST is free to walk wherever its
+control-flow dictates; `target_scope` tells the framework which model
+nodes to clone into the `UndoAction::CustomMutation` snapshot before
+the mutation runs and (for non-handler mutations) which nodes to sync
+from the tree back to the model afterward. A mutation author's job is
+to keep the declared scope a superset of the nodes the mutator
+actually touches — if the mutator writes outside this scope, those
+writes won't be reverted by `Ctrl+Z` and won't reach the saved model.
 
-| Value | Affected nodes |
+| Value | Nodes snapshotted / synced |
 |---|---|
 | `SelfOnly` | The anchor node. |
 | `Children` | Direct children of the anchor. |
@@ -129,9 +135,34 @@ performing the edits; this field scopes the snapshot window.
 | `Siblings` | The anchor's siblings (excluding itself). |
 
 For scope-helper-generated MutatorNodes (via
-`baumhard::mindmap::custom_mutation::scope::*`) the scope matches
-the AST shape. For hand-authored MutatorNodes, set `target_scope` to
-the smallest scope that covers every node the AST will touch.
+`baumhard::mindmap::custom_mutation::scope::*`) the helper name
+matches the `target_scope` value — `scope::self_and_descendants(...)`
+pairs with `SelfAndDescendants`, etc. For hand-authored MutatorNodes,
+pick the smallest scope that covers every node the AST will touch.
+
+## `mutator = null` (document-actions-only)
+
+A mutation whose payload is only canvas-level work (a theme switch,
+an ad-hoc `theme_variables` override) sets `mutator: null` (or omits
+the field entirely) and carries its work in `document_actions`. The
+framework skips the tree-walk path and runs `apply_document_actions`
+alone; the `UndoAction::CanvasSnapshot` captures the pre-action
+canvas state for undo. Example:
+
+```json
+{
+  "id": "switch-dark",
+  "name": "Switch to dark theme",
+  "description": "Copy the 'dark' theme variant into live variables.",
+  "contexts": ["map.node"],
+  "target_scope": "SelfOnly",
+  "document_actions": [{ "SetThemeVariant": "dark" }]
+}
+```
+
+`target_scope` is still required on the wire (it's a non-`Option`
+field) but is effectively unused for document-actions-only
+mutations. `SelfOnly` is the conventional value.
 
 ## `mutator` — the MutatorNode AST
 
@@ -150,13 +181,66 @@ Four top-level variants:
   (a Macro on the anchor whose child is an `Instruction` walking
   descendants).
 - **`Instruction { channel, instruction, children }`** — control
-  flow (`RepeatWhileAlwaysTrue` / `RepeatWhile` / `RotateWhile` /
-  `SpatialDescend`) wrapping inner children.
+  flow wrapping inner children. Instructions:
+  - `RepeatWhileAlwaysTrue` — apply children to every descendant.
+  - `RepeatWhile(<Predicate>)` — apply children to every descendant
+    for which the predicate holds, short-circuit once it fails.
+  - `RotateWhile(<f32>, <Predicate>)` — rotation stub (reserved).
+  - `SpatialDescend(<OrderedVec2>)` — descend by AABB containment to
+    the deepest node that holds the point, deliver the instruction's
+    attached mutation.
+  - `MapChildren` — **zip-by-sibling-position**. Pairs the
+    mutator's direct children with the target's direct children
+    by index, **bypassing channel alignment**. See "MapChildren"
+    below.
 - **`Repeat { section, channel_base, count, skip_indices, template }`**
   — expands at build time into N children at consecutive channels,
   each derived from `template`. `count` is `{ "Literal": N }` or
   `{ "Runtime": "<label>" }`. Used by widgets (the picker's hue
   ring) and any runtime-shaped section.
+
+### Channel alignment vs. `MapChildren`
+
+By default, the walker pairs a mutator's direct children with a
+target's direct children **by matching the `channel` field on
+each element** — see `format/channels.md`. This is broadcast
+semantics: one mutator on channel N hits every target child that
+happens to share channel N. It's the right default for groups.
+
+`Instruction::MapChildren` is the opt-in alternative: it pairs
+strictly by **sibling position** (zip), ignoring channels entirely.
+This is the shape size-aware layouts want — the `i`-th target child
+gets the `i`-th mutator child, regardless of how channels are
+assigned. A typical declarative layout pairs `MapChildren` with a
+`Repeat` expansion fed by a `SectionContext`:
+
+```json
+{
+  "Instruction": {
+    "channel": 0,
+    "instruction": "MapChildren",
+    "children": [{
+      "Repeat": {
+        "section": "children",
+        "channel_base": 0,
+        "count": { "Runtime": "children" },
+        "template": {
+          "Single": {
+            "channel": "SectionIndex",
+            "mutation": { "AreaDelta": ["position"] }
+          }
+        }
+      }
+    }]
+  }
+}
+```
+
+At apply time the registered `SectionContext` supplies
+`count("children") = N` and per-index
+`field("children", i, &CellField::position)`; the walker expands the
+`Repeat` into N `Single` mutators and `MapChildren` zips them against
+the N target children.
 
 ### Runtime holes
 
@@ -166,16 +250,33 @@ walker consults a `SectionContext` registered by the host
 application for the mutation's `id`. Pure-data mutations (no runtime
 holes) use a no-op context.
 
-For mutations too imperative for the AST — `flower-layout`,
-`tree-cascade`, anything requiring per-target computation of
-positions or other geometry — the host may register a
-**DynamicMutationHandler** instead (see
-`src/application/document/mutations/`). The handler takes the
-document + target node id and mutates the `MindMap` model
-directly; the mutator payload in the JSON is conventionally empty
-(`"mutations": []`). See
-`src/application/document/mutations/flower_layout.rs` for a worked
-example.
+### Imperative handlers vs. declarative mutators
+
+Two apply paths coexist:
+
+- **Declarative (`mutator: Some(MutatorNode)`)** — the walker
+  compiles the AST to a `MutatorTree<GfxMutator>` and walks it over
+  the Baumhard tree. The framework syncs mutated nodes back from the
+  tree to the model for undo. Runtime holes are resolved via a
+  `SectionContext` keyed on the mutation `id`. Preferred for
+  mutations expressible in the AST (pure-data field changes,
+  MapChildren-shaped per-index layouts, predicate-gated recursion).
+- **Imperative (`DynamicMutationHandler`)** — a Rust function
+  pointer registered on the document under the mutation `id`. When
+  present, the dispatcher calls the handler directly and it mutates
+  the `MindMap` model in place, bypassing the tree walk. Chosen for
+  mutations too structural for the AST (arbitrary BFS layouts,
+  anything that needs per-node custom computation spanning multiple
+  passes). The mutator field in the JSON is conventionally empty
+  (`"mutations": []` in the legacy shape, or `mutator: null`).
+
+Decision rule: reach for the declarative path first. Move to a
+handler when the AST gets contorted — typically when you find
+yourself wanting per-target state that `SectionContext` can't
+cleanly express, or multiple tree passes. `flower_layout.rs` and
+`tree_cascade.rs` under `src/application/document/mutations/` are
+the canonical handler examples; both are registered by
+`register_builtin_handlers` at startup.
 
 ## Authoring a user file
 
