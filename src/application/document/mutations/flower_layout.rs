@@ -5,6 +5,8 @@
 //! for each child; the tree rebuild on the next frame picks up the
 //! new geometry.
 
+use log::debug;
+
 use super::MindMapDocument;
 
 /// Padding added to the computed radius so children don't kiss the
@@ -15,10 +17,30 @@ const RADIAL_PADDING: f64 = 40.0;
 /// matching the convention in mind-mapping tools.
 const START_ANGLE: f64 = -std::f64::consts::FRAC_PI_2;
 
+/// `true` iff `f` is finite and not negative. Used to gate the
+/// layout geometry: a non-finite or negative size / position on any
+/// participating node would propagate as NaN / Infinity into every
+/// computed position, silently corrupting the model. §7
+/// interactive-path posture: degrade the frame, log, keep running.
+fn is_safe_coord(f: f64) -> bool {
+    f.is_finite() && f >= 0.0
+}
+
 pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
     let Some(target) = doc.mindmap.nodes.get(target_id).cloned() else {
         return;
     };
+    if !is_safe_coord(target.size.width)
+        || !is_safe_coord(target.size.height)
+        || !target.position.x.is_finite()
+        || !target.position.y.is_finite()
+    {
+        debug!(
+            "flower-layout: target '{}' has non-finite size/position; skipping",
+            target_id
+        );
+        return;
+    }
     let children: Vec<String> = doc
         .mindmap
         .children_of(target_id)
@@ -36,6 +58,7 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
     let max_child_span = children
         .iter()
         .filter_map(|id| doc.mindmap.nodes.get(id))
+        .filter(|n| is_safe_coord(n.size.width) && is_safe_coord(n.size.height))
         .map(|n| (n.size.width.max(n.size.height)) / 2.0)
         .fold(0.0_f64, f64::max);
     let radius = parent_span + max_child_span + RADIAL_PADDING;
@@ -49,6 +72,13 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
         let Some(child) = doc.mindmap.nodes.get_mut(child_id) else {
             continue;
         };
+        if !is_safe_coord(child.size.width) || !is_safe_coord(child.size.height) {
+            debug!(
+                "flower-layout: child '{}' has non-finite size; leaving in place",
+                child_id
+            );
+            continue;
+        }
         // Position is the top-left corner; centre the child on the
         // computed point.
         child.position.x = cx + radius * theta.cos() - child.size.width / 2.0;

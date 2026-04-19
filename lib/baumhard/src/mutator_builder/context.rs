@@ -17,6 +17,9 @@ use super::ast::CellField;
 /// mutator trees.
 pub trait SectionContext {
     /// Resolve a runtime cell count for `Repeat { count: Runtime(_) }`.
+    /// `name` is the `Runtime` label the AST carries; the consumer
+    /// disambiguates among multiple `Repeat` sections by this label.
+    /// Called once per `Repeat` node during [`super::build::build`].
     ///
     /// Cost: consumer-defined, typically O(1) via a small HashMap.
     fn count(&self, _name: &str) -> usize {
@@ -47,10 +50,27 @@ pub trait SectionContext {
         default_field_from_area(self.area(section, index), template)
     }
     /// Resolve a runtime single `Mutation` for `MutationSrc::Runtime`.
+    /// `label` is the enclosing `Repeat` section's name (or `""` when
+    /// invoked outside a `Repeat` template). Called once per
+    /// materialised `Single`/`Instruction` carrying a `Runtime`
+    /// mutation. Returning a `Mutation::None` is a valid no-op choice.
+    ///
+    /// Cost: consumer-defined. The caller holds no locks; the
+    /// implementation owns the mutation it returns (cloning is
+    /// implicit in the return-by-value contract).
     fn mutation(&self, _label: &str) -> Mutation {
         unreachable!("section context does not supply runtime mutations")
     }
     /// Resolve a runtime `Vec<Mutation>` for `MutationListSrc::Runtime`.
+    /// `label` is the free-form key the AST carries; the consumer
+    /// disambiguates among multiple runtime-sourced macros by this
+    /// label. Called once per matching `Macro` node during
+    /// [`super::build::build`]. Returning an empty `Vec` is a valid
+    /// no-op choice; the built `GfxMutator::Macro` then walks over
+    /// its target without applying anything.
+    ///
+    /// Cost: consumer-defined. The returned `Vec` is moved into the
+    /// mutator tree, so no double-allocation.
     fn mutation_list(&self, _label: &str) -> Vec<Mutation> {
         unreachable!("section context does not supply runtime mutation lists")
     }

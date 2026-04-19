@@ -7,13 +7,27 @@
 
 use std::collections::VecDeque;
 
+use log::debug;
+
 use super::MindMapDocument;
 
 const ROW_GAP: f64 = 80.0;
 const SIBLING_GAP: f64 = 40.0;
 
+/// `true` iff `f` is finite and not negative. Guards the layout
+/// against NaN / Infinity / negative sizes propagating into every
+/// downstream row — see `flower_layout::is_safe_coord` for the
+/// same rationale.
+fn is_safe_coord(f: f64) -> bool {
+    f.is_finite() && f >= 0.0
+}
+
 pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
-    // BFS queue of (parent_id, depth).
+    // BFS queue, seeded with the anchor. MindMap's single-parent
+    // invariant (`format/ids.md`, enforced at load by the verifier)
+    // rules out cycles, so the BFS is guaranteed to terminate; if a
+    // future model change relaxes the invariant this assumption will
+    // need a visited-set guard.
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(target_id.to_string());
 
@@ -30,8 +44,27 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
         let Some(parent) = doc.mindmap.nodes.get(&current).cloned() else {
             continue;
         };
+        if !is_safe_coord(parent.size.width)
+            || !is_safe_coord(parent.size.height)
+            || !parent.position.x.is_finite()
+            || !parent.position.y.is_finite()
+        {
+            debug!(
+                "tree-cascade: parent '{}' has non-finite size/position; skipping row",
+                current
+            );
+            // Still enqueue children so deeper levels get placed
+            // relative to their own parents if those are well-formed.
+            for child_id in &children {
+                queue.push_back(child_id.clone());
+            }
+            continue;
+        }
         // Gather child sizes once so we can compute the row width
-        // without re-borrowing inside the placement loop.
+        // without re-borrowing inside the placement loop. Skip
+        // children with non-finite sizes — they aren't placed this
+        // pass but are still walked as potential parents of their
+        // own sub-rows.
         let sizes: Vec<(f64, f64)> = children
             .iter()
             .filter_map(|id| doc.mindmap.nodes.get(id))
@@ -44,11 +77,18 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
 
         let mut cursor_x = parent_cx - total_width / 2.0;
         for (child_id, (cw, _ch)) in children.iter().zip(sizes.iter()) {
-            if let Some(child) = doc.mindmap.nodes.get_mut(child_id) {
-                child.position.x = cursor_x;
-                child.position.y = row_y;
+            if is_safe_coord(*cw) {
+                if let Some(child) = doc.mindmap.nodes.get_mut(child_id) {
+                    child.position.x = cursor_x;
+                    child.position.y = row_y;
+                }
+            } else {
+                debug!(
+                    "tree-cascade: child '{}' has non-finite width; leaving in place",
+                    child_id
+                );
             }
-            cursor_x += cw + SIBLING_GAP;
+            cursor_x += cw.max(0.0) + SIBLING_GAP;
             queue.push_back(child_id.clone());
         }
     }

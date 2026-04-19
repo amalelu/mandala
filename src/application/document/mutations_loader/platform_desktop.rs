@@ -7,6 +7,14 @@ use std::path::{Path, PathBuf};
 
 use baumhard::mindmap::custom_mutation::CustomMutation;
 
+/// Upper bound on user-file size, in bytes. Mutation files in the
+/// wild are small (tens of KB at most — the app bundle is 800
+/// bytes). A multi-megabyte file is almost certainly either a
+/// mistake (wrong file at the user path) or malicious, and loading
+/// it into memory + running serde over it is pointless work.
+/// Chosen generously: 1 MiB is ~3000× the app bundle's size.
+const MAX_USER_FILE_BYTES: u64 = 1 << 20;
+
 /// Load user mutations, with layered fallback: explicit CLI path >
 /// `$XDG_CONFIG_HOME/mandala/mutations.json` >
 /// `$HOME/.config/mandala/mutations.json` > empty. Never fails —
@@ -40,6 +48,21 @@ pub fn load_user(explicit_path: Option<&Path>) -> Vec<CustomMutation> {
 }
 
 fn read_and_parse(path: &Path) -> Result<Vec<CustomMutation>, String> {
+    // Reject oversized files before reading — `read_to_string`
+    // would otherwise allocate a String the size of the entire
+    // file and hand it to serde. See `MAX_USER_FILE_BYTES`.
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_USER_FILE_BYTES => {
+            return Err(format!(
+                "{} exceeds size cap ({} bytes > {} max); refusing to load",
+                path.display(),
+                meta.len(),
+                MAX_USER_FILE_BYTES
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("stat {}: {}", path.display(), e)),
+    }
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("read {}: {}", path.display(), e))?;
     super::parse_mutations_json(&src)
@@ -86,6 +109,18 @@ mod tests {
         std::fs::write(&tmp, "{ this is not json").unwrap();
         let v = load_user(Some(&tmp));
         assert!(v.is_empty());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn oversized_file_is_rejected() {
+        let tmp = std::env::temp_dir().join("mandala_test_oversized_mutations.json");
+        // Write a 2 MiB file — twice the 1 MiB cap. Content is
+        // irrelevant; the rejection happens before serde runs.
+        let blob = vec![b' '; (MAX_USER_FILE_BYTES as usize) * 2];
+        std::fs::write(&tmp, &blob).unwrap();
+        let v = load_user(Some(&tmp));
+        assert!(v.is_empty(), "oversized file must produce an empty result");
         let _ = std::fs::remove_file(&tmp);
     }
 
