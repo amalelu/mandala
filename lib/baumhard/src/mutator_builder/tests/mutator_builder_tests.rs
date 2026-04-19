@@ -584,3 +584,27 @@ fn json_instruction_mutation_defaults_to_none() {
     };
     assert!(matches!(mutation, MutationSrc::None));
 }
+
+/// `InstructionSpec::MapChildren` round-trips through JSON and
+/// materializes to `Instruction::MapChildren` via
+/// `into_instruction`. Guards the seam authors rely on when
+/// declaring MapChildren-shaped mutators in a custom_mutations
+/// bundle.
+#[test]
+fn json_instruction_spec_map_children_materializes_correctly() {
+    let src = r#"{
+        "Instruction": {
+            "channel": 3,
+            "instruction": "MapChildren"
+        }
+    }"#;
+    let node: MutatorNode = serde_json::from_str(src).expect("parse MutatorNode");
+    let MutatorNode::Instruction { channel, instruction, .. } = node else {
+        panic!("expected Instruction");
+    };
+    assert_eq!(channel, 3);
+    // Materialize the InstructionSpec into a concrete Instruction and
+    // verify the variant pairs with the walker primitive.
+    let inst = instruction.clone().into_instruction();
+    assert!(matches!(inst, Instruction::MapChildren));
+}

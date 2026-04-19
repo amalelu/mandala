@@ -150,6 +150,12 @@ pub enum InstructionSpec {
     RotateWhile(f32, Predicate),
     /// `Instruction::SpatialDescend(point)`.
     SpatialDescend(OrderedVec2),
+    /// `Instruction::MapChildren` — unit variant, no payload. Pairs
+    /// this instruction node's mutator children with the current
+    /// target's children by sibling position (zip), independent of
+    /// channel. The opt-in alternative to channel-based alignment for
+    /// per-index targeting.
+    MapChildren,
 }
 
 impl InstructionSpec {
@@ -161,6 +167,7 @@ impl InstructionSpec {
             InstructionSpec::RepeatWhile(p) => Instruction::RepeatWhile(p),
             InstructionSpec::RotateWhile(a, p) => Instruction::RotateWhile(a, p),
             InstructionSpec::SpatialDescend(point) => Instruction::SpatialDescend(point),
+            InstructionSpec::MapChildren => Instruction::MapChildren,
         }
     }
 }

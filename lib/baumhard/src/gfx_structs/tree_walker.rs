@@ -134,6 +134,9 @@ fn process_instruction_node(
         Instruction::SpatialDescend(point) => {
             spatial_descend(gfx_tree, mutator_tree, target_id, mutator_id, point);
         }
+        Instruction::MapChildren => {
+            zip_map_children(gfx_tree, mutator_tree, target_id, mutator_id);
+        }
     };
 }
 
@@ -227,6 +230,10 @@ fn get_target(arena: &mut Arena<GfxElement>, id: NodeId) -> &mut Node<GfxElement
 /// Take the children of the mutator, and the target, and start a walk for each matching channel pairs
 /// If one mutator matches many targets, then mutate all targets with that mutator
 /// If one target matches many mutators, then mutate that target with all the mutators
+///
+/// See also [`zip_map_children`] — the opt-out alternative that pairs
+/// children by sibling position (zip) instead of by channel, for
+/// mutations that need per-index targeting.
 #[inline]
 fn align_child_walks(
     gfx_tree: &mut Tree<GfxElement, GfxMutator>,
@@ -275,6 +282,132 @@ fn align_child_walks(
             debug!("Reached end of mutator siblings, breaking outer mutation loop.");
             break;
         }
+    }
+}
+
+/// Zip the mutator's direct children against the target's direct
+/// children by sibling position — the alternative to
+/// [`align_child_walks`] for consumers that need per-index
+/// targeting independent of channel semantics (e.g. size-aware
+/// layouts where every target child sits on the same broadcast
+/// channel).
+///
+/// For each pair up to
+/// `min(mutator_children_len, target_children_len)`, the mutator's
+/// own effect is **force-applied** to its paired target — bypassing
+/// the channel-match check that [`apply_if_matching_channel`]
+/// normally enforces. That bypass is the whole point: channels on
+/// the paired children are broadcast tags, and MapChildren's job is
+/// to ignore them at the pairing site.
+///
+/// After the force-apply, the mutator's subtree descends against the
+/// target's subtree through the standard path:
+/// - Single/Macro/Void → [`align_child_walks`] (channel-aware).
+/// - Instruction → [`process_instruction_node`], which re-dispatches
+///   into whichever instruction-body the child carries (including a
+///   nested MapChildren, which will zip one level deeper).
+///
+/// Excess children on either side are silently dropped with a single
+/// `debug!` line at termination. No allocation inside the loop
+/// (§B7). Graceful no-op on empty children on either side.
+///
+/// The *outer* instruction's own attached mutation is already
+/// applied to the current target by [`walk_tree_from`] before this
+/// function is called (same precedent as
+/// [`compare_apply_repeat_while`]) — this function handles only the
+/// descent into paired children.
+#[inline]
+fn zip_map_children(
+    gfx_tree: &mut Tree<GfxElement, GfxMutator>,
+    mutator_tree: &MutatorTree<GfxMutator>,
+    target_id: NodeId,
+    mutator_id: NodeId,
+) {
+    let mut option_mutator_child = get_mutator(&mutator_tree.arena, mutator_id).first_child();
+    let mut option_target_child = get_target(&mut gfx_tree.arena, target_id).first_child();
+
+    let mut paired: usize = 0;
+    loop {
+        let (mutator_child_id, target_child_id) = match (option_mutator_child, option_target_child) {
+            (Some(m), Some(t)) => (m, t),
+            _ => break,
+        };
+        // Look up the next-siblings *before* the force-apply that
+        // takes `&mut gfx_tree.arena`, so the read-only borrows end
+        // cleanly.
+        let next_mutator = mutator_tree
+            .arena
+            .get(mutator_child_id)
+            .and_then(|n| n.next_sibling());
+        let next_target = gfx_tree
+            .arena
+            .get(target_child_id)
+            .and_then(|n| n.next_sibling());
+
+        // Force-apply the mutator to its paired target, then capture
+        // the instruction (if the mutator is an Instruction) so the
+        // subsequent recursive dispatch has no arena borrows live.
+        let forwarded_instruction: Option<Instruction> = {
+            let m = get_mutator(&mutator_tree.arena, mutator_child_id).get();
+            let t = get_target(&mut gfx_tree.arena, target_child_id).get_mut();
+            m.apply_to(t);
+            match m {
+                GfxMutator::Instruction { instruction, .. } => Some(instruction.clone()),
+                _ => None,
+            }
+        };
+        match forwarded_instruction {
+            Some(instruction) => {
+                // Nested instruction: dispatch at the paired target.
+                // Matches `walk_tree_from`'s post-apply path for
+                // Instruction (`process_instruction_node` + early
+                // return — no align_child_walks).
+                process_instruction_node(
+                    gfx_tree,
+                    mutator_tree,
+                    target_child_id,
+                    mutator_child_id,
+                    &instruction,
+                );
+            }
+            None => {
+                // Single / Macro / Void: descend via channel-based
+                // align at the next level down. A user who wants the
+                // deeper level to also zip nests MapChildren inside.
+                align_child_walks(
+                    gfx_tree,
+                    mutator_tree,
+                    target_child_id,
+                    mutator_child_id,
+                );
+            }
+        }
+
+        paired += 1;
+        option_mutator_child = next_mutator;
+        option_target_child = next_target;
+    }
+
+    // Count any leftover children on either side — useful when a
+    // runtime-expanded mutator (via Repeat) disagrees with the
+    // actual target fan-out and the author wants to see it in logs.
+    // Only one of the two loops runs because we broke out as soon
+    // as either side ran dry.
+    let mut excess_mutator: usize = 0;
+    while let Some(m) = option_mutator_child {
+        excess_mutator += 1;
+        option_mutator_child = mutator_tree.arena.get(m).and_then(|n| n.next_sibling());
+    }
+    let mut excess_target: usize = 0;
+    while let Some(t) = option_target_child {
+        excess_target += 1;
+        option_target_child = gfx_tree.arena.get(t).and_then(|n| n.next_sibling());
+    }
+    if excess_mutator > 0 || excess_target > 0 {
+        debug!(
+            "MapChildren zip paired {} children; {} excess mutators, {} excess targets ignored",
+            paired, excess_mutator, excess_target
+        );
     }
 }
 
