@@ -14,13 +14,6 @@ borders, connection paths — is laid out as positioned font glyphs.
 
 ## Where to look first
 
-- **`DEPRECATED_ROADMAP.md`** — historical record of what each session did,
-  kept for reference. The earlier ROADMAP.md has been superseded; the
-  living "current state" now lives in this file's **Dual-target status**
-  section below (for parity) and in individual commit messages (for the
-  detail of what each session landed). Read the deprecated roadmap before
-  proposing large changes so you don't re-do something that's already
-  landed, but don't expect it to reflect the last few sessions.
 - **`CODE_CONVENTIONS.md`** — the workspace-wide coding spec:
   architectural invariants, how to use baumhard, complexity and KISS
   heuristics, error-handling posture, and documentation standards.
@@ -32,10 +25,11 @@ borders, connection paths — is laid out as positioned font glyphs.
 - **`TEST_CONVENTIONS.md`** — testing philosophy, where to put tests, the
   `do_*()` benchmark-reuse pattern, and what we deliberately don't do
   (no mocks, no snapshots, no GPU tests).
-- **`format/`** — the `.mindmap.json` format specification, split by
-  concept: structural Dewey-decimal IDs, named enums, palettes,
-  channels, text runs, validation invariants, migration from legacy.
-  Read this before changing the data model.
+- **`format/`** — the `.mindmap.json` format specification.
+  `format/schema.md` is the primary reference; per-concept docs cover
+  Dewey-decimal IDs, named enums, palettes, channels, text runs,
+  validation invariants, portal labels, mutations, and migration from
+  legacy. Read this before changing the data model.
 - **`crates/maptool/`** — CLI tool for working with `.mindmap.json`
   files: `show`, `grep`, `apply`, `export`, `convert --legacy`
   (migration from miMind-derived format), and `verify` (structural
@@ -47,153 +41,116 @@ borders, connection paths — is laid out as positioned font glyphs.
 
 ## Architectural shape (high level)
 
-- **Single-threaded** — the event loop owns the renderer directly.
-  Earlier revisions were multi-threaded with channels; that's gone. Don't
-  reintroduce threading without a real reason.
-- **Model / View separation** — `MindMapDocument` owns the data model
-  (`MindMap`, selection, undo stack). The `Renderer` owns GPU resources
-  and rebuilds buffers from intermediate representations the document
-  hands it.
-- **Dual rendering pipeline** — nodes render through a Baumhard
-  `Tree<GfxElement, GfxMutator>`; connections and borders render through a
-  flat `RenderScene`. These are two different paths, wired side-by-side in
-  the event loop. Be aware which pipeline you're touching.
-- **Mutation-first interaction model** — the roadmap's guiding philosophy
-  is that user actions should be expressible as mutations cascading
-  through the Baumhard tree where possible. Not every interaction fits
-  this (anything outside the tree — edges, borders, UI overlays — has to
-  reach the scene builder or renderer instead), but when something *can*
-  be a mutation, prefer that.
-- **Cross-platform reality** — almost everything that works on native
-  should also compile for wasm32. Native-only code lives behind
-  `#[cfg(not(target_arch = "wasm32"))]`; WASM-only code behind
-  `#[cfg(target_arch = "wasm32")]`. The WASM input path currently lags
-  behind the native input path — see the **Dual-target status** section
+Invariants live in `CODE_CONVENTIONS.md §3` — this section is the shape,
+not the rules.
+
+- **Single-threaded, with a clean model/view split.** The event loop
+  owns the `Renderer` directly; `MindMapDocument` owns the data model
+  (`MindMap`, selection, undo stack) and hands the renderer intermediate
+  representations to draw from. No channels, no worker threads.
+- **Dual rendering pipeline.** Nodes render through a Baumhard
+  `Tree<GfxElement, GfxMutator>`; connections, borders, and portals
+  render through a flat `RenderScene` wired via
+  `src/application/scene_host.rs`. Be aware which pipeline you're
+  touching.
+- **Mutation-first interaction model.** Where a user action can be
+  expressed as a mutation cascading through the Baumhard tree, prefer
+  that. Things outside the tree — edges, borders, overlays — reach the
+  scene builder or renderer directly.
+- **Cross-platform reality.** Almost everything that works on native
+  also compiles for wasm32. Native-only code sits behind
+  `#[cfg(not(target_arch = "wasm32"))]`; WASM-only behind
+  `#[cfg(target_arch = "wasm32")]`. WASM also falls back to WebGL2
+  (via `wgpu`'s `webgl` feature) on browsers without WebGPU. The WASM
+  input path currently lags behind native — see **Dual-target status**
   below for the precise surface.
 
 ## Dual-target status
 
 Mandala is built for native desktop (`cargo run`, primary dev loop) and
-WASM (`trunk serve` / `trunk build`, the browser build — same binary on
-desktop and mobile browsers). Per `CODE_CONVENTIONS.md §2` the two
-targets are equal citizens; this section tracks the current parity
-surface so a new session doesn't have to trawl `#[cfg]` guards to learn
-what works where.
+WASM (`trunk serve` / `trunk build` — same binary on desktop and mobile
+browsers). Per `CODE_CONVENTIONS.md §2` the two targets are equal
+citizens; this section tracks the current parity surface so a new
+session doesn't have to trawl `#[cfg]` guards to learn what works where.
 
 **Runs on both targets:**
 - Document model, scene builder, tree bridge — all of `MindMapDocument`
   and `baumhard::mindmap::*`.
-- Click to select (nodes); scroll-wheel zoom; undo stack.
 - Inline node text editor: double-click / Enter / Backspace to open,
   full keyboard flow (cursor, delete, insert, multi-line), click-outside
   to commit, Esc to cancel. Shared implementation under
   `src/application/app/text_edit/`.
-- Portal-mode edges (`display_mode = "portal"`): two glyph labels,
-  one per endpoint. Each label defaults to facing its partner
-  endpoint and can carry a per-endpoint `PortalEndpointState`
-  (`color` override + `border_t` pinned position + `text`
-  adjacent label). Single-click a marker selects that specific
-  label as `SelectionState::PortalLabel`; **double-click pans
-  the camera to the opposite endpoint**. The glyph-wheel color
-  picker, clipboard copy/paste/cut, and the `color` console
-  verb all route to the per-endpoint color override when a
-  portal label is selected (clipboard ops operate on the
-  resolved hex). The `edge` / `font` / `body` / `anchor` / `cap`
-  / `spacing` / `label` console verbs all accept a portal-label
-  selection too — they target the owning edge (or the
-  per-endpoint text, for `label`). See `format/portal-labels.md`
-  for the full spec. Dispatch wired in both `event_mouse_click.rs`
+- Portal-mode edges (`display_mode = "portal"`): two glyph labels, one
+  per endpoint, each carrying a `PortalEndpointState` (color override,
+  pinned `border_t` position, adjacent text). Single-click selects a
+  label as `SelectionState::PortalLabel`; double-click pans to the
+  opposite endpoint. Console verbs, clipboard, and the color picker all
+  route to the selected label. Dispatch wired in `event_mouse_click.rs`
   (native) and `run_wasm.rs` via the shared `ClickHit::PortalMarker`
-  path.
-- Action dispatch for `Undo`, `CreateOrphanNode`, `OrphanSelection`,
-  `DeleteSelection`, `EditSelection`, `EditSelectionClean`, `CancelMode`.
-- Keybind config loading (native: CLI arg + XDG; WASM: `?keybinds=…`
-  query param + `localStorage`). Same resolver on both sides —
-  `KeybindConfig::load_for_desktop` / `load_for_web` under
-  `src/application/keybinds/platform_{desktop,web}.rs` are the reference
-  for how platform-split config loading should shape.
+  path. See `format/portal-labels.md`.
+- Action dispatch: the keybind → action pipeline fires on both targets.
+  Representative actions include `Undo`, `CreateOrphanNode`,
+  `DeleteSelection`, `EditSelection`, `CancelMode`; the full enum lives
+  in `src/application/keybinds/action.rs`.
+- Keybind config loading — multi-source resolver with platform splits:
+  native reads a CLI arg + XDG; WASM reads `?keybinds=…` + `localStorage`.
+  `src/application/keybinds/platform_{desktop,web}.rs` is the reference
+  pattern for platform-split config loading.
+- Mutation framework — the `CustomMutation` carrier, four-source loader
+  (`src/application/document/mutations_loader/` with matching
+  `platform_{desktop,web}.rs` split), the `MutatorNode` AST + `build`
+  walker (`baumhard::mutator_builder`), the channel-bypassing
+  `Instruction::MapChildren` walker primitive, and the imperative
+  `DynamicMutationHandler` seam for size-aware layouts
+  (`src/application/document/mutations/{flower_layout,tree_cascade}.rs`).
+  Both `run_native.rs` and `run_wasm.rs` wire the loader + handler
+  registry at document-load time. See `format/mutations.md`.
 - Cross-platform monotonic clock via `now_ms()` in
   `src/application/app/mod.rs` (native: `Instant`; WASM:
   `performance.now()`).
-- Mutation framework: the `CustomMutation` carrier
-  (`baumhard::mindmap::custom_mutation`), the four-source loader
-  (`src/application/document/mutations_loader/` — app bundle + user
-  source, with platform-split `platform_{desktop,web}.rs` for the
-  user layer: XDG file on native, `?mutations=` query param +
-  `localStorage` on WASM), the `MutatorNode` AST +
-  `SectionContext` trait + `build` walker
-  (`baumhard::mutator_builder`), the channel-bypassing
-  `Instruction::MapChildren` walker primitive for per-index
-  targeting, and the imperative `DynamicMutationHandler` seam for
-  size-aware layouts
-  (`src/application/document/mutations/{flower_layout,tree_cascade}.rs`).
-  Both `run_native.rs` and `run_wasm.rs` wire the loader +
-  handler registry at document-load time. The `mutation` console
-  verb (list / apply / help) lives under the console modal which
-  is still native-only (see below). See `format/mutations.md`.
-- Window-resize → `RenderDecree::SetSurfaceSize`: both targets
-  reconfigure the wgpu surface on `WindowEvent::Resized`. Native
-  also rebuilds the color-picker overlay; WASM doesn't need that
-  branch since the picker isn't reachable there yet.
-- Canvas clear color: both targets resolve
-  `Canvas.background_color` through theme variables and call
-  `Renderer::set_clear_color_from_hex` at document-load time, so
-  the wgpu render-pass clear matches the doc's configured
-  background instead of the default pitch black.
-- WebGL2 fallback: `wgpu` ships with the `webgl` feature so the
-  WASM build runs on browsers without WebGPU (Firefox stable,
-  Safari < 17). WebGPU is still preferred when available.
 
-**Native-only today** (each is a roadmap-scale gap, not a style choice):
+**Native-only today** (each is a parity gap, not a style choice):
 - Drag gestures: pan, move-node, edge-handle, portal-label, rect-select
   — the entire `DragState` enum is native-gated.
 - `AppMode::{Reparent, Connect}` — the mode state machine plus its
   hover preview and click routing.
 - Modals: CLI console (`/` trigger), glyph-wheel color picker, edge
-  label editor, portal-label text editor — state types and rebuild
-  paths all live under `#[cfg(not(target_arch = "wasm32"))]`. The
-  `mutation` console verb (`list` / `apply` / `help` / `inspect`) is
-  wired through the console modal, so it inherits the same
-  native-only scope; its loader + registry run on both targets.
+  label editor, portal-label text editor. The `mutation` console verb
+  (`list` / `apply` / `help` / `inspect`) inherits this scope — the
+  loader + registry run on both targets, only the UI shell is native.
 - Hover-based UI: `hovered_node` tracking, cursor-change on button
-  nodes, OnClick trigger dispatch.
+  nodes, `OnClick` trigger dispatch.
 - Clipboard copy/paste — `arboard` on native; WASM `clipboard.rs` stubs
-  with `log::warn!` because the browser Clipboard API is async and not
-  yet integrated.
+  with `log::warn!`.
 
 **Absent on both targets** (named so they're visible as gaps, not
 mistaken for "handled somewhere"):
-- Touch gestures (tap / pinch / long-press) — the `PlatformContext::Touch`
-  enum variant exists in the custom-mutation registry but no input path
-  detects or dispatches on it.
-- DPI-aware canvas sizing on WASM (no `devicePixelRatio` handling —
-  the canvas buffer tracks CSS pixels 1:1 today).
-- `PlatformContext` runtime detection — always uses the compile-time
-  `Desktop` / `Web` branch, never `Touch`.
+- Touch gestures (tap / pinch / long-press) — the
+  `PlatformContext::Touch` variant exists but no input path dispatches
+  on it.
+- DPI-aware canvas sizing on WASM — the canvas buffer tracks CSS pixels
+  1:1; no `devicePixelRatio` handling.
+- `PlatformContext` runtime detection — always the compile-time
+  `Desktop` / `Web` branch.
 
 The prescriptive rule that goes with this list — new interactive
 features need a cross-platform story from the start — lives in
-`CODE_CONVENTIONS.md §2`. The local checks that enforce it
-(`./test.sh` WASM gate, `./build.sh --wasm`) are named under
-"Common tasks" below.
+`CODE_CONVENTIONS.md §2`. `./test.sh`'s WASM type-check gate and
+`./build.sh --wasm` are the local checks that keep it honest.
 
 ## Common tasks
 
-- **Run tests**: `./test.sh` (runs the full suite across both crates,
+- **Run tests**: `./test.sh` runs the full suite across both crates,
   prints a test count, then type-checks `wasm32-unknown-unknown` so
-  cross-platform drift fails the run). Variants: `./test.sh --coverage`
-  runs under `cargo-llvm-cov` (install once with
-  `cargo install cargo-llvm-cov`, produces
-  `target/llvm-cov/html/index.html` and `target/llvm-cov/lcov.info`);
-  `./test.sh --lint` adds an advisory `cargo fmt --check` +
-  `cargo clippy` pass (never fails the run); `./test.sh --bench` also
-  runs the criterion benches after tests pass.
+  cross-platform drift fails the run. Flags: `--coverage` (runs under
+  `cargo-llvm-cov`, outputs `target/llvm-cov/html/index.html`),
+  `--lint` (advisory `cargo fmt --check` + `cargo clippy`), `--bench`
+  (runs the criterion benches after tests).
 - **Build releases**: `./build.sh` cleans prior output and builds both
   the native binary (`target/release/mandala`) and the WASM bundle
-  (`dist/` via `trunk build --release`) in one run. `--debug` builds
-  dev profile on both sides; `--fat` switches native to `release-lto`
-  (WASM still ships with trunk's `--release`). Requires `trunk` on
-  `PATH` and the `wasm32-unknown-unknown` target installed.
+  (`dist/` via `trunk build --release`). `--debug` builds dev profile
+  on both sides; `--fat` switches native to `release-lto`. Requires
+  `trunk` on `PATH` and the `wasm32-unknown-unknown` target installed.
 - **Run the app**: `./run.sh [map.mindmap.json]` launches the release
   binary and `trunk serve --release` in parallel; Ctrl+C stops both.
   For one-off iteration use `cargo run -- maps/testament.mindmap.json`
@@ -202,32 +159,6 @@ features need a cross-platform story from the start — lives in
   `cargo test -p mandala --lib <pattern>`.
 - **Load a different mindmap**: the first positional CLI arg is the path
   to a `.mindmap.json` file; WASM reads it from the `?map=` query param.
-
-## Conventions worth knowing
-
-- **Everything is glyphs** — text, borders, and connections all render as
-  positioned font glyphs via cosmic-text. There are no rectangle shaders;
-  if you want a new visual element, think about how to express it as
-  characters first.
-- **Dewey-decimal IDs** — node IDs encode tree position (`"0"`,
-  `"0.1"`, `"1.2.3"`). Sibling order is the last segment. `parent_id`
-  caches the parent for O(1) lookup. See `format/ids.md` for the full
-  rationale. IDs do not currently cascade on reparent (known drift).
-- **Single-parent tree** — `MindNode.parent_id: Option<String>` is the
-  hierarchy. Non-hierarchical relationships use arbitrary edges with
-  `edge_type: "cross_link"`. Don't introduce multi-parent shapes.
-- **Edges have no stable IDs** — they're identified by the triple
-  `(from_id, to_id, edge_type)`. Existing code uses this pattern
-  consistently; mirror it when you need to reference edges.
-- **Undo lives on the document** — user actions push `UndoAction` variants
-  onto a stack, and `undo()` matches on the variant to reverse them. Each
-  new user-facing mutation wants a matching undo variant.
-- **Something looks unused?** — before deleting it, check whether it's
-  deferred WIP from a past milestone or a seam the named trajectory
-  (`CODE_CONVENTIONS.md §6`) preserves for future sessions.
-  `DEPRECATED_ROADMAP.md`'s "What needs work" list is one reference
-  point; the **Dual-target status** section above names parity gaps
-  explicitly.
 
 ## How to work with this codebase
 
