@@ -218,7 +218,6 @@ pub fn apply_mutations_to_element(
     mutations: &[crate::gfx_structs::mutator::Mutation],
     target: &mut crate::gfx_structs::element::GfxElement,
 ) {
-    use crate::core::primitives::Applicable;
     for mutation in mutations {
         mutation.apply_to(target);
     }

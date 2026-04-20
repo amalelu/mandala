@@ -412,8 +412,8 @@ pub fn model_block_commands() {
                     }
                     _ => {}
                 },
-                GfxElementField::Channel(channel) => {}
-                GfxElementField::Id(id) => {}
+                GfxElementField::Channel(_channel) => {}
+                GfxElementField::Id(_id) => {}
                 _ => {}
             }
         }
@@ -685,7 +685,7 @@ pub fn area_block_commands() {
                 ApplyOperation::Subtract => {
                     match element_field {
                         GfxElementField::GlyphArea(field) => match field {
-                            GlyphAreaField::Text(text) => {
+                            GlyphAreaField::Text(_text) => {
                                 panic!(
                                     "Subtract operation on text? \
                               God bless you."
@@ -766,7 +766,7 @@ pub fn area_block_commands() {
                                         .range;
                                     assert_eq!(my_range, new_range)
                                 }
-                                ColorFontRegionField::Font(font) => {
+                                ColorFontRegionField::Font(_font) => {
                                     panic!("Subtract operation on font? You have strayed [far] from the path.");
                                 }
                                 ColorFontRegionField::Color(color) => {
@@ -873,7 +873,7 @@ pub fn area_block_commands() {
                                         .range;
                                     assert_eq!(my_range, new_range)
                                 }
-                                ColorFontRegionField::Font(font) => {
+                                ColorFontRegionField::Font(_font) => {
                                     panic!("Add operation on font? My friend, there is darkness within you.");
                                 }
                                 ColorFontRegionField::Color(color) => {
@@ -927,7 +927,7 @@ pub fn area_block_commands() {
                         GlyphAreaField::Operation(_) => {}
                     },
                     GfxElementField::Region(range, field) => match field {
-                        ColorFontRegionField::Range(range) => {
+                        ColorFontRegionField::Range(_range) => {
                             panic!("Unsupported operation. Don't think that we don't have our eyes on you.");
                         }
                         ColorFontRegionField::Font(_) => {
@@ -1027,6 +1027,10 @@ lazy_static!(
     */
 );
 
+// Test-only formatter kept as a helper seam for future
+// ancestry-assertion tests; see the already-landed ancestry
+// tests above for the convention it plugs into.
+#[allow(dead_code)]
 #[inline(always)]
 fn ancestry_seq(sequence: &[usize]) -> String {
     sequence
@@ -1044,7 +1048,7 @@ pub fn test_event_propagation_complex_symmetric() {
 pub fn event_propagation_complex_symmetric() {
     // This is necessary to initialize lazy statics
     fonts::init();
-    let (mock_sender, mock_receiver) = unbounded();
+    let (mock_sender, _mock_receiver) = unbounded();
     let region_params = Arc::new(RegionParams::new(10, (1000, 1000)));
     let mut model: Tree<GfxElement, GfxMutator> = Tree::new(region_params, mock_sender);
     let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new();

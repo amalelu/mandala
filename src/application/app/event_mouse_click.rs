@@ -20,7 +20,7 @@ pub(super) fn handle_mouse_input(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
-    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
+    _scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
     drag_state: &mut DragState,
     app_mode: &mut AppMode,
     console_state: &mut ConsoleState,

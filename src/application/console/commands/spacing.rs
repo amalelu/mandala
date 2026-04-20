@@ -7,7 +7,6 @@ use crate::application::console::completion::{prefix_filter, Completion, Complet
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
-use crate::application::document::SelectionState;
 
 pub const PRESETS: &[(&str, f32)] = &[("tight", 0.0), ("normal", 2.0), ("wide", 6.0)];
 pub const VALUE_PRESETS: &[&str] = &["tight", "normal", "wide"];

@@ -1,4 +1,4 @@
-use crate::core::primitives::{Applicable, Flag, Flaggable};
+use crate::core::primitives::Applicable;
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{GfxMutator, GlyphTreeEventInstance};
 use crate::gfx_structs::util::regions::{RegionElementKeyPair, RegionIndexer, RegionParams};
@@ -64,6 +64,11 @@ impl Applicable<Tree<GfxElement, GfxMutator>> for MutatorTree<GfxMutator> {
     }
 }
 
+// `position`, `pending_mutations`, `region_params`, `region_index` are
+// written-only today: they're forward-compat seams for the named
+// trajectory (Baumhard script API, plugin mutations, BVH region
+// indexing) per CODE_CONVENTIONS.md §6.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Tree<T: Clone, M: Applicable<T>> {
     pub arena: Arena<T>,
@@ -94,6 +99,9 @@ pub struct Tree<T: Clone, M: Applicable<T>> {
 }
 
 impl Tree<GfxElement, GfxMutator> {
+    // Crate-internal alt-constructor preserved as a seam for future
+    // tree-construction call sites (per CODE_CONVENTIONS.md §6).
+    #[allow(dead_code)]
     pub(crate) fn new_with(
         element: GfxElement,
         region_params: Arc<RegionParams>,
@@ -118,7 +126,7 @@ impl Tree<GfxElement, GfxMutator> {
     /// This root node will be the ancestor of all nodes in this tree
     pub fn new(
         region_params: Arc<RegionParams>,
-        scene_index_sender: Sender<RegionElementKeyPair>,
+        _scene_index_sender: Sender<RegionElementKeyPair>,
     ) -> Self {
         let mut arena = Arena::default();
         let root = arena.new_node(GfxElement::void());
@@ -176,7 +184,7 @@ impl Tree<GfxElement, GfxMutator> {
     }
 
     /// See [NodeId::descendants]
-    pub fn descendants(&self) -> Descendants<GfxElement> {
+    pub fn descendants(&self) -> Descendants<'_, GfxElement> {
         self.root.descendants(&self.arena)
     }
 
@@ -185,7 +193,7 @@ impl Tree<GfxElement, GfxMutator> {
     }
 
     /// See [NodeId::children]
-    pub fn children(&self) -> Children<GfxElement> {
+    pub fn children(&self) -> Children<'_, GfxElement> {
         self.root.children(&self.arena)
     }
 

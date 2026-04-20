@@ -24,7 +24,6 @@ pub mod mutator;
 pub use component::{GlyphComponent, GlyphComponentField};
 pub use glyph_model::GlyphModel;
 pub use line::GlyphLine;
-pub(crate) use line::GlyphLineOp;
 pub use matrix::GlyphMatrix;
 pub use mutator::{
     DeltaGlyphModel, GlyphModelCommand, GlyphModelCommandType, GlyphModelField,

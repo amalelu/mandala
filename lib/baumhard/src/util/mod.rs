@@ -1,4 +1,3 @@
-pub mod simd;
 pub mod geometry;
 pub mod grapheme_chad;
 pub mod color_conversion;

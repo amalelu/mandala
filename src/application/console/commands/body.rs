@@ -6,7 +6,6 @@ use crate::application::console::completion::{prefix_filter, Completion, Complet
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
-use crate::application::document::SelectionState;
 
 /// Body-glyph presets. Kept as `(name, glyph)` pairs so the command
 /// table stays one source of truth for both completion and exec.

@@ -14,7 +14,7 @@ use wgpu::{
 };
 use winit::dpi::PhysicalSize;
 
-use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
+use baumhard::shaders::shaders::SHADERS;
 
 use super::Renderer;
 

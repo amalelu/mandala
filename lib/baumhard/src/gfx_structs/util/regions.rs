@@ -7,7 +7,7 @@
 //! `super::region_indexer`) owns the index structure itself.
 
 use crate::util::primes::is_prime;
-use std::sync::{RwLock, RwLockReadGuard, TryLockError};
+use std::sync::{RwLock, TryLockError};
 
 // Re-export so existing consumers that `use regions::RegionIndexer`
 // continue to resolve.

@@ -16,12 +16,14 @@ use std::collections::HashMap;
 /// honours runtime-count queries out of a `HashMap`. Per-section
 /// routing is deliberately minimal — the tests below don't need
 /// distinct areas per section, only per index.
+#[allow(dead_code)]
 struct StubCtx {
     areas: Vec<GlyphArea>,
     runtime_counts: HashMap<String, usize>,
 }
 
 impl StubCtx {
+    #[allow(dead_code)]
     fn with_areas(n: usize) -> Self {
         let mut areas = Vec::with_capacity(n);
         for i in 0..n {
@@ -52,6 +54,7 @@ impl SectionContext for StubCtx {
     }
 }
 
+#[allow(dead_code)]
 fn single_with_text() -> Box<MutatorNode> {
     Box::new(MutatorNode::Single {
         channel: ChannelSrc::SectionIndex,
@@ -222,6 +225,7 @@ fn repeat_runtime_count_consults_context() {
 
 use crate::gfx_structs::mutator::{GfxMutator, Instruction, Mutation, MutatorType};
 use crate::gfx_structs::predicate::Predicate;
+
 
 /// Tree rooted at a `Void` with no children produces an empty root.
 #[test]
@@ -620,6 +624,7 @@ fn json_instruction_spec_map_children_materializes_correctly() {
 /// the result parses back to a structurally identical value. Uses
 /// `serde_json::Value` for comparison so field-order drift doesn't
 /// spuriously fail.
+#[allow(dead_code)]
 fn assert_mutator_node_json_round_trips(node: &MutatorNode) {
     let first = serde_json::to_string(node).expect("first serialize");
     let reparsed: MutatorNode = serde_json::from_str(&first).expect("reparse");
