@@ -1,4 +1,4 @@
-//! Precomputed primes below [`PRIME_CEILING`] via a lazy Sieve of
+//! Precomputed primes below `PRIME_CEILING` via a lazy Sieve of
 //! Eratosthenes. The sieve runs once on first access; subsequent
 //! queries are a binary search into the cached vector.
 

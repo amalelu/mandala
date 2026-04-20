@@ -26,9 +26,9 @@ pub enum GlyphComponentField {
 }
 
 /// The leaf: one run of text rendered in a single font and colour.
-/// Stacks into a [`GlyphLine`], which stacks into a
-/// [`crate::gfx_structs::model::GlyphMatrix`], which belongs to a
-/// [`crate::gfx_structs::model::GlyphModel`].
+/// Stacks into a [`crate::gfx_structs::model::GlyphLine`], which
+/// stacks into a [`crate::gfx_structs::model::GlyphMatrix`], which
+/// belongs to a [`crate::gfx_structs::model::GlyphModel`].
 #[derive(Serialize, Debug, Eq, PartialEq, Deserialize, Clone)]
 pub struct GlyphComponent {
     /// The text run — may contain multi-byte / multi-grapheme clusters.

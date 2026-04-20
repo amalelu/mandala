@@ -148,7 +148,7 @@ impl BorderGlyphSet {
         build_side_column(self.left, rows)
     }
 
-    /// Like [`side_border`] but uses `self.right`. Presets where
+    /// Like [`Self::side_border`] but uses `self.right`. Presets where
     /// `left == right` can call either — this exists so callers
     /// never need to know which preset they have.
     pub fn right_side_border(&self, rows: usize) -> String {

@@ -1,4 +1,5 @@
-//! Well-known context tags for [`super::CustomMutation::contexts`].
+//! Well-known context tags for
+//! [`CustomMutation::contexts`](crate::mindmap::custom_mutation::CustomMutation::contexts).
 //!
 //! Contexts describe *where* and *on what* a mutation is meant to be
 //! used. Dotted namespaces group related tags (`map.node`, `map.tree`);

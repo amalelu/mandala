@@ -30,7 +30,7 @@ pub fn edge_handle_channel_for(
     }
 }
 
-/// Identity sequence for a set of [`EdgeHandleElement`]s — the
+/// Identity sequence for a set of `EdgeHandleElement`s — the
 /// kind-derived channel of each handle, in tree-insertion order.
 /// Two handle sets produce the same identity iff their structural
 /// shape is identical (same kinds in the same order); the in-place

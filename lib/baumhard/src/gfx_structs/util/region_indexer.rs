@@ -1,19 +1,19 @@
 //! Spatial bucket index for efficient element lookup by screen region.
 //!
-//! A [`RegionIndexer`] partitions a pixel grid into a flat vector of
+//! A `RegionIndexer` partitions a pixel grid into a flat vector of
 //! `BTreeSet<usize>` buckets. Each element id is inserted into one or
 //! more region buckets; queries then check a single bucket to find
 //! "which elements occupy this part of the screen" — O(1) per bucket
 //! lookup instead of O(elements). The reverse element→regions map is
 //! optional (enabled by default, disabled via
-//! [`RegionIndexer::new_without_reverse_index`] when no caller needs
+//! `RegionIndexer::new_without_reverse_index` when no caller needs
 //! it) and trades memory for fast "which regions does element X sit
 //! in?" queries.
 //!
 //! `RegionIndexer` owns only the index structure — it does not know
 //! about pixel dimensions, grid factors, or prime-avoidance. Those
-//! concerns live in [`super::regions::RegionParams`], which computes
-//! region IDs and passes them here.
+//! concerns live in the companion `regions::RegionParams`, which
+//! computes region IDs and passes them here.
 
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
@@ -115,7 +115,7 @@ impl RegionIndexer {
     /// `.clone()`, and the common "count" / "contains" queries stay
     /// allocation-free. O(1). Panics if `region` is out of bounds —
     /// caller is responsible for validating against
-    /// [`RegionParams::number_of_regions`].
+    /// [`RegionParams::calc_num_regions`](crate::gfx_structs::util::regions::RegionParams::calc_num_regions).
     pub fn elements_in_region(&self, region: usize) -> &BTreeSet<usize> {
         &self.index[region]
     }

@@ -1,10 +1,11 @@
 //! Grid-parameter management for the spatial region system.
 //!
-//! [`RegionParams`] computes how to subdivide a pixel resolution into
+//! `RegionParams` computes how to subdivide a pixel resolution into
 //! a 2-D grid of region buckets, avoiding prime-number dimensions
 //! (which have no non-trivial divisors and therefore cannot be evenly
-//! partitioned). The companion [`RegionIndexer`] (in
-//! `super::region_indexer`) owns the index structure itself.
+//! partitioned). The companion `RegionIndexer` (in
+//! `super::region_indexer`, re-exported below) owns the index
+//! structure itself.
 
 use crate::util::primes::is_prime;
 use std::sync::{RwLock, TryLockError};

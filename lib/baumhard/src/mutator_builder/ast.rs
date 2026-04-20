@@ -80,8 +80,9 @@ pub enum ChannelSrc {
 pub enum CountSrc {
     /// Count baked into the AST at deserialize time.
     Literal(usize),
-    /// Count fetched from [`SectionContext::count`] at apply time
-    /// under the given label.
+    /// Count fetched from
+    /// [`SectionContext::count`](crate::mutator_builder::context::SectionContext::count)
+    /// at apply time under the given label.
     Runtime(String),
 }
 

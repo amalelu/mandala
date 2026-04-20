@@ -1,19 +1,20 @@
-//! Top-level container for multiple [`Tree`]s that together make up
+//! Top-level container for multiple
+//! [`Tree`](crate::gfx_structs::tree::Tree)s that together make up
 //! one rendered frame.
 //!
-//! A [`Scene`] owns N `Tree<GfxElement, GfxMutator>` components,
+//! A `Scene` owns N `Tree<GfxElement, GfxMutator>` components,
 //! each with its own *layer* (draw order) and screen-space *offset*.
 //! The mindmap itself is one tree; borders, connections, the console
 //! overlay, and the color picker are sibling trees at higher layers.
 //!
 //! The scene is the single hit-test and render entry point. Given a
-//! screen-space point, [`Scene::component_at`] walks trees in
+//! screen-space point, `Scene::component_at` walks trees in
 //! top-to-bottom draw order, asks each in turn whether it contains
 //! the point, and returns the first `(SceneTreeId, NodeId)` hit.
 //! Each individual tree then resolves the concrete target via
-//! [`Tree::descendant_at`] — so the scene-level index stays cheap
-//! (O(trees)) and the per-tree walk stays linear in the tree's own
-//! node count.
+//! [`Tree::descendant_at`](crate::gfx_structs::tree::Tree::descendant_at)
+//! — so the scene-level index stays cheap (O(trees)) and the
+//! per-tree walk stays linear in the tree's own node count.
 
 use crate::core::primitives::Applicable;
 use crate::gfx_structs::element::GfxElement;

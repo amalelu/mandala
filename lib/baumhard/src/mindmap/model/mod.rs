@@ -1,20 +1,30 @@
 //! Mindmap data model — the types the loader deserializes from
-//! `.mindmap.json` and the document layer mutates. Split across three
+//! `.mindmap.json` and the document layer mutates. Split across four
 //! leaf modules so each concern stays skimmable:
 //!
-//! - [`canvas`] — [`Canvas`]: the per-map rendering context.
-//! - [`node`] — [`MindNode`] and everything that travels with it
-//!   ([`NodeStyle`], [`GlyphBorderConfig`], [`ColorSchema`], ...).
-//! - [`edge`] — [`MindEdge`], [`GlyphConnectionConfig`],
-//!   [`ControlPoint`], plus portal-mode helpers (portals are now a
-//!   `display_mode` on edges rather than a separate entity).
+//! - `canvas` — `Canvas`: the per-map rendering context.
+//! - `node` — `MindNode` and everything that travels with it
+//!   (`NodeStyle`, `GlyphBorderConfig`, `ColorSchema`, ...).
+//! - `edge` — `MindEdge`, `GlyphConnectionConfig`, `ControlPoint`,
+//!   plus portal-mode helpers (portals are now a `display_mode` on
+//!   edges rather than a separate entity).
+//! - `palette` — named colour palettes referenced by nodes'
+//!   `color_schema.palette` field.
 //!
-//! This module owns the top-level [`MindMap`] struct plus its impl
+//! This module owns the top-level `MindMap` struct plus its impl
 //! (root / ancestry / descendant queries), and the model-level tests.
 
+/// `Canvas` — per-map rendering context: background, default
+/// border/connection styles, theme variables.
 pub mod canvas;
+/// `MindEdge`, `ControlPoint`, `GlyphConnectionConfig`, plus
+/// portal-mode edge helpers (portals are a `display_mode` on edges).
 pub mod edge;
+/// `MindNode` and its travelling-companion structs (position,
+/// size, text runs, node style, layout, colour schema, border).
 pub mod node;
+/// Named colour palettes referenced by nodes' `color_schema.palette`
+/// field.
 pub mod palette;
 
 pub use canvas::Canvas;

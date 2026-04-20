@@ -1,4 +1,4 @@
-//! Runtime-value interface the [`super::build::build`] function
+//! Runtime-value interface the [`super::build`](crate::mutator_builder::build) function
 //! consults while expanding an AST. Consumers implement only the
 //! methods their AST actually exercises; the others default to
 //! `unreachable!()` so misuse is loud at runtime.
@@ -19,7 +19,7 @@ pub trait SectionContext {
     /// Resolve a runtime cell count for `Repeat { count: Runtime(_) }`.
     /// `name` is the `Runtime` label the AST carries; the consumer
     /// disambiguates among multiple `Repeat` sections by this label.
-    /// Called once per `Repeat` node during [`super::build::build`].
+    /// Called once per `Repeat` node during [`super::build`](crate::mutator_builder::build).
     ///
     /// Cost: consumer-defined, typically O(1) via a small HashMap.
     fn count(&self, _name: &str) -> usize {
@@ -65,7 +65,7 @@ pub trait SectionContext {
     /// `label` is the free-form key the AST carries; the consumer
     /// disambiguates among multiple runtime-sourced macros by this
     /// label. Called once per matching `Macro` node during
-    /// [`super::build::build`]. Returning an empty `Vec` is a valid
+    /// [`super::build`](crate::mutator_builder::build). Returning an empty `Vec` is a valid
     /// no-op choice; the built `GfxMutator::Macro` then walks over
     /// its target without applying anything.
     ///

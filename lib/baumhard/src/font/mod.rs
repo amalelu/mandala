@@ -4,7 +4,13 @@
 //! `FONT_SYSTEM`; `attrs` translates `ColorFontRegions` into
 //! cosmic-text `AttrsList`s.
 
+/// Cosmic-text `AttrsList` construction — bridges baumhard's
+/// `ColorFontRegions` into the attribute form the renderer passes
+/// to `Editor::insert_string`.
 pub mod attrs;
+/// Compiled-in font table, shared `FONT_SYSTEM`, cosmic-text
+/// editor factories, and the `measure_glyph_ink_bounds` /
+/// `measure_text_block_unbounded` text-measurement primitives.
 pub mod fonts;
 pub mod tests;
 

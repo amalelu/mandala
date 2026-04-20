@@ -86,8 +86,9 @@ pub enum GfxElement {
         unique_id: usize,
         event_subscribers: Vec<EventSubscriber>,
         /// Cached AABB covering this node and all its descendants.
-        /// Computed lazily by [`Tree::ensure_subtree_aabbs`] and
-        /// invalidated when a mutation touches the tree. Not
+        /// Computed lazily by
+        /// [`Tree::ensure_subtree_aabbs`](crate::gfx_structs::tree::Tree::ensure_subtree_aabbs)
+        /// and invalidated when a mutation touches the tree. Not
         /// serialised — it is a runtime cache, not persistent state.
         subtree_aabb: Option<(Vec2, Vec2)>,
     },
@@ -448,9 +449,10 @@ impl GfxElement {
 
     /// Write the cached subtree AABB for this node.
     ///
-    /// Called by [`Tree::compute_subtree_aabbs`] during the bottom-up
-    /// pass. Application code should not call this directly — use the
-    /// tree-level API instead.
+    /// Called by
+    /// [`Tree::compute_subtree_aabbs`](crate::gfx_structs::tree::Tree::compute_subtree_aabbs)
+    /// during the bottom-up pass. Application code should not call
+    /// this directly — use the tree-level API instead.
     ///
     /// O(1), no allocation.
     pub fn set_subtree_aabb(&mut self, aabb: Option<(Vec2, Vec2)>) {

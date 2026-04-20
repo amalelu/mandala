@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::ops::Add;
 
-/// Per-glyph halo style. When set on a [`GlyphArea`], the renderer
+/// Per-glyph halo style. When set on a [`crate::gfx_structs::area::GlyphArea`], the renderer
 /// emits 8 extra shaped buffers behind the area's text — each at the
 /// same metrics, family pinning, and alignment, but recolored to
 /// `color` and positioned at the offsets yielded by
@@ -121,11 +121,12 @@ pub enum GlyphAreaFieldType {
     ApplyOperation,
 }
 
-/// A single field delta for a [`GlyphArea`]. Each variant carries the
-/// new value (or addend, depending on the active [`ApplyOperation`])
-/// for one field of the area. Used inside [`DeltaGlyphArea`] and the
-/// mutator pipeline — the variant you pick determines which field is
-/// touched; all others are left alone.
+/// A single field delta for a [`crate::gfx_structs::area::GlyphArea`].
+/// Each variant carries the new value (or addend, depending on the
+/// active [`ApplyOperation`]) for one field of the area. Used inside
+/// [`crate::gfx_structs::area::DeltaGlyphArea`] and the mutator
+/// pipeline — the variant you pick determines which field is touched;
+/// all others are left alone.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub enum GlyphAreaField {
     /// Replace or append to the area's text content. Under
@@ -151,16 +152,19 @@ pub enum GlyphAreaField {
     /// `Assign` the entire set is replaced; under `Subtract` matching
     /// runs are removed.
     ColorFontRegions(ColorFontRegions),
-    /// Replace the area's [`GlyphArea::outline`]. `None` clears any
-    /// previously-set halo; `Some(style)` enables one. Additive
-    /// merge under `ApplyOperation::Add` is the rhs (a halo is
-    /// either on or off; combining two halo styles isn't
-    /// meaningful).
+    /// Replace the area's
+    /// [`outline`](crate::gfx_structs::area::GlyphArea#structfield.outline)
+    /// field. `None` clears any previously-set halo; `Some(style)`
+    /// enables one. Additive merge under `ApplyOperation::Add` is the
+    /// rhs (a halo is either on or off; combining two halo styles
+    /// isn't meaningful).
     Outline(Option<OutlineStyle>),
     /// Override the arithmetic operation that governs how all sibling
-    /// field deltas in the same [`DeltaGlyphArea`] are applied. Does
-    /// not modify the area itself — it is a control variant read by
-    /// [`GlyphArea::apply_operation`].
+    /// field deltas in the same
+    /// [`DeltaGlyphArea`](crate::gfx_structs::area::DeltaGlyphArea)
+    /// are applied. Does not modify the area itself — it is a control
+    /// variant read by
+    /// [`GlyphArea::apply_operation`](crate::gfx_structs::area::GlyphArea::apply_operation).
     Operation(ApplyOperation),
 }
 

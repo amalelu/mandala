@@ -4,13 +4,13 @@
 //! edge-handles) that the app crate's scene rebuilders consume.
 //!
 //! Split by role so each file stays focused:
-//! - [`node`] — `MindNode` → `GlyphArea` projection + the recursive
+//! - `node` — `MindNode` → `GlyphArea` projection + the recursive
 //!   child-insertion walker `build_mindmap_tree` drives.
-//! - [`border`] — framed-node border tree + §B2 mutator-tree builder.
-//! - [`portal`] — portal-pair markers + §B2 mutator.
-//! - [`connection`] — glyph-path edges (caps + body glyphs).
-//! - [`connection_label`] — per-edge label glyphs + hitbox map.
-//! - [`edge_handle`] — selected-edge handle glyphs (anchors,
+//! - `border` — framed-node border tree + §B2 mutator-tree builder.
+//! - `portal` — portal-pair markers + §B2 mutator.
+//! - `connection` — glyph-path edges (caps + body glyphs).
+//! - `connection_label` — per-edge label glyphs + hitbox map.
+//! - `edge_handle` — selected-edge handle glyphs (anchors,
 //!   midpoint, control points).
 //!
 //! The `MindMapTree` struct and `build_mindmap_tree` entry point
