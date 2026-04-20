@@ -23,6 +23,10 @@ mod drain_frame;
 #[cfg(not(target_arch = "wasm32"))]
 mod edge_drag;
 #[cfg(not(target_arch = "wasm32"))]
+mod event_cursor_moved;
+#[cfg(not(target_arch = "wasm32"))]
+mod event_keyboard;
+#[cfg(not(target_arch = "wasm32"))]
 mod event_mouse_click;
 #[cfg(not(target_arch = "wasm32"))]
 mod portal_label_drag;
@@ -30,6 +34,8 @@ mod portal_label_drag;
 mod label_edit;
 #[cfg(not(target_arch = "wasm32"))]
 mod run_native;
+#[cfg(not(target_arch = "wasm32"))]
+mod run_native_init;
 #[cfg(target_arch = "wasm32")]
 mod run_wasm;
 
@@ -396,23 +402,44 @@ enum DragState {
 Represents the root container of the application
 Manages the winit window and event_loop, and launches the rendering pipeline
  **/
+#[cfg(target_arch = "wasm32")]
 pub struct Application {
     options: Options,
     event_loop: EventLoop<()>,
     window: Arc<Window>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Application {
+    options: Options,
+}
+
 impl Application {
+    #[cfg(target_arch = "wasm32")]
     pub fn new(options: Options) -> Self {
         let event_loop = EventLoop::new().expect("Could not create an EventLoop");
 
-        let window = event_loop.create_window(Window::default_attributes()).expect("Failed to create application window");
+        // Pre-creating the window here on winit 0.30 is deprecated in
+        // favour of `ActiveEventLoop::create_window` inside
+        // `ApplicationHandler::resumed`. The native path takes that
+        // route; the WASM path still pre-creates because
+        // `run_wasm::run` attaches the canvas and installs DOM event
+        // listeners before the event loop starts.
+        #[allow(deprecated)]
+        let window = event_loop
+            .create_window(Window::default_attributes())
+            .expect("Failed to create application window");
 
         Application {
             options,
             event_loop,
             window: Arc::new(window),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(options: Options) -> Self {
+        Application { options }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -423,6 +450,11 @@ impl Application {
     #[cfg(target_arch = "wasm32")]
     pub fn run(self) {
         run_wasm::run(self)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn into_options(self) -> Options {
+        self.options
     }
 }
 /// Rebuild tree from model with selection highlight, plus connections and borders.

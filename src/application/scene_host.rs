@@ -98,7 +98,7 @@ pub enum OverlayDispatch {
 /// dispatcher — one DefaultHasher incantation instead of four.
 pub fn hash_canvas_signature<T: std::hash::Hash>(identity: &T) -> u64 {
     use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hasher;
     let mut h = DefaultHasher::new();
     identity.hash(&mut h);
     h.finish()

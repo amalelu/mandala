@@ -527,7 +527,7 @@ fn assemble_mindmap(name: &str, nodes: Vec<MindNode>, edges: Vec<MindEdge>) -> M
 
 fn run(cfg: Config) -> Result<(), String> {
     let mut rng = StdRng::seed_from_u64(cfg.seed);
-    let (mut nodes, mut edges) = match cfg.topology {
+    let (nodes, mut edges) = match cfg.topology {
         Topology::Balanced => gen_balanced(cfg.depth, cfg.branching),
         Topology::Skewed => gen_skewed(cfg.nodes),
         Topology::Star => gen_star(cfg.nodes),

@@ -33,6 +33,7 @@ pub struct SceneTreeId(usize);
 
 impl SceneTreeId {
     /// Crate-internal accessor for tests and benches.
+    #[allow(dead_code)]
     pub(crate) fn raw(&self) -> usize {
         self.0
     }

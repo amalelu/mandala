@@ -349,13 +349,15 @@ fn behavior_label(b: &baumhard::mindmap::custom_mutation::MutationBehavior) -> &
 
 fn source_label(s: &crate::application::document::mutations_loader::MutationSource) -> &'static str {
     use crate::application::document::mutations_loader::MutationSource::*;
+    // `MutationSource` is `#[non_exhaustive]`; the wildcard arm is a
+    // forward-compat seam for future variants (e.g. plugin sources).
+    // Currently unreachable because all variants are matched.
+    #[allow(unreachable_patterns)]
     match s {
         App => "app",
         User => "user",
         Map => "map",
         Inline => "inline",
-        // `MutationSource` is `#[non_exhaustive]`; future variants
-        // (e.g. plugin sources) fall through here until wired.
         _ => "(unknown source)",
     }
 }

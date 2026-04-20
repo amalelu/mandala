@@ -51,7 +51,6 @@ fn generate_font_file(
         }
     }
     writeln!(file, "}}")?;
-    writeln!(file, "use AppFont::*;")?;
     writeln!(
         file,
         "pub(crate) static FONT_DATA: [(AppFont, &'static [u8]); {}] = [",

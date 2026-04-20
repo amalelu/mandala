@@ -9,7 +9,6 @@ use crate::application::console::completion::{prefix_filter, Completion, Complet
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
-use crate::application::document::SelectionState;
 
 pub const SIDES: &[&str] = &["auto", "top", "right", "bottom", "left"];
 pub const KEYS: &[&str] = &["from", "to"];

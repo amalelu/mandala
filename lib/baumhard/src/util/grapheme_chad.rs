@@ -92,6 +92,7 @@ pub fn find_byte_index_of_grapheme(s: &str, index: usize) -> Option<usize> {
 }
 
 /// Finds the index immediately after the nth grapheme
+#[allow(dead_code)]
 fn find_index_after_nth_grapheme(str: &str, n: usize) -> Option<usize> {
     // Graphemes method provides an iterator over the grapheme clusters
     let mut graphemes = str.graphemes(true);

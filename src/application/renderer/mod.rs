@@ -11,8 +11,6 @@ mod scene_buffers;
 mod tree_buffers;
 mod tree_walker;
 
-use render::glyph_position_in_viewport;
-
 pub use borders::measure_max_glyph_advance;
 // `ConsoleFrameLayout` / `MAX_*` / `build_console_border_strings` are
 // part of the renderer's public surface and consumed by the test
@@ -25,17 +23,19 @@ pub use console_geometry::{
     ConsoleOverlayCompletion, ConsoleOverlayGeometry, ConsoleOverlayLine, ConsoleOverlayLineKind,
     MAX_CONSOLE_COMPLETION_ROWS, MAX_CONSOLE_SCROLLBACK_ROWS,
 };
-use borders::{
-    create_border_buffer, parse_hex_color,
-};
-use console_pass::{
-    build_console_overlay_mutator, build_console_overlay_tree, console_overlay_signature,
-};
-// `console_overlay_areas` is referenced only from the test block; the
-// non-test build flags it as unused. Gate to keep cargo check clean
-// while leaving the test build self-contained.
+// These imports are referenced only from the test block; the
+// non-test build flags them as unused. Gate to keep cargo check
+// clean while leaving the test build self-contained.
 #[cfg(test)]
-use console_pass::console_overlay_areas;
+use borders::{create_border_buffer, parse_hex_color};
+#[cfg(test)]
+use console_pass::{
+    build_console_overlay_mutator, build_console_overlay_tree, console_overlay_areas,
+    console_overlay_signature,
+};
+#[cfg(test)]
+use render::glyph_position_in_viewport;
+#[cfg(test)]
 use tree_walker::walk_tree_into_buffers;
 
 use std::borrow::Cow;
@@ -44,31 +44,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cosmic_text::{Attrs, AttrsList, Buffer, FontSystem};
-use glam::{Mat4, Quat, Vec3};
 use cosmic_text::{Family, Style};
-use glyphon::{Cache, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
-use log::{debug, error, info};
+use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
+use log::{error, info};
+
 use rustc_hash::FxHashMap;
 
 use wgpu::{
-    Adapter, Color, Device, Instance, MultisampleState, PipelineLayout, Queue, RenderPipeline,
-    ShaderModule, StoreOp, Surface, SurfaceCapabilities, SurfaceConfiguration, TextureFormat,
+    Adapter, Color, Device, Instance, MultisampleState, Queue, RenderPipeline,
+    ShaderModule, Surface, SurfaceCapabilities, SurfaceConfiguration, TextureFormat,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch};
+use crate::application::common::{PollTimer, RedrawMode, StopWatch};
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
-use baumhard::gfx_structs::element::GfxElement;
 #[cfg(test)]
 use baumhard::gfx_structs::area::GlyphArea;
-use baumhard::gfx_structs::mutator::GfxMutator;
-use baumhard::gfx_structs::tree::Tree;
-use baumhard::shaders::shaders::{SHADERS, SHADER_APPLICATION};
 use baumhard::gfx_structs::camera::Camera2D;
-use baumhard::mindmap::scene_builder::{RenderScene, BorderElement, ConnectionElement};
 use baumhard::mindmap::scene_cache::EdgeKey;
+use baumhard::shaders::shaders::SHADER_APPLICATION;
 use glam::Vec2;
 
 
@@ -514,8 +510,6 @@ impl Renderer {
     pub fn take_connection_geometry_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.connection_geometry_dirty, false)
     }
-
-    #[inline]
 
     const ZERO_DURATION: Duration = Duration::new(0, 0);
 

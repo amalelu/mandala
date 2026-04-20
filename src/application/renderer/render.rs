@@ -3,10 +3,9 @@
 //! `renderer/mod.rs` so the per-frame hot path has its own file
 //! and isn't interleaved with buffer rebuilds / hit tests / setup.
 
-use cosmic_text::Color;
 use glam::Vec2;
-use glyphon::{Resolution, TextArea, TextBounds};
-use log::{debug, error};
+use glyphon::{TextArea, TextBounds};
+use log::debug;
 use wgpu::StoreOp;
 
 use baumhard::font::fonts;
