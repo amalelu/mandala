@@ -11,8 +11,15 @@ This document is the format reference. For the Rust-side types see
 
 ## Where mutations come from
 
-Four sources contribute to a document's active registry, in ascending
-precedence (later writers override earlier ones with the same `id`):
+Four sources contribute to a document's active registry, in
+ascending precedence (later writers override earlier ones with the
+same `id`):
+
+<!-- SOURCE-OF-TRUTH: the precedence order below is also encoded in
+     src/application/document/mutations_loader/mod.rs as the
+     MutationSource enum variant order and in the doc comment on
+     build_mutation_registry_with_app_and_user. When the order or
+     set of sources changes, update all three in the same commit. -->
 
 1. **Application bundle** — `assets/mutations/application.json`,
    compiled into the binary via `include_str!`. Lowest precedence so
@@ -26,9 +33,20 @@ precedence (later writers override earlier ones with the same `id`):
 4. **Inline** — the `inline_mutations: [...]` array on a specific
    `MindNode`.
 
-`mutation help <id>` reports which layer owns the current definition.
+`mutation help <id>` and `mutation inspect <id>` both report which
+layer won the registry slot for that id.
 
-## JSON shape
+Override-safety note: if a user file redeclares the id of a
+bundled mutation that has a registered Rust handler (e.g.
+`flower-layout`, `tree-cascade`), the dispatcher **honours the
+user's declarative mutator** rather than silently running the
+bundled handler's algorithm against the user's scope. See
+`MindMapDocument::will_dispatch_to_handler` for the guard.
+
+## JSON shape — start here
+
+Most mutations are pure data: a flat `Vec<Mutation>` applied over a
+declared scope. Use this shape:
 
 ```json
 {
@@ -38,41 +56,77 @@ precedence (later writers override earlier ones with the same `id`):
       "name": "Grow Font 2pt",
       "description": "Increase font size by 2 points on the selected node and all descendants.",
       "contexts": ["map.node"],
-      "mutator": {
-        "Macro": {
-          "channel": 0,
-          "mutations": { "Literal": [{ "AreaCommand": { "GrowFont": 2.0 } }] },
-          "children": [
-            {
-              "Instruction": {
-                "channel": 0,
-                "instruction": "RepeatWhileAlwaysTrue",
-                "children": [
-                  {
-                    "Macro": {
-                      "channel": 0,
-                      "mutations": { "Literal": [{ "AreaCommand": { "GrowFont": 2.0 } }] }
-                    }
-                  }
-                ]
-              }
-            }
-          ]
-        }
-      },
-      "target_scope": "SelfAndDescendants",
-      "behavior": "Persistent"
+      "mutations": [{ "AreaCommand": { "GrowFont": 2.0 } }],
+      "target_scope": "SelfAndDescendants"
     }
   ]
 }
 ```
 
-The legacy shape that uses `mutations: [...]` + `target_scope`
-instead of a `mutator` AST is still accepted — the backward-compat
-deserializer synthesizes the MutatorNode via scope helpers on load.
-Save always emits the canonical `mutator` shape. In practice the
-legacy shape is often terser for pure-data mutations and is the
-preferred authoring form for simple cases.
+Drop that at `~/.config/mandala/mutations.json`, restart the app,
+and `/` → `mutation list` will show it. `mutation apply grow-font-2pt`
+on a node's selection grows the fonts. Three lines of change to
+author a new mutation.
+
+Fields the shape above uses:
+
+- `id` — unique key, typed at the console prompt.
+- `name` — human-readable name in `mutation list`.
+- `description` — first line shown in `mutation list`, expanded by
+  `mutation help <id>`.
+- `contexts` — dotted tags describing what the mutation touches
+  (`map.node`, `map.tree`, `internal`, …). See [contexts](#contexts)
+  below.
+- `mutations` — a flat `Vec<Mutation>` applied to every node
+  covered by `target_scope`. See the [Mutation vocabulary](#mutation-vocabulary)
+  section for the variants.
+- `target_scope` — one of `SelfOnly` / `Children` / `Descendants` /
+  `SelfAndDescendants` / `Parent` / `Siblings`. Governs both what
+  nodes the mutations apply to *and* the undo-snapshot window.
+
+When the legacy shape isn't enough — a mutation that needs
+per-child positioning, runtime-computed values, or the
+`MapChildren` walker primitive — use the richer [MutatorNode
+AST](#mutator--the-mutatornode-ast) form instead of or in addition
+to `mutations`. The backward-compat deserializer accepts both
+shapes on load; save always emits the canonical `mutator` form.
+
+### Mutation vocabulary
+
+`Mutation` is an enum from `baumhard::gfx_structs::mutator`. The
+JSON tag is the variant name; the payload is the variant's inner
+value. The most common variants for authoring:
+
+- `{"AreaCommand": { "GrowFont": 2.0 }}` — grow font size by 2pt.
+- `{"AreaCommand": { "ShrinkFont": 2.0 }}` — inverse.
+- `{"AreaCommand": { "NudgeRight": 50.0 }}` — shift x by 50px.
+  Sibling variants: `NudgeLeft`, `NudgeUp`, `NudgeDown`.
+- `{"AreaCommand": { "SetFontSize": 18.0 }}` — absolute font size.
+- `{"AreaCommand": { "MoveTo": [100.0, 200.0] }}` — absolute x,y.
+
+The full vocabulary lives in
+`lib/baumhard/src/gfx_structs/area_mutators.rs` under
+`GlyphAreaCommand`. Same enum-variant-as-JSON-tag convention.
+
+### Document-actions-only mutation
+
+A mutation can carry only canvas-level work (e.g. a theme switch)
+with no tree effect at all. Omit `mutator` and `mutations`, keep
+`target_scope` as a formal placeholder:
+
+```json
+{
+  "id": "switch-dark",
+  "name": "Switch to dark theme",
+  "description": "Copy the 'dark' theme variant into live variables.",
+  "contexts": ["map.node"],
+  "target_scope": "SelfOnly",
+  "document_actions": [{ "SetThemeVariant": "dark" }]
+}
+```
+
+`UndoAction::CanvasSnapshot` captures the pre-action canvas state
+so `Ctrl+Z` reverses it.
 
 ## Fields
 
@@ -139,30 +193,6 @@ For scope-helper-generated MutatorNodes (via
 matches the `target_scope` value — `scope::self_and_descendants(...)`
 pairs with `SelfAndDescendants`, etc. For hand-authored MutatorNodes,
 pick the smallest scope that covers every node the AST will touch.
-
-## `mutator = null` (document-actions-only)
-
-A mutation whose payload is only canvas-level work (a theme switch,
-an ad-hoc `theme_variables` override) sets `mutator: null` (or omits
-the field entirely) and carries its work in `document_actions`. The
-framework skips the tree-walk path and runs `apply_document_actions`
-alone; the `UndoAction::CanvasSnapshot` captures the pre-action
-canvas state for undo. Example:
-
-```json
-{
-  "id": "switch-dark",
-  "name": "Switch to dark theme",
-  "description": "Copy the 'dark' theme variant into live variables.",
-  "contexts": ["map.node"],
-  "target_scope": "SelfOnly",
-  "document_actions": [{ "SetThemeVariant": "dark" }]
-}
-```
-
-`target_scope` is still required on the wire (it's a non-`Option`
-field) but is effectively unused for document-actions-only
-mutations. `SelfOnly` is the conventional value.
 
 ## `mutator` — the MutatorNode AST
 
@@ -277,6 +307,37 @@ cleanly express, or multiple tree passes. `flower_layout.rs` and
 `tree_cascade.rs` under `src/application/document/mutations/` are
 the canonical handler examples; both are registered by
 `register_builtin_handlers` at startup.
+
+## Firing mutations from interaction
+
+The `mutation` console verb is one way to fire a mutation. The
+other is a trigger binding: a mutation id attached to a node's
+`trigger_bindings` array, fired when the user clicks, hovers, or
+presses a bound key on that node. The binding JSON shape lives on
+the node, not on the mutation:
+
+```json
+{
+  "id": "0",
+  "parent_id": null,
+  "text": "Root",
+  "trigger_bindings": [
+    { "trigger": "OnClick", "mutation_id": "switch-dark" },
+    { "trigger": "OnHover", "mutation_id": "highlight-red",
+      "contexts": ["Desktop"] }
+  ]
+}
+```
+
+Valid triggers: `OnClick`, `OnHover`, `{"OnKey": "<key>"}`,
+`{"OnLink": "<href>"}`. The optional `contexts` field limits the
+binding to particular runtime platforms (`Desktop` / `Web` /
+`Touch`); omit it to fire on all platforms.
+
+Trigger bindings respect `MutationBehavior::Toggle` semantics —
+click the same node twice on a Toggle-flavoured mutation to
+reverse it. See `format/schema.md` for the full node field
+reference.
 
 ## Authoring a user file
 

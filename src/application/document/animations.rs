@@ -74,11 +74,12 @@ impl MindMapDocument {
         self.build_mutation_registry_with_app_and_user(&[], user_mutations);
     }
 
-    /// Build the registry from all four sources, in ascending
-    /// precedence: application bundle < user file < map < inline.
-    /// Later writers override earlier ones with the same `id`, so
-    /// the inline-on-node shape wins last and the app bundle is the
-    /// most easily overridable layer.
+    /// Build the registry from all four sources. See the
+    /// "Where mutations come from" section in `format/mutations.md`
+    /// for the canonical precedence description; this method's
+    /// loop order (below) mirrors it and the [`MutationSource`]
+    /// enum variants at the loader's module doc. Later writers
+    /// override earlier ones with the same `id`.
     pub fn build_mutation_registry_with_app_and_user(
         &mut self,
         app_mutations: &[CustomMutation],

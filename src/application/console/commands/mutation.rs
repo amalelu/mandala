@@ -20,9 +20,9 @@ use crate::application::document::{MindMapDocument, SelectionState};
 pub const COMMAND: Command = Command {
     name: "mutation",
     aliases: &["mut"],
-    summary: "List and apply registered mutations",
-    usage: "mutation <list [--all] [filter] | apply <id> [node-id] | help <id>>",
-    tags: &["mut", "apply", "run", "list"],
+    summary: "List, apply, and inspect registered mutations",
+    usage: "mutation <list [--all] [filter] | apply <id> [node-id] | help <id> | inspect <id>>",
+    tags: &["mut", "apply", "run", "list", "inspect", "debug"],
     applicable: always,
     complete: complete_mutation,
     execute: execute_mutation,
@@ -33,7 +33,7 @@ fn complete_mutation(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Compl
         1 => {
             // Sub-command slot.
             let partial = state.partial.to_ascii_lowercase();
-            ["list", "apply", "help"]
+            ["list", "apply", "help", "inspect"]
                 .iter()
                 .filter(|s| s.starts_with(&partial))
                 .map(|s| Completion {
@@ -43,7 +43,10 @@ fn complete_mutation(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Compl
                 })
                 .collect()
         }
-        2 if matches!(state.tokens.get(1).map(String::as_str), Some("apply") | Some("help")) => {
+        2 if matches!(
+            state.tokens.get(1).map(String::as_str),
+            Some("apply") | Some("help") | Some("inspect")
+        ) => {
             // Mutation id slot. Show user-facing mutations by default
             // (internal ones are reachable but not completed — they
             // can still be typed by exact id in debugging sessions).
@@ -73,11 +76,14 @@ fn execute_mutation(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         Some("list") => list(args, eff),
         Some("apply") => apply(args, eff),
         Some("help") => help(args, eff),
+        Some("inspect") => inspect(args, eff),
         Some(other) => ExecResult::err(format!(
-            "unknown mutation sub-command: {} (try list / apply / help)",
+            "unknown mutation sub-command: {} (try list / apply / help / inspect)",
             other
         )),
-        None => ExecResult::err("mutation needs a sub-command (list / apply / help)"),
+        None => ExecResult::err(
+            "mutation needs a sub-command (list / apply / help / inspect)",
+        ),
     }
 }
 
@@ -227,14 +233,14 @@ fn help(args: &Args, eff: &ConsoleEffects) -> ExecResult {
         .unwrap_or("unknown");
 
     let mut lines = vec![
-        format!("{} — {}", cm.id, cm.name),
+        format!("{} \u{2014} {}", cm.id, cm.name),
         format!("source: {}", source),
-        format!("scope: {:?}", cm.target_scope),
-        format!("behavior: {:?}", cm.behavior),
+        format!("scope: {}", target_scope_label(&cm.target_scope)),
+        format!("behavior: {}", behavior_label(&cm.behavior)),
         format!(
             "contexts: {}",
             if cm.contexts.is_empty() {
-                "(none → treated as internal)".to_string()
+                "(none \u{2192} treated as internal)".to_string()
             } else {
                 cm.contexts.join(", ")
             }
@@ -247,6 +253,98 @@ fn help(args: &Args, eff: &ConsoleEffects) -> ExecResult {
         }
     }
     ExecResult::Lines(lines)
+}
+
+/// `mutation inspect <id>` — a terser sibling to `help` aimed at
+/// debugging silent-failure scenarios. Reports the layer source,
+/// whether the mutation is internal, whether it has a tree
+/// mutator, whether it has document actions, and whether a Rust
+/// handler will intercept it on apply. Intended as the first-stop
+/// command when `mutation apply` appears to do nothing.
+fn inspect(args: &Args, eff: &ConsoleEffects) -> ExecResult {
+    let id = match args.positional(1) {
+        Some(s) => s,
+        None => return ExecResult::err("mutation inspect needs an id"),
+    };
+    let cm = match eff.document.mutation_registry.get(id) {
+        Some(cm) => cm,
+        None => return ExecResult::err(format!("unknown mutation: {}", id)),
+    };
+    let source = eff
+        .document
+        .mutation_sources
+        .get(id)
+        .map(source_label)
+        .unwrap_or("unknown");
+
+    let visibility = if cm.is_internal() {
+        "internal (hidden from `mutation list`, refused by `mutation apply`)"
+    } else if cm.targets_map() {
+        "user-facing (listed in `mutation list`, runnable via `mutation apply`)"
+    } else {
+        "user-facing (no `map.*` context tag — will not appear in default `mutation list`)"
+    };
+
+    let payload = match (cm.mutator.is_some(), cm.document_actions.is_empty()) {
+        (true, false) => "tree mutator + document actions",
+        (true, true) => "tree mutator only",
+        (false, false) => "document actions only (no tree effect)",
+        (false, true) => "NO PAYLOAD — this mutation is effectively a no-op",
+    };
+
+    let dispatch = if eff.document.will_dispatch_to_handler(id) {
+        "Rust handler (imperative; mutator AST ignored)"
+    } else if cm.mutator.is_some() {
+        "declarative (walks the mutator AST at apply time)"
+    } else if !cm.document_actions.is_empty() {
+        "document-actions only"
+    } else {
+        "no dispatch — mutation would silently skip on apply"
+    };
+
+    let reach = cm
+        .mutator
+        .as_ref()
+        .map(|m| format!("{:?}", baumhard::mindmap::custom_mutation::mutator_reach(m)))
+        .unwrap_or_else(|| "n/a (no mutator)".to_string());
+
+    ExecResult::Lines(vec![
+        format!("{} \u{2014} {}", cm.id, cm.name),
+        format!("source: {}", source),
+        format!("visibility: {}", visibility),
+        format!("payload: {}", payload),
+        format!("dispatch: {}", dispatch),
+        format!("declared scope: {}", target_scope_label(&cm.target_scope)),
+        format!("mutator static reach: {}", reach),
+        format!(
+            "behavior: {}",
+            behavior_label(&cm.behavior)
+        ),
+    ])
+}
+
+/// Human-friendly name for a `TargetScope`, in the same casing the
+/// format doc uses. `{:?}` debug formatting produced `SelfAndDescendants`
+/// which reads as Rust identifier noise; this spells it out.
+fn target_scope_label(s: &baumhard::mindmap::custom_mutation::TargetScope) -> &'static str {
+    use baumhard::mindmap::custom_mutation::TargetScope::*;
+    match s {
+        SelfOnly => "self only",
+        Children => "children",
+        Descendants => "descendants",
+        SelfAndDescendants => "self and descendants",
+        Parent => "parent",
+        Siblings => "siblings",
+    }
+}
+
+/// Human-friendly name for a `MutationBehavior`.
+fn behavior_label(b: &baumhard::mindmap::custom_mutation::MutationBehavior) -> &'static str {
+    use baumhard::mindmap::custom_mutation::MutationBehavior::*;
+    match b {
+        Persistent => "persistent (commits to model, reversible via undo)",
+        Toggle => "toggle (visual only, reverses on re-trigger)",
+    }
 }
 
 fn source_label(s: &crate::application::document::mutations_loader::MutationSource) -> &'static str {
@@ -496,6 +594,61 @@ mod tests {
             after_x,
             restored_x
         );
+    }
+
+    #[test]
+    fn help_uses_human_readable_scope_and_behavior_labels() {
+        let mut doc = fixture_doc(
+            vec![(
+                "nudge",
+                make_cm("nudge", vec!["map.node", "map.tree"], "d"),
+            )],
+            vec![("nudge", MutationSource::App)],
+        );
+        match run("mutation help nudge", &mut doc) {
+            ExecResult::Lines(ls) => {
+                let all = ls.join("\n");
+                // No `{:?}` debug-format leakage.
+                assert!(!all.contains("SelfOnly"), "help should not leak Rust enum names");
+                assert!(!all.contains("Persistent"), "help should not leak Rust enum names");
+                // Human-readable replacements.
+                assert!(all.contains("scope: self only"));
+                assert!(all.contains("behavior: persistent"));
+            }
+            other => panic!("expected Lines, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn inspect_surfaces_dispatch_source_and_payload() {
+        let mut doc = fixture_doc(
+            vec![(
+                "nudge",
+                make_cm("nudge", vec!["map.node"], "Nudge right"),
+            )],
+            vec![("nudge", MutationSource::App)],
+        );
+        match run("mutation inspect nudge", &mut doc) {
+            ExecResult::Lines(ls) => {
+                let all = ls.join("\n");
+                assert!(all.contains("source: app"));
+                assert!(all.contains("visibility:"));
+                assert!(all.contains("payload: tree mutator only"));
+                assert!(all.contains("dispatch: declarative"));
+                assert!(all.contains("declared scope: self only"));
+                assert!(all.contains("mutator static reach: SelfOnly"));
+            }
+            other => panic!("expected Lines, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn inspect_unknown_returns_err() {
+        let mut doc = fixture_doc(vec![], vec![]);
+        match run("mutation inspect nope", &mut doc) {
+            ExecResult::Err(s) => assert!(s.contains("unknown mutation")),
+            other => panic!("expected Err, got {:?}", other),
+        }
     }
 
     /// Handler-id collision guard: when a user (or map, or inline)

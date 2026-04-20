@@ -1,12 +1,18 @@
 //! Four-source mutation loader: application bundle, user file, map,
 //! inline-on-node — in ascending precedence.
 //!
+//! **Source-of-truth note:** the precedence order (App < User < Map
+//! < Inline) is documented in `format/mutations.md` under "Where
+//! mutations come from." Code mirrors the doc — the [`MutationSource`]
+//! enum variant order and
+//! [`crate::application::document::MindMapDocument::build_mutation_registry_with_app_and_user`]
+//! encode the same ordering. Changes to the set or order update all
+//! three sites in the same commit.
+//!
 //! This module owns the outer loader (app + user slices produced in
 //! `load_app_and_user`), the app-bundle parser ([`builtin`]), and the
 //! platform-split user-file readers ([`platform_desktop`] /
-//! [`platform_web`]). The merged registry — where map and inline
-//! mutations join and later keys override earlier ones — is built by
-//! [`crate::application::document::MindMapDocument::build_mutation_registry_with_app_and_user`].
+//! [`platform_web`]).
 //!
 //! Resilience posture (§7): every layer is best-effort. Failures log
 //! `warn!` and fall through to the next source; the app never crashes
