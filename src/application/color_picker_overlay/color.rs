@@ -2,7 +2,7 @@
 //! picker's tree / mutator / area builders.
 
 /// Convert a normalized `[0, 1]` RGB triple into an opaque
-/// `cosmic_text::Color`. Used by the glyph-wheel color picker render
+/// `baumhard::font::Color`. Used by the glyph-wheel color picker render
 /// path to paint each hue-ring slot, sat/val cell, and preview glyph
 /// at its own HSV coordinate without per-frame closure allocation.
 ///
@@ -10,9 +10,9 @@
 /// out-of-range floats, so `baumhard::util::color::convert_f32_to_u8`
 /// isn't a drop-in replacement for this path.
 #[inline]
-pub(super) fn rgb_to_cosmic_color(rgb: [f32; 3]) -> cosmic_text::Color {
+pub(super) fn rgb_to_cosmic_color(rgb: [f32; 3]) -> baumhard::font::Color {
     let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-    cosmic_text::Color::rgba(to_u8(rgb[0]), to_u8(rgb[1]), to_u8(rgb[2]), 255)
+    baumhard::font::Color::rgba(to_u8(rgb[0]), to_u8(rgb[1]), to_u8(rgb[2]), 255)
 }
 
 /// Linear mix of `rgb` toward white by `t` ∈ `[0, 1]`. `t = 0` is the
@@ -32,7 +32,7 @@ fn mix_toward_white(rgb: [f32; 3], t: f32) -> [f32; 3] {
 /// toward white, which reads as a subtle glow on top of the
 /// hue-saturated base color.
 #[inline]
-pub(super) fn highlight_selected_cell_color(rgb: [f32; 3]) -> cosmic_text::Color {
+pub(super) fn highlight_selected_cell_color(rgb: [f32; 3]) -> baumhard::font::Color {
     rgb_to_cosmic_color(mix_toward_white(rgb, 0.6))
 }
 
@@ -45,6 +45,6 @@ pub(super) fn highlight_selected_cell_color(rgb: [f32; 3]) -> cosmic_text::Color
 /// the hue-saturated background but not so saturated that the glyph
 /// character becomes hard to read.
 #[inline]
-pub(super) fn highlight_hovered_cell_color(rgb: [f32; 3]) -> cosmic_text::Color {
+pub(super) fn highlight_hovered_cell_color(rgb: [f32; 3]) -> baumhard::font::Color {
     rgb_to_cosmic_color(mix_toward_white(rgb, 0.4))
 }
