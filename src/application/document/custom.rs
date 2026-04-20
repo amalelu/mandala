@@ -4,8 +4,8 @@
 //! plumbing.
 
 use baumhard::mindmap::custom_mutation::{
-    apply_mutations_to_element, flat_mutations, CustomMutation, DocumentAction, MutationBehavior,
-    TargetScope,
+    apply_mutations_to_element, flat_mutations, mutator_reach, CustomMutation, DocumentAction,
+    MutationBehavior, TargetScope,
 };
 use baumhard::mindmap::model::MindNode;
 use baumhard::mindmap::tree_builder::MindMapTree;
@@ -84,6 +84,25 @@ impl MindMapDocument {
                 );
             }
             return;
+        }
+
+        // Authoring-mistake guard: if the mutator AST walks deeper
+        // than `target_scope` snapshots, undo will silently miss
+        // the deeper edits. Log a `warn!` — still applies the
+        // mutation (the author may have their own reasons, or the
+        // warning may surface a bug worth fixing) but flags the
+        // scope mismatch so it doesn't pass unnoticed.
+        if let Some(mutator) = custom.mutator.as_ref() {
+            let reach = mutator_reach(mutator);
+            if !custom.target_scope.covers_reach(reach) {
+                log::warn!(
+                    "mutation '{}': mutator reach is {:?} but target_scope is \
+                     {:?}; undo will not capture edits beyond the declared scope",
+                    custom.id,
+                    reach,
+                    custom.target_scope
+                );
+            }
         }
 
         // Persistent: snapshot, apply, sync/push undo.

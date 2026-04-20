@@ -33,6 +33,7 @@ use baumhard::mindmap::custom_mutation::CustomMutation;
 /// Variants are in ascending precedence: `App` is the lowest layer
 /// (most easily overridable), `Inline` is the highest (wins last).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MutationSource {
     /// Shipped with the binary via `assets/mutations/application.json`.
     App,

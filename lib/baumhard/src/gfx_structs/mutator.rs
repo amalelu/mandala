@@ -18,6 +18,7 @@ use crate::util::ordered_vec2::OrderedVec2;
 /// [`walk_tree_from`](crate::gfx_structs::tree_walker::walk_tree_from);
 /// cost is proportional to the number of matching descendants.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Instruction {
    /// Recursively apply the child mutator nodes of this instruction
    /// on every target descendant for which `Predicate` returns true.

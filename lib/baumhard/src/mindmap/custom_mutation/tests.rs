@@ -240,3 +240,65 @@ fn all_triggers_serialize() {
         assert_eq!(back, trigger);
     }
 }
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+    use crate::gfx_structs::area::GlyphAreaCommand;
+    use crate::gfx_structs::mutator::Mutation;
+
+    fn nudge() -> Mutation {
+        Mutation::area_command(GlyphAreaCommand::NudgeRight(1.0))
+    }
+
+    #[test]
+    fn scope_self_only_covers_only_self_only_reach() {
+        assert!(TargetScope::SelfOnly.covers_reach(MutatorReach::SelfOnly));
+        assert!(!TargetScope::SelfOnly.covers_reach(MutatorReach::Children));
+        assert!(!TargetScope::SelfOnly.covers_reach(MutatorReach::Descendants));
+    }
+
+    #[test]
+    fn scope_children_covers_self_and_children_but_not_descendants() {
+        assert!(TargetScope::Children.covers_reach(MutatorReach::SelfOnly));
+        assert!(TargetScope::Children.covers_reach(MutatorReach::Children));
+        assert!(!TargetScope::Children.covers_reach(MutatorReach::Descendants));
+    }
+
+    #[test]
+    fn scope_descendants_covers_everything() {
+        assert!(TargetScope::Descendants.covers_reach(MutatorReach::SelfOnly));
+        assert!(TargetScope::Descendants.covers_reach(MutatorReach::Children));
+        assert!(TargetScope::Descendants.covers_reach(MutatorReach::Descendants));
+    }
+
+    #[test]
+    fn reach_of_self_only_scope_helper_is_self_only() {
+        let node = scope::self_only(vec![nudge()]);
+        assert_eq!(mutator_reach(&node), MutatorReach::SelfOnly);
+    }
+
+    #[test]
+    fn reach_of_descendants_scope_helper_is_descendants() {
+        let node = scope::descendants(vec![nudge()]);
+        assert_eq!(mutator_reach(&node), MutatorReach::Descendants);
+    }
+
+    #[test]
+    fn reach_of_self_and_descendants_scope_helper_is_descendants() {
+        let node = scope::self_and_descendants(vec![nudge()]);
+        assert_eq!(mutator_reach(&node), MutatorReach::Descendants);
+    }
+
+    #[test]
+    fn reach_of_mapchildren_is_children() {
+        use crate::mutator_builder::{InstructionSpec, MutationSrc, MutatorNode};
+        let node = MutatorNode::Instruction {
+            channel: 0,
+            instruction: InstructionSpec::MapChildren,
+            mutation: MutationSrc::None,
+            children: vec![],
+        };
+        assert_eq!(mutator_reach(&node), MutatorReach::Children);
+    }
+}

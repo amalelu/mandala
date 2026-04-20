@@ -256,6 +256,9 @@ fn source_label(s: &crate::application::document::mutations_loader::MutationSour
         User => "user",
         Map => "map",
         Inline => "inline",
+        // `MutationSource` is `#[non_exhaustive]`; future variants
+        // (e.g. plugin sources) fall through here until wired.
+        _ => "(unknown source)",
     }
 }
 

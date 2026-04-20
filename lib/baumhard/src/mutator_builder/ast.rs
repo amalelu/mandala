@@ -108,6 +108,7 @@ impl MutationSrc {
 
 /// Where a `Macro`'s `Vec<Mutation>` comes from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MutationListSrc {
     /// A baked-in `Vec<Mutation>` serialized alongside the AST. The
     /// overwhelming case for [`crate::mindmap::custom_mutation`]

@@ -72,7 +72,15 @@ pub struct CustomMutation {
     /// Whether this mutation persists to the model or is a visual toggle.
     #[serde(default)]
     pub behavior: MutationBehavior,
-    /// Optional predicate filter — only apply to nodes matching this condition.
+    /// **Reserved — not yet consumed by the apply path.** When
+    /// wired (a future session), this will gate mutator application
+    /// per target node: for each node the scope-collected set
+    /// returns, the predicate will be tested against the node's
+    /// GfxElement and only matching nodes receive the mutator's
+    /// effect. Today the field round-trips through serde and is
+    /// preserved on save, but `apply_custom_mutation` never checks
+    /// it. Mutation authors may populate it now for forward
+    /// compatibility; it is effectively a no-op until consumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<Predicate>,
     /// Optional canvas/document-level actions that fire alongside the
@@ -238,5 +246,91 @@ pub fn flat_mutations(
             ..
         } => Some(list.clone()),
         _ => None,
+    }
+}
+
+/// Which node sets, relative to the anchor, the mutator AST could
+/// touch at apply time. Returned by [`mutator_reach`] and compared
+/// against the declared [`CustomMutation::target_scope`] to catch
+/// authoring mistakes where the undo-snapshot scope is narrower
+/// than the mutator's actual reach (which silently loses edits on
+/// undo). Ordered from narrowest to widest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MutatorReach {
+    /// Only the anchor node. Every non-empty mutator reaches this.
+    SelfOnly,
+    /// The anchor's direct children (reached via `MapChildren`).
+    Children,
+    /// Arbitrary descendants (reached via `RepeatWhile` /
+    /// `RotateWhile` / `SpatialDescend`).
+    Descendants,
+}
+
+/// Widest set of nodes the MutatorNode AST can reach. The app layer
+/// uses this to detect mismatches between the declared
+/// [`CustomMutation::target_scope`] (which governs undo snapshot +
+/// model sync reach) and the mutator payload's actual reach — a
+/// mutator that walks descendants paired with
+/// `TargetScope::SelfOnly` will silently lose descendant edits on
+/// undo.
+///
+/// Cost: O(AST size), no allocation.
+pub fn mutator_reach(mutator: &MutatorNode) -> MutatorReach {
+    use crate::mutator_builder::{InstructionSpec, MutatorNode as N};
+    fn walk(node: &MutatorNode, reach: &mut MutatorReach) {
+        let widen = |r: &mut MutatorReach, to: MutatorReach| {
+            if to > *r {
+                *r = to;
+            }
+        };
+        match node {
+            N::Void { children, .. } | N::Macro { children, .. } => {
+                for c in children {
+                    walk(c, reach);
+                }
+            }
+            N::Instruction {
+                instruction,
+                children,
+                ..
+            } => {
+                match instruction {
+                    InstructionSpec::RepeatWhileAlwaysTrue
+                    | InstructionSpec::RepeatWhile(_)
+                    | InstructionSpec::RotateWhile(_, _)
+                    | InstructionSpec::SpatialDescend(_) => {
+                        widen(reach, MutatorReach::Descendants);
+                    }
+                    InstructionSpec::MapChildren => {
+                        widen(reach, MutatorReach::Children);
+                    }
+                }
+                for c in children {
+                    walk(c, reach);
+                }
+            }
+            N::Repeat { template, .. } => walk(template, reach),
+            N::Single { .. } => {}
+        }
+    }
+    let mut reach = MutatorReach::SelfOnly;
+    walk(mutator, &mut reach);
+    reach
+}
+
+impl TargetScope {
+    /// `true` iff this scope's undo-snapshot window covers every
+    /// node `reach` could touch. Used to flag mismatched scope +
+    /// mutator pairs at apply time.
+    pub fn covers_reach(&self, reach: MutatorReach) -> bool {
+        match self {
+            TargetScope::SelfOnly | TargetScope::Parent => {
+                reach == MutatorReach::SelfOnly
+            }
+            TargetScope::Children | TargetScope::Siblings => {
+                reach <= MutatorReach::Children
+            }
+            TargetScope::Descendants | TargetScope::SelfAndDescendants => true,
+        }
     }
 }
