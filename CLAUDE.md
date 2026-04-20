@@ -131,6 +131,18 @@ what works where.
   handler registry at document-load time. The `mutation` console
   verb (list / apply / help) lives under the console modal which
   is still native-only (see below). See `format/mutations.md`.
+- Window-resize → `RenderDecree::SetSurfaceSize`: both targets
+  reconfigure the wgpu surface on `WindowEvent::Resized`. Native
+  also rebuilds the color-picker overlay; WASM doesn't need that
+  branch since the picker isn't reachable there yet.
+- Canvas clear color: both targets resolve
+  `Canvas.background_color` through theme variables and call
+  `Renderer::set_clear_color_from_hex` at document-load time, so
+  the wgpu render-pass clear matches the doc's configured
+  background instead of the default pitch black.
+- WebGL2 fallback: `wgpu` ships with the `webgl` feature so the
+  WASM build runs on browsers without WebGPU (Firefox stable,
+  Safari < 17). WebGPU is still preferred when available.
 
 **Native-only today** (each is a roadmap-scale gap, not a style choice):
 - Drag gestures: pan, move-node, edge-handle, portal-label, rect-select
