@@ -1,16 +1,16 @@
 //! AST types for the mutator-tree DSL. See `super` for the high-level
-//! tour; this file is the type-level wire format the JSON parses into.
+//! tour; this file is the type-level wire format that JSON parses into.
 
-use baumhard::core::primitives::ApplyOperation;
-use baumhard::gfx_structs::mutator::Instruction;
-use baumhard::gfx_structs::predicate::Predicate;
-use baumhard::util::ordered_vec2::OrderedVec2;
-use serde::Deserialize;
+use crate::core::primitives::ApplyOperation;
+use crate::gfx_structs::mutator::{Instruction, Mutation};
+use crate::gfx_structs::predicate::Predicate;
+use crate::util::ordered_vec2::OrderedVec2;
+use serde::{Deserialize, Serialize};
 
 /// One node in the mutator-tree DSL. Variants map 1:1 to `GfxMutator`
 /// constructors; `Repeat` is a compact sugar for "expand to N children
 /// at consecutive channels".
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MutatorNode {
     /// `GfxMutator::Void` — no mutation, just structural grouping.
     /// Children are expanded in declaration order.
@@ -25,11 +25,18 @@ pub enum MutatorNode {
         mutation: MutationSrc,
     },
     /// `GfxMutator::Macro` — flat batch of `Mutation`s on one channel.
-    /// Macros can't contain other Macros — that's `Mutation`-level
-    /// nesting, which this AST doesn't model.
+    /// Macros can't nest their own mutation list — that's
+    /// `Mutation`-level nesting, which this AST doesn't model.
+    /// `children` lets a Macro carry child mutator nodes in the
+    /// arena (for the `SelfAndDescendants` scope shape: Macro at root
+    /// applies to the anchor, with an `Instruction(RepeatWhile)`
+    /// child walking descendants). Defaults to empty so the overwhelming
+    /// "flat Macro" case stays terse.
     Macro {
         channel: usize,
         mutations: MutationListSrc,
+        #[serde(default)]
+        children: Vec<MutatorNode>,
     },
     /// `GfxMutator::Instruction` — recursive evaluation driver
     /// (`RepeatWhile` etc.) wrapping inner children.
@@ -59,21 +66,27 @@ pub enum MutatorNode {
 
 /// Where a `Single`'s channel comes from. Inside a `Repeat`,
 /// `SectionIndex` resolves to `channel_base + iter_index`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChannelSrc {
+    /// A baked-in channel index.
     Literal(usize),
+    /// The iteration's channel (`channel_base + iter_index`). Only
+    /// meaningful inside a [`MutatorNode::Repeat`] template.
     SectionIndex,
 }
 
 /// Static or runtime-supplied cell count.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CountSrc {
+    /// Count baked into the AST at deserialize time.
     Literal(usize),
+    /// Count fetched from [`SectionContext::count`] at apply time
+    /// under the given label.
     Runtime(String),
 }
 
 /// Where a single `Mutation` comes from.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MutationSrc {
     /// `Mutation::AreaDelta` whose fields are filled at apply time —
     /// bare `CellField` variants pull from the area lookup; tagged
@@ -94,18 +107,25 @@ impl MutationSrc {
 }
 
 /// Where a `Macro`'s `Vec<Mutation>` comes from.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MutationListSrc {
+    /// A baked-in `Vec<Mutation>` serialized alongside the AST. The
+    /// overwhelming case for [`crate::mindmap::custom_mutation`]
+    /// entries that ship pure data from a JSON file — no runtime
+    /// context is consulted.
+    Literal(Vec<Mutation>),
     /// Entirely runtime-supplied — the section context returns the
     /// list keyed by the label (a free-form name the consumer
-    /// disambiguates on).
+    /// disambiguates on). Used by consumers whose `Vec<Mutation>`
+    /// depends on scene state (e.g. size-aware layouts).
     Runtime(String),
 }
 
 /// Per-cell `AreaDelta` field slot. Bare variants = "supplied at
 /// runtime by the area lookup"; tagged variants = baked-in literals
 /// reused for every cell.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(non_camel_case_types)]
 pub enum CellField {
     Text,
@@ -118,16 +138,25 @@ pub enum CellField {
     Operation(ApplyOperation),
 }
 
-/// Serializable shadow of `baumhard::gfx_structs::mutator::Instruction`.
+/// Serializable shadow of [`Instruction`].
 /// `RepeatWhileAlwaysTrue` is spelled out as a named variant to avoid
 /// forcing every caller to serialize a full always-true `Predicate`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InstructionSpec {
     /// `Instruction::RepeatWhile(Predicate::always_true())`.
     RepeatWhileAlwaysTrue,
+    /// `Instruction::RepeatWhile(predicate)`.
     RepeatWhile(Predicate),
+    /// `Instruction::RotateWhile(angle, predicate)`.
     RotateWhile(f32, Predicate),
+    /// `Instruction::SpatialDescend(point)`.
     SpatialDescend(OrderedVec2),
+    /// `Instruction::MapChildren` — unit variant, no payload. Pairs
+    /// this instruction node's mutator children with the current
+    /// target's children by sibling position (zip), independent of
+    /// channel. The opt-in alternative to channel-based alignment for
+    /// per-index targeting.
+    MapChildren,
 }
 
 impl InstructionSpec {
@@ -139,6 +168,7 @@ impl InstructionSpec {
             InstructionSpec::RepeatWhile(p) => Instruction::RepeatWhile(p),
             InstructionSpec::RotateWhile(a, p) => Instruction::RotateWhile(a, p),
             InstructionSpec::SpatialDescend(point) => Instruction::SpatialDescend(point),
+            InstructionSpec::MapChildren => Instruction::MapChildren,
         }
     }
 }

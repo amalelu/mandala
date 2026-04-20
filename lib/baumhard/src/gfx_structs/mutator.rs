@@ -18,12 +18,18 @@ use crate::util::ordered_vec2::OrderedVec2;
 /// [`walk_tree_from`](crate::gfx_structs::tree_walker::walk_tree_from);
 /// cost is proportional to the number of matching descendants.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Instruction {
    /// Recursively apply the child mutator nodes of this instruction
    /// on every target descendant for which `Predicate` returns true.
    /// When the predicate fails on a node the branch terminates and
    /// the walker resumes with the default terminator. O(n) in the
    /// number of descendants tested.
+   ///
+   /// Aligns mutator children to target children by **channel** (via
+   /// [`crate::gfx_structs::tree_walker::align_child_walks`]). For
+   /// per-index targeting that sidesteps channel semantics entirely,
+   /// see [`Instruction::MapChildren`].
    RepeatWhile(Predicate),
    /// Rotate every descendant that satisfies the predicate around the
    /// pivot element's position by the given degrees. The `f32` is the
@@ -51,10 +57,49 @@ pub enum Instruction {
    /// to whichever node the point lands on, regardless of its
    /// channel. This is intentional: spatial routing targets the
    /// visually correct node, not a structurally aligned one.
+   /// [`MapChildren`](Instruction::MapChildren) is the other
+   /// channel-bypassing variant — distinguished by pairing strictly
+   /// on sibling position rather than spatial hit-test.
    ///
    /// Costs: O(branching_factor × depth) when subtrees are spatially
    /// disjoint; O(n) worst case with fully overlapping subtrees.
    SpatialDescend(OrderedVec2),
+   /// Pair the mutator-node's direct children with the target-node's
+   /// direct children **strictly by sibling position** (zip), ignoring
+   /// channels on the paired children. For each pair up to
+   /// `min(mutator_children_len, target_children_len)`, the walker
+   /// recursively dispatches via
+   /// [`walk_tree_from`](crate::gfx_structs::tree_walker::walk_tree_from).
+   /// Excess children on either side are silently skipped (one
+   /// `debug!` line at termination).
+   ///
+   /// When to reach for this variant: the default channel-align path
+   /// (via [`align_child_walks`](crate::gfx_structs::tree_walker::align_child_walks),
+   /// see also [`RepeatWhile`](Instruction::RepeatWhile)) treats the
+   /// `channel` field as a broadcast-group tag — one mutator on
+   /// channel N hits every target child on channel N. That's correct
+   /// for groups but wrong for per-index targeting where each child
+   /// needs a distinct mutation (e.g. laying out the `i`-th child at
+   /// position `i`). `MapChildren` is the opt-in alternative that
+   /// pairs strictly on sibling position, independent of channel.
+   ///
+   /// The instruction's own attached `mutation` field (non-`None`) is
+   /// applied to the current target via the standard pre-dispatch at
+   /// the top of
+   /// [`walk_tree_from`](crate::gfx_structs::tree_walker::walk_tree_from)
+   /// — same precedent as [`RepeatWhile`](Instruction::RepeatWhile).
+   ///
+   /// Composes with the AST-level `Repeat` wrapper for runtime-count
+   /// expansion: `Instruction(MapChildren) { children: [Repeat { ... }] }`
+   /// expands at build time into N concrete Single children, which
+   /// `MapChildren` then zips against N target children. This is the
+   /// declarative path size-aware layouts (flower-like arrangements,
+   /// cascading trees) use when a `SectionContext` impl supplies
+   /// per-index field values.
+   ///
+   /// Cost: O(min(mutator_children_len, target_children_len)), no
+   /// allocation inside the zip.
+   MapChildren,
 }
 
 /// Discriminant returned by [`GfxMutator::get_type`] for fast

@@ -18,6 +18,7 @@ pub mod edge;
 pub mod font;
 pub mod help;
 pub mod label;
+pub mod mutation;
 pub mod new;
 pub mod open;
 pub mod save;
@@ -66,6 +67,7 @@ pub const COMMANDS: &[Command] = &[
     font::COMMAND,
     spacing::COMMAND,
     label::COMMAND,
+    mutation::COMMAND,
     save::COMMAND,
     open::COMMAND,
     new::COMMAND,
@@ -110,7 +112,7 @@ mod tests {
     fn test_command_registry_has_every_migrated_verb() {
         let expected = [
             "help", "anchor", "body", "cap", "color", "edge", "font",
-            "spacing", "label", "save", "open", "new",
+            "spacing", "label", "mutation", "save", "open", "new",
         ];
         for name in expected {
             assert!(

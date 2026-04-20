@@ -16,3 +16,4 @@ pub mod predicate_tests;
 pub mod subtree_aabb_tests;
 pub mod bvh_descent_tests;
 pub mod spatial_descend_tests;
+pub mod map_children_tests;

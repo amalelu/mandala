@@ -163,7 +163,23 @@ wasm_bindgen_futures::spawn_local(async move {
         crate::application::scene_host::AppScene::new();
     match fetch_map_json(&mindmap_path).await {
         Ok(json) => match MindMapDocument::from_json_str(&json, Some(mindmap_path.clone())) {
-            Ok(doc) => {
+            Ok(mut doc) => {
+                // Four-source mutation registry, matching the native
+                // path: app bundle (shipped in the binary) < user
+                // source (?mutations= query param + localStorage) <
+                // map (custom_mutations in the .mindmap.json) <
+                // inline (on individual nodes). Plus the Rust-backed
+                // handlers for layouts too structural for pure data.
+                let (app_mutations, user_mutations) =
+                    crate::application::document::mutations_loader::load_app_and_user();
+                doc.build_mutation_registry_with_app_and_user(
+                    &app_mutations,
+                    &user_mutations,
+                );
+                crate::application::document::mutations::register_builtin_handlers(
+                    &mut doc,
+                );
+
                 let mindmap_tree = doc.build_tree();
                 renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
                 renderer.fit_camera_to_tree(&mindmap_tree.tree);

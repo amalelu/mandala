@@ -115,6 +115,22 @@ what works where.
 - Cross-platform monotonic clock via `now_ms()` in
   `src/application/app/mod.rs` (native: `Instant`; WASM:
   `performance.now()`).
+- Mutation framework: the `CustomMutation` carrier
+  (`baumhard::mindmap::custom_mutation`), the four-source loader
+  (`src/application/document/mutations_loader/` — app bundle + user
+  source, with platform-split `platform_{desktop,web}.rs` for the
+  user layer: XDG file on native, `?mutations=` query param +
+  `localStorage` on WASM), the `MutatorNode` AST +
+  `SectionContext` trait + `build` walker
+  (`baumhard::mutator_builder`), the channel-bypassing
+  `Instruction::MapChildren` walker primitive for per-index
+  targeting, and the imperative `DynamicMutationHandler` seam for
+  size-aware layouts
+  (`src/application/document/mutations/{flower_layout,tree_cascade}.rs`).
+  Both `run_native.rs` and `run_wasm.rs` wire the loader +
+  handler registry at document-load time. The `mutation` console
+  verb (list / apply / help) lives under the console modal which
+  is still native-only (see below). See `format/mutations.md`.
 
 **Native-only today** (each is a roadmap-scale gap, not a style choice):
 - Drag gestures: pan, move-node, edge-handle, portal-label, rect-select
@@ -123,7 +139,10 @@ what works where.
   hover preview and click routing.
 - Modals: CLI console (`/` trigger), glyph-wheel color picker, edge
   label editor, portal-label text editor — state types and rebuild
-  paths all live under `#[cfg(not(target_arch = "wasm32"))]`.
+  paths all live under `#[cfg(not(target_arch = "wasm32"))]`. The
+  `mutation` console verb (`list` / `apply` / `help` / `inspect`) is
+  wired through the console modal, so it inherits the same
+  native-only scope; its loader + registry run on both targets.
 - Hover-based UI: `hovered_node` tracking, cursor-change on button
   nodes, OnClick trigger dispatch.
 - Clipboard copy/paste — `arboard` on native; WASM `clipboard.rs` stubs

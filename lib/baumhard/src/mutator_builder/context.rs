@@ -3,13 +3,25 @@
 //! methods their AST actually exercises; the others default to
 //! `unreachable!()` so misuse is loud at runtime.
 
-use baumhard::gfx_structs::area::{GlyphArea, GlyphAreaField};
-use baumhard::gfx_structs::mutator::Mutation;
+use crate::gfx_structs::area::{GlyphArea, GlyphAreaField};
+use crate::gfx_structs::mutator::Mutation;
 
 use super::ast::CellField;
 
+/// Runtime look-up surface for the mutator builder. Each method
+/// corresponds to one runtime-sourced AST variant; consumers implement
+/// only those their `MutatorNode` exercises.
+///
+/// The default implementations panic loudly via `unreachable!()` so a
+/// misused AST fails immediately rather than silently producing wrong
+/// mutator trees.
 pub trait SectionContext {
     /// Resolve a runtime cell count for `Repeat { count: Runtime(_) }`.
+    /// `name` is the `Runtime` label the AST carries; the consumer
+    /// disambiguates among multiple `Repeat` sections by this label.
+    /// Called once per `Repeat` node during [`super::build::build`].
+    ///
+    /// Cost: consumer-defined, typically O(1) via a small HashMap.
     fn count(&self, _name: &str) -> usize {
         unreachable!("section context does not supply runtime counts")
     }
@@ -18,6 +30,8 @@ pub trait SectionContext {
     /// `MutationSrc::AreaDelta` inside a `Repeat` *unless* the
     /// consumer overrides [`field`](Self::field) — see that method's
     /// docs for the slim-context opt-out.
+    ///
+    /// Cost: consumer-defined. Typically a slice index.
     fn area(&self, _section: &str, _index: usize) -> &GlyphArea {
         unreachable!("section context does not supply per-section areas")
     }
@@ -36,10 +50,27 @@ pub trait SectionContext {
         default_field_from_area(self.area(section, index), template)
     }
     /// Resolve a runtime single `Mutation` for `MutationSrc::Runtime`.
+    /// `label` is the enclosing `Repeat` section's name (or `""` when
+    /// invoked outside a `Repeat` template). Called once per
+    /// materialised `Single`/`Instruction` carrying a `Runtime`
+    /// mutation. Returning a `Mutation::None` is a valid no-op choice.
+    ///
+    /// Cost: consumer-defined. The caller holds no locks; the
+    /// implementation owns the mutation it returns (cloning is
+    /// implicit in the return-by-value contract).
     fn mutation(&self, _label: &str) -> Mutation {
         unreachable!("section context does not supply runtime mutations")
     }
     /// Resolve a runtime `Vec<Mutation>` for `MutationListSrc::Runtime`.
+    /// `label` is the free-form key the AST carries; the consumer
+    /// disambiguates among multiple runtime-sourced macros by this
+    /// label. Called once per matching `Macro` node during
+    /// [`super::build::build`]. Returning an empty `Vec` is a valid
+    /// no-op choice; the built `GfxMutator::Macro` then walks over
+    /// its target without applying anything.
+    ///
+    /// Cost: consumer-defined. The returned `Vec` is moved into the
+    /// mutator tree, so no double-allocation.
     fn mutation_list(&self, _label: &str) -> Vec<Mutation> {
         unreachable!("section context does not supply runtime mutation lists")
     }

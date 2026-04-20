@@ -11,6 +11,7 @@ use baumhard::mindmap::custom_mutation::{CustomMutation, PlatformContext, Trigge
 use baumhard::mindmap::model::MindNode;
 use baumhard::mindmap::tree_builder::MindMapTree;
 
+use super::mutations_loader::MutationSource;
 use super::types::AnimationInstance;
 use super::MindMapDocument;
 
@@ -51,34 +52,61 @@ fn apply_position_mutations_to_node(
     }
 }
 
+// `MutationSource` lives in `mutations_loader::MutationSource` —
+// imported here via `use` at the top so registry-building can stamp
+// source layers into `self.mutation_sources` alongside the registry
+// writes. Keeping the type in the loader module groups it with the
+// precedence definition it's inseparable from.
+
 impl MindMapDocument {
     /// Build the mutation registry from map-level and inline node mutations.
     /// Inline mutations override map-level mutations with the same id.
     pub fn build_mutation_registry(&mut self) {
-        self.build_mutation_registry_with_user(&[]);
+        self.build_mutation_registry_with_app_and_user(&[], &[]);
     }
 
-    /// Variant that also accepts a slice of user-defined mutations
-    /// (from `$XDG_CONFIG_HOME/mandala/mutations.json`). Precedence
-    /// is user < map < inline: user mutations are inserted first, so
-    /// map and inline entries with the same id overwrite them.
+    /// Variant retained for callers that already supply a user slice.
+    /// Delegates to the four-source builder with an empty app slice.
     pub fn build_mutation_registry_with_user(
         &mut self,
         user_mutations: &[CustomMutation],
     ) {
+        self.build_mutation_registry_with_app_and_user(&[], user_mutations);
+    }
+
+    /// Build the registry from all four sources. See the
+    /// "Where mutations come from" section in `format/mutations.md`
+    /// for the canonical precedence description; this method's
+    /// loop order (below) mirrors it and the [`MutationSource`]
+    /// enum variants at the loader's module doc. Later writers
+    /// override earlier ones with the same `id`.
+    pub fn build_mutation_registry_with_app_and_user(
+        &mut self,
+        app_mutations: &[CustomMutation],
+        user_mutations: &[CustomMutation],
+    ) {
         self.mutation_registry.clear();
-        // User-defined mutations (lowest precedence).
+        self.mutation_sources.clear();
+        for cm in app_mutations {
+            self.mutation_registry.insert(cm.id.clone(), cm.clone());
+            self.mutation_sources
+                .insert(cm.id.clone(), MutationSource::App);
+        }
         for cm in user_mutations {
             self.mutation_registry.insert(cm.id.clone(), cm.clone());
+            self.mutation_sources
+                .insert(cm.id.clone(), MutationSource::User);
         }
-        // Map-level mutations (overrides user).
         for cm in &self.mindmap.custom_mutations {
             self.mutation_registry.insert(cm.id.clone(), cm.clone());
+            self.mutation_sources
+                .insert(cm.id.clone(), MutationSource::Map);
         }
-        // Inline node mutations (highest — overrides map and user).
         for node in self.mindmap.nodes.values() {
             for cm in &node.inline_mutations {
                 self.mutation_registry.insert(cm.id.clone(), cm.clone());
+                self.mutation_sources
+                    .insert(cm.id.clone(), MutationSource::Inline);
             }
         }
     }
@@ -192,8 +220,18 @@ impl MindMapDocument {
         // GlyphArea command vocabulary so animation receives the same
         // final state instant-mode would have landed on — there's
         // only one source of truth for "what does this mutation do".
+        // Extract the flat Mutation list from the mutator AST for the
+        // scratch-node replay. MutatorNode shapes with runtime holes
+        // (size-aware mutations) can't be previewed against a single
+        // model node — the scratch stays at `from` and the animation
+        // lerps to whatever the mutator produces at completion.
         let mut scratch = from_node.clone();
-        apply_position_mutations_to_node(&cm.mutations, &mut scratch);
+        let flat = cm
+            .mutator
+            .as_ref()
+            .and_then(baumhard::mindmap::custom_mutation::flat_mutations)
+            .unwrap_or_default();
+        apply_position_mutations_to_node(&flat, &mut scratch);
         let to_node = scratch;
 
         self.active_animations.push(AnimationInstance {
@@ -274,7 +312,7 @@ impl MindMapDocument {
             for idx in completed_indices.into_iter().rev() {
                 let anim = self.active_animations.swap_remove(idx);
                 if let Some(tree) = tree.as_deref_mut() {
-                    self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+                    self.apply_custom_mutation(&anim.cm, &anim.target_id, Some(tree));
                 } else {
                     // No tree available — at minimum restore the
                     // model to the `to` snapshot so the next
@@ -320,7 +358,7 @@ impl MindMapDocument {
         let mut tree = tree;
         for anim in drained {
             if let Some(tree) = tree.as_deref_mut() {
-                self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+                self.apply_custom_mutation(&anim.cm, &anim.target_id, Some(tree));
             } else if let Some(node) = self.mindmap.nodes.get_mut(&anim.target_id) {
                 // No tree available — restore the model to the
                 // `to` snapshot directly. Undo path is then the

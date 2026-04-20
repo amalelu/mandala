@@ -2,10 +2,13 @@
 //! the builder against a stub `SectionContext` so we don't need any
 //! picker / widget / GPU state.
 
-use super::*;
-use baumhard::core::primitives::{ApplyOperation, ColorFontRegions};
-use baumhard::gfx_structs::area::GlyphArea;
-use baumhard::gfx_structs::tree::BranchChannel;
+use crate::core::primitives::{ApplyOperation, ColorFontRegions};
+use crate::gfx_structs::area::GlyphArea;
+use crate::gfx_structs::tree::BranchChannel;
+use crate::mutator_builder::{
+    build, iter_section_channels, CellField, ChannelSrc, CountSrc, InstructionSpec,
+    MutationListSrc, MutationSrc, MutatorNode, SectionContext,
+};
 use glam::Vec2;
 use std::collections::HashMap;
 
@@ -213,12 +216,12 @@ fn repeat_runtime_count_consults_context() {
 // =============================================================
 // Non-Repeat tree shapes — exercise the variants the picker spec
 // doesn't use but that the AST has to carry for the named
-// extensibility trajectory (console overlay, scope topologies in
-// `lib/baumhard`, future script-API mutators).
+// extensibility trajectory (console overlay, scope topologies,
+// future script-API mutators).
 // =============================================================
 
-use baumhard::gfx_structs::mutator::{GfxMutator, Instruction, Mutation, MutatorType};
-use baumhard::gfx_structs::predicate::Predicate;
+use crate::gfx_structs::mutator::{GfxMutator, Instruction, Mutation, MutatorType};
+use crate::gfx_structs::predicate::Predicate;
 
 /// Tree rooted at a `Void` with no children produces an empty root.
 #[test]
@@ -296,6 +299,7 @@ fn macro_pulls_mutation_list_from_runtime_context() {
     let node = MutatorNode::Macro {
         channel: 0,
         mutations: MutationListSrc::Runtime("scope_mutations".into()),
+        children: vec![],
     };
     let ctx = MacroCtx;
     let mt = build(&node, &ctx);
@@ -328,6 +332,7 @@ fn instruction_with_children_mirrors_scope_topology() {
         children: vec![MutatorNode::Macro {
             channel: 0,
             mutations: MutationListSrc::Runtime("leaf".into()),
+            children: vec![],
         }],
     };
     let mt = build(&node, &ScopeCtx);
@@ -477,8 +482,9 @@ fn area_delta_outside_repeat_panics() {
 
 // =============================================================
 // JSON roundtrip — the AST's load-bearing purpose is deserializing
-// from `widgets/*.json`. Drift in serde renames / variant shapes
-// must surface here rather than silently at picker-open time.
+// from JSON (widgets, custom mutations, future user scripts). Drift
+// in serde renames / variant shapes must surface here rather than
+// silently at picker-open time.
 // =============================================================
 
 /// A compact MutatorNode literal round-trips through serde_json
@@ -577,4 +583,103 @@ fn json_instruction_mutation_defaults_to_none() {
         panic!("expected Instruction");
     };
     assert!(matches!(mutation, MutationSrc::None));
+}
+
+/// `InstructionSpec::MapChildren` round-trips through JSON and
+/// materializes to `Instruction::MapChildren` via
+/// `into_instruction`. Guards the seam authors rely on when
+/// declaring MapChildren-shaped mutators in a custom_mutations
+/// bundle.
+#[test]
+fn json_instruction_spec_map_children_materializes_correctly() {
+    let src = r#"{
+        "Instruction": {
+            "channel": 3,
+            "instruction": "MapChildren"
+        }
+    }"#;
+    let node: MutatorNode = serde_json::from_str(src).expect("parse MutatorNode");
+    let MutatorNode::Instruction { channel, instruction, .. } = node else {
+        panic!("expected Instruction");
+    };
+    assert_eq!(channel, 3);
+    // Materialize the InstructionSpec into a concrete Instruction and
+    // verify the variant pairs with the walker primitive.
+    let inst = instruction.clone().into_instruction();
+    assert!(matches!(inst, Instruction::MapChildren));
+}
+
+// =============================================================
+// Full serialize ↔ deserialize round-trips — catches accidental
+// serde field renames / shape drift that a one-way parse test
+// would miss. Authored in response to a code-review finding that
+// existing JSON tests only parsed, never re-emitted.
+// =============================================================
+
+/// Helper: round-trip a MutatorNode through serde_json and assert
+/// the result parses back to a structurally identical value. Uses
+/// `serde_json::Value` for comparison so field-order drift doesn't
+/// spuriously fail.
+fn assert_mutator_node_json_round_trips(node: &MutatorNode) {
+    let first = serde_json::to_string(node).expect("first serialize");
+    let reparsed: MutatorNode = serde_json::from_str(&first).expect("reparse");
+    let second = serde_json::to_string(&reparsed).expect("second serialize");
+    let v1: serde_json::Value = serde_json::from_str(&first).unwrap();
+    let v2: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(v1, v2, "MutatorNode JSON drifted across round-trip");
+}
+
+#[test]
+fn json_round_trip_macro_with_literal_mutations_preserves_shape() {
+    use crate::gfx_structs::area::GlyphAreaCommand;
+    use crate::gfx_structs::mutator::Mutation;
+    // The pure-data shape that scope::self_only produces — a Macro
+    // on channel 0 carrying a `MutationListSrc::Literal` list.
+    let node = MutatorNode::Macro {
+        channel: 0,
+        mutations: MutationListSrc::Literal(vec![
+            Mutation::area_command(GlyphAreaCommand::NudgeRight(3.0)),
+            Mutation::area_command(GlyphAreaCommand::GrowFont(1.5)),
+        ]),
+        children: vec![],
+    };
+    assert_mutator_node_json_round_trips(&node);
+}
+
+#[test]
+fn json_round_trip_instruction_map_children_preserves_shape() {
+    let node = MutatorNode::Instruction {
+        channel: 7,
+        instruction: InstructionSpec::MapChildren,
+        mutation: MutationSrc::None,
+        children: vec![MutatorNode::Single {
+            channel: ChannelSrc::Literal(3),
+            mutation: MutationSrc::None,
+        }],
+    };
+    assert_mutator_node_json_round_trips(&node);
+}
+
+#[test]
+fn json_round_trip_repeat_inside_map_children_preserves_shape() {
+    // The canonical declarative size-aware layout shape — Repeat
+    // under MapChildren, with SectionIndex channels and an
+    // AreaDelta template. The Repeat-composition test relies on
+    // this exact serde layout.
+    let node = MutatorNode::Instruction {
+        channel: 0,
+        instruction: InstructionSpec::MapChildren,
+        mutation: MutationSrc::None,
+        children: vec![MutatorNode::Repeat {
+            section: "children".into(),
+            channel_base: 0,
+            count: CountSrc::Runtime("children".into()),
+            skip_indices: vec![],
+            template: Box::new(MutatorNode::Single {
+                channel: ChannelSrc::SectionIndex,
+                mutation: MutationSrc::AreaDelta(vec![CellField::position]),
+            }),
+        }],
+    };
+    assert_mutator_node_json_round_trips(&node);
 }

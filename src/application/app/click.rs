@@ -61,7 +61,7 @@ pub(super) fn handle_click(
                     // and commits the final mutation at completion.
                     doc.start_animation(&cm, id, now_ms() as u64);
                 } else if let Some(tree) = mindmap_tree.as_mut() {
-                    doc.apply_custom_mutation(&cm, id, tree);
+                    doc.apply_custom_mutation(&cm, id, Some(tree));
                 }
                 doc.apply_document_actions(&cm);
             }

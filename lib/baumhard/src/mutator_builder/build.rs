@@ -1,9 +1,9 @@
 //! Recursive walker that turns a [`MutatorNode`] + [`SectionContext`]
 //! into a concrete `MutatorTree<GfxMutator>`.
 
-use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
-use baumhard::gfx_structs::mutator::{GfxMutator, Mutation};
-use baumhard::gfx_structs::tree::MutatorTree;
+use crate::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
+use crate::gfx_structs::mutator::{GfxMutator, Mutation};
+use crate::gfx_structs::tree::MutatorTree;
 use indextree::NodeId;
 
 use super::ast::{ChannelSrc, CountSrc, MutationListSrc, MutationSrc, MutatorNode};
@@ -13,6 +13,9 @@ use super::context::SectionContext;
 /// root is `node` itself — which must be a `Void` / `Single` /
 /// `Macro` / `Instruction`. A `Repeat` only makes sense as a child,
 /// so using one as the root panics.
+///
+/// Cost: O(nodes) in the expanded tree, plus one `SectionContext`
+/// call per runtime-sourced field / count / mutation.
 pub fn build<C: SectionContext + ?Sized>(
     node: &MutatorNode,
     ctx: &C,
@@ -33,6 +36,9 @@ pub fn build<C: SectionContext + ?Sized>(
 /// at apply time, in tree-insertion (channel-ascending) order. Used
 /// by the initial-build path (which builds a `Tree<GfxElement, _>`)
 /// so its channel set matches what the mutator path will target.
+///
+/// Cost: O(expanded nodes). No allocation beyond the caller-provided
+/// `out` buffer.
 pub fn iter_section_channels<C: SectionContext + ?Sized>(
     node: &MutatorNode,
     ctx: &C,
@@ -54,12 +60,14 @@ pub fn iter_section_channels<C: SectionContext + ?Sized>(
                 out.push((section.clone(), i, channel_base + i));
             }
         }
-        MutatorNode::Void { children, .. } | MutatorNode::Instruction { children, .. } => {
+        MutatorNode::Void { children, .. }
+        | MutatorNode::Instruction { children, .. }
+        | MutatorNode::Macro { children, .. } => {
             for child in children {
                 iter_section_channels(child, ctx, out);
             }
         }
-        MutatorNode::Single { .. } | MutatorNode::Macro { .. } => {}
+        MutatorNode::Single { .. } => {}
     }
 }
 
@@ -75,7 +83,8 @@ fn node_children(node: &MutatorNode) -> &[MutatorNode] {
     match node {
         MutatorNode::Void { children, .. } => children,
         MutatorNode::Instruction { children, .. } => children,
-        MutatorNode::Single { .. } | MutatorNode::Macro { .. } | MutatorNode::Repeat { .. } => &[],
+        MutatorNode::Macro { children, .. } => children,
+        MutatorNode::Single { .. } | MutatorNode::Repeat { .. } => &[],
     }
 }
 
@@ -108,7 +117,10 @@ fn materialize_node<C: SectionContext + ?Sized>(
             let m = materialize_mutation(mutation, ctx, iter);
             GfxMutator::new(m, ch)
         }
-        MutatorNode::Macro { channel, mutations } => match mutations {
+        MutatorNode::Macro {
+            channel, mutations, ..
+        } => match mutations {
+            MutationListSrc::Literal(list) => GfxMutator::new_macro(list.clone(), *channel),
             MutationListSrc::Runtime(label) => {
                 GfxMutator::new_macro(ctx.mutation_list(label), *channel)
             }

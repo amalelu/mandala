@@ -273,14 +273,28 @@ optional.
 {
   "id": "switch-dark",
   "name": "Switch to dark theme",
+  "description": "Copy the 'dark' theme variant into live variables.",
+  "contexts": ["map.node"],
   "target_scope": "SelfOnly",
   "document_actions": [ { "SetThemeVariant": "dark" } ]
 }
 ```
 
 Map-level custom mutations are referenced by `TriggerBinding.mutation_id`
-on a node. `target_scope` is one of `"SelfOnly"`, `"Children"`,
+on a node, dispatched by `OnClick` / `OnHover` / `OnKey` triggers, or
+applied explicitly via the `mutation apply <id>` console verb.
+
+See [`mutations.md`](./mutations.md) for the complete reference:
+four-source loader (app / user / map / inline), the `contexts`
+namespace (`internal`, `map`, `map.node`, `map.tree`), the `mutator`
+MutatorNode AST (used for declarative mutators with runtime holes),
+and the imperative `DynamicMutationHandler` seam (used for
+size-aware layouts like `flower-layout` / `tree-cascade`).
+
+`target_scope` is one of `"SelfOnly"`, `"Children"`,
 `"Descendants"`, `"SelfAndDescendants"`, `"Parent"`, `"Siblings"`.
+`behavior` defaults to `"Persistent"`; `"Toggle"` reverses on
+second trigger.
 
 ## TriggerBinding (on a node)
 
