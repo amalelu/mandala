@@ -3,13 +3,15 @@
 //! A `CustomMutation` is a named, reusable bundle the host application
 //! dispatches in response to triggers (clicks, hovers, key bindings)
 //! or console commands (`mutation apply`). The payload is a
-//! [`MutatorNode`] AST that the [`crate::mutator_builder`] walker
-//! compiles to a `MutatorTree<GfxMutator>` at apply time. Simple
-//! mutations bake their `Vec<Mutation>` into the AST via
-//! [`scope::self_only`] / [`scope::descendants`] /
-//! [`scope::self_and_descendants`]; size-aware mutations use a
-//! MutatorNode with runtime holes and a `SectionContext` registered
-//! by the host application under the mutation's `id`.
+//! [`MutatorNode`](crate::mutator_builder::MutatorNode) AST that the
+//! [`crate::mutator_builder`] walker compiles to a
+//! `MutatorTree<GfxMutator>` at apply time. Simple mutations bake
+//! their `Vec<Mutation>` into the AST via
+//! `scope::self_only`, `scope::descendants`, or
+//! `scope::self_and_descendants`;
+//! size-aware mutations use a `MutatorNode` with runtime holes and a
+//! `SectionContext` registered by the host application under the
+//! mutation's `id`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,7 +19,11 @@ use std::collections::HashMap;
 use crate::gfx_structs::predicate::Predicate;
 use crate::mutator_builder::MutatorNode;
 
+/// Well-known context tags for `CustomMutation::contexts` — the
+/// stable vocabulary for where/on-what a mutation applies.
 pub mod contexts;
+/// Constructor helpers producing a `MutatorNode` equivalent to each
+/// legacy `TargetScope` variant.
 pub mod scope;
 
 mod serialized;

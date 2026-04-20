@@ -2,8 +2,8 @@
 //! the renderer's shader-loading pass.
 //!
 //! The renderer registers every `(name, wgsl_source)` pair in
-//! [`SHADERS`] at startup and later looks the module up by the name
-//! the application chose — [`SHADER_APPLICATION`]. Two entries
+//! `SHADERS` at startup and later looks the module up by the name
+//! the application chose — `SHADER_APPLICATION`. Two entries
 //! pointing at the same `.wgsl` is a seam for swapping the
 //! application shader out per-pass without touching the renderer:
 //! change `SHADER_APPLICATION`'s binding, no rebuild needed.

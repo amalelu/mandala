@@ -1,3 +1,13 @@
+//! `GlyphArea` — the text-region element variant of a `GfxElement`.
+//! Owns the text content, font scale, position, bounding size,
+//! halo outline, and the `ColorFontRegions` set that carries per-
+//! range colour / font overrides. Mutations land here through
+//! `apply_operation` (`DeltaGlyphArea`) or the higher-level
+//! `GlyphAreaCommand`; the field and mutator vocabularies live in
+//! the sibling `area_fields` and `area_mutators` modules and are
+//! re-exported from this one so consumers import from a single
+//! path.
+
 pub use super::area_fields::*;
 pub use super::area_mutators::*;
 
@@ -145,27 +155,24 @@ impl GlyphArea {
     pub fn apply_operation(&mut self, delta: &DeltaGlyphArea) {
         let operation = delta.operation_variant();
 
-        if delta.position().is_some() {
-            let position = OrderedVec2::from_vec2(delta.position().unwrap());
+        if let Some(position) = delta.position() {
+            let position = OrderedVec2::from_vec2(position);
             operation.apply(&mut self.position.x, position.x);
             operation.apply(&mut self.position.y, position.y);
         }
 
-        if delta.bounds().is_some() {
-            let bounds = OrderedVec2::from_vec2(delta.bounds().unwrap());
+        if let Some(bounds) = delta.bounds() {
+            let bounds = OrderedVec2::from_vec2(bounds);
             operation.apply(&mut self.render_bounds.x, bounds.x);
             operation.apply(&mut self.render_bounds.y, bounds.y);
         }
 
-        if delta.line_height().is_some() {
-            operation.apply(
-                &mut self.line_height,
-                OrderedFloat::from(delta.line_height().unwrap()),
-            );
+        if let Some(line_height) = delta.line_height() {
+            operation.apply(&mut self.line_height, OrderedFloat::from(line_height));
         }
 
-        if delta.scale().is_some() {
-            operation.apply(&mut self.scale, OrderedFloat::from(delta.scale().unwrap()));
+        if let Some(scale) = delta.scale() {
+            operation.apply(&mut self.scale, OrderedFloat::from(scale));
         }
 
         if let Some(x) = delta.color_font_regions() {
@@ -187,12 +194,10 @@ impl GlyphArea {
             }
         }
 
-        if delta.text_ref().is_some() {
+        if let Some(text) = delta.text_ref() {
             match operation {
-                ApplyOperation::Assign => {
-                    self.text = delta.text_ref().unwrap().to_string();
-                }
-                ApplyOperation::Add => self.text += delta.text_ref().unwrap(),
+                ApplyOperation::Assign => self.text = text.to_string(),
+                ApplyOperation::Add => self.text += text,
                 _ => {}
             }
         }

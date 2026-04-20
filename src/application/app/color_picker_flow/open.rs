@@ -158,7 +158,7 @@ pub(in crate::application::app) fn open_picker_inner(
         // per-cell. A single per-arm correction can't pull this
         // off: both sidebearings (drives x) and baseline-relative
         // ink extent (drives y) vary glyph-to-glyph within an arm.
-        let mut swash_cache = cosmic_text::SwashCache::new();
+        let mut swash_cache = baumhard::font::SwashCache::new();
         use baumhard::font::fonts::measure_glyph_ink_bounds;
         use crate::application::color_picker::CROSSHAIR_CENTER_CELL;
         let mut arm_ink_offsets = |glyphs: &[&str], font: Option<baumhard::font::fonts::AppFont>|

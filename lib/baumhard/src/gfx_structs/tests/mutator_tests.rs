@@ -3,8 +3,9 @@
 //!
 //! Covers `Mutation::AreaDelta`, `Mutation::AreaCommand`,
 //! `Mutation::None`, `Instruction::RepeatWhile`,
-//! `Instruction::RotateWhile`, and `MutatorTree::apply_to` forward-
-//! apply behaviour.
+//! `Instruction::RotateWhile`, `GfxMutator::Macro`,
+//! `GfxMutator::Void`, and `MutatorTree::apply_to` forward-apply
+//! behaviour.
 //!
 //! Follows the `do_*()` / `test_*()` split from §T2.2: every public
 //! body is benchmarkable from `benches/test_bench.rs`.
@@ -379,5 +380,205 @@ pub fn do_mutator_tree_applies_to_target() {
         almost_equal(child.position().y, 71.0),
         "child y: expected 71.0, got {}",
         child.position().y
+    );
+}
+
+// ── GfxMutator::Macro ──────────────────────────────────────────────
+
+#[test]
+fn test_mutator_macro_applies_all_mutations_in_order() {
+    do_mutator_macro_applies_all_mutations_in_order();
+}
+
+/// A `Macro` mutator applies every `Mutation` in its vec to the same
+/// target element. The position delta is split across two `AreaDelta`
+/// entries so the assertion proves *both* ran — a single-apply bug
+/// would leave one component short of the summed delta.
+pub fn do_mutator_macro_applies_all_mutations_in_order() {
+    fonts::init();
+
+    let mut element = GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str(
+            "macro",
+            1.0,
+            10.0,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 50.0),
+        ),
+        0,
+        0,
+    );
+
+    let first = Mutation::area_delta(DeltaGlyphArea::new(vec![
+        GlyphAreaField::Operation(ApplyOperation::Add),
+        GlyphAreaField::position(5.0, 7.0),
+    ]));
+    let second = Mutation::area_delta(DeltaGlyphArea::new(vec![
+        GlyphAreaField::Operation(ApplyOperation::Add),
+        GlyphAreaField::position(2.0, 3.0),
+    ]));
+    let mutator = GfxMutator::new_macro(vec![first, second], 0);
+
+    mutator.apply_to(&mut element);
+
+    // Both deltas ran: (5+2, 7+3) = (7, 10).
+    assert!(
+        almost_equal(element.position().x, 7.0),
+        "Expected x=7.0 after two add-deltas, got {}",
+        element.position().x
+    );
+    assert!(
+        almost_equal(element.position().y, 10.0),
+        "Expected y=10.0 after two add-deltas, got {}",
+        element.position().y
+    );
+}
+
+#[test]
+fn test_mutator_macro_empty_is_noop() {
+    do_mutator_macro_empty_is_noop();
+}
+
+/// A `Macro` with no mutations leaves the target untouched. Mirrors
+/// the `Mutation::None` noop guarantee at the mutator level — an
+/// empty-vec `Macro` is a valid carrier even if nothing inside it
+/// fires.
+pub fn do_mutator_macro_empty_is_noop() {
+    fonts::init();
+
+    let mut element = GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str(
+            "empty",
+            1.0,
+            10.0,
+            Vec2::new(15.0, 25.0),
+            Vec2::new(100.0, 50.0),
+        ),
+        0,
+        0,
+    );
+    let before = element.position();
+    let text_before = element.glyph_area().unwrap().text.clone();
+
+    let mutator = GfxMutator::new_macro(vec![], 0);
+    mutator.apply_to(&mut element);
+
+    assert_eq!(element.position(), before);
+    assert_eq!(element.glyph_area().unwrap().text, text_before);
+}
+
+// ── GfxMutator::Void ───────────────────────────────────────────────
+
+#[test]
+fn test_mutator_void_is_noop_when_applied_directly() {
+    do_mutator_void_is_noop_when_applied_directly();
+}
+
+/// `Void` falls through the `Applicable<GfxElement>` match — applying
+/// it to an element changes nothing. This guarantees a `Void`
+/// placeholder in a `MutatorTree` can never corrupt the target that
+/// happens to align under it.
+pub fn do_mutator_void_is_noop_when_applied_directly() {
+    fonts::init();
+
+    let mut element = GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str(
+            "void",
+            1.0,
+            10.0,
+            Vec2::new(42.0, 17.0),
+            Vec2::new(100.0, 50.0),
+        ),
+        0,
+        0,
+    );
+    let before = element.position();
+    let text_before = element.glyph_area().unwrap().text.clone();
+
+    let mutator = GfxMutator::new_void(0);
+    mutator.apply_to(&mut element);
+
+    assert_eq!(element.position(), before);
+    assert_eq!(element.glyph_area().unwrap().text, text_before);
+}
+
+#[test]
+fn test_mutator_void_preserves_channel_alignment_in_tree_walk() {
+    do_mutator_void_preserves_channel_alignment_in_tree_walk();
+}
+
+/// `Void` is load-bearing for channel alignment in a `MutatorTree`:
+/// when sibling mutators must skip one target position without
+/// carrying a payload, a `Void` at the matching channel keeps the
+/// subsequent `Single` aligned to the next target child. Build a
+/// target tree with two children on channels 1 and 2; align a
+/// `Void` on channel 1 and a `Single` on channel 2; verify only
+/// child 2 was mutated.
+pub fn do_mutator_void_preserves_channel_alignment_in_tree_walk() {
+    fonts::init();
+
+    // -- target tree: root (ch 0) -> child_1 (ch 1) -> child_2 (ch 2)
+    let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+    let child_1_id = model.arena.new_node(GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str(
+            "ch1",
+            1.0,
+            10.0,
+            Vec2::new(10.0, 10.0),
+            Vec2::new(50.0, 50.0),
+        ),
+        1,
+        1,
+    ));
+    let child_2_id = model.arena.new_node(GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str(
+            "ch2",
+            1.0,
+            10.0,
+            Vec2::new(20.0, 20.0),
+            Vec2::new(50.0, 50.0),
+        ),
+        2,
+        2,
+    ));
+    model.root.append(child_1_id, &mut model.arena);
+    model.root.append(child_2_id, &mut model.arena);
+
+    let child_1_before = model.arena.get(child_1_id).unwrap().get().position();
+
+    // -- mutator tree: root (Void ch 0) -> Void (ch 1), Single (ch 2, add (3, 4))
+    let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new();
+    let void_mut_id = mutator.arena.new_node(GfxMutator::new_void(1));
+    let single_mut_id = mutator.arena.new_node(GfxMutator::new(
+        Mutation::area_delta(DeltaGlyphArea::new(vec![
+            GlyphAreaField::Operation(ApplyOperation::Add),
+            GlyphAreaField::position(3.0, 4.0),
+        ])),
+        2,
+    ));
+    mutator.root.append(void_mut_id, &mut mutator.arena);
+    mutator.root.append(single_mut_id, &mut mutator.arena);
+
+    mutator.apply_to(&mut model);
+
+    // child_1 unchanged (the Void aligned to it).
+    let child_1 = model.arena.get(child_1_id).unwrap().get();
+    assert_eq!(
+        child_1.position(),
+        child_1_before,
+        "Void mutator must not change its aligned target"
+    );
+
+    // child_2 shifted by (3, 4).
+    let child_2 = model.arena.get(child_2_id).unwrap().get();
+    assert!(
+        almost_equal(child_2.position().x, 23.0),
+        "child_2 x: expected 23.0 (20 + 3), got {}",
+        child_2.position().x
+    );
+    assert!(
+        almost_equal(child_2.position().y, 24.0),
+        "child_2 y: expected 24.0 (20 + 4), got {}",
+        child_2.position().y
     );
 }

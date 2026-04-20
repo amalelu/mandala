@@ -1,3 +1,16 @@
+//! Walker that drives `MutatorTree::apply_to` — aligns mutators to
+//! target-tree elements by their
+//! [`BranchChannel`](crate::gfx_structs::tree::BranchChannel) and
+//! dispatches each mutator's effect. Handles straight-line
+//! alignment, `Instruction::RepeatWhile` loop expansion (with the
+//! [`Predicate`](crate::gfx_structs::predicate::Predicate) language),
+//! and the event-propagation side channel that `GlyphTreeEvent`s
+//! ride on. The single entry point is
+//! [`walk_tree_from`](crate::gfx_structs::tree_walker::walk_tree_from);
+//! everything else in this module is internal scaffolding kept
+//! `pub` so mutator-DSL authors
+//! can compose custom terminators without forking the walker.
+
 use glam::Vec2;
 use indextree::{Arena, Node, NodeId};
 use log::{debug, warn};

@@ -1,4 +1,5 @@
-//! Tests for [`crate::font::fonts::measure_glyph_ink_bounds`].
+//! Tests for [`crate::font::fonts`] measurement primitives:
+//! [`measure_glyph_ink_bounds`] and [`measure_text_block_unbounded`].
 //!
 //! Follows the `do_*()` / `test_*()` split from §B8 — every `do_*`
 //! body is benchmarkable from `benches/test_bench.rs`.
@@ -6,7 +7,9 @@
 use cosmic_text::SwashCache;
 
 use crate::font::fonts;
-use crate::font::fonts::{measure_glyph_ink_bounds, AppFont, FONT_SYSTEM};
+use crate::font::fonts::{
+    measure_glyph_ink_bounds, measure_text_block_unbounded, AppFont, FONT_SYSTEM,
+};
 
 #[test]
 fn test_measure_glyph_ink_bounds_latin_has_positive_advance() {
@@ -172,3 +175,92 @@ pub fn do_measure_glyph_ink_bounds_y_offset_from_box_center() {
     );
 }
 
+#[test]
+fn test_measure_text_block_unbounded_empty_is_zero() {
+    do_measure_text_block_unbounded_empty_is_zero();
+}
+
+/// Empty input short-circuits to `TextBlockSize::ZERO` without
+/// touching the shaper.
+pub fn do_measure_text_block_unbounded_empty_is_zero() {
+    fonts::init();
+    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let out = measure_text_block_unbounded(&mut fs, "", 14.0, 16.8);
+    assert_eq!(out.width, 0.0);
+    assert_eq!(out.height, 0.0);
+    assert_eq!(out.line_count, 0);
+}
+
+#[test]
+fn test_measure_text_block_unbounded_single_line_nonzero() {
+    do_measure_text_block_unbounded_single_line_nonzero();
+}
+
+/// A single-line Latin string shapes to one run with positive width
+/// and `height == line_height`.
+pub fn do_measure_text_block_unbounded_single_line_nonzero() {
+    fonts::init();
+    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let out = measure_text_block_unbounded(&mut fs, "Hello", 14.0, 16.8);
+    assert_eq!(out.line_count, 1, "one line expected for no-newline input");
+    assert!(out.width > 0.0, "non-empty text must produce positive width");
+    assert!(
+        (out.height - 16.8).abs() < 0.001,
+        "height should be line_height * 1 line, got {}",
+        out.height
+    );
+}
+
+#[test]
+fn test_measure_text_block_unbounded_multiline_width_is_widest_line() {
+    do_measure_text_block_unbounded_multiline_width_is_widest_line();
+}
+
+/// Embedded `\n` produces one layout run per line; `width` is the
+/// widest run and `height == line_count * line_height`.
+pub fn do_measure_text_block_unbounded_multiline_width_is_widest_line() {
+    fonts::init();
+    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let narrow = measure_text_block_unbounded(&mut fs, "a", 14.0, 16.8);
+    let wide = measure_text_block_unbounded(&mut fs, "ccccc", 14.0, 16.8);
+    let block = measure_text_block_unbounded(&mut fs, "a\nbb\nccccc", 14.0, 16.8);
+    assert_eq!(block.line_count, 3, "three \\n-separated lines expected");
+    assert!(
+        (block.height - 3.0 * 16.8).abs() < 0.001,
+        "height should be 3 * line_height, got {}",
+        block.height
+    );
+    // Width must match the widest standalone line within float slop.
+    assert!(
+        (block.width - wide.width).abs() < 0.5,
+        "block width should match widest line; block={} wide={} narrow={}",
+        block.width,
+        wide.width,
+        narrow.width
+    );
+    assert!(block.width > narrow.width);
+}
+
+#[test]
+fn test_measure_text_block_unbounded_width_scales_with_font_size() {
+    do_measure_text_block_unbounded_width_scales_with_font_size();
+}
+
+/// Doubling `scale` roughly doubles the returned `width` — the
+/// primitive actually drives shaping rather than e.g. ignoring the
+/// size parameter. Uses a generous tolerance because exact scaling
+/// is font-dependent (kerning, hinting).
+pub fn do_measure_text_block_unbounded_width_scales_with_font_size() {
+    fonts::init();
+    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let small = measure_text_block_unbounded(&mut fs, "Hello world", 14.0, 16.8);
+    let large = measure_text_block_unbounded(&mut fs, "Hello world", 28.0, 33.6);
+    let ratio = large.width / small.width;
+    assert!(
+        (1.8..=2.2).contains(&ratio),
+        "width should scale ~linearly with font size; ratio={} (small={}, large={})",
+        ratio,
+        small.width,
+        large.width
+    );
+}

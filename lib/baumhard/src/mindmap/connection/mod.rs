@@ -1,17 +1,19 @@
 //! Connection-path geometry: anchor resolution, straight/cubic Bezier
 //! path construction, arc-length sampling, and point-to-path distance.
 //!
-//! - [`build_connection_path`] turns an edge's anchors + control points
-//!   into a [`ConnectionPath`] (straight or cubic Bezier).
-//! - [`sample_path`] walks evenly-spaced points along a path —
+//! - `build_connection_path` turns an edge's anchors + control points
+//!   into a `ConnectionPath` (straight or cubic Bezier).
+//! - `sample_path` walks evenly-spaced points along a path —
 //!   `scene_builder` uses these to place per-glyph anchors along a
 //!   rendered connection.
-//! - [`distance_to_path`] backs the edge hit-test.
+//! - `distance_to_path` backs the edge hit-test.
 //!
 //! The cubic-Bezier internals (arc-length table, parameter binary
-//! search) live in the sibling [`bezier`] module; the tests live in
+//! search) live in the sibling `bezier` module; the tests live in
 //! `tests.rs` so the public surface here stays skimmable.
 
+/// Cubic-Bezier math and arc-length sampling — the internals
+/// behind `sample_path` and `distance_to_path`.
 pub mod bezier;
 #[cfg(test)]
 mod tests;

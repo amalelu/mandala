@@ -7,14 +7,14 @@
 //!
 //! This module deliberately replaces the dormant
 //! [`crate::core::animation`] skeleton. The dormant types are
-//! generic over `T: Mutable` and don't fit Mandala's
+//! generic over a `Mutable` trait and don't fit Mandala's
 //! `MindMap` model + `MutatorTree` shape.
 //!
 //! # Architecture
 //!
-//! - [`AnimationTiming`] is a serializable envelope on
-//!   `CustomMutation` carrying `duration_ms`, `delay_ms`,
-//!   [`Easing`] curve, and an optional [`Followup`].
+//! - `AnimationTiming` is a serializable envelope on
+//!   `CustomMutation` carrying `duration_ms`, `delay_ms`, an
+//!   `Easing` curve, and an optional `Followup`.
 //! - The per-active-mutation runtime record (snapshot of from/to
 //!   states, elapsed time, completion path) lives in the app
 //!   layer — `mandala::application::document::AnimationInstance`
@@ -22,10 +22,10 @@
 //!   completion commit (`apply_custom_mutation`) both live
 //!   there. This module stays pure baumhard: serializable types
 //!   and stateless helpers, no `MindNode` or document coupling.
-//! - [`lerp_f32`], [`lerp_vec2`], [`lerp_color`] are the
-//!   per-field interpolators. Position, scale, and color fields
-//!   blend continuously; structural changes (text replacement,
-//!   region count shifts) snap at the boundary.
+//! - `lerp_f32`, `lerp_vec2`, `lerp_color` are the per-field
+//!   interpolators. Position, scale, and color fields blend
+//!   continuously; structural changes (text replacement, region
+//!   count shifts) snap at the boundary.
 //!
 //! # Composition with the §B2 mutator path
 //!

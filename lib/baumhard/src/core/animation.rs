@@ -1,10 +1,10 @@
 //! Animation traits and timeline primitives.
 //!
-//! Defines the vocabulary used to sequence [`Mutable`] changes over
-//! time — the `Mutator` / `AnimationMutator` traits, the
-//! [`Timeline`] / [`TimelineEvent`] event stream, and the
-//! [`TimelineBuilder`] fluent constructor. The scene-level executor
-//! lives outside this module; here we only describe the data shapes.
+//! Defines the vocabulary used to sequence `Mutable` changes over
+//! time — the `Mutator` / `AnimationMutator` traits, the `Timeline`
+//! / `TimelineEvent` event stream, and the `TimelineBuilder` fluent
+//! constructor. The scene-level executor lives outside this module;
+//! here we only describe the data shapes.
 
 use std::rc::Rc;
 

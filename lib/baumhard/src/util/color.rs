@@ -1,7 +1,7 @@
 //! Core colour type and arithmetic, plus macros for compile-time
 //! colour literals. The conversion utilities (hex/RGB/HSV, theme
-//! variable resolution) live in the companion
-//! [`super::color_conversion`] module.
+//! variable resolution) live in the companion `super::color_conversion`
+//! module.
 
 use std::ops::{Add, Div, Index, IndexMut, Mul, Sub};
 use serde::{Deserialize, Serialize};

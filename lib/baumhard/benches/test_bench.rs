@@ -3,7 +3,10 @@ use baumhard::core::tests::primitives_tests::*;
 use baumhard::font::tests::fonts_tests::*;
 use baumhard::gfx_structs::tests::area_tests::*;
 use baumhard::gfx_structs::tests::model_tests::*;
-use baumhard::gfx_structs::tests::region_tests::*;
+use baumhard::gfx_structs::tests::mutator_tests::*;
+use baumhard::gfx_structs::tests::region_indexer_tests::*;
+use baumhard::gfx_structs::tests::region_params_tests::*;
+use baumhard::gfx_structs::tests::region_rect_tests::*;
 use baumhard::gfx_structs::tests::scene_tests::*;
 use baumhard::gfx_structs::tests::tree_tests::*;
 use baumhard::gfx_structs::tests::tree_walker_tests::*;
@@ -65,15 +68,26 @@ fn criterion_benchmark(c: &mut Criterion) {
     });
     c.bench_function("event_propagation_complex", |b| b.iter(|| event_propagation_complex_symmetric()));
     c.bench_function("event_propagation_simple", |b| b.iter(|| event_propagation_simple()));
+    c.bench_function("mutator_macro_applies_all_mutations_in_order", |b| {
+        b.iter(|| do_mutator_macro_applies_all_mutations_in_order())
+    });
+    c.bench_function("mutator_macro_empty_is_noop", |b| {
+        b.iter(|| do_mutator_macro_empty_is_noop())
+    });
+    c.bench_function("mutator_void_is_noop_when_applied_directly", |b| {
+        b.iter(|| do_mutator_void_is_noop_when_applied_directly())
+    });
+    c.bench_function("mutator_void_preserves_channel_alignment_in_tree_walk", |b| {
+        b.iter(|| do_mutator_void_preserves_channel_alignment_in_tree_walk())
+    });
     // regions //
-    c.bench_function("regions_sunny_day", |b| b.iter(|| do_region_params_new_sunny_day()));
+    c.bench_function("region_params_new_sunny_day", |b| b.iter(|| do_region_params_new_sunny_day()));
     c.bench_function("region_indexer_initialise", |b| b.iter(|| do_region_indexer_initialize()));
-    c.bench_function("region_indexer_insert", |b| b.iter(|| do_region_indexer_insert_delete()));
-    c.bench_function("regions_rainy_day", |b| b.iter(|| do_regions_params_new_rainy_day()));
-    c.bench_function("region_params_calculate_pixel_from_region", |b| b.iter(|| do_region_params_calculate_pixel_from_region()));
-    c.bench_function("region_params_calculate_region_from_pixel", |b| b.iter(|| do_region_params_calculate_region_from_pixel()));
-    c.bench_function("region_params_calculate_regions_intersected_by_rectangle", |b| b.iter(||
-       do_region_params_calculate_regions_intersected_by_rectangle()));
+    c.bench_function("region_indexer_insert_and_remove", |b| b.iter(|| do_region_indexer_insert_and_remove()));
+    c.bench_function("region_params_non_divisor_target", |b| b.iter(|| do_region_params_non_divisor_target()));
+    c.bench_function("region_params_pixel_to_region", |b| b.iter(|| do_region_params_pixel_to_region()));
+    c.bench_function("region_params_region_to_pixel", |b| b.iter(|| do_region_params_region_to_pixel()));
+    c.bench_function("region_rect_exhaustive_4x4_grid", |b| b.iter(|| do_rect_exhaustive_4x4_grid()));
     // grapheme_chad //
     c.bench_function("slice_to_newline", |b| b.iter(|| do_slice_to_newline()));
     c.bench_function("split_graphemes", |b| b.iter(|| do_split_graphemes()));
@@ -173,6 +187,18 @@ fn criterion_benchmark(c: &mut Criterion) {
     });
     c.bench_function("measure_glyph_ink_bounds_y_offset_from_box_center", |b| {
         b.iter(|| do_measure_glyph_ink_bounds_y_offset_from_box_center())
+    });
+    c.bench_function("measure_text_block_unbounded_empty_is_zero", |b| {
+        b.iter(|| do_measure_text_block_unbounded_empty_is_zero())
+    });
+    c.bench_function("measure_text_block_unbounded_single_line_nonzero", |b| {
+        b.iter(|| do_measure_text_block_unbounded_single_line_nonzero())
+    });
+    c.bench_function("measure_text_block_unbounded_multiline_width_is_widest_line", |b| {
+        b.iter(|| do_measure_text_block_unbounded_multiline_width_is_widest_line())
+    });
+    c.bench_function("measure_text_block_unbounded_width_scales_with_font_size", |b| {
+        b.iter(|| do_measure_text_block_unbounded_width_scales_with_font_size())
     });
     // scene + hit-test //
     c.bench_function("descendant_at_hits_single_area", |b| b.iter(|| do_descendant_at_hits_single_area()));

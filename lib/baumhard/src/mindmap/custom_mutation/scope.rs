@@ -1,5 +1,7 @@
-//! Constructor helpers that produce a [`MutatorNode`] equivalent to
-//! each legacy [`super::TargetScope`] variant. A [`super::CustomMutation`]
+//! Constructor helpers that produce a
+//! [`MutatorNode`](crate::mutator_builder::MutatorNode) equivalent to
+//! each legacy `TargetScope` variant. A
+//! [`CustomMutation`](crate::mindmap::custom_mutation::CustomMutation)
 //! whose payload used to be a flat `Vec<Mutation>` + `target_scope`
 //! now carries a `mutator: MutatorNode` — these helpers bake a flat
 //! `Vec<Mutation>` into the AST shape that matches the scope the

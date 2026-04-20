@@ -5,7 +5,7 @@
 //! the renderer pipeline code. Colors are authored for a dark canvas
 //! (the app's default); a future theme-variant pass may swap them.
 
-use cosmic_text::Color;
+use baumhard::font::Color;
 
 // ---- border / chrome --------------------------------------------------
 

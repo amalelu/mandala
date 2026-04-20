@@ -1,7 +1,10 @@
 //! Glyph-model mutators: `DeltaGlyphModel` (field-level deltas) and
 //! `GlyphModelCommand` (high-level commands like nudge / rotate /
-//! insert). Both implement [`Applicable<GlyphModel>`] and route through
-//! [`GlyphModel`]'s internal `apply_operation` or its public methods.
+//! insert). Both implement
+//! [`Applicable`](crate::core::primitives::Applicable)`<GlyphModel>`
+//! and route through
+//! [`GlyphModel`](crate::gfx_structs::model::GlyphModel)'s internal
+//! `apply_operation` or its public methods.
 
 use super::glyph_model::GlyphModel;
 use super::line::GlyphLine;

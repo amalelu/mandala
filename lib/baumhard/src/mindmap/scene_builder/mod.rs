@@ -5,21 +5,21 @@
 //! buffers.
 //!
 //! Sharded by role so each file stays focused:
-//! - [`mod@self`] — element structs, preview wrappers, `RenderScene`
-//!   aggregate, edge-handle glyph constants, the public re-export
-//!   surface.
-//! - [`builder`] — `build_scene`, `build_scene_with_cache`, and the
+//! - [`self`] (this file) — element structs, preview wrappers,
+//!   `RenderScene` aggregate, edge-handle glyph constants, the
+//!   public re-export surface.
+//! - `builder` — `build_scene`, `build_scene_with_cache`, and the
 //!   cache-less wrappers. Thin orchestrator; delegates to the
 //!   role modules below.
-//! - [`node_pass`] — emits `TextElement`s + `BorderElement`s + clip
+//! - `node_pass` — emits `TextElement`s + `BorderElement`s + clip
 //!   AABBs in a single walk over visible nodes.
-//! - [`connection`] — connection body glyphs (with
+//! - `connection` — connection body glyphs (with
 //!   `SceneConnectionCache` fast/slow paths), edge-handle glyphs,
 //!   and the `point_inside_any_node` clip predicate.
-//! - [`label`] — connection labels with the inline-edit override
+//! - `label` — connection labels with the inline-edit override
 //!   + synthesize-if-empty pass.
-//! - [`portal`] — two markers per edge with `display_mode = "portal"`.
-//! - [`edge_handle`] — `build_edge_handles` helper (re-exported
+//! - `portal` — two markers per edge with `display_mode = "portal"`.
+//! - `edge_handle` — `build_edge_handles` helper (re-exported
 //!   for external callers that hit-test handles without building
 //!   a full scene).
 
@@ -237,6 +237,9 @@ mod connection;
 mod edge_handle;
 mod label;
 mod node_pass;
+/// Portal-marker emission — one `PortalElement` per endpoint of
+/// each `display_mode = "portal"` edge, attached to its owning
+/// node's border at the point facing the opposite endpoint.
 pub mod portal;
 
 #[cfg(test)]

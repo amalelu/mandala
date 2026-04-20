@@ -1,3 +1,12 @@
+//! Arena-backed glyph tree + its mutator sibling. `Tree<T, M>` wraps
+//! an `indextree::Arena` for O(1) child iteration and O(1) node
+//! access; `MutatorTree<M>` mirrors that shape but carries mutations
+//! instead of elements. The two meet in `MutatorTree::apply_to`,
+//! which hands both arenas to `walk_tree_from` (in the sibling
+//! `tree_walker` module) to align mutators to targets by branch
+//! channel. Everything here is mutation-first per §B2: changing a
+//! field is a mutator applied in-place, never a rebuilt arena.
+
 use crate::core::primitives::Applicable;
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{GfxMutator, GlyphTreeEventInstance};
@@ -51,7 +60,7 @@ pub trait TreeNode {
 /// [`Tree`] because mutators carry no spatial data — no region
 /// index, no AABB caches, no position. Applied to a `Tree` via
 /// [`MutatorTree::apply_to`], which drives
-/// [`walk_tree_from`](crate::gfx_structs::tree_walker::walk_tree_from).
+/// [`walk_tree_from`].
 #[derive(Clone, Debug)]
 pub struct MutatorTree<T> {
     /// Backing arena — the same `indextree::Arena` used by the
@@ -115,8 +124,9 @@ pub struct Tree<T: Clone, M: Applicable<T>> {
     phantom: PhantomData<M>,
     /// Arena id of the tree root.
     pub root: NodeId,
-    /// Draw order hint relative to sibling trees in a [`Scene`].
-    /// Higher = drawn on top.
+    /// Draw order hint relative to sibling trees in a
+    /// [`Scene`](crate::gfx_structs::scene::Scene). Higher = drawn on
+    /// top.
     pub layer: usize,
     /// All child positions are relative to this
     position: Vec2,

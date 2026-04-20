@@ -94,11 +94,7 @@ pub(super) fn handle_click(
                     let mut ids = existing.clone();
                     if let Some(pos) = ids.iter().position(|i| i == id) {
                         ids.remove(pos);
-                        doc.selection = match ids.len() {
-                            0 => SelectionState::None,
-                            1 => SelectionState::Single(ids.into_iter().next().unwrap()),
-                            _ => SelectionState::Multi(ids),
-                        };
+                        doc.selection = SelectionState::from_ids(ids);
                     } else {
                         ids.push(id.clone());
                         doc.selection = SelectionState::Multi(ids);

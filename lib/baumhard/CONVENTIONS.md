@@ -179,13 +179,11 @@ worst target.
   in `lib/baumhard/src/gfx_structs/model.rs` is the exemplar: tiny,
   called in the tight loop, inlined on purpose. `#[inline]` on a cold
   function just slows down compilation.
-- **`unsafe` is forbidden.** New `unsafe` is a roadmap-scale decision
-  and needs a benchmark plus a review. `unsafe` for lifetime
+- **`unsafe` is forbidden.** There is no `unsafe` block anywhere in
+  Baumhard today; keep it that way. New `unsafe` is a roadmap-scale
+  decision and needs a benchmark plus a review. `unsafe` for lifetime
   laundering, raw pointer arithmetic, or "I know better than the
-  borrow checker" is never acceptable. The existing `unsafe` in
-  `lib/baumhard/src/util/simd.rs` is legacy scaffolding from an early
-  SIMD experiment and is a violation to be cleaned up — not a
-  precedent.
+  borrow checker" is never acceptable.
 - **Every user-visible primitive has a criterion bench.** New
   primitives ship with a new entry in `benches/test_bench.rs`;
   removed primitives drop theirs in the same commit. The bench file

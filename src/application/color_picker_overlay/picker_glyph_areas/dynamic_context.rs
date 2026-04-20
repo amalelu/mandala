@@ -29,21 +29,21 @@ use super::areas::PickerSection;
 /// Per-section base-color tables precomputed in
 /// [`PickerDynamicContext::new`]. Each entry pairs the float RGB
 /// (the shape `highlight_hovered_cell_color` wants as input) with the
-/// already-quantized `cosmic_text::Color` (for the common non-hovered,
+/// already-quantized `baumhard::font::Color` (for the common non-hovered,
 /// non-selected case). `field()` becomes an array-index lookup plus
 /// an optional highlight mix for the 1-3 cells per apply that are
 /// actually hovered or the currently-selected sat/val cell.
 #[derive(Clone, Copy)]
 struct CellColor {
     rgb: [f32; 3],
-    color: cosmic_text::Color,
+    color: baumhard::font::Color,
 }
 
 impl CellColor {
     const fn zero() -> Self {
         Self {
             rgb: [0.0; 3],
-            color: cosmic_text::Color(0),
+            color: baumhard::font::Color(0),
         }
     }
 
@@ -189,7 +189,7 @@ pub(super) struct PickerDynamicContext<'a> {
     layout: &'a ColorPickerLayout,
     /// Preview color in cosmic form — reused by title/hint/hex/preview
     /// (when not commit-hovered).
-    preview_color: cosmic_text::Color,
+    preview_color: baumhard::font::Color,
     /// Preview color in float RGB — input to the `highlight_*` mixes
     /// for the preview-commit-hover branch.
     preview_rgb: [f32; 3],
@@ -307,11 +307,11 @@ impl<'a> PickerDynamicContext<'a> {
     }
 }
 
-/// Convert a `cosmic_text::Color` to `[f32; 4]` in `[0, 1]` — same
+/// Convert a `baumhard::font::Color` to `[f32; 4]` in `[0, 1]` — same
 /// shape as `make_area`'s float-region input so the two paths
 /// produce bit-identical region values.
 #[inline]
-fn cosmic_to_rgba(color: cosmic_text::Color) -> [f32; 4] {
+fn cosmic_to_rgba(color: baumhard::font::Color) -> [f32; 4] {
     [
         color.r() as f32 / 255.0,
         color.g() as f32 / 255.0,
@@ -371,7 +371,7 @@ impl<'a> SectionContext for PickerDynamicContext<'a> {
         // apply that are hovered or the currently-selected sat/val
         // cell. No `hsv_to_rgb` calls on this hot loop.
         let g = self.geometry;
-        let (count, color, font): (usize, cosmic_text::Color, Option<AppFont>) = match section {
+        let (count, color, font): (usize, baumhard::font::Color, Option<AppFont>) = match section {
             PickerSection::Title | PickerSection::Hint => {
                 unreachable!("title/hint sections are not built")
             }

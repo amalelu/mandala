@@ -2,10 +2,10 @@
 //!
 //! This module defines the foundational data types that every higher-level
 //! abstraction in Baumhard rests on: character-range colour/font regions
-//! ([`ColorFontRegions`], [`ColorFontRegion`]), the arithmetic operation
-//! enum ([`ApplyOperation`]), spatial anchoring ([`Anchor`],
-//! [`AnchorPoint`], [`AnchorTarget`]), element flags ([`Flag`]), and the
-//! [`Applicable`] trait that the mutation pipeline dispatches through.
+//! (`ColorFontRegions`, `ColorFontRegion`), the arithmetic operation
+//! enum (`ApplyOperation`), spatial anchoring (`Anchor`, `AnchorPoint`,
+//! `AnchorTarget`), element flags (`Flag`), and the `Applicable` trait
+//! that the mutation pipeline dispatches through.
 //!
 //! Nothing in this module touches the GPU, the font system, or the arena
 //! — it is pure data + O(n)-or-better algorithms over sorted sets.

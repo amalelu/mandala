@@ -15,7 +15,7 @@ use glam::Vec2;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn make_area(
     text: &str,
-    color: cosmic_text::Color,
+    color: baumhard::font::Color,
     font_size: f32,
     line_height: f32,
     pos: (f32, f32),

@@ -125,6 +125,34 @@ pub enum SelectionState {
 }
 
 impl SelectionState {
+    /// Build a node selection from a flat list of IDs: empty becomes
+    /// [`SelectionState::None`], a single element becomes [`Single`],
+    /// anything longer becomes [`Multi`]. Shared by the three call
+    /// sites (single click, drag-select preview, drag-select commit)
+    /// that collapse a hit-set into a selection state — keeps the
+    /// empty-vs-single-vs-multi split in one place so they cannot
+    /// drift. Interactive-path safe: never panics on any input length
+    /// (§9).
+    ///
+    /// [`Single`]: SelectionState::Single
+    /// [`Multi`]: SelectionState::Multi
+    pub fn from_ids(ids: Vec<String>) -> Self {
+        let mut iter = ids.into_iter();
+        match iter.next() {
+            None => SelectionState::None,
+            Some(first) => match iter.next() {
+                None => SelectionState::Single(first),
+                Some(second) => {
+                    let mut all = Vec::with_capacity(2 + iter.size_hint().0);
+                    all.push(first);
+                    all.push(second);
+                    all.extend(iter);
+                    SelectionState::Multi(all)
+                }
+            },
+        }
+    }
+
     pub fn is_selected(&self, node_id: &str) -> bool {
         match self {
             SelectionState::None => false,

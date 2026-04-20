@@ -1,3 +1,15 @@
+//! `GfxMutator` — the top-level mutator variant that rides one node
+//! of a `MutatorTree<GfxMutator>`. The four variants cover single-
+//! target mutations (`Single`), padded alignment slots (`Void`),
+//! control-flow loops (`Instruction` + its
+//! [`Predicate`](crate::gfx_structs::predicate::Predicate) condition),
+//! and batched field updates against one target (`Macro`). This
+//! module also defines the `Mutation` payload enum that `Single`
+//! and `Macro` carry, the `Instruction` control-flow enum that
+//! `Instruction` nodes carry, and the `GlyphTreeEvent` /
+//! `GlyphTreeEventInstance` types that the walker threads through
+//! the tree as a side channel during `apply_to`.
+
 use log::debug;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -27,9 +39,9 @@ pub enum Instruction {
    /// number of descendants tested.
    ///
    /// Aligns mutator children to target children by **channel** (via
-   /// [`crate::gfx_structs::tree_walker::align_child_walks`]). For
-   /// per-index targeting that sidesteps channel semantics entirely,
-   /// see [`Instruction::MapChildren`].
+   /// `tree_walker::align_child_walks`, private). For per-index
+   /// targeting that sidesteps channel semantics entirely, see
+   /// [`Instruction::MapChildren`].
    RepeatWhile(Predicate),
    /// Rotate every descendant that satisfies the predicate around the
    /// pivot element's position by the given degrees. The `f32` is the
@@ -74,8 +86,8 @@ pub enum Instruction {
    /// `debug!` line at termination).
    ///
    /// When to reach for this variant: the default channel-align path
-   /// (via [`align_child_walks`](crate::gfx_structs::tree_walker::align_child_walks),
-   /// see also [`RepeatWhile`](Instruction::RepeatWhile)) treats the
+   /// (via `tree_walker::align_child_walks` — private — see also
+   /// [`RepeatWhile`](Instruction::RepeatWhile)) treats the
    /// `channel` field as a broadcast-group tag — one mutator on
    /// channel N hits every target child on channel N. That's correct
    /// for groups but wrong for per-index targeting where each child
