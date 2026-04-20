@@ -169,6 +169,24 @@ impl SelectionState {
         }
     }
 
+    /// Return the owning `EdgeRef` for either an `Edge` or
+    /// `PortalLabel` selection — the "which edge is the user
+    /// pointing at" form, collapsing the two selection shapes
+    /// into one. Used by console predicates + the `edge`
+    /// command so commands targeting the edge as a whole (type
+    /// change, display mode flip, reset) keep working after a
+    /// user clicks a portal marker and ends up with a
+    /// `PortalLabel` selection. Pair with `selected_edge` for
+    /// the narrower "whole-edge, not a label" form on the rare
+    /// paths that need to disambiguate.
+    pub fn selected_edge_or_portal_edge(&self) -> Option<EdgeRef> {
+        match self {
+            SelectionState::Edge(e) => Some(e.clone()),
+            SelectionState::PortalLabel(s) => Some(s.edge_ref()),
+            _ => None,
+        }
+    }
+
     /// A cached `EdgeKey` borrow for the selected portal label,
     /// if any, suitable for building a
     /// [`baumhard::mindmap::scene_builder::SelectedPortalLabel`]

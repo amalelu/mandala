@@ -11,7 +11,7 @@
 use super::Command;
 use crate::application::console::completion::{prefix_filter, Completion, CompletionContext, CompletionState};
 use crate::application::console::parser::Args;
-use crate::application::console::predicates::edge_selected;
+use crate::application::console::predicates::edge_or_portal_label_selected;
 use crate::application::console::traits::{apply_kvs, HasLabel};
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 use crate::application::document::SelectionState;
@@ -26,7 +26,7 @@ pub const COMMAND: Command = Command {
     summary: "Edit, clear, set, or reposition the selected edge's label",
     usage: "label text=\"<text>\" [position=<start|middle|end>]   |   label edit   |   label clear",
     tags: &["edge", "label", "text", "position", "clear", "edit"],
-    applicable: edge_selected,
+    applicable: edge_or_portal_label_selected,
     complete: complete_label,
     execute: execute_label,
 };
@@ -69,25 +69,49 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     // `label clear` empties the label.
     match args.positional(0) {
         Some("edit") => {
-            let er = match &eff.document.selection {
-                SelectionState::Edge(e) => e.clone(),
+            // `label edit` opens the inline editor. Dispatches
+            // to the edge label editor for `Edge` selections and
+            // to the portal-text editor for `PortalLabel`
+            // selections — the console effect fields are
+            // mutually exclusive (only one can be Some per
+            // command execution).
+            match &eff.document.selection {
+                SelectionState::Edge(e) => {
+                    eff.open_label_edit = Some(e.clone());
+                    eff.close_console = true;
+                    return ExecResult::ok_empty();
+                }
+                SelectionState::PortalLabel(s) => {
+                    eff.open_portal_text_edit =
+                        Some((s.edge_ref(), s.endpoint_node_id.clone()));
+                    eff.close_console = true;
+                    return ExecResult::ok_empty();
+                }
                 _ => return ExecResult::err("no edge selected"),
-            };
-            eff.open_label_edit = Some(er);
-            eff.close_console = true;
-            return ExecResult::ok_empty();
+            }
         }
         Some("clear") => {
-            let er = match &eff.document.selection {
-                SelectionState::Edge(e) => e.clone(),
+            match &eff.document.selection {
+                SelectionState::Edge(e) => {
+                    let changed = eff.document.set_edge_label(&e.clone(), None);
+                    return if changed {
+                        ExecResult::ok_msg("label cleared")
+                    } else {
+                        ExecResult::ok_msg("label already empty")
+                    };
+                }
+                SelectionState::PortalLabel(s) => {
+                    let er = s.edge_ref();
+                    let ep = s.endpoint_node_id.clone();
+                    let changed = eff.document.set_portal_label_text(&er, &ep, None);
+                    return if changed {
+                        ExecResult::ok_msg("portal label text cleared")
+                    } else {
+                        ExecResult::ok_msg("portal label text already empty")
+                    };
+                }
                 _ => return ExecResult::err("no edge selected"),
-            };
-            let changed = eff.document.set_edge_label(&er, None);
-            return if changed {
-                ExecResult::ok_msg("label cleared")
-            } else {
-                ExecResult::ok_msg("label already empty")
-            };
+            }
         }
         Some(other) => {
             return ExecResult::err(format!(

@@ -10,7 +10,7 @@
 //! helper already exists here.
 
 use super::ConsoleContext;
-use crate::application::document::SelectionState;
+use crate::application::document::{EdgeRef, SelectionState};
 
 // ============================================================
 // Selection shape
@@ -28,22 +28,25 @@ pub fn two_nodes_selected(ctx: &ConsoleContext) -> bool {
     matches!(&ctx.document.selection, SelectionState::Multi(ids) if ids.len() == 2)
 }
 
-/// True when the current selection is an edge with
-/// `display_mode = "portal"`. Used by the console to scope
-/// portal-only actions (like `edge portal` create) and filter
-/// completion.
+/// True when the current selection points at an edge (either
+/// `SelectionState::Edge` or `SelectionState::PortalLabel`).
+/// Commands that target the edge *as a whole* (type change,
+/// display mode flip, path reset) use this so they keep working
+/// after a click lands on a portal marker — otherwise flipping
+/// an edge to portal mode would trap the user (click-to-select
+/// on a portal yields `PortalLabel`, and no edge command would
+/// apply).
+pub fn edge_or_portal_label_selected(ctx: &ConsoleContext) -> bool {
+    ctx.document.selection.selected_edge_or_portal_edge().is_some()
+}
+
+/// True when the current selection resolves to a portal-mode
+/// edge — covers both `Edge(er)` pointing at a portal-mode edge
+/// and any `PortalLabel` selection (whose owning edge is
+/// definitionally portal-mode). Used by palette entries that
+/// should only surface when the user is in portal context.
 pub fn portal_edge_selected(ctx: &ConsoleContext) -> bool {
-    let er = match &ctx.document.selection {
-        SelectionState::Edge(e) => e,
-        _ => return false,
-    };
-    ctx.document
-        .mindmap
-        .edges
-        .iter()
-        .find(|e| er.matches(e))
-        .map(baumhard::mindmap::model::is_portal_edge)
-        .unwrap_or(false)
+    with_selected_edge(ctx, baumhard::mindmap::model::is_portal_edge)
 }
 
 pub fn edge_selected_or_two_nodes(ctx: &ConsoleContext) -> bool {
@@ -53,17 +56,14 @@ pub fn edge_selected_or_two_nodes(ctx: &ConsoleContext) -> bool {
 /// `color pick` is applicable for both edges and portals — each
 /// branch hands off to the appropriate `ColorTarget`.
 pub fn edge_selected_with_control_points(ctx: &ConsoleContext) -> bool {
-    let er = match &ctx.document.selection {
-        SelectionState::Edge(e) => e,
-        _ => return false,
-    };
-    ctx.document
-        .mindmap
-        .edges
-        .iter()
-        .find(|e| er.matches(e))
-        .map(|e| !e.control_points.is_empty())
-        .unwrap_or(false)
+    with_selected_edge(ctx, |e| !e.control_points.is_empty())
+}
+
+/// Resolve the currently-targeted edge ref (widens to include
+/// `PortalLabel`). Kept as a module helper so every predicate
+/// uses the same disambiguation rule.
+fn selected_edge_ref(ctx: &ConsoleContext) -> Option<EdgeRef> {
+    ctx.document.selection.selected_edge_or_portal_edge()
 }
 
 // ============================================================
@@ -74,9 +74,9 @@ fn with_selected_edge<F>(ctx: &ConsoleContext, f: F) -> bool
 where
     F: FnOnce(&baumhard::mindmap::model::MindEdge) -> bool,
 {
-    let er = match &ctx.document.selection {
-        SelectionState::Edge(e) => e,
-        _ => return false,
+    let er = match selected_edge_ref(ctx) {
+        Some(e) => e,
+        None => return false,
     };
     ctx.document
         .mindmap
@@ -87,74 +87,43 @@ where
         .unwrap_or(false)
 }
 
-fn effective_body_glyph(ctx: &ConsoleContext) -> Option<String> {
-    let er = ctx.document.selection.selected_edge()?;
+fn resolved_for_selected<'a>(
+    ctx: &'a ConsoleContext,
+) -> Option<std::borrow::Cow<'a, baumhard::mindmap::model::GlyphConnectionConfig>> {
+    let er = selected_edge_ref(ctx)?;
     let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
-    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
+    Some(baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
         edge,
         &ctx.document.mindmap.canvas,
-    );
-    Some(resolved.body.clone())
+    ))
+}
+
+fn effective_body_glyph(ctx: &ConsoleContext) -> Option<String> {
+    resolved_for_selected(ctx).map(|r| r.body.clone())
 }
 
 fn effective_cap_start(ctx: &ConsoleContext) -> Option<Option<String>> {
-    let er = ctx.document.selection.selected_edge()?;
-    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
-    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
-        edge,
-        &ctx.document.mindmap.canvas,
-    );
-    Some(resolved.cap_start.clone())
+    resolved_for_selected(ctx).map(|r| r.cap_start.clone())
 }
 
 fn effective_cap_end(ctx: &ConsoleContext) -> Option<Option<String>> {
-    let er = ctx.document.selection.selected_edge()?;
-    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
-    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
-        edge,
-        &ctx.document.mindmap.canvas,
-    );
-    Some(resolved.cap_end.clone())
+    resolved_for_selected(ctx).map(|r| r.cap_end.clone())
 }
 
 pub fn effective_font_size_pt(ctx: &ConsoleContext) -> Option<f32> {
-    let er = ctx.document.selection.selected_edge()?;
-    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
-    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
-        edge,
-        &ctx.document.mindmap.canvas,
-    );
-    Some(resolved.font_size_pt)
+    resolved_for_selected(ctx).map(|r| r.font_size_pt)
 }
 
 pub fn selected_edge_min_font(ctx: &ConsoleContext) -> Option<f32> {
-    let er = ctx.document.selection.selected_edge()?;
-    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
-    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
-        edge,
-        &ctx.document.mindmap.canvas,
-    );
-    Some(resolved.min_font_size_pt)
+    resolved_for_selected(ctx).map(|r| r.min_font_size_pt)
 }
 
 pub fn selected_edge_max_font(ctx: &ConsoleContext) -> Option<f32> {
-    let er = ctx.document.selection.selected_edge()?;
-    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
-    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
-        edge,
-        &ctx.document.mindmap.canvas,
-    );
-    Some(resolved.max_font_size_pt)
+    resolved_for_selected(ctx).map(|r| r.max_font_size_pt)
 }
 
 pub fn effective_spacing(ctx: &ConsoleContext) -> Option<f32> {
-    let er = ctx.document.selection.selected_edge()?;
-    let edge = ctx.document.mindmap.edges.iter().find(|e| er.matches(e))?;
-    let resolved = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
-        edge,
-        &ctx.document.mindmap.canvas,
-    );
-    Some(resolved.spacing)
+    resolved_for_selected(ctx).map(|r| r.spacing)
 }
 
 pub fn body_is(ctx: &ConsoleContext, glyph: &str) -> bool {
@@ -203,20 +172,20 @@ pub fn edge_type_is(ctx: &ConsoleContext, t: &str) -> bool {
 }
 
 pub fn edge_conversion_would_duplicate(ctx: &ConsoleContext, new_type: &str) -> bool {
-    let er = match &ctx.document.selection {
-        SelectionState::Edge(e) => e,
-        _ => return false,
+    let er = match selected_edge_ref(ctx) {
+        Some(e) => e,
+        None => return false,
     };
     let current_idx = match ctx.document.mindmap.edges.iter().position(|e| er.matches(e)) {
         Some(i) => i,
         None => return false,
     };
-    let from_id = &ctx.document.mindmap.edges[current_idx].from_id;
-    let to_id = &ctx.document.mindmap.edges[current_idx].to_id;
+    let from_id = ctx.document.mindmap.edges[current_idx].from_id.clone();
+    let to_id = ctx.document.mindmap.edges[current_idx].to_id.clone();
     ctx.document.mindmap.edges.iter().enumerate().any(|(i, e)| {
         i != current_idx
-            && &e.from_id == from_id
-            && &e.to_id == to_id
+            && e.from_id == from_id
+            && e.to_id == to_id
             && e.edge_type == new_type
     })
 }

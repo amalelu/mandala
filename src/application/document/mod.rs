@@ -103,6 +103,17 @@ pub struct MindMapDocument {
     /// never touched during editing; the preview is purely a
     /// scene-level substitution.
     pub label_edit_preview: Option<(baumhard::mindmap::scene_cache::EdgeKey, String)>,
+    /// Transient portal-text editor buffer. When `Some(...)`, the
+    /// scene builder substitutes the buffer for the target
+    /// endpoint's `PortalEndpointState.text` so text edits render
+    /// live. Same discipline as `label_edit_preview`: the
+    /// committed model in `self.mindmap` is never touched during
+    /// editing; the preview is purely a scene-level substitution.
+    /// Key shape is `(edge_key, endpoint_node_id, buffer)` —
+    /// portal labels are per-endpoint, so the key needs both the
+    /// owning edge and the endpoint side.
+    pub portal_text_edit_preview:
+        Option<(baumhard::mindmap::scene_cache::EdgeKey, String, String)>,
     /// Transient color-picker hover preview. When `Some(...)`, the
     /// scene builder substitutes the preview color for the edge
     /// under the wheel — overriding both the resolved `config.color`
@@ -198,6 +209,7 @@ impl MindMapDocument {
             mutation_handlers: HashMap::new(),
             active_toggles: HashSet::new(),
             label_edit_preview: None,
+            portal_text_edit_preview: None,
             color_picker_preview: None,
             active_animations: Vec::new(),
         };

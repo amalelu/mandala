@@ -30,6 +30,7 @@ pub(super) fn load_test_doc() -> MindMapDocument {
         mutation_handlers: HashMap::new(),
         active_toggles: HashSet::new(),
         label_edit_preview: None,
+        portal_text_edit_preview: None,
         color_picker_preview: None,
         active_animations: Vec::new(),
     };

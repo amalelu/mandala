@@ -52,6 +52,20 @@ pub struct SceneSelectionContext<'a> {
     pub label_edit: Option<(&'a EdgeKey, &'a str)>,
 }
 
+/// Substitution pair for the portal-text inline edit preview.
+/// Carries the `(edge_key, endpoint_node_id)` identity of the
+/// target portal label plus the current buffer contents to be
+/// rendered in place of the committed `PortalEndpointState.text`.
+/// Consumed by the tree-builder path (the live portal render
+/// pipeline), not by the scene builder — portal text never
+/// materialized through `RenderScene.portal_elements`.
+#[derive(Debug, Clone, Copy)]
+pub struct PortalTextEditOverride<'a> {
+    pub edge_key: &'a EdgeKey,
+    pub endpoint_node_id: &'a str,
+    pub buffer: &'a str,
+}
+
 /// Builds a RenderScene from a MindMap, determining which nodes and borders
 /// are visible (accounting for fold state) and extracting their layout data.
 ///
@@ -187,14 +201,19 @@ pub fn build_scene_with_cache(
         camera_zoom,
     );
 
-    // Portal pass — two markers per visible portal-mode edge,
-    // colored by preview > selection > edge color.
+    // Portal pass — one marker per endpoint of every visible
+    // portal-mode edge, colored by preview > selection > edge
+    // color. Text labels do not go through this path; the tree
+    // builder (`tree_builder::portal`) is the live portal
+    // renderer and emits text as sibling GlyphAreas under each
+    // endpoint's subtree.
     let portal_elements = build_portal_elements(
         map,
         offsets,
         selected_edge,
         selected_portal_label,
         portal_color_preview,
+        camera_zoom,
     );
 
     RenderScene {

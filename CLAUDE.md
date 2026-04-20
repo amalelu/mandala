@@ -91,15 +91,20 @@ what works where.
 - Portal-mode edges (`display_mode = "portal"`): two glyph labels,
   one per endpoint. Each label defaults to facing its partner
   endpoint and can carry a per-endpoint `PortalEndpointState`
-  (`color` override + `border_t` pinned position). Single-click a
-  marker selects that specific label as `SelectionState::PortalLabel`;
-  **double-click pans the camera to the opposite endpoint**. The
-  glyph-wheel color picker, clipboard copy/paste/cut, and the
-  `color` console verb all route to the per-endpoint color
-  override when a portal label is selected (clipboard ops operate
-  on the resolved hex). See `format/portal-labels.md` for the
-  full spec. Dispatch wired in both `event_mouse_click.rs` (native)
-  and `run_wasm.rs` via the shared `ClickHit::PortalMarker` path.
+  (`color` override + `border_t` pinned position + `text`
+  adjacent label). Single-click a marker selects that specific
+  label as `SelectionState::PortalLabel`; **double-click pans
+  the camera to the opposite endpoint**. The glyph-wheel color
+  picker, clipboard copy/paste/cut, and the `color` console
+  verb all route to the per-endpoint color override when a
+  portal label is selected (clipboard ops operate on the
+  resolved hex). The `edge` / `font` / `body` / `anchor` / `cap`
+  / `spacing` / `label` console verbs all accept a portal-label
+  selection too — they target the owning edge (or the
+  per-endpoint text, for `label`). See `format/portal-labels.md`
+  for the full spec. Dispatch wired in both `event_mouse_click.rs`
+  (native) and `run_wasm.rs` via the shared `ClickHit::PortalMarker`
+  path.
 - Action dispatch for `Undo`, `CreateOrphanNode`, `OrphanSelection`,
   `DeleteSelection`, `EditSelection`, `EditSelectionClean`, `CancelMode`.
 - Keybind config loading (native: CLI arg + XDG; WASM: `?keybinds=…`
@@ -133,11 +138,11 @@ what works where.
 - `AppMode::{Reparent, Connect}` — the mode state machine plus its
   hover preview and click routing.
 - Modals: CLI console (`/` trigger), glyph-wheel color picker, edge
-  label editor — state types and rebuild paths all live under
-  `#[cfg(not(target_arch = "wasm32"))]`. The `mutation` console verb
-  (`list` / `apply` / `help`) is wired through this path, so it
-  inherits the same native-only scope; its loader + registry run on
-  both targets.
+  label editor, portal-label text editor — state types and rebuild
+  paths all live under `#[cfg(not(target_arch = "wasm32"))]`. The
+  `mutation` console verb (`list` / `apply` / `help` / `inspect`) is
+  wired through the console modal, so it inherits the same
+  native-only scope; its loader + registry run on both targets.
 - Hover-based UI: `hovered_node` tracking, cursor-change on button
   nodes, OnClick trigger dispatch.
 - Clipboard copy/paste — `arboard` on native; WASM `clipboard.rs` stubs

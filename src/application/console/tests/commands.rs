@@ -250,33 +250,9 @@ fn test_edge_type_parent_child_updates_edge() {
     assert!(doc.mindmap.edges.iter().any(|e| e.edge_type == target));
 }
 
-#[test]
-fn test_edge_portal_with_two_nodes_selected() {
-    let mut doc = load_test_doc();
-    let mut ids = doc.mindmap.nodes.keys().cloned();
-    let a = ids.next().unwrap();
-    let b = ids.next().unwrap();
-    doc.selection = SelectionState::Multi(vec![a.clone(), b.clone()]);
-    let _ = run("edge portal", &mut doc);
-    // Post-refactor: portal creation yields a SelectionState::Edge
-    // whose matching edge has `display_mode = "portal"`.
-    assert!(matches!(doc.selection, SelectionState::Edge(_)));
-    let edge = doc
-        .mindmap
-        .edges
-        .iter()
-        .find(|e| e.from_id == a && e.to_id == b)
-        .expect("portal edge must exist");
-    assert!(baumhard::mindmap::model::is_portal_edge(edge));
-}
-
-#[test]
-fn test_edge_portal_errors_without_two_node_selection() {
-    let mut doc = load_test_doc();
-    doc.selection = SelectionState::None;
-    let result = run("edge portal", &mut doc);
-    assert!(matches!(result, ExecResult::Err(_)));
-}
+// `edge portal` subcommand was removed — creation now goes
+// through connect mode + `edge display_mode=portal`. Tests
+// previously pinned here are obsolete.
 
 #[test]
 fn test_edge_display_mode_portal_then_line_toggles() {

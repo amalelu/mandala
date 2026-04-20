@@ -180,6 +180,14 @@ impl<'a> HasLabel for TargetView<'a> {
     fn set_label(&mut self, s: Option<String>) -> Outcome {
         match self {
             TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_label(er, s)),
+            // Portal label → per-endpoint text. Shares the
+            // `label text="…"` console syntax with edges; the
+            // routing splits here based on the selection kind.
+            TargetView::PortalLabel {
+                doc,
+                er,
+                endpoint_node_id,
+            } => Outcome::applied(doc.set_portal_label_text(er, endpoint_node_id, s)),
             _ => Outcome::NotApplicable,
         }
     }
