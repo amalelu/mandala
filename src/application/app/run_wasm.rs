@@ -37,6 +37,14 @@ let body = document.body().expect("No body");
 body.append_child(&canvas).expect("Failed to append canvas");
 canvas.set_width(web_window.inner_width().unwrap().as_f64().unwrap() as u32);
 canvas.set_height(web_window.inner_height().unwrap().as_f64().unwrap() as u32);
+let cw = canvas.width();
+let ch = canvas.height();
+log::info!("WASM: canvas sized {}x{}", cw, ch);
+if cw == 0 || ch == 0 {
+    log::warn!(
+        "WASM: canvas has zero dimension — render surface will be empty"
+    );
+}
 
 // Canvas must be focusable for keyboard events to reach winit.
 // Without tabindex, an HTMLCanvasElement never receives focus.
@@ -148,10 +156,12 @@ wasm_bindgen_futures::spawn_local(async move {
         renderer_window,
     )
     .await;
+    log::info!("WASM: adapter + surface + renderer ready");
 
     let size = canvas.width();
     let height = canvas.height();
     renderer.process_decree(RenderDecree::SetSurfaceSize(size, height));
+    log::info!("WASM: surface configured {}x{}", size, height);
 
     // std::fs is unavailable in the browser; fetch over the page origin instead.
     let mut doc_opt: Option<MindMapDocument> = None;
@@ -164,6 +174,19 @@ wasm_bindgen_futures::spawn_local(async move {
     match fetch_map_json(&mindmap_path).await {
         Ok(json) => match MindMapDocument::from_json_str(&json, Some(mindmap_path.clone())) {
             Ok(mut doc) => {
+                // Canvas background: resolve through theme variables
+                // so `"var(--bg)"` works, then hand off to the
+                // renderer as the render-pass clear color. Mirrors
+                // run_native.rs so the WASM canvas paints against
+                // the doc's configured background instead of the
+                // default pitch black.
+                let vars = &doc.mindmap.canvas.theme_variables;
+                let resolved_bg = baumhard::util::color::resolve_var(
+                    &doc.mindmap.canvas.background_color,
+                    vars,
+                );
+                renderer.set_clear_color_from_hex(resolved_bg);
+
                 // Four-source mutation registry, matching the native
                 // path: app bundle (shipped in the binary) < user
                 // source (?mutations= query param + localStorage) <
@@ -207,6 +230,7 @@ wasm_bindgen_futures::spawn_local(async move {
     }
 
     renderer.process_decree(RenderDecree::StartRender);
+    log::info!("WASM: StartRender dispatched, rAF loop starting");
 
     // Populate the shared state now that init is complete.
     *renderer_for_init.borrow_mut() = Some(renderer);
@@ -254,9 +278,13 @@ app.event_loop.run(move |event, _window_target| {
 
     match event {
         Event::WindowEvent {
-            event: WindowEvent::Resized(_size), ..
+            event: WindowEvent::Resized(size), ..
         } => {
-            // On WASM, resize is handled by the renderer's own loop
+            if let Some(renderer) = renderer_for_events.borrow_mut().as_mut() {
+                renderer.process_decree(
+                    RenderDecree::SetSurfaceSize(size.width, size.height),
+                );
+            }
         }
         Event::WindowEvent {
             event: WindowEvent::CloseRequested, ..

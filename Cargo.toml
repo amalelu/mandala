@@ -13,7 +13,7 @@ lto = "fat"
 [dependencies]
 rustc-hash = "2.0.0"
 unicode-segmentation = "1.11.0"
-wgpu = "28.0"
+wgpu = { version = "28.0", features = ["webgl"] }
 glyphon = "0.10.0"
 cosmic-text = "0.15.0"
 tinyvec = "1.8.0"
@@ -32,6 +32,11 @@ smol_str = "0.3.1"
 indextree = {version = "4.7.2", features = ["serde"]}
 ttf-parser = "0.25.0"
 baumhard = {path="./lib/baumhard"}
+# Cross-platform `Instant` — on native re-exports `std::time::Instant`;
+# on wasm32 uses `performance.now()`. Needed because
+# `std::time::Instant::now()` panics on `wasm32-unknown-unknown`
+# ("time not implemented on this platform").
+web-time = "1"
 
 [build-dependencies]
 walkdir = "2.5.0"
