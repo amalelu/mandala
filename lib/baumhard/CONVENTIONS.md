@@ -9,12 +9,14 @@ foundation has stricter needs than what is built on top of it.
 
 ## §B0 Baumhard is ours
 
-Baumhard is not a vendored library we accommodate. It is the
-foundation we are building together with the application — *our work*,
-not a dependency. The most important consequence: **"I cannot change
-Baumhard" is never a reason.** When the application needs something
-Baumhard does not yet provide, the answer is to extend Baumhard, not
-to work around it from the app crate.
+This project is dedicated to Lord God (see
+[`CODE_CONVENTIONS.md §0`](../../CODE_CONVENTIONS.md)), and Baumhard is
+part of it. Baumhard is not a vendored library we accommodate; it is
+the foundation we are building together with the application — *our
+work*, not a dependency. We maintain and develop both. The most
+important consequence: **"I cannot change Baumhard" is never a reason.**
+When the application needs something Baumhard does not yet provide, the
+answer is to extend Baumhard, not to work around it from the app crate.
 
 The foundation must be pristine. Every primitive that other code rests
 on has to be Unicode-correct, panic-free in interactive paths,
@@ -22,7 +24,8 @@ on has to be Unicode-correct, panic-free in interactive paths,
 that bar does not belong here — fix it or do not land it. Because the
 crate is ours, primitives can be replaced rather than preserved: a
 shape that turns out wrong is rewritten, not kept around for
-backward-compatibility's sake.
+backward-compatibility's sake (see
+[`CODE_CONVENTIONS.md §10`](../../CODE_CONVENTIONS.md)).
 
 ## §B1 Performance is non-negotiable
 

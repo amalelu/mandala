@@ -2,16 +2,19 @@
 
 ## §T0 Why we test
 
-The test suite is how we know the foundation is intact. When the
-fundamentals — mutation correctness, Unicode handling, geometry,
-region indexing, undo round-trips, loader edges — pass on every
-commit, we can move quickly and confidently on top of them. When they
-do not, every change above them is suspect.
+This project is dedicated to Lord God (see
+[`CODE_CONVENTIONS.md §0`](./CODE_CONVENTIONS.md)). The test suite is
+how we honour that dedication in practice: it is how we know the
+foundation is intact. When the fundamentals — mutation correctness,
+Unicode handling, geometry, region indexing, undo round-trips, loader
+edges — pass on every commit, we can move confidently on top of them.
+When they do not, every change above them is suspect.
 
-We test heavily, and we test fundamentals first. We do not test to
-chase a coverage percentage, to mock our way around wgpu, or to prove
-the type system to itself. A green suite is a covenant: the pieces we
-have cared enough to encode still behave the way we expected them to.
+Extensive unit testing is a directive, not a nice-to-have. We test
+heavily, and we test fundamentals first. We do not test to chase a
+coverage percentage, to mock our way around wgpu, or to prove the type
+system to itself. A green suite is a covenant: the pieces we have
+cared enough to encode still behave the way we expected them to.
 
 ## §T1 Test fundamentals first, and test them heavily
 
@@ -192,7 +195,7 @@ Any of these triggers a test in the same commit:
 - Anything you catch yourself re-verifying by hand across sessions.
   That manual check is a regression test begging to be written.
 - Any change to a fundamental (§T1). Touching a fundamental without
-  adding to its test surface is technical debt, and §4 of
+  adding to its test surface is technical debt, and §5 of
   [`CODE_CONVENTIONS.md`](./CODE_CONVENTIONS.md) does not tolerate
   technical debt.
 
@@ -213,7 +216,7 @@ headless harness to chase it.
 ## §T9 Mobile and WASM
 
 The cross-platform reality (see
-[`CODE_CONVENTIONS.md §2`](./CODE_CONVENTIONS.md) and §3) shapes how
+[`CODE_CONVENTIONS.md §4`](./CODE_CONVENTIONS.md) and §3) shapes how
 we test for non-native targets.
 
 - **Tests run on native.** `./test.sh` exercises the entire suite

@@ -69,7 +69,7 @@ not the rules.
 
 Mandala is built for native desktop (`cargo run`, primary dev loop) and
 WASM (`trunk serve` / `trunk build` — same binary on desktop and mobile
-browsers). Per `CODE_CONVENTIONS.md §2` the two targets are equal
+browsers). Per `CODE_CONVENTIONS.md §4` the two targets are equal
 citizens; this section tracks the current parity surface so a new
 session doesn't have to trawl `#[cfg]` guards to learn what works where.
 
@@ -135,7 +135,7 @@ mistaken for "handled somewhere"):
 
 The prescriptive rule that goes with this list — new interactive
 features need a cross-platform story from the start — lives in
-`CODE_CONVENTIONS.md §2`. `./test.sh`'s WASM type-check gate and
+`CODE_CONVENTIONS.md §4`. `./test.sh`'s WASM type-check gate and
 `./build.sh --wasm` are the local checks that keep it honest.
 
 ## Common tasks
