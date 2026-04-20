@@ -175,8 +175,9 @@ pub struct NodeLayout {
 
 /// Links a node to one entry in a named [`super::Palette`] keyed by
 /// depth. `level` is the index into the palette's `groups`; clamped
-/// at read time so a schema referencing a level beyond the palette's
-/// length falls back to the last group rather than erroring.
+/// at theme-resolve time (`resolve_theme_colors`) so a schema
+/// referencing a level beyond the palette's length falls back to
+/// the last group rather than erroring.
 /// `starts_at_root` and `connections_colored` are round-tripped
 /// miMind-compat flags that the renderer interprets when resolving
 /// effective colors. Plain data; no runtime cost.

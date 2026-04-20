@@ -1,14 +1,15 @@
 //! One-way migration from the miMind-derived legacy `.mindmap.json`
 //! format to the current one.
 //!
-//! The current format's loader rejects legacy files outright — there's
-//! no runtime compatibility shim, because every legacy-shaped field
-//! (opaque integer IDs, enum codes, inlined palettes, `index`) has a
-//! named successor that `verify` enforces. This module is how a user
-//! with an unmigrated file crosses the one-way door: each submodule
-//! performs one orthogonal transform (IDs, enums, palettes, cleanup)
-//! and the whole pipeline runs in a fixed order so later passes can
-//! assume the earlier ones have already landed.
+//! The current format's loader has no runtime compatibility shim for
+//! legacy files: `portals[]` is rejected outright by the loader and
+//! every other legacy-shaped field (opaque integer IDs, enum codes,
+//! inlined palettes, `index`) trips serde's own type mismatch on
+//! parse. Either way, an unmigrated file does not load. This module
+//! is how a user crosses the one-way door: each submodule performs
+//! one orthogonal transform (IDs, enums, palettes, cleanup) and the
+//! whole pipeline runs in a fixed order so later passes can assume
+//! the earlier ones have already landed.
 
 mod cleanup;
 mod enums;

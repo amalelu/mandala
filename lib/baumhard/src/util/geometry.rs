@@ -8,9 +8,13 @@ use glam::{Mat3, Vec2};
 /// O(1).
 pub fn clockwise_rotation_around_pivot(a: Vec2, pivot: Vec2, degrees: f32) -> Vec2 {
    let translated = a - pivot;
+
    let radians = -degrees.to_radians();
    let rotation = Mat3::from_rotation_z(radians);
-   rotation.transform_point2(translated) + pivot
+
+   let result = rotation.transform_point2(translated) + pivot;
+
+   result
 }
 
 const ERROR_TOLERANCE_ALMOST_EQUAL: f32 = 1e-5;
