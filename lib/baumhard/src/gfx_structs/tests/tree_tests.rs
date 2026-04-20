@@ -1027,6 +1027,9 @@ lazy_static!(
     */
 );
 
+// Test-only formatter kept as a helper seam for future
+// ancestry-assertion tests; see the already-landed ancestry
+// tests above for the convention it plugs into.
 #[allow(dead_code)]
 #[inline(always)]
 fn ancestry_seq(sequence: &[usize]) -> String {

@@ -91,7 +91,12 @@ pub fn find_byte_index_of_grapheme(s: &str, index: usize) -> Option<usize> {
     None // Return None if index is out of bounds
 }
 
-/// Finds the index immediately after the nth grapheme
+/// Finds the index immediately after the nth grapheme.
+// Named grapheme-boundary utility preserved as a seam alongside
+// the live `find_byte_index_of_grapheme` helper above — future
+// grapheme-aware text-editing paths (IME runs, cursor motion
+// across clusters) want the "after-nth" variant too.
+// Per CODE_CONVENTIONS.md §6.
 #[allow(dead_code)]
 fn find_index_after_nth_grapheme(str: &str, n: usize) -> Option<usize> {
     // Graphemes method provides an iterator over the grapheme clusters
