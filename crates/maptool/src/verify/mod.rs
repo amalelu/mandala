@@ -1,7 +1,14 @@
-//! Verify a `.mindmap.json` file against the structural invariants
-//! the format expects. Each submodule checks one category of
-//! invariant and returns `Vec<Violation>`. `verify` runs them all
-//! and returns the concatenated list.
+//! Structural invariant verification for `.mindmap.json` files.
+//!
+//! Verification is a boundary check, not a best-effort parse: a file
+//! either satisfies every named invariant the format guarantees or it
+//! doesn't, and each violation is reported as a specific, named
+//! property (tree shape, Dewey-ID consistency, edge references, palette
+//! references, named-enum membership, text-run bounds) rather than a
+//! free-form error message. That separation is what makes `verify` safe
+//! to run as a gate: the loader can be permissive about missing or
+//! defaulted fields, and everything load-tolerant-but-structurally-
+//! invalid still surfaces here.
 
 mod enums;
 mod ids;

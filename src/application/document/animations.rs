@@ -139,7 +139,7 @@ impl MindMapDocument {
         results
     }
 
-    // ---- Animation lifecycle (Phase 4.2) ----
+    // ---- Animation lifecycle ----
     //
     // Animations are an *envelope* on `apply_custom_mutation` — when
     // a `CustomMutation` carries `timing: Some(AnimationTiming { ... })`
@@ -161,13 +161,11 @@ impl MindMapDocument {
     // produced the same final state anyway, just in one step
     // instead of many. The undo entry is pushed once at completion.
     //
-    // Per the original Phase 4 plan: position / size / color
-    // interpolate; structural changes (text replacement, region
-    // count shifts) snap at the boundary. v1 only interpolates
-    // `position` because every other interpolated field needs
-    // careful per-mutation snapshot logic that adds more lines than
-    // the foundation justifies. Subsequent commits expand the
-    // interpolated-field set as concrete consumers arrive.
+    // Interpolation scope: position / size / color are the candidate
+    // fields; structural changes (text replacement, region count
+    // shifts) snap at the boundary. Currently only `position` is
+    // interpolated — the other fields need per-mutation snapshot
+    // logic that's deferred until a concrete consumer arrives.
 
     /// Start an animation for `cm` targeting `target_id`. Snapshots
     /// the current node state, applies the mutation to a scratch
@@ -176,7 +174,7 @@ impl MindMapDocument {
     /// caller has already verified
     /// `cm.timing.as_ref().is_some_and(|t| t.duration_ms > 0)`.
     ///
-    /// **v1 restrictions** (lifted as concrete consumers arrive):
+    /// **Current scope** (expanded as concrete consumers arrive):
     /// only `TargetScope::SelfOnly` interpolates per-frame; other
     /// scopes apply at the boundary. Only `position` is lerped
     /// continuously; text / regions / structural fields snap at
@@ -201,7 +199,8 @@ impl MindMapDocument {
         }
 
         // Re-trigger the same (mutation_id, node_id) mid-flight is a
-        // silent no-op — same semantics as the original Phase 4 plan.
+        // silent no-op — otherwise a held button could spawn dozens
+        // of overlapping instances and the blend would overshoot.
         if self
             .active_animations
             .iter()

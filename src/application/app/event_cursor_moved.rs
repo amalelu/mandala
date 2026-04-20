@@ -281,8 +281,9 @@ pub(super) fn handle_cursor_moved(
                     } else {
                         vec![node_id]
                     };
-                    // Phase 4(B): start each drag with a
-                    // clean scene cache.
+                    // Start each drag with a clean scene cache so
+                    // the keyed-edge rebuild picks up the moving
+                    // node's edges from scratch.
                     scene_cache.clear();
                     *drag_state = DragState::MovingNode {
                         node_ids,

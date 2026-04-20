@@ -1,4 +1,4 @@
-//! Session 6C edge-handle emission: unselected baseline, straight-edge midpoint, curved-edge control points, cubic two-CP, absolute canvas positioning.
+//! Edge-handle emission: unselected baseline, straight-edge midpoint, curved-edge control points, cubic two-CP, absolute canvas positioning.
 
 use super::fixtures::*;
 use super::super::*;
@@ -147,5 +147,5 @@ fn test_edge_handle_control_point_position_is_absolute_canvas() {
 }
 
 // ====================================================================
-// Session 6D — ConnectionLabelElement emission
+// ConnectionLabelElement emission
 // ====================================================================

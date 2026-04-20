@@ -394,6 +394,6 @@ use super::defaults::default_cross_link_edge;
     }
 
     // -----------------------------------------------------------------
-    // Session 7A: node text editing
+    // Node text editing
     // -----------------------------------------------------------------
 

@@ -18,12 +18,19 @@
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 
-/// Scenes and Trees all have their own unique [RegionIndexer]
+/// Forward region→elements (and optional reverse element→regions)
+/// index. Owned per-tree and per-scene; does not cross thread
+/// boundaries. See the module header for the partitioning scheme.
 #[derive(Debug, Clone)]
 pub struct RegionIndexer {
-    // Region is accessed by Vec-index (all regions exists in the Vec), BTreeSet for the element-ID (GfxElement or Tree)
+    /// Forward index: position `r` holds the element ids sitting in
+    /// region `r`. `BTreeSet` keeps iteration order deterministic and
+    /// supports O(log n) insert/remove.
     index: Vec<BTreeSet<usize>>,
+    /// Reverse index: `element_id → regions it occupies`. Only
+    /// populated when `use_reverse_index` is true.
     reverse_index: FxHashMap<usize, BTreeSet<usize>>,
+    /// Whether to maintain the reverse index on `insert` / `remove`.
     use_reverse_index: bool,
 }
 
@@ -70,7 +77,11 @@ impl RegionIndexer {
         }
     }
 
-    /// Properly indexes (and reverse-indexes) the element_id with the region
+    /// Record that `element_id` currently occupies `region`. Also
+    /// updates the reverse (element→regions) map when that map is
+    /// enabled. O(log n) into the `BTreeSet`; one `BTreeSet`
+    /// allocation on first insert of a given element when the
+    /// reverse index is live.
     pub fn insert(&mut self, element_id: usize, region: usize) {
         self.index[region].insert(element_id);
         if self.use_reverse_index {
@@ -84,7 +95,9 @@ impl RegionIndexer {
         }
     }
 
-    /// Properly removes the element-region index / reverse-index
+    /// Undo a prior [`insert`](Self::insert) — drop the element from
+    /// `region` in both the forward and (when enabled) reverse index.
+    /// O(log n); missing entries are silent no-ops.
     pub fn remove(&mut self, element_id: usize, region: usize) {
         self.index[region].remove(&element_id);
         if self.use_reverse_index {
@@ -120,7 +133,12 @@ impl RegionIndexer {
         &self.reverse_index
     }
 
-    /// The indexed version of [self.find_regions_for_element]
+    /// Clone the set of regions that `element_id` currently occupies,
+    /// or an empty set when the element has no entries (or the
+    /// reverse index was disabled at construction). O(n) in the
+    /// clone size; the indexer itself is not mutated despite the
+    /// `&mut self` signature (kept for API compatibility with older
+    /// callers).
     pub fn get_reverse_index_for_element(&mut self, element_id: usize) -> BTreeSet<usize> {
         self.reverse_index
             .get(&element_id)

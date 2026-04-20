@@ -35,9 +35,9 @@ pub enum UndoAction {
     /// A new node was created (via `apply_create_orphan_node`). Undo
     /// removes the node from `mindmap.nodes` by id.
     CreateNode { node_id: String },
-    /// Session 7A: the `text` (and possibly `text_runs`) of a node was
-    /// edited in place via `set_node_text`. Undo restores the pre-edit
-    /// `text` and `text_runs` on the node, if it still exists.
+    /// The `text` (and possibly `text_runs`) of a node was edited in
+    /// place via `set_node_text`. Undo restores the pre-edit `text` and
+    /// `text_runs` on the node, if it still exists.
     EditNodeText {
         node_id: String,
         before_text: String,

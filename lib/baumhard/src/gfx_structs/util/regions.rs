@@ -42,20 +42,27 @@ pub enum RegionError {
     Poisoned,
 }
 
-/// Shared between a Scene and its Trees
+/// Shared pixel-grid / region-bucket parameters for one Scene and
+/// its owned Trees. Each field sits behind an `RwLock` so readers
+/// (hit-tests, renderer) and the one writer ([`RegionParams::adapt`])
+/// can access it without a global mutex.
 #[derive(Debug)]
 pub struct RegionParams {
-    /// The initial target value that the pixel-grid will be divided into horizontally and vertically
-    /// For example a factor of 10 will attempt to create a 10x10 grid of regions
-    /// But the actual factor used in practice may vary depending on the size of the window
+    /// Caller-requested subdivisions per axis. The effective factor
+    /// (stored in `region_factor_x`/`_y`) is derived from this plus
+    /// the current resolution — divisor-snapped to avoid fractional
+    /// regions.
     target_region_factor: RwLock<usize>,
-    /// The current, effective region-factor being used for x / horizontal
+    /// Effective horizontal subdivisions in use after divisor-snap.
     region_factor_x: RwLock<usize>,
-    /// The current, effective region-factor being used for x / vertical
+    /// Effective vertical subdivisions in use after divisor-snap.
     region_factor_y: RwLock<usize>,
-    /// The effective resolution, none of the dimensions should have a span equal to a prime number
+    /// Canvas resolution the factors were snapped against. Neither
+    /// dimension is prime (enforced by `new`/`adapt`).
     current_resolution: RwLock<(usize, usize)>,
+    /// Pixels per region along x (`resolution.0 / region_factor_x`).
     region_size_x: RwLock<usize>,
+    /// Pixels per region along y (`resolution.1 / region_factor_y`).
     region_size_y: RwLock<usize>,
 }
 
@@ -166,6 +173,15 @@ impl RegionParams {
         Ok(output)
     }
 
+    /// Translate a pixel coordinate into the index of the region
+    /// bucket that contains it. Row-major ordering.
+    ///
+    /// # Errors
+    /// - `InvalidParameters` if `pixel` lies at or beyond the
+    ///   current resolution on either axis.
+    ///
+    /// # Costs
+    /// O(1). Three lock reads (resolution, region sizes, factor_x).
     pub fn calculate_region_from_pixel(&self, pixel: (usize, usize)) -> Result<usize, RegionError> {
         let dimensions = self.read_current_resolution()?;
         if dimensions.0 <= pixel.0 || dimensions.1 <= pixel.1 {
@@ -178,6 +194,13 @@ impl RegionParams {
         Ok(pixel.1 / region_y * region_factor_x + (pixel.0 / region_x))
     }
 
+    /// Return the top-left pixel corner of the given region bucket.
+    ///
+    /// # Errors
+    /// - `InvalidParameters` if `region` is past the live bucket count.
+    ///
+    /// # Costs
+    /// O(1), four lock reads.
     pub fn calculate_pixel_from_region(
         &self,
         region: usize,
@@ -194,32 +217,45 @@ impl RegionParams {
         Ok((pixel_x, pixel_y))
     }
 
+    /// Effective `factor_x * factor_y` region bucket count. O(1),
+    /// two lock reads.
     pub fn calc_num_regions(&self) -> Result<usize, RegionError> {
         let region_factor_x = self.read_region_factor_x()?;
         let region_factor_y = self.read_region_factor_y()?;
         Ok(region_factor_x * region_factor_y)
     }
 
+    /// Read-lock accessor for the y-axis region size (pixels). O(1);
+    /// returns `Updating` if an `adapt` call is mid-flight.
     pub fn read_region_size_y(&self) -> Result<usize, RegionError> {
         Self::read_locked_value(&self.region_size_y)
     }
 
+    /// Read-lock accessor for the x-axis region size (pixels). O(1);
+    /// returns `Updating` if an `adapt` call is mid-flight.
     pub fn read_region_size_x(&self) -> Result<usize, RegionError> {
         Self::read_locked_value(&self.region_size_x)
     }
 
+    /// Read-lock accessor for the canvas resolution the factors are
+    /// snapped against. O(1); see [`RegionError`] for the failure modes.
     pub fn read_current_resolution(&self) -> Result<(usize, usize), RegionError> {
         Self::read_locked_value(&self.current_resolution)
     }
 
+    /// Read-lock accessor for the caller-requested target factor.
+    /// Differs from the effective factors when the resolution forced
+    /// a divisor snap. O(1).
     pub fn read_target_region_factor(&self) -> Result<usize, RegionError> {
         Self::read_locked_value(&self.target_region_factor)
     }
 
+    /// Read-lock accessor for the effective x-axis factor. O(1).
     pub fn read_region_factor_x(&self) -> Result<usize, RegionError> {
         Self::read_locked_value(&self.region_factor_x)
     }
 
+    /// Read-lock accessor for the effective y-axis factor. O(1).
     pub fn read_region_factor_y(&self) -> Result<usize, RegionError> {
         Self::read_locked_value(&self.region_factor_y)
     }
@@ -234,6 +270,16 @@ impl RegionParams {
         }
     }
 
+    /// Reconfigure for a new target factor and/or resolution. All six
+    /// inner locks are acquired for write in sequence; downstream
+    /// readers observe `RegionError::Updating` until the call returns.
+    ///
+    /// # Panics
+    /// Asserts neither dimension is prime (same invariant as `new`).
+    ///
+    /// # Costs
+    /// O(sqrt(max(dimensions.0, dimensions.1))) for the divisor
+    /// search, plus six write-lock acquisitions.
     pub fn adapt(&mut self, target_factor: usize, dimensions: (usize, usize)) {
         assert!(!is_prime(dimensions.0));
         assert!(!is_prime(dimensions.1));
@@ -319,7 +365,7 @@ pub struct RegionElementKeyPair {
 impl RegionElementKeyPair {
     /// Construct a pair. Both fields are plain `usize`s — no
     /// validation; the sender is trusted to have produced them from
-    /// a live tree / region bucket.
+    /// a live tree / region bucket. O(1), no allocation.
     pub fn new(region_num: usize, element_id: usize) -> Self {
         Self {
             region_num,

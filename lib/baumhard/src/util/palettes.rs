@@ -1,19 +1,26 @@
-/// These palettes are mostly for reference and, when suitable, internal use
-/// But application objects should define their own palettes
+//! Reference palettes — internal seeds and example constants.
+//! Application code should define its own palettes rather than
+//! importing these directly; they exist to keep the colour-math
+//! tests and demo paths from open-coding magic numbers.
+
 use crate::util::color::Color;
 
+/// Opaque RGB white.
 pub const TOTAL_WHITE: Color = Color {
     rgba: [255, 255, 255, 255],
 };
 
+/// Opaque RGB black.
 pub const TOTAL_BLACK: Color = Color {
     rgba: [0, 0, 0, 255],
 };
 
+/// Earth-toned five-colour palette.
 pub mod light_forest {
     use crate::util::color::FloatRgba;
     use crate::rgba;
 
+    /// The full palette as an ordered array.
     pub const LIGHT_FOREST: [FloatRgba; 5] =
         [DARK_BROWN, LIGHT_BROWN, LIGHT_GREEN, GREEN, DARK_GREEN];
 
@@ -24,10 +31,12 @@ pub mod light_forest {
     pub const DARK_GREEN: FloatRgba = rgba!([126, 137, 37, 255]);
 }
 
+/// Cool-toned five-colour palette.
 pub mod smooth_ocean {
     use crate::util::color::FloatRgba;
     use crate::rgba;
 
+    /// The full palette as an ordered array.
     pub const SMOOTH_OCEAN: [FloatRgba; 5] = [DARK_TURQUOISE, TURQUOISE, GREY, ALMOST_WHITE, BEIGE];
 
     pub const DARK_TURQUOISE: FloatRgba = rgba!([70, 149, 151, 255]);
@@ -37,6 +46,8 @@ pub mod smooth_ocean {
     pub const BEIGE: FloatRgba = rgba!([221, 190, 170, 255]);
 }
 
+/// Named palettes defined by hex literals, parsed once at program
+/// start via `lazy_static`.
 pub mod hex_palettes {
     use lazy_static::lazy_static;
 

@@ -93,17 +93,31 @@ impl Hash for OutlineStyle {
     }
 }
 
-/// This is for use in HashMaps and Sets
+/// Discriminant tag for [`GlyphAreaField`] — payload-free so it can
+/// key a `HashMap`/`HashSet` without paying the inner field's
+/// allocation or equality cost.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum GlyphAreaFieldType {
+    /// Tag for [`GlyphAreaField::Text`].
     Text,
+    /// Tag for [`GlyphAreaField::Scale`].
     Scale,
+    /// Tag for [`GlyphAreaField::LineHeight`].
     LineHeight,
+    /// Reserved for flag deltas; no matching `GlyphAreaField` variant
+    /// today — preserved as a seam per `CODE_CONVENTIONS.md` §6.
     Flags,
+    /// Tag for [`GlyphAreaField::Position`].
     Position,
+    /// Tag for [`GlyphAreaField::Bounds`].
     Bounds,
+    /// Tag for [`GlyphAreaField::ColorFontRegions`].
     ColorFontRegions,
+    /// Tag for [`GlyphAreaField::Outline`].
     Outline,
+    /// Tag for [`GlyphAreaField::Operation`] — the control variant
+    /// that selects `Assign`/`Add`/`Subtract` for the rest of the
+    /// delta.
     ApplyOperation,
 }
 
@@ -228,21 +242,28 @@ impl Add for GlyphAreaField {
 }
 
 impl GlyphAreaField {
+    /// Wrap an `f32` scale into a `Scale` field, converting through
+    /// `OrderedFloat` so the enum remains `Eq`/`Hash`. O(1).
     pub fn scale(s: f32) -> Self {
         GlyphAreaField::Scale(OrderedFloat::from(s))
     }
 
+    /// Wrap an `f32` into a `LineHeight` field. O(1).
     pub fn line_height(line_height: f32) -> Self {
         GlyphAreaField::LineHeight(OrderedFloat::from(line_height))
     }
 
+    /// Construct a `Bounds` field from `(x, y)`. O(1).
     pub fn bounds(x: f32, y: f32) -> Self {
         GlyphAreaField::Bounds(OrderedVec2::new_f32(x, y))
     }
 
+    /// Construct a `Position` field from `(x, y)`. O(1).
     pub fn position(x: f32, y: f32) -> Self {
         GlyphAreaField::Position(OrderedVec2::new_f32(x, y))
     }
+    /// Discriminant tag for this field. Zero-cost; usable as a
+    /// HashMap/HashSet key.
     pub const fn variant(&self) -> GlyphAreaFieldType {
         match self {
             GlyphAreaField::Text(_) => GlyphAreaFieldType::Text,
@@ -256,6 +277,8 @@ impl GlyphAreaField {
         }
     }
 
+    /// Whether `self` and `other` represent the same field variant
+    /// (ignoring payload). O(1).
     #[inline]
     pub fn same_type(&self, other: &GlyphAreaField) -> bool {
         self.variant() == other.variant()

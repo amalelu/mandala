@@ -43,10 +43,10 @@ impl Renderer {
     }
 
 
-    /// Session 6D: AABB hit test against the rendered label hitboxes.
-    /// Returns true when `canvas_pos` falls inside the hitbox of the
-    /// given edge's label. Used by the app to dispatch inline
-    /// click-to-edit when a selected edge's label is clicked.
+    /// AABB hit test against the rendered label hitboxes. Returns
+    /// true when `canvas_pos` falls inside the hitbox of the given
+    /// edge's label. Used by the app to dispatch inline click-to-edit
+    /// when a selected edge's label is clicked.
     pub fn hit_test_edge_label(
         &self,
         canvas_pos: Vec2,
@@ -66,8 +66,8 @@ impl Renderer {
     /// Used by `update_connection_label_tree` once labels render
     /// through the canvas-scene tree path; the tree builder owns
     /// the AABB computation and hands the map over via this
-    /// setter so the legacy `hit_test_edge_label` keeps working.
-    /// Will go away in Session 5.
+    /// setter so `hit_test_edge_label` keeps working off the
+    /// flat-pass hitbox map while label buffers migrate.
     pub fn set_connection_label_hitboxes(
         &mut self,
         hitboxes: std::collections::HashMap<EdgeKey, (Vec2, Vec2)>,

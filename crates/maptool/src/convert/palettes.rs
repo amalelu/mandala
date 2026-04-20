@@ -1,8 +1,14 @@
-//! Hoist per-node color_schema groups into a top-level "palettes" map.
-//! Each unique palette (identified by its name) gets defined once at the
-//! map level. Per-node color_schema is simplified to a reference:
-//! palette name + level + flags. The miMind `theme_id` and `variant`
-//! fields are dropped.
+//! Hoist per-node color_schema groups into a top-level `palettes` map.
+//!
+//! miMind stored the full group list on every node that carried a
+//! palette, so a single palette shared across dozens of nodes was
+//! duplicated dozens of times in the file. The current format names
+//! each palette once at the map level and references it by key from
+//! each node — same visual result, diffs that survive palette tweaks.
+//! Each node's color_schema is rewritten to the reference form
+//! (palette key + level + flags). `theme_id` is dropped; `variant` is
+//! folded into the key name so two schemas that differ only in variant
+//! get distinct palette entries instead of clobbering each other.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;

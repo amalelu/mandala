@@ -1,11 +1,11 @@
 //! Per-edge cache of connection glyph geometry.
 //!
-//! Phase B of the "Connection & border render cost" work: during a drag the
-//! scene builder would re-sample every visible edge every frame, even though
-//! most edges had not moved. For a 20,000-unit cross-link at typical spacing
-//! that is ~1,667 Bezier point evaluations + a 256-entry arc-length table
-//! rebuild per frame per such edge, which is more than enough to blow the
-//! drag budget and stutter the interaction.
+//! Why it exists: during a drag the scene builder would otherwise
+//! re-sample every visible edge every frame, even though most edges
+//! have not moved. For a 20,000-unit cross-link at typical spacing
+//! that is ~1,667 Bezier point evaluations + a 256-entry arc-length
+//! table rebuild per frame per such edge, which is more than enough
+//! to blow the drag budget and stutter the interaction.
 //!
 //! This module lets the scene builder stash the **pre-clip** sampled
 //! positions of each edge keyed by `(from_id, to_id, edge_type)`. On the
@@ -85,9 +85,12 @@ pub struct CachedConnection {
     pub color: String,
 }
 
-/// Per-edge cache, plus a reverse index from node ID → edges that touch it
-/// so a drag of node N dirties the right edges in O(k_N) instead of walking
-/// the whole edge list.
+/// Per-edge cache of sampled connection geometry, plus a reverse
+/// index from node ID → edges that touch it so a drag of node N
+/// dirties the right edges in `O(k_N)` instead of walking the whole
+/// edge list. Owned by the app's document / renderer glue and passed
+/// into [`crate::mindmap::scene_builder::build_scene_with_cache`] on
+/// each frame.
 #[derive(Default, Debug)]
 pub struct SceneConnectionCache {
     entries: HashMap<EdgeKey, CachedConnection>,
@@ -110,6 +113,9 @@ pub struct SceneConnectionCache {
 const ZOOM_EPSILON: f32 = 1.0e-3;
 
 impl SceneConnectionCache {
+    /// Construct an empty cache. Same as `Self::default()` — the
+    /// explicit constructor exists so callers don't have to know the
+    /// `Default` trait is derived. Allocation-free.
     pub fn new() -> Self {
         Self::default()
     }
@@ -145,10 +151,12 @@ impl SceneConnectionCache {
         self.scene_zoom = Some(z);
     }
 
+    /// `true` iff no cached entries are currently held. O(1).
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// Number of cached edge entries. O(1).
     pub fn len(&self) -> usize {
         self.entries.len()
     }

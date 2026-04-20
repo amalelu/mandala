@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::mindmap::custom_mutation::{CustomMutation, TriggerBinding};
 
+/// A single node in the mindmap: one rectangle of text + style,
+/// attached to a tree position via [`Self::parent_id`] and a
+/// Dewey-decimal [`Self::id`]. The loader materializes one of these
+/// per `.mindmap.json` entry; the scene builder and tree builder
+/// both project from this shape.
+///
+/// Plain data; no runtime cost beyond the `String` allocations serde
+/// performs on deserialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MindNode {
     pub id: String,
@@ -34,18 +42,32 @@ pub struct MindNode {
     pub inline_mutations: Vec<CustomMutation>,
 }
 
+/// Canvas-space top-left corner of a node's AABB. Units are
+/// arbitrary canvas pixels (the camera transforms to screen space at
+/// render time). Plain data; no runtime cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
 }
 
+/// Canvas-space extent of a node's AABB. Width and height are
+/// strictly positive in practice but not checked at type level —
+/// scene-builder code guards against zero-size nodes on its own.
+/// Plain data; no runtime cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Size {
     pub width: f64,
     pub height: f64,
 }
 
+/// A styled slice of a node's `text`, matching miMind's text-run
+/// concept: `[start, end)` byte indices carry one font / size /
+/// color / style combination, with optional hyperlink target.
+/// Multiple runs describe a single multi-style string; gaps in
+/// coverage render with node-level defaults.
+///
+/// Plain data; no runtime cost beyond the string allocations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextRun {
     pub start: usize,
@@ -59,6 +81,10 @@ pub struct TextRun {
     pub hyperlink: Option<String>,
 }
 
+/// Visual style for one node's frame / background / text. Colors are
+/// raw `#RRGGBB` or `var(--name)` strings — callers pass them through
+/// `util::color::resolve_var` against the canvas theme map before
+/// rasterizing. Plain data; no runtime cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStyle {
     pub background_color: String,
@@ -134,6 +160,11 @@ fn default_tr_glyph() -> String { "\u{256E}".to_string() }
 fn default_bl_glyph() -> String { "\u{2570}".to_string() }
 fn default_br_glyph() -> String { "\u{256F}".to_string() }
 
+/// Descriptor for how this node arranges its children — a
+/// miMind-compat record carried through for round-trip fidelity.
+/// Mandala does not currently drive layout from these fields;
+/// custom mutations (see `format/mutations.md`) are the active
+/// layout mechanism. Plain data; no runtime cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeLayout {
     #[serde(rename = "type")]
@@ -142,6 +173,13 @@ pub struct NodeLayout {
     pub spacing: f64,
 }
 
+/// Links a node to one entry in a named [`super::Palette`] keyed by
+/// depth. `level` is the index into the palette's `groups`; clamped
+/// at read time so a schema referencing a level beyond the palette's
+/// length falls back to the last group rather than erroring.
+/// `starts_at_root` and `connections_colored` are round-tripped
+/// miMind-compat flags that the renderer interprets when resolving
+/// effective colors. Plain data; no runtime cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColorSchema {
     pub palette: String,
@@ -150,6 +188,9 @@ pub struct ColorSchema {
     pub connections_colored: bool,
 }
 
+/// One palette entry — the four colors a themed node inherits at a
+/// given depth level. Referenced from [`ColorSchema::level`] via
+/// [`super::Palette::groups`]. Plain data; no runtime cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColorGroup {
     pub background: String,

@@ -333,7 +333,7 @@ fn test_text_edit_state_is_open_closed_variant() {
 }
 
 // -----------------------------------------------------------------
-// Cursor helpers: boundary cases added after perf rewrite
+// Cursor helpers: boundary cases
 // -----------------------------------------------------------------
 
 #[test]
@@ -406,13 +406,13 @@ fn test_delete_before_cursor_with_multibyte() {
 }
 
 // -----------------------------------------------------------------
-// Grapheme-cluster regression tests (chunk 3 / §B2)
+// Grapheme-cluster regression tests
 // -----------------------------------------------------------------
 //
 // These guard the rule that a single Backspace/Delete removes a
-// whole grapheme cluster, not a Unicode scalar. Pre-chunk-3 the
-// helpers used `chars()` and would corrupt emoji and ZWJ
-// sequences mid-cluster on the first Backspace.
+// whole grapheme cluster, not a Unicode scalar. An earlier char-
+// indexed implementation would corrupt emoji and ZWJ sequences
+// mid-cluster on the first Backspace.
 
 #[test]
 fn test_cursor_edit_with_emoji_backspace() {

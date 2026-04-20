@@ -1,6 +1,14 @@
-//! Legacy format converter: transforms a miMind-derived `.mindmap.json`
-//! into the current format with structural IDs, named enums, hoisted
-//! palettes, and channel support.
+//! One-way migration from the miMind-derived legacy `.mindmap.json`
+//! format to the current one.
+//!
+//! The current format's loader rejects legacy files outright — there's
+//! no runtime compatibility shim, because every legacy-shaped field
+//! (opaque integer IDs, enum codes, inlined palettes, `index`) has a
+//! named successor that `verify` enforces. This module is how a user
+//! with an unmigrated file crosses the one-way door: each submodule
+//! performs one orthogonal transform (IDs, enums, palettes, cleanup)
+//! and the whole pipeline runs in a fixed order so later passes can
+//! assume the earlier ones have already landed.
 
 mod cleanup;
 mod enums;

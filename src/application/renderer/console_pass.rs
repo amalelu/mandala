@@ -28,14 +28,13 @@ use super::measure_max_glyph_advance;
 // Stable channel scheme for the console overlay tree
 // =============================================================
 //
-// Mirrors the picker's stable-channel discipline (commit
-// `ceaeeb4`): every console GlyphArea sits at a deterministic
-// channel so the §B2 in-place mutator path can target it across
-// keystrokes. Bands are wide enough to add new sub-rows without
-// renumbering. **Order matters** — the values must be strictly
-// ascending in tree-insertion order, otherwise Baumhard's
-// `align_child_walks` breaks alignment and the mutator path
-// silently misses elements.
+// Mirrors the picker's stable-channel discipline: every console
+// GlyphArea sits at a deterministic channel so the §B2 in-place
+// mutator path can target it across keystrokes. Bands are wide
+// enough to add new sub-rows without renumbering. **Order
+// matters** — the values must be strictly ascending in
+// tree-insertion order, otherwise Baumhard's `align_child_walks`
+// breaks alignment and the mutator path silently misses elements.
 //
 // Layout-wise: 4 borders → `scrollback_rows` × (gutter + text)
 // always-emitted slots → `completion_rows` always-emitted slots

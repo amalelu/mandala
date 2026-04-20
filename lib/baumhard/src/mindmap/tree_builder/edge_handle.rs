@@ -12,6 +12,12 @@ use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::tree::Tree;
 use crate::util::color;
 
+/// Map a handle kind to its stable tree channel. Anchors take 1/2,
+/// the midpoint takes 3, and control points stride from 100 by index
+/// so adding a CP never collides with the fixed anchor channels. The
+/// in-place mutator path compares channels from this function on both
+/// sides of the rebuild so the same handle kind always lands on the
+/// same arena slot. O(1).
 pub fn edge_handle_channel_for(
     kind: crate::mindmap::scene_builder::EdgeHandleKind,
 ) -> usize {

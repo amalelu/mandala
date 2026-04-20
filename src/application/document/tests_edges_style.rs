@@ -257,7 +257,7 @@ use super::defaults::default_cross_link_edge;
     }
 
     // ========================================================================
-    // Session 6D — connection style and label mutation tests
+    // Connection style and label mutation tests
     // ========================================================================
 
     #[test]

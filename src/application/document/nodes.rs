@@ -10,18 +10,18 @@ use super::undo_action::UndoAction;
 use super::MindMapDocument;
 
 impl MindMapDocument {
-    /// Session 7A: replace a node's `text` and collapse its `text_runs`
-    /// to a single run inheriting the first original run's formatting
-    /// (font, size_pt, color, bold, italic, underline). If the original
-    /// had no runs, a white 24pt Liberation Sans run is synthesized —
+    /// Replace a node's `text` and collapse its `text_runs` to a single
+    /// run inheriting the first original run's formatting (font,
+    /// size_pt, color, bold, italic, underline). If the original had
+    /// no runs, a white 24pt Liberation Sans run is synthesized —
     /// mirrors `default_orphan_node`.
     ///
     /// Returns `true` if the value actually changed. No-op / no undo
     /// push on unchanged text, matching `set_edge_label`'s contract.
     ///
     /// **Collapse caveat**: authored multi-run nodes lose their per-span
-    /// formatting on any edit. Session 7B's `TextRun` splitting will
-    /// preserve it.
+    /// formatting on any edit — a future per-run splitter would preserve
+    /// it, but until then the editor path is single-run.
     pub fn set_node_text(&mut self, node_id: &str, new_text: String) -> bool {
         let node = match self.mindmap.nodes.get_mut(node_id) {
             Some(n) => n,

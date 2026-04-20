@@ -132,14 +132,13 @@ use baumhard::util::grapheme_chad;
 const EDGE_HIT_TOLERANCE_PX: f32 = 8.0;
 
 /// Screen-space click tolerance (in pixels) for edge grab-handle hit
-/// testing in Session 6C. Slightly larger than the edge-path
-/// tolerance above because handles are point-like and need a bit
-/// more grab-area to feel forgiving.
+/// testing. Slightly larger than the edge-path tolerance above
+/// because handles are point-like and need a bit more grab-area
+/// to feel forgiving.
 #[cfg(not(target_arch = "wasm32"))]
 const EDGE_HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
 
 
-/// Tracks the previous left-click in screen space so a second click
 /// What a single click targeted. Used by [`LastClick`] + the
 /// double-click detector so a portal-marker double-click (navigate)
 /// is distinguishable from a node double-click (edit text) and from
@@ -162,10 +161,11 @@ enum ClickHit {
     },
 }
 
-/// within a short time + distance window is recognized as a
-/// double-click. Double-click fires on the second `Pressed` event,
-/// not the second release. `time` is `f64` milliseconds from the
-/// cross-platform `now_ms()` helper.
+/// Records the previous left-click's time, screen position, and hit
+/// target so a second click within a short time + distance window
+/// is recognized as a double-click. Double-click fires on the second
+/// `Pressed` event, not the second release. `time` is `f64`
+/// milliseconds from the cross-platform `now_ms()` helper.
 #[derive(Debug, Clone)]
 struct LastClick {
     time: f64,
@@ -348,7 +348,7 @@ enum DragState {
         individual: bool,
     },
     /// Dragging a grab-handle on the selected edge to reshape it.
-    /// Session 6C: handles come in four kinds (see
+    /// Handles come in four kinds (see
     /// `scene_builder::EdgeHandleKind`): two anchor endpoints, any
     /// existing control points, and a midpoint handle on straight
     /// edges that curves them into a quadratic Bezier on first drag.
@@ -457,9 +457,6 @@ impl Application {
         self.options
     }
 }
-/// Rebuild tree from model with selection highlight, plus connections and borders.
-/// When the current selection is an edge, its `ConnectionElement` gets a
-/// cyan color override baked in via `build_scene_with_selection()`.
 
 /**
 Launch and run options for the application and the application instance
@@ -481,12 +478,9 @@ pub struct Options {
     pub keybind_config: crate::application::keybinds::KeybindConfig,
 }
 
-// =====================================================================
-// Session 7A: unit tests for pure helpers (cursor math, caret
-// insertion, double-click detection, Baumhard mutation round-trip).
-// Event-loop integration is verified manually via `cargo run`.
-// =====================================================================
-
+// Unit tests for pure helpers (cursor math, caret insertion,
+// double-click detection, Baumhard mutation round-trip). Event-loop
+// integration is verified manually via `cargo run`.
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]

@@ -51,14 +51,14 @@ pub const WINDOW_SIZE: usize = 8;
 /// Maximum drain divisor. At 60 fps, `N = 8` means the dragged node
 /// updates every ~133ms — laggy but still tracking. Past this, visual
 /// tracking becomes so stale that capping is the kinder behaviour; the
-/// remaining budget shortfall has to be addressed by the other Phase 4
-/// fixes (culling, incremental rebuild, shape-once reuse).
+/// remaining budget shortfall has to be addressed by the companion
+/// techniques (culling, incremental rebuild, shape-once reuse).
 pub const MAX_N: u32 = 8;
 
 /// A conservative default refresh budget: 16.67ms (60 Hz) minus ~2.7ms
 /// of safety margin for GPU present and other per-frame overhead. The
-/// correct value depends on the actual monitor refresh rate; detecting
-/// that at runtime is an open question flagged in the session plan.
+/// correct value depends on the actual monitor refresh rate; runtime
+/// detection of that is still an open question.
 pub const DEFAULT_BUDGET: Duration = Duration::from_micros(14_000);
 
 /// Per-frame throttle that degrades mutation frequency under load.

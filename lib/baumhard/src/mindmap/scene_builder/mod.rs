@@ -64,17 +64,17 @@ pub struct RenderScene {
     pub border_elements: Vec<BorderElement>,
     pub connection_elements: Vec<ConnectionElement>,
     pub portal_elements: Vec<PortalElement>,
-    /// Session 6C: grab-handles rendered on top of the *selected* edge.
+    /// Grab-handles rendered on top of the *selected* edge.
     /// Always empty unless `selected_edge` was `Some` on the scene-build
     /// call. Contains the two anchor endpoints, any existing control
     /// points, and (for straight edges only) a midpoint handle that
     /// triggers the "curve a straight line" gesture when dragged.
     pub edge_handles: Vec<EdgeHandleElement>,
-    /// Session 6D: labels attached to edges whose `label` field is
-    /// non-empty. One element per labeled edge, positioned along the
-    /// connection path at `edge.label_position_t` (defaulting to 0.5).
-    /// Not cached in `SceneConnectionCache` — labels are ≤ 1 per edge
-    /// and rebuilt each frame at trivial cost.
+    /// Labels attached to edges whose `label` field is non-empty.
+    /// One element per labeled edge, positioned along the connection
+    /// path at `edge.label_position_t` (defaulting to 0.5). Not cached
+    /// in `SceneConnectionCache` — labels are ≤ 1 per edge and rebuilt
+    /// each frame at trivial cost.
     pub connection_label_elements: Vec<ConnectionLabelElement>,
     pub background_color: String,
 }
@@ -152,8 +152,8 @@ pub struct PortalElement {
     pub font_size_pt: f32,
 }
 
-/// Session 6D: a text label attached to a connection edge. Rendered
-/// as a cosmic-text buffer positioned along the edge's path at a
+/// A text label attached to a connection edge. Rendered as a
+/// cosmic-text buffer positioned along the edge's path at a
 /// parameter-space `t` derived from `MindEdge.label_position_t`.
 ///
 /// The AABB (`position`, `bounds`) is used by the Renderer both to
@@ -183,7 +183,7 @@ pub struct ConnectionLabelElement {
     pub font_size_pt: f32,
 }
 
-/// Which part of a selected edge a grab-handle targets. Session 6C's
+/// Which part of a selected edge a grab-handle targets. The
 /// connection reshape surface: anchor endpoints can be dragged to
 /// change which side of a node an edge attaches to, control points
 /// can be dragged to reshape a curve, and the `Midpoint` handle on a

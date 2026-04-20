@@ -12,18 +12,30 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::ops::{Add, AddAssign, MulAssign};
 
-/// Each variant represents a field in GlyphComponent, used for mutators
+/// Field-level delta vocabulary for [`GlyphComponent`]. Each variant
+/// carries the replacement (or addend) for one field; the mutator
+/// pipeline picks the variant to know *which* part to touch.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum GlyphComponentField {
+    /// New text run.
     Text(String),
+    /// Font assignment.
     Font(AppFont),
+    /// Colour assignment.
     Color(FloatRgba),
 }
 
+/// The leaf: one run of text rendered in a single font and colour.
+/// Stacks into a [`GlyphLine`], which stacks into a
+/// [`crate::gfx_structs::model::GlyphMatrix`], which belongs to a
+/// [`crate::gfx_structs::model::GlyphModel`].
 #[derive(Serialize, Debug, Eq, PartialEq, Deserialize, Clone)]
 pub struct GlyphComponent {
+    /// The text run — may contain multi-byte / multi-grapheme clusters.
     pub text: String,
+    /// Font used for this run.
     pub font: AppFont,
+    /// RGBA colour (u8 per channel).
     pub color: Color,
 }
 
@@ -85,6 +97,8 @@ impl Add for GlyphComponent {
 }
 
 impl GlyphComponent {
+    /// Build a component from `(text, font, color)`. O(n) in
+    /// `text.len()` for the owning copy.
     pub fn text(text: &str, font: AppFont, color: Color) -> Self {
         GlyphComponent {
             text: text.to_string(),
@@ -93,6 +107,8 @@ impl GlyphComponent {
         }
     }
 
+    /// Build an invisible-colour spacer of `n` ASCII spaces. Used by
+    /// the matrix painter to pad lines. O(n) for the repeat.
     pub fn space(n: usize) -> Self {
         GlyphComponent {
             text: " ".repeat(n),
@@ -101,6 +117,9 @@ impl GlyphComponent {
         }
     }
 
+    /// Split off the graphemes at-and-after `at_idx` into a new
+    /// component (inheriting this component's font / colour). O(n)
+    /// in `at_idx` for the grapheme walk.
     pub fn split_off(&mut self, at_idx: usize) -> Self {
         let split_str = split_off_graphemes(&mut self.text, at_idx);
         GlyphComponent {
@@ -110,28 +129,39 @@ impl GlyphComponent {
         }
     }
 
+    /// Prepend `n` ASCII spaces to the text. O(n) for the alloc +
+    /// O(existing.len()) for the shift.
     pub fn space_front(&mut self, n: usize) {
         self.pad_front(" ", n);
     }
 
+    /// Append `n` ASCII spaces to the text. O(n).
     pub fn space_back(&mut self, n: usize) {
         self.pad_back(" ", n);
     }
 
+    /// Prepend `n` repetitions of `pad` to the text. O(n·|pad|) +
+    /// O(existing.len()).
     pub fn pad_front(&mut self, pad: &str, n: usize) {
         let padding = pad.repeat(n);
         self.text.insert_str(0, &padding);
     }
 
+    /// Append `n` repetitions of `pad` to the text. O(n·|pad|).
     pub fn pad_back(&mut self, pad: &str, n: usize) {
         let padding = pad.repeat(n);
         self.text.push_str(&padding);
     }
 
+    /// True when the text contains at least one non-whitespace
+    /// character. O(n) in the text length.
     pub fn contains_non_space(&self) -> bool {
         self.text.chars().any(|c| !c.is_whitespace())
     }
 
+    /// Index of the first non-whitespace character (by `char`
+    /// iteration, not grapheme), or `None` if the run is all
+    /// whitespace. O(n).
     pub fn index_of_first_non_space_char(&self) -> Option<usize> {
         self.text
             .chars()
@@ -140,21 +170,24 @@ impl GlyphComponent {
             .map(|(i, _)| i)
     }
 
+    /// Borrow the text as a `&str`. O(1).
     pub fn as_str(&self) -> &str {
         self.text.as_str()
     }
 
-    /// Returns number of grapheme clusters
+    /// Grapheme-cluster count of the text. O(n) grapheme walk.
     pub fn length(&self) -> usize {
         count_grapheme_clusters(&self.text)
     }
 
-    /// This works on unicode grapheme clusters
+    /// Drop `num` grapheme clusters from the front of the text. O(n)
+    /// grapheme walk plus O(text.len()) shift.
     pub fn discard_front(&mut self, num: usize) {
         delete_front_unicode(&mut self.text, num);
     }
 
-    /// This works on unicode grapheme clusters
+    /// Drop `num` grapheme clusters from the back of the text. O(n)
+    /// grapheme walk.
     pub fn discard_back(&mut self, num: usize) {
         delete_back_unicode(&mut self.text, num);
     }

@@ -105,14 +105,11 @@ pub(super) struct InitState {
 }
 
 impl InitState {
-    /// Per-event dispatch. The old closure body from the
-    /// pre-migration `run_native::run` lived here verbatim; most
-    /// of its bulk has since moved out into
-    /// [`super::event_mouse_click`],
-    /// [`super::event_cursor_moved`], and
-    /// [`super::event_keyboard`]. This method handles the
-    /// smaller arms (resize, close, wheel, modifiers) inline
-    /// and delegates the larger ones.
+    /// Per-event dispatch. Most of the per-event work lives in
+    /// [`super::event_mouse_click`], [`super::event_cursor_moved`],
+    /// and [`super::event_keyboard`]; this method handles the
+    /// smaller arms (resize, close, wheel, modifiers) inline and
+    /// delegates the larger ones.
     pub(super) fn handle_event(
         &mut self,
         event_loop: &ActiveEventLoop,

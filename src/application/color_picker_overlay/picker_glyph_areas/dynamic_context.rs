@@ -482,7 +482,7 @@ mod tests {
     /// The sat-bar base-color cache is keyed on `(hue, val)` — the
     /// `sat` axis must NOT participate in the key, otherwise a
     /// sat-slider scrub would re-populate the cache on every frame
-    /// (the perf regression d4a3126 fixed).
+    /// (the perf regression the axis-split was introduced to fix).
     ///
     /// Previous versions of this test asserted that two calls with
     /// different `sat` produced identical output arrays. That's

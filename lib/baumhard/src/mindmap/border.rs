@@ -181,6 +181,12 @@ pub struct BorderStyle {
 }
 
 impl BorderStyle {
+    /// Construct a default visible border with the given color
+    /// (`#RRGGBB` hex or resolved theme variable). Uses the rounded
+    /// box-drawing preset + 14 pt default font size — matches the
+    /// scene builder's per-framed-node default so node borders keep
+    /// the same look when a caller asks for "a default border in this
+    /// color" instead of building one field-by-field.
     pub fn default_with_color(color: &str) -> Self {
         BorderStyle {
             glyph_set: BorderGlyphSet::box_drawing_rounded(),

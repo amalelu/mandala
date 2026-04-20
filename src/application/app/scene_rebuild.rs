@@ -140,8 +140,8 @@ pub(in crate::application::app) fn update_border_tree_with_offsets(
 /// instead of allocating a new one each frame. When portals are
 /// added, removed, or a fold reveals/hides an endpoint, the
 /// identity sequence shifts and we fall back to a full rebuild.
-/// Mirrors the canonical pattern from the picker (commit
-/// `ceaeeb4`), now applied to a nested-channel tree.
+/// Mirrors the canonical in-place mutator pattern from the picker,
+/// now applied to a nested-channel tree.
 pub(in crate::application::app) fn update_portal_tree(
     doc: &MindMapDocument,
     offsets: &std::collections::HashMap<String, (f32, f32)>,
@@ -260,7 +260,7 @@ pub(in crate::application::app) fn update_connection_tree(
 /// hitbox map back to the renderer so `hit_test_edge_label`
 /// keeps working.
 ///
-/// **§B2 dispatch.** Inline label edits (Phase 2.1's hot path),
+/// **§B2 dispatch.** Inline label edits (the hot path),
 /// color changes, and label movement keep the structural identity
 /// (the per-edge `EdgeKey` sequence) stable; the in-place mutator
 /// path runs and the arena is reused. Adding or removing a label,

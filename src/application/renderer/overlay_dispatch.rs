@@ -135,8 +135,9 @@ impl Renderer {
     /// still use [`Self::rebuild_color_picker_overlay_buffers`]
     /// because the arena needs to be created or torn down. Calls
     /// `rebuild_overlay_scene_buffers` afterward to refresh the
-    /// shaped buffers — the cosmic-text shape pass is still per-
-    /// element, which is the §B1 perf gap tracked in `ROADMAP.md`.
+    /// shaped buffers — the cosmic-text shape pass is still
+    /// per-element, which is the §B1 perf gap in
+    /// `lib/baumhard/CONVENTIONS.md`.
     pub fn apply_color_picker_overlay_mutator(
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,

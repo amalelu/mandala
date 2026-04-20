@@ -21,6 +21,10 @@ use serde::{Deserialize, Serialize};
 use crate::font::fonts::AppFont;
 use crate::util::color::FloatRgba;
 
+/// One contiguous span of text with an optional colour and font
+/// pin. Identified by its [`Range`]; `Eq` / `Hash` only inspect the
+/// range so two regions with the same bounds collide in the owning
+/// [`ColorFontRegions`] set regardless of colour / font.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ColorFontRegion {
     pub range: Range,
@@ -30,11 +34,15 @@ pub struct ColorFontRegion {
 
 impl Hash for ColorFontRegion {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // We only hash the range here so that we can use the range as a key to get
+        // Only the range is hashed — the set semantics key on it alone
+        // so a lookup by bare range can find a stored region with any
+        // colour / font payload.
         self.range.hash(state);
     }
 }
 
+/// Field selector for a [`ColorFontRegion`]. Used by mutation paths
+/// that update a single facet of an existing region.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ColorFontRegionField {
     Range(Range),
@@ -64,9 +72,13 @@ impl Ord for ColorFontRegion {
 }
 
 impl ColorFontRegion {
+    /// Construct a region with an explicit range, font pin, and colour
+    /// pin. All fields may be `None` except the range.
     pub fn new(range: Range, font: Option<AppFont>, color: Option<FloatRgba>) -> Self {
         ColorFontRegion { range, font, color }
     }
+    /// Construct a keying-only region — no font, no colour — suitable
+    /// for `BTreeSet::get` / `remove` lookups by range alone.
     pub fn new_key_only(range: Range) -> Self {
         ColorFontRegion {
             range,
@@ -76,27 +88,37 @@ impl ColorFontRegion {
     }
 }
 
+/// Ordered set of [`ColorFontRegion`]s keyed on `Range`. Acts as the
+/// styled-span table for a single string; nearly every method on it
+/// is a mutation primitive that keeps the set consistent under
+/// insertion / deletion of characters in the backing text.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Hash)]
 pub struct ColorFontRegions {
     pub regions: BTreeSet<ColorFontRegion>,
 }
 
 impl ColorFontRegions {
+    /// Build a set from an existing `Vec<ColorFontRegion>`. Last-wins
+    /// on duplicate ranges — the `BTreeSet` collect collapses them.
     pub fn new_from(source: Vec<ColorFontRegion>) -> Self {
         ColorFontRegions {
             regions: source.into_iter().collect(),
         }
     }
+    /// Empty region set.
     pub fn new_empty() -> Self {
         ColorFontRegions {
             regions: BTreeSet::new(),
         }
     }
 
+    /// Borrow every region as a `Vec<&ColorFontRegion>` (allocates the
+    /// outer vec; the regions themselves are not copied).
     pub fn all_regions(&self) -> Vec<&ColorFontRegion> {
         self.regions.iter().collect()
     }
 
+    /// Number of regions currently stored.
     pub fn num_regions(&self) -> usize {
         self.regions.len()
     }
@@ -126,9 +148,9 @@ impl ColorFontRegions {
     /// Insert a region, replacing any existing region with the same
     /// key. An inverted range (`start > end`) is dropped with a
     /// warning rather than panicking — `submit_region` is reachable
-    /// from interactive text-edit paths (see `app.rs` callers around
-    /// the `Type` action), and CODE_CONVENTIONS.md §4 says those must
-    /// not abort the editor over a single bad mutation.
+    /// from interactive text-edit paths (the `Type` action in the
+    /// app-level `text_edit` module), and CODE_CONVENTIONS.md §4 says
+    /// those must not abort the editor over a single bad mutation.
     pub fn submit_region(&mut self, region: ColorFontRegion) {
         if region.range.start > region.range.end {
             warn!(
@@ -143,8 +165,12 @@ impl ColorFontRegions {
         self.regions.insert(region);
     }
 
-    /// If there is a region in the given range, it will be split in two at the start of the range
-    /// and the second half will be pushed forward to the end of the range
+    /// Split any region overlapping `range` at `range.start`, push the
+    /// second half forward past `range.end`, and shift every region
+    /// strictly right of `range.end` by `range.magnitude()`.
+    ///
+    /// Costs: O(n) over existing regions plus one full vec clone of
+    /// the set.
     pub fn split_and_separate(&mut self, range: Range) {
         let mut copy_of_regions: Vec<_> = self.regions.iter().copied().collect();
         let mut cloned_regions: Vec<ColorFontRegion> = Vec::new();
@@ -169,16 +195,16 @@ impl ColorFontRegions {
     /// Regions with `start <= idx` (including straddlers where
     /// `start <= idx < end`) are left untouched — their `end` does
     /// **not** extend to cover the inserted chars. That's the
-    /// "replace-and-shift" semantics `GlyphMatrix::copy_from` relies
-    /// on: it pairs each call with a follow-up `submit_region` for the
-    /// newly-inserted span, so the surrounding region deliberately
-    /// does not absorb the insertion.
+    /// "replace-and-shift" semantics used by paths that pair each call
+    /// with a follow-up `submit_region` for the newly-inserted span,
+    /// so the surrounding region deliberately does not absorb the
+    /// insertion.
     ///
     /// Callers that want the surrounding region to absorb the insertion
-    /// (the text-editor caret, user typing) need to follow up with a
-    /// `remove` + `submit_region` that widens the straddling region's
-    /// `end` by `magnitude`. See the symmetric [`Self::shrink_regions_after`]
-    /// for the delete path.
+    /// (the text-editor caret, user typing) should instead use
+    /// [`Self::insert_regions_at`], which extends straddling regions
+    /// to cover the new chars. See the symmetric
+    /// [`Self::shrink_regions_after`] for the delete path.
     ///
     /// Costs: O(n) over existing regions; one full clone of the
     /// BTreeSet to decouple from the iterator.
@@ -266,10 +292,10 @@ impl ColorFontRegions {
     ///   left by `magnitude` so the region sits flush against the
     ///   remaining-text boundary.
     ///
-    /// Used by the text-edit path's backspace / delete handlers
-    /// (`src/application/app.rs`) to keep per-run color and `AppFont`
-    /// pins intact across character deletion instead of rebuilding the
-    /// region set from a heuristic.
+    /// Used by the text-edit path's backspace / delete handlers (the
+    /// app-level `text_edit` module) to keep per-run color and
+    /// `AppFont` pins intact across character deletion instead of
+    /// rebuilding the region set from a heuristic.
     ///
     /// Costs: O(n) over existing regions; one collect + one extend.
     pub fn shrink_regions_after(&mut self, idx: usize, magnitude: usize) {
@@ -307,6 +333,8 @@ impl ColorFontRegions {
         self.regions.extend(updated);
     }
 
+    /// Replace the entire region set with a copy of `regions`.
+    /// O(n) in `regions.regions.len()`.
     pub fn replace_regions(&mut self, regions: &Self) {
         self.regions.clear();
         for region in &regions.regions {
@@ -314,6 +342,10 @@ impl ColorFontRegions {
         }
     }
 
+    /// Merge `region` into the set: if a region with the same range
+    /// already exists, its colour / font fields are overwritten by any
+    /// `Some(_)` fields in `region` (leaving the rest intact). If no
+    /// match exists, the region is inserted as-is.
     pub fn set_or_insert(&mut self, region: &ColorFontRegion) {
         if self.regions.contains(region) {
             let mut new_region = self.regions.get(region).unwrap().clone();
@@ -329,6 +361,8 @@ impl ColorFontRegions {
         }
     }
 
+    /// Look up the region whose range exactly matches `range`.
+    /// Returns `None` when no such region exists.
     pub fn get(&self, range: Range) -> Option<&ColorFontRegion> {
         self.regions.get(&ColorFontRegion::new_key_only(range))
     }
@@ -350,10 +384,14 @@ impl ColorFontRegions {
             .expect("hard_get: requested range is not present in this region table")
     }
 
+    /// Remove the region keyed on `range`. Returns `true` if a match
+    /// was found and removed.
     pub fn remove_range(&mut self, range: Range) -> bool {
         self.remove(&ColorFontRegion::new_key_only(range))
     }
 
+    /// Remove the region whose range matches `region`'s. Colour / font
+    /// payloads are ignored for the match — only the range is the key.
     pub fn remove(&mut self, region: &ColorFontRegion) -> bool {
         self.regions.remove(region)
     }
@@ -401,6 +439,9 @@ pub enum ApplyOperation {
 }
 
 impl ApplyOperation {
+    /// Apply this operation to `lhs`, using `rhs` as the delta. `T`
+    /// must support all four arithmetic assigns so every variant is
+    /// expressible against a single generic bound.
     pub fn apply<T: AddAssign<T> + MulAssign<T> + SubAssign<T> + Default>(
         &self,
         lhs: &mut T,
@@ -417,6 +458,9 @@ impl ApplyOperation {
     }
 }
 
+/// Half-open index range `[start, end)`. Used as the key type on
+/// [`ColorFontRegion`] and any other span-of-chars payload in the
+/// core model. Totally ordered for `BTreeSet` storage.
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct Range {
     pub start: usize,
@@ -424,34 +468,44 @@ pub struct Range {
 }
 
 impl Range {
+    /// Construct a range from a `(start, end)` tuple.
     pub fn tup(range: (usize, usize)) -> Self {
         Range {
             start: range.0,
             end: range.1,
         }
     }
+    /// Construct a range from explicit `start` and `end` components.
     pub fn new(start: usize, end: usize) -> Self {
         Range { start, end }
     }
 
+    /// Convert to a `std::ops::Range<usize>` so it can be used for
+    /// slice indexing and iteration.
     pub fn to_rust_range(&self) -> std::ops::Range<usize> {
         self.start..self.end
     }
 
+    /// `end - start`. Does not check for underflow; an inverted range
+    /// will panic in debug and underflow in release.
     pub fn magnitude(&self) -> usize {
         self.end - self.start
     }
 
+    /// Shift both endpoints right by `n`.
     pub fn push_right(&mut self, n: usize) {
         self.start += n;
         self.end += n;
     }
 
+    /// Shift both endpoints left by `n`.
     pub fn push_left(&mut self, n: usize) {
         self.start -= n;
         self.end -= n;
     }
 
+    /// Returns `true` iff the two half-open ranges share at least one
+    /// index. Touching endpoints (`a.end == b.start`) do *not* overlap.
     pub fn overlaps(&self, other: &Self) -> bool {
         if self.start >= other.end || other.start >= self.end {
             return false;
@@ -460,19 +514,24 @@ impl Range {
     }
 }
 
+/// Helper for types that can have [`Flag`]s toggled on and off.
+/// Implementers typically back this with a bitset.
 pub trait Flaggable {
     fn flag_is_set(&self, flag: Flag) -> bool;
     fn set_flag(&mut self, flag: Flag);
     fn clear_flag(&mut self, flag: Flag);
 }
 
+/// Something that can be applied (merged) into a `T`. The mutation
+/// pipeline's dispatch trait — every delta type implements it against
+/// its target.
 pub trait Applicable<T: Clone> {
     fn apply_to(&self, target: &mut T);
 }
 
-// This was created to allow for integrated UI functionality
-// We will probably need a lot more flags in order to support
-// A complete UI experience
+/// Element flags used by the UI / interaction layer. Seeded with the
+/// minimum needed for focus, mutability, anchoring, and event
+/// generation; new flags are added as interactions grow.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub enum Flag {
     Focused,
@@ -482,6 +541,9 @@ pub enum Flag {
     MutationEvents,
 }
 
+/// Up to four [`Anchor`]s applied to a single element, describing
+/// which corners / edges are pinned. Larger variants imply more
+/// constraints on the layout solver.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum AnchorBox {
     Single(Anchor),
@@ -490,6 +552,9 @@ pub enum AnchorBox {
     Full(Anchor, Anchor, Anchor, Anchor),
 }
 
+/// A three-way positional constraint: a target (parent / window /
+/// world / …), the point on the target this element pins to, and the
+/// point on the element itself that meets it.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Anchor {
     target: AnchorTarget,
@@ -498,6 +563,8 @@ pub struct Anchor {
 }
 
 impl Anchor {
+    /// Construct an anchor with full control over target, target
+    /// point, and self point.
     pub fn new(target: AnchorTarget, target_point: AnchorPoint, self_point: AnchorPoint) -> Self {
         Anchor {
             target,
@@ -506,6 +573,8 @@ impl Anchor {
         }
     }
 
+    /// Pin `self_point` on this element to `parent_point` on its
+    /// immediate parent.
     pub fn on_parent(parent_point: AnchorPoint, self_point: AnchorPoint) -> Self {
         Anchor {
             target: AnchorTarget::Parent { generation_offset: 0 },
@@ -514,6 +583,8 @@ impl Anchor {
         }
     }
 
+    /// Pin `self_point` on this element to `window_point` in window
+    /// coordinates.
     pub fn on_window(window_point: AnchorPoint, self_point: AnchorPoint) -> Self {
         Anchor {
             target: AnchorTarget::Window,
@@ -522,6 +593,8 @@ impl Anchor {
         }
     }
 
+    /// Pin `self_point` on this element to `world_point` in world
+    /// coordinates.
     pub fn in_world(world_point: AnchorPoint, self_point: AnchorPoint) -> Self {
         Anchor {
             target: AnchorTarget::World,
@@ -557,6 +630,9 @@ impl Default for Anchor {
     }
 }
 
+/// What an [`Anchor`] is pinned *to*. `Parent` / `Child` walk the
+/// tree by `generation_offset` or `child_num`; `Window` / `Display` /
+/// `World` use global coordinate systems.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum AnchorTarget {
     Parent { generation_offset: usize },
@@ -566,6 +642,9 @@ pub enum AnchorTarget {
     World,
 }
 
+/// Named point on a rectangular region — the nine cardinal positions
+/// plus a pixel-offset parameter so callers can nudge a pin without
+/// adding a fresh variant.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum AnchorPoint {
     TopLeft(i16),
@@ -579,10 +658,12 @@ pub enum AnchorPoint {
     Center(i16),
 }
 
+/// Query a 2D position from an element.
 pub trait Positioned {
     fn position(&self) -> OrderedVec2;
 }
 
+/// Query the bounding-box dimensions (width, height) of an element.
 pub trait Bounded {
     fn bounds(&self) -> OrderedVec2;
 }

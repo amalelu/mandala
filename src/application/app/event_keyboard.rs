@@ -96,10 +96,9 @@ pub(super) fn handle_keyboard_input(
         }
     }
 
-    // Session 6D: inline label edit modal. Steals keys
-    // the same way the console does. Escape discards,
-    // Enter commits, Backspace pops, character keys
-    // append.
+    // Inline label edit modal. Steals keys the same way
+    // the console does. Escape discards, Enter commits,
+    // Backspace pops, character keys append.
     if label_edit_state.is_open() {
         if let Some(doc) = document.as_mut() {
             handle_label_edit_key(
@@ -142,12 +141,12 @@ pub(super) fn handle_keyboard_input(
         return;
     }
 
-    // Session 7A: inline node text editor. Steals keys
-    // the same way the console / label-edit modals do.
-    // Enter and Tab are literal characters inside the
-    // editor — this is a multi-line paragraph editor,
-    // not an outliner. Esc cancels; commit is via
-    // click-outside in the mouse handler.
+    // Inline node text editor. Steals keys the same way
+    // the console / label-edit modals do. Enter and Tab
+    // are literal characters inside the editor — this is
+    // a multi-line paragraph editor, not an outliner.
+    // Esc cancels; commit is via click-outside in the
+    // mouse handler.
     if text_edit_state.is_open() {
         if let Some(doc) = document.as_mut() {
             handle_text_edit_key(
@@ -214,10 +213,9 @@ pub(super) fn handle_keyboard_input(
             if matches!(*app_mode, AppMode::Reparent { .. } | AppMode::Connect { .. }) {
                 *app_mode = AppMode::Normal;
                 *hovered_node = None;
-                // Session 7A: clear any stale click so a
-                // post-mode click doesn't get retroactively
-                // paired with a pre-mode click into a
-                // spurious double-click.
+                // Clear any stale click so a post-mode click
+                // doesn't get retroactively paired with a pre-mode
+                // click into a spurious double-click.
                 *last_click = None;
                 if let Some(doc) = document.as_ref() {
                     rebuild_all_with_mode(

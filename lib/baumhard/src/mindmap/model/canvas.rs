@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{GlyphBorderConfig, GlyphConnectionConfig};
 
+/// Shared, per-map rendering context: background color, default
+/// border / connection styles, live theme-variable map, and the
+/// named theme variants that swap into it. One `Canvas` per
+/// [`super::MindMap`]. Plain data; no runtime cost beyond the
+/// `HashMap` / `String` allocations serde performs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Canvas {
     pub background_color: String,

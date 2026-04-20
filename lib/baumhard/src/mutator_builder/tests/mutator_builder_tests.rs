@@ -614,10 +614,10 @@ fn json_instruction_spec_map_children_materializes_correctly() {
 }
 
 // =============================================================
-// Full serialize ↔ deserialize round-trips — catches accidental
+// Full serialize <-> deserialize round-trips — catches accidental
 // serde field renames / shape drift that a one-way parse test
-// would miss. Authored in response to a code-review finding that
-// existing JSON tests only parsed, never re-emitted.
+// would miss (parse-only tests can't see a serialize-side rename
+// until a downstream consumer trips on it).
 // =============================================================
 
 /// Helper: round-trip a MutatorNode through serde_json and assert

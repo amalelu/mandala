@@ -142,4 +142,4 @@ fn test_scene_caps_clipped_for_framed_endpoints() {
         "cap_end should be clipped when target has a visible frame");
 }
 
-// --- Phase B cache tests --------------------------------------------
+// --- Connection-cache integration tests -----------------------------

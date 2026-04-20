@@ -1,5 +1,15 @@
-//! Integer-to-string enum conversion for fields inherited from miMind.
-//! Converts opaque integer codes to human-readable named strings.
+//! Legacy-format migration seam: rewrites miMind's numeric enum codes
+//! as the named string values the current format expects.
+//!
+//! miMind encoded layout type, direction, node shape, edge line style,
+//! and edge anchors as opaque integers (`0`, `1`, `2`, ...). The
+//! current format uses human-readable strings (`"tree"`, `"rounded_
+//! rectangle"`, `"dashed"`, ...) so a map can be read or diffed without
+//! a decoder ring, and so `verify::enums` can check a node's shape
+//! against a known-value list instead of a numeric range. This module
+//! is the one-way translation that makes the named-enum invariant
+//! reachable from legacy input — out-of-range integers fall back to the
+//! safest default rather than failing the conversion.
 
 use serde_json::Value;
 

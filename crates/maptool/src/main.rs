@@ -741,7 +741,8 @@ mod tests {
 
     #[test]
     fn parse_grep_args_i_after_map_path() {
-        // The position bug from the review: -i between map and pattern.
+        // -i between map and pattern must still be recognised — the
+        // parser treats `-i` as position-independent.
         let args = as_strings(&["map.json", "-i", "pat"]);
         let p = parse_grep_args(&args).unwrap();
         assert_eq!(p.map_path, "map.json");

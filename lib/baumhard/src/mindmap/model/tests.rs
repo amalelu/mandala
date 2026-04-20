@@ -205,7 +205,7 @@ fn effective_font_size_respects_custom_bounds() {
     assert!((cfg.effective_font_size_pt(2.0) - 7.0).abs() < EFFECTIVE_FONT_EPSILON);
 }
 
-// Session 6D Phase 1: label_position_t + resolved_for helper.
+// label_position_t + resolved_for helper.
 
 fn synthetic_edge_with_label(label: Option<&str>, pos: Option<f32>) -> MindEdge {
     MindEdge {

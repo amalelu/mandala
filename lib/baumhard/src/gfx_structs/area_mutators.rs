@@ -112,6 +112,8 @@ pub enum GlyphAreaCommand {
 }
 
 impl GlyphAreaCommand {
+    /// Discriminant tag for this command, useful for set/map keys.
+    /// O(1), no allocation.
     pub fn variant(&self) -> GlyphAreaCommandType {
         match self {
             GlyphAreaCommand::PopFront(_) => GlyphAreaCommandType::PopFront,
@@ -199,8 +201,16 @@ impl Applicable<GlyphArea> for GlyphAreaCommand {
 /////// DeltaGlyphArea Mutator ////////
 ///////////////////////////////////////
 
+/// A field-set delta targeting a [`GlyphArea`]. The map keys guarantee
+/// at most one entry per field type; the value carries the new payload
+/// and (via the co-located `Operation` entry) the arithmetic semantics
+/// to apply. Applied via [`Applicable::apply_to`], which dispatches
+/// into [`GlyphArea::apply_operation`].
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct DeltaGlyphArea {
+    /// One entry per touched field type. `GlyphAreaFieldType::ApplyOperation`
+    /// is a sibling entry that carries the global `Add`/`Assign`/`Subtract`
+    /// mode for the rest of the delta.
     pub fields: FxHashMap<GlyphAreaFieldType, GlyphAreaField>,
 }
 
@@ -235,6 +245,9 @@ impl Add for DeltaGlyphArea {
 }
 
 impl DeltaGlyphArea {
+    /// Collect a vector of fields into a delta, keyed by their
+    /// `GlyphAreaFieldType`. Duplicate variants collapse to the last
+    /// entry in `fields` (FxHashMap semantics). O(n) over `fields`.
     pub fn new(fields: Vec<GlyphAreaField>) -> DeltaGlyphArea {
         let mut field_map = FxHashMap::default();
         for field in fields {
@@ -244,6 +257,9 @@ impl DeltaGlyphArea {
         DeltaGlyphArea { fields: field_map }
     }
 
+    /// The global arithmetic mode this delta applies with
+    /// (`Assign` / `Add` / `Subtract`), or `Noop` when no
+    /// `Operation` entry is present. O(1).
     pub fn operation_variant(&self) -> ApplyOperation {
         if let Some(GlyphAreaField::Operation(operation)) =
             self.fields.get(&GlyphAreaFieldType::ApplyOperation)
@@ -254,6 +270,7 @@ impl DeltaGlyphArea {
         }
     }
 
+    /// Return the delta's colour/font region payload, if any. O(1).
     pub fn color_font_regions(&self) -> Option<&ColorFontRegions> {
         if let Some(GlyphAreaField::ColorFontRegions(color_font_regions)) =
             self.fields.get(&GlyphAreaFieldType::ColorFontRegions)
@@ -264,6 +281,7 @@ impl DeltaGlyphArea {
         }
     }
 
+    /// Return the delta's position payload as a `Vec2`, if any. O(1).
     pub fn position(&self) -> Option<Vec2> {
         if let Some(GlyphAreaField::Position(x)) = self.fields.get(&GlyphAreaFieldType::Position) {
             Some(x.to_vec2())
@@ -272,6 +290,7 @@ impl DeltaGlyphArea {
         }
     }
 
+    /// Return the delta's scale payload, if any. O(1).
     pub fn scale(&self) -> Option<f32> {
         if let Some(GlyphAreaField::Scale(scale)) = self.fields.get(&GlyphAreaFieldType::Scale) {
             Some(scale.0)
@@ -280,6 +299,7 @@ impl DeltaGlyphArea {
         }
     }
 
+    /// Return the delta's line-height payload, if any. O(1).
     pub fn line_height(&self) -> Option<f32> {
         if let Some(GlyphAreaField::LineHeight(line_height)) =
             self.fields.get(&GlyphAreaFieldType::LineHeight)
@@ -290,6 +310,7 @@ impl DeltaGlyphArea {
         }
     }
 
+    /// Borrow the delta's text payload, if any. O(1).
     pub fn text_ref(&self) -> Option<&str> {
         if let Some(GlyphAreaField::Text(text)) = self.fields.get(&GlyphAreaFieldType::Text) {
             Some(text)
@@ -298,6 +319,7 @@ impl DeltaGlyphArea {
         }
     }
 
+    /// Return the delta's bounds payload as a `Vec2`, if any. O(1).
     pub fn bounds(&self) -> Option<Vec2> {
         if let Some(GlyphAreaField::Bounds(x)) = self.fields.get(&GlyphAreaFieldType::Bounds) {
             Some(x.to_vec2())

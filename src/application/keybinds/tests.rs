@@ -220,11 +220,10 @@ fn test_open_console_default_bound_to_slash() {
 
 #[test]
 fn test_open_console_in_document_context() {
-    // After the context-aware dispatch redesign, the event loop
-    // calls `action_for_context(Document, "/", …)` — not the bare
-    // `action_for("/")`. Covers the `/` → console regression that
-    // motivated this branch. Add the bare-resolver test sibling
-    // above, this one locks the path the event loop actually walks.
+    // The event loop calls `action_for_context(Document, "/", …)`
+    // — not the bare `action_for("/")`. Pins the resolver path the
+    // event loop actually walks, guarding the `/` → console binding
+    // against a regression in contextual dispatch.
     let resolved = KeybindConfig::default().resolve();
     assert_eq!(
         resolved.action_for_context(InputContext::Document, "/", false, false, false),
@@ -339,7 +338,7 @@ fn test_normalize_key_name() {
     assert_eq!(normalize_key_name("Z"), "z");
 }
 
-// ── Phase 1 + 2: component-scoped actions and contextual resolution ──
+// ── Component-scoped actions and contextual resolution ──
 
 #[test]
 fn test_default_config_has_console_actions() {

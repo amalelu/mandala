@@ -14,8 +14,13 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use std::ops::{AddAssign, Index, IndexMut, MulAssign, SubAssign};
 
+/// Stacked collection of [`GlyphLine`]s rendered top-to-bottom.
+/// Wraps a single `Vec<GlyphLine>`; indexing past the end of the
+/// matrix auto-expands with empty lines, so callers can write into
+/// arbitrary coordinates without pre-sizing.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GlyphMatrix {
+    /// Ordered lines. Index 0 is the top-most visual line.
     pub matrix: Vec<GlyphLine>,
 }
 
@@ -99,31 +104,56 @@ impl AddAssign for GlyphMatrix {
 }
 
 impl GlyphMatrix {
+    /// Empty matrix. O(1), no allocation.
     pub fn new() -> Self {
         GlyphMatrix { matrix: vec![] }
     }
+    /// Append a line. O(1) amortised.
     pub fn push(&mut self, line: GlyphLine) {
         self.matrix.push(line);
     }
 
+    /// Borrow the line at `line_num`. O(1).
     pub fn get(&self, line_num: usize) -> Option<&GlyphLine> {
         self.matrix.get(line_num)
     }
 
+    /// Mutable borrow of the line at `line_num`. O(1).
     pub fn get_mut(&mut self, line_num: usize) -> Option<&mut GlyphLine> {
         self.matrix.get_mut(line_num)
     }
 
+    /// Expanding-insert at `(line_num, idx)`: grows rows / columns
+    /// with blank space as needed, then delegates to
+    /// [`GlyphLine::expanding_insert`]. O(line growth + grapheme
+    /// walk).
     pub fn expanding_insert(&mut self, line_num: usize, idx: usize, component: &GlyphComponent) {
         self.expand_to_line(line_num, idx);
         self.matrix[line_num].expanding_insert(idx, component);
     }
 
+    /// Overriding-insert at `(line_num, idx)`: grows rows / columns
+    /// with blank space as needed, then delegates to
+    /// [`GlyphLine::overriding_insert`]. O(line growth + grapheme
+    /// walk).
     pub fn overriding_insert(&mut self, line_num: usize, idx: usize, component: &GlyphComponent) {
         self.expand_to_line(line_num, idx);
         self.matrix[line_num].overriding_insert(idx, component);
     }
 
+    /// Paint this matrix into the caller-owned `string` +
+    /// `regions` pair, offset by `(cols, rows)` graphemes.
+    /// The target `string` is padded with newlines / spaces as
+    /// needed so every source component lands on the intended
+    /// grapheme cell. `regions` gains one `ColorFontRegion` per
+    /// painted component so the renderer can colour/fontify the
+    /// right spans.
+    ///
+    /// # Costs
+    ///
+    /// O(total painted graphemes + existing text size) — the walk
+    /// over source components is linear, but each
+    /// `replace_graphemes_until_newline` call is O(line length).
     pub fn place_in(
         &self,
         string: &mut String,
@@ -157,10 +187,10 @@ impl GlyphMatrix {
                 }
             }
 
-            // Then copy the contents of each line into the corresponding line in the target String
-            // todo: It would be nice if the following logic also applied, but right now it does not:
-            // if the source is space, and the target is non-space, then let it remain unchanged
-            // Otherwise prioritize the one being copied over
+            // Copy each component into the target line. Source
+            // always wins the cell — a future refinement where
+            // whitespace source preserves non-whitespace target is
+            // not yet implemented.
             let mut comp_head = graph_line_start_index + offset.0;
             for component in line.line.iter() {
                 let region_shift =

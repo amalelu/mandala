@@ -264,9 +264,9 @@ impl GlyphConnectionConfig {
     /// through the standard precedence: per-edge override (`edge.glyph_connection`)
     /// > canvas-level default (`canvas.default_connection`) > hardcoded default.
     ///
-    /// Session 6D uses this helper from the document mutation layer when
-    /// forking an inherited-default edge into a concrete per-edge copy on
-    /// the first style edit. The returned `Cow::Owned` case carries a
+    /// The document mutation layer calls this when forking an
+    /// inherited-default edge into a concrete per-edge copy on the
+    /// first style edit. The returned `Cow::Owned` case carries a
     /// freshly-cloned value the caller can install into
     /// `edge.glyph_connection`.
     pub fn resolved_for<'a>(edge: &'a MindEdge, canvas: &'a Canvas) -> std::borrow::Cow<'a, GlyphConnectionConfig> {
