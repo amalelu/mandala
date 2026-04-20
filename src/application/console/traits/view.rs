@@ -4,10 +4,13 @@
 //! (`selection_targets`, `view_for`) sits with the view since each
 //! is a single-line constructor.
 //!
-//! Post-refactor there are two target shapes: `Node` and `Edge`.
+//! Three target shapes: `Node`, `Edge`, and `PortalLabel`.
 //! Portal-mode edges go through the `Edge` shape just like
 //! line-mode edges — `display_mode` is a render flag, not a
 //! separate entity, so trait dispatch doesn't split on it.
+//! `PortalLabel` is its own variant because its trait impls
+//! route to the per-endpoint `PortalEndpointState` instead of
+//! the owning edge's fields.
 
 use super::capabilities::{
     AcceptsWheelColor, HandlesCopy, HandlesCut, HandlesPaste, HasBgColor, HasBorderColor,

@@ -43,8 +43,8 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
     // Load mindmap — document and tree persist for interactive use.
     let mut document: Option<MindMapDocument> = None;
     let mut mindmap_tree: Option<MindMapTree> = None;
-    // Phase 4(B) keyed incremental rebuild: document-side cache of
-    // per-edge pre-clip sample geometry. Populated lazily by
+    // Keyed incremental rebuild: document-side cache of per-edge
+    // pre-clip sample geometry. Populated lazily by
     // `build_scene_with_cache`; cleared by `rebuild_all` so any
     // structural change forces a fresh scene build.
     let scene_cache = baumhard::mindmap::scene_cache::SceneConnectionCache::new();
@@ -136,12 +136,12 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
         // bindings (a "button"). Tracked so we only call set_cursor
         // on transitions instead of every CursorMoved event.
         cursor_is_hand: false,
-        // Phase 4(E): governing-invariant throttle. Per-frame work
-        // in the drag path feeds its measured duration into this
-        // tracker; when the moving average crosses the refresh
-        // budget, `should_drain()` starts returning false on some
-        // frames, coalescing multiple ticks' pending delta into a
-        // single drain.
+        // Governing-invariant throttle. Per-frame work in the drag
+        // path feeds its measured duration into this tracker; when
+        // the moving average crosses the refresh budget,
+        // `should_drain()` starts returning false on some frames,
+        // coalescing multiple ticks' pending delta into a single
+        // drain.
         mutation_throttle: MutationFrequencyThrottle::with_default_budget(),
         // Picker hover gate: cursor-moves into the picker update
         // HSV + preview synchronously (cheap), but scene + overlay

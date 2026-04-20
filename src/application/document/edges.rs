@@ -31,8 +31,8 @@ impl MindMapDocument {
     /// Hit-test the grab-handles of a specific edge at `canvas_pos`.
     /// Returns the closest handle whose canvas-space position is
     /// within `tolerance` of the cursor, or `None` if nothing is in
-    /// range. Used by the Session 6C edge-reshape drag flow — called
-    /// at mouse-down time when an edge is currently selected.
+    /// range. Called at mouse-down time by the edge-reshape drag flow
+    /// when an edge is currently selected.
     ///
     /// Computed from the live edge (so any in-progress drag is
     /// reflected), without consulting the scene cache. Bounded cost:
@@ -131,7 +131,7 @@ impl MindMapDocument {
     }
 
     // ========================================================================
-    // Session 6D — connection style and label mutation helpers
+    // Connection style and label mutation helpers.
     //
     // Every helper in this block mirrors the `reset_edge_to_straight` /
     // `set_edge_anchor` template exactly:

@@ -13,32 +13,64 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+/// Every node in a `Tree<T, M>` — and every mutator in a
+/// `MutatorTree<M>` — answers this query. The tree-walker aligns
+/// mutators to targets by comparing `channel()` values, so this is
+/// the one trait the walker needs on both sides of the dispatch.
 pub trait BranchChannel {
+    /// Channel index used for walker alignment. O(1).
     fn channel(&self) -> usize;
 }
 
+/// Thread-safe closure that receives a mutable `GfxElement` plus a
+/// delivered event. `Arc<Mutex<_>>` because elements are cloned and
+/// moved between arenas; the wrapper keeps a single callback
+/// reachable from every clone without duplicating state.
 pub type EventSubscriber =
     Arc<Mutex<dyn FnMut(&mut GfxElement, GlyphTreeEventInstance) + Send + Sync>>;
 
+/// A tree node that can receive event deliveries. Implemented by
+/// `GfxElement`, which in turn fans events out to its registered
+/// [`EventSubscriber`]s.
 pub trait TreeEventConsumer {
+    /// Handle an event instance. Typically fans out to subscribers
+    /// cloned from `self`, so the handler can mutate `self` without
+    /// aliasing the subscriber list.
     fn accept_event(&mut self, event: &GlyphTreeEventInstance);
 }
 
+/// Trees require an identity ("void") node for structural padding —
+/// the type lets `MutatorTree::new` and `Tree::new` stay generic.
 pub trait TreeNode {
+    /// Produce a neutral / no-op instance used as placeholder in
+    /// arena slots that need no payload.
     fn void() -> Self;
 }
 
+/// Arena of mutator nodes plus a root id. Separate type from
+/// [`Tree`] because mutators carry no spatial data — no region
+/// index, no AABB caches, no position. Applied to a `Tree` via
+/// [`MutatorTree::apply_to`], which drives
+/// [`walk_tree_from`](crate::gfx_structs::tree_walker::walk_tree_from).
 #[derive(Clone, Debug)]
 pub struct MutatorTree<T> {
+    /// Backing arena — the same `indextree::Arena` used by the
+    /// target `Tree`, so `NodeId`s can traverse freely within the
+    /// mutator tree.
     pub arena: Arena<T>,
+    /// Arena id of the mutator root. Every walk starts here.
     pub root: NodeId,
 }
 
 impl <T: TreeNode + Clone> MutatorTree<T> {
+    /// Construct an empty mutator tree rooted at a `T::void()`
+    /// node. O(1); one arena allocation for the root.
     pub fn new() -> Self {
         Self::new_with(T::void())
     }
 
+    /// Construct a mutator tree whose root carries `node`. O(1);
+    /// one arena allocation.
     pub fn new_with(node: T) -> Self {
         let mut arena = Arena::default();
         let root = arena.new_node(node);
@@ -48,6 +80,8 @@ impl <T: TreeNode + Clone> MutatorTree<T> {
         }
     }
 
+    /// Borrow the arena node at `id`, or `None` if the id has been
+    /// removed. O(1).
     pub fn get(&self, id: NodeId) -> Option<&Node<T>> {
         self.arena.get(id)
     }
@@ -68,13 +102,21 @@ impl Applicable<Tree<GfxElement, GfxMutator>> for MutatorTree<GfxMutator> {
 // written-only today: they're forward-compat seams for the named
 // trajectory (Baumhard script API, plugin mutations, BVH region
 // indexing) per CODE_CONVENTIONS.md §6.
+/// Arena-backed tree of elements `T` mutable by an applicable `M`.
+/// Owns the spatial caches (AABB memo, per-node subtree AABBs,
+/// optional region index) that accelerate hit-testing and the
+/// BVH descent. A `Scene` may host many trees layered on top of
+/// each other.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Tree<T: Clone, M: Applicable<T>> {
+    /// Backing arena of element nodes.
     pub arena: Arena<T>,
     phantom: PhantomData<M>,
+    /// Arena id of the tree root.
     pub root: NodeId,
-    /// Layer is used to determine the order that trees should be drawn onto the Scene
+    /// Draw order hint relative to sibling trees in a [`Scene`].
+    /// Higher = drawn on top.
     pub layer: usize,
     /// All child positions are relative to this
     position: Vec2,
@@ -122,8 +164,10 @@ impl Tree<GfxElement, GfxMutator> {
         }
     }
 
-    /// Constructs a new Tree with a root node of type void
-    /// This root node will be the ancestor of all nodes in this tree
+    /// Indexed tree with a `GfxElement::void()` root. `_scene_index_sender`
+    /// is accepted for API compatibility with the forward-compat
+    /// region-indexing trajectory (§6); it is not currently wired.
+    /// O(1); one arena allocation for the root.
     pub fn new(
         region_params: Arc<RegionParams>,
         _scene_index_sender: Sender<RegionElementKeyPair>,
@@ -144,6 +188,10 @@ impl Tree<GfxElement, GfxMutator> {
         }
     }
 
+    /// Un-indexed tree whose root is `element`. No region index is
+    /// attached — use for scratch trees (tests, builder staging)
+    /// that don't participate in scene-level hit-test. O(1); one
+    /// arena allocation.
     pub fn new_non_indexed_with(element: GfxElement) -> Self {
         let mut arena = Arena::default();
         let root = arena.new_node(element);
@@ -161,7 +209,8 @@ impl Tree<GfxElement, GfxMutator> {
         }
     }
 
-    /// Creates an un-indexed Tree with a default [T::void] root node
+    /// Un-indexed tree whose root is `GfxElement::void()`. O(1);
+    /// one arena allocation.
     pub fn new_non_indexed() -> Self {
         let mut arena = Arena::default();
         let root = arena.new_node(GfxElement::void());
@@ -179,30 +228,36 @@ impl Tree<GfxElement, GfxMutator> {
         }
     }
 
+    /// Borrow the arena node at `id`, or `None` if it has been
+    /// removed. O(1).
     pub fn get(&self, id: NodeId) -> Option<&Node<GfxElement>> {
         self.arena.get(id)
     }
 
-    /// See [NodeId::descendants]
+    /// Pre-order iterator over every descendant of [`Self::root`]
+    /// (inclusive). See [`NodeId::descendants`] for iteration order.
     pub fn descendants(&self) -> Descendants<'_, GfxElement> {
         self.root.descendants(&self.arena)
     }
 
+    /// Root node id. O(1).
     pub fn root(&self) -> NodeId {
         self.root
     }
 
-    /// See [NodeId::children]
+    /// Direct-child iterator over [`Self::root`]. See
+    /// [`NodeId::children`].
     pub fn children(&self) -> Children<'_, GfxElement> {
         self.root.children(&self.arena)
     }
 
-    /// Clones the provided [Self] into this one, ignoring the root
+    /// Clone `target`'s subtree (without its root) into this tree
+    /// under [`Self::root`]. O(n) in the imported node count; each
+    /// node's arena entry is cloned.
     pub fn import(&mut self, target: &Self) {
         self.import_arena(&target.arena, target.root);
     }
 
-    /// Clones the provided GfxArena into this one, ignoring the root
     fn import_arena(&mut self, target: &Arena<GfxElement>, target_root: NodeId) {
         arena_utils::clone_subtree(target, target_root, &mut self.arena, self.root);
     }

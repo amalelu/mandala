@@ -80,10 +80,8 @@ pub enum PickerGesture {
 
 /// Modal state for the glyph-wheel color picker.
 ///
-/// The previous revision of this struct also stored a
-/// `snapshot: UndoAction` so a pre-picker clone of the edited edge
-/// could be restored on cancel. That snapshot is no longer needed:
-/// preview is now a purely visual substitution via
+/// No pre-picker snapshot is stored on the struct: preview is a
+/// purely visual substitution via
 /// `MindMapDocument::color_picker_preview`, so cancel just clears
 /// the preview and commit calls `set_edge_color` once on the final
 /// HSV — the committed model is untouched during hover and the

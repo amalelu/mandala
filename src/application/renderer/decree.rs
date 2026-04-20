@@ -41,15 +41,16 @@ impl Renderer {
                         screen_delta: Vec2::new(dx, dy),
                     },
                 );
-                // Phase A's off-screen glyph cull is a function of the
-                // camera, so moving the camera invalidates the cached
-                // per-edge visible-glyph layout. Clear the renderer-side
-                // connection cache so the next rebuild re-runs the cull
-                // from scratch, and raise the viewport-dirty flag so the
-                // event loop actually triggers the rebuild. The
-                // document-side `SceneConnectionCache` holds canvas-space
-                // samples whose spacing doesn't depend on pan, so it is
-                // NOT cleared here — geometry stays cached across pans.
+                // The per-edge off-screen glyph cull is a function of
+                // the camera, so moving the camera invalidates the
+                // cached per-edge visible-glyph layout. Clear the
+                // renderer-side connection cache so the next rebuild
+                // re-runs the cull from scratch, and raise the
+                // viewport-dirty flag so the event loop actually
+                // triggers the rebuild. The document-side
+                // `SceneConnectionCache` holds canvas-space samples
+                // whose spacing doesn't depend on pan, so it is NOT
+                // cleared here — geometry stays cached across pans.
                 self.connection_buffers.clear();
                 self.connection_viewport_dirty = true;
             }

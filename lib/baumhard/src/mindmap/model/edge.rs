@@ -10,24 +10,46 @@ use serde::{Deserialize, Serialize};
 
 use super::Canvas;
 
+/// One directed connection between two `MindNode`s. The central
+/// edge type in the mindmap model: every rendered line, portal, and
+/// cross-link materializes from one of these. Plain data — no
+/// indices, no back-pointers; serde deserialization allocates for
+/// the owned `String` / `Vec` fields but construction is otherwise
+/// O(1). Edges have no stable id; callers identify them by the
+/// `(from_id, to_id, edge_type)` triple.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MindEdge {
+    /// Id of the source node.
     pub from_id: String,
+    /// Id of the destination node.
     pub to_id: String,
+    /// Edge-type tag (e.g. `"parent_child"`, `"cross_link"`).
+    /// Together with `from_id` and `to_id` this forms the edge's
+    /// (unstable) identity.
     #[serde(rename = "type")]
     pub edge_type: String,
+    /// Stroke colour as `#RRGGBB[AA]` or `var(--name)`.
     pub color: String,
+    /// Stroke width in points.
     pub width: i32,
+    /// Line-style vocabulary term (e.g. `"solid"`, `"dashed"`).
     pub line_style: String,
+    /// False hides the edge without removing it from the model.
     pub visible: bool,
+    /// Optional label text rendered along the connection path.
     pub label: Option<String>,
     /// Parameter-space position of the label along the connection
     /// path. `0.0` sits at the from-anchor, `1.0` at the to-anchor,
     /// `0.5` (or `None`) at the midpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_position_t: Option<f32>,
+    /// Anchor-site vocabulary term for the source endpoint (e.g.
+    /// `"top"`, `"auto"`).
     pub anchor_from: String,
+    /// Anchor-site vocabulary term for the destination endpoint.
     pub anchor_to: String,
+    /// Bezier control points shaping the connection curve. Empty =
+    /// straight line. Heap-allocated vector; growth is user-driven.
     pub control_points: Vec<ControlPoint>,
     /// Glyph-based connection rendering. Optional — if absent, the renderer
     /// composes a connection from default glyphs based on the edge direction.
@@ -264,9 +286,9 @@ impl GlyphConnectionConfig {
     /// through the standard precedence: per-edge override (`edge.glyph_connection`)
     /// > canvas-level default (`canvas.default_connection`) > hardcoded default.
     ///
-    /// Session 6D uses this helper from the document mutation layer when
-    /// forking an inherited-default edge into a concrete per-edge copy on
-    /// the first style edit. The returned `Cow::Owned` case carries a
+    /// The document mutation layer calls this when forking an
+    /// inherited-default edge into a concrete per-edge copy on the
+    /// first style edit. The returned `Cow::Owned` case carries a
     /// freshly-cloned value the caller can install into
     /// `edge.glyph_connection`.
     pub fn resolved_for<'a>(edge: &'a MindEdge, canvas: &'a Canvas) -> std::borrow::Cow<'a, GlyphConnectionConfig> {
@@ -280,8 +302,15 @@ impl GlyphConnectionConfig {
     }
 }
 
+/// One Bezier control point for an edge's connection curve. Stored
+/// in canvas-space coordinates (absolute, not relative to the
+/// endpoints). Plain data, zero allocation, `Copy`-free only because
+/// `f64` fields keep parity with the JSON precision of the source
+/// format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlPoint {
+    /// Canvas-space x coordinate.
     pub x: f64,
+    /// Canvas-space y coordinate.
     pub y: f64,
 }

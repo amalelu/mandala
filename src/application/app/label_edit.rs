@@ -1,8 +1,7 @@
-//! Inline edge-label editor: open / handle key / close. Holds the
-//! Session 6D label-editing flow — opens an in-place editor on a
-//! selected edge, routes printable / navigation / commit keystrokes
-//! through `route_label_edit_key`, and commits or cancels back to the
-//! model's `MindEdge.label` on Enter / Esc.
+//! Inline edge-label editor: open / handle key / close. Opens an
+//! in-place editor on a selected edge, routes printable / navigation
+//! / commit keystrokes through `route_label_edit_key`, and commits or
+//! cancels back to the model's `MindEdge.label` on Enter / Esc.
 
 use winit::keyboard::Key;
 
@@ -17,20 +16,20 @@ use super::{
     rebuild_all, route_label_edit_key, update_connection_label_tree, update_portal_tree,
 };
 
-/// Session 6D: inline-edit state for a connection's label. When
-/// `Open`, all keyboard input is routed to the label-edit handler
-/// (just like `ConsoleState::Open` captures keys for the console
-/// input line). Mutually exclusive with `ConsoleState::Open` — the
-/// console check runs first, so opening the console while editing a
-/// label is a no-op.
+/// Inline-edit state for a connection's label. When `Open`, all
+/// keyboard input is routed to the label-edit handler (just like
+/// `ConsoleState::Open` captures keys for the console input line).
+/// Mutually exclusive with `ConsoleState::Open` — the console check
+/// runs first, so opening the console while editing a label is a
+/// no-op.
 ///
-/// Mirrors `TextEditState` in shape (buffer + grapheme cursor),
-/// per CODE_CONVENTIONS §1: every keystroke routes through
-/// `grapheme_chad` so backspace over an emoji removes the whole
-/// cluster, not a stray byte. The buffer is threaded into the
-/// scene_builder via `MindMapDocument::label_edit_preview`; the
-/// connection-label tree's §B2 mutator path (Phase 1.3) picks up
-/// the new text + caret without rebuilding the arena.
+/// Mirrors `TextEditState` in shape (buffer + grapheme cursor): every
+/// keystroke routes through `grapheme_chad` so backspace over an
+/// emoji removes the whole cluster, not a stray byte. The buffer is
+/// threaded into the scene_builder via
+/// `MindMapDocument::label_edit_preview`; the connection-label tree's
+/// in-place mutator path picks up the new text + caret without
+/// rebuilding the arena.
 #[derive(Debug, Clone)]
 pub(in crate::application::app) enum LabelEditState {
     Closed,
@@ -59,12 +58,11 @@ impl LabelEditState {
     }
 }
 
-/// Session 6D: transition into inline label edit mode for the given
-/// edge. Seeds the buffer from the edge's current label (or the
-/// empty string) and installs a preview override on the renderer so
-/// the caret shows up immediately. Callers must ensure the edge
-/// still exists in `doc.mindmap.edges` — the function silently
-/// returns otherwise.
+/// Transition into inline label edit mode for the given edge. Seeds
+/// the buffer from the edge's current label (or the empty string)
+/// and installs a preview override on the renderer so the caret
+/// shows up immediately. Callers must ensure the edge still exists
+/// in `doc.mindmap.edges` — the function silently returns otherwise.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn open_label_edit(
     edge_ref: &crate::application::document::EdgeRef,
@@ -155,10 +153,10 @@ pub(in crate::application::app) fn handle_label_edit_key(
     }
 
     // Refresh the preview on the document so the caret + edited text
-    // render on the next frame. The connection-label tree's §B2
-    // mutator path (Phase 1.3) picks up the new text without
-    // rebuilding the arena because the per-edge identity sequence
-    // stays constant during a label edit.
+    // render on the next frame. The connection-label tree's in-place
+    // mutator path picks up the new text without rebuilding the
+    // arena because the per-edge identity sequence stays constant
+    // during a label edit.
     if let LabelEditState::Open {
         edge_ref,
         buffer,
@@ -178,8 +176,8 @@ pub(in crate::application::app) fn handle_label_edit_key(
     }
 }
 
-/// Session 6D: close the inline label editor. If `commit` is true,
-/// writes the current buffer into the edge's label (via
+/// Close the inline label editor. If `commit` is true, writes the
+/// current buffer into the edge's label (via
 /// `document.set_edge_label`) and pushes an undo entry. If false,
 /// restores the pre-edit label (equivalent to discarding the buffer)
 /// — no undo push because we never mutated the model during typing.

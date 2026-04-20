@@ -35,9 +35,9 @@ impl Renderer {
     /// at the end of the call. If `dirty_node_ids` is `None`, everything
     /// is treated as dirty (full re-shape).
     ///
-    /// This is Phase B of the "Connection & border render cost" fix: on
-    /// a drag frame that moves one node, only that node's border cache
-    /// entry is re-shaped. All other visible borders reuse their shaped
+    /// The keyed path is what keeps drag interactive: on a drag frame
+    /// that moves one node, only that node's border cache entry is
+    /// re-shaped. All other visible borders reuse their shaped
     /// `cosmic_text::Buffer`s — cosmic-text shaping is the dominant cost
     /// here, so skipping it for unmoved borders is the point.
     pub fn rebuild_border_buffers_keyed(
@@ -310,8 +310,9 @@ impl Renderer {
         self.connection_buffers.retain(|k, _| seen.contains(k));
     }
 
-    /// Session 6D: rebuild the per-edge label buffers from a freshly
-    /// computed scene.
+    /// Rebuild the per-edge label buffers from a freshly computed
+    /// scene. Labels are ≤ 1 per edge and rebuilt every scene build
+    /// — cheap enough that no incremental-reuse cache is warranted.
     pub fn rebuild_connection_label_buffers(
         &mut self,
         label_elements: &[baumhard::mindmap::scene_builder::ConnectionLabelElement],

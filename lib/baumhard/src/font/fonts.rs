@@ -1,3 +1,9 @@
+//! Compiled-in font table, shared `FontSystem`, and cosmic-text
+//! editor factories. The `AppFont` enum + `FONT_DATA` array are
+//! emitted by `build.rs` at crate-compile time so the binary carries
+//! every font it might need without touching the filesystem at run
+//! time.
+
 use std::sync::{Arc, RwLock};
 
 use cosmic_text::fontdb::ID;
@@ -11,10 +17,10 @@ use rustc_hash::FxHashMap;
 use tinyvec::TinyVec;
 
 use crate::font::fonts::AppFont::*;
-// // Do not remove the following "unused" imports
+// Serde derives are used by the generated AppFont enum below.
 //@formatter:off
 use serde::{Deserialize, Serialize};
-// Include generated file (from build.rs script)
+// Build-time generated: defines `AppFont` and `FONT_DATA`.
 include!(concat!(env!("OUT_DIR"), "/generated_fonts_data.rs"));
 
 fn load_font_sources() -> FxHashMap<AppFont, Source> {
@@ -25,7 +31,12 @@ fn load_font_sources() -> FxHashMap<AppFont, Source> {
     return map;
 }
 
-/// WARNING! This function will wait for, and then lock font-system write access
+/// Register every compiled-in font with [`FONT_SYSTEM`], returning
+/// the `AppFont → fontdb ID` map callers use to resolve faces.
+///
+/// Acquires the `FONT_SYSTEM` **write** lock; callers that already
+/// hold any lock on it will deadlock. Costs: one lock acquisition
+/// plus one `load_font_source` call per entry in [`FONT_SOURCES`].
 fn load_fonts() -> FxHashMap<AppFont, TinyVec<[ID; 8]>> {
     debug!("Waiting for font-system write lock");
     let mut font_system = FONT_SYSTEM
@@ -43,16 +54,29 @@ fn load_fonts() -> FxHashMap<AppFont, TinyVec<[ID; 8]>> {
 }
 
 lazy_static! {
+    /// `AppFont → fontdb::Source` map built once from the compiled-in
+    /// `FONT_DATA` byte arrays.
     pub static ref FONT_SOURCES: FxHashMap<AppFont, Source> = load_font_sources();
+    /// Global cosmic-text `FontSystem`. Every cosmic-text operation
+    /// (shaping, layout, measurement) goes through this single
+    /// `RwLock`-guarded instance.
     pub static ref FONT_SYSTEM: RwLock<FontSystem> = RwLock::new(FontSystem::new());
+    /// `AppFont → fontdb face IDs` map populated on first access by
+    /// [`load_fonts`]. Read-only after initialization.
     pub static ref COMPILED_FONT_ID_MAP: FxHashMap<AppFont, TinyVec<[ID; 8]>> = load_fonts();
 }
 
+/// Force lazy initialization of [`COMPILED_FONT_ID_MAP`] — and, via
+/// it, the one-time `FONT_SYSTEM` write-lock that registers every
+/// compiled-in font. Call once at program start before any shaping
+/// / measurement path.
 pub fn init() {
-    // This ensures that load_fonts gets called, which requires exclusive lock over the font system
     COMPILED_FONT_ID_MAP.capacity();
 }
 
+/// Invoke `closure(app_font, source)` for every entry in
+/// [`FONT_SOURCES`]. `Source` is cloned per call because cosmic-text
+/// takes it by value when loading.
 pub fn do_for_all_sources<F>(mut closure: F)
 where
     F: FnMut(AppFont, Source),
@@ -62,18 +86,27 @@ where
     }
 }
 
+/// Clone out the `fontdb::Source` for a named compiled-in font.
+/// Panics if `name` is not in [`FONT_SOURCES`].
 pub fn get_font_source(name: &AppFont) -> Source {
     return FONT_SOURCES.get(name).unwrap().clone();
 }
 
-/// This is only for testing
+/// Pick a random compiled-in font source. **Test-only helper** —
+/// production paths should pick fonts deterministically.
 pub fn get_some_font() -> Source {
     let mut rng = rand::thread_rng();
     return FONT_SOURCES.values().choose(&mut rng).unwrap().clone();
 }
 
+/// Opaque black. The default foreground colour for newly-built
+/// `AttrsList`s.
 pub const DEFAULT_FONT_COLOR: Color = Color::rgba(0, 0, 0, 255);
 
+/// Build a single-span `AttrsList` pinned to `font_family_name`,
+/// opaque-black text, normal style / stretch / weight. Convenience
+/// for call sites that need a baseline attribute set before layering
+/// per-region overrides on top.
 pub fn get_default_attr_list(font_family_name: &str) -> AttrsList {
     AttrsList::new(
         &Attrs::new()
@@ -85,7 +118,13 @@ pub fn get_default_attr_list(font_family_name: &str) -> AttrsList {
     )
 }
 
-/// WARNING! This function will wait for, and then lock font-system write access
+/// Build a cosmic-text `Editor` seeded with `text`, shaping it
+/// against the given `font_id`.
+///
+/// Acquires the `FONT_SYSTEM` **write** lock for the duration of the
+/// call; callers holding any existing guard on [`FONT_SYSTEM`] will
+/// deadlock. Panics if `font_id` is missing from
+/// [`COMPILED_FONT_ID_MAP`] or if the face cannot be resolved.
 pub fn create_cosmic_editor_str(
     font_id: &AppFont,
     scale: f32,
@@ -107,7 +146,12 @@ pub fn create_cosmic_editor_str(
     return editor;
 }
 
-/// WARNING! This function will wait for, and then lock font-system write access
+/// Build an empty cosmic-text `Editor` with word-wrap enabled at the
+/// given bounds.
+///
+/// Acquires the `FONT_SYSTEM` **write** lock for the duration of the
+/// call; callers holding any existing guard on [`FONT_SYSTEM`] will
+/// deadlock.
 pub fn create_cosmic_editor(scale: f32, line_height: f32, bound_x: f32, bound_y: f32) -> Editor<'static> {
     debug!("Waiting for font-system write lock");
     let mut font_system = FONT_SYSTEM.write().expect("FontSystem lock was poisoned");
@@ -117,12 +161,17 @@ pub fn create_cosmic_editor(scale: f32, line_height: f32, bound_x: f32, bound_y:
     return Editor::new(buffer);
 }
 
+/// Borrow the inner `Buffer` out of a cosmic-text `BufferRef`,
+/// regardless of its Owned / Borrowed / Arc variant.
 pub fn unwrap_buffer_ref<'a>(buffer_ref: &'a BufferRef) -> &'a Buffer {
     return match buffer_ref {
 
     BufferRef::Owned(owned) => {&owned}BufferRef::Borrowed(borrowed) => {borrowed}BufferRef::Arc(arc) => {arc.as_ref()}}
 }
 
+/// Replace the `Metrics` on `buffer`. Acquires the `FONT_SYSTEM`
+/// **write** lock for the set; callers holding any existing guard on
+/// [`FONT_SYSTEM`] will deadlock.
 pub fn adjust_buffer_metrics(buffer: &mut Buffer, metrics: Metrics) {
     debug!("Waiting for font-system write lock");
     let mut font_system = FONT_SYSTEM.write().expect("FontSystem lock was poisoned");
@@ -131,11 +180,10 @@ pub fn adjust_buffer_metrics(buffer: &mut Buffer, metrics: Metrics) {
 
 /// Ink bounding box of a shaped glyph string, measured at a specific
 /// font size. Sibling of the `measure_max_glyph_advance` scalar
-/// measurement (currently in `src/application/renderer.rs` as
-/// pre-existing debt per CODE_CONVENTIONS.md §1; tracked to move
-/// here on the way past) — where advance measures just how wide the
-/// glyph pushes the pen, ink bounds measure where the visible
-/// pixels actually land.
+/// measurement (currently in the app-level renderer as pre-existing
+/// debt per CODE_CONVENTIONS.md §1; tracked to move here on the way
+/// past) — where advance measures just how wide the glyph pushes the
+/// pen, ink bounds measure where the visible pixels actually land.
 ///
 /// Consumers — today the color picker's crosshair arms and central
 /// preview glyph — use this to compute ink-center-vs-advance-center
@@ -211,8 +259,8 @@ impl InkBounds {
 /// `font_system` and `swash_cache` are passed in rather than taken
 /// from the global [`FONT_SYSTEM`] so the primitive composes with
 /// existing call sites that already hold the write guard (notably
-/// the color picker open path in `src/application/app.rs`, which
-/// measures advances and ink in the same lock scope).
+/// the color picker open path, which measures advances and ink in
+/// the same lock scope).
 ///
 /// `y_min` / `y_max` are baseline-relative; `line_y` (also returned
 /// on [`InkBounds`]) carries the baseline-from-buffer-top so callers

@@ -51,11 +51,10 @@ pub(super) fn drain_moving_node(
 
         // Rebuild connections and borders with position offsets.
         //
-        // Phase 4(B): use the cache-aware scene build so
-        // only edges whose endpoints appear in `offsets`
-        // get re-sampled. The renderer's keyed rebuild
-        // methods then only re-shape the buffers for
-        // dirty elements; stable elements have just
+        // Use the cache-aware scene build so only edges whose
+        // endpoints appear in `offsets` get re-sampled. The
+        // renderer's keyed rebuild methods then only re-shape the
+        // buffers for dirty elements; stable elements have just
         // their `pos` patched in place.
         if let Some(doc) = document.as_ref() {
             let mut offsets: HashMap<String, (f32, f32)> = HashMap::new();
@@ -94,10 +93,9 @@ pub(super) fn drain_moving_node(
             // legacy keyed border path used to
             // patch positions in place (cheap)
             // while the tree path re-shapes every
-            // border (more expensive) -- that's a
-            // known regression to address with a
-            // tree-side incremental cache, see the
-            // unified-rendering plan Session 2f.
+            // border (more expensive) -- a known
+            // regression to address with a
+            // tree-side incremental cache.
             update_border_tree_with_offsets(doc, &offsets, app_scene);
             // Labels are emitted per frame (not
             // cached) so their positions track the
@@ -123,12 +121,11 @@ pub(super) fn drain_moving_node(
     }
 }
 
-/// Session 6C edge-handle drag drain. Mirrors the
-/// MovingNode drain above but writes the edge in
-/// place instead of moving nodes. The scene cache
-/// is invalidated for the single dirty edge so the
-/// next build re-samples just that edge; everything
-/// else rides the incremental rebuild path.
+/// Edge-handle drag drain. Mirrors the MovingNode drain above but
+/// writes the edge in place instead of moving nodes. The scene
+/// cache is invalidated for the single dirty edge so the next
+/// build re-samples just that edge; everything else rides the
+/// incremental rebuild path.
 pub(super) fn drain_edge_handle(
     edge_ref: &EdgeRef,
     handle: &mut baumhard::mindmap::scene_builder::EdgeHandleKind,
@@ -328,14 +325,12 @@ pub(super) fn drain_color_picker_hover(
     }
 }
 
-/// Phase 4: tick any active animations. Each
-/// tick lerps the from / to snapshots into the
-/// model and (on completion) routes the final
-/// state through `apply_custom_mutation` so the
-/// standard model-sync + undo-push runs once.
-/// Drives `rebuild_all` only when something
-/// actually advanced -- sleeping in Poll mode
-/// when no animations are active is automatic.
+/// Tick any active animations. Each tick lerps the from / to
+/// snapshots into the model and (on completion) routes the final
+/// state through `apply_custom_mutation` so the standard model-sync
+/// + undo-push runs once. Drives `rebuild_all` only when something
+/// actually advanced -- sleeping in Poll mode when no animations
+/// are active is automatic.
 pub(super) fn drain_animation_tick(
     document: &mut Option<MindMapDocument>,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,

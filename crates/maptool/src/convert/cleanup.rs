@@ -1,5 +1,12 @@
-//! Remove or normalize fields that don't belong in the new format:
-//! drop the `index` field from nodes, add default `channel: 0`.
+//! Field-shape cleanup that runs after IDs, enums, and palettes have
+//! been rewritten.
+//!
+//! miMind tracked sibling order with an explicit `index` integer; the
+//! current format encodes that ordering in the Dewey-decimal ID itself
+//! (`0.3` is the fourth child of `0`), so once IDs have been assigned
+//! `index` is redundant and is removed. `channel` is a new field the
+//! legacy format didn't carry — every node defaults to the base channel
+//! (`0`) so the output validates against the post-migration invariants.
 
 use serde_json::Value;
 

@@ -14,27 +14,31 @@ use glam::Vec2;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
+/// Renderable glyph content for one tree node: a stacked matrix of
+/// lines plus its placement metadata. Scene builders emit one per
+/// model-bearing node.
 #[derive(Derivative, Serialize, Deserialize, Debug, Clone)]
 #[derivative(PartialEq, Eq)]
 pub struct GlyphModel {
+    /// The stacked glyph lines rendered by this model.
     pub glyph_matrix: GlyphMatrix,
-    /// ## FYI
-    /// Starting from 0 as the lowest level, the layer places the [GlyphModel] in relation to other objects
-    /// The higher the layer value, the closer to the camera it should be considered
-    /// So the objects with the highest layer value will always be painted on top of any other objects
-    /// If two objects have the same layer, then it is undefined what should happen if they collide
-    /// But the program should not crash, because this is something that will happen quite often
-    /// although collision logic should then take place and separate them
+    /// Draw order relative to sibling models. Zero is furthest from
+    /// the camera; higher layers paint on top. Collisions at the
+    /// same layer are undefined but non-fatal — the renderer must
+    /// survive them without crashing.
     pub layer: usize,
-    /// Origin is (0,0) from the top left corner in its parent container,
-    /// increasing x goes to the right while increasing y goes downwards
+    /// Origin anchor (top-left) in the parent container's coordinate
+    /// space. `+x` right, `+y` down.
     pub position: OrderedVec2,
+    /// Click-sensitive rectangles populated by the scene builder.
+    /// Ignored for `PartialEq` — it's derived data, not identity.
     #[derivative(PartialEq = "ignore")]
     pub hitbox: HitBox,
 }
 
 impl GlyphModel {
-    /// Creates a new [GlyphModel] with an empty Vec and layer set to 0, at (0,0)
+    /// Empty model at origin with layer 0. O(1); no allocation
+    /// beyond the default `GlyphMatrix`.
     pub fn new() -> Self {
         GlyphModel {
             glyph_matrix: GlyphMatrix::default(),
@@ -44,50 +48,67 @@ impl GlyphModel {
         }
     }
 
+    /// Borrow the hit-box. O(1).
     pub fn hitbox(&self) -> &HitBox {
         &self.hitbox
     }
 
+    /// Mutable borrow of the hit-box — scene builders rewrite it on
+    /// layout. O(1).
     pub fn hitbox_as_mut(&mut self) -> &mut HitBox {
         &mut self.hitbox
     }
 
+    /// Append one [`GlyphLine`] to the matrix. O(1) amortised.
     pub fn add_line(&mut self, line: GlyphLine) {
         self.glyph_matrix.push(line);
     }
 
+    /// Shift position left by `amount` pixels. O(1).
     pub fn nudge_left(&mut self, amount: &f32) {
         self.position.x -= amount;
     }
 
+    /// Shift position right by `amount` pixels. O(1).
     pub fn nudge_right(&mut self, amount: &f32) {
         self.position.x += amount;
     }
 
+    /// Shift position up (y decreases) by `amount` pixels. O(1).
     pub fn nudge_up(&mut self, amount: &f32) {
         self.position.y -= amount;
     }
 
+    /// Shift position down (y increases) by `amount` pixels. O(1).
     pub fn nudge_down(&mut self, amount: &f32) {
         self.position.y += amount;
     }
 
+    /// Teleport position to absolute `(x, y)`. O(1).
     pub fn move_to(&mut self, x: &f32, y: &f32) {
         self.position.x = OrderedFloat::from(*x);
         self.position.y = OrderedFloat::from(*y);
     }
 
+    /// Rotate position clockwise around `pivot` by `degrees`. O(1).
     pub fn rotate(&mut self, pivot: &Vec2, degrees: &f32) {
         let new_position =
             geometry::clockwise_rotation_around_pivot(self.position.to_vec2(), *pivot, *degrees);
         self.position = OrderedVec2::from_vec2(new_position);
     }
 
+    /// Insert `component` at `(line_num, at_idx)` replacing any
+    /// overlapping content. Lines and columns are grown with
+    /// whitespace padding as needed. O(line length) for the
+    /// grapheme walk plus the splice.
     pub fn rude_insert(&mut self, component: &GlyphComponent, line_num: &usize, at_idx: &usize) {
         self.glyph_matrix
             .overriding_insert(*line_num, *at_idx, component);
     }
 
+    /// Insert `component` at `(line_num, at_idx)` shifting existing
+    /// graphemes to the right. O(line length) for the grapheme walk
+    /// plus the shift.
     pub fn expanding_insert(
         &mut self,
         component: &GlyphComponent,

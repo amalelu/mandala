@@ -1,9 +1,8 @@
-//! Data structures pulled out of the pre-split `document.rs`:
-//! the animation runtime record, the ref types (`EdgeRef`,
-//! `ReparentUndoData`), the selection state enum, the
-//! reparent-highlight constants, and `HIGHLIGHT_COLOR`.
-//! No methods on `MindMapDocument` live here — those are
-//! sharded across the other submodules.
+//! Document-level data structures: the animation runtime record,
+//! the ref types (`EdgeRef`, `ReparentUndoData`), the selection
+//! state enum, and the reparent-highlight / selection colour
+//! constants. Methods on `MindMapDocument` live in the sibling
+//! submodules.
 
 use baumhard::mindmap::animation::AnimationTiming;
 use baumhard::mindmap::custom_mutation::CustomMutation;
@@ -13,9 +12,9 @@ use baumhard::mindmap::scene_cache::EdgeKey;
 /// Selection highlight color: bright cyan [R, G, B, A]
 pub const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
 
-/// Per-active-mutation runtime record for the Phase-4 animation
-/// system. Carries the from/to `MindNode` snapshot and the
-/// driving `CustomMutation`; the dispatcher in
+/// Per-active-mutation runtime record for the animation system.
+/// Carries the from/to `MindNode` snapshot and the driving
+/// `CustomMutation`; the dispatcher in
 /// [`MindMapDocument::tick_animations`] interpolates per-frame
 /// and writes the blended state back into `mindmap.nodes`.
 ///
@@ -69,9 +68,10 @@ pub const REPARENT_SOURCE_COLOR: [f32; 4] = [1.0, 0.55, 0.0, 1.0];
 /// a potential reparent target.
 pub const REPARENT_TARGET_COLOR: [f32; 4] = [0.2, 1.0, 0.4, 1.0];
 
-/// Identifies an edge in the MindMap by its endpoints and type. Edges have
-/// no stable ID, so this triple is the canonical reference (matching how
-/// `apply_reparent` looks up parent_child edges at document.rs:301).
+/// Identifies an edge in the MindMap by its endpoints and type. Edges
+/// have no stable ID, so this triple is the canonical reference — the
+/// same shape `apply_reparent` uses when it looks up parent_child
+/// edges for rewrites.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EdgeRef {
     pub from_id: String,

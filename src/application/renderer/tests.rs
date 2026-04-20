@@ -72,11 +72,13 @@ fn cull_handles_non_origin_viewport() {
 
 #[test]
 fn cull_kills_most_glyphs_on_a_very_long_edge() {
-    // Simulate a Phase 4(A) scenario: a 20,000 canvas-unit connection,
-    // sampled every 15 units (default spacing), one endpoint at origin,
-    // the other at (20000, 0). Viewport is the first 400x400 canvas
-    // units. With font_size=12 margin, we should keep glyphs whose x
-    // is in [-12, 412] — roughly 28 of ~1334 samples.
+    // A 20,000 canvas-unit connection, sampled every 15 units
+    // (default spacing), one endpoint at origin, the other at
+    // (20000, 0). Viewport is the first 400x400 canvas units. With
+    // font_size=12 margin, we should keep glyphs whose x is in
+    // [-12, 412] — roughly 28 of ~1334 samples. Pins that the cull
+    // actually culls on long cross-links instead of silently shaping
+    // every sample.
     let vp_min = Vec2::new(0.0, 0.0);
     let vp_max = Vec2::new(400.0, 400.0);
     let margin = 12.0;
@@ -492,17 +494,17 @@ fn console_signature_shifts_on_scrollback_grow() {
     );
 }
 
-/// 8fccc8e replaced two `.expect()` panics in
-/// `console_overlay_areas` with `let-else { log::warn!; continue; }`
-/// so a violated `scrollback_rows = min(scrollback.len(), MAX)`
-/// (or `completion_rows` mirror) invariant degrades the frame
-/// instead of aborting the process. Pin the degraded behaviour:
-/// artificially shorten the geometry's scrollback vec AFTER
-/// computing the layout so `scrollback_rows` (baked into the
-/// layout) exceeds `geometry.scrollback.len()`, then call
-/// `console_overlay_areas` and assert we return without panic.
+/// `console_overlay_areas` degrades (logs + skips the slot) rather
+/// than panicking when a caller violates the
+/// `scrollback_rows = min(scrollback.len(), MAX)` (or
+/// `completion_rows` mirror) invariant — interactive paths never
+/// abort (§7). Pin the degraded behaviour: artificially shorten the
+/// geometry's scrollback vec AFTER computing the layout so
+/// `scrollback_rows` (baked into the layout) exceeds
+/// `geometry.scrollback.len()`, then call `console_overlay_areas`
+/// and assert we return without panic.
 ///
-/// A revert to `.expect()` would poison the test thread; the
+/// A regression to `.expect()` would poison the test thread; the
 /// surviving return proves the defensive path still fires.
 #[test]
 fn console_overlay_areas_degrades_when_scrollback_shorter_than_layout_rows() {

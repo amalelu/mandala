@@ -22,13 +22,19 @@ use crate::mindmap::model::ControlPoint;
 
 use self::bezier::{cubic_bezier_length, cubic_bezier_point, sample_cubic_bezier};
 
-/// A point sampled along a connection path.
+/// A single sampled point along a connection path, produced by
+/// [`sample_path`] in canvas-space coordinates. Plain data; no
+/// runtime cost beyond the `Vec2` copy.
 #[derive(Debug, Clone)]
 pub struct SampledPoint {
     pub position: Vec2,
 }
 
-/// Represents the geometric path of a connection between two nodes.
+/// Geometric shape of a connection between two nodes, returned by
+/// [`build_connection_path`]. Either a straight segment (no control
+/// points) or a cubic Bezier (one or two control points — a quadratic
+/// Bezier is promoted to cubic by the builder so the downstream
+/// sampler only has to handle one curved shape). Plain data.
 #[derive(Debug, Clone)]
 pub enum ConnectionPath {
     Straight {
@@ -129,8 +135,8 @@ pub fn build_connection_path(
 
 /// Return a point on `path` at the parameter value `t`, clamped to
 /// `[0.0, 1.0]`. Straight paths lerp linearly between endpoints; cubic
-/// Bezier paths evaluate the curve at `t` directly. Used by Session 6D
-/// for label positioning along a connection — `t = 0.0` sits at the
+/// Bezier paths evaluate the curve at `t` directly. Used for label
+/// positioning along a connection — `t = 0.0` sits at the
 /// from-anchor, `t = 0.5` at the midpoint, `t = 1.0` at the to-anchor.
 ///
 /// Parameter-space positioning is fine for the Start/Middle/End label
@@ -147,7 +153,10 @@ pub fn point_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
     }
 }
 
-/// Computes the total arc length of a connection path.
+/// Total arc length of a connection path in canvas units. Straight
+/// paths return the exact endpoint distance; cubic Bezier paths
+/// approximate the length by walking `ARC_LENGTH_SUBDIVISIONS`
+/// straight segments, so cost is O(subdivisions) with no allocation.
 pub fn path_length(path: &ConnectionPath) -> f32 {
     match path {
         ConnectionPath::Straight { start, end } => start.distance(*end),

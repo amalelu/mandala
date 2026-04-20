@@ -1,6 +1,8 @@
 //! Tests for anchor resolution, path sampling, Bezier math, and edge
 //! hit-test. Includes performance regression guards for the long-edge
-//! code paths exercised by Session 4B's drag-frame optimisations.
+//! code paths whose drag-frame cost is governed by the invariant
+//! "sample count scales linearly with path length, independently of
+//! the arc-length subdivision table size".
 
 use super::*;
 use crate::mindmap::model::ControlPoint;
@@ -303,9 +305,11 @@ fn test_build_quadratic_promotion() {
 // Performance regression guards
 //
 // These tests do not assert wall-clock timings (flaky under CI load).
-// They assert behavioural invariants that the Phase 4B drag-frame
-// optimisations in ROADMAP.md depend on — if any of these break, the
-// long-connection stutter the optimisation fixed will return.
+// They assert the behavioural invariant the drag-frame sampler
+// relies on: long paths must emit a sample count proportional to
+// `length / spacing`, not capped at the arc-length subdivision
+// table size. Breaking this reintroduces the long-connection drag
+// stutter the sampler was tuned to avoid.
 // -----------------------------------------------------------------
 
 /// A 20,000-unit straight path sampled at spacing 15 must produce a
@@ -330,8 +334,8 @@ fn test_sample_long_straight_scales_linearly_with_length() {
 /// A long cubic bezier's sample count is linear in path length, not in
 /// the subdivision table size. If the arc-length lookup regressed to
 /// walking the table per sample (O(N·subdivisions)) instead of binary
-/// search, the test would still pass — but the ROADMAP-critical
-/// invariant is that sample count itself tracks length, and that's what
+/// search, the test would still pass — the invariant we care about
+/// here is that sample count itself tracks length, and that's what
 /// this guards.
 #[test]
 fn test_sample_long_bezier_count_bounded_by_length() {
@@ -351,7 +355,8 @@ fn test_sample_long_bezier_count_bounded_by_length() {
         "expected at least {}, got {}", expected_floor, points.len());
     assert!(points.len() <= expected_floor + 2,
         "expected at most {}, got {}", expected_floor + 2, points.len());
-    // Sanity: we're in the "long edge" regime the ROADMAP calls out.
+    // Sanity: we're in the "long edge" regime the sample-count
+    // invariant targets.
     assert!(points.len() > 1000);
 }
 
@@ -477,7 +482,7 @@ fn test_distance_to_path_on_long_bezier_is_finite() {
     assert!(d > 1.0);
 }
 
-// Session 6D Phase 1: point_at_t for label positioning along edges.
+// point_at_t for label positioning along edges.
 
 #[test]
 fn point_at_t_straight_endpoints_and_midpoint() {

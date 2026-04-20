@@ -115,10 +115,9 @@ pub(super) fn handle_mouse_input(
                         app_scene,
                         renderer,
                     );
-                    // Session 7A: mode-exit via target
-                    // click — clear any stale click so
-                    // the first post-mode click can't
-                    // be paired into a double-click.
+                    // Mode-exit via target click — clear any stale
+                    // click so the first post-mode click can't be
+                    // paired into a double-click.
                     *last_click = None;
                 }
                 // Pressed: swallow — do not transition drag state
@@ -336,13 +335,11 @@ pub(super) fn handle_mouse_input(
                 // Released
                 match std::mem::replace(drag_state, DragState::None) {
                     DragState::Pending { hit_node, .. } => {
-                        // Session 7A: if the node text
-                        // editor is open, the release
-                        // decides whether to commit or
-                        // swallow. If the release lands
-                        // inside the edited node's AABB,
-                        // keep editing (no commit, no
-                        // selection change). Otherwise
+                        // If the node text editor is open, the
+                        // release decides whether to commit or
+                        // swallow. If the release lands inside the
+                        // edited node's AABB, keep editing (no
+                        // commit, no selection change). Otherwise
                         // commit and fall through.
                         if text_edit_state.is_open() {
                             let release_canvas = renderer.screen_to_canvas(
@@ -385,11 +382,11 @@ pub(super) fn handle_mouse_input(
                                 );
                             }
                         }
-                        // Session 6D: if an edge is selected and
-                        // the cursor hits its label, open the
-                        // inline label editor instead of
-                        // processing a regular click. Takes
-                        // precedence over node / edge selection.
+                        // If an edge is selected and the cursor
+                        // hits its label, open the inline label
+                        // editor instead of processing a regular
+                        // click. Takes precedence over node / edge
+                        // selection.
                         let mut entered_label_edit = false;
                         if hit_node.is_none() {
                             // First, a read-only check to see

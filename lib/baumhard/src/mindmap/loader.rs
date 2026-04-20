@@ -1,13 +1,27 @@
+//! `.mindmap.json` loader + saver. Accepts both the current edge-based
+//! portal shape and pre-refactor files that still ship a top-level
+//! `portals[]` array, rejecting the latter with a concrete migration
+//! pointer instead of silently dropping data.
+
 use std::fs;
 use std::path::Path;
 use crate::mindmap::model::MindMap;
 
+/// Load a `MindMap` from a file path. Reads the entire file into
+/// memory via `std::fs::read_to_string`, then delegates to
+/// [`load_from_str`]. Native-only (synchronous I/O). Returns a
+/// `String` error describing the path + underlying cause.
 pub fn load_from_file(path: &Path) -> Result<MindMap, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read file {}: {}", path.display(), e))?;
     load_from_str(&content)
 }
 
+/// Parse a `MindMap` from a JSON string. Rejects pre-refactor files
+/// that still carry a top-level `portals[]` array with a concrete
+/// migration pointer (`maptool convert --portals`) so a stale map
+/// doesn't silently lose its portals — serde would otherwise ignore
+/// the unknown field. Allocation-bounded by the input size.
 pub fn load_from_str(json: &str) -> Result<MindMap, String> {
     // Pre-refactor maps stored portals in a separate `portals[]` array.
     // Post-refactor portals are edges with `display_mode = "portal"`,

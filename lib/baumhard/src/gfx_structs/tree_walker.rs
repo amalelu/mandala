@@ -8,8 +8,12 @@ use crate::gfx_structs::predicate::Predicate;
 use crate::core::primitives::Applicable;
 use crate::util::ordered_vec2::OrderedVec2;
 
-/// The term 'terminator' here refers conceptually to a function that should run
-/// after a conditional loop is performed on the target tree (using an [Instruction])
+/// Continuation called after a conditional loop ([`Instruction`])
+/// exits — it resumes the normal walk from the mutator sibling
+/// whose channel matches the current target. Unchecked call-site
+/// inside the walker; not a stable public API but `pub` so mutator
+/// authors can substitute custom terminators when extending the
+/// walker.
 pub const DEFAULT_TERMINATOR: fn(&mut Tree<GfxElement, GfxMutator>, &MutatorTree<GfxMutator>, NodeId, NodeId) =
     |gfx_tree: &mut Tree<GfxElement, GfxMutator>,
      mutator_tree: &MutatorTree<GfxMutator>,
@@ -44,6 +48,10 @@ pub const DEFAULT_TERMINATOR: fn(&mut Tree<GfxElement, GfxMutator>, &MutatorTree
         }
     };
 
+/// Walk the entire `mutator_tree` against the `gfx_tree`, starting
+/// from both roots. Convenience wrapper around [`walk_tree_from`];
+/// cost is O(matching pairs) — see that function for the full
+/// analysis.
 pub fn walk_tree(
     gfx_tree: &mut Tree<GfxElement, GfxMutator>,
     mutator_tree: &MutatorTree<GfxMutator>,
@@ -51,7 +59,11 @@ pub fn walk_tree(
     walk_tree_from(gfx_tree, mutator_tree, gfx_tree.root, mutator_tree.root)
 }
 
-/// Recursively descend the trees, applying the mutator-tree to the target-tree
+/// Dispatch one mutator node against one target node and recurse
+/// into aligned children. `target_id` and `mutator_id` must belong
+/// to the arenas that back `gfx_tree` and `mutator_tree`
+/// respectively. Cost: O(sum of matching (target, mutator) pairs)
+/// — every pairwise match is one apply; pruned branches are free.
 pub fn walk_tree_from(
     gfx_tree: &mut Tree<GfxElement, GfxMutator>,
     mutator_tree: &MutatorTree<GfxMutator>,

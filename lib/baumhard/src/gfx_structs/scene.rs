@@ -122,12 +122,12 @@ impl Scene {
         }
     }
 
-    /// Number of registered trees, regardless of visibility.
+    /// Number of registered trees, regardless of visibility. O(1).
     pub fn len(&self) -> usize {
         self.trees.len()
     }
 
-    /// Convenience for `len() == 0`.
+    /// Convenience for `len() == 0`. O(1).
     pub fn is_empty(&self) -> bool {
         self.trees.is_empty()
     }

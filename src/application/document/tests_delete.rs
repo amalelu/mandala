@@ -135,7 +135,7 @@ use super::defaults::default_cross_link_edge;
     }
 
     // ---------------------------------------------------------------
-    // Node deletion (Session 7A follow-up)
+    // Node deletion
     // ---------------------------------------------------------------
 
     /// Pick a node from the testament map that has at least one child
@@ -250,13 +250,13 @@ use super::defaults::default_cross_link_edge;
         }
     }
 
-    /// Regression test for the edge-ordering bug found in review of
-    /// the initial Session 7A follow-up commit. When a deleted node
-    /// has multiple incident edges scattered through the edge vec,
-    /// naive in-place removal stores post-removal indices, so the
-    /// undo reinserts them at the wrong positions and silently
-    /// reorders edges the caller never touched. The fix stores
-    /// pre-removal indices via `enumerate()` + `retain()`.
+    /// Regression test for an edge-ordering bug in node deletion:
+    /// when a deleted node has multiple incident edges scattered
+    /// through the edge vec, naive in-place removal stores
+    /// post-removal indices, so the undo reinserts them at the wrong
+    /// positions and silently reorders edges the caller never
+    /// touched. The fix stores pre-removal indices via `enumerate()`
+    /// + `retain()`.
     ///
     /// Built as a self-contained test so we control the edge
     /// neighborhood precisely.
@@ -401,7 +401,7 @@ use super::defaults::default_cross_link_edge;
     }
 
     // ---------------------------------------------------------------------
-    // Session 6B: connection creation
+    // Connection creation
     // ---------------------------------------------------------------------
 
     #[test]

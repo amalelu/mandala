@@ -27,9 +27,8 @@ fn test_applicability_anchor_visible_with_edge() {
 fn test_applicability_edge_requires_edge_or_two_nodes() {
     // Portals are now edges; the standalone `portal` command went
     // away and its verbs folded into `edge`. The `edge` command is
-    // applicable when either an edge is selected (for type /
-    // display_mode / reset kvs) or exactly two nodes are selected
-    // (for `edge portal` creation).
+    // applicable when an edge (line-mode or portal-mode) or a
+    // portal-label selection is active.
     let mut doc = load_test_doc();
     // With nothing selected, not applicable.
     let ctx = ConsoleContext::from_document(&doc);

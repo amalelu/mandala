@@ -149,12 +149,12 @@ pub fn rect_select(corner_a: Vec2, corner_b: Vec2, tree: &MindMapTree) -> Vec<St
 /// selection highlights first (cyan), then source (orange), then target
 /// (green), and the last write wins on conflicts.
 ///
-/// Architectural note: this replaces the earlier trio of
-/// `apply_selection_highlight` / `apply_reparent_source_highlight` /
-/// `apply_reparent_target_highlight` helpers, which all did the same
-/// direct arena patching with different constants. The single function
-/// here is both shorter and aligns with architectural decision #6 in
-/// ROADMAP.md (mutations as the interaction model).
+/// Architectural note: this replaces an earlier trio of per-purpose
+/// highlight helpers that each did the same direct arena patching
+/// with different constants. The single function here is both shorter
+/// and aligns with the mutation-first interaction model — highlights
+/// flow through the same mutator vocabulary as every other tree
+/// edit.
 pub fn apply_tree_highlights<'a, I>(tree: &mut MindMapTree, highlights: I)
 where
     I: IntoIterator<Item = (&'a str, [f32; 4])>,

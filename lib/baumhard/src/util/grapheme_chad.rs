@@ -88,15 +88,14 @@ pub fn find_byte_index_of_grapheme(s: &str, index: usize) -> Option<usize> {
         }
         byte_index += grapheme.len();
     }
-    None // Return None if index is out of bounds
+    None
 }
 
-/// Finds the index immediately after the nth grapheme.
-// Named grapheme-boundary utility preserved as a seam alongside
-// the live `find_byte_index_of_grapheme` helper above — future
-// grapheme-aware text-editing paths (IME runs, cursor motion
-// across clusters) want the "after-nth" variant too.
-// Per CODE_CONVENTIONS.md §6.
+/// Byte index immediately after the `n`-th grapheme cluster.
+/// Preserved as a seam alongside `find_byte_index_of_grapheme` —
+/// future grapheme-aware text-editing paths (IME runs, cursor motion
+/// across clusters) want the "after-nth" variant too
+/// (CODE_CONVENTIONS.md §6).
 #[allow(dead_code)]
 fn find_index_after_nth_grapheme(str: &str, n: usize) -> Option<usize> {
     // Graphemes method provides an iterator over the grapheme clusters
@@ -140,20 +139,18 @@ pub fn nth_grapheme_cluster_byte_index(s: &str, n: usize) -> Option<usize> {
 }
 
 fn replace_substring(s: &mut String, i: usize, n: usize, source: &str) {
-    let mut bytes = s.as_bytes().to_vec(); // Convert the String to a Vec<u8>
+    let mut bytes = s.as_bytes().to_vec();
     let source_bytes = source.as_bytes();
 
-    // Remove the specified range
     bytes.drain(i..n);
-
-    // Insert the new bytes
     bytes.splice(i..i, source_bytes.iter().cloned());
 
-    // Safely convert Vec<u8> back to String
+    // Invalid UTF-8 after the splice would be a caller-level bug
+    // (passed a byte offset mid-codepoint); log and leave `s` alone
+    // rather than panic inside the text-edit hot path.
     if let Ok(modified_string) = String::from_utf8(bytes) {
         *s = modified_string;
     } else {
-        // Handle invalid UTF-8 conversion, if necessary
         error!("Failed to convert bytes to UTF-8 String.");
     }
 }
@@ -246,12 +243,10 @@ pub fn find_nth_line_byte_range(s: &str, n: usize) -> Option<(usize, usize)> {
         }
         if ch == '\n' {
             if line_head == n {
-                // So it's time to move the line head up one tick
-                // but if the head is currently at n, then this is the last
-                // index in the line
+                // Newline that terminates the requested line — emit
+                // [last_line_start, idx), i.e. without the \n itself.
                 return Some((last_line_start, idx));
             }
-            // otherwise
             new_line = true;
             line_head += 1;
         }
@@ -446,7 +441,7 @@ pub fn delete_back_unicode(s: &mut String, n: usize) {
         char_count += grapheme.len();
     }
     if grapheme_count <= n {
-        s.clear(); // If there are fewer or equal graphemes than n, clear the string
+        s.clear();
         return;
     }
     let new_len = s.len() - char_count;
@@ -470,10 +465,9 @@ pub fn delete_front_unicode(s: &mut String, n: usize) {
         }
     }
     if grapheme_count < n {
-        s.clear(); // If there are fewer graphemes than n, clear the string
+        s.clear();
         return;
     }
-    // Remove the first n graphemes
     s.drain(0..char_count);
 }
 

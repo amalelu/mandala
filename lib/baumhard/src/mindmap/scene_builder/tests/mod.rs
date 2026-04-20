@@ -10,10 +10,10 @@
 //!   cap survival / cap clip.
 //! - [`cache`] — `SceneConnectionCache` integration (hit, miss,
 //!   drag stability, eviction, fold, selection stability).
-//! - [`edge_handles`] — Session 6C edge-handle emission (straight /
-//!   curved / cubic / canvas-absolute).
-//! - [`labels`] — Session 6D connection-label emission (present /
-//!   missing / position_t / color inheritance).
+//! - [`edge_handles`] — edge-handle emission (straight / curved /
+//!   cubic / canvas-absolute).
+//! - [`labels`] — connection-label emission (present / missing /
+//!   position_t / color inheritance).
 //! - [`portals`] — portal element emission (two-per-pair / missing
 //!   endpoint / fold filter / theme var / selection highlight /
 //!   anchor / drag offset).

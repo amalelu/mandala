@@ -411,8 +411,7 @@ use super::defaults::default_cross_link_edge;
     }
 
     /// Re-triggering the same `(mutation_id, node_id)` mid-flight
-    /// is a silent no-op — same semantics as the original Phase 4
-    /// roadmap entry. Otherwise, a held button could spawn dozens
+    /// is a silent no-op — otherwise a held button could spawn dozens
     /// of overlapping instances and the blend would overshoot.
     #[test]
     fn test_start_animation_re_trigger_mid_flight_is_noop() {
@@ -602,5 +601,5 @@ use super::defaults::default_cross_link_edge;
         assert!(hits.is_empty(), "Should find no nodes in distant rect");
     }
 
-    // --- Session 9B: Custom mutation registry & application tests ---
+    // --- Custom mutation registry & application tests ---
 

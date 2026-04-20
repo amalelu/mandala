@@ -369,8 +369,8 @@ impl Renderer {
 /// anchor lands just outside the visible region still get drawn (avoiding
 /// visible popping at the viewport edge during pan).
 ///
-/// Extracted as a free function so Phase 4(A)'s core decision is unit-
-/// testable without needing a real `Renderer` / wgpu context.
+/// Extracted as a free function so the core cull decision is
+/// unit-testable without needing a real `Renderer` / wgpu context.
 #[inline]
 pub(super) fn glyph_position_in_viewport(
     x: f32,

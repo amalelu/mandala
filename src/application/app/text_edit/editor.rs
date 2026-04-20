@@ -300,8 +300,7 @@ pub(in crate::application::app) fn apply_text_edit_to_tree(
 
     // Construct the Baumhard delta: Text + ColorFontRegions + Assign.
     // The Assign operation replaces both fields wholesale — see
-    // `GlyphArea::apply_operation` at area.rs:261 for regions and
-    // area.rs:273 for text.
+    // `GlyphArea::apply_operation` in `gfx_structs/area.rs`.
     let delta = DeltaGlyphArea::new(vec![
         GlyphAreaField::Text(display_text),
         GlyphAreaField::ColorFontRegions(display_regions),
@@ -424,8 +423,10 @@ pub(in crate::application::app) fn handle_text_edit_key(
             changed = true;
         }
         _ => {
-            // Printable character: accept each non-control char. Mirrors
-            // `handle_label_edit_key` at app.rs ~line 1929.
+            // Printable character: accept each non-control char.
+            // Mirrors `route_label_edit_key` so IME / dead-key
+            // multi-char payloads insert in order and control
+            // chars are filtered.
             if let Key::Character(c) = logical_key {
                 for ch in c.as_str().chars() {
                     if !ch.is_control() {

@@ -33,6 +33,17 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::mindmap::custom_mutation::CustomMutation;
 
+/// The whole-map value type — what [`crate::mindmap::loader`]
+/// deserializes from a `.mindmap.json` file and what the document
+/// layer mutates and persists. Carries the version, name, shared
+/// canvas state, named palettes, the node map (keyed by Dewey-decimal
+/// id), the edge list, and any map-level custom mutations.
+///
+/// Plain data; no runtime cost beyond the `HashMap` / `Vec`
+/// allocations serde performs. Tree-shape queries
+/// ([`Self::root_nodes`], [`Self::children_of`],
+/// [`Self::is_ancestor_or_self`], etc.) walk the node map lazily —
+/// see each method for its per-call cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MindMap {
     pub version: String,

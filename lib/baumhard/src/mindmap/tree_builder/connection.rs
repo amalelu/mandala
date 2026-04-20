@@ -20,7 +20,12 @@ const CONN_BODY_BASE_CHANNEL: usize = 100;
 #[allow(dead_code)]
 const CONN_CAP_END_CHANNEL: usize = 1_000_001;
 
-/// channel set ⇒ `align_child_walks` matches every child.
+/// Per-edge structural identity the in-place mutator path compares
+/// against. Matches iff both the edge (`EdgeKey`), its cap presence,
+/// and its sampled body-glyph count are unchanged — which is what
+/// `align_child_walks` needs to step through each child channel by
+/// position without shape drift. Any field changing forces a full
+/// rebuild. Plain data; no runtime cost.
 pub type ConnectionEdgeIdentity = (
     crate::mindmap::scene_cache::EdgeKey,
     /* has_cap_start */ bool,

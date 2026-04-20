@@ -17,14 +17,13 @@ impl Renderer {
     /// connections use their own `rebuild_*_buffers` methods alongside it.
     pub fn rebuild_buffers_from_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>) {
         self.mindmap_buffers.clear();
-        // Session 6C follow-up: node backgrounds live on GlyphArea
-        // and are collected fresh alongside the text buffers. The
-        // render pipeline reads them back out each frame to draw
-        // solid fills behind the text, with the camera transform
-        // baked in at the last moment. Clearing here (rather than
-        // on every render call) keeps the collect cost aligned
-        // with the tree rebuild cadence — i.e. only when something
-        // structural changed.
+        // Node backgrounds live on GlyphArea and are collected
+        // fresh alongside the text buffers. The render pipeline
+        // reads them back out each frame to draw solid fills behind
+        // the text, with the camera transform baked in at the last
+        // moment. Clearing here (rather than on every render call)
+        // keeps the collect cost aligned with the tree rebuild
+        // cadence — i.e. only when something structural changed.
         self.node_background_rects.clear();
         let mut font_system = fonts::FONT_SYSTEM
             .write()
@@ -36,10 +35,10 @@ impl Renderer {
             |unique_id, buffer| {
                 // Mindmap is the only buffer store that needs
                 // string keys (its `FxHashMap<String, _>` is shared
-                // with the legacy edit / undo paths). Stringifying
-                // here keeps the allocation off the helper's
-                // critical path so overlay / canvas-scene callers
-                // never pay it.
+                // with the edit / undo paths that address nodes by
+                // Dewey-decimal id). Stringifying here keeps the
+                // allocation off the helper's critical path so
+                // overlay / canvas-scene callers never pay it.
                 self.mindmap_buffers.insert(unique_id.to_string(), buffer);
             },
             |rect| self.node_background_rects.push(rect),
@@ -102,7 +101,7 @@ impl Renderer {
     /// result into the palette pass alongside the per-overlay
     /// buffer stores that predate this refactor — once every
     /// overlay has migrated to a tree, those per-overlay stores go
-    /// away (see Session 5 in the unified-rendering plan).
+    /// away.
     ///
     /// # Costs
     ///
@@ -137,10 +136,11 @@ impl Renderer {
                 },
                 |_rect| {
                     // Overlay-tree background fills aren't wired to
-                    // a screen-space rect pipeline yet. When
-                    // Sessions 3 / 4 need them they can add a
-                    // dedicated `overlay_scene_background_rects`
-                    // field and a screen-space draw pass.
+                    // a screen-space rect pipeline yet. When a
+                    // screen-space overlay actually needs background
+                    // fills, add a dedicated
+                    // `overlay_scene_background_rects` field and a
+                    // screen-space draw pass.
                 },
             );
         }

@@ -28,7 +28,7 @@
 //! points in `app.rs` are gated behind `#[cfg(not(target_arch =
 //! "wasm32"))]` like the palette and label-edit modals. Picker keyboard
 //! / mouse dispatch for WASM is deferred as part of the broader WASM
-//! input gap tracked in the roadmap.
+//! input gap named in `CLAUDE.md`'s Dual-target status section.
 //!
 //! Split between files:
 //! - [`glyph_tables`] — constants, JSON-backed glyph accessors,

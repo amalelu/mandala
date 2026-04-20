@@ -19,7 +19,7 @@
 //! still lives next to the event loop (see `app.rs: mindmap_tree`)
 //! and is consumed directly by the renderer. That's the last
 //! migration step and the cleanest to defer until the overlays
-//! are proven working in the new shape (see ROADMAP).
+//! are proven working in the new shape.
 
 use std::collections::HashMap;
 
@@ -50,7 +50,7 @@ pub enum OverlayRole {
 /// can host. Canvas-space trees are drawn with the camera transform
 /// so they pan and zoom with the mindmap. The mindmap itself is
 /// deliberately not a variant — its tree still lives next to the
-/// event loop until Session 5 moves it in.
+/// event loop and will migrate in a later pass.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum CanvasRole {
     /// The box-drawing glyphs framing each bordered node. Rebuilt
@@ -417,8 +417,8 @@ impl AppScene {
     /// Hit-test the overlay sub-scene. Canvas-space roles are
     /// intentionally not checked — overlay hits should always
     /// win over canvas hits, and the canvas hit-test still goes
-    /// through `document::hit_test` (deferred — see ROADMAP's
-    /// "hit-test still goes through document path" entry).
+    /// through `document::hit_test` (unifying those two paths is
+    /// deferred work).
     pub fn overlay_at(&mut self, screen_pt: Vec2) -> Option<(OverlayRole, NodeId)> {
         let hit = self.overlay.component_at(screen_pt)?;
         let role = self.overlay_role_for_id(hit.0)?;
@@ -540,8 +540,8 @@ mod tests {
 
     /// `canvas_signature` is `None` for an unregistered role and
     /// any role whose signature was never set. Pins the contract
-    /// that `update_portal_tree` (and the Phase 1.2 / 1.3 sites
-    /// that follow) rely on to dispatch into a full rebuild on
+    /// that `update_portal_tree` (and its sibling canvas-role
+    /// dispatchers) rely on to dispatch into a full rebuild on
     /// the first frame after open.
     #[test]
     fn canvas_signature_is_none_when_unset_or_unregistered() {

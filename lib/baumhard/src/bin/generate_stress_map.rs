@@ -21,9 +21,9 @@
 //! - `--cross-links K` adds `K` random `cross_link` edges between
 //!   non-hierarchically-related nodes. Simulates a messy real-world map.
 //! - `--long-edges K` adds `K` cross-link edges between the most-distant
-//!   node pairs in the layout. This is the key knob for Phase 4 perf
-//!   testing: long edges are the ones whose glyph sampling count explodes,
-//!   which is exactly the stutter case we're optimising for.
+//!   node pairs in the layout. Long edges are the ones whose per-frame
+//!   glyph-sampling cost explodes, so this is the key knob for connection-
+//!   rendering perf tests.
 //!
 //! # Example invocations
 //!
@@ -34,7 +34,7 @@
 //!     --output maps/stress_balanced.mindmap.json
 //!
 //! # A deeply skewed map with two deliberately long cross-links for
-//! # Phase 4 before/after measurement.
+//! # before/after connection-render perf measurement.
 //! cargo run -p baumhard --bin generate_stress_map -- \
 //!     --topology skewed --nodes 500 --long-edges 2 \
 //!     --output maps/stress_long_edges.mindmap.json
@@ -131,8 +131,9 @@ OPTIONS:
     --cross-links <K>                   Add K random cross-link edges (default: 0)
     --long-edges <K>                    Add K cross-link edges between the most-
                                         distant node pairs. The key knob for
-                                        Phase 4 connection-render perf tests.
-                                        (default: 0)
+                                        connection-render perf tests — these
+                                        are the edges whose per-frame glyph-
+                                        sampling cost dominates. (default: 0)
     --seed <S>                          RNG seed for deterministic output
                                         (default: 0xBAADF00D)
     --output <PATH>                     Output file path (default: maps/stress.mindmap.json)
@@ -460,9 +461,9 @@ fn add_random_cross_links(
 
 /// Add `count` cross-link edges between the most-distant node pairs. Picks
 /// the two nodes with the maximum separation as the first edge, then the
-/// next-most-distant non-overlapping pair, and so on. This is the key
-/// long-connection knob for Phase 4 perf testing — these are exactly the
-/// edges whose per-frame glyph-sampling cost blows the frame budget.
+/// next-most-distant non-overlapping pair, and so on. These are the edges
+/// whose per-frame glyph-sampling cost dominates, so this is the key long-
+/// connection knob for connection-render perf testing.
 fn add_longest_edges(nodes: &[MindNode], edges: &mut Vec<MindEdge>, count: usize) {
     if nodes.len() < 2 || count == 0 {
         return;

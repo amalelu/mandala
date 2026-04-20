@@ -13,6 +13,9 @@ use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::tree::Tree;
 use crate::util::color;
 
+/// Output of [`build_connection_label_tree`]: the baumhard tree of
+/// per-label GlyphAreas plus a per-edge AABB map so the renderer can
+/// resolve label clicks back to the owning edge.
 pub struct ConnectionLabelTree {
     pub tree: Tree<GfxElement, GfxMutator>,
     /// `EdgeKey → AABB` for click hit-testing on the label.

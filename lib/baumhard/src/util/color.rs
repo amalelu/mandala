@@ -56,18 +56,40 @@ macro_rules! hex {
     }};
 }
 
+/// `[R, G, B, A]` in `[0.0, 1.0]` — the canvas-space colour
+/// representation consumed by the renderer. Plain array, zero
+/// allocation, `Copy`.
 pub type FloatRgba = [f32; 4];
+/// `[R, G, B, A]` in `[0, 255]` — the byte-packed form used by
+/// [`Color`] and by hex parsing. Plain array, zero allocation,
+/// `Copy`.
 pub type Rgba = [u8; 4];
+/// Ordered list of float RGBA colours forming a named palette. Heap
+/// allocation proportional to the number of entries; typically
+/// constructed once at program start via `lazy_static`.
 pub type Palette = Vec<FloatRgba>;
 
+/// Index of the alpha channel in an [`Rgba`] / [`FloatRgba`] quad.
 pub const ALPHA_IDX: usize = 3;
+/// Index of the blue channel in an [`Rgba`] / [`FloatRgba`] quad.
 pub const BLUE_IDX: usize = 2;
+/// Index of the green channel in an [`Rgba`] / [`FloatRgba`] quad.
 pub const GREEN_IDX: usize = 1;
+/// Index of the red channel in an [`Rgba`] / [`FloatRgba`] quad.
 pub const RED_IDX: usize = 0;
+/// Maximum value of a single [`Rgba`] channel (`255`, fully opaque /
+/// saturated).
 pub const VAL_MAX: u8 = 255;
 
+/// Byte-packed RGBA colour, the blessed in-memory colour type in
+/// baumhard. Wraps a `[u8; 4]` and implements the four wrapping
+/// arithmetic traits ([`Add`], [`Sub`], [`Mul`], [`Div`]) plus
+/// [`Index`] / [`IndexMut`] for channel access. `Copy`, zero
+/// allocation, serde-serializable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Color {
+    /// Raw `[R, G, B, A]` byte channels. Exposed `pub` so palette
+    /// constants can be written as struct literals at compile time.
     pub rgba: Rgba,
 }
 
@@ -185,18 +207,22 @@ impl Index<usize> for Color {
 }
 
 impl Color {
+    /// Opaque black (`[0, 0, 0, 255]`). O(1), no heap.
     pub fn black() -> Self {
         Color {
             rgba: [0, 0, 0, 255],
         }
     }
 
+    /// Fully transparent black (`[0, 0, 0, 0]`) — the "no fill"
+    /// sentinel. O(1), no heap.
     pub fn invisible() -> Self {
         Color {
             rgba: [0, 0, 0, 0],
         }
     }
 
+    /// Opaque white (`[255, 255, 255, 255]`). O(1), no heap.
     pub fn white() -> Self {
         Color {
             rgba: [255, 255, 255, 255],
@@ -218,10 +244,17 @@ impl Color {
             rgba: convert_f32_to_u8(float_rgba),
         }
     }
+    /// Overwrite the alpha channel with `opacity` (0 = transparent,
+    /// 255 = opaque). RGB is unchanged. O(1), no heap.
     pub fn set_alpha(&mut self, opacity: u8) {
         self.rgba[ALPHA_IDX] = opacity;
     }
 
+    /// Convert to [`FloatRgba`] by integer-dividing each channel by
+    /// [`VAL_MAX`]. O(1), no heap. Note: this uses `u8` integer
+    /// division, so every non-max channel collapses to `0.0` — the
+    /// lossy form is kept for the existing scaling call sites that
+    /// rely on it.
     pub fn to_float(&self) -> FloatRgba {
         [
             (self.rgba[RED_IDX] / VAL_MAX).into(),

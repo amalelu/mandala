@@ -8,9 +8,17 @@ use crate::util::grapheme_chad::split_off_graphemes;
 use serde::{Deserialize, Serialize};
 use std::ops::{AddAssign, Index, IndexMut, MulAssign, SubAssign};
 
+/// One visual line in a [`crate::gfx_structs::model::GlyphMatrix`] —
+/// a vector of [`GlyphComponent`] runs. `ignore_initial_space`
+/// controls how `*Assign` operators treat leading whitespace in the
+/// rhs during matrix composition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GlyphLine {
+    /// Ordered list of coloured/fonted text runs that together form
+    /// the line.
     pub line: Vec<GlyphComponent>,
+    /// When `true`, leading whitespace components in the rhs of an
+    /// `*Assign` op are skipped instead of overwriting the lhs.
     pub ignore_initial_space: bool,
 }
 
@@ -59,6 +67,7 @@ pub(crate) enum GlyphLineOp {
 }
 
 impl GlyphLine {
+    /// Empty line. O(1).
     pub fn new() -> Self {
         GlyphLine {
             line: vec![],
@@ -66,6 +75,9 @@ impl GlyphLine {
         }
     }
 
+    /// Splice `source` into the component vector at `index`,
+    /// clamped to the line's current length. O(source.len() +
+    /// line.len() - index) for the shift.
     pub fn insert_at_index(&mut self, source: Vec<GlyphComponent>, index: usize) {
         // Ensure the index does not exceed the target's length to prevent panics
         let effective_index = index.min(self.line.len());
@@ -77,12 +89,16 @@ impl GlyphLine {
             .splice(effective_index..effective_index, source.into_iter());
     }
 
+    /// Line containing one component. O(1).
     pub fn new_with(component: GlyphComponent) -> Self {
         let mut new = GlyphLine::new();
         new.push(component);
         new
     }
 
+    /// Line wrapping a pre-built component vector plus the
+    /// `ignore_initial_space` flag. O(1); the vector is moved, not
+    /// cloned.
     pub fn new_with_vec(comps: Vec<GlyphComponent>, ignore_initial_space: bool) -> Self {
         GlyphLine {
             line: comps,
@@ -148,22 +164,29 @@ impl GlyphLine {
         }
     }
 
+    /// Append a component to the end. O(1) amortised.
     pub fn push(&mut self, glyph: GlyphComponent) {
         self.line.push(glyph);
     }
 
+    /// Borrow the component at position `i`. O(1).
     pub fn get(&self, i: usize) -> Option<&GlyphComponent> {
         self.line.get(i)
     }
 
+    /// Borrow the last component. O(1).
     pub fn last_component(&self) -> Option<&GlyphComponent> {
         self.line.last()
     }
 
+    /// Mutable borrow of the last component. O(1).
     pub fn last_comp_mut(&mut self) -> Option<&mut GlyphComponent> {
         self.line.last_mut()
     }
 
+    /// Component index that contains grapheme position `index`, or
+    /// `line.len()` when `index` is past the last component.
+    /// O(n) grapheme walk over components.
     pub fn component_of_index(&self, index: usize) -> usize {
         let mut head = 0;
         for (i, comp) in self.line.iter().enumerate() {
@@ -176,6 +199,8 @@ impl GlyphLine {
         self.line.len()
     }
 
+    /// Grapheme-index where component `index` begins. O(n) grapheme
+    /// walk. Panics when `index >= line.len()`.
     pub fn index_of_component(&self, index: usize) -> usize {
         let mut idx = 0;
         for (i, comp) in self.line.iter().enumerate() {
@@ -190,6 +215,7 @@ impl GlyphLine {
         );
     }
 
+    /// Mutable component borrow at position `i`. O(1).
     pub fn get_mut(&mut self, i: usize) -> Option<&mut GlyphComponent> {
         self.line.get_mut(i)
     }
@@ -295,6 +321,8 @@ impl GlyphLine {
         line.insert(comp_idx + 1, cloned_comp);
     }
 
+    /// Total grapheme count across every component. O(sum of
+    /// component grapheme walks).
     pub fn length(&self) -> usize {
         self.line.iter().map(|comp| comp.length()).sum()
     }
@@ -305,6 +333,10 @@ impl GlyphLine {
         line.insert(comp_idx + 1, split_off_comp);
     }
 
+    /// Insert `item` at grapheme position `begin`, pushing existing
+    /// content to the right. Pads with whitespace when `begin`
+    /// exceeds the current line length. O(n) grapheme walk + O(n)
+    /// splice.
     pub fn expanding_insert(&mut self, begin: usize, item: &GlyphComponent) {
         // We have two index types here; component index and "external index"
         // [[A,B,C], [D,E,F], [G,H]]
@@ -354,6 +386,10 @@ impl GlyphLine {
         self.line.insert(comp_at_insert + 1, item.clone());
     }
 
+    /// Insert `item` at grapheme position `begin`, overwriting the
+    /// `item.length()` graphemes that already occupied that range.
+    /// Pads with whitespace when `begin` exceeds the current line
+    /// length. O(n) grapheme walk + O(n) splice/drain.
     pub fn overriding_insert(&mut self, begin: usize, item: &GlyphComponent) {
         // We have two index types here; component index and "external index"
         // [[A,B,C], [D,E,F], [G,H]]

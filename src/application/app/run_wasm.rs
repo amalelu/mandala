@@ -144,7 +144,9 @@ let input_rc: Rc<RefCell<Option<WasmInputState>>> = Rc::new(RefCell::new(None));
 let renderer_for_init = renderer_rc.clone();
 let input_for_init = input_rc.clone();
 
-// On WASM we run single-threaded -- spawn the renderer init as a future
+// Renderer init is async on the browser (adapter + surface setup
+// are Promise-backed). Spawn as a future so the event loop doesn't
+// block waiting for wgpu.
 wasm_bindgen_futures::spawn_local(async move {
     let instance = Instance::default();
     let surface = instance

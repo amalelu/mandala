@@ -13,9 +13,9 @@
 //! `CustomMutation` undo entry after.
 //!
 //! Registered at startup by `register_builtin_handlers` (called from
-//! `run_native.rs`), so first-party app mutations that ship in
-//! `assets/mutations/application.json` have their Rust
-//! implementations wired automatically.
+//! both the native and WASM app-init paths), so first-party app
+//! mutations that ship in `assets/mutations/application.json` have
+//! their Rust implementations wired automatically on both targets.
 
 use super::MindMapDocument;
 

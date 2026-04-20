@@ -1,8 +1,9 @@
 //! `MindMapDocument` — owns the data model (`MindMap`, selection,
 //! undo stack, animation state, mutation registry, transient
 //! previews) and hands intermediate representations to the
-//! renderer. Pre-consolidation this file was ~5700 lines; the
-//! behaviour is now sharded across sibling submodules.
+//! renderer. Behaviour is sharded across sibling submodules; this
+//! file carries only the struct definition, construction, and the
+//! scene-build entry points.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

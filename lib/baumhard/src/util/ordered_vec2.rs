@@ -3,6 +3,12 @@ use glam::Vec2;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
+/// Hashable, `Eq`-able 2D float vector. Wraps each component in
+/// [`OrderedFloat`] so instances can live inside hash maps, `BTreeSet`s,
+/// and the mutation system's keyed collections — `glam::Vec2` lacks
+/// `Hash` / `Eq` because `f32` is not totally-ordered. Arithmetic ops
+/// are component-wise; no NaN handling beyond what `OrderedFloat`
+/// provides.
 #[derive(Clone, Copy, Hash, Eq, Debug, Serialize, Deserialize)]
 pub struct OrderedVec2 {
     pub x: OrderedFloat<f32>,
@@ -16,10 +22,13 @@ impl PartialEq for OrderedVec2 {
 }
 
 impl OrderedVec2 {
+    /// Construct from a `glam::Vec2`. O(1).
     pub fn from_vec2(vec2: Vec2) -> Self {
         Self::new_f32(vec2.x, vec2.y)
     }
 
+    /// Construct from already-wrapped [`OrderedFloat`] components.
+    /// O(1).
     pub fn new(x: OrderedFloat<f32>, y: OrderedFloat<f32>) -> Self {
         OrderedVec2 {
             x: OrderedFloat::from(x),
@@ -27,6 +36,7 @@ impl OrderedVec2 {
         }
     }
 
+    /// Construct from raw `f32` components. O(1).
     pub fn new_f32(x: f32, y: f32) -> Self {
         OrderedVec2 {
             x: OrderedFloat::from(x),
@@ -34,18 +44,22 @@ impl OrderedVec2 {
         }
     }
 
+    /// Unwrap the x component as `f32`.
     pub fn x(&self) -> f32 {
         self.x.0
     }
 
+    /// Unwrap the y component as `f32`.
     pub fn y(&self) -> f32 {
         self.y.0
     }
 
+    /// Convert to `glam::Vec2`. O(1).
     pub fn to_vec2(&self) -> Vec2 {
         Vec2::new(self.x.0, self.y.0)
     }
 
+    /// Convert to a `(x, y)` `f32` tuple. O(1).
     pub fn to_pair(&self) -> (f32, f32) {
         (self.x.0, self.y.0)
     }

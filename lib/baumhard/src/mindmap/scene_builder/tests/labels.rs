@@ -1,4 +1,4 @@
-//! Session 6D connection-label emission: label present, missing/empty, position_t follow, color inheritance, GlyphConnectionConfig override.
+//! Connection-label emission: label present, missing/empty, position_t follow, color inheritance, GlyphConnectionConfig override.
 
 use super::fixtures::*;
 use super::super::*;

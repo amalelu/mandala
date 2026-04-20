@@ -150,10 +150,10 @@ fn connection_mutator_round_trip_matches_full_rebuild() {
 }
 
 /// Connection-label round-trip with a label-text edit (the
-/// hot path for inline label editing in Phase 2.1): identity
-/// is the per-edge `EdgeKey` sequence, so changing the text
-/// alone keeps the identity stable and the in-place mutator
-/// path picks up the new glyphs without touching the arena.
+/// hot path for inline label editing): identity is the per-edge
+/// `EdgeKey` sequence, so changing the text alone keeps the
+/// identity stable and the in-place mutator path picks up the new
+/// glyphs without touching the arena.
 #[test]
 fn connection_label_mutator_round_trip_handles_text_edit() {
     use crate::core::primitives::Applicable;

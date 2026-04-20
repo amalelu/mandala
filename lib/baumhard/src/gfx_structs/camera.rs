@@ -68,9 +68,13 @@ pub enum CameraMutation {
 }
 
 impl Camera2D {
+    /// Lowest zoom factor allowed; any mutation clamps against this.
     pub const MIN_ZOOM: f32 = 0.05;
+    /// Highest zoom factor allowed; any mutation clamps against this.
     pub const MAX_ZOOM: f32 = 5.0;
 
+    /// Construct a camera centred on canvas origin with zoom 1.0.
+    /// O(1), no allocation.
     pub fn new(viewport_width: u32, viewport_height: u32) -> Self {
         Camera2D {
             position: Vec2::ZERO,

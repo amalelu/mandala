@@ -151,8 +151,9 @@ pub struct Renderer {
     /// Per-node border glyph buffers, keyed by `node_id`. Each entry is a
     /// `Vec` of 4 buffers (top/bottom/left/right) matching the layout in
     /// `rebuild_border_buffers_keyed`. Keyed so unchanged borders survive
-    /// across drag frames without re-shaping — Phase B of the
-    /// connection-render cost work.
+    /// across drag frames without re-shaping — cosmic-text shaping is
+    /// the dominant cost here, skipping it for unmoved borders is what
+    /// keeps drag interactive.
     border_buffers: FxHashMap<String, Vec<MindMapTextBuffer>>,
     /// Per-edge connection glyph buffers, keyed by `(from_id, to_id,
     /// edge_type)`. Each entry is the `Vec` of already-shaped glyph
@@ -160,22 +161,22 @@ pub struct Renderer {
     /// drag frames — the big win for the "long cross-link, dragging
     /// something else" scenario.
     connection_buffers: FxHashMap<EdgeKey, Vec<MindMapTextBuffer>>,
-    /// Edge grab-handle buffers for Session 6C's connection reshape
-    /// surface. Populated only when an edge is selected; rebuilt
-    /// fresh every time the scene is rebuilt with a selected edge.
-    /// Bounded cost (≤ 5 glyph buffers per selected edge) so no
-    /// keyed cache is warranted.
+    /// Edge grab-handle buffers for the connection reshape surface.
+    /// Populated only when an edge is selected; rebuilt fresh every
+    /// time the scene is rebuilt with a selected edge. Bounded cost
+    /// (≤ 5 glyph buffers per selected edge) so no keyed cache is
+    /// warranted.
     edge_handle_buffers: Vec<MindMapTextBuffer>,
-    /// Session 6D: per-edge label buffers, keyed by `EdgeKey`. Each
-    /// entry is the shaped cosmic-text buffer for that edge's label
-    /// (if any). Labels are ≤ 1 per edge and rebuilt every scene
-    /// build — no incremental-reuse cache is warranted.
+    /// Per-edge label buffers, keyed by `EdgeKey`. Each entry is the
+    /// shaped cosmic-text buffer for that edge's label (if any).
+    /// Labels are ≤ 1 per edge and rebuilt every scene build — no
+    /// incremental-reuse cache is warranted.
     connection_label_buffers: FxHashMap<EdgeKey, MindMapTextBuffer>,
-    /// Session 6D: AABB hitbox for each rendered label, keyed by
-    /// `EdgeKey`. Populated alongside `connection_label_buffers`;
-    /// consulted by `hit_test_edge_label` when the app dispatches
-    /// inline click-to-edit. Stored as `(min, max)` canvas-space
-    /// corners so the hit test is a pair of comparisons per edge.
+    /// AABB hitbox for each rendered label, keyed by `EdgeKey`.
+    /// Populated alongside `connection_label_buffers`; consulted by
+    /// `hit_test_edge_label` when the app dispatches inline
+    /// click-to-edit. Stored as `(min, max)` canvas-space corners so
+    /// the hit test is a pair of comparisons per edge.
     connection_label_hitboxes: FxHashMap<EdgeKey, (Vec2, Vec2)>,
     /// Per-endpoint portal marker buffers, keyed by `(edge_key,
     /// endpoint_node_id)` so each of the two marker glyphs of a
@@ -191,9 +192,9 @@ pub struct Renderer {
     /// portal glyph to an `EdgeKey` + the endpoint the marker sits
     /// above (the double-click jump target is the *other* endpoint).
     portal_hitboxes: FxHashMap<(EdgeKey, String), (Vec2, Vec2)>,
-    /// Session 6C: command palette overlay buffers. Rendered above
+    /// Command palette / console overlay buffers. Rendered above
     /// everything else in screen coordinates. Populated only when
-    /// the palette is open; cleared otherwise.
+    /// the console is open; cleared otherwise.
     console_overlay_buffers: Vec<MindMapTextBuffer>,
     /// Screen-space geometry of the color picker's opaque backdrop.
     /// Captured inside `rebuild_color_picker_overlay_buffers`; the
@@ -595,11 +596,11 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
         self.viewport.update(&self.queue, Resolution { width, height });
         self.camera.set_viewport_size(width, height);
-        // Viewport changed → Phase A's off-screen glyph cull needs to
-        // re-run for every edge. Drop the keyed connection buffer cache
-        // so the next rebuild rebuilds from a clean slate, and raise
-        // the viewport-dirty flag so the event loop actually triggers
-        // that rebuild.
+        // Viewport changed → the per-edge off-screen glyph cull
+        // needs to re-run for every edge. Drop the keyed connection
+        // buffer cache so the next rebuild rebuilds from a clean
+        // slate, and raise the viewport-dirty flag so the event loop
+        // actually triggers that rebuild.
         self.connection_buffers.clear();
         self.connection_viewport_dirty = true;
     }
