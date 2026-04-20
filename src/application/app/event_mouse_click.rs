@@ -541,11 +541,7 @@ pub(super) fn handle_mouse_input(
                         renderer.clear_overlay_buffers();
                         if let (Some(doc), Some(tree)) = (document.as_mut(), mindmap_tree.as_ref()) {
                             let hits = rect_select(start_canvas, current_canvas, tree);
-                            doc.selection = match hits.len() {
-                                0 => SelectionState::None,
-                                1 => SelectionState::Single(hits.into_iter().next().unwrap()),
-                                _ => SelectionState::Multi(hits),
-                            };
+                            doc.selection = SelectionState::from_ids(hits);
                             rebuild_all(doc, mindmap_tree, app_scene, renderer);
                         }
                     }

@@ -107,6 +107,36 @@ use super::defaults::default_cross_link_edge;
     }
 
     #[test]
+    fn test_selection_state_from_ids_empty_is_none() {
+        assert!(matches!(SelectionState::from_ids(vec![]), SelectionState::None));
+    }
+
+    #[test]
+    fn test_selection_state_from_ids_single_element_is_single() {
+        match SelectionState::from_ids(vec!["alpha".to_string()]) {
+            SelectionState::Single(id) => assert_eq!(id, "alpha"),
+            other => panic!("expected Single, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_selection_state_from_ids_two_elements_is_multi_preserving_order() {
+        match SelectionState::from_ids(vec!["a".to_string(), "b".to_string()]) {
+            SelectionState::Multi(ids) => assert_eq!(ids, vec!["a".to_string(), "b".to_string()]),
+            other => panic!("expected Multi, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_selection_state_from_ids_many_elements_is_multi_preserving_order() {
+        let input = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        match SelectionState::from_ids(input.clone()) {
+            SelectionState::Multi(ids) => assert_eq!(ids, input),
+            other => panic!("expected Multi, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_apply_tree_highlights_via_walker() {
         let mut tree = load_test_tree();
         let node_id = *tree.node_map.get("0").unwrap();

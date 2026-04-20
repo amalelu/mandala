@@ -209,11 +209,7 @@ pub(super) fn drain_selecting_rect(
     if let Some(doc) = document.as_ref() {
         let mut new_tree = doc.build_tree();
         let hits = rect_select(sc, cc, &new_tree);
-        let preview_selection = match hits.len() {
-            0 => SelectionState::None,
-            1 => SelectionState::Single(hits.into_iter().next().unwrap()),
-            _ => SelectionState::Multi(hits),
-        };
+        let preview_selection = SelectionState::from_ids(hits);
         apply_tree_highlights(
             &mut new_tree,
             preview_selection
