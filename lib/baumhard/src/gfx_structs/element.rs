@@ -1,3 +1,13 @@
+//! `GfxElement` — the value type every `Tree<GfxElement, _>` node
+//! holds. Three variants cover the two renderable glyph types
+//! (`GlyphArea` for text regions, `GlyphModel` for composed glyph
+//! shapes) plus a lightweight `Void` placeholder used to pad tree
+//! structure without rendering cost. This module also owns the
+//! field-selector enum (`GfxElementField`) used by the mutator
+//! pipeline to address a single facet of an element, the
+//! discriminant tag (`GfxElementType`), and the per-node AABB
+//! caching that accelerates the hit-test BVH descent.
+
 use crate::core::primitives::{ColorFontRegionField, Flag, Flaggable, Range};
 use crate::gfx_structs::area::{GlyphArea, GlyphAreaField};
 use crate::gfx_structs::model::{GlyphModel, GlyphModelField};

@@ -1,3 +1,10 @@
+//! Per-node border rendering vocabulary — the `GlyphBorder*` config
+//! structs the loader deserializes and the geometry constants the
+//! renderer and `tree_builder::build_border_tree` share to keep
+//! border layout consistent across the two paths. Borders are the
+//! glyph-drawn rectangles around framed nodes; portal labels, edge
+//! handles, and drag previews all attach to these geometry hints.
+
 use serde::{Deserialize, Serialize};
 
 /// Fraction of `font_size` by which a border's top/bottom runs

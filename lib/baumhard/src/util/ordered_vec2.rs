@@ -1,3 +1,10 @@
+//! Hashable 2D float vector — the wrapper baumhard uses wherever
+//! `glam::Vec2` would sit in a `HashMap` key, a `BTreeSet`, or the
+//! mutation system's keyed collections. `glam::Vec2` lacks `Hash` /
+//! `Eq` because `f32` is not totally ordered; `OrderedVec2` wraps
+//! each axis in `ordered_float::OrderedFloat` to make those traits
+//! available without giving up component-wise arithmetic.
+
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 use glam::Vec2;
 use ordered_float::OrderedFloat;

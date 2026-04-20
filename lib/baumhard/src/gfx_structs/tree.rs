@@ -1,3 +1,12 @@
+//! Arena-backed glyph tree + its mutator sibling. `Tree<T, M>` wraps
+//! an `indextree::Arena` for O(1) child iteration and O(1) node
+//! access; `MutatorTree<M>` mirrors that shape but carries mutations
+//! instead of elements. The two meet in `MutatorTree::apply_to`,
+//! which hands both arenas to `walk_tree_from` (in the sibling
+//! `tree_walker` module) to align mutators to targets by branch
+//! channel. Everything here is mutation-first per §B2: changing a
+//! field is a mutator applied in-place, never a rebuilt arena.
+
 use crate::core::primitives::Applicable;
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{GfxMutator, GlyphTreeEventInstance};

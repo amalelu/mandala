@@ -1,3 +1,12 @@
+//! Predicate language that steers walker traversal — the condition
+//! expressions inside `Instruction::RepeatWhile` and its siblings.
+//! A `Predicate` pairs a `Comparator` with a field selector drawn
+//! from the `GfxElement` / `GlyphArea` / `GlyphModel` field enums,
+//! so a mutator can express things like "repeat on every child
+//! whose text starts empty" without hand-coding a walker. Pure
+//! data + O(1) evaluations; serde-serializable so the mutator DSL
+//! can persist predicates verbatim.
+
 use crate::core::primitives::ColorFontRegionField;
 use crate::gfx_structs::area::GlyphAreaField;
 use crate::gfx_structs::area::GlyphAreaField::{Bounds, ColorFontRegions, LineHeight, Scale, Text};

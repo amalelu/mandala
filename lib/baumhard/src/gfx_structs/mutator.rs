@@ -1,3 +1,14 @@
+//! `GfxMutator` — the top-level mutator variant that rides one node
+//! of a `MutatorTree<GfxMutator>`. The four variants cover single-
+//! target mutations (`Single`), padded alignment slots (`Void`),
+//! control-flow loops (`Instruction` + its [`Predicate`] condition),
+//! and batched field updates against one target (`Macro`). This
+//! module also defines the `Mutation` payload enum that `Single`
+//! and `Macro` carry, the `Instruction` control-flow enum that
+//! `Instruction` nodes carry, and the `GlyphTreeEvent` /
+//! `GlyphTreeEventInstance` types that the walker threads through
+//! the tree as a side channel during `apply_to`.
+
 use log::debug;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};

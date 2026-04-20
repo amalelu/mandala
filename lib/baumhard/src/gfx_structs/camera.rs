@@ -1,3 +1,11 @@
+//! 2D pan/zoom camera — the projection between canvas space
+//! (where mindmap nodes live) and screen space (pixel coordinates).
+//! Single `Camera2D` struct plus its `canvas_to_screen` /
+//! `screen_to_canvas` helpers; no scene graph, no matrix stack.
+//! The renderer uses this to compute its orthographic view matrix;
+//! every hit-test path uses `screen_to_canvas` to land a pointer
+//! event on the right glyph.
+
 use glam::Vec2;
 
 /// A 2D camera for navigating large canvas spaces with pan and zoom.
