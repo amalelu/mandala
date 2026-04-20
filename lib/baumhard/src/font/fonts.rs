@@ -345,3 +345,66 @@ pub fn measure_glyph_ink_bounds(
     out.advance = advance_total;
     out
 }
+
+/// Natural-size measurement of a text block laid out as unbroken
+/// single lines — cosmic-text still splits on embedded `\n`.
+/// Produced by [`measure_text_block_unbounded`] for callers that
+/// want to size a box to fit text rather than reflow text to a
+/// fixed width.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextBlockSize {
+    /// Maximum `line_w` across all laid-out runs, in pixels.
+    pub width: f32,
+    /// `line_count * line_height`, in pixels.
+    pub height: f32,
+    /// Number of layout runs produced. `0` for empty input.
+    pub line_count: u32,
+}
+
+impl TextBlockSize {
+    /// Zero-sized measurement — what empty input produces. Useful as
+    /// an early-return sentinel.
+    pub const ZERO: Self = Self { width: 0.0, height: 0.0, line_count: 0 };
+}
+
+/// Shape `text` through cosmic-text without a width constraint and
+/// return its natural [`TextBlockSize`]. Embedded `\n` produces
+/// additional lines; the returned `width` is the widest run, and
+/// `height = line_count * line_height`.
+///
+/// `font_system` is passed in — not taken from the global
+/// [`FONT_SYSTEM`] — so the caller controls the lock scope (§B5).
+/// `scale` is the font size in px; `line_height` is the absolute
+/// line height in px (not a multiplier), applied uniformly to every
+/// line. Empty input returns [`TextBlockSize::ZERO`] without shaping.
+///
+/// Costs: one scratch `Buffer`, one shaping pass, O(lines) fold
+/// over `layout_runs`. No rasterisation (no `SwashCache` required).
+pub fn measure_text_block_unbounded(
+    font_system: &mut cosmic_text::FontSystem,
+    text: &str,
+    scale: f32,
+    line_height: f32,
+) -> TextBlockSize {
+    if text.is_empty() {
+        return TextBlockSize::ZERO;
+    }
+    let mut buffer = Buffer::new(font_system, Metrics::new(scale, line_height));
+    // `None` on both axes = unbounded; measure natural widths.
+    buffer.set_size(font_system, None, None);
+    buffer.set_text(font_system, text, &Attrs::new(), Shaping::Advanced, None);
+
+    let mut max_w = 0.0_f32;
+    let mut line_count = 0_u32;
+    for run in buffer.layout_runs() {
+        if run.line_w > max_w {
+            max_w = run.line_w;
+        }
+        line_count += 1;
+    }
+    TextBlockSize {
+        width: max_w,
+        height: line_count as f32 * line_height,
+        line_count,
+    }
+}

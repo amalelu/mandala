@@ -174,6 +174,18 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("measure_glyph_ink_bounds_y_offset_from_box_center", |b| {
         b.iter(|| do_measure_glyph_ink_bounds_y_offset_from_box_center())
     });
+    c.bench_function("measure_text_block_unbounded_empty_is_zero", |b| {
+        b.iter(|| do_measure_text_block_unbounded_empty_is_zero())
+    });
+    c.bench_function("measure_text_block_unbounded_single_line_nonzero", |b| {
+        b.iter(|| do_measure_text_block_unbounded_single_line_nonzero())
+    });
+    c.bench_function("measure_text_block_unbounded_multiline_width_is_widest_line", |b| {
+        b.iter(|| do_measure_text_block_unbounded_multiline_width_is_widest_line())
+    });
+    c.bench_function("measure_text_block_unbounded_width_scales_with_font_size", |b| {
+        b.iter(|| do_measure_text_block_unbounded_width_scales_with_font_size())
+    });
     // scene + hit-test //
     c.bench_function("descendant_at_hits_single_area", |b| b.iter(|| do_descendant_at_hits_single_area()));
     c.bench_function("descendant_at_prefers_smallest", |b| b.iter(|| do_descendant_at_prefers_smallest()));

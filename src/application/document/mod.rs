@@ -146,11 +146,7 @@ pub enum ColorPickerPreview {
 }
 
 fn grow_node_sizes_to_fit_text(map: &mut MindMap) {
-    use cosmic_text::{Attrs, Buffer, Metrics, Shaping};
-
-    let mut font_system = baumhard::font::fonts::FONT_SYSTEM
-        .write()
-        .expect("font system lock poisoned");
+    use baumhard::font::fonts::{measure_text_block_unbounded, FONT_SYSTEM};
 
     for node in map.nodes.values_mut() {
         let scale = node
@@ -162,28 +158,16 @@ fn grow_node_sizes_to_fit_text(map: &mut MindMap) {
         let pad_x = scale * 1.5;
         let pad_y = scale * 0.5;
 
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(scale, line_height));
-        // Unbounded layout so we measure the natural single-line width
-        // of each logical line (cosmic-text still breaks on embedded
-        // `\n`), which is the right floor for "how big does the box
-        // need to be".
-        buffer.set_size(&mut font_system, None, None);
-        buffer.set_text(
-            &mut font_system,
-            &node.text,
-            &Attrs::new(),
-            Shaping::Advanced,
-            None,
-        );
+        // Per-node lock scope: a renderer frame scheduled during
+        // document load can interleave between nodes rather than
+        // waiting for every measurement. §B5.
+        let block = {
+            let mut fs = FONT_SYSTEM.write().expect("font system lock poisoned");
+            measure_text_block_unbounded(&mut fs, &node.text, scale, line_height)
+        };
 
-        let measured_w = buffer
-            .layout_runs()
-            .map(|r| r.line_w)
-            .fold(0.0_f32, f32::max);
-        let measured_h = buffer.layout_runs().count() as f32 * line_height;
-
-        let need_w = (measured_w + pad_x) as f64;
-        let need_h = (measured_h + pad_y) as f64;
+        let need_w = (block.width + pad_x) as f64;
+        let need_h = (block.height + pad_y) as f64;
         if node.size.width < need_w {
             node.size.width = need_w;
         }
