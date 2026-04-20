@@ -180,7 +180,7 @@ fn test_measure_text_block_unbounded_empty_is_zero() {
     do_measure_text_block_unbounded_empty_is_zero();
 }
 
-/// Empty input short-circuits to [`TextBlockSize::ZERO`] without
+/// Empty input short-circuits to `TextBlockSize::ZERO` without
 /// touching the shaper.
 pub fn do_measure_text_block_unbounded_empty_is_zero() {
     fonts::init();

@@ -1,3 +1,13 @@
+//! `GlyphArea` — the text-region element variant of a `GfxElement`.
+//! Owns the text content, font scale, position, bounding size,
+//! halo outline, and the `ColorFontRegions` set that carries per-
+//! range colour / font overrides. Mutations land here through
+//! `apply_operation` (`DeltaGlyphArea`) or the higher-level
+//! `GlyphAreaCommand`; the field and mutator vocabularies live in
+//! the sibling `area_fields` and `area_mutators` modules and are
+//! re-exported from this one so consumers import from a single
+//! path.
+
 pub use super::area_fields::*;
 pub use super::area_mutators::*;
 
