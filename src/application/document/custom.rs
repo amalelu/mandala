@@ -10,30 +10,79 @@ use baumhard::mindmap::custom_mutation::{
 use baumhard::mindmap::model::MindNode;
 use baumhard::mindmap::tree_builder::MindMapTree;
 
+use super::mutations_loader::MutationSource;
 use super::undo_action::UndoAction;
 use super::MindMapDocument;
 
 impl MindMapDocument {
+    /// `true` when the registered mutation at `mutation_id` will
+    /// dispatch through its Rust [`super::mutations::DynamicMutationHandler`]
+    /// at apply time. Two conditions must hold:
+    ///
+    /// - A handler is registered for this id.
+    /// - The mutation's source layer is [`MutationSource::App`] — i.e.
+    ///   the definition the user sees actually is the one the handler
+    ///   was written for. If the user / map / inline layer overrode
+    ///   the id, their declarative shape wins and the bundled handler
+    ///   is bypassed.
+    ///
+    /// This prevents a subtle hijack: a user mutation carrying the
+    /// same id as a bundled handler (e.g. `"flower-layout"`) would
+    /// otherwise win in the registry but still get executed by the
+    /// bundled Rust algorithm, silently discarding the user's
+    /// declared `mutator` and `target_scope`.
+    pub fn will_dispatch_to_handler(&self, mutation_id: &str) -> bool {
+        self.mutation_handlers.contains_key(mutation_id)
+            && self.mutation_sources.get(mutation_id) == Some(&MutationSource::App)
+    }
+
     /// Apply a custom mutation to the tree and optionally sync to the model.
     /// For Persistent mutations, snapshots affected nodes for undo and sets dirty flag.
     /// For Toggle mutations, tracks active state without model sync.
+    ///
+    /// The `tree` argument is only consulted on the declarative
+    /// flat-apply path. When [`Self::will_dispatch_to_handler`]
+    /// returns `true` for `custom.id` the handler mutates the model
+    /// directly; callers that know ahead of time the handler will
+    /// fire may pass `None` and skip the (expensive) tree build
+    /// entirely. Passing `None` on the declarative path logs a
+    /// warning and is otherwise a no-op (the mutation isn't applied).
     pub fn apply_custom_mutation(
         &mut self,
         custom: &CustomMutation,
         node_id: &str,
-        tree: &mut MindMapTree,
+        mut tree: Option<&mut MindMapTree>,
     ) {
-        // For toggle behavior, check if already active and reverse if so
+        // For toggle behavior, check if already active and reverse if so.
         if custom.behavior == MutationBehavior::Toggle {
             let key = (node_id.to_string(), custom.id.clone());
             if self.active_toggles.contains(&key) {
-                // Reverse: remove toggle, rebuild affected nodes from model
+                // Second trigger: remove from active set. The tree
+                // mutation from the first trigger is *not* inverted
+                // in place — Mutations aren't guaranteed invertible.
+                // The caller is expected to rebuild the tree from
+                // the model next frame (the model is untouched
+                // because Toggle skips the persistent-path model
+                // sync). Console and event-loop callers both rebuild
+                // scene state on every dispatch so this is the
+                // conventional shape; trigger dispatchers that keep
+                // a persistent tree across events must explicitly
+                // call `build_tree()` after a toggle-off.
                 self.active_toggles.remove(&key);
+                self.dirty = true;
                 return;
             }
             self.active_toggles.insert(key);
-            // Toggle mutations apply to tree only (visual), no model sync
-            self.apply_to_tree(custom, node_id, tree);
+            // Toggle mutations apply to tree only (visual), no model sync.
+            if let Some(tree) = tree.as_deref_mut() {
+                self.apply_to_tree(custom, node_id, tree);
+            } else {
+                log::warn!(
+                    "apply_custom_mutation: Toggle mutation '{}' called with None tree; \
+                     visual toggle skipped. Pass Some(&mut tree) for Toggle mutations.",
+                    custom.id
+                );
+            }
             return;
         }
 
@@ -44,17 +93,30 @@ impl MindMapDocument {
             .filter_map(|id| self.mindmap.nodes.get(id).map(|n| (id.clone(), n.clone())))
             .collect();
 
-        // If a dynamic handler is registered for this mutation, it's
-        // authoritative — mutates the model directly and the tree
-        // rebuild on the next frame picks up the new state. Skip the
-        // tree-apply + tree-to-model sync path entirely for these.
-        if let Some(handler) = self.mutation_handlers.get(&custom.id).copied() {
-            handler(self, node_id);
-        } else {
+        // Handler dispatch: only fires when the mutation at this id
+        // actually came from the app bundle — a user / map / inline
+        // override of the same id keeps the declarative path so the
+        // user's mutator is honoured. See
+        // [`Self::will_dispatch_to_handler`] for the rationale.
+        if self.will_dispatch_to_handler(&custom.id) {
+            if let Some(handler) = self.mutation_handlers.get(&custom.id).copied() {
+                handler(self, node_id);
+            }
+        } else if let Some(tree) = tree.as_deref_mut() {
             self.apply_to_tree(custom, node_id, tree);
             for id in &affected_ids {
                 self.sync_node_from_tree(id, tree);
             }
+        } else {
+            log::warn!(
+                "apply_custom_mutation: declarative mutation '{}' called with None tree; \
+                 flat-apply skipped. Pass Some(&mut tree) when the mutation isn't \
+                 handler-dispatched.",
+                custom.id
+            );
+            // Fall through: document_actions still push undo below,
+            // but no tree/model changes occurred.
+            return;
         }
 
         if !snapshots.is_empty() {

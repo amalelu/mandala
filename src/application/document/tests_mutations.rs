@@ -314,7 +314,7 @@ use super::defaults::default_cross_link_edge;
         let mut tree = doc.build_tree();
 
         assert!(!doc.dirty);
-        doc.apply_custom_mutation(&cm, "0", &mut tree);
+        doc.apply_custom_mutation(&cm, "0", Some(&mut tree));
         assert!(doc.dirty, "Persistent mutation should set dirty flag");
         assert_eq!(doc.undo_stack.len(), 1, "Should push undo action");
     }
@@ -328,7 +328,7 @@ use super::defaults::default_cross_link_edge;
         doc.build_mutation_registry();
         let mut tree = doc.build_tree();
 
-        doc.apply_custom_mutation(&cm, "0", &mut tree);
+        doc.apply_custom_mutation(&cm, "0", Some(&mut tree));
         assert!(!doc.dirty, "Toggle mutation should not set dirty flag");
         assert!(doc.undo_stack.is_empty(), "Toggle mutation should not push undo");
         assert!(doc.active_toggles.contains(&("0".to_string(), "toggle-test".to_string())));
@@ -344,11 +344,11 @@ use super::defaults::default_cross_link_edge;
         let mut tree = doc.build_tree();
 
         // First apply: activates toggle
-        doc.apply_custom_mutation(&cm, "0", &mut tree);
+        doc.apply_custom_mutation(&cm, "0", Some(&mut tree));
         assert!(doc.active_toggles.contains(&("0".to_string(), "toggle-test".to_string())));
 
         // Second apply: deactivates toggle
-        doc.apply_custom_mutation(&cm, "0", &mut tree);
+        doc.apply_custom_mutation(&cm, "0", Some(&mut tree));
         assert!(!doc.active_toggles.contains(&("0".to_string(), "toggle-test".to_string())));
     }
 
@@ -361,7 +361,7 @@ use super::defaults::default_cross_link_edge;
         let orig_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;
         let mut tree = doc.build_tree();
 
-        doc.apply_custom_mutation(&cm, node_id, &mut tree);
+        doc.apply_custom_mutation(&cm, node_id, Some(&mut tree));
         // Position may have been synced from tree; verify undo restores original
         assert!(doc.undo());
         let restored_x = doc.mindmap.nodes.get(node_id).unwrap().position.x;

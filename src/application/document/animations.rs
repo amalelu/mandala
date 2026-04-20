@@ -311,7 +311,7 @@ impl MindMapDocument {
             for idx in completed_indices.into_iter().rev() {
                 let anim = self.active_animations.swap_remove(idx);
                 if let Some(tree) = tree.as_deref_mut() {
-                    self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+                    self.apply_custom_mutation(&anim.cm, &anim.target_id, Some(tree));
                 } else {
                     // No tree available — at minimum restore the
                     // model to the `to` snapshot so the next
@@ -357,7 +357,7 @@ impl MindMapDocument {
         let mut tree = tree;
         for anim in drained {
             if let Some(tree) = tree.as_deref_mut() {
-                self.apply_custom_mutation(&anim.cm, &anim.target_id, tree);
+                self.apply_custom_mutation(&anim.cm, &anim.target_id, Some(tree));
             } else if let Some(node) = self.mindmap.nodes.get_mut(&anim.target_id) {
                 // No tree available — restore the model to the
                 // `to` snapshot directly. Undo path is then the

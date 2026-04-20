@@ -943,7 +943,7 @@ app.event_loop.run(move |event, _window_target| {
                                 if let (Some(m), Some(tree)) =
                                     (mutation, mindmap_tree.as_mut())
                                 {
-                                    doc.apply_custom_mutation(&m, &nid, tree);
+                                    doc.apply_custom_mutation(&m, &nid, Some(tree));
                                     scene_cache.clear();
                                     rebuild_all(doc, &mut mindmap_tree, &mut app_scene, &mut renderer);
                                 }

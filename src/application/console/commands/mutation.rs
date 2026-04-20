@@ -175,11 +175,19 @@ fn apply(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     // document-actions need to fire — a single custom mutation can
     // carry both and users expect one `mutation apply` to do both.
     //
-    // The tree apply needs a fresh MindMapTree; we build one, hand it
-    // to `apply_custom_mutation`, discard it afterwards (the renderer
-    // rebuilds from the model on the next frame).
-    let mut tree = eff.document.build_tree();
-    eff.document.apply_custom_mutation(&cm, &target_id, &mut tree);
+    // The declarative (flat-apply) path needs a fresh MindMapTree;
+    // the imperative handler path mutates the model directly and
+    // doesn't touch the tree, so we skip the (expensive) build when
+    // dispatch will go to a handler. The tree is discarded after
+    // apply either way — the renderer rebuilds from the model on
+    // the next frame.
+    if eff.document.will_dispatch_to_handler(&cm.id) {
+        eff.document.apply_custom_mutation(&cm, &target_id, None);
+    } else {
+        let mut tree = eff.document.build_tree();
+        eff.document
+            .apply_custom_mutation(&cm, &target_id, Some(&mut tree));
+    }
     eff.document.apply_document_actions(&cm);
 
     ExecResult::ok_msg(format!("applied '{}' to node '{}'", id, target_id))
@@ -484,6 +492,54 @@ mod tests {
             "undo must restore the original position (got {} → {})",
             after_x,
             restored_x
+        );
+    }
+
+    /// Handler-id collision guard: when a user (or map, or inline)
+    /// mutation takes the same `id` as a bundled handler, the
+    /// registry picks the user's mutation by precedence — and
+    /// dispatch must honour the user's declarative mutator rather
+    /// than silently running the bundled Rust handler, which was
+    /// written for the app-bundled mutation's shape. This test
+    /// proves `will_dispatch_to_handler` returns `false` when the
+    /// source is anything other than App, forcing the flat-apply
+    /// path.
+    #[test]
+    fn user_override_of_bundled_id_takes_declarative_path() {
+        let path = format!(
+            "{}/maps/testament.mindmap.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut doc = MindMapDocument::load(&path).expect("testament loads");
+
+        // User mutation shadowing the bundled `flower-layout` id.
+        let user_cm = make_cm(
+            "flower-layout",
+            vec!["map.node"],
+            "user-authored flower-layout override",
+        );
+        doc.build_mutation_registry_with_app_and_user(&[], &[user_cm.clone()]);
+        // The bundled handlers registry still has `flower-layout`
+        // because a real app also registers them; the test
+        // simulates that by inserting directly.
+        doc.mutation_handlers.insert(
+            "flower-layout".to_string(),
+            crate::application::document::mutations::flower_layout::apply,
+        );
+
+        assert!(
+            !doc.will_dispatch_to_handler("flower-layout"),
+            "user-sourced override must bypass the bundled handler"
+        );
+
+        // Now add the bundled version and rebuild — the app source
+        // should win when no user shadow is present.
+        let mut app_cm = user_cm.clone();
+        app_cm.description = "bundled".to_string();
+        doc.build_mutation_registry_with_app_and_user(&[app_cm], &[]);
+        assert!(
+            doc.will_dispatch_to_handler("flower-layout"),
+            "app-sourced bundled mutation must dispatch to its handler"
         );
     }
 }
