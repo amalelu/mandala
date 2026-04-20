@@ -360,5 +360,5 @@ mutation on a specific node overrides the map's.
   it means for mutator targeting.
 - `format/enums.md` — the named-string convention used for
   `contexts`, `target_scope`, `behavior`.
-- `CODE_CONVENTIONS.md §1` — why the mutation framework lives in
-  Baumhard and why its seams are preserved.
+- `CODE_CONVENTIONS.md §1` and `§7` — why the mutation framework lives
+  in Baumhard and why its seams are preserved.

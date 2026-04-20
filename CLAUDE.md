@@ -75,7 +75,7 @@ borders, connection paths — is laid out as positioned font glyphs.
 
 Mandala is built for native desktop (`cargo run`, primary dev loop) and
 WASM (`trunk serve` / `trunk build`, the browser build — same binary on
-desktop and mobile browsers). Per `CODE_CONVENTIONS.md §2` the two
+desktop and mobile browsers). Per `CODE_CONVENTIONS.md §4` the two
 targets are equal citizens; this section tracks the current parity
 surface so a new session doesn't have to trawl `#[cfg]` guards to learn
 what works where.
@@ -173,7 +173,7 @@ mistaken for "handled somewhere"):
 
 The prescriptive rule that goes with this list — new interactive
 features need a cross-platform story from the start — lives in
-`CODE_CONVENTIONS.md §2`. The local checks that enforce it
+`CODE_CONVENTIONS.md §4`. The local checks that enforce it
 (`./test.sh` WASM gate, `./build.sh --wasm`) are named under
 "Common tasks" below.
 
@@ -224,7 +224,7 @@ features need a cross-platform story from the start — lives in
   new user-facing mutation wants a matching undo variant.
 - **Something looks unused?** — before deleting it, check whether it's
   deferred WIP from a past milestone or a seam the named trajectory
-  (`CODE_CONVENTIONS.md §6`) preserves for future sessions.
+  (`CODE_CONVENTIONS.md §7`) preserves for future sessions.
   `DEPRECATED_ROADMAP.md`'s "What needs work" list is one reference
   point; the **Dual-target status** section above names parity gaps
   explicitly.
