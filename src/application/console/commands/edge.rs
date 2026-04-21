@@ -7,8 +7,12 @@
 //!   edge between its line form (rendered path) and its portal form
 //!   (two floating markers, no line). Portal-mode edges reuse
 //!   `glyph_connection.body` as the marker glyph.
-//! - **Path reset:** `edge reset=<straight|style>` clears control
-//!   points (straight) or per-edge glyph overrides (style).
+//! - **Path reset / curve:** `edge reset=<straight|curve|style>`.
+//!   `straight` clears control points, `curve` inserts one default
+//!   control point (bootstraps a gentle quadratic Bezier on a
+//!   straight edge — same result the midpoint drag-handle produces
+//!   but reachable from the keyboard), `style` clears per-edge
+//!   glyph overrides.
 //!
 //! Portal-mode edges are created by first building a line edge
 //! (Connect mode / Ctrl+D) and then flipping with
@@ -25,7 +29,7 @@ use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 
 pub const KEYS: &[&str] = &["type", "reset", "display_mode"];
 pub const EDGE_TYPES: &[&str] = &[EDGE_TYPE_CROSS_LINK, EDGE_TYPE_PARENT_CHILD];
-pub const RESETS: &[&str] = &["straight", "style"];
+pub const RESETS: &[&str] = &["straight", "curve", "style"];
 pub const DISPLAY_MODES: &[&str] = &[
     baumhard::mindmap::model::DISPLAY_MODE_LINE,
     baumhard::mindmap::model::DISPLAY_MODE_PORTAL,
@@ -34,13 +38,15 @@ pub const DISPLAY_MODES: &[&str] = &[
 pub const COMMAND: Command = Command {
     name: "edge",
     aliases: &[],
-    summary: "Convert edge type, switch display mode, or reset path/style",
-    usage: "edge type=<cross_link|parent_child>   |   edge display_mode=<line|portal>   |   edge reset=<straight|style>",
+    summary: "Convert edge type, switch display mode, curve/straighten, or reset style",
+    usage: "edge type=<cross_link|parent_child>   |   edge display_mode=<line|portal>   |   edge reset=<straight|curve|style>",
     tags: &[
         "edge",
         "type",
         "reset",
         "straight",
+        "curve",
+        "bezier",
         "style",
         "cross_link",
         "parent_child",
@@ -144,6 +150,14 @@ fn execute_edge(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                         messages.push("connection already straight".into());
                     }
                 }
+                "curve" => {
+                    let changed = eff.document.curve_straight_edge(&er);
+                    if changed {
+                        any_applied = true;
+                    } else {
+                        messages.push("connection already curved".into());
+                    }
+                }
                 "style" => {
                     let changed = eff.document.reset_edge_style_to_default(&er);
                     if changed {
@@ -154,7 +168,7 @@ fn execute_edge(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                 }
                 other => {
                     messages.push(format!(
-                        "reset '{}' must be straight or style",
+                        "reset '{}' must be straight, curve, or style",
                         other
                     ));
                 }

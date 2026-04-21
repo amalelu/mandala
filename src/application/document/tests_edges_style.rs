@@ -167,6 +167,53 @@ use super::defaults::default_cross_link_edge;
     }
 
     #[test]
+    fn test_curve_straight_edge_inserts_control_point() {
+        // On a straight edge, `curve_straight_edge` inserts one CP
+        // offset perpendicular to the anchor line. The resulting
+        // control-point count is 1 (quadratic Bezier form).
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let ok = doc.curve_straight_edge(&edge_ref);
+        assert!(ok, "curve on a straight edge should report success");
+        assert_eq!(
+            doc.mindmap.edges[edge_idx].control_points.len(),
+            1,
+            "a single CP bootstraps a quadratic Bezier"
+        );
+        assert!(doc.dirty);
+        assert_eq!(doc.undo_stack.len(), 1);
+    }
+
+    #[test]
+    fn test_curve_straight_edge_noop_on_already_curved() {
+        // Re-running `curve_straight_edge` on an already-curved edge
+        // is a no-op — keeps the undo stack clean for console users
+        // who repeat the command.
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        doc.mindmap.edges[edge_idx]
+            .control_points
+            .push(ControlPoint { x: 5.0, y: 5.0 });
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let ok = doc.curve_straight_edge(&edge_ref);
+        assert!(!ok, "curve on already-curved edge should be a no-op");
+        assert_eq!(doc.mindmap.edges[edge_idx].control_points.len(), 1);
+    }
+
+    #[test]
     fn test_set_edge_anchor_pushes_undo() {
         let mut doc = load_test_doc();
         let edge_idx = doc.mindmap.edges.iter()

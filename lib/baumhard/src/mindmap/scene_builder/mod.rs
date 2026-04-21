@@ -227,9 +227,20 @@ pub struct EdgeHandleElement {
     pub font_size_pt: f32,
 }
 
-/// Glyph used for edge grab-handles. A solid black diamond reads as
-/// a clickable control point across most fonts.
+/// Glyph used for anchor and control-point edge grab-handles. A
+/// solid black diamond reads as a clickable control point across
+/// most fonts.
 const EDGE_HANDLE_GLYPH: &str = "\u{25C6}"; // ◆
+
+/// Distinct glyph for the `Midpoint` handle that appears only on
+/// straight edges and bootstraps the "curve this line" gesture on
+/// drag. A curved arrow reads as "bend me" — specifically an
+/// anticlockwise hook (`↺`) so nothing about the handle looks like
+/// a plain re-selection target. Without this second glyph the
+/// midpoint handle is visually identical to the anchor handles and
+/// the gesture is undiscoverable (see `commands/edge.rs` for the
+/// console-side counterpart, `edge reset=curve`).
+const EDGE_MIDPOINT_HANDLE_GLYPH: &str = "\u{21BA}"; // ↺
 
 /// Font size (in points) for the edge handle glyphs. Slightly larger
 /// than the default connection glyph size so handles stand out on top

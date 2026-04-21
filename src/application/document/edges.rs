@@ -92,6 +92,90 @@ impl MindMapDocument {
         true
     }
 
+    /// Insert a single control point on `edge_ref` so a straight
+    /// edge curves into a gentle quadratic Bezier. No-op if the
+    /// edge is already curved (has ≥ 1 control point) so
+    /// re-invocation from the console doesn't keep deforming the
+    /// curve. Returns `true` on success, pushes `EditEdge` to the
+    /// undo stack, sets `dirty`.
+    ///
+    /// The inserted control point sits at the midpoint of the
+    /// current anchor line, pushed perpendicular to the line by
+    /// a quarter of its length — the same cosmetic default the
+    /// midpoint-handle drag produces on its first idle frame, so
+    /// the keyboard path and the mouse path both land on a
+    /// visually identical starting curve. The offset is stored as
+    /// a relative vector from the source node's center (matching
+    /// the `control_points[0]` encoding the scene builder expects).
+    pub fn curve_straight_edge(&mut self, edge_ref: &EdgeRef) -> bool {
+        use baumhard::mindmap::connection;
+        use baumhard::mindmap::model::ControlPoint;
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        if !self.mindmap.edges[idx].control_points.is_empty() {
+            return false;
+        }
+        // Resolve the actual path endpoints so the curve bulges
+        // out relative to the rendered straight line, not the
+        // (centre-to-centre) raw vector between nodes.
+        let edge = &self.mindmap.edges[idx];
+        let from_node = match self.mindmap.nodes.get(&edge.from_id) {
+            Some(n) => n,
+            None => return false,
+        };
+        let to_node = match self.mindmap.nodes.get(&edge.to_id) {
+            Some(n) => n,
+            None => return false,
+        };
+        let from_pos = Vec2::new(from_node.position.x as f32, from_node.position.y as f32);
+        let from_size =
+            Vec2::new(from_node.size.width as f32, from_node.size.height as f32);
+        let to_pos = Vec2::new(to_node.position.x as f32, to_node.position.y as f32);
+        let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+        let path = connection::build_connection_path(
+            from_pos,
+            from_size,
+            &edge.anchor_from,
+            to_pos,
+            to_size,
+            &edge.anchor_to,
+            &[],
+        );
+        let (start, end) = match path {
+            connection::ConnectionPath::Straight { start, end } => (start, end),
+            // Defensive branch — we guarded `control_points.is_empty()`
+            // above, so this path builder should always return a
+            // straight segment. If a future change makes that not
+            // hold, bail rather than insert garbage.
+            _ => return false,
+        };
+        let mid = start.lerp(end, 0.5);
+        let tangent = end - start;
+        let length = tangent.length();
+        if length < f32::EPSILON {
+            return false;
+        }
+        // Perpendicular (tangent rotated 90° counter-clockwise).
+        // A quarter-length nudge reads as a gentle curve without
+        // looking like a bug.
+        let normal = Vec2::new(-tangent.y, tangent.x) / length;
+        let control_point_canvas = mid + normal * (length * 0.25);
+        let from_center =
+            Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
+        let offset = control_point_canvas - from_center;
+
+        let before = self.mindmap.edges[idx].clone();
+        self.mindmap.edges[idx].control_points.push(ControlPoint {
+            x: offset.x as f64,
+            y: offset.y as f64,
+        });
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
     /// Set an edge's `anchor_from` (when `is_from == true`) or
     /// `anchor_to` (when `is_from == false`) to `value`. Valid values
     /// are 0 (auto) or 1..=4 (top/right/bottom/left). Returns `true`

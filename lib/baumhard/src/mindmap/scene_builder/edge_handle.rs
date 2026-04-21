@@ -12,7 +12,7 @@ use crate::mindmap::scene_cache::EdgeKey;
 
 use super::{
     EdgeHandleElement, EdgeHandleKind, EDGE_HANDLE_FONT_SIZE_PT, EDGE_HANDLE_GLYPH,
-    SELECTED_EDGE_COLOR,
+    EDGE_MIDPOINT_HANDLE_GLYPH, SELECTED_EDGE_COLOR,
 };
 
 /// Build the grab-handle set for a single selected edge, given the
@@ -50,13 +50,25 @@ pub fn build_edge_handles(
     let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
     let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
 
-    let make = |kind: EdgeHandleKind, position: Vec2| EdgeHandleElement {
-        edge_key: edge_key.clone(),
-        kind,
-        position: (position.x, position.y),
-        glyph: EDGE_HANDLE_GLYPH.to_string(),
-        color: SELECTED_EDGE_COLOR.to_string(),
-        font_size_pt: EDGE_HANDLE_FONT_SIZE_PT,
+    let make = |kind: EdgeHandleKind, position: Vec2| {
+        // The midpoint handle carries a distinct glyph so the
+        // "drag-to-curve" gesture is visible on a straight edge —
+        // without it, users can't tell the midpoint marker apart
+        // from the two anchor handles and the gesture is
+        // undiscoverable.
+        let glyph = if kind == EdgeHandleKind::Midpoint {
+            EDGE_MIDPOINT_HANDLE_GLYPH
+        } else {
+            EDGE_HANDLE_GLYPH
+        };
+        EdgeHandleElement {
+            edge_key: edge_key.clone(),
+            kind,
+            position: (position.x, position.y),
+            glyph: glyph.to_string(),
+            color: SELECTED_EDGE_COLOR.to_string(),
+            font_size_pt: EDGE_HANDLE_FONT_SIZE_PT,
+        }
     };
 
     let mut handles = Vec::with_capacity(5);
