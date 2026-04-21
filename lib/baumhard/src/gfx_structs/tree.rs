@@ -303,7 +303,19 @@ impl Tree<GfxElement, GfxMutator> {
     /// the containment test. Use for fuzzy hit-tests where the
     /// caller wants to forgive a stylus or fat-finger near-miss
     /// (e.g. edge handles, console close-buttons).
+    ///
+    /// `slack` must be `>= 0.0`. The shape-refinement step inside
+    /// `bvh_descend` inflates the shape by `slack` on every side;
+    /// a negative value would require a *tightening* of the shape,
+    /// which this API does not provide (and which would make the
+    /// AABB pre-test and the shape post-test disagree). Debug
+    /// builds assert; release builds clamp to `0.0`.
     pub fn descendant_near(&mut self, point: Vec2, slack: f32) -> Option<NodeId> {
+        debug_assert!(
+            slack >= 0.0,
+            "descendant_near: slack must be >= 0.0 (got {slack})"
+        );
+        let slack = slack.max(0.0);
         self.ensure_subtree_aabbs();
         let mut best: Option<(NodeId, f32)> = None;
         self.bvh_descend(self.root, point, slack, &mut best);
@@ -369,31 +381,24 @@ impl Tree<GfxElement, GfxMutator> {
                         // Refine with the node's shape so a click
                         // in the AABB corner of an ellipse counts
                         // as a miss. `contains_local` sees the
-                        // shape in the node's own frame; we undo
-                        // the slack here so a non-rectangular
-                        // shape's fuzzy margin still grows
-                        // isotropically (callers who ask for
-                        // slack > 0 are doing fat-finger
-                        // forgiveness, not shape-hugging).
-                        let local = glam::Vec2::new(point.x - pos.x, point.y - pos.y);
-                        let shape_hit = if slack <= 0.0 {
-                            area.shape.contains_local(local, bounds)
-                        } else {
-                            // Inflate the shape's bounds by `slack`
-                            // on each side and re-test in the
-                            // shifted frame so the same tolerance
-                            // applies to a rectangle and an
-                            // ellipse alike.
-                            let inflated = glam::Vec2::new(
-                                bounds.x + 2.0 * slack,
-                                bounds.y + 2.0 * slack,
-                            );
-                            area.shape.contains_local(
-                                glam::Vec2::new(local.x + slack, local.y + slack),
-                                inflated,
-                            )
-                        };
-                        if shape_hit {
+                        // shape in the node's own frame; inflating
+                        // the bounds by `slack` on every side (and
+                        // shifting the local point by `slack` into
+                        // the inflated frame) gives rectangle and
+                        // ellipse the same isotropic fuzzy margin
+                        // callers request for fat-finger forgiveness.
+                        // `slack >= 0.0` is enforced by
+                        // `descendant_near` so `slack == 0` is the
+                        // exact-hit case (no-op inflation).
+                        let local = glam::Vec2::new(
+                            point.x - pos.x + slack,
+                            point.y - pos.y + slack,
+                        );
+                        let inflated = glam::Vec2::new(
+                            bounds.x + 2.0 * slack,
+                            bounds.y + 2.0 * slack,
+                        );
+                        if area.shape.contains_local(local, inflated) {
                             // Tie-break by *original* (un-slacked) area
                             // so a physically smaller element still wins.
                             let size = bounds.x * bounds.y;

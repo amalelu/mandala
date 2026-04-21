@@ -3,6 +3,7 @@ use baumhard::core::tests::primitives_tests::*;
 use baumhard::font::tests::fonts_tests::*;
 use baumhard::gfx_structs::tests::area_tests::*;
 use baumhard::gfx_structs::tests::model_tests::*;
+use baumhard::gfx_structs::tests::shape_tests::*;
 use baumhard::gfx_structs::tests::mutator_tests::*;
 use baumhard::gfx_structs::tests::region_indexer_tests::*;
 use baumhard::gfx_structs::tests::region_params_tests::*;
@@ -56,6 +57,24 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("outline_subtract_clears", |b| b.iter(|| do_outline_subtract_clears()));
     c.bench_function("outline_changes_hash", |b| b.iter(|| do_outline_changes_hash()));
     c.bench_function("outline_field_add_picks_rhs", |b| b.iter(|| do_outline_field_add_picks_rhs()));
+    c.bench_function("shape_default_is_rectangle", |b| b.iter(|| do_shape_default_is_rectangle()));
+    c.bench_function("shape_assign_round_trip", |b| b.iter(|| do_shape_assign_round_trip()));
+    c.bench_function("shape_subtract_resets_to_rectangle", |b| b.iter(|| do_shape_subtract_resets_to_rectangle()));
+    c.bench_function("shape_changes_hash", |b| b.iter(|| do_shape_changes_hash()));
+    c.bench_function("shape_field_add_picks_rhs", |b| b.iter(|| do_shape_field_add_picks_rhs()));
+    // shape math (point-in-shape / shape-vs-AABB) //
+    c.bench_function("shape_from_style_string_known_names", |b| b.iter(|| do_shape_from_style_string_known_names()));
+    c.bench_function("shape_from_style_string_empty_and_unknown_fall_back_to_rectangle", |b| b.iter(|| do_shape_from_style_string_empty_and_unknown_fall_back_to_rectangle()));
+    c.bench_function("shape_rectangle_contains_local", |b| b.iter(|| do_shape_rectangle_contains_local()));
+    c.bench_function("shape_ellipse_contains_centre_and_rim", |b| b.iter(|| do_shape_ellipse_contains_centre_and_rim()));
+    c.bench_function("shape_ellipse_rejects_aabb_corners", |b| b.iter(|| do_shape_ellipse_rejects_aabb_corners()));
+    c.bench_function("shape_ellipse_handles_stretched_conic", |b| b.iter(|| do_shape_ellipse_handles_stretched_conic()));
+    c.bench_function("shape_degenerate_bounds_never_hit", |b| b.iter(|| do_shape_degenerate_bounds_never_hit()));
+    c.bench_function("shape_ellipse_intersects_aabb_fully_inside", |b| b.iter(|| do_shape_ellipse_intersects_aabb_fully_inside()));
+    c.bench_function("shape_ellipse_intersects_aabb_corner_only", |b| b.iter(|| do_shape_ellipse_intersects_aabb_corner_only()));
+    c.bench_function("shape_ellipse_intersects_aabb_straddling_rim", |b| b.iter(|| do_shape_ellipse_intersects_aabb_straddling_rim()));
+    c.bench_function("shape_ellipse_intersects_aabb_fully_outside", |b| b.iter(|| do_shape_ellipse_intersects_aabb_fully_outside()));
+    c.bench_function("shape_shader_ids_are_stable", |b| b.iter(|| do_shape_shader_ids_are_stable()));
     // glyph_tree //
     c.bench_function("basics_solo_mutation", |b| b.iter(|| basics_solo_mutation()));
     c.bench_function("model_block_commands", |b| b.iter(|| model_block_commands()));

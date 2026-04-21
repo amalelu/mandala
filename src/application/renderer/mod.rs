@@ -80,6 +80,14 @@ use glam::Vec2;
 /// `case` arm in `fs_main`. The shape id comes from
 /// `NodeShape::shader_id` on the baumhard side; the two must stay
 /// in lock-step.
+///
+/// `shape_id` rides the vertex stream as a plain `f32` (written
+/// with `SHAPE_ID_* as f32`, read with `u32(round(id))`) rather
+/// than a `Uint32` vertex attribute, because integer vertex
+/// attributes are a wgpu WebGL2 feature gate on some browsers and
+/// the per-shape branch only needs a handful of discrete values.
+/// The round-trip through `f32` is lossless for the small integer
+/// range we use; see `NodeShape::shader_id` for the allocation.
 const RECT_SHADER_WGSL: &str = r#"
 const SHAPE_RECT: u32 = 0u;
 const SHAPE_ELLIPSE: u32 = 1u;
@@ -88,7 +96,7 @@ struct VsIn {
     @location(0) pos: vec2<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) shape_id: u32,
+    @location(3) shape_id: f32,
 };
 
 struct VsOut {
@@ -104,7 +112,11 @@ fn vs_main(in: VsIn) -> VsOut {
     out.pos = vec4<f32>(in.pos, 0.0, 1.0);
     out.color = in.color;
     out.uv = in.uv;
-    out.shape_id = in.shape_id;
+    // `round` then cast — the CPU writes exact integers, so the
+    // round is belt-and-braces against any driver-side rasterisation
+    // of the attribute. Flat-interpolated onto VsOut as `u32` so
+    // the fragment `switch` is a plain integer compare.
+    out.shape_id = u32(round(in.shape_id));
     return out;
 }
 
@@ -427,8 +439,14 @@ impl Renderer {
                             offset: 16,
                             shader_location: 2,
                         },
+                        // `shape_id` as `Float32`, not `Uint32`: wgpu's
+                        // WebGL2 backend doesn't support integer vertex
+                        // attributes on every browser, and we only need
+                        // a handful of discrete ids. The WGSL vertex
+                        // stage rounds + casts to `u32` before
+                        // flat-interpolating.
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
+                            format: wgpu::VertexFormat::Float32,
                             offset: 32,
                             shader_location: 3,
                         },

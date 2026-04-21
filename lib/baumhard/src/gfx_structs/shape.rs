@@ -147,6 +147,17 @@ impl NodeShape {
     /// rect is inside the ellipse, *or* when the ellipse-centre is
     /// inside the rect) — which is what we want for a lasso.
     ///
+    /// Degenerate bounds (zero or negative extent on either axis)
+    /// report `false` even if the AABBs would overlap numerically.
+    /// This matches [`Self::contains_local`] and the BVH's
+    /// `bounds.x > 0.0 && bounds.y > 0.0` guard in `bvh_descend`:
+    /// a zero-size node renders nothing, so selecting nothing for
+    /// it is the internally consistent answer. Small behaviour
+    /// change from the pre-shape `rect_select` (which would have
+    /// matched a point-sized node under the cursor) — considered
+    /// an improvement and noted here so a future test author can
+    /// find the rationale.
+    ///
     /// O(1). No allocation.
     #[inline]
     pub fn intersects_local_aabb(self, min: Vec2, max: Vec2, bounds: Vec2) -> bool {
@@ -176,123 +187,9 @@ impl NodeShape {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// Tests live out-of-line at
+// `lib/baumhard/src/gfx_structs/tests/shape_tests.rs` so the
+// criterion bench harness at `lib/baumhard/benches/test_bench.rs`
+// can reuse each `do_*()` body as a micro-benchmark — see
+// TEST_CONVENTIONS.md §T2.2.
 
-    #[test]
-    fn from_style_string_known_names() {
-        assert_eq!(NodeShape::from_style_string("rectangle"), NodeShape::Rectangle);
-        assert_eq!(NodeShape::from_style_string("Rectangle"), NodeShape::Rectangle);
-        assert_eq!(NodeShape::from_style_string("ellipse"), NodeShape::Ellipse);
-        assert_eq!(NodeShape::from_style_string("ELLIPSE"), NodeShape::Ellipse);
-        // "circle" is accepted as an alias for the Ellipse variant.
-        assert_eq!(NodeShape::from_style_string("circle"), NodeShape::Ellipse);
-    }
-
-    #[test]
-    fn from_style_string_empty_and_unknown_fall_back_to_rectangle() {
-        assert_eq!(NodeShape::from_style_string(""), NodeShape::Rectangle);
-        assert_eq!(NodeShape::from_style_string("diamond"), NodeShape::Rectangle);
-        assert_eq!(NodeShape::from_style_string("zigzag"), NodeShape::Rectangle);
-    }
-
-    #[test]
-    fn rectangle_contains_local() {
-        let b = Vec2::new(100.0, 50.0);
-        assert!(NodeShape::Rectangle.contains_local(Vec2::new(0.0, 0.0), b));
-        assert!(NodeShape::Rectangle.contains_local(Vec2::new(100.0, 50.0), b));
-        assert!(NodeShape::Rectangle.contains_local(Vec2::new(50.0, 25.0), b));
-        assert!(!NodeShape::Rectangle.contains_local(Vec2::new(-0.1, 25.0), b));
-        assert!(!NodeShape::Rectangle.contains_local(Vec2::new(100.1, 25.0), b));
-    }
-
-    #[test]
-    fn ellipse_contains_centre_and_rim() {
-        // Perfect circle: bounds 100x100, radius 50, centre (50, 50).
-        let b = Vec2::new(100.0, 100.0);
-        assert!(NodeShape::Ellipse.contains_local(Vec2::new(50.0, 50.0), b));
-        assert!(NodeShape::Ellipse.contains_local(Vec2::new(0.0, 50.0), b)); // left rim
-        assert!(NodeShape::Ellipse.contains_local(Vec2::new(100.0, 50.0), b)); // right rim
-        assert!(NodeShape::Ellipse.contains_local(Vec2::new(50.0, 0.0), b)); // top rim
-        assert!(NodeShape::Ellipse.contains_local(Vec2::new(50.0, 100.0), b)); // bottom rim
-    }
-
-    #[test]
-    fn ellipse_rejects_aabb_corners() {
-        // Corners of the bounding box sit at distance √2 · r from
-        // the centre, well outside the circle.
-        let b = Vec2::new(100.0, 100.0);
-        assert!(!NodeShape::Ellipse.contains_local(Vec2::new(0.0, 0.0), b));
-        assert!(!NodeShape::Ellipse.contains_local(Vec2::new(100.0, 0.0), b));
-        assert!(!NodeShape::Ellipse.contains_local(Vec2::new(0.0, 100.0), b));
-        assert!(!NodeShape::Ellipse.contains_local(Vec2::new(100.0, 100.0), b));
-    }
-
-    #[test]
-    fn ellipse_handles_stretched_conic() {
-        // Wider than tall: 200 × 50, radii (100, 25). The point
-        // (100, 50) is the bottom rim; (100, 0) is the top rim;
-        // (0, 25) / (200, 25) are the left/right rims. Corners
-        // are still outside.
-        let b = Vec2::new(200.0, 50.0);
-        assert!(NodeShape::Ellipse.contains_local(Vec2::new(100.0, 25.0), b)); // centre
-        assert!(NodeShape::Ellipse.contains_local(Vec2::new(0.0, 25.0), b));
-        assert!(NodeShape::Ellipse.contains_local(Vec2::new(200.0, 25.0), b));
-        assert!(!NodeShape::Ellipse.contains_local(Vec2::new(0.0, 0.0), b));
-        assert!(!NodeShape::Ellipse.contains_local(Vec2::new(200.0, 50.0), b));
-    }
-
-    #[test]
-    fn degenerate_bounds_never_hit() {
-        assert!(!NodeShape::Rectangle.contains_local(Vec2::ZERO, Vec2::ZERO));
-        assert!(!NodeShape::Ellipse.contains_local(Vec2::ZERO, Vec2::new(0.0, 100.0)));
-        assert!(!NodeShape::Ellipse.contains_local(Vec2::ZERO, Vec2::new(100.0, -1.0)));
-    }
-
-    #[test]
-    fn ellipse_intersects_aabb_fully_inside_ellipse() {
-        // Selection rect fully inside a 100×100 circle at centre.
-        let b = Vec2::new(100.0, 100.0);
-        let min = Vec2::new(40.0, 40.0);
-        let max = Vec2::new(60.0, 60.0);
-        assert!(NodeShape::Ellipse.intersects_local_aabb(min, max, b));
-    }
-
-    #[test]
-    fn ellipse_intersects_aabb_corner_only() {
-        // Selection rect tucked into the top-left corner of the
-        // bounding box (outside the ellipse). Should NOT intersect.
-        let b = Vec2::new(100.0, 100.0);
-        let min = Vec2::new(0.0, 0.0);
-        let max = Vec2::new(5.0, 5.0);
-        assert!(!NodeShape::Ellipse.intersects_local_aabb(min, max, b));
-    }
-
-    #[test]
-    fn ellipse_intersects_aabb_straddling_rim() {
-        // Selection rect whose left edge crosses the ellipse's
-        // left rim — must count as an overlap.
-        let b = Vec2::new(100.0, 100.0);
-        let min = Vec2::new(-10.0, 40.0);
-        let max = Vec2::new(10.0, 60.0);
-        assert!(NodeShape::Ellipse.intersects_local_aabb(min, max, b));
-    }
-
-    #[test]
-    fn ellipse_intersects_aabb_fully_outside() {
-        let b = Vec2::new(100.0, 100.0);
-        let min = Vec2::new(200.0, 200.0);
-        let max = Vec2::new(300.0, 300.0);
-        assert!(!NodeShape::Ellipse.intersects_local_aabb(min, max, b));
-    }
-
-    #[test]
-    fn shader_ids_are_stable() {
-        // These values are wire-format: the fragment shader
-        // matches on the same integers. Lock them in so a
-        // reordering of the enum doesn't silently reassign them.
-        assert_eq!(NodeShape::Rectangle.shader_id(), 0);
-        assert_eq!(NodeShape::Ellipse.shader_id(), 1);
-    }
-}

@@ -78,6 +78,14 @@ pub struct GlyphArea {
     /// renderer's rect SDF pipeline (drawn fill) and the BVH
     /// descent (point-in-shape hit test), so changing this field
     /// automatically moves both visuals and input together.
+    ///
+    /// Round-trip fidelity for unknown-spelling shapes is owned by
+    /// the format layer (`NodeStyle.shape: String` in
+    /// `crate::mindmap::model::node`), *not* by this field: the
+    /// string-to-enum conversion in
+    /// [`NodeShape::from_style_string`](crate::gfx_structs::shape::NodeShape::from_style_string)
+    /// collapses unknowns to `Rectangle`, but the original string
+    /// is preserved on the `MindNode` and rewritten on save.
     #[serde(default)]
     pub shape: NodeShape,
     /// Click-sensitive extents. Ignored for `PartialEq` because

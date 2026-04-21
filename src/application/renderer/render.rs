@@ -24,10 +24,13 @@ impl Renderer {
     /// frame so the fragment shader can evaluate any SDF in the shape
     /// table without extra uniforms.
     ///
-    /// Layout per vertex: `[x, y, u, v, r, g, b, a, shape_id_bits]`
-    /// (9 × 4 bytes = 36 bytes; must match `RECT_VERTEX_SIZE`). The
-    /// `shape_id` rides as a `u32` bit pattern reinterpreted via
-    /// `f32::from_bits` so the whole stream stays a single `Vec<f32>`.
+    /// Layout per vertex: `[x, y, u, v, r, g, b, a, shape_id]`
+    /// (9 × 4 bytes = 36 bytes; must match `RECT_VERTEX_SIZE`).
+    /// `shape_id` rides the stream as a plain `f32` (`shape_id as f32`)
+    /// because wgpu's WebGL2 backend doesn't support integer vertex
+    /// attributes on every browser — the WGSL vertex stage rounds and
+    /// casts to `u32` before flat-interpolating. The round-trip is
+    /// lossless for the small integer range we use.
     fn push_rect_ndc(
         out: &mut Vec<f32>,
         ndc_min: Vec2,
@@ -45,10 +48,10 @@ impl Renderer {
         let (lx, ly) = (ndc_min.x, ndc_min.y); // bottom-left
         let (rx, ry) = (ndc_max.x, ndc_max.y); // top-right
         let [r, g, b, a] = color;
-        // `shape_id` is a u32 reinterpreted through the f32 stream;
-        // the shader reads it back as `Uint32` so the bit pattern
-        // is preserved losslessly.
-        let sid = f32::from_bits(shape_id);
+        // `shape_id` is encoded as `Float32` in the vertex buffer;
+        // WGSL rounds + casts back to `u32` before the switch. See
+        // the type-level doc on this function for the rationale.
+        let sid = shape_id as f32;
         // UVs match the quad's local frame: TL = (0, 0), TR = (1, 0),
         // BR = (1, 1), BL = (0, 1). The SDF cases in the fragment
         // shader assume exactly this parameterisation.

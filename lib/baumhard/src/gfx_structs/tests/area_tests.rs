@@ -21,6 +21,7 @@ use crate::core::primitives::ApplyOperation;
 use crate::gfx_structs::area::{
     DeltaGlyphArea, GlyphArea, GlyphAreaField, OutlineStyle,
 };
+use crate::gfx_structs::shape::NodeShape;
 
 /// A halo style suitable for "add a 3 px black outline" — the
 /// picker's default. Reused across the outline tests.
@@ -206,4 +207,139 @@ pub fn do_outline_offsets_canonical_8_stamp() {
             );
         }
     }
+}
+
+/// Newly-constructed `GlyphArea`s default to `NodeShape::Rectangle`.
+/// Locks in the backwards-compatible posture: every pre-existing
+/// call site builds through `new_with_str` and must keep rendering
+/// / hit-testing as an axis-aligned box unless it opts in.
+#[test]
+pub fn test_shape_default_is_rectangle() {
+    do_shape_default_is_rectangle();
+}
+
+pub fn do_shape_default_is_rectangle() {
+    let area = GlyphArea::new_with_str(
+        "hello",
+        14.0,
+        14.0,
+        Vec2::new(0.0, 0.0),
+        Vec2::new(100.0, 20.0),
+    );
+    assert_eq!(area.shape, NodeShape::Rectangle);
+}
+
+/// Round-trip: a `DeltaGlyphArea` carrying `Shape(Ellipse)` under
+/// `Assign` rewrites the area's shape; a follow-up `Assign`
+/// carrying `Rectangle` reverts it. Pins the "assign replaces"
+/// semantics that mutation authors rely on for shape swaps.
+#[test]
+pub fn test_shape_assign_round_trip() {
+    do_shape_assign_round_trip();
+}
+
+pub fn do_shape_assign_round_trip() {
+    let mut area = GlyphArea::new_with_str(
+        "hello",
+        14.0,
+        14.0,
+        Vec2::new(0.0, 0.0),
+        Vec2::new(100.0, 20.0),
+    );
+
+    let delta_set = DeltaGlyphArea::new(vec![
+        GlyphAreaField::Shape(NodeShape::Ellipse),
+        GlyphAreaField::Operation(ApplyOperation::Assign),
+    ]);
+    area.apply_operation(&delta_set);
+    assert_eq!(area.shape, NodeShape::Ellipse, "Assign should set the shape");
+
+    let delta_revert = DeltaGlyphArea::new(vec![
+        GlyphAreaField::Shape(NodeShape::Rectangle),
+        GlyphAreaField::Operation(ApplyOperation::Assign),
+    ]);
+    area.apply_operation(&delta_revert);
+    assert_eq!(
+        area.shape,
+        NodeShape::Rectangle,
+        "Assign should replace the shape outright"
+    );
+}
+
+/// `Subtract` resets the shape to `Rectangle` regardless of the
+/// delta's payload — distinct from `Outline::Subtract` (which
+/// clears to `None`) because shape has no "unset" state; the
+/// natural "remove what's there" target is the default.
+#[test]
+pub fn test_shape_subtract_resets_to_rectangle() {
+    do_shape_subtract_resets_to_rectangle();
+}
+
+pub fn do_shape_subtract_resets_to_rectangle() {
+    let mut area = GlyphArea::new_with_str(
+        "hello",
+        14.0,
+        14.0,
+        Vec2::new(0.0, 0.0),
+        Vec2::new(100.0, 20.0),
+    );
+    area.shape = NodeShape::Ellipse;
+
+    // Payload is `Ellipse` but `Subtract` ignores it — the
+    // semantic is "remove the custom shape", which lands on
+    // Rectangle regardless.
+    let delta = DeltaGlyphArea::new(vec![
+        GlyphAreaField::Shape(NodeShape::Ellipse),
+        GlyphAreaField::Operation(ApplyOperation::Subtract),
+    ]);
+    area.apply_operation(&delta);
+    assert_eq!(area.shape, NodeShape::Rectangle);
+}
+
+/// Hash discrimination: two areas identical apart from `shape`
+/// hash to different values. Dirty-set machinery downstream keys
+/// on `GlyphArea` hashing, so without this a shape-only change
+/// would be invisible to the renderer's "does this buffer need
+/// reshaping?" check.
+#[test]
+pub fn test_shape_changes_hash() {
+    do_shape_changes_hash();
+}
+
+pub fn do_shape_changes_hash() {
+    let area_rect = GlyphArea::new_with_str(
+        "hello",
+        14.0,
+        14.0,
+        Vec2::new(0.0, 0.0),
+        Vec2::new(100.0, 20.0),
+    );
+    let mut area_ellipse = area_rect.clone();
+    area_ellipse.shape = NodeShape::Ellipse;
+
+    let mut h_rect = DefaultHasher::new();
+    area_rect.hash(&mut h_rect);
+    let mut h_ellipse = DefaultHasher::new();
+    area_ellipse.hash(&mut h_ellipse);
+    assert_ne!(
+        h_rect.finish(),
+        h_ellipse.finish(),
+        "shape difference must change GlyphArea hash"
+    );
+}
+
+/// Additive merge: two `Shape` deltas combined via the
+/// `GlyphAreaField::Add` impl yield the rhs — shapes don't
+/// compose arithmetically, so last-writer-wins is the only
+/// meaningful semantic (same posture as Outline above).
+#[test]
+pub fn test_shape_field_add_picks_rhs() {
+    do_shape_field_add_picks_rhs();
+}
+
+pub fn do_shape_field_add_picks_rhs() {
+    let lhs = GlyphAreaField::Shape(NodeShape::Rectangle);
+    let rhs = GlyphAreaField::Shape(NodeShape::Ellipse);
+    let combined = lhs + rhs.clone();
+    assert_eq!(combined, rhs);
 }

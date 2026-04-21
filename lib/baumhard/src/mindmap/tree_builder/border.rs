@@ -74,6 +74,15 @@ pub fn border_node_data(
         // tracked as follow-up work (see CLAUDE.md). Authors still
         // round-trip the `show_frame` flag untouched — we simply
         // don't emit the glyphs.
+        //
+        // We re-parse `node.style.shape` here rather than reading
+        // `area.shape` off the already-built tree because the
+        // border tree builder runs from the model, not the node
+        // tree — it has no `GlyphArea` in scope. The two parsers
+        // are the same (`NodeShape::from_style_string`), so the
+        // values agree today; the invariant to preserve if this
+        // ever changes is "border pass and node pass resolve the
+        // same string to the same `NodeShape`".
         if NodeShape::from_style_string(&node.style.shape) != NodeShape::Rectangle {
             continue;
         }
