@@ -27,8 +27,13 @@ fn portal_tree_emits_two_markers_per_edge() {
         let leaves: Vec<NodeId> = ev.children(&result.tree.arena).collect();
         assert_eq!(leaves.len(), 2, "icon + text under each endpoint void");
     }
-    // Hitboxes: one entry per (edge, endpoint) — spans icon + text.
-    assert_eq!(result.hitboxes.len(), 2);
+    // Hitboxes are split per sub-part: every endpoint gets an
+    // icon entry (always present); text entries only for
+    // endpoints with non-empty text. This fixture has empty
+    // text on both endpoints, so only icon hitboxes are
+    // registered.
+    assert_eq!(result.icon_hitboxes.len(), 2);
+    assert!(result.text_hitboxes.is_empty());
 }
 
 #[test]
@@ -48,7 +53,8 @@ fn portal_tree_skips_edge_with_folded_endpoint() {
         .push(synthetic_portal_edge("child", "other", "#00ff00"));
     let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
     assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
-    assert!(result.hitboxes.is_empty());
+    assert!(result.icon_hitboxes.is_empty());
+    assert!(result.text_hitboxes.is_empty());
 }
 
 #[test]
@@ -69,7 +75,8 @@ fn portal_tree_skips_line_mode_edges() {
 
     let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
     assert_eq!(result.tree.root.children(&result.tree.arena).count(), 0);
-    assert!(result.hitboxes.is_empty());
+    assert!(result.icon_hitboxes.is_empty());
+    assert!(result.text_hitboxes.is_empty());
 }
 
 #[test]
@@ -344,6 +351,46 @@ fn portal_tree_text_area_carries_text_color_and_size_overrides() {
 }
 
 #[test]
+fn portal_tree_registers_text_hitbox_when_text_present() {
+    // Inverse of the "empty-text suppression" test: an endpoint
+    // with visible text registers a text_hitbox distinct from
+    // the icon_hitbox so the renderer can dispatch text clicks
+    // to `SelectionState::PortalText` and icon clicks to
+    // `SelectionState::PortalLabel`.
+    use crate::mindmap::model::PortalEndpointState;
+
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 400.0, 0.0),
+        ],
+        vec![],
+    );
+    let mut edge = synthetic_portal_edge("a", "b", "#aa88cc");
+    edge.portal_from = Some(PortalEndpointState {
+        text: Some("hi".to_string()),
+        ..Default::default()
+    });
+    map.edges.push(edge);
+
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
+    let key_a = (EdgeKey::new("a", "b", "cross_link"), "a".to_string());
+    let key_b = (EdgeKey::new("a", "b", "cross_link"), "b".to_string());
+    // Both endpoints get icon hitboxes.
+    assert!(result.icon_hitboxes.contains_key(&key_a));
+    assert!(result.icon_hitboxes.contains_key(&key_b));
+    // Only the from-endpoint has text, so only it has a text
+    // hitbox.
+    assert!(result.text_hitboxes.contains_key(&key_a));
+    assert!(!result.text_hitboxes.contains_key(&key_b));
+    // Icon and text AABBs must not coincide — they name
+    // different clickable regions.
+    let icon_aabb = result.icon_hitboxes.get(&key_a).unwrap();
+    let text_aabb = result.text_hitboxes.get(&key_a).unwrap();
+    assert_ne!(icon_aabb, text_aabb);
+}
+
+#[test]
 fn portal_tree_hitbox_excludes_reserved_text_slot_when_text_absent() {
     // When an endpoint has no text, the combined hitbox must
     // collapse to the icon AABB alone — otherwise a phantom
@@ -366,12 +413,19 @@ fn portal_tree_hitbox_excludes_reserved_text_slot_when_text_absent() {
     let endpoint_void = pair.children(&result.tree.arena).next().unwrap();
     let children: Vec<_> = endpoint_void.children(&result.tree.arena).collect();
     let icon_area = glyph_area_of(&result.tree, children[0]);
-    // Hitbox for the from-endpoint should match the icon AABB
-    // within float tolerance, not some larger union.
+    // Icon hitbox for the from-endpoint exists; the text hitbox
+    // for the same endpoint must NOT have been registered (the
+    // `text_string.is_empty()` branch suppresses it so a text-
+    // less portal doesn't grow a phantom hot zone).
+    let key = (EdgeKey::new("a", "b", "cross_link"), "a".to_string());
+    assert!(
+        !result.text_hitboxes.contains_key(&key),
+        "empty-text endpoint should not register a text hitbox"
+    );
     let (min, max) = result
-        .hitboxes
-        .get(&(EdgeKey::new("a", "b", "cross_link"), "a".to_string()))
-        .expect("hitbox should be registered for from-endpoint");
+        .icon_hitboxes
+        .get(&key)
+        .expect("icon hitbox should be registered for from-endpoint");
     let icon_pos = glam::Vec2::new(icon_area.position.x.0, icon_area.position.y.0);
     let icon_extent = glam::Vec2::new(
         icon_area.render_bounds.x.0,

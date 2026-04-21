@@ -2,8 +2,8 @@
 //! they share an idiom (canvas-space or screen-space coordinate
 //! math against a cached bounding rect or scene extent) and
 //! because they all operate against state the other impls
-//! build up — `connection_label_hitboxes`, `portal_hitboxes`,
-//! `camera`.
+//! build up — `connection_label_hitboxes`,
+//! `portal_icon_hitboxes`, `portal_text_hitboxes`, `camera`.
 
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
@@ -78,34 +78,70 @@ impl Renderer {
         }
     }
 
-    /// Replace the portal-hitbox map wholesale. Called from
-    /// `update_portal_tree` every time the portal tree is rebuilt
-    /// or mutated — the tree builder owns the AABB computation and
-    /// hands the map over via this setter so [`Self::hit_test_portal`]
-    /// keeps working.
-    pub fn set_portal_hitboxes(
+    /// Replace the portal **icon** hitbox map wholesale. Called
+    /// from `update_portal_tree` every time the portal tree is
+    /// rebuilt or mutated — the tree builder owns the AABB
+    /// computation and hands the map over via this setter so
+    /// [`Self::hit_test_portal`] keeps working.
+    pub fn set_portal_icon_hitboxes(
         &mut self,
         hitboxes: std::collections::HashMap<(EdgeKey, String), (Vec2, Vec2)>,
     ) {
-        self.portal_hitboxes.clear();
-        self.portal_hitboxes.extend(hitboxes);
+        self.portal_icon_hitboxes.clear();
+        self.portal_icon_hitboxes.extend(hitboxes);
     }
 
-    /// Hit-test portal markers at `canvas_pos`. Returns the
-    /// `(EdgeKey, endpoint_node_id)` of the first marker whose AABB
-    /// contains the point, or `None` if no marker is hit. The
-    /// endpoint id is the node the hit marker sits above — the app
-    /// uses the *other* endpoint as the double-click navigation
-    /// target.
+    /// Replace the portal **text** hitbox map wholesale. Sibling
+    /// of [`Self::set_portal_icon_hitboxes`]. Text entries exist
+    /// only for endpoints with non-empty text — empty-string
+    /// slots register no entry here so text-less portals don't
+    /// grow a phantom hot zone (see `tree_builder::portal` for
+    /// the invariant).
+    pub fn set_portal_text_hitboxes(
+        &mut self,
+        hitboxes: std::collections::HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    ) {
+        self.portal_text_hitboxes.clear();
+        self.portal_text_hitboxes.extend(hitboxes);
+    }
+
+    /// Hit-test portal **icon** markers at `canvas_pos`. Returns
+    /// the `(EdgeKey, endpoint_node_id)` of the first icon whose
+    /// AABB contains the point, or `None` if no icon is hit. The
+    /// endpoint id is the node the hit marker sits above — the
+    /// app uses the *other* endpoint as the double-click
+    /// navigation target.
     ///
     /// Linear scan — portal counts stay in the dozens so a spatial
     /// index is not worth the maintenance cost. Consulted from
     /// `handle_click` as an alternate selection path, routed in
-    /// before the edge hit test so clicks on a marker floating above
-    /// a node's top-right corner don't accidentally fall through to
-    /// an edge beneath.
+    /// before the edge hit test so clicks on a marker floating
+    /// above a node's top-right corner don't accidentally fall
+    /// through to an edge beneath. Pair with
+    /// [`Self::hit_test_portal_text`] to distinguish icon clicks
+    /// from text clicks — callers that want "any portal sub-part"
+    /// check both in sequence.
     pub fn hit_test_portal(&self, canvas_pos: Vec2) -> Option<(EdgeKey, String)> {
-        for ((key, endpoint), (min, max)) in &self.portal_hitboxes {
+        for ((key, endpoint), (min, max)) in &self.portal_icon_hitboxes {
+            if canvas_pos.x >= min.x
+                && canvas_pos.x <= max.x
+                && canvas_pos.y >= min.y
+                && canvas_pos.y <= max.y
+            {
+                return Some((key.clone(), endpoint.clone()));
+            }
+        }
+        None
+    }
+
+    /// Hit-test portal **text** labels at `canvas_pos`. Sibling of
+    /// [`Self::hit_test_portal`]. Text and icon AABBs don't overlap
+    /// in practice (text sits beside the icon along the border
+    /// normal), so the two hit-tests are mutually exclusive — but
+    /// the event loop checks text first so per-channel routing
+    /// stays deterministic.
+    pub fn hit_test_portal_text(&self, canvas_pos: Vec2) -> Option<(EdgeKey, String)> {
+        for ((key, endpoint), (min, max)) in &self.portal_text_hitboxes {
             if canvas_pos.x >= min.x
                 && canvas_pos.x <= max.x
                 && canvas_pos.y >= min.y

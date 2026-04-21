@@ -113,11 +113,19 @@ enum PendingClick {
     None,
     Empty,
     Node(String),
-    /// Cursor landed on a portal marker at mouse-down. Committed
+    /// Cursor landed on a portal **icon** at mouse-down. Committed
     /// at mouse-up into a `SelectionState::PortalLabel`. Carries
     /// both the owning-edge key and the endpoint id the marker
     /// belongs to, matching the native click dispatch surface.
     PortalMarker {
+        edge_key: baumhard::mindmap::scene_cache::EdgeKey,
+        endpoint_node_id: String,
+    },
+    /// Cursor landed on a portal **text** at mouse-down.
+    /// Committed at mouse-up into a `SelectionState::PortalText`.
+    /// Shares the identity shape with `PortalMarker`; only the
+    /// mouse-up selection routing differs.
+    PortalText {
         edge_key: baumhard::mindmap::scene_cache::EdgeKey,
         endpoint_node_id: String,
     },
@@ -467,21 +475,36 @@ app.event_loop.run(move |event, _window_target| {
                 // route double-click on a portal marker to a camera
                 // jump. The portal hit test runs only when the node
                 // hit test misses, same as native.
-                let portal_hit = if hit_node.is_none() {
-                    let mut renderer_borrow = renderer_for_events.borrow_mut();
-                    renderer_borrow
+                let (portal_text_hit, portal_icon_hit) = if hit_node.is_none() {
+                    let renderer_borrow = renderer_for_events.borrow();
+                    let t = renderer_borrow
                         .as_ref()
-                        .and_then(|r| r.hit_test_portal(canvas_pos))
+                        .and_then(|r| r.hit_test_portal_text(canvas_pos));
+                    let i = if t.is_none() {
+                        renderer_borrow
+                            .as_ref()
+                            .and_then(|r| r.hit_test_portal(canvas_pos))
+                    } else {
+                        None
+                    };
+                    (t, i)
                 } else {
-                    None
+                    (None, None)
                 };
-                let click_hit: ClickHit = match (&hit_node, &portal_hit) {
-                    (Some(id), _) => ClickHit::Node(id.clone()),
-                    (None, Some((key, ep))) => ClickHit::PortalMarker {
+                let click_hit: ClickHit = if let Some(id) = &hit_node {
+                    ClickHit::Node(id.clone())
+                } else if let Some((key, ep)) = &portal_text_hit {
+                    ClickHit::PortalText {
                         edge: key.clone(),
                         endpoint: ep.clone(),
-                    },
-                    (None, None) => ClickHit::Empty,
+                    }
+                } else if let Some((key, ep)) = &portal_icon_hit {
+                    ClickHit::PortalMarker {
+                        edge: key.clone(),
+                        endpoint: ep.clone(),
+                    }
+                } else {
+                    ClickHit::Empty
                 };
                 let is_dblclick = !already_editing_same_target
                     && input.last_click
@@ -509,7 +532,12 @@ app.event_loop.run(move |event, _window_target| {
                                 renderer,
                             );
                         }
-                        ClickHit::PortalMarker { edge, endpoint } => {
+                        ClickHit::PortalMarker { edge, endpoint }
+                        | ClickHit::PortalText { edge, endpoint } => {
+                            // Double-click on icon or text both
+                            // jump to the partner endpoint — they
+                            // share the same endpoint identity
+                            // and the same "navigate" intent.
                             let other_id = if *endpoint == edge.from_id {
                                 edge.to_id.clone()
                             } else {
@@ -556,18 +584,27 @@ app.event_loop.run(move |event, _window_target| {
                     return;
                 }
 
-                input.pending_click = match (hit_node.clone(), portal_hit.clone()) {
-                    (Some(id), _) => PendingClick::Node(id),
-                    // Portal-marker click — committed to
+                input.pending_click = if let Some(id) = hit_node.clone() {
+                    PendingClick::Node(id)
+                } else if let Some((key, endpoint)) = portal_text_hit.clone() {
+                    // Portal **text** click — committed to
+                    // `SelectionState::PortalText` on mouse-up.
+                    PendingClick::PortalText {
+                        edge_key: key,
+                        endpoint_node_id: endpoint,
+                    }
+                } else if let Some((key, endpoint)) = portal_icon_hit.clone() {
+                    // Portal **icon** click — committed to
                     // `SelectionState::PortalLabel` on mouse-up.
                     // Double-click already fired above so a
                     // pending marker click can only mean "select
                     // this label".
-                    (None, Some((key, endpoint))) => PendingClick::PortalMarker {
+                    PendingClick::PortalMarker {
                         edge_key: key,
                         endpoint_node_id: endpoint,
-                    },
-                    (None, None) => PendingClick::Empty,
+                    }
+                } else {
+                    PendingClick::Empty
                 };
                 input.last_click = Some(LastClick {
                     time: now,
@@ -623,6 +660,15 @@ app.event_loop.run(move |event, _window_target| {
                         edge_key,
                         endpoint_node_id,
                     } => SelectionState::PortalLabel(
+                        crate::application::document::PortalLabelSel {
+                            edge_key,
+                            endpoint_node_id,
+                        },
+                    ),
+                    PendingClick::PortalText {
+                        edge_key,
+                        endpoint_node_id,
+                    } => SelectionState::PortalText(
                         crate::application::document::PortalLabelSel {
                             edge_key,
                             endpoint_node_id,

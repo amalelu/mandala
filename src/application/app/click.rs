@@ -122,7 +122,24 @@ pub(super) fn handle_click(
             let canvas_pos = renderer.screen_to_canvas(
                 cursor_pos.0 as f32, cursor_pos.1 as f32,
             );
-            if let Some((edge_key, endpoint)) = renderer.hit_test_portal(canvas_pos) {
+            // Portal sub-part precedence: text first, icon next.
+            // Text and icon AABBs don't overlap in practice (text
+            // sits beside the icon along the border normal), so
+            // only one of these hits at a time — the ordering
+            // keeps routing deterministic even if future layout
+            // changes make them adjacent.
+            if let Some((edge_key, endpoint)) =
+                renderer.hit_test_portal_text(canvas_pos)
+            {
+                doc.selection = SelectionState::PortalText(
+                    crate::application::document::PortalLabelSel {
+                        edge_key,
+                        endpoint_node_id: endpoint,
+                    },
+                );
+            } else if let Some((edge_key, endpoint)) =
+                renderer.hit_test_portal(canvas_pos)
+            {
                 doc.selection = SelectionState::PortalLabel(
                     crate::application::document::PortalLabelSel {
                         edge_key,

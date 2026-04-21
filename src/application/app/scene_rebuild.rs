@@ -207,12 +207,14 @@ pub(in crate::application::app) fn update_portal_tree(
     match app_scene.canvas_dispatch(CanvasRole::Portals, signature) {
         CanvasDispatch::InPlaceMutator => {
             let result = build_portal_mutator_tree_from_pairs(&pairs);
-            renderer.set_portal_hitboxes(result.hitboxes);
+            renderer.set_portal_icon_hitboxes(result.icon_hitboxes);
+            renderer.set_portal_text_hitboxes(result.text_hitboxes);
             app_scene.apply_canvas_mutator(CanvasRole::Portals, &result.mutator);
         }
         CanvasDispatch::FullRebuild => {
             let result = build_portal_tree_from_pairs(&pairs);
-            renderer.set_portal_hitboxes(result.hitboxes);
+            renderer.set_portal_icon_hitboxes(result.icon_hitboxes);
+            renderer.set_portal_text_hitboxes(result.text_hitboxes);
             app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
             app_scene.set_canvas_signature(CanvasRole::Portals, signature);
         }

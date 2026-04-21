@@ -162,21 +162,37 @@ pub(super) fn handle_mouse_input(
                 let now = now_ms();
                 // Resolve the "what was hit" used by double-click
                 // detection. Node hits beat portal hits (a node
-                // under a portal marker is the more common target);
-                // no hit at all is `Empty` — still meaningful for
-                // empty-canvas double-click.
-                let portal_hit = if hit_node.is_none() {
-                    renderer.hit_test_portal(canvas_pos)
+                // under a portal marker is the more common target).
+                // Portal sub-parts are resolved in priority order:
+                // text first, then icon — the two AABBs don't
+                // overlap in practice but the ordering keeps the
+                // routing deterministic if geometry ever places
+                // them adjacent.
+                let portal_text_hit = if hit_node.is_none() {
+                    renderer.hit_test_portal_text(canvas_pos)
                 } else {
                     None
                 };
-                let click_hit: ClickHit = match (&hit_node, &portal_hit) {
-                    (Some(id), _) => ClickHit::Node(id.clone()),
-                    (None, Some((key, ep))) => ClickHit::PortalMarker {
+                let portal_icon_hit =
+                    if hit_node.is_none() && portal_text_hit.is_none() {
+                        renderer.hit_test_portal(canvas_pos)
+                    } else {
+                        None
+                    };
+                let click_hit: ClickHit = if let Some(id) = &hit_node {
+                    ClickHit::Node(id.clone())
+                } else if let Some((key, ep)) = &portal_text_hit {
+                    ClickHit::PortalText {
                         edge: key.clone(),
                         endpoint: ep.clone(),
-                    },
-                    (None, None) => ClickHit::Empty,
+                    }
+                } else if let Some((key, ep)) = &portal_icon_hit {
+                    ClickHit::PortalMarker {
+                        edge: key.clone(),
+                        endpoint: ep.clone(),
+                    }
+                } else {
+                    ClickHit::Empty
                 };
                 let already_editing_same_target = text_edit_state
                     .node_id()
@@ -216,13 +232,17 @@ pub(super) fn handle_mouse_input(
                             }
                             return;
                         }
-                        ClickHit::PortalMarker { edge, endpoint } => {
+                        ClickHit::PortalMarker { edge, endpoint }
+                        | ClickHit::PortalText { edge, endpoint } => {
                             // Portal double-click: pan the camera to
                             // the node "on the other side" of the
-                            // portal-mode edge. The hit endpoint is
-                            // the node this marker sits above; the
-                            // opposite endpoint is the navigation
-                            // target.
+                            // portal-mode edge. Works identically
+                            // for an icon or text double-click —
+                            // both share the same endpoint identity
+                            // and the same "jump to partner" intent.
+                            // The hit endpoint is the node this
+                            // marker sits above; the opposite
+                            // endpoint is the navigation target.
                             let other_id = if *endpoint == edge.from_id {
                                 edge.to_id.clone()
                             } else {
@@ -319,7 +339,11 @@ pub(super) fn handle_mouse_input(
                 // current selection — grabbing a marker is a
                 // valid first action, not just a follow-up to a
                 // prior click.
-                let hit_portal_label = match &portal_hit {
+                // Portal **icon** drag captures the `border_t`
+                // slide gesture — dragging the text sub-part
+                // isn't a supported interaction. Only populate
+                // this when the icon-side hit was present.
+                let hit_portal_label = match &portal_icon_hit {
                     Some((key, endpoint)) if hit_node.is_none() => {
                         Some((key.clone(), endpoint.clone()))
                     }

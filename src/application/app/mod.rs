@@ -153,11 +153,22 @@ enum ClickHit {
     Empty,
     /// Cursor is inside node `id`'s AABB.
     Node(String),
-    /// Cursor is inside a portal marker. `edge` identifies the
-    /// owning portal-mode edge; `endpoint` is the node the hit
-    /// marker sits above (the double-click pan target is the
+    /// Cursor is inside a portal **icon** marker. `edge` identifies
+    /// the owning portal-mode edge; `endpoint` is the node the
+    /// hit marker sits above (the double-click pan target is the
     /// *other* endpoint).
     PortalMarker {
+        edge: baumhard::mindmap::scene_cache::EdgeKey,
+        endpoint: String,
+    },
+    /// Cursor is inside a portal **text** label — the glyph area
+    /// sitting alongside a portal icon. Routes to
+    /// `SelectionState::PortalText`, distinct from the icon so
+    /// per-channel operations (color / font) target only the
+    /// clicked sub-part. Double-click inherits the same
+    /// pan-to-partner behaviour as `PortalMarker` — the
+    /// endpoint identity is shared between icon and text.
+    PortalText {
         edge: baumhard::mindmap::scene_cache::EdgeKey,
         endpoint: String,
     },
