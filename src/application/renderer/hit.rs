@@ -62,6 +62,29 @@ impl Renderer {
         }
     }
 
+    /// Scan every registered edge-label hitbox and return the
+    /// first owning [`EdgeKey`] whose AABB contains `canvas_pos`.
+    /// Sibling of [`Self::hit_test_portal`] / [`Self::hit_test_portal_text`]
+    /// but keyed by edge identity alone — edge labels have no
+    /// endpoint split. Linear scan; label counts stay proportional
+    /// to visible edges, so no spatial index is warranted.
+    ///
+    /// Used by the click dispatcher to route a label click to
+    /// `SelectionState::EdgeLabel` without requiring the edge to
+    /// already be selected.
+    pub fn hit_test_any_edge_label(&self, canvas_pos: Vec2) -> Option<EdgeKey> {
+        for (key, (min, max)) in &self.connection_label_hitboxes {
+            if canvas_pos.x >= min.x
+                && canvas_pos.x <= max.x
+                && canvas_pos.y >= min.y
+                && canvas_pos.y <= max.y
+            {
+                return Some(key.clone());
+            }
+        }
+        None
+    }
+
     /// Replace the connection-label hitbox map wholesale.
     /// Used by `update_connection_label_tree` once labels render
     /// through the canvas-scene tree path; the tree builder owns

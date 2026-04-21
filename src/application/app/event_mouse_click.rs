@@ -179,6 +179,20 @@ pub(super) fn handle_mouse_input(
                     } else {
                         None
                     };
+                // Edge-label hit only when no node / portal sub-part
+                // has claimed the click. Edge labels sit along the
+                // connection path; placing them behind the portal
+                // check keeps the portal's "floating over a node"
+                // behaviour correct even if a label happens to
+                // overlap.
+                let edge_label_hit = if hit_node.is_none()
+                    && portal_text_hit.is_none()
+                    && portal_icon_hit.is_none()
+                {
+                    renderer.hit_test_any_edge_label(canvas_pos)
+                } else {
+                    None
+                };
                 let click_hit: ClickHit = if let Some(id) = &hit_node {
                     ClickHit::Node(id.clone())
                 } else if let Some((key, ep)) = &portal_text_hit {
@@ -191,6 +205,8 @@ pub(super) fn handle_mouse_input(
                         edge: key.clone(),
                         endpoint: ep.clone(),
                     }
+                } else if let Some(key) = &edge_label_hit {
+                    ClickHit::EdgeLabel(key.clone())
                 } else {
                     ClickHit::Empty
                 };
@@ -273,6 +289,34 @@ pub(super) fn handle_mouse_input(
                                     ),
                                 );
                                 rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            }
+                            return;
+                        }
+                        ClickHit::EdgeLabel(edge_key) => {
+                            // Double-click on an edge label opens
+                            // the inline label editor — the "click
+                            // to select, dbl-click to edit" idiom
+                            // the `Node` variant already follows.
+                            // Commit the EdgeLabel selection first
+                            // so the editor opens against the
+                            // authoritative selection state.
+                            if let Some(doc) = document.as_mut() {
+                                let er = crate::application::document::EdgeRef::new(
+                                    edge_key.from_id.as_str(),
+                                    edge_key.to_id.as_str(),
+                                    edge_key.edge_type.as_str(),
+                                );
+                                doc.selection = SelectionState::EdgeLabel(
+                                    crate::application::document::EdgeLabelSel::new(er.clone()),
+                                );
+                                rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                                open_label_edit(
+                                    &er,
+                                    doc,
+                                    label_edit_state,
+                                    app_scene,
+                                    renderer,
+                                );
                             }
                             return;
                         }
@@ -406,58 +450,47 @@ pub(super) fn handle_mouse_input(
                                 );
                             }
                         }
-                        // If an edge is selected and the cursor
-                        // hits its label, open the inline label
-                        // editor instead of processing a regular
-                        // click. Takes precedence over node / edge
-                        // selection.
-                        let mut entered_label_edit = false;
-                        if hit_node.is_none() {
-                            // First, a read-only check to see
-                            // whether we should even call the
-                            // editor (hits the selected edge's
-                            // label AABB). Split from the
-                            // `open_label_edit` call so the
-                            // mutable borrow of `document`
-                            // doesn't conflict with the
-                            // immutable read.
-                            let label_edit_target: Option<crate::application::document::EdgeRef> =
-                                if let Some(doc) = document.as_ref() {
-                                    if let SelectionState::Edge(er) = &doc.selection {
-                                        let canvas_pos = renderer.screen_to_canvas(
-                                            cursor_pos.0 as f32,
-                                            cursor_pos.1 as f32,
-                                        );
-                                        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
-                                            &er.from_id,
-                                            &er.to_id,
-                                            &er.edge_type,
-                                        );
-                                        if renderer.hit_test_edge_label(canvas_pos, &edge_key) {
-                                            Some(er.clone())
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-                            if let Some(er_clone) = label_edit_target {
+                        // Edge-label single click: route to the
+                        // `EdgeLabel` selection rather than opening
+                        // the editor. Matches the "click to select,
+                        // dbl-click to edit" idiom the node /
+                        // portal-label variants already follow —
+                        // the dbl-click branch above handles the
+                        // editor-open case. Takes precedence over
+                        // regular node / edge click processing.
+                        let edge_label_target: Option<crate::application::document::EdgeRef> =
+                            if hit_node.is_none() {
+                                let canvas_pos = renderer.screen_to_canvas(
+                                    cursor_pos.0 as f32,
+                                    cursor_pos.1 as f32,
+                                );
+                                renderer.hit_test_any_edge_label(canvas_pos).map(|k| {
+                                    crate::application::document::EdgeRef::new(
+                                        k.from_id.as_str(),
+                                        k.to_id.as_str(),
+                                        k.edge_type.as_str(),
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                        let entered_label_select =
+                            if let Some(er) = edge_label_target {
                                 if let Some(doc) = document.as_mut() {
-                                    open_label_edit(
-                                        &er_clone,
-                                        doc,
-                                        label_edit_state,
-                                        app_scene,
-                                        renderer,
+                                    doc.selection = SelectionState::EdgeLabel(
+                                        crate::application::document::EdgeLabelSel::new(
+                                            er,
+                                        ),
                                     );
-                                    entered_label_edit = true;
+                                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                                    true
+                                } else {
+                                    false
                                 }
-                            }
-                        }
-                        if !entered_label_edit {
+                            } else {
+                                false
+                            };
+                        if !entered_label_select {
                             handle_click(
                                 hit_node,
                                 cursor_pos,

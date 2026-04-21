@@ -129,6 +129,15 @@ enum PendingClick {
         edge_key: baumhard::mindmap::scene_cache::EdgeKey,
         endpoint_node_id: String,
     },
+    /// Cursor landed on a line-mode edge's label AABB at
+    /// mouse-down. Committed at mouse-up into
+    /// `SelectionState::EdgeLabel` so per-label color / font /
+    /// copy operations target the label instead of the edge
+    /// body. Double-click is handled inline by the press-time
+    /// dispatcher — WASM doesn't open the inline editor modal
+    /// yet so the dbl-click branch falls back to the same
+    /// selection commit for parity with single click.
+    EdgeLabel(baumhard::mindmap::scene_cache::EdgeKey),
 }
 struct WasmInputState {
     document: MindMapDocument,
@@ -475,22 +484,30 @@ app.event_loop.run(move |event, _window_target| {
                 // route double-click on a portal marker to a camera
                 // jump. The portal hit test runs only when the node
                 // hit test misses, same as native.
-                let (portal_text_hit, portal_icon_hit) = if hit_node.is_none() {
-                    let renderer_borrow = renderer_for_events.borrow();
-                    let t = renderer_borrow
-                        .as_ref()
-                        .and_then(|r| r.hit_test_portal_text(canvas_pos));
-                    let i = if t.is_none() {
-                        renderer_borrow
+                let (portal_text_hit, portal_icon_hit, edge_label_hit) =
+                    if hit_node.is_none() {
+                        let renderer_borrow = renderer_for_events.borrow();
+                        let t = renderer_borrow
                             .as_ref()
-                            .and_then(|r| r.hit_test_portal(canvas_pos))
+                            .and_then(|r| r.hit_test_portal_text(canvas_pos));
+                        let i = if t.is_none() {
+                            renderer_borrow
+                                .as_ref()
+                                .and_then(|r| r.hit_test_portal(canvas_pos))
+                        } else {
+                            None
+                        };
+                        let l = if t.is_none() && i.is_none() {
+                            renderer_borrow
+                                .as_ref()
+                                .and_then(|r| r.hit_test_any_edge_label(canvas_pos))
+                        } else {
+                            None
+                        };
+                        (t, i, l)
                     } else {
-                        None
+                        (None, None, None)
                     };
-                    (t, i)
-                } else {
-                    (None, None)
-                };
                 let click_hit: ClickHit = if let Some(id) = &hit_node {
                     ClickHit::Node(id.clone())
                 } else if let Some((key, ep)) = &portal_text_hit {
@@ -503,6 +520,8 @@ app.event_loop.run(move |event, _window_target| {
                         edge: key.clone(),
                         endpoint: ep.clone(),
                     }
+                } else if let Some(key) = &edge_label_hit {
+                    ClickHit::EdgeLabel(key.clone())
                 } else {
                     ClickHit::Empty
                 };
@@ -561,6 +580,29 @@ app.event_loop.run(move |event, _window_target| {
                             );
                             rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                         }
+                        ClickHit::EdgeLabel(edge_key) => {
+                            // Edge label double-click is a parity
+                            // placeholder on WASM. Native opens the
+                            // inline label editor; WASM's modal
+                            // editor path isn't available here yet,
+                            // so for now we commit the
+                            // `EdgeLabel` selection and let the
+                            // user fall back to the `/label edit`
+                            // console verb. Single-click already
+                            // produces the same selection below,
+                            // so dbl-click effectively matches
+                            // single-click behaviour on WASM until
+                            // the modal lands.
+                            let er = crate::application::document::EdgeRef::new(
+                                edge_key.from_id.as_str(),
+                                edge_key.to_id.as_str(),
+                                edge_key.edge_type.as_str(),
+                            );
+                            input.document.selection = SelectionState::EdgeLabel(
+                                crate::application::document::EdgeLabelSel::new(er),
+                            );
+                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                        }
                         ClickHit::Empty => {
                             let allow_create = !matches!(
                                 input.document.selection,
@@ -603,6 +645,10 @@ app.event_loop.run(move |event, _window_target| {
                         edge_key: key,
                         endpoint_node_id: endpoint,
                     }
+                } else if let Some(key) = edge_label_hit.clone() {
+                    // Edge label click — committed to
+                    // `SelectionState::EdgeLabel` on mouse-up.
+                    PendingClick::EdgeLabel(key)
                 } else {
                     PendingClick::Empty
                 };
@@ -674,6 +720,16 @@ app.event_loop.run(move |event, _window_target| {
                             endpoint_node_id,
                         },
                     ),
+                    PendingClick::EdgeLabel(edge_key) => {
+                        let er = crate::application::document::EdgeRef::new(
+                            edge_key.from_id.as_str(),
+                            edge_key.to_id.as_str(),
+                            edge_key.edge_type.as_str(),
+                        );
+                        SelectionState::EdgeLabel(
+                            crate::application::document::EdgeLabelSel::new(er),
+                        )
+                    }
                     _ => SelectionState::None,
                 };
                 let mut renderer_borrow = renderer_for_events.borrow_mut();

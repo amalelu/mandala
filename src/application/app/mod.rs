@@ -172,6 +172,13 @@ enum ClickHit {
         edge: baumhard::mindmap::scene_cache::EdgeKey,
         endpoint: String,
     },
+    /// Cursor is inside a line-mode edge's **label** AABB.
+    /// Routes to `SelectionState::EdgeLabel` on single click so
+    /// color / font / copy operations target the label instead
+    /// of the edge body; double-click opens the inline label
+    /// editor, matching the "click to select, dbl to edit"
+    /// idiom the `Node` variant already follows.
+    EdgeLabel(baumhard::mindmap::scene_cache::EdgeKey),
 }
 
 /// Records the previous left-click's time, screen position, and hit
