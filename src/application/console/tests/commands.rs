@@ -257,6 +257,67 @@ fn test_font_kv_size_sets_absolute_value_on_edge() {
 }
 
 #[test]
+fn test_font_kv_size_min_max_atomic_on_edge() {
+    // User asks for `size=14 max=10` — the atomic setter should
+    // apply max first, then clamp size into the new bound,
+    // landing on `size=10, max=10`. Naive order would produce
+    // `size=14, max=10` (bug).
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    let result = run("font size=14 max=10", &mut doc);
+    assert!(matches!(result, ExecResult::Ok(_)));
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let cfg = updated.glyph_connection.as_ref().unwrap();
+    assert!((cfg.max_font_size_pt - 10.0).abs() < 0.01, "max={}", cfg.max_font_size_pt);
+    assert!(
+        (cfg.font_size_pt - 10.0).abs() < 0.01,
+        "size should clamp to new max; got {}",
+        cfg.font_size_pt
+    );
+}
+
+#[test]
+fn test_font_kv_min_alone_narrows_edge_clamp() {
+    // `min=20` with no size touches only the min clamp. The
+    // base size remains whatever it was before (which for the
+    // fixture happens to be 12).
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    let size_before = doc
+        .mindmap
+        .edges
+        .iter()
+        .find(|e| er.matches(e))
+        .unwrap()
+        .glyph_connection
+        .as_ref()
+        .map(|c| c.font_size_pt)
+        .unwrap_or(12.0);
+    let _ = run("font min=20", &mut doc);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let cfg = updated.glyph_connection.as_ref().unwrap();
+    assert!((cfg.min_font_size_pt - 20.0).abs() < 0.01, "min={}", cfg.min_font_size_pt);
+    // Size wasn't in the kvs, so it shouldn't have moved.
+    assert!(
+        (cfg.font_size_pt - size_before).abs() < 0.01,
+        "size should be unchanged; was {}, now {}",
+        size_before,
+        cfg.font_size_pt
+    );
+}
+
+#[test]
+fn test_font_kv_invalid_value_reports_error() {
+    // Non-numeric input is rejected at parse time, not silently
+    // ignored. Returns `Err` so the console displays it as an
+    // error line.
+    let mut doc = load_test_doc();
+    let _ = select_first_edge(&mut doc);
+    let result = run("font size=abc", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
+}
+
+#[test]
 fn test_edge_type_parent_child_updates_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);

@@ -537,6 +537,226 @@ impl MindMapDocument {
         true
     }
 
+    /// Atomic `font size / min / max` setter for the edge body's
+    /// `glyph_connection` channel. Applies `min` and `max` first,
+    /// then clamps `size` against the **new** bounds, so the user-
+    /// level command `font size=14 max=10` lands as `size=10, max=10`
+    /// instead of the wrong `size=14, max=10` a naive one-at-a-time
+    /// dispatch would produce. Each argument is optional; `None`
+    /// leaves that field untouched. Returns `true` if any field
+    /// changed. Rejects non-finite or non-positive values by
+    /// leaving the field untouched.
+    ///
+    /// A single `EditEdge` undo entry covers the whole triple, so
+    /// Ctrl+Z reverses the atomic edit in one step.
+    pub fn set_edge_font(
+        &mut self,
+        edge_ref: &EdgeRef,
+        size: Option<f32>,
+        min: Option<f32>,
+        max: Option<f32>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let cfg = Self::ensure_glyph_connection(
+            &mut self.mindmap.edges[idx],
+            &self.mindmap.canvas,
+        );
+        let mut changed = false;
+        if let Some(m) = min.filter(|v| v.is_finite() && *v > 0.0) {
+            if (cfg.min_font_size_pt - m).abs() >= f32::EPSILON {
+                cfg.min_font_size_pt = m;
+                changed = true;
+            }
+        }
+        if let Some(m) = max.filter(|v| v.is_finite() && *v > 0.0) {
+            if (cfg.max_font_size_pt - m).abs() >= f32::EPSILON {
+                cfg.max_font_size_pt = m;
+                changed = true;
+            }
+        }
+        if let Some(s) = size.filter(|v| v.is_finite() && *v > 0.0) {
+            let clamped = s.clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
+            if (cfg.font_size_pt - clamped).abs() >= f32::EPSILON {
+                cfg.font_size_pt = clamped;
+                changed = true;
+            }
+        }
+        if !changed {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Sibling of [`Self::set_edge_font`] targeting the edge
+    /// **label** channel (`label_config.font_size_pt` / `min` /
+    /// `max`). Same atomic ordering — min/max write before the
+    /// clamped size — so label-level clamps can be tightened
+    /// without dropping a concurrent size write. Forks a fresh
+    /// `EdgeLabelConfig` on first edit; rolls back an all-default
+    /// struct when clearing to None leaves nothing interesting.
+    ///
+    /// Resolver fallbacks: a label with no own override inherits
+    /// the edge's `glyph_connection` clamps (see
+    /// `EdgeLabelConfig::effective_font_size_pt`). Clamping the
+    /// user-facing `size` value here happens against the
+    /// **resolved** clamps — own min/max when set, edge min/max
+    /// otherwise — so a label that only overrides `size` clamps
+    /// into the edge's bounds without needing a full triple.
+    pub fn set_edge_label_font(
+        &mut self,
+        edge_ref: &EdgeRef,
+        size: Option<f32>,
+        min: Option<f32>,
+        max: Option<f32>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        // Compute the resolved body clamps once for fallback
+        // when the label config doesn't carry its own.
+        let body_min;
+        let body_max;
+        {
+            let edge = &self.mindmap.edges[idx];
+            let cfg = GlyphConnectionConfig::resolved_for(edge, &self.mindmap.canvas);
+            body_min = cfg.min_font_size_pt;
+            body_max = cfg.max_font_size_pt;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        let label_cfg = Self::ensure_label_config(&mut self.mindmap.edges[idx]);
+        let mut changed = false;
+        if let Some(m) = min.filter(|v| v.is_finite() && *v > 0.0) {
+            if label_cfg.min_font_size_pt != Some(m) {
+                label_cfg.min_font_size_pt = Some(m);
+                changed = true;
+            }
+        }
+        if let Some(m) = max.filter(|v| v.is_finite() && *v > 0.0) {
+            if label_cfg.max_font_size_pt != Some(m) {
+                label_cfg.max_font_size_pt = Some(m);
+                changed = true;
+            }
+        }
+        if let Some(s) = size.filter(|v| v.is_finite() && *v > 0.0) {
+            let effective_min = label_cfg.min_font_size_pt.unwrap_or(body_min);
+            let effective_max = label_cfg.max_font_size_pt.unwrap_or(body_max);
+            let clamped = s.clamp(effective_min, effective_max);
+            if label_cfg.font_size_pt != Some(clamped) {
+                label_cfg.font_size_pt = Some(clamped);
+                changed = true;
+            }
+        }
+        // Rollback-on-noop + rollback-if-label-config-empty so
+        // an unchanged triple doesn't leave an empty
+        // `EdgeLabelConfig` behind.
+        if !changed {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        if self.mindmap.edges[idx]
+            .label_config
+            .as_ref()
+            .map_or(false, |c| c == &EdgeLabelConfig::default())
+        {
+            self.mindmap.edges[idx].label_config = None;
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Sibling of [`Self::set_edge_font`] targeting a portal
+    /// endpoint's **text** channel
+    /// (`PortalEndpointState.text_font_size_pt` / `text_min_font_size_pt`
+    /// / `text_max_font_size_pt`). Same atomic ordering. Forks
+    /// `PortalEndpointState` on first edit; rolls back an all-default
+    /// endpoint state on clear. Fallback clamps come from the
+    /// resolved `glyph_connection` when the endpoint's own clamps
+    /// aren't set, matching the label resolver.
+    pub fn set_portal_text_font(
+        &mut self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+        size: Option<f32>,
+        min: Option<f32>,
+        max: Option<f32>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let body_min;
+        let body_max;
+        {
+            let edge = &self.mindmap.edges[idx];
+            let cfg = GlyphConnectionConfig::resolved_for(edge, &self.mindmap.canvas);
+            body_min = cfg.min_font_size_pt;
+            body_max = cfg.max_font_size_pt;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        let slot = match portal_endpoint_state_mut(
+            &mut self.mindmap.edges[idx],
+            endpoint_node_id,
+        ) {
+            Some(s) => s,
+            None => return false,
+        };
+        let state = slot.get_or_insert_with(PortalEndpointState::default);
+        let mut changed = false;
+        if let Some(m) = min.filter(|v| v.is_finite() && *v > 0.0) {
+            if state.text_min_font_size_pt != Some(m) {
+                state.text_min_font_size_pt = Some(m);
+                changed = true;
+            }
+        }
+        if let Some(m) = max.filter(|v| v.is_finite() && *v > 0.0) {
+            if state.text_max_font_size_pt != Some(m) {
+                state.text_max_font_size_pt = Some(m);
+                changed = true;
+            }
+        }
+        if let Some(s) = size.filter(|v| v.is_finite() && *v > 0.0) {
+            let effective_min = state.text_min_font_size_pt.unwrap_or(body_min);
+            let effective_max = state.text_max_font_size_pt.unwrap_or(body_max);
+            let clamped = s.clamp(effective_min, effective_max);
+            if state.text_font_size_pt != Some(clamped) {
+                state.text_font_size_pt = Some(clamped);
+                changed = true;
+            }
+        }
+        if !changed {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
+        if let Some(existing) = self.mindmap.edges[idx]
+            .portal_from
+            .as_ref()
+            .filter(|s| *s == &PortalEndpointState::default())
+        {
+            let _ = existing;
+            self.mindmap.edges[idx].portal_from = None;
+        }
+        if let Some(existing) = self.mindmap.edges[idx]
+            .portal_to
+            .as_ref()
+            .filter(|s| *s == &PortalEndpointState::default())
+        {
+            let _ = existing;
+            self.mindmap.edges[idx].portal_to = None;
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
     /// Set the connection's glyph `spacing` (canvas units between
     /// adjacent body glyphs). Returns `true` if the value actually
     /// changed.

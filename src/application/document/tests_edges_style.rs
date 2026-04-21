@@ -769,3 +769,105 @@ use super::defaults::default_cross_link_edge;
             "clearing the sole override should roll back to no endpoint state"
         );
     }
+
+    #[test]
+    fn test_set_edge_font_atomic_ordering_applies_max_before_size() {
+        // User asks size=14 max=10 atomically — the setter
+        // applies max first, then clamps size against the new
+        // bound. Confirms the documented ordering; a naive
+        // size-then-max dispatch would leave the struct with
+        // size=14, max=10 (bug).
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let ok = doc.set_edge_font(&er, Some(14.0), None, Some(10.0));
+        assert!(ok);
+        let idx = doc.edge_index(&er).unwrap();
+        let cfg = doc.mindmap.edges[idx].glyph_connection.as_ref().unwrap();
+        assert!((cfg.max_font_size_pt - 10.0).abs() < 1.0e-4);
+        assert!(
+            (cfg.font_size_pt - 10.0).abs() < 1.0e-4,
+            "size should clamp to new max; got {}",
+            cfg.font_size_pt
+        );
+    }
+
+    #[test]
+    fn test_set_edge_label_font_leaves_edge_body_untouched() {
+        // Label font triple writes `label_config.*`; the edge
+        // body's `glyph_connection.*` must not move.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Seed a known baseline.
+        assert!(doc.set_edge_font(&er, Some(12.0), Some(8.0), Some(64.0)));
+        let before = {
+            let idx = doc.edge_index(&er).unwrap();
+            let cfg = doc.mindmap.edges[idx].glyph_connection.as_ref().unwrap();
+            (cfg.font_size_pt, cfg.min_font_size_pt, cfg.max_font_size_pt)
+        };
+        assert!(doc.set_edge_label_font(&er, Some(18.0), Some(10.0), Some(30.0)));
+        let idx = doc.edge_index(&er).unwrap();
+        let body = doc.mindmap.edges[idx].glyph_connection.as_ref().unwrap();
+        assert_eq!(
+            (body.font_size_pt, body.min_font_size_pt, body.max_font_size_pt),
+            before,
+            "edge body font must be unchanged by a label-only write"
+        );
+        let label = doc.mindmap.edges[idx].label_config.as_ref().unwrap();
+        assert_eq!(label.font_size_pt, Some(18.0));
+        assert_eq!(label.min_font_size_pt, Some(10.0));
+        assert_eq!(label.max_font_size_pt, Some(30.0));
+    }
+
+    #[test]
+    fn test_set_edge_label_font_size_clamps_into_inherited_body_bounds() {
+        // Label sets only `size`, no own clamps — the clamp must
+        // fall back to the edge's `glyph_connection` bounds. Here
+        // the body max is 20, so a label size of 100 clamps to 20.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        assert!(doc.set_edge_font(&er, Some(12.0), Some(8.0), Some(20.0)));
+        assert!(doc.set_edge_label_font(&er, Some(100.0), None, None));
+        let idx = doc.edge_index(&er).unwrap();
+        let label = doc.mindmap.edges[idx].label_config.as_ref().unwrap();
+        assert_eq!(
+            label.font_size_pt,
+            Some(20.0),
+            "label size should clamp into body max when label carries no own clamps"
+        );
+    }
+
+    #[test]
+    fn test_set_portal_text_font_writes_endpoint_state_only() {
+        // Portal-text triple writes endpoint_state.text_*; the
+        // icon's own font size (inherited from glyph_connection)
+        // must not move.
+        use baumhard::mindmap::model::{portal_endpoint_state, DISPLAY_MODE_PORTAL};
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+        assert!(doc.set_edge_font(&er, Some(30.0), Some(20.0), Some(60.0)));
+        let endpoint_id = doc.mindmap.edges[idx].from_id.clone();
+        assert!(doc.set_portal_text_font(&er, &endpoint_id, Some(14.0), Some(10.0), Some(48.0)));
+        let edge = &doc.mindmap.edges[idx];
+        let body = edge.glyph_connection.as_ref().unwrap();
+        assert!((body.font_size_pt - 30.0).abs() < 1.0e-4);
+        let state = portal_endpoint_state(edge, &endpoint_id).expect("endpoint state");
+        assert_eq!(state.text_font_size_pt, Some(14.0));
+        assert_eq!(state.text_min_font_size_pt, Some(10.0));
+        assert_eq!(state.text_max_font_size_pt, Some(48.0));
+    }
+
+    #[test]
+    fn test_set_edge_font_rejects_non_positive_and_nan() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // NaN and non-positive values are filtered silently (no
+        // change, no undo entry); caller's responsibility to
+        // validate at its own layer.
+        doc.undo_stack.clear();
+        assert!(!doc.set_edge_font(&er, Some(f32::NAN), None, None));
+        assert!(!doc.set_edge_font(&er, Some(-5.0), None, None));
+        assert!(!doc.set_edge_font(&er, Some(f32::INFINITY), None, None));
+        assert!(doc.undo_stack.is_empty());
+    }
