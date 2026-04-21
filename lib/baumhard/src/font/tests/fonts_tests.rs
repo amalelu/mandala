@@ -4,11 +4,16 @@
 //! Follows the `do_*()` / `test_*()` split from §B8 — every `do_*`
 //! body is benchmarkable from `benches/test_bench.rs`.
 
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
 use cosmic_text::SwashCache;
 
 use crate::font::fonts;
 use crate::font::fonts::{
-    measure_glyph_ink_bounds, measure_text_block_unbounded, AppFont, FONT_SYSTEM,
+    acquire_font_system_write_with_timeout, measure_glyph_ink_bounds,
+    measure_text_block_unbounded, AppFont, FONT_SYSTEM,
 };
 
 #[test]
@@ -262,5 +267,42 @@ pub fn do_measure_text_block_unbounded_width_scales_with_font_size() {
         ratio,
         small.width,
         large.width
+    );
+}
+
+/// Freeze-hardening regression: `acquire_font_system_write` must
+/// panic (not hang) when the write guard cannot be obtained within
+/// its timeout budget. The production deadlock this guards against
+/// is a same-thread re-entrant `RwLock::write()` acquire — which
+/// `std::sync::RwLock` would otherwise block on forever.
+///
+/// The test holds the guard on a **separate** thread (not the test
+/// thread) to avoid poisoning the lock when the panic unwinds: the
+/// test thread never holds the guard, so the panic's unwind drops
+/// nothing the lock cares about. The spawned holder thread
+/// eventually drops its guard cleanly when it finishes sleeping,
+/// leaving FONT_SYSTEM usable for subsequent tests.
+#[test]
+#[should_panic(expected = "FONT_SYSTEM write lock not available")]
+fn test_acquire_font_system_write_panics_on_timeout() {
+    fonts::init();
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    // Spawn a thread that grabs the guard, signals us, then holds
+    // it long enough to let our acquire attempt time out. We do
+    // not join the handle — the test function panics below, and
+    // the detached thread finishes on its own.
+    let _holder = thread::spawn(move || {
+        let _guard = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+        acquired_tx.send(()).unwrap();
+        thread::sleep(Duration::from_millis(500));
+    });
+    acquired_rx.recv().expect("holder thread should acquire");
+    // Test-scale timeout — the production constant is 5 s which
+    // would make this test slow. The contract we're pinning is
+    // "panics instead of hanging"; the panic message and the code
+    // path are identical.
+    let _would_hang = acquire_font_system_write_with_timeout(
+        "test_acquire_font_system_write_panics_on_timeout",
+        Duration::from_millis(50),
     );
 }

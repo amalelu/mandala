@@ -25,13 +25,29 @@ fn is_safe_coord(f: f64) -> bool {
 pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
     // BFS queue, seeded with the anchor. MindMap's single-parent
     // invariant (`format/ids.md`, enforced at load by the verifier)
-    // rules out cycles, so the BFS is guaranteed to terminate; if a
-    // future model change relaxes the invariant this assumption will
-    // need a visited-set guard.
+    // rules out cycles, so the BFS is guaranteed to terminate.
+    // `iteration_budget` converts a future invariant violation
+    // (cycle, duplicate parent link introduced by a new mutation)
+    // from an infinite loop that freezes the UI into an immediate
+    // panic whose stack trace points at this function. The bound
+    // is `2 * nodes.len()`: a cycle-free BFS visits each node at
+    // most once and enqueues each child at most once, so exceeding
+    // twice the node count is definitive proof of a cycle.
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(target_id.to_string());
+    let iteration_budget = doc.mindmap.nodes.len().saturating_mul(2).max(2);
+    let mut iterations = 0usize;
 
     while let Some(current) = queue.pop_front() {
+        iterations += 1;
+        assert!(
+            iterations <= iteration_budget,
+            "tree-cascade BFS exceeded {} iterations starting from '{}': \
+             the single-parent invariant appears to be violated (cycle?). \
+             Aborting to avoid an infinite freeze.",
+            iteration_budget,
+            target_id
+        );
         let children: Vec<String> = doc
             .mindmap
             .children_of(&current)
@@ -186,5 +202,32 @@ mod tests {
         let after = doc.mindmap.nodes.get(&leaf).unwrap().position.clone();
         assert_eq!(before.x, after.x);
         assert_eq!(before.y, after.y);
+    }
+
+    /// Freeze-hardening regression: if the single-parent invariant
+    /// is violated (e.g. a bug elsewhere introduces a two-node
+    /// parent cycle), the BFS must abort with a diagnostic panic
+    /// rather than loop forever and freeze the UI. Without the
+    /// iteration guard this test would hang.
+    #[test]
+    #[should_panic(expected = "tree-cascade BFS exceeded")]
+    fn cycle_in_parent_links_panics_instead_of_freezing() {
+        let path = format!(
+            "{}/maps/testament.mindmap.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut doc = MindMapDocument::load(&path).unwrap();
+        // Pick any two distinct nodes and wire them into a cycle by
+        // pointing each at the other as parent. `children_of` scans
+        // `nodes.values().filter(|n| n.parent_id == Some(parent))`,
+        // so this creates `A → B → A → ...` for the BFS.
+        let mut ids = doc.mindmap.nodes.keys().cloned();
+        let a = ids.next().expect("fixture has at least one node");
+        let b = ids.next().expect("fixture has at least two nodes");
+        doc.mindmap.nodes.get_mut(&a).unwrap().parent_id = Some(b.clone());
+        doc.mindmap.nodes.get_mut(&b).unwrap().parent_id = Some(a.clone());
+        // Seed the BFS at one of the cycle nodes so the loop can
+        // actually enter the cycle.
+        apply(&mut doc, &a);
     }
 }

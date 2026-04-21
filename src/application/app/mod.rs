@@ -29,6 +29,8 @@ mod event_keyboard;
 #[cfg(not(target_arch = "wasm32"))]
 mod event_mouse_click;
 #[cfg(not(target_arch = "wasm32"))]
+mod freeze_watchdog;
+#[cfg(not(target_arch = "wasm32"))]
 mod portal_label_drag;
 #[cfg(not(target_arch = "wasm32"))]
 mod label_edit;

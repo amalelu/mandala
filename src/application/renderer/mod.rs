@@ -46,7 +46,7 @@ use std::time::Duration;
 use cosmic_text::{Attrs, AttrsList, Buffer, FontSystem};
 use cosmic_text::{Family, Style};
 use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
-use log::{error, info};
+use log::{error, info, warn};
 
 use rustc_hash::FxHashMap;
 
@@ -668,6 +668,33 @@ impl Renderer {
             error!("Height has to be higher than 0 but was {}", height);
             return;
         }
+        // Freeze-hardening: `surface.configure` on dimensions beyond
+        // `max_texture_dimension_2d` can leave the surface in a bad
+        // state on some wgpu backends — subsequent
+        // `get_current_texture()` calls may then block indefinitely
+        // rather than returning an error. Clamp proactively; a
+        // slightly letterboxed frame is infinitely preferable to a
+        // hung UI. The scenario is realistic on ultra-wide or
+        // multi-monitor-maxed windows.
+        let max_dim = self.device.limits().max_texture_dimension_2d;
+        let width = if width > max_dim {
+            warn!(
+                "Requested surface width {} exceeds GPU max_texture_dimension_2d {}; clamping",
+                width, max_dim
+            );
+            max_dim
+        } else {
+            width
+        };
+        let height = if height > max_dim {
+            warn!(
+                "Requested surface height {} exceeds GPU max_texture_dimension_2d {}; clamping",
+                height, max_dim
+            );
+            max_dim
+        } else {
+            height
+        };
         info!("Updating surface size");
         self.config.width = width;
         self.config.height = height;

@@ -487,6 +487,44 @@ use super::defaults::default_cross_link_edge;
         assert!(!advanced);
     }
 
+    /// Freeze-hardening regression: a tick called with an
+    /// astronomically large `now_ms` (simulating CPU starvation that
+    /// delays the event loop well past the animation's duration)
+    /// must complete the animation exactly once and leave the active
+    /// list empty on the next call — never loop or overshoot. The
+    /// invariant holds because `tick_animations` short-circuits on
+    /// `elapsed >= total` before it computes the progress fraction.
+    #[test]
+    fn test_tick_animations_extreme_overshoot_still_completes() {
+        let mut doc = load_test_doc();
+        let cm = make_animated_mutation("anim-overshoot", 1000);
+        let node_id = first_testament_node_id(&doc);
+        let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+        doc.start_animation(&cm, &node_id, 0);
+        // now_ms four orders of magnitude past duration.
+        let advanced_first = doc.tick_animations(u64::MAX / 2, None);
+        assert!(advanced_first, "first tick should complete the animation");
+        assert!(
+            !doc.has_active_animations(),
+            "animation must drain on overshoot, not linger"
+        );
+
+        let advanced_second = doc.tick_animations(u64::MAX / 2, None);
+        assert!(
+            !advanced_second,
+            "subsequent tick with no active animations must not advance"
+        );
+
+        let final_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        let expected = orig_x + 100.0;
+        assert!(
+            (final_x - expected).abs() < 0.001,
+            "overshoot tick should land on to_node position, got {} expected ~{}",
+            final_x, expected,
+        );
+    }
+
     #[test]
     fn test_fast_forward_animations_snaps_to_end() {
         let mut doc = load_test_doc();

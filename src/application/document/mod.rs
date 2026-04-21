@@ -146,7 +146,7 @@ pub enum ColorPickerPreview {
 }
 
 fn grow_node_sizes_to_fit_text(map: &mut MindMap) {
-    use baumhard::font::fonts::{measure_text_block_unbounded, FONT_SYSTEM};
+    use baumhard::font::fonts::{acquire_font_system_write, measure_text_block_unbounded};
 
     for node in map.nodes.values_mut() {
         let scale = node
@@ -162,7 +162,7 @@ fn grow_node_sizes_to_fit_text(map: &mut MindMap) {
         // document load can interleave between nodes rather than
         // waiting for every measurement. §B5.
         let block = {
-            let mut fs = FONT_SYSTEM.write().expect("font system lock poisoned");
+            let mut fs = acquire_font_system_write("grow_node_sizes_to_fit_text");
             measure_text_block_unbounded(&mut fs, &node.text, scale, line_height)
         };
 

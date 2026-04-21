@@ -129,9 +129,9 @@ pub(in crate::application::app) fn open_picker_inner(
         arm_right_ink_offsets,
         preview_ink_offset,
     ) = {
-        let mut font_system = baumhard::font::fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
+        let mut font_system = baumhard::font::fonts::acquire_font_system_write(
+            "color_picker_flow::open",
+        );
         let mut crosshair: Vec<&str> = Vec::with_capacity(40);
         crosshair.extend(arm_top_glyphs().iter().copied());
         crosshair.extend(arm_bottom_glyphs().iter().copied());
