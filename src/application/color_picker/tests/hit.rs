@@ -54,11 +54,36 @@ fn hit_test_drag_anchor_between_bars_and_ring() {
     let g = sample_geometry();
     let layout = compute_color_picker_layout(&g, 1280.0, 720.0);
     // Halfway between center and ring radius, along a 45° diagonal —
-    // stays off every cardinal bar and every ring slot.
+    // stays off every cardinal bar and every ring slot for any
+    // reasonable sizing of the sample geometry. The assertions
+    // below pin the fixture invariants this test relies on so a
+    // future tweak that makes the ring font big relative to the
+    // wheel (violating "off the ring") fails loudly here rather
+    // than silently flipping the result of `hit_test_picker`.
     let r = layout.outer_radius * 0.5;
     let diag = r / std::f32::consts::SQRT_2;
     let x = layout.center.0 + diag;
     let y = layout.center.1 + diag;
+    // `diag` must clear the cardinal-bar tolerance on both axes.
+    let cell_half = (layout.cell_advance * 0.5).max(layout.font_size * 0.4);
+    assert!(
+        diag > cell_half,
+        "test point at diag={diag} must sit off the cardinal bars \
+         (cell_half={cell_half})"
+    );
+    // The closest hue slot sits on a circle of radius `ring_r` at
+    // the nearest 15° step; the distance from our test point to
+    // any ring slot is at least `ring_r − r = outer_radius / 2 −
+    // ring_font_size / 2` once you collapse to the diagonal, which
+    // must exceed `ring_font_size / 2` (the glyph hit radius) or
+    // the test point grazes the ring.
+    let ring_half = layout.ring_font_size * 0.5;
+    let min_dist_to_ring = (layout.outer_radius * 0.5 - ring_half).abs();
+    assert!(
+        min_dist_to_ring > ring_half,
+        "test point must clear the hue ring: min_dist_to_ring={min_dist_to_ring}, \
+         ring_half={ring_half}"
+    );
     assert_eq!(hit_test_picker(&layout, x, y), PickerHit::DragAnchor);
 }
 
