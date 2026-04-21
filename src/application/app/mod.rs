@@ -45,9 +45,10 @@ mod run_wasm;
 
 // Cross-platform imports.
 use scene_rebuild::{
-    flush_canvas_scene_buffers, rebuild_all, rebuild_scene_only, update_border_tree_static,
-    update_border_tree_with_offsets, update_connection_label_tree, update_connection_tree,
-    update_edge_handle_tree, update_portal_tree,
+    flush_canvas_scene_buffers, rebuild_after_selection_change, rebuild_all,
+    rebuild_scene_only, update_border_tree_static, update_border_tree_with_offsets,
+    update_connection_label_tree, update_connection_tree, update_edge_handle_tree,
+    update_portal_tree,
 };
 use text_edit::{
     close_text_edit, delete_at_cursor, delete_before_cursor, handle_text_edit_key,

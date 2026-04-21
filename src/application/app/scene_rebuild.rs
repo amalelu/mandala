@@ -8,11 +8,184 @@
 //! (`update_*_tree`). `rebuild_scene_only` skips the node-tree
 //! rebuild for paths that only changed scene data (selection,
 //! preview overrides) without touching the model.
+//!
+//! `rebuild_after_selection_change` is the post-selection-change
+//! chooser: scene-only when both prev and new selections are edge-
+//! adjacent (no node-tree highlight to shift), full rebuild
+//! otherwise. Exists so every selection-change callsite picks the
+//! right granularity through one seam rather than reasoning about
+//! which variants touch the tree.
 
 use crate::application::document::{
-    apply_tree_highlights, MindMapDocument, HIGHLIGHT_COLOR,
+    apply_tree_highlights, MindMapDocument, SelectionState, HIGHLIGHT_COLOR,
 };
 use crate::application::renderer::Renderer;
+
+/// Pure predicate for [`rebuild_after_selection_change`]'s
+/// dispatch. Returns `true` when transitioning from `prev` to
+/// `new` requires a full `rebuild_all` (node-tree highlights
+/// need to be applied, shifted, or cleared). Returns `false`
+/// when both selections are edge-adjacent and only the scene-
+/// level highlight cascade moves.
+///
+/// Factored out of the helper so the decision is unit-testable
+/// without renderer / scene-host setup — the full
+/// `rebuild_after_selection_change` is an integration surface
+/// over wgpu state.
+pub(in crate::application::app) fn selection_change_touches_tree(
+    prev: &SelectionState,
+    new: &SelectionState,
+) -> bool {
+    fn touches_tree(sel: &SelectionState) -> bool {
+        matches!(sel, SelectionState::Single(_) | SelectionState::Multi(_))
+    }
+    touches_tree(prev) || touches_tree(new)
+}
+
+/// Post-selection-change rebuild with the right granularity.
+/// Picks `rebuild_all` when either the previous or new selection
+/// is `Single` / `Multi` (node-tree highlights need reapplying or
+/// clearing), `rebuild_scene_only` otherwise (edge-adjacent
+/// selection changes only move scene-level highlight cascades,
+/// not node text-buffer region colors).
+///
+/// Exists for every selection-change callsite that would
+/// otherwise call `rebuild_all` unconditionally — under §4's
+/// mobile budget a full rebuild on every edge-label / portal
+/// click is wasted work on a large map. This helper makes the
+/// right choice a one-liner so callers don't have to re-derive
+/// the decision.
+pub(in crate::application::app) fn rebuild_after_selection_change(
+    prev_selection: &SelectionState,
+    doc: &MindMapDocument,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+) {
+    if selection_change_touches_tree(prev_selection, &doc.selection) {
+        rebuild_all(doc, mindmap_tree, app_scene, renderer);
+    } else {
+        rebuild_scene_only(doc, app_scene, renderer);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selection_change_touches_tree;
+    use crate::application::document::{
+        EdgeLabelSel, EdgeRef, PortalLabelSel, SelectionState,
+    };
+    use baumhard::mindmap::scene_cache::EdgeKey;
+
+    fn edge_ref() -> EdgeRef {
+        EdgeRef::new("a", "b", "cross_link")
+    }
+    fn portal() -> PortalLabelSel {
+        PortalLabelSel {
+            edge_key: EdgeKey::new("a", "b", "cross_link"),
+            endpoint_node_id: "a".into(),
+        }
+    }
+
+    #[test]
+    fn edge_adjacent_to_edge_adjacent_is_scene_only() {
+        // Any pair of edge-adjacent variants (Edge / EdgeLabel /
+        // PortalLabel / PortalText) transitions without touching
+        // node text buffers — scene-only is correct.
+        let variants = [
+            SelectionState::Edge(edge_ref()),
+            SelectionState::EdgeLabel(EdgeLabelSel::new(edge_ref())),
+            SelectionState::PortalLabel(portal()),
+            SelectionState::PortalText(portal()),
+        ];
+        for prev in &variants {
+            for new in &variants {
+                assert!(
+                    !selection_change_touches_tree(prev, new),
+                    "{:?} -> {:?} should be scene-only",
+                    prev,
+                    new
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transition_into_node_selection_needs_full_rebuild() {
+        // Edge-adjacent -> Single / Multi: the new node must have
+        // its highlight color region applied to its text buffer.
+        let prev = SelectionState::EdgeLabel(EdgeLabelSel::new(edge_ref()));
+        assert!(selection_change_touches_tree(
+            &prev,
+            &SelectionState::Single("n".into())
+        ));
+        assert!(selection_change_touches_tree(
+            &prev,
+            &SelectionState::Multi(vec!["a".into(), "b".into()])
+        ));
+    }
+
+    #[test]
+    fn transition_out_of_node_selection_needs_full_rebuild() {
+        // Single / Multi -> Edge-adjacent: the previous node's
+        // highlight must be CLEARED from its text buffer. Scene-
+        // only would leave the stale highlight stuck.
+        for prev in [
+            SelectionState::Single("n".into()),
+            SelectionState::Multi(vec!["a".into(), "b".into()]),
+        ] {
+            assert!(selection_change_touches_tree(
+                &prev,
+                &SelectionState::Edge(edge_ref())
+            ));
+            assert!(selection_change_touches_tree(
+                &prev,
+                &SelectionState::EdgeLabel(EdgeLabelSel::new(edge_ref()))
+            ));
+            assert!(selection_change_touches_tree(
+                &prev,
+                &SelectionState::PortalLabel(portal())
+            ));
+            assert!(selection_change_touches_tree(
+                &prev,
+                &SelectionState::PortalText(portal())
+            ));
+            assert!(selection_change_touches_tree(
+                &prev,
+                &SelectionState::None
+            ));
+        }
+    }
+
+    #[test]
+    fn none_to_edge_adjacent_is_scene_only() {
+        // A fresh click on an edge label when nothing was
+        // selected: no tree highlight to clear, no new one to
+        // apply. Scene-only is correct.
+        for new in [
+            SelectionState::Edge(edge_ref()),
+            SelectionState::EdgeLabel(EdgeLabelSel::new(edge_ref())),
+            SelectionState::PortalLabel(portal()),
+            SelectionState::PortalText(portal()),
+        ] {
+            assert!(
+                !selection_change_touches_tree(&SelectionState::None, &new),
+                "None -> {:?} should be scene-only",
+                new
+            );
+        }
+    }
+
+    #[test]
+    fn node_to_node_needs_full_rebuild() {
+        // Node -> node: old highlight clears, new highlight
+        // applies. Full rebuild in both directions.
+        assert!(selection_change_touches_tree(
+            &SelectionState::Single("a".into()),
+            &SelectionState::Single("b".into())
+        ));
+    }
+}
 
 pub(in crate::application::app) fn rebuild_all(
     doc: &MindMapDocument,

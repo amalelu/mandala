@@ -581,27 +581,46 @@ app.event_loop.run(move |event, _window_target| {
                             rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
                         }
                         ClickHit::EdgeLabel(edge_key) => {
-                            // Edge label double-click is a parity
+                            // Edge-label double-click is a parity
                             // placeholder on WASM. Native opens the
                             // inline label editor; WASM's modal
                             // editor path isn't available here yet,
-                            // so for now we commit the
-                            // `EdgeLabel` selection and let the
-                            // user fall back to the `/label edit`
-                            // console verb. Single-click already
-                            // produces the same selection below,
-                            // so dbl-click effectively matches
-                            // single-click behaviour on WASM until
-                            // the modal lands.
-                            let er = crate::application::document::EdgeRef::new(
+                            // so the user falls back to the
+                            // `/label edit` console verb. The
+                            // previous single-click (release 1 in
+                            // the dbl-click pair) already committed
+                            // `SelectionState::EdgeLabel` and
+                            // rebuilt the scene — this branch has
+                            // nothing to add. Skipping the
+                            // redundant commit + rebuild is both
+                            // correct and meaningfully cheaper on
+                            // mobile browsers (§4 mobile budget).
+                            // If the selection somehow drifted
+                            // between the two clicks, the `match`
+                            // below handles re-committing; the
+                            // guard just avoids the wasted
+                            // rebuild in the common case.
+                            let expected_er = crate::application::document::EdgeRef::new(
                                 edge_key.from_id.as_str(),
                                 edge_key.to_id.as_str(),
                                 edge_key.edge_type.as_str(),
                             );
-                            input.document.selection = SelectionState::EdgeLabel(
-                                crate::application::document::EdgeLabelSel::new(er),
+                            let already_selected = matches!(
+                                &input.document.selection,
+                                SelectionState::EdgeLabel(s) if s.edge_ref == expected_er
                             );
-                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                            if !already_selected {
+                                input.document.selection = SelectionState::EdgeLabel(
+                                    crate::application::document::EdgeLabelSel::new(
+                                        expected_er,
+                                    ),
+                                );
+                                rebuild_scene_only(
+                                    &input.document,
+                                    &mut input.app_scene,
+                                    renderer,
+                                );
+                            }
                         }
                         ClickHit::Empty => {
                             let allow_create = !matches!(
@@ -699,7 +718,14 @@ app.event_loop.run(move |event, _window_target| {
                     return;
                 }
 
-                // Plain selection click
+                // Plain selection click. Snapshot the previous
+                // selection so `rebuild_after_selection_change`
+                // can pick between `rebuild_all` (needed when
+                // either side is a node selection — tree
+                // highlights must be applied or cleared) and the
+                // cheaper `rebuild_scene_only` (edge-adjacent →
+                // edge-adjacent transitions).
+                let prev_selection = input.document.selection.clone();
                 input.document.selection = match pending {
                     PendingClick::Node(node_id) => SelectionState::Single(node_id),
                     PendingClick::PortalMarker {
@@ -734,7 +760,13 @@ app.event_loop.run(move |event, _window_target| {
                 };
                 let mut renderer_borrow = renderer_for_events.borrow_mut();
                 if let Some(renderer) = renderer_borrow.as_mut() {
-                    rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                    rebuild_after_selection_change(
+                        &prev_selection,
+                        &input.document,
+                        &mut input.mindmap_tree,
+                        &mut input.app_scene,
+                        renderer,
+                    );
                 }
             }
         }

@@ -306,10 +306,25 @@ pub(super) fn handle_mouse_input(
                                     edge_key.to_id.as_str(),
                                     edge_key.edge_type.as_str(),
                                 );
+                                let prev = doc.selection.clone();
                                 doc.selection = SelectionState::EdgeLabel(
                                     crate::application::document::EdgeLabelSel::new(er.clone()),
                                 );
-                                rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                                // Selection-change rebuild picks the
+                                // right granularity — scene-only when
+                                // both prev and new are edge-adjacent,
+                                // full rebuild when transitioning from
+                                // a node selection so the old node
+                                // highlight clears. `open_label_edit`
+                                // below will trigger any further
+                                // buffer updates it needs.
+                                rebuild_after_selection_change(
+                                    &prev,
+                                    doc,
+                                    mindmap_tree,
+                                    app_scene,
+                                    renderer,
+                                );
                                 open_label_edit(
                                     &er,
                                     doc,
@@ -486,12 +501,19 @@ pub(super) fn handle_mouse_input(
                         let entered_label_select =
                             if let Some(er) = edge_label_target {
                                 if let Some(doc) = document.as_mut() {
+                                    let prev = doc.selection.clone();
                                     doc.selection = SelectionState::EdgeLabel(
                                         crate::application::document::EdgeLabelSel::new(
                                             er,
                                         ),
                                     );
-                                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                                    rebuild_after_selection_change(
+                                        &prev,
+                                        doc,
+                                        mindmap_tree,
+                                        app_scene,
+                                        renderer,
+                                    );
                                     true
                                 } else {
                                     false
@@ -620,7 +642,12 @@ pub(super) fn handle_mouse_input(
                                     doc.dirty = true;
                                 }
                             }
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            // Scene-only rebuild: every per-frame
+                            // drain already used `rebuild_scene_only`
+                            // because node trees are untouched by a
+                            // label move; the release commit is
+                            // the same story.
+                            rebuild_scene_only(doc, app_scene, renderer);
                         }
                         mutation_throttle.reset();
                     }

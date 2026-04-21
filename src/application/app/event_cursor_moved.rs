@@ -161,7 +161,14 @@ pub(super) fn handle_cursor_moved(
                     cursor_canvas,
                 );
                 if changed {
-                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                    // `rebuild_scene_only` — the label drag mutates
+                    // `label_config` on one edge only; node text
+                    // buffers, node backgrounds, and border trees
+                    // are all untouched. Skipping the tree rebuild
+                    // halves the per-drag-frame cost on maps with
+                    // many nodes, matching the same "scene-only"
+                    // discipline the color-picker hover uses.
+                    rebuild_scene_only(doc, app_scene, renderer);
                 }
             }
         }
@@ -236,12 +243,28 @@ pub(super) fn handle_cursor_moved(
                                     edge_ref.clone(),
                                 ),
                             );
+                            let prev = doc.selection.clone();
                             scene_cache.clear();
                             *drag_state = DragState::DraggingEdgeLabel {
                                 edge_ref,
                                 original,
                             };
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            // `rebuild_after_selection_change` picks
+                            // `rebuild_scene_only` when both the
+                            // previous and new selections are edge-
+                            // adjacent (no node-tree highlight to
+                            // shift). When the user was on a node
+                            // before and drag-starts an edge-label
+                            // in the same gesture, falls back to a
+                            // full rebuild to clear the old node
+                            // highlight from the tree's text buffer.
+                            rebuild_after_selection_change(
+                                &prev,
+                                doc,
+                                mindmap_tree,
+                                app_scene,
+                                renderer,
+                            );
                             return;
                         }
                     }
