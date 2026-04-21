@@ -23,6 +23,8 @@ mod drain_frame;
 #[cfg(not(target_arch = "wasm32"))]
 mod edge_drag;
 #[cfg(not(target_arch = "wasm32"))]
+mod edge_label_drag;
+#[cfg(not(target_arch = "wasm32"))]
 mod event_cursor_moved;
 #[cfg(not(target_arch = "wasm32"))]
 mod event_keyboard;
@@ -353,6 +355,13 @@ enum DragState {
             baumhard::mindmap::scene_cache::EdgeKey,
             String,
         )>,
+        /// If the cursor landed on an edge-label AABB at
+        /// mouse-down, this records the owning edge key so a
+        /// drag past threshold transitions to
+        /// `DraggingEdgeLabel`. Takes precedence over
+        /// `hit_node` — a label hovering over a node behind
+        /// it should move as a label, not a node.
+        hit_edge_label: Option<baumhard::mindmap::scene_cache::EdgeKey>,
     },
     /// Dragging to pan the camera (started on empty space).
     Panning,
@@ -414,6 +423,23 @@ enum DragState {
         /// Full pre-drag `MindEdge` snapshot, used both for
         /// `UndoAction::EditEdge` at release and to skip undo
         /// entries when the drag didn't actually move `border_t`.
+        original: baumhard::mindmap::model::MindEdge,
+    },
+    /// Dragging a line-mode edge's text label along its
+    /// connection path. The cursor drags in free canvas space
+    /// and each drain frame projects that position onto the
+    /// edge's path via
+    /// [`baumhard::mindmap::connection::closest_point_on_path`],
+    /// writing the resulting
+    /// `(position_t, perpendicular_offset)` into the edge's
+    /// `label_config`. On release a single
+    /// `UndoAction::EditEdge` is pushed carrying the pre-drag
+    /// snapshot.
+    DraggingEdgeLabel {
+        edge_ref: EdgeRef,
+        /// Full pre-drag `MindEdge` snapshot — used both for
+        /// the undo entry at release and to skip pushing an
+        /// entry when the drag didn't actually move the label.
         original: baumhard::mindmap::model::MindEdge,
     },
 }

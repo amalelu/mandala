@@ -141,6 +141,30 @@ pub(super) fn handle_cursor_moved(
             *total_delta += delta;
             *pending_delta += delta;
         }
+        DragState::DraggingEdgeLabel { edge_ref, .. } => {
+            // Edge-label drag writes `position_t` +
+            // `perpendicular_offset` per mouse-move event
+            // directly — the state is two f32s on the edge,
+            // and the only visual consumer is the label
+            // pass, which rebuilds cheaply (one label per
+            // labeled edge). Bypasses the per-frame drain /
+            // undo push that `MovingNode` / `DraggingEdgeHandle`
+            // use; release commits a single `EditEdge` with
+            // the pre-drag snapshot.
+            let cursor_canvas =
+                renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
+            let edge_ref = edge_ref.clone();
+            if let Some(doc) = document.as_mut() {
+                let changed = super::edge_label_drag::apply_edge_label_drag(
+                    doc,
+                    &edge_ref,
+                    cursor_canvas,
+                );
+                if changed {
+                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                }
+            }
+        }
         DragState::DraggingPortalLabel {
             edge_ref,
             endpoint_node_id,
@@ -174,13 +198,48 @@ pub(super) fn handle_cursor_moved(
             hit_node,
             hit_edge_handle,
             hit_portal_label,
+            hit_edge_label,
         } => {
             let dist_x = cursor_pos_val.0 - start_pos.0;
             let dist_y = cursor_pos_val.1 - start_pos.1;
             if dist_x * dist_x + dist_y * dist_y > 25.0 {
                 // Past threshold — decide what kind of drag
-                // this is. Portal-label > edge-handle >
-                // node > rect-select > pan.
+                // this is. Priority: portal-label >
+                // edge-handle > edge-label > node >
+                // rect-select > pan. Edge-label beats node
+                // because a label may sit above a node in
+                // crowded layouts; placing it after the
+                // handle/portal checks keeps selected-edge
+                // handles reachable.
+                if let Some(edge_key) = hit_edge_label.take() {
+                    if let Some(doc) = document.as_mut() {
+                        let edge_ref = crate::application::document::EdgeRef::new(
+                            &edge_key.from_id,
+                            &edge_key.to_id,
+                            &edge_key.edge_type,
+                        );
+                        if let Some(original) = doc
+                            .mindmap
+                            .edges
+                            .iter()
+                            .find(|e| edge_ref.matches(e))
+                            .cloned()
+                        {
+                            doc.selection = SelectionState::EdgeLabel(
+                                crate::application::document::EdgeLabelSel::new(
+                                    edge_ref.clone(),
+                                ),
+                            );
+                            scene_cache.clear();
+                            *drag_state = DragState::DraggingEdgeLabel {
+                                edge_ref,
+                                original,
+                            };
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            return;
+                        }
+                    }
+                }
                 if let Some((edge_key, endpoint)) = hit_portal_label.take() {
                     if let Some(doc) = document.as_mut() {
                         let edge_ref = crate::application::document::EdgeRef::new(

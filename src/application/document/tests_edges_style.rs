@@ -871,3 +871,41 @@ use super::defaults::default_cross_link_edge;
         assert!(!doc.set_edge_font(&er, Some(f32::INFINITY), None, None));
         assert!(doc.undo_stack.is_empty());
     }
+
+    #[test]
+    fn test_set_edge_label_perpendicular_offset_writes_and_clears() {
+        // Setter writes the signed offset into
+        // `label_config.perpendicular_offset`; passing `None`
+        // clears it and rolls back an all-default `EdgeLabelConfig`
+        // so the edge goes back to no label config at all.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Write a negative offset.
+        assert!(doc.set_edge_label_perpendicular_offset(&er, Some(-12.5)));
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .label_config
+                .as_ref()
+                .and_then(|c| c.perpendicular_offset),
+            Some(-12.5)
+        );
+        // Re-setting the same value is a no-op.
+        let depth = doc.undo_stack.len();
+        assert!(!doc.set_edge_label_perpendicular_offset(&er, Some(-12.5)));
+        assert_eq!(doc.undo_stack.len(), depth);
+        // Clear it back — no other fields were set, so
+        // `label_config` itself should become None.
+        assert!(doc.set_edge_label_perpendicular_offset(&er, None));
+        assert!(doc.mindmap.edges[idx].label_config.is_none());
+    }
+
+    #[test]
+    fn test_set_edge_label_perpendicular_offset_rejects_non_finite() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        doc.undo_stack.clear();
+        assert!(!doc.set_edge_label_perpendicular_offset(&er, Some(f32::NAN)));
+        assert!(!doc.set_edge_label_perpendicular_offset(&er, Some(f32::INFINITY)));
+        assert!(doc.undo_stack.is_empty());
+    }

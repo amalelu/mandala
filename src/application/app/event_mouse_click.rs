@@ -393,11 +393,18 @@ pub(super) fn handle_mouse_input(
                     }
                     _ => None,
                 };
+                // Reuse the press-time edge-label hit captured
+                // earlier so the threshold-cross transition can
+                // promote to `DraggingEdgeLabel`. Priority
+                // ordering in `event_cursor_moved.rs` still
+                // gives portal-label / edge-handle drag higher
+                // precedence when multiple hits overlap.
                 *drag_state = DragState::Pending {
                     start_pos: cursor_pos,
                     hit_node,
                     hit_edge_handle,
                     hit_portal_label,
+                    hit_edge_label: edge_label_hit,
                 };
             } else {
                 // Released
@@ -582,6 +589,28 @@ pub(super) fn handle_mouse_input(
                                 if current.portal_from != original.portal_from
                                     || current.portal_to != original.portal_to
                                 {
+                                    doc.undo_stack.push(UndoAction::EditEdge {
+                                        index: idx,
+                                        before: original,
+                                    });
+                                    doc.dirty = true;
+                                }
+                            }
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                        }
+                        mutation_throttle.reset();
+                    }
+                    DragState::DraggingEdgeLabel { edge_ref, original } => {
+                        // Per-frame drag already wrote
+                        // `label_config.{position_t,
+                        // perpendicular_offset}` directly. Commit
+                        // with a single `EditEdge` carrying the
+                        // pre-drag snapshot, skipping the undo
+                        // entry if nothing actually moved.
+                        if let Some(doc) = document.as_mut() {
+                            if let Some(idx) = doc.edge_index(&edge_ref) {
+                                let current = &doc.mindmap.edges[idx];
+                                if current.label_config != original.label_config {
                                     doc.undo_stack.push(UndoAction::EditEdge {
                                         index: idx,
                                         before: original,
