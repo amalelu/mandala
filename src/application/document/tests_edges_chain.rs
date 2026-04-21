@@ -110,6 +110,8 @@ use super::defaults::default_cross_link_edge;
             channel: 0,
             trigger_bindings: Vec::new(),
             inline_mutations: Vec::new(),
+            min_zoom_to_render: None,
+            max_zoom_to_render: None,
         };
         let mut nodes = HashMap::new();
         nodes.insert("n1".to_string(), node);

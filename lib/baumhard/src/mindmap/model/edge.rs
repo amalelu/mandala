@@ -78,6 +78,18 @@ pub struct MindEdge {
     /// and inheritance rules as [`MindEdge::portal_from`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portal_to: Option<PortalEndpointState>,
+    /// Lower bound on `camera.zoom` at which this edge renders —
+    /// including its body glyphs, caps, label, and (for portal-mode
+    /// edges) both endpoint markers unless an endpoint or label
+    /// overrides. `None` = unbounded below. Paired with
+    /// [`Self::max_zoom_to_render`]; same flat-optional posture as
+    /// [`GlyphConnectionConfig::min_font_size_pt`]. Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_zoom_to_render: Option<f32>,
+    /// Upper bound on `camera.zoom` at which this edge renders.
+    /// `None` = unbounded above. Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_zoom_to_render: Option<f32>,
 }
 
 /// Per-endpoint overrides for a portal-mode edge's marker (the
@@ -146,6 +158,20 @@ pub struct PortalEndpointState {
     /// font size. `None` inherits the edge's `max_font_size_pt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_max_font_size_pt: Option<f32>,
+    /// Lower bound on `camera.zoom` at which this endpoint marker
+    /// (icon + text) renders. When either this or
+    /// [`Self::max_zoom_to_render`] is `Some`, it **replaces** the
+    /// edge-level `min_zoom_to_render` / `max_zoom_to_render` for
+    /// this endpoint (not intersects — matching the portal
+    /// font-clamp cascade). `None` on both sides means "inherit
+    /// the edge window unchanged". Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_zoom_to_render: Option<f32>,
+    /// Upper bound on `camera.zoom` at which this endpoint marker
+    /// renders. See [`Self::min_zoom_to_render`] for the cascade
+    /// rule. Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_zoom_to_render: Option<f32>,
 }
 
 /// Return the endpoint state for the `endpoint_node_id` side of
@@ -381,6 +407,20 @@ pub struct EdgeLabelConfig {
     /// font size. `None` inherits the edge's `max_font_size_pt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_font_size_pt: Option<f32>,
+    /// Lower bound on `camera.zoom` at which this label renders.
+    /// When either this or [`Self::max_zoom_to_render`] is `Some`,
+    /// it **replaces** the owning edge's `min_zoom_to_render` /
+    /// `max_zoom_to_render` for the label (not intersects —
+    /// matching the font-clamp cascade above). `None` on both
+    /// sides means "inherit the edge window unchanged".
+    /// Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_zoom_to_render: Option<f32>,
+    /// Upper bound on `camera.zoom` at which this label renders.
+    /// See [`Self::min_zoom_to_render`] for the cascade rule.
+    /// Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_zoom_to_render: Option<f32>,
 }
 
 /// Multiplier applied to the edge body's effective font size to

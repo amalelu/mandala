@@ -40,6 +40,19 @@ pub struct MindNode {
     /// Inline custom mutations defined on this node (not shared with other nodes).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_mutations: Vec<CustomMutation>,
+    /// Lower bound on `camera.zoom` at which this node (and its
+    /// glyph border, which inherits from the node) renders.
+    /// `None` = unbounded below. Mirrors the
+    /// `min_font_size_pt` / `max_font_size_pt` pair on
+    /// [`crate::mindmap::model::edge::GlyphConnectionConfig`] —
+    /// same flat-optional posture, orthogonal concept (presence
+    /// vs. size). Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_zoom_to_render: Option<f32>,
+    /// Upper bound on `camera.zoom` at which this node renders.
+    /// `None` = unbounded above. Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_zoom_to_render: Option<f32>,
 }
 
 /// Canvas-space top-left corner of a node's AABB. Units are

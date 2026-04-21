@@ -225,6 +225,8 @@ fn synthetic_edge_with_label(label: Option<&str>, config: Option<EdgeLabelConfig
         display_mode: None,
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -238,6 +240,8 @@ fn label_config_round_trips_through_json() {
         font_size_pt: Some(18.0),
         min_font_size_pt: Some(9.0),
         max_font_size_pt: Some(64.0),
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     };
     let edge = synthetic_edge_with_label(Some("hello"), Some(cfg.clone()));
     let json = serde_json::to_string(&edge).unwrap();
@@ -460,6 +464,8 @@ fn portal_endpoint_text_fields_round_trip() {
         text_font_size_pt: Some(14.0),
         text_min_font_size_pt: Some(10.0),
         text_max_font_size_pt: Some(48.0),
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     };
     let json = serde_json::to_string(&state).unwrap();
     assert!(json.contains("text_color"));

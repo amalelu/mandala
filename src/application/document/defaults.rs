@@ -26,6 +26,8 @@ pub(super) fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge 
         display_mode: None,
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -79,6 +81,8 @@ pub(super) fn default_orphan_node(id: &str, position: Vec2) -> MindNode {
         channel: 0,
         trigger_bindings: Vec::new(),
         inline_mutations: Vec::new(),
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -103,6 +107,8 @@ pub(super) fn default_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
         display_mode: None,
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -144,5 +150,7 @@ pub(super) fn default_portal_edge(
         display_mode: Some(DISPLAY_MODE_PORTAL.to_string()),
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }

@@ -43,6 +43,8 @@ pub(super) fn synthetic_node(id: &str, x: f64, y: f64, w: f64, h: f64, show_fram
         channel: 0,
         trigger_bindings: vec![],
         inline_mutations: vec![],
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -64,6 +66,8 @@ pub(super) fn synthetic_edge(from: &str, to: &str, anchor_from: &str, anchor_to:
         display_mode: None,
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -134,5 +138,7 @@ pub(super) fn synthetic_portal_edge(a: &str, b: &str, color: &str) -> MindEdge {
         display_mode: Some(DISPLAY_MODE_PORTAL.to_string()),
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }

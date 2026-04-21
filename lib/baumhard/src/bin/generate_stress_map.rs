@@ -268,6 +268,8 @@ fn make_node(id: String, parent_id: Option<String>, x: f64, y: f64, depth: usize
         channel: 0,
         trigger_bindings: Vec::new(),
         inline_mutations: Vec::new(),
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -290,6 +292,8 @@ fn make_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
         display_mode: None,
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -313,6 +317,8 @@ fn make_cross_link_edge(from_id: &str, to_id: &str) -> MindEdge {
         display_mode: None,
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 

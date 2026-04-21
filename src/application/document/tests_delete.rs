@@ -58,6 +58,8 @@ use super::defaults::default_cross_link_edge;
             display_mode: None,
             portal_from: None,
             portal_to: None,
+            min_zoom_to_render: None,
+            max_zoom_to_render: None,
         };
         assert!(edge_ref.matches(&edge));
 
@@ -305,6 +307,8 @@ use super::defaults::default_cross_link_edge;
             display_mode: None,
             portal_from: None,
             portal_to: None,
+            min_zoom_to_render: None,
+            max_zoom_to_render: None,
         };
 
         // Edge layout: [a→b, a→target, c→d, target→d, b→c]
