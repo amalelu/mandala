@@ -49,9 +49,8 @@ impl Renderer {
             BORDER_APPROX_CHAR_WIDTH_FRAC, BORDER_CORNER_OVERLAP_FRAC,
         };
 
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
+        let mut font_system =
+            fonts::acquire_font_system_write("rebuild_border_buffers_keyed");
 
         let mut seen: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(border_elements.len());
@@ -157,9 +156,8 @@ impl Renderer {
         if handles.is_empty() {
             return;
         }
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
+        let mut font_system =
+            fonts::acquire_font_system_write("rebuild_edge_handle_buffers");
         for handle in handles {
             let cosmic_color = parse_hex_color(&handle.color)
                 .unwrap_or(cosmic_text::Color::rgba(0, 229, 255, 255));
@@ -190,9 +188,8 @@ impl Renderer {
         connection_elements: &[ConnectionElement],
         dirty_edge_keys: Option<&std::collections::HashSet<EdgeKey>>,
     ) {
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
+        let mut font_system =
+            fonts::acquire_font_system_write("rebuild_connection_buffers_keyed");
 
         let vp_w = self.config.width as f32;
         let vp_h = self.config.height as f32;
@@ -322,9 +319,8 @@ impl Renderer {
         if label_elements.is_empty() {
             return;
         }
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
+        let mut font_system =
+            fonts::acquire_font_system_write("rebuild_connection_label_buffers");
 
         for elem in label_elements {
             let cosmic_color = parse_hex_color(&elem.color)
@@ -358,9 +354,8 @@ impl Renderer {
     /// Coordinates are in canvas space.
     pub fn rebuild_selection_rect_overlay(&mut self, min: Vec2, max: Vec2) {
         self.overlay_buffers.clear();
-        let mut font_system = fonts::FONT_SYSTEM
-            .write()
-            .expect("Failed to acquire font_system lock");
+        let mut font_system =
+            fonts::acquire_font_system_write("rebuild_selection_rect_overlay");
 
         let font_size: f32 = 14.0;
         let approx_char_width = font_size * 0.6;

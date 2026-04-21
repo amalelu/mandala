@@ -47,7 +47,13 @@ not the rules.
 - **Single-threaded, with a clean model/view split.** The event loop
   owns the `Renderer` directly; `MindMapDocument` owns the data model
   (`MindMap`, selection, undo stack) and hands the renderer intermediate
-  representations to draw from. No channels, no worker threads.
+  representations to draw from. No channels, no worker threads for app
+  logic. One disciplined exception: native builds run a freeze
+  watchdog on a background thread
+  (`src/application/app/freeze_watchdog.rs`). The watchdog only
+  reads a shared `AtomicU64` timestamp the main loop pings — it
+  never touches app state — so the single-threaded invariant for
+  the model/view pipeline is preserved.
 - **Dual rendering pipeline.** Nodes render through a Baumhard
   `Tree<GfxElement, GfxMutator>`; connections, borders, and portals
   render through a flat `RenderScene` wired via
@@ -128,6 +134,13 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   nodes, `OnClick` trigger dispatch.
 - Clipboard copy/paste — `arboard` on native; WASM `clipboard.rs` stubs
   with `log::warn!`.
+- Freeze watchdog — native runs a background thread
+  (`src/application/app/freeze_watchdog.rs`) that aborts the
+  process with a diagnostic banner if the main loop stalls longer
+  than its threshold. WASM gets the browser's built-in
+  "unresponsive tab" dialog for free, so no equivalent is wired;
+  a Worker-based liveness check can slot in when a concrete need
+  arises.
 
 **Absent on both targets** (named so they're visible as gaps, not
 mistaken for "handled somewhere"):

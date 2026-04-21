@@ -4,7 +4,9 @@
 //! every font it might need without touching the filesystem at run
 //! time.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockWriteGuard, TryLockError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use cosmic_text::fontdb::ID;
 use cosmic_text::{Attrs, AttrsList, Buffer, BufferRef, Color, Edit, Editor, Family, Metrics, Shaping, Stretch, Style, SwashCache, Weight, Wrap};
@@ -74,6 +76,73 @@ pub fn init() {
     COMPILED_FONT_ID_MAP.capacity();
 }
 
+/// Wall-clock ceiling for a `FONT_SYSTEM` write acquisition. Mandala
+/// is single-threaded (see `CLAUDE.md`), so in healthy operation the
+/// lock is always free when a caller asks for it. Any wait longer
+/// than a single frame means a re-entrancy bug — the same thread
+/// already holds the guard and is trying to acquire it again, which
+/// `std::sync::RwLock::write()` would otherwise block on forever.
+/// 5 s is orders of magnitude beyond any legitimate frame budget and
+/// conservative enough to never fire on a healthy system.
+const FONT_SYSTEM_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Poll interval while waiting for the `FONT_SYSTEM` write guard.
+/// Short enough that a lock release is noticed promptly; long enough
+/// that a spinning thread doesn't waste CPU.
+const FONT_SYSTEM_LOCK_POLL: Duration = Duration::from_millis(1);
+
+/// Acquire the `FONT_SYSTEM` write guard with a bounded timeout,
+/// panicking with `site` in the message on timeout or poison.
+///
+/// Every `FONT_SYSTEM.write()` call site in the codebase should go
+/// through this helper instead of calling `RwLock::write` directly.
+/// The rationale is in the `FONT_SYSTEM_LOCK_TIMEOUT` doc above:
+/// a timeout here is a re-entrancy bug, and without the helper that
+/// bug would hang the main thread indefinitely. With the helper, it
+/// produces a stack trace pointing at the second acquisition site.
+///
+/// `site` is a short static string naming the call site; it appears
+/// in the panic message so the stack makes the culprit obvious even
+/// in a stripped release build.
+pub fn acquire_font_system_write(site: &'static str) -> RwLockWriteGuard<'static, FontSystem> {
+    acquire_font_system_write_with_timeout(site, FONT_SYSTEM_LOCK_TIMEOUT)
+}
+
+/// Internal worker for [`acquire_font_system_write`] with a
+/// caller-chosen timeout. Exposed (crate-visible) so tests can
+/// exercise the timeout path without waiting the full production
+/// 5-second budget.
+pub fn acquire_font_system_write_with_timeout(
+    site: &'static str,
+    timeout: Duration,
+) -> RwLockWriteGuard<'static, FontSystem> {
+    let start = Instant::now();
+    loop {
+        match FONT_SYSTEM.try_write() {
+            Ok(guard) => return guard,
+            Err(TryLockError::Poisoned(_)) => {
+                panic!(
+                    "FONT_SYSTEM lock is poisoned (site: {site}). A prior \
+                     holder panicked while holding the guard."
+                );
+            }
+            Err(TryLockError::WouldBlock) => {
+                if start.elapsed() >= timeout {
+                    panic!(
+                        "FONT_SYSTEM write lock not available after {:?} \
+                         (site: {site}). In a single-threaded app this \
+                         almost certainly means the current thread \
+                         already holds the guard — look for a re-entrant \
+                         call on the stack above.",
+                        timeout
+                    );
+                }
+                thread::sleep(FONT_SYSTEM_LOCK_POLL);
+            }
+        }
+    }
+}
+
 /// Invoke `closure(app_font, source)` for every entry in
 /// [`FONT_SOURCES`]. `Source` is cloned per call because cosmic-text
 /// takes it by value when loading.
@@ -121,9 +190,11 @@ pub fn get_default_attr_list(font_family_name: &str) -> AttrsList {
 /// Build a cosmic-text `Editor` seeded with `text`, shaping it
 /// against the given `font_id`.
 ///
-/// Acquires the `FONT_SYSTEM` **write** lock for the duration of the
-/// call; callers holding any existing guard on [`FONT_SYSTEM`] will
-/// deadlock. Panics if `font_id` is missing from
+/// Acquires the `FONT_SYSTEM` **write** lock for the duration of
+/// the call via [`acquire_font_system_write`]; a caller that already
+/// holds a guard on [`FONT_SYSTEM`] is a re-entrancy bug and will
+/// trigger the helper's timeout panic with a stack trace pointing
+/// at the second acquisition site. Panics if `font_id` is missing from
 /// [`COMPILED_FONT_ID_MAP`] or if the face cannot be resolved.
 pub fn create_cosmic_editor_str(
     font_id: &AppFont,
@@ -132,7 +203,7 @@ pub fn create_cosmic_editor_str(
     text: &str,
 ) -> Editor<'static> {
     debug!("Waiting for font-system write lock");
-    let mut font_system = FONT_SYSTEM.write().expect("FontSystem lock was poisoned");
+    let mut font_system = acquire_font_system_write("create_cosmic_editor_str");
 
     let buffer = Buffer::new(&mut font_system, Metrics::new(scale, line_height));
 
@@ -149,12 +220,14 @@ pub fn create_cosmic_editor_str(
 /// Build an empty cosmic-text `Editor` with word-wrap enabled at the
 /// given bounds.
 ///
-/// Acquires the `FONT_SYSTEM` **write** lock for the duration of the
-/// call; callers holding any existing guard on [`FONT_SYSTEM`] will
-/// deadlock.
+/// Acquires the `FONT_SYSTEM` **write** lock for the duration of
+/// the call via [`acquire_font_system_write`]; a caller that already
+/// holds a guard on [`FONT_SYSTEM`] is a re-entrancy bug and will
+/// trigger the helper's timeout panic with a stack trace pointing
+/// at the second acquisition site.
 pub fn create_cosmic_editor(scale: f32, line_height: f32, bound_x: f32, bound_y: f32) -> Editor<'static> {
     debug!("Waiting for font-system write lock");
-    let mut font_system = FONT_SYSTEM.write().expect("FontSystem lock was poisoned");
+    let mut font_system = acquire_font_system_write("create_cosmic_editor");
     let mut buffer = Buffer::new(&mut font_system, Metrics::new(scale, line_height));
     buffer.set_size(&mut font_system, Some(bound_x), Some(bound_y));
     buffer.set_wrap(&mut font_system, Wrap::Word);
@@ -174,7 +247,7 @@ pub fn unwrap_buffer_ref<'a>(buffer_ref: &'a BufferRef) -> &'a Buffer {
 /// [`FONT_SYSTEM`] will deadlock.
 pub fn adjust_buffer_metrics(buffer: &mut Buffer, metrics: Metrics) {
     debug!("Waiting for font-system write lock");
-    let mut font_system = FONT_SYSTEM.write().expect("FontSystem lock was poisoned");
+    let mut font_system = acquire_font_system_write("adjust_buffer_metrics");
     buffer.set_metrics(&mut font_system, metrics);
 }
 

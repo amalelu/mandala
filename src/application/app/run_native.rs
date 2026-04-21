@@ -9,6 +9,7 @@
 
 use super::*;
 
+use super::freeze_watchdog::FreezeWatchdog;
 use baumhard::mindmap::tree_builder::MindMapTree;
 use winit::application::ApplicationHandler;
 use winit::event::StartCause;
@@ -18,11 +19,20 @@ use winit::window::WindowId;
 /// Entry point called from `Application::run` on every non-WASM
 /// target. Hands control to winit's event loop; returns when the
 /// window is closed.
+///
+/// Spawns the freeze watchdog before handing off to winit so it
+/// can catch a hang anywhere after the window is created, not just
+/// inside `drain_frame`. See
+/// [`super::freeze_watchdog::FreezeWatchdog`] for the rationale —
+/// short version: Mandala is single-threaded and a same-thread
+/// `std::sync::RwLock` re-entry deadlock would otherwise hang
+/// silently forever.
 pub(super) fn run(app: Application) {
     let event_loop = EventLoop::new().expect("Could not create an EventLoop");
     let mut handler = NativeApp {
         options: app.into_options(),
         init: None,
+        watchdog: FreezeWatchdog::spawn(),
     };
     event_loop
         .run_app(&mut handler)
@@ -37,6 +47,11 @@ pub(super) fn run(app: Application) {
 struct NativeApp {
     options: Options,
     init: Option<InitState>,
+    /// Freeze watchdog — ticked at the top of every `AboutToWait`
+    /// drain and also on every window event, so a frame that
+    /// hangs mid-drain or mid-event produces a diagnostic abort
+    /// after [`super::freeze_watchdog::FREEZE_THRESHOLD`].
+    watchdog: FreezeWatchdog,
 }
 
 impl ApplicationHandler for NativeApp {
@@ -52,6 +67,11 @@ impl ApplicationHandler for NativeApp {
             .create_window(Window::default_attributes())
             .expect("Failed to create application window");
         self.init = Some(run_native_init::build(&self.options, Arc::new(window)));
+        // Ping once as soon as the window is up so the watchdog
+        // knows the main loop has reached a live state. Before
+        // this point, the watchdog treats the zeroed atomic as
+        // "still initializing" and doesn't enforce the threshold.
+        self.watchdog.tick();
     }
 
     fn window_event(
@@ -60,12 +80,14 @@ impl ApplicationHandler for NativeApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        self.watchdog.tick();
         if let Some(init) = self.init.as_mut() {
             init.handle_event(event_loop, Event::WindowEvent { window_id, event });
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.watchdog.tick();
         if let Some(init) = self.init.as_mut() {
             init.handle_event(event_loop, Event::AboutToWait);
         }

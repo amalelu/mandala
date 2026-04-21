@@ -46,7 +46,7 @@ use std::time::Duration;
 use cosmic_text::{Attrs, AttrsList, Buffer, FontSystem};
 use cosmic_text::{Family, Style};
 use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
-use log::{error, info};
+use log::{error, info, warn};
 
 use rustc_hash::FxHashMap;
 
@@ -354,6 +354,45 @@ pub(super) struct NodeBackgroundRect {
     /// Stable shape id from [`baumhard::gfx_structs::shape::NodeShape::shader_id`].
     /// Flat-interpolated to the fragment shader's `switch`.
     pub shape_id: u32,
+}
+
+/// Clamp a requested surface (width, height) to the GPU's
+/// `max_texture_dimension_2d`. Pure function so the clamp logic is
+/// testable without a live GPU device.
+///
+/// # Why this exists
+///
+/// `surface.configure` on dimensions beyond the GPU's 2D texture
+/// limit can leave the surface in a bad state on some wgpu
+/// backends — subsequent `get_current_texture()` calls may then
+/// block indefinitely rather than returning an error. Clamping
+/// proactively trades a letterboxed frame for a non-hung UI. The
+/// scenario is realistic on ultra-wide displays or multi-monitor-
+/// maxed windows.
+pub(crate) fn clamp_surface_size_to_gpu_limit(
+    width: u32,
+    height: u32,
+    max_dim: u32,
+) -> (u32, u32) {
+    let clamped_width = if width > max_dim {
+        warn!(
+            "Requested surface width {} exceeds GPU max_texture_dimension_2d {}; clamping",
+            width, max_dim
+        );
+        max_dim
+    } else {
+        width
+    };
+    let clamped_height = if height > max_dim {
+        warn!(
+            "Requested surface height {} exceeds GPU max_texture_dimension_2d {}; clamping",
+            height, max_dim
+        );
+        max_dim
+    } else {
+        height
+    };
+    (clamped_width, clamped_height)
 }
 
 impl Renderer {
@@ -668,6 +707,8 @@ impl Renderer {
             error!("Height has to be higher than 0 but was {}", height);
             return;
         }
+        let max_dim = self.device.limits().max_texture_dimension_2d;
+        let (width, height) = clamp_surface_size_to_gpu_limit(width, height, max_dim);
         info!("Updating surface size");
         self.config.width = width;
         self.config.height = height;
