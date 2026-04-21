@@ -345,6 +345,96 @@ impl MindMapDocument {
         true
     }
 
+    /// Set (or clear, with `color = None`) the `label_config.color`
+    /// override on a line-mode edge's label. Sibling of
+    /// [`Self::set_edge_color`], which targets the edge body cascade;
+    /// this setter writes only the label channel so a coloured edge
+    /// can carry a differently-coloured label. Forks a fresh
+    /// `EdgeLabelConfig` on the edge if one isn't already present.
+    /// Rolls back an all-default `EdgeLabelConfig` when clearing the
+    /// color would leave the struct entirely empty, matching the
+    /// rollback discipline on `set_portal_label_color` so unchanged
+    /// selections don't leave undo droppings.
+    pub fn set_edge_label_color(&mut self, edge_ref: &EdgeRef, color: Option<&str>) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let current = self.mindmap.edges[idx]
+            .label_config
+            .as_ref()
+            .and_then(|c| c.color.clone());
+        let new_val = color.map(|s| s.to_string());
+        if current == new_val {
+            return false;
+        }
+        let before = self.mindmap.edges[idx].clone();
+        match new_val {
+            Some(c) => {
+                Self::ensure_label_config(&mut self.mindmap.edges[idx]).color = Some(c);
+            }
+            None => {
+                if let Some(cfg) = self.mindmap.edges[idx].label_config.as_mut() {
+                    cfg.color = None;
+                    if cfg == &EdgeLabelConfig::default() {
+                        self.mindmap.edges[idx].label_config = None;
+                    }
+                }
+            }
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Read the resolved edge-label color for copy-to-clipboard.
+    /// Walks the label color cascade: `label_config.color` →
+    /// `glyph_connection.color` → `edge.color`, with
+    /// `var(--name)` references expanded through the theme
+    /// variable map. Returns `None` only when the edge itself is
+    /// missing; a no-override edge still produces a concrete hex
+    /// (falls back to `edge.color`) so the user gets something
+    /// pasteable in every case.
+    pub fn resolve_edge_label_color(&self, edge_ref: &EdgeRef) -> Option<String> {
+        let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
+        let cfg =
+            baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(edge, &self.mindmap.canvas);
+        let raw = edge
+            .label_config
+            .as_ref()
+            .and_then(|c| c.color.as_deref())
+            .or(cfg.color.as_deref())
+            .unwrap_or(edge.color.as_str());
+        Some(
+            baumhard::util::color::resolve_var(raw, &self.mindmap.canvas.theme_variables)
+                .to_string(),
+        )
+    }
+
+    /// Read the resolved portal-text color for copy-to-clipboard.
+    /// Sibling of [`Self::resolve_portal_label_color`] targeting
+    /// the text channel: cascade is `text_color` → icon color
+    /// cascade (per-endpoint `color` → `glyph_connection.color` →
+    /// `edge.color`). Returns `None` only when the edge is
+    /// missing.
+    pub fn resolve_portal_text_color(
+        &self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+    ) -> Option<String> {
+        let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
+        let state = baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
+        // Text's own override wins; fall back to the icon's
+        // already-resolved cascade via `resolve_portal_label_color`.
+        if let Some(hex) = state.and_then(|s| s.text_color.as_deref()) {
+            return Some(
+                baumhard::util::color::resolve_var(hex, &self.mindmap.canvas.theme_variables)
+                    .to_string(),
+            );
+        }
+        self.resolve_portal_label_color(edge_ref, endpoint_node_id)
+    }
+
     /// Set the color override on a connection's glyph_connection config.
     /// Passing `None` clears the override so the edge inherits from
     /// `edge.color` (or the canvas default). Returns `true` if the edge
