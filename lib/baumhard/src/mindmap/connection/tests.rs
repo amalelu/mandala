@@ -837,3 +837,85 @@ fn closest_point_on_path_cubic_offset_cursor_produces_signed_perp() {
     assert!((t - true_t).abs() < 1.0e-2, "t={t} vs {true_t}");
     assert!((perp - offset).abs() < 1.0e-1, "perp={perp} vs {offset}");
 }
+
+#[test]
+fn closest_point_on_path_cubic_degenerate_all_coincident() {
+    // All four control points coincident: every evaluation of
+    // B(t) returns the same point, tangent is zero everywhere.
+    // Contract: `t=0`, `perp=0` — callers get a deterministic
+    // fallback rather than NaN.
+    let pt = Vec2::new(7.0, 11.0);
+    let path = ConnectionPath::CubicBezier {
+        start: pt,
+        control1: pt,
+        control2: pt,
+        end: pt,
+    };
+    let (t, perp) = closest_point_on_path(&path, Vec2::new(50.0, 50.0));
+    assert!(t.is_finite());
+    assert!(perp.is_finite());
+    // The closest point on a degenerate curve is the coincident
+    // point; perpendicular from cursor to it projected on the
+    // zero tangent is zero by convention.
+    assert!(
+        (0.0..=1.0).contains(&t),
+        "t stayed in [0,1] under degenerate curve"
+    );
+    assert_eq!(perp, 0.0);
+}
+
+#[test]
+fn closest_point_on_path_cubic_near_inflection_never_worse_than_seed() {
+    // Cubic with an inflection point — B''(t) changes sign near
+    // the middle of the curve, which can send a naive Newton
+    // step past the true minimum. The divergence guard compares
+    // Newton's refined dist² against the sampling seed's and
+    // falls back when Newton diverged. Any cursor position
+    // must produce a path point whose distance is ≤ the best
+    // sample's distance.
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(10.0, 100.0);
+    let p2 = Vec2::new(90.0, -100.0); // inflection between p1 and p2
+    let p3 = Vec2::new(100.0, 0.0);
+    let path = ConnectionPath::CubicBezier {
+        start: p0,
+        control1: p1,
+        control2: p2,
+        end: p3,
+    };
+    // Cursor at a position that exercises the inflection region.
+    let cursors = [
+        Vec2::new(50.0, 0.0),
+        Vec2::new(50.0, 10.0),
+        Vec2::new(50.0, -10.0),
+        Vec2::new(25.0, 30.0),
+        Vec2::new(75.0, -30.0),
+    ];
+    for cursor in cursors {
+        // Compute the sampling-only seed distance for the same
+        // cursor by replicating the 32-sample sweep.
+        let mut seed_best = f32::MAX;
+        for i in 0..=32 {
+            let t = i as f32 / 32.0;
+            let d = (crate::mindmap::connection::bezier::cubic_bezier_point(
+                t, p0, p1, p2, p3,
+            ) - cursor)
+                .length_squared();
+            if d < seed_best {
+                seed_best = d;
+            }
+        }
+        let (t, _perp) = closest_point_on_path(&path, cursor);
+        let point =
+            crate::mindmap::connection::bezier::cubic_bezier_point(t, p0, p1, p2, p3);
+        let refined_dist_sq = (point - cursor).length_squared();
+        assert!(
+            refined_dist_sq <= seed_best + 1.0e-3,
+            "Newton must never be worse than seed: refined={} seed_best={} t={} cursor={:?}",
+            refined_dist_sq,
+            seed_best,
+            t,
+            cursor
+        );
+    }
+}

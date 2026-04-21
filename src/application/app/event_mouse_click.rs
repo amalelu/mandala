@@ -409,7 +409,7 @@ pub(super) fn handle_mouse_input(
             } else {
                 // Released
                 match std::mem::replace(drag_state, DragState::None) {
-                    DragState::Pending { hit_node, .. } => {
+                    DragState::Pending { hit_node, hit_edge_label, .. } => {
                         // If the node text editor is open, the
                         // release decides whether to commit or
                         // swallow. If the release lands inside the
@@ -463,24 +463,26 @@ pub(super) fn handle_mouse_input(
                         // dbl-click to edit" idiom the node /
                         // portal-label variants already follow —
                         // the dbl-click branch above handles the
-                        // editor-open case. Takes precedence over
-                        // regular node / edge click processing.
+                        // editor-open case.
+                        //
+                        // Consume the `hit_edge_label` captured at
+                        // press time (with its full priority chain:
+                        // node > portal_text > portal_icon >
+                        // edge_label > edge_body). Re-hit-testing
+                        // at release would ignore that chain — a
+                        // press that landed on a portal icon but
+                        // drifted a few pixels onto an overlapping
+                        // edge label before release would mis-
+                        // route to `EdgeLabel` instead of the
+                        // portal's sub-threshold single-click.
                         let edge_label_target: Option<crate::application::document::EdgeRef> =
-                            if hit_node.is_none() {
-                                let canvas_pos = renderer.screen_to_canvas(
-                                    cursor_pos.0 as f32,
-                                    cursor_pos.1 as f32,
-                                );
-                                renderer.hit_test_any_edge_label(canvas_pos).map(|k| {
-                                    crate::application::document::EdgeRef::new(
-                                        k.from_id.as_str(),
-                                        k.to_id.as_str(),
-                                        k.edge_type.as_str(),
-                                    )
-                                })
-                            } else {
-                                None
-                            };
+                            hit_edge_label.map(|k| {
+                                crate::application::document::EdgeRef::new(
+                                    k.from_id.as_str(),
+                                    k.to_id.as_str(),
+                                    k.edge_type.as_str(),
+                                )
+                            });
                         let entered_label_select =
                             if let Some(er) = edge_label_target {
                                 if let Some(doc) = document.as_mut() {

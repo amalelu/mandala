@@ -199,15 +199,57 @@ pub fn tangent_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
 ///   with `CLOSEST_POINT_NEWTON_ITERS` iterations of Newton's
 ///   method on `f(t) = (B(t) - cursor) · B'(t) = 0`. This
 ///   converges quadratically near the minimum and handles the
-///   curved case without requiring the arc-length table (`t`-space
-///   uniform sampling is cheap and the refinement fixes the
-///   parameter-space bias).
+///   curved case without requiring the arc-length table. The
+///   Newton step is guarded two ways:
+///   1. `denom ≈ 0` breaks out early to avoid a divide that would
+///      send `t` to infinity.
+///   2. After refinement, the Newton result's squared distance is
+///      compared against the sampling sweep's best. If Newton
+///      diverged (seed was better), the sweep's `best_t` is used
+///      instead. Near inflection points where `B''(t)` briefly
+///      dominates `B'(t)·B'(t)` with opposite sign, Newton can
+///      oscillate between endpoints; this fallback keeps the
+///      answer monotone in "closer to cursor".
 ///
-/// The returned `perpendicular_offset` is the signed distance from
-/// the path to the cursor along [`normal_at_t`] at the returned
-/// `t` — positive matches the normal direction (see `normal_at_t`
+/// The returned `perpendicular_offset` is the signed **component
+/// along the path normal** at the returned `t` — `to_cursor ·
+/// normal_at_t(t)`. For a cursor on the curve this is ±0, matching
+/// the Euclidean distance. For a cursor far enough off the
+/// curve that `t` clamped to `0` or `1`, this is only the
+/// perpendicular component at the endpoint — the tangential
+/// component is discarded. That's the right shape for the label-
+/// drag caller (the label sits on the path with a perpendicular
+/// offset; tangential drift past the endpoint just pins `t` at 0
+/// or 1), but callers that need full Euclidean distance from the
+/// path segment should use [`distance_to_path`] instead.
+/// Positive perp matches the normal direction (see `normal_at_t`
 /// for the Y-down orientation note); negative means the cursor is
 /// on the other side.
+// ---- tuning constants for the cubic closest-point search ----
+
+/// Uniform-t sample count for the cubic-Bezier closest-point
+/// search. 32 keeps the sweep well under 1µs at f32 and is
+/// sufficient to seed the Newton refiner in the neighbourhood of
+/// the true minimum for labels on typical mindmap curvatures.
+const CLOSEST_POINT_SAMPLES: usize = 32;
+
+/// Newton iterations applied after the sampling sweep. 6 is more
+/// than enough for quadratic convergence to f32 epsilon on
+/// well-conditioned curves; caps the cost.
+const CLOSEST_POINT_NEWTON_ITERS: usize = 6;
+
+/// Minimum `|f'(t)|` before the Newton iteration bails. Below
+/// this, `numer / denom` would produce a step that either flips
+/// sign (overshoot the minimum) or flies off the [0, 1] range on
+/// near-inflection cubics. The seed-vs-refined fallback below
+/// catches the cases this early-break misses.
+const CLOSEST_POINT_NEWTON_DENOM_EPSILON: f32 = f32::EPSILON;
+
+/// Step-size below which Newton has converged. Each iteration
+/// after this produces noise at f32 precision; bailing avoids
+/// burning cycles on bit-level oscillation.
+const CLOSEST_POINT_NEWTON_STEP_EPSILON: f32 = 1.0e-5;
+
 pub fn closest_point_on_path(path: &ConnectionPath, cursor: Vec2) -> (f32, f32) {
     match path {
         ConnectionPath::Straight { start, end } => {
@@ -257,36 +299,43 @@ pub fn closest_point_on_path(path: &ConnectionPath, cursor: Vec2) -> (f32, f32) 
                 let bpp = cubic_bezier_second_derivative(t, p0, p1, p2, p3);
                 let numer = (b - cursor).dot(bp);
                 let denom = bp.dot(bp) + (b - cursor).dot(bpp);
-                if denom.abs() < f32::EPSILON {
+                if denom.abs() < CLOSEST_POINT_NEWTON_DENOM_EPSILON {
                     break;
                 }
                 let next = (t - numer / denom).clamp(0.0, 1.0);
-                if (next - t).abs() < 1.0e-5 {
+                if (next - t).abs() < CLOSEST_POINT_NEWTON_STEP_EPSILON {
                     t = next;
                     break;
                 }
                 t = next;
             }
-            let closest = cubic_bezier_point(t, p0, p1, p2, p3);
+            // Divergence guard: if Newton wandered worse than the
+            // sampling seed (possible near inflection points
+            // where `B''` flips sign and the step overshoots),
+            // fall back to the seed. Without this the caller can
+            // see `t` oscillate between 0 and 1 under a slow
+            // drag even though the geometric closest point is
+            // mid-curve.
+            let refined_point = cubic_bezier_point(t, p0, p1, p2, p3);
+            let refined_dist_sq = (refined_point - cursor).length_squared();
+            let (final_t, closest) = if refined_dist_sq <= best_dist_sq {
+                (t, refined_point)
+            } else {
+                (best_t, cubic_bezier_point(best_t, p0, p1, p2, p3))
+            };
             let to_cursor = cursor - closest;
-            let tangent = cubic_bezier_tangent(t, p0, p1, p2, p3).normalize_or_zero();
+            let tangent =
+                cubic_bezier_tangent(final_t, p0, p1, p2, p3).normalize_or_zero();
             let normal = Vec2::new(-tangent.y, tangent.x);
             let perp = to_cursor.dot(normal);
-            (t, perp)
+            (final_t, perp)
         }
     }
 }
 
-/// Uniform-t sample count for the cubic-Bezier closest-point
-/// search. 32 keeps the sweep well under 1µs at f32 and is
-/// sufficient to seed the Newton refiner in the neighbourhood of
-/// the true minimum for labels on typical mindmap curvatures.
-const CLOSEST_POINT_SAMPLES: usize = 32;
-
-/// Newton iterations applied after the sampling sweep.
-/// 6 iterations is more than enough for quadratic convergence to
-/// f32 epsilon on well-conditioned curves; caps the cost.
-const CLOSEST_POINT_NEWTON_ITERS: usize = 6;
+// closest-point tuning constants live alongside their user
+// (`closest_point_on_path`). Kept `const` rather than inlined so a
+// future reviewer sees the tuning knobs listed together.
 
 /// Unit normal of `path` at `t`. Computed as the tangent rotated
 /// 90° in canvas coordinates via `(x, y) → (-y, x)`.

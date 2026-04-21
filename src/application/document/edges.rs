@@ -547,6 +547,17 @@ impl MindMapDocument {
     /// changed. Rejects non-finite or non-positive values by
     /// leaving the field untouched.
     ///
+    /// **Inverted bounds guard.** The resolved `(min, max)` pair
+    /// (after applying overrides on top of the existing struct)
+    /// must satisfy `min ≤ max`. Inverted input returns `false`
+    /// without mutating — landing an inverted pair would panic
+    /// the next renderer frame via
+    /// [`baumhard::mindmap::model::GlyphConnectionConfig::effective_font_size_pt`]'s
+    /// `clamp` call (interactive-path invariant per §9). The
+    /// console `font` command re-checks up-front so the user gets
+    /// a clear error message; this boundary check is defence in
+    /// depth for any other caller.
+    ///
     /// A single `EditEdge` undo entry covers the whole triple, so
     /// Ctrl+Z reverses the atomic edit in one step.
     pub fn set_edge_font(
@@ -565,6 +576,21 @@ impl MindMapDocument {
             &mut self.mindmap.edges[idx],
             &self.mindmap.canvas,
         );
+        // Resolve the (min, max) pair that will land on the struct
+        // if this call succeeds. Reject inverted pairs before any
+        // mutation — Self::clamp panics on `min > max`, and a
+        // later renderer frame hits the same panic via
+        // `effective_font_size_pt`.
+        let final_min = min
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(cfg.min_font_size_pt);
+        let final_max = max
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(cfg.max_font_size_pt);
+        if final_min > final_max {
+            self.mindmap.edges[idx] = before;
+            return false;
+        }
         let mut changed = false;
         if let Some(m) = min.filter(|v| v.is_finite() && *v > 0.0) {
             if (cfg.min_font_size_pt - m).abs() >= f32::EPSILON {
@@ -579,6 +605,7 @@ impl MindMapDocument {
             }
         }
         if let Some(s) = size.filter(|v| v.is_finite() && *v > 0.0) {
+            // Bounds resolved above, known-ordered, safe for clamp.
             let clamped = s.clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
             if (cfg.font_size_pt - clamped).abs() >= f32::EPSILON {
                 cfg.font_size_pt = clamped;
@@ -630,6 +657,31 @@ impl MindMapDocument {
             body_min = cfg.min_font_size_pt;
             body_max = cfg.max_font_size_pt;
         }
+        // Resolve the (min, max) pair that will land after this
+        // call. Either side falls back to the existing label
+        // override or the body's clamp when the call leaves it
+        // untouched. Inverted pairs bail before any mutation —
+        // `f32::clamp` panics on `min > max`, and the renderer's
+        // `effective_font_size_pt` would hit the same panic.
+        let existing_label_min = self.mindmap.edges[idx]
+            .label_config
+            .as_ref()
+            .and_then(|c| c.min_font_size_pt);
+        let existing_label_max = self.mindmap.edges[idx]
+            .label_config
+            .as_ref()
+            .and_then(|c| c.max_font_size_pt);
+        let final_min = min
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .or(existing_label_min)
+            .unwrap_or(body_min);
+        let final_max = max
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .or(existing_label_max)
+            .unwrap_or(body_max);
+        if final_min > final_max {
+            return false;
+        }
         let before = self.mindmap.edges[idx].clone();
         let label_cfg = Self::ensure_label_config(&mut self.mindmap.edges[idx]);
         let mut changed = false;
@@ -648,6 +700,10 @@ impl MindMapDocument {
         if let Some(s) = size.filter(|v| v.is_finite() && *v > 0.0) {
             let effective_min = label_cfg.min_font_size_pt.unwrap_or(body_min);
             let effective_max = label_cfg.max_font_size_pt.unwrap_or(body_max);
+            // `effective_{min,max}` are guaranteed ordered by the
+            // `final_min > final_max` guard above — `effective_*`
+            // resolve through the same `user-override → label
+            // override → body clamp` cascade.
             let clamped = s.clamp(effective_min, effective_max);
             if label_cfg.font_size_pt != Some(clamped) {
                 label_cfg.font_size_pt = Some(clamped);
@@ -701,6 +757,40 @@ impl MindMapDocument {
             body_min = cfg.min_font_size_pt;
             body_max = cfg.max_font_size_pt;
         }
+        // Check that the endpoint id resolves to a portal slot
+        // before we clone the edge — cloning unnecessarily for a
+        // bogus endpoint id would be wasteful.
+        {
+            let edge = &self.mindmap.edges[idx];
+            if !(endpoint_node_id == edge.from_id || endpoint_node_id == edge.to_id) {
+                return false;
+            }
+        }
+        // Resolve the (min, max) pair that will land after this
+        // call, using the same user-override → endpoint-override
+        // → body-clamp cascade as `effective_font_size_pt` on the
+        // render side. Reject inverted bounds before any mutation
+        // to keep `clamp` panic-safe here and downstream.
+        let (existing_text_min, existing_text_max) = {
+            let edge = &self.mindmap.edges[idx];
+            let state =
+                baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
+            (
+                state.and_then(|s| s.text_min_font_size_pt),
+                state.and_then(|s| s.text_max_font_size_pt),
+            )
+        };
+        let final_min = min
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .or(existing_text_min)
+            .unwrap_or(body_min);
+        let final_max = max
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .or(existing_text_max)
+            .unwrap_or(body_max);
+        if final_min > final_max {
+            return false;
+        }
         let before = self.mindmap.edges[idx].clone();
         let slot = match portal_endpoint_state_mut(
             &mut self.mindmap.edges[idx],
@@ -709,6 +799,11 @@ impl MindMapDocument {
             Some(s) => s,
             None => return false,
         };
+        // Track whether this call forked a fresh `PortalEndpointState`
+        // so the default-scrub below only touches the slot this
+        // call actually installed (a pre-existing default state on
+        // the *other* endpoint must survive untouched).
+        let forked_default = slot.is_none();
         let state = slot.get_or_insert_with(PortalEndpointState::default);
         let mut changed = false;
         if let Some(m) = min.filter(|v| v.is_finite() && *v > 0.0) {
@@ -726,6 +821,8 @@ impl MindMapDocument {
         if let Some(s) = size.filter(|v| v.is_finite() && *v > 0.0) {
             let effective_min = state.text_min_font_size_pt.unwrap_or(body_min);
             let effective_max = state.text_max_font_size_pt.unwrap_or(body_max);
+            // Guaranteed ordered by the `final_min > final_max`
+            // guard above.
             let clamped = s.clamp(effective_min, effective_max);
             if state.text_font_size_pt != Some(clamped) {
                 state.text_font_size_pt = Some(clamped);
@@ -736,21 +833,27 @@ impl MindMapDocument {
             self.mindmap.edges[idx] = before;
             return false;
         }
-        if let Some(existing) = self.mindmap.edges[idx]
-            .portal_from
-            .as_ref()
-            .filter(|s| *s == &PortalEndpointState::default())
-        {
-            let _ = existing;
-            self.mindmap.edges[idx].portal_from = None;
-        }
-        if let Some(existing) = self.mindmap.edges[idx]
-            .portal_to
-            .as_ref()
-            .filter(|s| *s == &PortalEndpointState::default())
-        {
-            let _ = existing;
-            self.mindmap.edges[idx].portal_to = None;
+        // If this call forked a fresh default state and still
+        // wrote nothing interesting (all writes would be
+        // redundant), roll the slot back to `None` — matches the
+        // label-config scrub discipline. Only the slot this call
+        // wrote is touched; the *other* endpoint's state (even if
+        // it happens to hold a pre-existing default) is left
+        // alone, because the scrub is conditional on
+        // `forked_default`.
+        if forked_default {
+            let edge = &mut self.mindmap.edges[idx];
+            let post_state = baumhard::mindmap::model::portal_endpoint_state(
+                edge,
+                endpoint_node_id,
+            );
+            if post_state.map_or(false, |s| s == &PortalEndpointState::default()) {
+                if endpoint_node_id == edge.from_id {
+                    edge.portal_from = None;
+                } else if endpoint_node_id == edge.to_id {
+                    edge.portal_to = None;
+                }
+            }
         }
         self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
         self.dirty = true;

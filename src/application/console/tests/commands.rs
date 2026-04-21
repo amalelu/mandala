@@ -318,6 +318,22 @@ fn test_font_kv_invalid_value_reports_error() {
 }
 
 #[test]
+fn test_font_kv_inverted_min_max_reports_error() {
+    // `min=20 max=10` is inverted — would panic `f32::clamp` on
+    // the next render frame. Console rejects up front so the
+    // user sees a clear error (setter also rejects defence-in-
+    // depth, but via silent no-op).
+    let mut doc = load_test_doc();
+    let _ = select_first_edge(&mut doc);
+    let result = run("font min=20 max=10", &mut doc);
+    assert!(
+        matches!(result, ExecResult::Err(_)),
+        "inverted bounds must surface as Err, got {:?}",
+        result
+    );
+}
+
+#[test]
 fn test_label_position_t_writes_label_config() {
     // `label position_t=0.25` lands the value directly into
     // `label_config.position_t`. Values outside [0, 1] clamp

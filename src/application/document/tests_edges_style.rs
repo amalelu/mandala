@@ -909,3 +909,82 @@ use super::defaults::default_cross_link_edge;
         assert!(!doc.set_edge_label_perpendicular_offset(&er, Some(f32::INFINITY)));
         assert!(doc.undo_stack.is_empty());
     }
+
+    #[test]
+    fn test_set_edge_font_rejects_inverted_min_max_explicit() {
+        // Explicit inverted bounds — `min=20 max=10` — would panic
+        // `f32::clamp` on the next render frame. Setter refuses
+        // to land the pair.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        doc.undo_stack.clear();
+        assert!(!doc.set_edge_font(&er, Some(14.0), Some(20.0), Some(10.0)));
+        assert!(doc.undo_stack.is_empty(), "no undo entry for rejected triple");
+    }
+
+    #[test]
+    fn test_set_edge_font_rejects_inverted_against_existing_max() {
+        // `min=20` alone with `max` already below 20. The
+        // incoming min inverts against the struct's existing max.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Seed a baseline with max=10.
+        assert!(doc.set_edge_font(&er, Some(8.0), Some(5.0), Some(10.0)));
+        doc.undo_stack.clear();
+        // Now try to set min=20: resolved (20, 10) is inverted.
+        assert!(!doc.set_edge_font(&er, None, Some(20.0), None));
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_edge_label_font_rejects_inverted_min_max() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        doc.undo_stack.clear();
+        assert!(!doc.set_edge_label_font(&er, Some(14.0), Some(30.0), Some(20.0)));
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_portal_text_font_rejects_inverted_min_max() {
+        use baumhard::mindmap::model::DISPLAY_MODE_PORTAL;
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+        let endpoint = doc.mindmap.edges[idx].from_id.clone();
+        doc.undo_stack.clear();
+        assert!(!doc.set_portal_text_font(&er, &endpoint, Some(14.0), Some(30.0), Some(20.0)));
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_portal_text_font_does_not_clear_other_endpoint_default_state() {
+        // Regression for R2.2: the pre-fix scrub block scanned
+        // both `portal_from` and `portal_to` and nuked either one
+        // that happened to be in `PortalEndpointState::default()`
+        // shape. A setter call that forks a fresh state on the
+        // `from` side must not silently discard a pre-existing
+        // default state on the `to` side.
+        use baumhard::mindmap::model::{PortalEndpointState, DISPLAY_MODE_PORTAL};
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+        // Seed the to-endpoint with a persistent default state —
+        // this shape is rare in normal flows but could arise
+        // through hand-edited JSON or a future code path that
+        // installs default without fields.
+        doc.mindmap.edges[idx].portal_to = Some(PortalEndpointState::default());
+        let from_id = doc.mindmap.edges[idx].from_id.clone();
+        // Set text font only on the from-endpoint.
+        assert!(doc.set_portal_text_font(&er, &from_id, Some(14.0), None, None));
+        // Post-call: from-endpoint got the text_font_size; to-
+        // endpoint's pre-existing state is untouched.
+        assert!(doc.mindmap.edges[idx].portal_from.is_some());
+        assert_eq!(
+            doc.mindmap.edges[idx].portal_to,
+            Some(PortalEndpointState::default()),
+            "unrelated endpoint's default state must survive"
+        );
+    }

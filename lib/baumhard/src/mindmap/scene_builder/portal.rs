@@ -346,15 +346,30 @@ pub(crate) fn layout_portal_text(
     // grows the text independently — a 6pt annotation beside a
     // 50pt badge still sits at a consistent distance from the badge.
     let padding = icon_font_size_pt * PORTAL_TEXT_PADDING_FRAC;
-    // Icon center as the anchor for text placement. Text AABB
-    // is positioned so its inner edge sits one padding beyond
-    // the icon's outer edge along the outward normal, with
-    // perpendicular centering on the icon.
+    // Icon center as the anchor for text placement.
     let icon_center = Vec2::new(
         icon.top_left.x + icon.bounds.x * 0.5,
         icon.top_left.y + icon.bounds.y * 0.5,
     );
-    let outward_offset = icon.bounds.x * 0.5 + padding + bounds.x * 0.5;
+    // Distance along the outward normal needed to keep the text
+    // AABB entirely outside the icon AABB. Both AABBs are world-
+    // axis-aligned; their half-extent along an arbitrary normal
+    // is the "support function" of the rectangle —
+    // `|half.x * normal.x| + |half.y * normal.y|`. For cardinal
+    // normals (top/right/bottom/left sides) this collapses to the
+    // half-width and the old `icon.bounds.x * 0.5 + bounds.x * 0.5`
+    // formula. For the cardinal-corner transitions where
+    // `border_outward_normal` briefly returns a diagonal
+    // (Y-down canvas, normal from a corner), the old formula
+    // under-estimated the clearance and the text AABB could
+    // cross into the icon AABB — mis-routing icon clicks to
+    // `ClickHit::PortalText`.
+    let icon_half = icon.bounds * 0.5;
+    let text_half = bounds * 0.5;
+    let abs_normal = Vec2::new(normal.x.abs(), normal.y.abs());
+    let icon_support = icon_half.x * abs_normal.x + icon_half.y * abs_normal.y;
+    let text_support = text_half.x * abs_normal.x + text_half.y * abs_normal.y;
+    let outward_offset = icon_support + padding + text_support;
     let text_center = icon_center + normal * outward_offset;
     let top_left = Vec2::new(
         text_center.x - bounds.x * 0.5,

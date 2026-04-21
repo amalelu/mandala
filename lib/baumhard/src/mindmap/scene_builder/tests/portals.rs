@@ -8,6 +8,7 @@
 use super::fixtures::*;
 use super::super::*;
 use crate::mindmap::scene_cache::{EdgeKey, SceneConnectionCache};
+use glam::Vec2;
 use std::collections::HashMap;
 
 #[test]
@@ -397,4 +398,81 @@ fn portal_text_font_size_inherits_icon_default_when_absent() {
         1.0,
     );
     assert!((icon.font_size_pt - text.font_size_pt).abs() < 1.0e-4);
+}
+
+#[test]
+fn portal_text_aabb_never_overlaps_icon_aabb() {
+    // Regression for the diagonal-normal AABB overlap bug: the
+    // icon and text AABBs are both world-axis-aligned, so pushing
+    // the text `center` outward by `icon_half + padding + text_half`
+    // along a ~45° normal still let the text AABB slip back into
+    // the icon's bounds for long text. The `layout_portal_text`
+    // support-function fix guarantees non-overlap for every
+    // `border_t` the user can reach. Exercise several positions
+    // around the border — including the cardinal-corner
+    // transitions in `border_outward_normal` — and every text
+    // length from 1 char to a realistic long label.
+    use super::super::portal::{layout_portal_label, layout_portal_text, PortalLabelLayout};
+    use crate::mindmap::model::PortalEndpointState;
+
+    let owner_pos = Vec2::new(100.0, 100.0);
+    let owner_size = Vec2::new(200.0, 80.0);
+    let partner_center = Vec2::new(1000.0, 500.0);
+    let icon_font = 50.0;
+    let text_font = 14.0;
+
+    // Walk the full border parameter range in 64 steps — covers
+    // every side plus the cardinal-corner transitions where the
+    // normal direction jumps.
+    for i in 0..64 {
+        let t = (i as f32 / 64.0) * 4.0;
+        let state = PortalEndpointState {
+            border_t: Some(t),
+            ..Default::default()
+        };
+        let icon = layout_portal_label(
+            owner_pos,
+            owner_size,
+            partner_center,
+            Some(&state),
+            icon_font,
+        );
+        for text in [
+            "x",
+            "hello",
+            "a much longer annotation label that could reach back",
+        ] {
+            let layout = layout_portal_text(
+                icon,
+                owner_pos,
+                owner_size,
+                partner_center,
+                Some(&state),
+                icon_font,
+                text_font,
+                text,
+            );
+            // Icon AABB.
+            let icon_min = icon.top_left;
+            let icon_max = icon.top_left + icon.bounds;
+            let text_min = layout.top_left;
+            let text_max = layout.top_left + layout.bounds;
+            // Two AABBs are disjoint iff max of one is less than
+            // min of the other on some axis.
+            let disjoint_x = text_max.x <= icon_min.x || text_min.x >= icon_max.x;
+            let disjoint_y = text_max.y <= icon_min.y || text_min.y >= icon_max.y;
+            assert!(
+                disjoint_x || disjoint_y,
+                "text AABB overlaps icon AABB at border_t={t} text={text:?}: \
+                 icon=[{:?}..{:?}] text=[{:?}..{:?}]",
+                icon_min, icon_max, text_min, text_max,
+            );
+        }
+    }
+
+    // Ensure the synthetic_* helpers are still reachable from
+    // this test module under the new test — touching to prevent
+    // a future import-pruning pass from silently deleting.
+    let _ = synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false);
+    let _ = synthetic_portal_edge("a", "b", "#aa88cc");
 }

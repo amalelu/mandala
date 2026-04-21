@@ -116,6 +116,19 @@ fn execute_font(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     if size.is_none() && min.is_none() && max.is_none() {
         return ExecResult::err("font: nothing to set");
     }
+    // Reject obviously-inverted explicit bounds up front so the
+    // user sees a clear error instead of a silent no-op from the
+    // setter's inverted-bounds guard. The setter still re-checks
+    // against resolved (post-override) bounds for defence in
+    // depth — that catches the case where the user passes only
+    // one side and it inverts against the existing struct.
+    if let (Some(lo), Some(hi)) = (min, max) {
+        if lo > hi {
+            return ExecResult::err(format!(
+                "font: min={lo} > max={hi} (inverted bounds)"
+            ));
+        }
+    }
 
     // Selection-variant dispatch. A Multi node selection fans
     // out over each node (size only; min/max are NotApplicable
