@@ -72,9 +72,10 @@ pub struct RenderScene {
     pub edge_handles: Vec<EdgeHandleElement>,
     /// Labels attached to edges whose `label` field is non-empty.
     /// One element per labeled edge, positioned along the connection
-    /// path at `edge.label_position_t` (defaulting to 0.5). Not cached
-    /// in `SceneConnectionCache` — labels are ≤ 1 per edge and rebuilt
-    /// each frame at trivial cost.
+    /// path at `label_config.position_t` (defaulting to 0.5), shifted
+    /// by `label_config.perpendicular_offset` along the path normal
+    /// when set. Not cached in `SceneConnectionCache` — labels are
+    /// ≤ 1 per edge and rebuilt each frame at trivial cost.
     pub connection_label_elements: Vec<ConnectionLabelElement>,
     pub background_color: String,
 }
@@ -154,7 +155,10 @@ pub struct PortalElement {
 
 /// A text label attached to a connection edge. Rendered as a
 /// cosmic-text buffer positioned along the edge's path at a
-/// parameter-space `t` derived from `MindEdge.label_position_t`.
+/// parameter-space `t` derived from
+/// `MindEdge.label_config.position_t`, optionally shifted
+/// perpendicular to the path by
+/// `MindEdge.label_config.perpendicular_offset`.
 ///
 /// The AABB (`position`, `bounds`) is used by the Renderer both to
 /// build the text buffer and to populate the label-hit-test index so

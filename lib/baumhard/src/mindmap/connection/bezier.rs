@@ -20,6 +20,19 @@ pub(crate) fn cubic_bezier_point(t: f32, p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2)
     uuu * p0 + 3.0 * uu * t * p1 + 3.0 * u * tt * p2 + ttt * p3
 }
 
+/// Analytical derivative of a cubic Bezier curve at parameter t.
+/// Used to compute the path tangent (and thus the normal) for
+/// label positioning. Returns an unnormalised tangent vector; the
+/// caller normalises. Degenerate paths (coincident control points)
+/// can produce a zero-length tangent — callers handle that by
+/// falling back to the straight-segment direction.
+pub(crate) fn cubic_bezier_tangent(t: f32, p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2) -> Vec2 {
+    let u = 1.0 - t;
+    // d/dt [ (1-t)^3 p0 + 3(1-t)^2 t p1 + 3(1-t) t^2 p2 + t^3 p3 ]
+    //     = 3(1-t)^2 (p1 - p0) + 6(1-t)t (p2 - p1) + 3 t^2 (p3 - p2)
+    3.0 * u * u * (p1 - p0) + 6.0 * u * t * (p2 - p1) + 3.0 * t * t * (p3 - p2)
+}
+
 /// Total arc length of a cubic Bezier curve, approximated by walking
 /// `ARC_LENGTH_SUBDIVISIONS` straight segments between evenly-spaced
 /// parameter samples.

@@ -527,13 +527,19 @@ use super::defaults::default_cross_link_edge;
         let er = first_testament_edge_ref(&doc);
         assert!(doc.set_edge_label_position(&er, -5.0));
         let idx = doc.edge_index(&er).unwrap();
-        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(0.0));
+        let pos = |d: &MindMapDocument, i: usize| {
+            d.mindmap.edges[i]
+                .label_config
+                .as_ref()
+                .and_then(|c| c.position_t)
+        };
+        assert_eq!(pos(&doc, idx), Some(0.0));
 
         assert!(doc.set_edge_label_position(&er, 42.0));
-        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(1.0));
+        assert_eq!(pos(&doc, idx), Some(1.0));
 
         assert!(doc.set_edge_label_position(&er, 0.75));
-        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(0.75));
+        assert_eq!(pos(&doc, idx), Some(0.75));
     }
 
     #[test]

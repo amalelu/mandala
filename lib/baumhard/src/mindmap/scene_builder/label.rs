@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use glam::Vec2;
 
 use crate::mindmap::connection;
-use crate::mindmap::model::{GlyphConnectionConfig, MindMap};
+use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig, MindMap};
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::util::color::resolve_var;
 
@@ -99,18 +99,20 @@ pub(super) fn build_label_elements(
             &edge.anchor_to,
             &edge.control_points,
         );
-        let t = edge.label_position_t.unwrap_or(0.5);
-        let anchor = connection::point_at_t(&path, t);
+        let label_cfg = edge.label_config.as_ref();
+        let t = EdgeLabelConfig::effective_position_t(label_cfg);
+        let perp = EdgeLabelConfig::effective_perpendicular_offset(label_cfg);
+        let anchor_on_path = connection::point_at_t(&path, t);
+        let anchor = apply_perpendicular_offset(&path, t, anchor_on_path, perp);
 
         let config = GlyphConnectionConfig::resolved_for(edge, &map.canvas);
-        let base_font_size = config.effective_font_size_pt(camera_zoom);
-        // Labels render slightly larger than the body glyphs so they
-        // read as a distinct element on top of the connection path.
-        let font_size_pt = base_font_size * 1.1;
+        let font_size_pt =
+            EdgeLabelConfig::effective_font_size_pt(label_cfg, edge, &map.canvas, camera_zoom);
         // Color picker preview: substitute the preview hex for this
         // edge's label color if the preview targets it. Applied
         // before `resolve_var` so `var(--accent)`-style preview values
-        // still theme-resolve correctly.
+        // still theme-resolve correctly. Label color cascades: its
+        // own override → glyph_connection.color → edge.color.
         let raw_color: &str = edge_color_preview
             .and_then(|p| {
                 if *p.edge_key == edge_key {
@@ -119,7 +121,12 @@ pub(super) fn build_label_elements(
                     None
                 }
             })
-            .unwrap_or_else(|| config.color.as_deref().unwrap_or(edge.color.as_str()));
+            .unwrap_or_else(|| {
+                label_cfg
+                    .and_then(|c| c.color.as_deref())
+                    .or(config.color.as_deref())
+                    .unwrap_or(edge.color.as_str())
+            });
         let color = resolve_var(raw_color, vars).to_string();
 
         // Loose AABB sized from the glyph-count approximation
@@ -193,11 +200,18 @@ pub(super) fn build_label_elements(
                             &edge.anchor_to,
                             &edge.control_points,
                         );
-                        let t = edge.label_position_t.unwrap_or(0.5);
-                        let anchor = connection::point_at_t(&path, t);
+                        let label_cfg = edge.label_config.as_ref();
+                        let t = EdgeLabelConfig::effective_position_t(label_cfg);
+                        let perp = EdgeLabelConfig::effective_perpendicular_offset(label_cfg);
+                        let anchor_on_path = connection::point_at_t(&path, t);
+                        let anchor = apply_perpendicular_offset(&path, t, anchor_on_path, perp);
                         let config = GlyphConnectionConfig::resolved_for(edge, &map.canvas);
-                        let base_font_size = config.effective_font_size_pt(camera_zoom);
-                        let font_size_pt = base_font_size * 1.1;
+                        let font_size_pt = EdgeLabelConfig::effective_font_size_pt(
+                            label_cfg,
+                            edge,
+                            &map.canvas,
+                            camera_zoom,
+                        );
                         // Synthesized path is for an edge being edited
                         // with an empty committed label — if the color
                         // picker is also previewing this edge,
@@ -211,7 +225,10 @@ pub(super) fn build_label_elements(
                                 }
                             })
                             .unwrap_or_else(|| {
-                                config.color.as_deref().unwrap_or(edge.color.as_str())
+                                label_cfg
+                                    .and_then(|c| c.color.as_deref())
+                                    .or(config.color.as_deref())
+                                    .unwrap_or(edge.color.as_str())
                             });
                         let color = resolve_var(raw_color, vars).to_string();
                         let rendered = format!("{buffer}\u{258C}");
@@ -236,4 +253,23 @@ pub(super) fn build_label_elements(
     }
 
     connection_label_elements
+}
+
+/// Apply a signed perpendicular offset to an on-path anchor,
+/// shifting it along the path normal at parameter `t`. A positive
+/// offset moves the label in the direction of
+/// [`connection::normal_at_t`] (tangent rotated 90°
+/// counter-clockwise); negative reverses. Zero is an early-out so
+/// labels with no `perpendicular_offset` skip the tangent
+/// computation entirely.
+fn apply_perpendicular_offset(
+    path: &connection::ConnectionPath,
+    t: f32,
+    anchor: Vec2,
+    perp: f32,
+) -> Vec2 {
+    if perp.abs() < f32::EPSILON {
+        return anchor;
+    }
+    anchor + connection::normal_at_t(path, t) * perp
 }

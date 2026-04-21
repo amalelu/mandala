@@ -22,7 +22,7 @@ use glam::Vec2;
 
 use crate::mindmap::model::ControlPoint;
 
-use self::bezier::{cubic_bezier_length, cubic_bezier_point, sample_cubic_bezier};
+use self::bezier::{cubic_bezier_length, cubic_bezier_point, cubic_bezier_tangent, sample_cubic_bezier};
 
 /// A single sampled point along a connection path, produced by
 /// [`sample_path`] in canvas-space coordinates. Plain data; no
@@ -153,6 +153,40 @@ pub fn point_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
             cubic_bezier_point(t, *start, *control1, *control2, *end)
         }
     }
+}
+
+/// Return the unit tangent direction of `path` at parameter `t`,
+/// clamped to `[0, 1]`. Straight paths return the normalised
+/// (end - start) vector for every `t`; cubic Bezier paths evaluate
+/// the analytical derivative at `t`. If the path is degenerate
+/// (zero length or coincident controls) the returned vector is
+/// [`Vec2::X`] — a deterministic fallback so callers computing a
+/// normal (by rotating 90°) still get a well-defined perpendicular.
+pub fn tangent_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
+    let t = t.clamp(0.0, 1.0);
+    let raw = match path {
+        ConnectionPath::Straight { start, end } => *end - *start,
+        ConnectionPath::CubicBezier { start, control1, control2, end } => {
+            cubic_bezier_tangent(t, *start, *control1, *control2, *end)
+        }
+    };
+    let len = raw.length();
+    if len < f32::EPSILON {
+        Vec2::X
+    } else {
+        raw / len
+    }
+}
+
+/// Unit normal of `path` at `t` — the tangent rotated 90°
+/// counter-clockwise (i.e. to the "left" of the direction of
+/// travel from `start` to `end`). Used by label rendering to
+/// apply [`crate::mindmap::model::EdgeLabelConfig::perpendicular_offset`]:
+/// a positive offset pushes the label in the returned direction,
+/// a negative one pushes it the opposite way.
+pub fn normal_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
+    let tangent = tangent_at_t(path, t);
+    Vec2::new(-tangent.y, tangent.x)
 }
 
 /// Total arc length of a connection path in canvas units. Straight

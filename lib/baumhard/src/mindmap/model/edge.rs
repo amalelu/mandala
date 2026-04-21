@@ -38,11 +38,15 @@ pub struct MindEdge {
     pub visible: bool,
     /// Optional label text rendered along the connection path.
     pub label: Option<String>,
-    /// Parameter-space position of the label along the connection
-    /// path. `0.0` sits at the from-anchor, `1.0` at the to-anchor,
-    /// `0.5` (or `None`) at the midpoint.
+    /// Per-edge label rendering overrides — position, color,
+    /// font-size clamps. `None` means "inherit everything": the
+    /// label sits at the path midpoint, picks up the edge color,
+    /// and sizes at `body_font × 1.1` with the edge's clamps. See
+    /// [`EdgeLabelConfig`]. Applies only to line-mode edges;
+    /// portal-mode edges keep per-endpoint text state on
+    /// [`PortalEndpointState`] instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label_position_t: Option<f32>,
+    pub label_config: Option<EdgeLabelConfig>,
     /// Anchor-site vocabulary term for the source endpoint (e.g.
     /// `"top"`, `"auto"`).
     pub anchor_from: String,
@@ -83,11 +87,18 @@ pub struct MindEdge {
 /// both markers inherit from the edge's base color + a directional
 /// default position pointing at the opposite endpoint.
 ///
-/// Color cascade (highest-priority first): `PortalEndpointState.color`
-/// → `MindEdge.glyph_connection.color` → `MindEdge.color` → theme
-/// variable resolution. Mirrors the edge-body color cascade so the
-/// two markers and the (absent) line stay visually consistent when
-/// the user recolors the whole edge.
+/// Icon color cascade (highest-priority first):
+/// `PortalEndpointState.color` → `MindEdge.glyph_connection.color` →
+/// `MindEdge.color` → theme variable resolution. Mirrors the
+/// edge-body color cascade so the two markers and the (absent)
+/// line stay visually consistent when the user recolors the whole
+/// edge.
+///
+/// Text color cascade (for the per-endpoint text label, highest
+/// first): `PortalEndpointState.text_color` → icon color cascade.
+/// The two channels are deliberately independent so a coloured
+/// badge can carry a differently-coloured label beside it — the
+/// user asked for this parity with line-mode edge labels.
 ///
 /// Position: `border_t` parameterizes a point on the owning node's
 /// border perimeter, clockwise from top-left, in `[0.0, 4.0)` where
@@ -97,9 +108,9 @@ pub struct MindEdge {
 /// its counterpart until the user drags it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PortalEndpointState {
-    /// Color override as `#RRGGBB` or `var(--name)`. `None` = inherit
-    /// from the edge color cascade. Cleared by "cut" on the portal
-    /// label, set by wheel / paste / console commands.
+    /// Icon color override as `#RRGGBB` or `var(--name)`. `None` =
+    /// inherit from the edge color cascade. Cleared by "cut" on
+    /// the portal label, set by wheel / paste / console commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// Position along the owning node's border perimeter,
@@ -115,6 +126,26 @@ pub struct PortalEndpointState {
     /// endpoint marker and work only for portal-mode edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Per-endpoint **text** color override. `None` inherits the
+    /// icon color cascade. Independent from [`Self::color`] so a
+    /// portal label can show (for example) a cyan badge next to
+    /// a neutral-white text annotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+    /// Per-endpoint text font size in points at `camera.zoom == 1.0`.
+    /// `None` = inherit the edge's `glyph_connection.font_size_pt`.
+    /// Clamped through the same screen-space LOD logic as the
+    /// icon: see [`GlyphConnectionConfig::effective_font_size_pt`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_font_size_pt: Option<f32>,
+    /// Lower clamp (screen-space points) on the per-endpoint text
+    /// font size. `None` inherits the edge's `min_font_size_pt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_min_font_size_pt: Option<f32>,
+    /// Upper clamp (screen-space points) on the per-endpoint text
+    /// font size. `None` inherits the edge's `max_font_size_pt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_max_font_size_pt: Option<f32>,
 }
 
 /// Return the endpoint state for the `endpoint_node_id` side of
@@ -299,6 +330,105 @@ impl GlyphConnectionConfig {
         } else {
             std::borrow::Cow::Owned(GlyphConnectionConfig::default())
         }
+    }
+}
+
+/// Per-edge label rendering overrides — the optional sibling of
+/// [`GlyphConnectionConfig`] for the text label that sits along an
+/// edge's connection path. All fields are optional; an absent config
+/// means "everything defaults" (midpoint position, no perpendicular
+/// offset, inherit edge color, size at `body_font × 1.1` with the
+/// edge's clamps). The renderer reads through an inheritance cascade
+/// via [`EdgeLabelConfig::effective_font_size_pt`].
+///
+/// Applies only to line-mode edges. Portal-mode edges carry their
+/// per-endpoint text styling on [`PortalEndpointState`] instead —
+/// the two concepts share shape but not identity (line-mode has one
+/// label per edge; portal mode has one per endpoint).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EdgeLabelConfig {
+    /// Tangential position on the connection path, `[0.0, 1.0]`.
+    /// `0.0` is the from-anchor, `1.0` the to-anchor, `0.5` (or
+    /// `None`) the midpoint. Set by the label-drag path and by
+    /// `label position_t=` / `label position=<start|middle|end>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_t: Option<f32>,
+    /// Perpendicular offset from the path point, in canvas units,
+    /// along the path normal at `position_t`. `None` = on the
+    /// path. Positive / negative encodes the side; the drag path
+    /// derives it from the cursor's orthogonal distance to the
+    /// closest path point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perpendicular_offset: Option<f32>,
+    /// Label color override (`#RRGGBB[AA]` or `var(--name)`).
+    /// `None` inherits the edge color cascade
+    /// (`glyph_connection.color` → `edge.color` → theme vars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Target on-screen font size at `camera.zoom == 1.0`. `None`
+    /// inherits the derived default (`glyph_connection.font_size_pt
+    /// × 1.1`), preserving the legacy "label reads slightly larger
+    /// than body" look for maps that don't specify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_pt: Option<f32>,
+    /// Lower clamp (screen-space points) on the effective on-screen
+    /// font size. `None` inherits the edge's `min_font_size_pt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_font_size_pt: Option<f32>,
+    /// Upper clamp (screen-space points) on the effective on-screen
+    /// font size. `None` inherits the edge's `max_font_size_pt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_font_size_pt: Option<f32>,
+}
+
+/// Multiplier applied to the edge body's effective font size to
+/// derive the default label size. Keeps labels visually distinct
+/// from the sampled body glyphs without requiring every map to
+/// author a `label_config.font_size_pt`.
+pub const DEFAULT_LABEL_SIZE_FACTOR: f32 = 1.1;
+
+impl EdgeLabelConfig {
+    /// Effective tangential position in `[0.0, 1.0]`. Falls back to
+    /// the midpoint (`0.5`) when the field is absent. The scene
+    /// builder reads every label position through this helper so
+    /// the fallback lives in one place.
+    pub fn effective_position_t(opt: Option<&EdgeLabelConfig>) -> f32 {
+        opt.and_then(|c| c.position_t).unwrap_or(0.5)
+    }
+
+    /// Effective perpendicular offset in canvas units. Falls back
+    /// to `0.0` (on the path).
+    pub fn effective_perpendicular_offset(opt: Option<&EdgeLabelConfig>) -> f32 {
+        opt.and_then(|c| c.perpendicular_offset).unwrap_or(0.0)
+    }
+
+    /// Effective canvas-space label font size for the given edge at
+    /// the given camera zoom. Cascades through the label config's
+    /// own overrides, then the edge's `glyph_connection` base × the
+    /// `DEFAULT_LABEL_SIZE_FACTOR`, then the hardcoded default. The
+    /// clamps are screen-space points (same LOD mechanic as
+    /// [`GlyphConnectionConfig::effective_font_size_pt`]): clamp
+    /// against the resolved `(min, max)` then divide back through
+    /// zoom.
+    pub fn effective_font_size_pt(
+        label_config: Option<&EdgeLabelConfig>,
+        edge: &MindEdge,
+        canvas: &Canvas,
+        camera_zoom: f32,
+    ) -> f32 {
+        let body = GlyphConnectionConfig::resolved_for(edge, canvas);
+        let base = label_config
+            .and_then(|c| c.font_size_pt)
+            .unwrap_or_else(|| body.font_size_pt * DEFAULT_LABEL_SIZE_FACTOR);
+        let min = label_config
+            .and_then(|c| c.min_font_size_pt)
+            .unwrap_or(body.min_font_size_pt);
+        let max = label_config
+            .and_then(|c| c.max_font_size_pt)
+            .unwrap_or(body.max_font_size_pt);
+        let z = camera_zoom.max(f32::EPSILON);
+        let target_screen = (base * z).clamp(min, max);
+        target_screen / z
     }
 }
 

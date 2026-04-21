@@ -7,8 +7,8 @@
 use glam::Vec2;
 
 use baumhard::mindmap::model::{
-    is_portal_edge, portal_endpoint_state_mut, Canvas, GlyphConnectionConfig, MindEdge,
-    PortalEndpointState, DISPLAY_MODE_LINE, DISPLAY_MODE_PORTAL, PORTAL_GLYPH_PRESETS,
+    is_portal_edge, portal_endpoint_state_mut, Canvas, EdgeLabelConfig, GlyphConnectionConfig,
+    MindEdge, PortalEndpointState, DISPLAY_MODE_LINE, DISPLAY_MODE_PORTAL, PORTAL_GLYPH_PRESETS,
 };
 use baumhard::mindmap::scene_builder;
 
@@ -404,25 +404,38 @@ impl MindMapDocument {
         true
     }
 
-    /// Set the label's position along the connection path. `t` is
-    /// clamped into `[0.0, 1.0]` — values outside that range are
-    /// silently pulled back. Returns `true` if the clamped value
-    /// actually differs from the current.
+    /// Set the label's tangential position along the connection path.
+    /// `t` is clamped into `[0.0, 1.0]` — values outside that range
+    /// are silently pulled back. Returns `true` if the clamped value
+    /// actually differs from the current. Forks a fresh
+    /// `EdgeLabelConfig` on the edge if one isn't already present
+    /// (mirrors `ensure_glyph_connection` on the body cascade).
     pub fn set_edge_label_position(&mut self, edge_ref: &EdgeRef, t: f32) -> bool {
         let clamped = t.clamp(0.0, 1.0);
         let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
             Some(i) => i,
             None => return false,
         };
-        let current = self.mindmap.edges[idx].label_position_t.unwrap_or(0.5);
+        let current = EdgeLabelConfig::effective_position_t(
+            self.mindmap.edges[idx].label_config.as_ref(),
+        );
         if (current - clamped).abs() < f32::EPSILON {
             return false;
         }
         let before = self.mindmap.edges[idx].clone();
-        self.mindmap.edges[idx].label_position_t = Some(clamped);
+        Self::ensure_label_config(&mut self.mindmap.edges[idx]).position_t = Some(clamped);
         self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
         self.dirty = true;
         true
+    }
+
+    /// Return a mutable reference to `edge.label_config`, lazily
+    /// inserting a default [`EdgeLabelConfig`] when absent. Mirrors
+    /// [`Self::ensure_glyph_connection`] for the body cascade — the
+    /// first edit on an unstyled label forks a config onto the edge,
+    /// subsequent edits reuse it.
+    pub(super) fn ensure_label_config(edge: &mut MindEdge) -> &mut EdgeLabelConfig {
+        edge.label_config.get_or_insert_with(EdgeLabelConfig::default)
     }
 
     /// Change the `edge_type` of an edge. Refuses the change (returns
