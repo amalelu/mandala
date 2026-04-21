@@ -369,6 +369,21 @@ pub(super) struct NodeBackgroundRect {
     pub zoom_visibility: baumhard::gfx_structs::zoom_visibility::ZoomVisibility,
 }
 
+impl NodeBackgroundRect {
+    /// Should this rect render at the current camera state?
+    /// Combines the spatial AABB cull (`Camera2D::is_visible`)
+    /// with the zoom-window cull
+    /// (`ZoomVisibility::contains`). Pure, no allocation; the
+    /// render loop calls this once per rect per frame.
+    pub(super) fn visible_at(
+        &self,
+        camera: &baumhard::gfx_structs::camera::Camera2D,
+    ) -> bool {
+        camera.is_visible(self.position, self.size)
+            && self.zoom_visibility.contains(camera.zoom)
+    }
+}
+
 /// Clamp a requested surface (width, height) to the GPU's
 /// `max_texture_dimension_2d`. Pure function so the clamp logic is
 /// testable without a live GPU device.
@@ -782,6 +797,23 @@ pub struct MindMapTextBuffer {
     /// bounds `None`) renders at every zoom — existing buffers pay
     /// nothing.
     pub zoom_visibility: baumhard::gfx_structs::zoom_visibility::ZoomVisibility,
+}
+
+impl MindMapTextBuffer {
+    /// Should this text buffer render at the current camera
+    /// state? Combines the spatial AABB cull
+    /// (`Camera2D::is_visible`) with the zoom-window cull
+    /// (`ZoomVisibility::contains`). Pure, no allocation; the
+    /// render loop calls this once per buffer per frame in the
+    /// `main_text_areas` collector.
+    pub(super) fn visible_at(
+        &self,
+        camera: &baumhard::gfx_structs::camera::Camera2D,
+    ) -> bool {
+        let pos = Vec2::new(self.pos.0, self.pos.1);
+        let size = Vec2::new(self.bounds.0, self.bounds.1);
+        camera.is_visible(pos, size) && self.zoom_visibility.contains(camera.zoom)
+    }
 }
 
 

@@ -476,3 +476,96 @@ fn portal_text_aabb_never_overlaps_icon_aabb() {
     let _ = synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false);
     let _ = synthetic_portal_edge("a", "b", "#aa88cc");
 }
+
+/// Zoom-visibility cascade (scene-builder path): when both
+/// endpoint bounds are `None`, the emitted `PortalElement`
+/// inherits the edge's window verbatim.
+#[test]
+fn portal_zoom_visibility_inherits_edge_window_when_endpoint_absent() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    let mut edge = synthetic_portal_edge("a", "b", "#aa88cc");
+    edge.min_zoom_to_render = Some(0.5);
+    edge.max_zoom_to_render = Some(2.0);
+    map.edges.push(edge);
+    let scene = build_scene(&map, 1.0);
+    assert_eq!(scene.portal_elements.len(), 2);
+    for pe in &scene.portal_elements {
+        assert_eq!(
+            pe.zoom_visibility,
+            ZoomVisibility { min: Some(0.5), max: Some(2.0) },
+        );
+    }
+}
+
+/// Zoom-visibility cascade (scene-builder path): the endpoint's
+/// pair **replaces** the edge's pair whenever either bound is
+/// `Some`, mirroring the portal text-clamp cascade. This test
+/// sets only `min` on one endpoint and confirms the other
+/// endpoint still inherits the edge window — the cascade is
+/// per-endpoint, not shared between the two markers of an edge.
+#[test]
+fn portal_zoom_visibility_endpoint_override_replaces_edge_window() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+    use crate::mindmap::model::PortalEndpointState;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    let mut edge = synthetic_portal_edge("a", "b", "#aa88cc");
+    edge.min_zoom_to_render = Some(0.5);
+    edge.max_zoom_to_render = Some(2.0);
+    edge.portal_from = Some(PortalEndpointState {
+        min_zoom_to_render: Some(1.5),
+        max_zoom_to_render: None,
+        ..Default::default()
+    });
+    map.edges.push(edge);
+    let scene = build_scene(&map, 1.0);
+    assert_eq!(scene.portal_elements.len(), 2);
+    let from = scene
+        .portal_elements
+        .iter()
+        .find(|pe| pe.endpoint_node_id == "a")
+        .expect("portal_from endpoint present");
+    let to = scene
+        .portal_elements
+        .iter()
+        .find(|pe| pe.endpoint_node_id == "b")
+        .expect("portal_to endpoint present");
+    assert_eq!(
+        from.zoom_visibility,
+        ZoomVisibility { min: Some(1.5), max: None },
+        "endpoint override must fully replace the edge window, not intersect"
+    );
+    assert_eq!(
+        to.zoom_visibility,
+        ZoomVisibility { min: Some(0.5), max: Some(2.0) },
+        "the untouched endpoint must still inherit the edge window",
+    );
+}
+
+/// Defaults: an edge with no authored window emits two portal
+/// elements whose `zoom_visibility` is unbounded.
+#[test]
+fn portal_zoom_visibility_defaults_to_unbounded() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let scene = build_scene(&map, 1.0);
+    for pe in &scene.portal_elements {
+        assert_eq!(pe.zoom_visibility, ZoomVisibility::unbounded());
+    }
+}

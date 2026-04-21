@@ -110,10 +110,7 @@ impl Renderer {
             .iter()
             .chain(self.canvas_scene_background_rects.iter())
         {
-            if !self.camera.is_visible(rect.position, rect.size) {
-                continue;
-            }
-            if !rect.zoom_visibility.contains(self.camera.zoom) {
+            if !rect.visible_at(&self.camera) {
                 continue;
             }
             let screen_tl = self.camera.canvas_to_screen(rect.position);
@@ -236,14 +233,10 @@ impl Renderer {
             .chain(self.overlay_buffers.iter())
             .chain(self.canvas_scene_buffers.iter())
             .filter_map(|tb| {
+                if !tb.visible_at(&self.camera) {
+                    return None;
+                }
                 let canvas_pos = Vec2::new(tb.pos.0, tb.pos.1);
-                let canvas_size = Vec2::new(tb.bounds.0, tb.bounds.1);
-                if !self.camera.is_visible(canvas_pos, canvas_size) {
-                    return None;
-                }
-                if !tb.zoom_visibility.contains(self.camera.zoom) {
-                    return None;
-                }
                 let screen_pos = self.camera.canvas_to_screen(canvas_pos);
                 Some(TextArea {
                     buffer: &tb.buffer,

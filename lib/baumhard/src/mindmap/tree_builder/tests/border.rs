@@ -177,13 +177,24 @@ fn border_parent_channels_are_sorted_index_based() {
 fn border_mutator_round_trip_matches_full_rebuild() {
     use crate::core::primitives::Applicable;
 
-    let map = synthetic_map(
+    let mut map = synthetic_map(
         vec![
             synthetic_node("a", None, 0.0, 0.0),
             synthetic_node("b", None, 200.0, 0.0),
         ],
         vec![],
     );
+    // Author a non-default zoom window on one of the nodes so
+    // the parity loop actually exercises the border mutator
+    // delta's `GlyphAreaField::ZoomVisibility` write (§B2):
+    // a regression dropping that field from the assign delta
+    // would leave `tree_a`'s four border runs at the unbounded
+    // default while a fresh build picks up `{0.5, 2.0}`, and
+    // the per-field assertion below trips on `zoom_visibility`.
+    if let Some(node_a) = map.nodes.get_mut("a") {
+        node_a.min_zoom_to_render = Some(0.5);
+        node_a.max_zoom_to_render = Some(2.0);
+    }
 
     // State A: no offsets.
     let mut tree_a = build_border_tree(&map, &HashMap::new());
@@ -204,8 +215,8 @@ fn border_mutator_round_trip_matches_full_rebuild() {
         expected.root.children(&expected.arena).collect();
     assert_eq!(actual_parents.len(), expected_parents.len());
     // Full-field parity — text / position / bounds / scale /
-    // line_height / regions / outline — so any silent drift
-    // on a mutator-written field surfaces here.
+    // line_height / regions / outline / zoom_visibility — so
+    // any silent drift on a mutator-written field surfaces here.
     for (a_p, e_p) in actual_parents.iter().zip(expected_parents.iter()) {
         let a_runs: Vec<NodeId> = a_p.children(&tree_a.arena).collect();
         let e_runs: Vec<NodeId> = e_p.children(&expected.arena).collect();
@@ -220,7 +231,61 @@ fn border_mutator_round_trip_matches_full_rebuild() {
             assert_eq!(a_area.line_height, e_area.line_height);
             assert_eq!(a_area.regions, e_area.regions);
             assert_eq!(a_area.outline, e_area.outline);
+            assert_eq!(a_area.zoom_visibility, e_area.zoom_visibility);
         }
+    }
+}
+
+/// A node's zoom-visibility window is stamped onto every one
+/// of its four border `GlyphArea` runs — top, bottom, left,
+/// right — so the frame renders only when the owning node
+/// does. Without this assertion, a regression in
+/// `BorderNodeData::zoom_visibility` propagation (either at
+/// the initial-build stamp site in `border_node_data` or at
+/// the `append_border_run` call chain) would ship a node that
+/// vanishes above zoom 2× leaving four orphan frame fragments
+/// on the canvas.
+#[test]
+fn border_runs_inherit_owning_node_zoom_visibility() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let mut map = synthetic_map(
+        vec![synthetic_node("a", None, 0.0, 0.0)],
+        vec![],
+    );
+    let window = ZoomVisibility { min: Some(1.0), max: Some(2.5) };
+    if let Some(node) = map.nodes.get_mut("a") {
+        node.min_zoom_to_render = Some(1.0);
+        node.max_zoom_to_render = Some(2.5);
+    }
+    let tree = build_border_tree(&map, &HashMap::new());
+    let parents: Vec<NodeId> = tree.root.children(&tree.arena).collect();
+    assert_eq!(parents.len(), 1, "one framed node → one sub-tree");
+    let runs: Vec<NodeId> = parents[0].children(&tree.arena).collect();
+    assert_eq!(runs.len(), 4, "border sub-tree has four runs");
+    for run in &runs {
+        let area = tree.arena.get(*run).unwrap().get().glyph_area().unwrap();
+        assert_eq!(area.zoom_visibility, window);
+    }
+}
+
+/// Default path: a node with no authored window yields border
+/// runs whose `zoom_visibility` is unbounded. Guards the
+/// zero-cost default so pre-existing maps pay nothing.
+#[test]
+fn border_runs_default_to_unbounded_when_node_has_no_window() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let map = synthetic_map(
+        vec![synthetic_node("a", None, 0.0, 0.0)],
+        vec![],
+    );
+    let tree = build_border_tree(&map, &HashMap::new());
+    let parents: Vec<NodeId> = tree.root.children(&tree.arena).collect();
+    let runs: Vec<NodeId> = parents[0].children(&tree.arena).collect();
+    for run in &runs {
+        let area = tree.arena.get(*run).unwrap().get().glyph_area().unwrap();
+        assert_eq!(area.zoom_visibility, ZoomVisibility::unbounded());
     }
 }
 

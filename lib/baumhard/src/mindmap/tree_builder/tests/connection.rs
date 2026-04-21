@@ -105,10 +105,18 @@ fn connection_identity_sequence_changes_with_structural_shifts() {
 #[test]
 fn connection_mutator_round_trip_matches_full_rebuild() {
     use crate::core::primitives::Applicable;
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
     use crate::mindmap::scene_builder::ConnectionElement;
     use crate::mindmap::scene_cache::EdgeKey;
 
-    let mk = |color: &str| ConnectionElement {
+    // Non-default zoom window on `elem_b` so the round-trip
+    // test actually catches a regression in the mutator's
+    // `GlyphAreaField::ZoomVisibility` delta write — if the
+    // delta stopped writing the window, `tree_a` would retain
+    // `elem_a`'s unbounded default while the fresh build picks
+    // up the new window, and the per-field assertion below
+    // trips on `zoom_visibility`.
+    let mk = |color: &str, zv: ZoomVisibility| ConnectionElement {
         edge_key: EdgeKey::new("a", "b", "child"),
         glyph_positions: vec![(10.0, 0.0), (20.0, 0.0)],
         body_glyph: "·".into(),
@@ -117,10 +125,10 @@ fn connection_mutator_round_trip_matches_full_rebuild() {
         font: None,
         font_size_pt: 12.0,
         color: color.into(),
-        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
+        zoom_visibility: zv,
     };
-    let elem_a = mk("#ff0000");
-    let elem_b = mk("#00E5FF");
+    let elem_a = mk("#ff0000", ZoomVisibility::unbounded());
+    let elem_b = mk("#00E5FF", ZoomVisibility { min: Some(0.75), max: Some(3.0) });
 
     let mut tree_a = build_connection_tree(std::slice::from_ref(&elem_a));
     let mutator = build_connection_mutator_tree(std::slice::from_ref(&elem_b));
@@ -149,6 +157,7 @@ fn connection_mutator_round_trip_matches_full_rebuild() {
             assert_eq!(a_area.line_height, e_area.line_height);
             assert_eq!(a_area.regions, e_area.regions);
             assert_eq!(a_area.outline, e_area.outline);
+            assert_eq!(a_area.zoom_visibility, e_area.zoom_visibility);
         }
     }
 }
@@ -161,10 +170,14 @@ fn connection_mutator_round_trip_matches_full_rebuild() {
 #[test]
 fn connection_label_mutator_round_trip_handles_text_edit() {
     use crate::core::primitives::Applicable;
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
     use crate::mindmap::scene_builder::ConnectionLabelElement;
     use crate::mindmap::scene_cache::EdgeKey;
 
-    let mk = |text: &str| ConnectionLabelElement {
+    // Non-default zoom window on `elem_b` so the parity loop
+    // below catches a regression in the label mutator's
+    // `GlyphAreaField::ZoomVisibility` delta write.
+    let mk = |text: &str, zv: ZoomVisibility| ConnectionLabelElement {
         edge_key: EdgeKey::new("a", "b", "child"),
         text: text.into(),
         position: (10.0, 10.0),
@@ -172,10 +185,10 @@ fn connection_label_mutator_round_trip_handles_text_edit() {
         color: "#ffffff".into(),
         font: None,
         font_size_pt: 12.0,
-        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
+        zoom_visibility: zv,
     };
-    let elem_a = mk("old");
-    let elem_b = mk("new label");
+    let elem_a = mk("old", ZoomVisibility::unbounded());
+    let elem_b = mk("new label", ZoomVisibility { min: Some(1.5), max: None });
     assert_eq!(
         connection_label_identity_sequence(std::slice::from_ref(&elem_a)),
         connection_label_identity_sequence(std::slice::from_ref(&elem_b))
@@ -202,6 +215,7 @@ fn connection_label_mutator_round_trip_handles_text_edit() {
         assert_eq!(a_area.line_height, e_area.line_height);
         assert_eq!(a_area.regions, e_area.regions);
         assert_eq!(a_area.outline, e_area.outline);
+        assert_eq!(a_area.zoom_visibility, e_area.zoom_visibility);
     }
 }
 

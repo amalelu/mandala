@@ -259,6 +259,95 @@ mod tests {
         assert!(map.canvas.theme_variants.is_empty());
     }
 
+    /// Existing fixtures pre-date the zoom-visibility feature, so
+    /// every model field on every node / edge / label / portal
+    /// endpoint must round-trip as `None`. Pins the
+    /// `skip_serializing_if` contract so the on-disk form of
+    /// unchanged maps stays byte-stable against the JSON keys
+    /// — a regression in a serde attribute would surface here as
+    /// a `Some(…)` drift on load, and (via the follow-up
+    /// serialize roundtrip) as a newly-emitted key in the file.
+    #[test]
+    fn test_existing_fixtures_have_no_authored_zoom_windows() {
+        let path = test_map_path();
+        let map = load_from_file(&path).expect("testament loads");
+        for node in map.nodes.values() {
+            assert!(
+                node.min_zoom_to_render.is_none(),
+                "testament node {} has an unexpected min_zoom_to_render",
+                node.id
+            );
+            assert!(
+                node.max_zoom_to_render.is_none(),
+                "testament node {} has an unexpected max_zoom_to_render",
+                node.id
+            );
+        }
+        for (i, edge) in map.edges.iter().enumerate() {
+            assert!(
+                edge.min_zoom_to_render.is_none(),
+                "testament edge[{i}] has an unexpected min_zoom_to_render"
+            );
+            assert!(
+                edge.max_zoom_to_render.is_none(),
+                "testament edge[{i}] has an unexpected max_zoom_to_render"
+            );
+            if let Some(cfg) = edge.label_config.as_ref() {
+                assert!(cfg.min_zoom_to_render.is_none());
+                assert!(cfg.max_zoom_to_render.is_none());
+            }
+            if let Some(pf) = edge.portal_from.as_ref() {
+                assert!(pf.min_zoom_to_render.is_none());
+                assert!(pf.max_zoom_to_render.is_none());
+            }
+            if let Some(pt) = edge.portal_to.as_ref() {
+                assert!(pt.min_zoom_to_render.is_none());
+                assert!(pt.max_zoom_to_render.is_none());
+            }
+        }
+
+        // Serialize back and confirm the raw JSON never mentions
+        // the new keys — the `skip_serializing_if = "Option::is_none"`
+        // attributes must suppress every default field.
+        let serialized = serde_json::to_string(&map).expect("serializes");
+        assert!(
+            !serialized.contains("min_zoom_to_render"),
+            "testament roundtrip emitted an unexpected min_zoom_to_render key"
+        );
+        assert!(
+            !serialized.contains("max_zoom_to_render"),
+            "testament roundtrip emitted an unexpected max_zoom_to_render key"
+        );
+    }
+
+    /// Roundtrip the same fixture through a second parse and
+    /// confirm the structural shape is preserved — serde's
+    /// default / skip_if attributes on the new fields must be
+    /// symmetric so two load / save passes converge on the
+    /// same model. Complements the raw-JSON check above.
+    #[test]
+    fn test_testament_double_roundtrip_is_stable() {
+        let path = test_map_path();
+        let first = load_from_file(&path).expect("first load");
+        let intermediate = serde_json::to_string(&first).expect("first serialize");
+        let second: MindMap = serde_json::from_str(&intermediate).expect("second load");
+
+        // Canonical markers on the model that would drift if
+        // any new serde attribute was asymmetric. Cover each of
+        // the four structs that gained the zoom pair.
+        assert_eq!(first.nodes.len(), second.nodes.len());
+        assert_eq!(first.edges.len(), second.edges.len());
+        for (id, first_node) in &first.nodes {
+            let second_node = second.nodes.get(id).expect("node preserved");
+            assert_eq!(first_node.min_zoom_to_render, second_node.min_zoom_to_render);
+            assert_eq!(first_node.max_zoom_to_render, second_node.max_zoom_to_render);
+        }
+        for (first_edge, second_edge) in first.edges.iter().zip(second.edges.iter()) {
+            assert_eq!(first_edge.min_zoom_to_render, second_edge.min_zoom_to_render);
+            assert_eq!(first_edge.max_zoom_to_render, second_edge.max_zoom_to_render);
+        }
+    }
+
     fn theme_demo_path() -> PathBuf {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.pop();
