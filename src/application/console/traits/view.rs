@@ -363,10 +363,27 @@ pub fn selection_targets(sel: &SelectionState) -> Vec<TargetId> {
         SelectionState::Single(id) => vec![TargetId::Node(id.clone())],
         SelectionState::Multi(ids) => ids.iter().cloned().map(TargetId::Node).collect(),
         SelectionState::Edge(er) => vec![TargetId::Edge(er.clone())],
-        SelectionState::PortalLabel(s) => vec![TargetId::PortalLabel {
-            edge: s.edge_ref(),
-            endpoint_node_id: s.endpoint_node_id.clone(),
-        }],
+        // Line-mode label selection resolves to an edge target
+        // for now — the dispatcher routes kv commands to the
+        // edge (preserving today's behaviour) until the label
+        // gets its own `TargetId::EdgeLabel` variant in the
+        // clipboard / font-clamp commit. This keeps color /
+        // clipboard / font behaviour stable under the new
+        // selection variant without diverging before the sibling
+        // logic lands.
+        SelectionState::EdgeLabel(s) => vec![TargetId::Edge(s.edge_ref.clone())],
+        // Portal icon and text both produce a `PortalLabel`
+        // target; the text channel will split off in the same
+        // follow-up commit that adds `TargetView::PortalText`.
+        // Today the channels share a target so paste / cut /
+        // color behaviour is preserved when either sub-variant
+        // is selected.
+        SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => {
+            vec![TargetId::PortalLabel {
+                edge: s.edge_ref(),
+                endpoint_node_id: s.endpoint_node_id.clone(),
+            }]
+        }
     }
 }
 

@@ -45,6 +45,8 @@ mod tests_mutations;
 mod tests_nodes;
 #[cfg(test)]
 mod tests_reparent;
+#[cfg(test)]
+mod tests_selection;
 
 pub use hit_test::{
     apply_drag_delta, apply_drag_delta_and_collect_patches,

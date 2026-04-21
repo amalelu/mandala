@@ -78,9 +78,16 @@ pub(super) fn handle_click(
             // Shift+click on an edge selection promotes the clicked node
             // to a fresh single selection (no edge multi-select).
             match &doc.selection {
+                // Any edge-adjacent selection shouldn't absorb a
+                // shift+click on a node — promote the node to a
+                // fresh single selection, the same as clicking
+                // from a `None` or `Edge` state. Covers all four
+                // edge-side variants (body, label, icon, text).
                 SelectionState::None
                 | SelectionState::Edge(_)
-                | SelectionState::PortalLabel(_) => {
+                | SelectionState::EdgeLabel(_)
+                | SelectionState::PortalLabel(_)
+                | SelectionState::PortalText(_) => {
                     doc.selection = SelectionState::Single(id.clone());
                 }
                 SelectionState::Single(existing) => {
