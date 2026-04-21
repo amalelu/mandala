@@ -95,10 +95,23 @@ impl ZoomVisibility {
 
     /// Inclusive containment check: `true` iff `zoom` falls inside
     /// `[min, max]` with `None` on either side treated as an open
-    /// bound. Branchless — two chained compares on at most two
-    /// `Option<f32>` values. Safe in the render-loop filter.
+    /// bound. Two chained compares on at most two `Option<f32>`
+    /// values. Safe in the render-loop filter.
+    ///
+    /// `zoom.is_nan()` returns `false` — NaN compares as
+    /// `false` against everything else, and accepting a NaN
+    /// camera as "always render" would silently leak a bug at
+    /// the camera level into the visible frame. A well-formed
+    /// `camera.zoom` is always finite
+    /// ([`crate::gfx_structs::camera::Camera2D`] clamps it), so
+    /// this guard only fires when something upstream is already
+    /// broken; keeping the element culled surfaces the bug
+    /// instead of hiding it.
     #[inline]
     pub fn contains(&self, zoom: f32) -> bool {
+        if zoom.is_nan() {
+            return false;
+        }
         if let Some(min) = self.min {
             if zoom < min {
                 return false;
@@ -115,9 +128,43 @@ impl ZoomVisibility {
     /// Build a window from a pair of optional bounds (the flat
     /// serde shape the mindmap model uses on
     /// [`crate::mindmap::model::MindNode`],
-    /// [`crate::mindmap::model::MindEdge`], etc.). O(1).
+    /// [`crate::mindmap::model::MindEdge`], etc.). Does not
+    /// validate the bounds — see [`ZoomVisibility::try_new`]
+    /// for the invariant-enforcing constructor. O(1).
     pub const fn from_pair(min: Option<f32>, max: Option<f32>) -> Self {
         ZoomVisibility { min, max }
+    }
+
+    /// Invariant-enforcing constructor: returns `Some` when
+    /// each `Some` bound is finite **and** `min <= max` whenever
+    /// both are set; `None` otherwise. The only call site that
+    /// should take the raw struct literal today is serde; every
+    /// programmatic build — mutator payloads, plugin surfaces,
+    /// future script APIs — should go through this so the
+    /// always-invisible window case can't slip past the
+    /// construction boundary (§B10 "prefer surfaces that
+    /// compose"). O(1).
+    ///
+    /// The verifier (`maptool verify` / `verify::zoom_bounds`)
+    /// enforces the same rules at load time for authored JSON;
+    /// this constructor is its programmatic counterpart.
+    pub fn try_new(min: Option<f32>, max: Option<f32>) -> Option<Self> {
+        if let Some(m) = min {
+            if !m.is_finite() {
+                return None;
+            }
+        }
+        if let Some(m) = max {
+            if !m.is_finite() {
+                return None;
+            }
+        }
+        if let (Some(mn), Some(mx)) = (min, max) {
+            if mn > mx {
+                return None;
+            }
+        }
+        Some(ZoomVisibility { min, max })
     }
 
     /// Replace-not-intersect cascade: if `override_pair` contains

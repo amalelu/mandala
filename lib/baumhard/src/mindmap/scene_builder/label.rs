@@ -17,36 +17,12 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 
-use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::mindmap::connection;
-use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig, MindEdge, MindMap};
+use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig, MindMap};
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::util::color::resolve_var;
 
 use super::{ConnectionLabelElement, EdgeColorPreview};
-
-/// Replace-not-intersect cascade for an edge label's zoom window:
-/// the label's `min_zoom_to_render` / `max_zoom_to_render` override
-/// the parent edge's pair when either is `Some`; otherwise inherit
-/// the edge window unchanged. Mirrors the portal-text cascade in
-/// `portal.rs`. O(1).
-fn resolve_label_zoom_visibility(
-    edge: &MindEdge,
-    label_cfg: Option<&EdgeLabelConfig>,
-) -> ZoomVisibility {
-    let edge_window = ZoomVisibility::from_pair(
-        edge.min_zoom_to_render,
-        edge.max_zoom_to_render,
-    );
-    match label_cfg {
-        Some(cfg) => ZoomVisibility::cascade_replace(
-            edge_window,
-            cfg.min_zoom_to_render,
-            cfg.max_zoom_to_render,
-        ),
-        None => edge_window,
-    }
-}
 
 /// Emit connection labels for the given map + overrides. Returns
 /// the two-pass union: committed labels first, then (optionally) a
@@ -175,7 +151,7 @@ pub(super) fn build_label_elements(
             color,
             font: config.font.clone(),
             font_size_pt,
-            zoom_visibility: resolve_label_zoom_visibility(edge, label_cfg),
+            zoom_visibility: edge.label_zoom_window(label_cfg),
         });
     }
 
@@ -270,7 +246,7 @@ pub(super) fn build_label_elements(
                             color,
                             font: config.font.clone(),
                             font_size_pt,
-                            zoom_visibility: resolve_label_zoom_visibility(edge, label_cfg),
+                            zoom_visibility: edge.label_zoom_window(label_cfg),
                         });
                     }
                 }

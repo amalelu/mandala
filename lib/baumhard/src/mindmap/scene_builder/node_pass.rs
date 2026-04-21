@@ -108,10 +108,7 @@ pub(super) fn build_node_elements(
                 border_style,
                 node_position: (pos_x, pos_y),
                 node_size: (size_x, size_y),
-                zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::from_pair(
-                    node.min_zoom_to_render,
-                    node.max_zoom_to_render,
-                ),
+                zoom_visibility: node.zoom_window(),
             });
         }
     }

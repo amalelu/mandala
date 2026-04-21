@@ -71,6 +71,8 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("zoom_visibility_closed_window_renders_inside_band", |b| b.iter(|| do_closed_window_renders_inside_band()));
     c.bench_function("zoom_visibility_single_point_band_is_inclusive", |b| b.iter(|| do_single_point_band_is_inclusive()));
     c.bench_function("zoom_visibility_inverted_band_never_contains", |b| b.iter(|| do_inverted_band_never_contains()));
+    c.bench_function("zoom_visibility_nan_zoom_never_contains", |b| b.iter(|| do_nan_zoom_never_contains()));
+    c.bench_function("zoom_visibility_try_new_enforces_invariants", |b| b.iter(|| do_try_new_enforces_invariants()));
     c.bench_function("zoom_visibility_assign_round_trip", |b| b.iter(|| do_zoom_visibility_assign_round_trip()));
     c.bench_function("zoom_visibility_subtract_resets_to_unbounded", |b| b.iter(|| do_zoom_visibility_subtract_resets_to_unbounded()));
     c.bench_function("zoom_visibility_field_add_picks_rhs", |b| b.iter(|| do_zoom_visibility_field_add_picks_rhs()));

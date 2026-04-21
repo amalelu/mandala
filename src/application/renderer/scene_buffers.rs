@@ -76,6 +76,16 @@ impl Renderer {
             let bottom_y = ny + nh - corner_overlap;
 
             // Fast path: cached, clean, matching glyph count.
+            // Only `.pos` is patched in place — other buffer
+            // fields (including `zoom_visibility`) are
+            // structurally stable under drag, which is the only
+            // scenario `dirty_node_ids` ever excludes.
+            // `rebuild_border_buffers_keyed` call sites today
+            // pass `dirty_node_ids = None`, forcing the slow
+            // path; a future keyed-drag optimisation that
+            // actually takes this branch must also stamp any
+            // fields that can change between builds onto
+            // `existing[i]` here.
             if !is_dirty {
                 if let Some(existing) = self.border_buffers.get_mut(&elem.node_id) {
                     if existing.len() == 4 {
@@ -244,6 +254,13 @@ impl Renderer {
             }
 
             // Fast path: clean + cached + same glyph count.
+            // Only `.pos` is patched in place — `zoom_visibility`
+            // and other structurally stable fields are
+            // preserved from the previous build. Call sites
+            // today always pass `dirty_edge_keys = None` so the
+            // slow path below runs; if a future keyed-drag
+            // optimisation enables this branch, it must also
+            // update any fields that can change between builds.
             if !is_dirty {
                 if let Some(existing) = self.connection_buffers.get_mut(&elem.edge_key) {
                     if existing.len() == visible_positions.len() {

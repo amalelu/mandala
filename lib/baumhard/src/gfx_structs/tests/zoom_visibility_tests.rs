@@ -137,6 +137,87 @@ pub fn do_inverted_band_never_contains() {
     }
 }
 
+/// NaN camera zoom never renders: `contains(NaN)` is `false`
+/// on every window, including fully-unbounded. Without this
+/// guard, NaN's `false`-for-every-compare semantics would
+/// silently flip an invisible element to "always render" —
+/// a surprising and hard-to-diagnose failure mode. Well-formed
+/// `camera.zoom` is always finite (Camera2D clamps it), so
+/// this only fires when something upstream is already broken;
+/// culling the element makes the break visible.
+#[test]
+pub fn test_nan_zoom_never_contains() {
+    do_nan_zoom_never_contains();
+}
+
+pub fn do_nan_zoom_never_contains() {
+    for v in [
+        ZoomVisibility::unbounded(),
+        ZoomVisibility { min: Some(0.0), max: None },
+        ZoomVisibility { min: None, max: Some(100.0) },
+        ZoomVisibility { min: Some(0.5), max: Some(2.0) },
+    ] {
+        assert!(!v.contains(f32::NAN), "NaN zoom must never render: {v:?}");
+    }
+}
+
+/// `try_new` enforces the load-bearing invariants the raw
+/// struct literal doesn't — both bounds finite (when set),
+/// and `min <= max` when both are set. Single-sided
+/// windows and unbounded pass cleanly; inverted and
+/// non-finite are rejected with `None`.
+#[test]
+pub fn test_try_new_enforces_invariants() {
+    do_try_new_enforces_invariants();
+}
+
+pub fn do_try_new_enforces_invariants() {
+    // Accepted shapes.
+    assert_eq!(
+        ZoomVisibility::try_new(None, None),
+        Some(ZoomVisibility::unbounded())
+    );
+    assert_eq!(
+        ZoomVisibility::try_new(Some(0.5), None),
+        Some(ZoomVisibility { min: Some(0.5), max: None })
+    );
+    assert_eq!(
+        ZoomVisibility::try_new(None, Some(2.0)),
+        Some(ZoomVisibility { min: None, max: Some(2.0) })
+    );
+    assert_eq!(
+        ZoomVisibility::try_new(Some(1.0), Some(1.0)),
+        Some(ZoomVisibility { min: Some(1.0), max: Some(1.0) }),
+        "single-point band is permitted — valid but always-false below/above"
+    );
+    assert_eq!(
+        ZoomVisibility::try_new(Some(0.5), Some(2.0)),
+        Some(ZoomVisibility { min: Some(0.5), max: Some(2.0) })
+    );
+
+    // Rejected shapes.
+    assert!(
+        ZoomVisibility::try_new(Some(2.0), Some(0.5)).is_none(),
+        "min > max must reject"
+    );
+    assert!(
+        ZoomVisibility::try_new(Some(f32::NAN), None).is_none(),
+        "NaN min must reject"
+    );
+    assert!(
+        ZoomVisibility::try_new(None, Some(f32::NAN)).is_none(),
+        "NaN max must reject"
+    );
+    assert!(
+        ZoomVisibility::try_new(Some(f32::INFINITY), None).is_none(),
+        "non-finite (Inf) min must reject"
+    );
+    assert!(
+        ZoomVisibility::try_new(None, Some(f32::NEG_INFINITY)).is_none(),
+        "non-finite (-Inf) max must reject"
+    );
+}
+
 /// `DeltaGlyphArea` round-trip: an `Assign` delta writes a window
 /// onto a previously-unbounded area; a follow-up `Assign` with
 /// unbounded clears it. Pins the mutator-surface contract that

@@ -232,19 +232,15 @@ pub struct Renderer {
     /// click-to-edit. Stored as `(min, max)` canvas-space corners so
     /// the hit test is a pair of comparisons per edge.
     connection_label_hitboxes: FxHashMap<EdgeKey, (Vec2, Vec2)>,
-    /// Per-endpoint portal marker buffers, keyed by `(edge_key,
-    /// endpoint_node_id)` so each of the two marker glyphs of a
-    /// portal-mode edge is stored separately. Rebuilt every scene
-    /// build from the `portal_elements` field of `RenderScene`.
-    /// Portal counts stay in the dozens so a keyed cache is enough;
-    /// no incremental rebuild path is warranted.
-    portal_buffers: FxHashMap<(EdgeKey, String), MindMapTextBuffer>,
     /// AABB hitbox for each rendered portal marker, keyed by
-    /// `(edge_key, endpoint_node_id)`. Populated alongside
-    /// `portal_buffers`; consulted by `hit_test_portal` when the
-    /// `handle_click` dispatcher needs to resolve a click on a
-    /// portal glyph to an `EdgeKey` + the endpoint the marker sits
-    /// above (the double-click jump target is the *other* endpoint).
+    /// `(edge_key, endpoint_node_id)`. Portal glyph buffers
+    /// themselves flow through `canvas_scene_buffers` via the
+    /// tree pipeline (see `tree_builder::portal`); this map
+    /// carries only the hit-test rectangles the event loop
+    /// needs. Consulted by `hit_test_portal` when
+    /// `handle_click` resolves a click on a portal glyph to an
+    /// `EdgeKey` + the endpoint the marker sits above (the
+    /// double-click jump target is the *other* endpoint).
     /// Split between the icon's AABB and the text's AABB so the
     /// event loop can route clicks on text to
     /// `SelectionState::PortalText` and clicks on the icon to
@@ -583,7 +579,6 @@ impl Renderer {
             edge_handle_buffers: Vec::new(),
             connection_label_buffers: FxHashMap::default(),
             connection_label_hitboxes: FxHashMap::default(),
-            portal_buffers: FxHashMap::default(),
             portal_icon_hitboxes: FxHashMap::default(),
             portal_text_hitboxes: FxHashMap::default(),
             console_overlay_buffers: Vec::new(),

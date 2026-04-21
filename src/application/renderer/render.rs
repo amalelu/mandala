@@ -228,7 +228,6 @@ impl Renderer {
             .chain(self.border_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_label_buffers.values())
-            .chain(self.portal_buffers.values())
             .chain(self.edge_handle_buffers.iter())
             .chain(self.overlay_buffers.iter())
             .chain(self.canvas_scene_buffers.iter())

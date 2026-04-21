@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::mindmap::custom_mutation::{CustomMutation, TriggerBinding};
 
 /// A single node in the mindmap: one rectangle of text + style,
@@ -53,6 +54,20 @@ pub struct MindNode {
     /// `None` = unbounded above. Inclusive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_zoom_to_render: Option<f32>,
+}
+
+impl MindNode {
+    /// This node's authored zoom window, as a
+    /// [`ZoomVisibility`]. Borders inherit this window
+    /// verbatim — no separate per-border override today, the
+    /// reviewer-flagged "floating frame fragment" case is
+    /// prevented by construction. O(1).
+    pub fn zoom_window(&self) -> ZoomVisibility {
+        ZoomVisibility::from_pair(
+            self.min_zoom_to_render,
+            self.max_zoom_to_render,
+        )
+    }
 }
 
 /// Canvas-space top-left corner of a node's AABB. Units are

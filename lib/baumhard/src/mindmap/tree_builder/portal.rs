@@ -263,20 +263,12 @@ pub fn portal_pair_data(
                 &text_string,
             );
 
-            // Replace-not-intersect cascade: the endpoint's
-            // zoom window overrides the owning edge's when either
-            // bound is `Some`; otherwise inherit. Mirrors the
-            // font-clamp cascade a few lines up. Both the icon
-            // and text areas share the same resolved window so
-            // they appear / disappear together.
-            let endpoint_zoom_window = crate::gfx_structs::zoom_visibility::ZoomVisibility::cascade_replace(
-                crate::gfx_structs::zoom_visibility::ZoomVisibility::from_pair(
-                    edge.min_zoom_to_render,
-                    edge.max_zoom_to_render,
-                ),
-                endpoint_state.and_then(|s| s.min_zoom_to_render),
-                endpoint_state.and_then(|s| s.max_zoom_to_render),
-            );
+            // Replace-not-intersect cascade — both the icon and
+            // text areas share the same resolved window so they
+            // appear / disappear together. Resolver lives on
+            // `MindEdge` so scene-builder and tree-builder can't
+            // drift on the cascade rule.
+            let endpoint_zoom_window = edge.portal_endpoint_zoom_window(endpoint_state);
 
             let mut icon_area = GlyphArea::new_with_str(
                 &style.glyph,

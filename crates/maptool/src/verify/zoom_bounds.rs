@@ -71,8 +71,35 @@ fn check_pair(
     min: Option<f32>,
     max: Option<f32>,
 ) {
+    // Non-finite (NaN / ±Inf) fails first. `ZoomVisibility::contains`
+    // guards NaN at runtime, but an always-false element sitting in
+    // the file on disk is a bug to surface, not a state to accept.
+    if let Some(m) = min {
+        if !m.is_finite() {
+            out.push(Violation {
+                category: "zoom_bounds",
+                location: location.to_string(),
+                message: format!(
+                    "{}min_zoom_to_render {} is not finite",
+                    field_prefix, m
+                ),
+            });
+        }
+    }
+    if let Some(m) = max {
+        if !m.is_finite() {
+            out.push(Violation {
+                category: "zoom_bounds",
+                location: location.to_string(),
+                message: format!(
+                    "{}max_zoom_to_render {} is not finite",
+                    field_prefix, m
+                ),
+            });
+        }
+    }
     if let (Some(min), Some(max)) = (min, max) {
-        if min > max {
+        if min.is_finite() && max.is_finite() && min > max {
             out.push(Violation {
                 category: "zoom_bounds",
                 location: location.to_string(),
@@ -160,5 +187,43 @@ mod tests {
         let v = check(&map);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].location, "edge[0]");
+    }
+
+    #[test]
+    fn non_finite_min_flagged() {
+        let mut map = MindMap::new_blank("t");
+        let mut n = node("0", None);
+        n.min_zoom_to_render = Some(f32::NAN);
+        map.nodes.insert("0".into(), n);
+        let v = check(&map);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("is not finite"));
+    }
+
+    #[test]
+    fn non_finite_max_flagged() {
+        let mut map = MindMap::new_blank("t");
+        let mut n = node("0", None);
+        n.max_zoom_to_render = Some(f32::INFINITY);
+        map.nodes.insert("0".into(), n);
+        let v = check(&map);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("is not finite"));
+    }
+
+    #[test]
+    fn non_finite_pair_reports_both_violations() {
+        // Both bounds non-finite — one violation per bound,
+        // not a single compound message. Keeps the per-field
+        // verifier posture consistent with the rest of the
+        // `zoom_bounds` category.
+        let mut map = MindMap::new_blank("t");
+        let mut n = node("0", None);
+        n.min_zoom_to_render = Some(f32::NEG_INFINITY);
+        n.max_zoom_to_render = Some(f32::NAN);
+        map.nodes.insert("0".into(), n);
+        let v = check(&map);
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().all(|x| x.message.contains("is not finite")));
     }
 }

@@ -14,7 +14,6 @@ use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::shape::NodeShape;
 use crate::gfx_structs::tree::Tree;
-use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::mindmap::model::{MindMap, MindNode};
 use crate::util::color;
 
@@ -77,12 +76,9 @@ pub(super) fn mindnode_to_glyph_area(
     // Stamp the node's optional zoom window onto the area. Default
     // (both `None`) leaves the area unbounded — the renderer's
     // final cull skips no-ops for it. Border areas inherit this
-    // same window via `build_border_elements`, so a node that
+    // same window via `MindNode::zoom_window`, so a node that
     // disappears at high zoom takes its glyph frame with it.
-    area.zoom_visibility = ZoomVisibility {
-        min: node.min_zoom_to_render,
-        max: node.max_zoom_to_render,
-    };
+    area.zoom_visibility = node.zoom_window();
 
     // Convert text runs to ColorFontRegions
     let mut regions = ColorFontRegions::new_empty();

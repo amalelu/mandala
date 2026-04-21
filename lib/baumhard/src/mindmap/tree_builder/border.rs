@@ -106,10 +106,7 @@ pub fn border_node_data(
             pos_y: node.position.y as f32 + oy,
             size_x: node.size.width as f32,
             size_y: node.size.height as f32,
-            zoom_visibility: ZoomVisibility::from_pair(
-                node.min_zoom_to_render,
-                node.max_zoom_to_render,
-            ),
+            zoom_visibility: node.zoom_window(),
         });
         parent_channel += 1;
     }
