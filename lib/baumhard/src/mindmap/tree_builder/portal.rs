@@ -38,7 +38,7 @@ use crate::gfx_structs::tree::Tree;
 use crate::mindmap::model::{is_portal_edge, portal_endpoint_state, MindMap, MindNode};
 use crate::mindmap::scene_builder::portal::{
     layout_portal_label, layout_portal_text, node_center, resolve_portal_endpoint_style,
-    SelectedPortalLabel,
+    resolve_portal_endpoint_text_style, SelectedPortalLabel,
 };
 use crate::mindmap::scene_builder::PortalTextEditOverride;
 use crate::mindmap::scene_cache::EdgeKey;
@@ -206,6 +206,14 @@ pub fn portal_pair_data(
                 raw_color_override,
                 camera_zoom,
             );
+            let text_style = resolve_portal_endpoint_text_style(
+                edge,
+                endpoint_state,
+                &map.canvas,
+                raw_color_override,
+                &style.color,
+                camera_zoom,
+            );
             let icon_layout = layout_portal_label(
                 owner_pos,
                 owner_size,
@@ -213,8 +221,10 @@ pub fn portal_pair_data(
                 endpoint_state,
                 style.font_size_pt,
             );
-            let color_rgba =
+            let icon_color_rgba =
                 color::hex_to_rgba_safe(&style.color, [0.92, 0.92, 0.92, 1.0]);
+            let text_color_rgba =
+                color::hex_to_rgba_safe(&text_style.color, [0.92, 0.92, 0.92, 1.0]);
 
             // Inline edit preview wins over the committed `text`
             // so the user sees their buffer live. Empty string
@@ -235,7 +245,7 @@ pub fn portal_pair_data(
                 owner_size,
                 node_center(partner_pos, partner_size),
                 endpoint_state,
-                style.font_size_pt,
+                text_style.font_size_pt,
                 &text_string,
             );
 
@@ -253,15 +263,15 @@ pub fn portal_pair_data(
                 regions.submit_region(ColorFontRegion::new(
                     Range::new(0, icon_clusters),
                     None,
-                    Some(color_rgba),
+                    Some(icon_color_rgba),
                 ));
                 icon_area.regions = regions;
             }
 
             let mut text_area = GlyphArea::new_with_str(
                 &text_string,
-                style.font_size_pt,
-                style.font_size_pt,
+                text_style.font_size_pt,
+                text_style.font_size_pt,
                 text_layout.top_left,
                 text_layout.bounds,
             );
@@ -272,7 +282,7 @@ pub fn portal_pair_data(
                 regions.submit_region(ColorFontRegion::new(
                     Range::new(0, text_clusters),
                     None,
-                    Some(color_rgba),
+                    Some(text_color_rgba),
                 ));
                 text_area.regions = regions;
             }

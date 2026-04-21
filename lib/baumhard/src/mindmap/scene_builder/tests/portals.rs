@@ -235,3 +235,166 @@ fn portal_color_preview_wins_over_selection() {
     assert_eq!(scene.portal_elements[0].color, "#112233");
     assert_eq!(scene.portal_elements[1].color, "#112233");
 }
+
+// ---- portal text-style resolver (text_color / text_font_size_pt /
+// text_min_font_size_pt / text_max_font_size_pt) ----
+
+#[test]
+fn portal_text_style_inherits_icon_color_when_override_absent() {
+    // Per-endpoint `text_color` is absent → resolver returns the
+    // already-resolved icon color. Preserves the pre-refactor
+    // behaviour for maps that don't opt into the new text channel.
+    use super::super::portal::resolve_portal_endpoint_text_style;
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let edge = &map.edges[0];
+    let icon_color = "#aa88cc";
+    let text_style = resolve_portal_endpoint_text_style(
+        edge,
+        None,
+        &map.canvas,
+        None,
+        icon_color,
+        1.0,
+    );
+    assert_eq!(text_style.color, icon_color);
+}
+
+#[test]
+fn portal_text_color_override_wins_over_icon_cascade() {
+    use crate::mindmap::model::PortalEndpointState;
+    use super::super::portal::resolve_portal_endpoint_text_style;
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let endpoint = PortalEndpointState {
+        text_color: Some("#00ff00".to_string()),
+        ..Default::default()
+    };
+    let text_style = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        Some(&endpoint),
+        &map.canvas,
+        None,
+        "#aa88cc",
+        1.0,
+    );
+    assert_eq!(text_style.color, "#00ff00");
+}
+
+#[test]
+fn portal_text_color_transient_override_wins_over_endpoint_override() {
+    // Selection cyan / preview hex must beat the per-endpoint
+    // `text_color` so wheel drag stays visible while a label is
+    // selected.
+    use crate::mindmap::model::PortalEndpointState;
+    use super::super::portal::resolve_portal_endpoint_text_style;
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let endpoint = PortalEndpointState {
+        text_color: Some("#00ff00".to_string()),
+        ..Default::default()
+    };
+    let text_style = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        Some(&endpoint),
+        &map.canvas,
+        Some("#ffffff"),
+        "#aa88cc",
+        1.0,
+    );
+    assert_eq!(text_style.color, "#ffffff");
+}
+
+#[test]
+fn portal_text_font_size_override_wins_over_icon_base() {
+    // Per-endpoint `text_font_size_pt` detaches the text from the
+    // icon so a coloured badge can host a smaller annotation beside
+    // it without shrinking the badge itself.
+    use crate::mindmap::model::PortalEndpointState;
+    use super::super::portal::resolve_portal_endpoint_text_style;
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let endpoint = PortalEndpointState {
+        text_font_size_pt: Some(24.0),
+        text_min_font_size_pt: Some(12.0),
+        text_max_font_size_pt: Some(96.0),
+        ..Default::default()
+    };
+    // At zoom 1.0, target screen = 24 pt, well inside [12, 96] → 24.
+    let text_style = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        Some(&endpoint),
+        &map.canvas,
+        None,
+        "#aa88cc",
+        1.0,
+    );
+    assert!(
+        (text_style.font_size_pt - 24.0).abs() < 1.0e-4,
+        "expected 24, got {}",
+        text_style.font_size_pt
+    );
+    // At zoom 0.25, target screen = 6 pt → pinned at min 12 → canvas
+    // size = 12 / 0.25 = 48.
+    let text_style_zoomed_out = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        Some(&endpoint),
+        &map.canvas,
+        None,
+        "#aa88cc",
+        0.25,
+    );
+    assert!(
+        (text_style_zoomed_out.font_size_pt - 48.0).abs() < 1.0e-4,
+        "expected 48 after zoom clamp, got {}",
+        text_style_zoomed_out.font_size_pt
+    );
+}
+
+#[test]
+fn portal_text_font_size_inherits_icon_default_when_absent() {
+    // No `text_font_size_pt` override → text size equals the icon
+    // size (which inherits from `glyph_connection` or the portal
+    // default).
+    use super::super::portal::{
+        resolve_portal_endpoint_style, resolve_portal_endpoint_text_style,
+    };
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let icon = resolve_portal_endpoint_style(
+        &map.edges[0],
+        None,
+        &map.canvas,
+        None,
+        1.0,
+    );
+    let text = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        None,
+        &map.canvas,
+        None,
+        &icon.color,
+        1.0,
+    );
+    assert!((icon.font_size_pt - text.font_size_pt).abs() < 1.0e-4);
+}

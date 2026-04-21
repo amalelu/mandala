@@ -84,6 +84,22 @@ pub struct ResolvedPortalStyle {
     pub font_size_pt: f32,
 }
 
+/// Resolved rendering params for a portal endpoint's **text**
+/// label — the glyph area that sits alongside the icon. Split out
+/// from [`ResolvedPortalStyle`] so per-endpoint overrides
+/// (`text_color`, `text_font_size_pt`, `text_min_font_size_pt`,
+/// `text_max_font_size_pt`) route only to the text channel while
+/// the icon keeps reading its own cascade. Font inherits from the
+/// icon unconditionally — users that need separate fonts can fork
+/// the edge's `glyph_connection.font`; per-endpoint text-font
+/// override isn't a current requirement.
+#[derive(Debug, Clone)]
+pub struct ResolvedPortalTextStyle {
+    pub color: String,
+    pub font: Option<String>,
+    pub font_size_pt: f32,
+}
+
 /// Resolve the per-endpoint portal marker style. Merges the color
 /// cascade (preview > whole-edge-select > per-label-select >
 /// per-endpoint override > edge-level override > edge.color),
@@ -153,6 +169,79 @@ pub fn resolve_portal_endpoint_style(
     ResolvedPortalStyle {
         glyph,
         color: resolve_var(raw_color, &canvas.theme_variables).to_string(),
+        font: cfg.font.clone(),
+        font_size_pt,
+    }
+}
+
+/// Resolve the text-channel style for one portal endpoint. Sibling
+/// of [`resolve_portal_endpoint_style`] — the text label carries
+/// its own color + size cascade so a coloured badge can hold a
+/// differently-coloured annotation beside it (parity with
+/// line-mode edge labels).
+///
+/// Color cascade, in order of precedence:
+/// 1. `raw_color_override` (preview / whole-edge highlight / per-label
+///    highlight) — wins so live wheel feedback and selection cyan
+///    remain visible.
+/// 2. `endpoint_state.text_color` — per-endpoint text override.
+/// 3. `icon_color` — falls back to the already-resolved icon cascade
+///    so a portal whose user has only set `color` gets a text
+///    channel that matches the icon automatically.
+///
+/// Font size inheritance:
+/// - Base: `endpoint_state.text_font_size_pt` → edge's
+///   `glyph_connection.font_size_pt` (or the hardcoded portal
+///   default when the edge carries no glyph_connection, matching
+///   the icon's fallback).
+/// - Clamps: `endpoint_state.text_min_font_size_pt` /
+///   `text_max_font_size_pt` → the edge's `glyph_connection` clamps.
+/// The clamping formula mirrors
+/// [`GlyphConnectionConfig::effective_font_size_pt`]: clamp the
+/// target-screen size into `[min, max]` and divide back through
+/// `camera_zoom`, so the text LODs the same way the icon does.
+pub fn resolve_portal_endpoint_text_style(
+    edge: &MindEdge,
+    endpoint_state: Option<&PortalEndpointState>,
+    canvas: &Canvas,
+    raw_color_override: Option<&str>,
+    icon_color: &str,
+    camera_zoom: f32,
+) -> ResolvedPortalTextStyle {
+    let cfg = GlyphConnectionConfig::resolved_for(edge, canvas);
+    let body_base = if edge.glyph_connection.is_none() {
+        DEFAULT_PORTAL_MARKER_FONT_SIZE_PT
+    } else {
+        cfg.font_size_pt
+    };
+    let base_font_size = endpoint_state
+        .and_then(|s| s.text_font_size_pt)
+        .unwrap_or(body_base);
+    let min = endpoint_state
+        .and_then(|s| s.text_min_font_size_pt)
+        .unwrap_or(cfg.min_font_size_pt);
+    let max = endpoint_state
+        .and_then(|s| s.text_max_font_size_pt)
+        .unwrap_or(cfg.max_font_size_pt);
+    let z = camera_zoom.max(f32::EPSILON);
+    let target_screen = (base_font_size * z).clamp(min, max);
+    let font_size_pt = target_screen / z;
+
+    // Text color: transient overrides first, then the per-endpoint
+    // `text_color`, then the already-resolved icon color. Falling
+    // back to the icon color (as a fully-resolved hex) rather than
+    // re-running the icon cascade keeps the two channels in sync
+    // for portals the user has only half-styled.
+    let resolved_text_color: String = if let Some(hex) = raw_color_override {
+        resolve_var(hex, &canvas.theme_variables).to_string()
+    } else if let Some(hex) = endpoint_state.and_then(|s| s.text_color.as_deref()) {
+        resolve_var(hex, &canvas.theme_variables).to_string()
+    } else {
+        icon_color.to_string()
+    };
+
+    ResolvedPortalTextStyle {
+        color: resolved_text_color,
         font: cfg.font.clone(),
         font_size_pt,
     }
