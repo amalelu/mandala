@@ -362,6 +362,11 @@ pub(super) struct NodeBackgroundRect {
     /// Stable shape id from [`baumhard::gfx_structs::shape::NodeShape::shader_id`].
     /// Flat-interpolated to the fragment shader's `switch`.
     pub shape_id: u32,
+    /// Per-`GlyphArea` zoom window. The main render loop skips this
+    /// rect whenever `camera.zoom` falls outside the window. Default
+    /// (both bounds `None`) renders at every zoom — existing nodes
+    /// pay nothing.
+    pub zoom_visibility: baumhard::gfx_structs::zoom_visibility::ZoomVisibility,
 }
 
 /// Clamp a requested surface (width, height) to the GPU's
@@ -771,6 +776,12 @@ pub struct MindMapTextBuffer {
     pub buffer: Buffer,
     pub pos: (f32, f32),
     pub bounds: (f32, f32),
+    /// Per-`GlyphArea` zoom window copied in at buffer-build time.
+    /// The main render loop skips this buffer whenever
+    /// `camera.zoom` falls outside the window. Default (both
+    /// bounds `None`) renders at every zoom — existing buffers pay
+    /// nothing.
+    pub zoom_visibility: baumhard::gfx_structs::zoom_visibility::ZoomVisibility,
 }
 
 

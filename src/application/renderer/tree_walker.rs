@@ -65,6 +65,7 @@ pub(super) fn walk_tree_into_buffers(
                 size: Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
                 color,
                 shape_id: area.shape.shader_id(),
+                zoom_visibility: area.zoom_visibility,
             });
         }
 
@@ -201,6 +202,7 @@ pub(super) fn walk_tree_into_buffers(
                         area.position.y.0 + y_off + offset.y,
                     ),
                     bounds: (bound_x, bound_y),
+                    zoom_visibility: area.zoom_visibility,
                 };
                 yield_buffer(element.unique_id(), text_buffer);
             };

@@ -113,6 +113,9 @@ impl Renderer {
             if !self.camera.is_visible(rect.position, rect.size) {
                 continue;
             }
+            if !rect.zoom_visibility.contains(self.camera.zoom) {
+                continue;
+            }
             let screen_tl = self.camera.canvas_to_screen(rect.position);
             let screen_size = rect.size * self.camera.zoom;
             let (ndc_min, ndc_max) = Self::screen_rect_to_ndc_bounds(
@@ -236,6 +239,9 @@ impl Renderer {
                 let canvas_pos = Vec2::new(tb.pos.0, tb.pos.1);
                 let canvas_size = Vec2::new(tb.bounds.0, tb.bounds.1);
                 if !self.camera.is_visible(canvas_pos, canvas_size) {
+                    return None;
+                }
+                if !tb.zoom_visibility.contains(self.camera.zoom) {
                     return None;
                 }
                 let screen_pos = self.camera.canvas_to_screen(canvas_pos);
