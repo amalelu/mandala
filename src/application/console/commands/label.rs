@@ -17,15 +17,18 @@ use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 use crate::application::document::SelectionState;
 
 pub const VERBS: &[&str] = &["edit", "clear"];
-pub const KEYS: &[&str] = &["text", "position"];
+pub const KEYS: &[&str] = &["text", "position", "position_t", "perpendicular"];
 pub const POSITIONS: &[&str] = &["start", "middle", "end"];
 
 pub const COMMAND: Command = Command {
     name: "label",
     aliases: &[],
-    summary: "Edit, clear, set, or reposition the selected edge's label",
-    usage: "label text=\"<text>\" [position=<start|middle|end>]   |   label edit   |   label clear",
-    tags: &["edge", "label", "text", "position", "clear", "edit"],
+    summary: "Edit, clear, reposition, or offset the selected edge's label",
+    usage: "label text=\"<text>\" [position=<start|middle|end>] [position_t=<f32>] [perpendicular=<f32>]   |   label edit   |   label clear",
+    tags: &[
+        "edge", "label", "text", "position", "position_t",
+        "perpendicular", "offset", "drag", "clear", "edit",
+    ],
     applicable: edge_or_portal_label_selected,
     complete: complete_label,
     execute: execute_label,
@@ -130,12 +133,22 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         return ExecResult::err("usage: label text=\"<text>\" [position=<start|middle|end>]");
     }
 
-    // Position is edge-specific; we handle it before the trait
-    // dispatch so the dispatcher doesn't need a dedicated trait for
-    // a one-field concept.
+    // Position / position_t / perpendicular are edge-label-specific
+    // (they address the `EdgeLabelConfig` geometry channels on a
+    // line-mode edge) — handle them directly so the trait
+    // dispatcher doesn't need a dedicated trait for each single-
+    // field concept.
     let position_kv = kvs.iter().find(|(k, _)| k == "position").cloned();
-    let trait_kvs: Vec<(String, String)> =
-        kvs.iter().filter(|(k, _)| k != "position").cloned().collect();
+    let position_t_kv = kvs.iter().find(|(k, _)| k == "position_t").cloned();
+    let perpendicular_kv = kvs
+        .iter()
+        .find(|(k, _)| k == "perpendicular")
+        .cloned();
+    let trait_kvs: Vec<(String, String)> = kvs
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "position" | "position_t" | "perpendicular"))
+        .cloned()
+        .collect();
 
     let mut messages = Vec::new();
     let mut any_applied = false;
@@ -149,10 +162,23 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         messages.extend(report.messages);
     }
 
-    if let Some((_, value)) = position_kv {
+    // Resolve the target edge ref once for every geometry kv —
+    // all three (position, position_t, perpendicular) address the
+    // same `label_config` on the owning edge. EdgeLabel / Edge /
+    // PortalLabel / PortalText all collapse to the owning edge
+    // via `selected_edge_or_portal_edge`; applying geometry to
+    // anything else is a user error reported as a per-key
+    // message.
+    let target_edge: Option<crate::application::document::EdgeRef> =
         match &eff.document.selection {
-            SelectionState::Edge(er) => {
-                let er = er.clone();
+            SelectionState::Edge(er) => Some(er.clone()),
+            SelectionState::EdgeLabel(s) => Some(s.edge_ref.clone()),
+            _ => None,
+        };
+
+    if let Some((_, value)) = position_kv {
+        match target_edge.as_ref() {
+            Some(er) => {
                 let t = match value.as_str() {
                     "start" => 0.0,
                     "middle" => 0.5,
@@ -164,13 +190,90 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                         ))
                     }
                 };
-                let changed = eff.document.set_edge_label_position(&er, t);
+                let changed = eff.document.set_edge_label_position(er, t);
                 any_applied |= changed;
                 if !changed {
                     messages.push(format!("position already {}", value));
                 }
             }
-            _ => messages.push("position: not applicable to selection".into()),
+            None => messages.push("position: not applicable to selection".into()),
+        }
+    }
+
+    if let Some((_, value)) = position_t_kv {
+        match target_edge.as_ref() {
+            Some(er) => match value.parse::<f32>() {
+                Ok(t) if t.is_finite() => {
+                    // `set_edge_label_position` clamps into [0, 1].
+                    // Echo the clamped value when the user's input
+                    // was out of range so they notice the
+                    // normalisation — silent-clamp would look like
+                    // "worked" even though the stored value
+                    // differs from what they typed.
+                    let clamped = t.clamp(0.0, 1.0);
+                    if (t - clamped).abs() > f32::EPSILON {
+                        messages.push(format!(
+                            "position_t {} clamped to {}",
+                            value, clamped
+                        ));
+                    }
+                    let changed = eff.document.set_edge_label_position(er, t);
+                    any_applied |= changed;
+                    if !changed {
+                        messages
+                            .push(format!("position_t already ≈ {:.4}", clamped));
+                    }
+                }
+                Ok(_) => {
+                    return ExecResult::err(format!(
+                        "position_t '{}' must be finite",
+                        value
+                    ))
+                }
+                Err(_) => {
+                    return ExecResult::err(format!(
+                        "position_t '{}' is not a number",
+                        value
+                    ))
+                }
+            },
+            None => messages.push("position_t: not applicable to selection".into()),
+        }
+    }
+
+    if let Some((_, value)) = perpendicular_kv {
+        match target_edge.as_ref() {
+            Some(er) => {
+                // Empty string clears back to on-path. Any other
+                // value must parse as a finite f32.
+                let offset: Option<f32> = if value.is_empty() {
+                    None
+                } else {
+                    match value.parse::<f32>() {
+                        Ok(v) if v.is_finite() => Some(v),
+                        Ok(_) => {
+                            return ExecResult::err(format!(
+                                "perpendicular '{}' must be finite",
+                                value
+                            ))
+                        }
+                        Err(_) => {
+                            return ExecResult::err(format!(
+                                "perpendicular '{}' is not a number",
+                                value
+                            ))
+                        }
+                    }
+                };
+                let changed = eff
+                    .document
+                    .set_edge_label_perpendicular_offset(er, offset);
+                any_applied |= changed;
+                if !changed {
+                    messages.push("perpendicular already applied".into());
+                }
+            }
+            None => messages.push("perpendicular: not applicable to selection".into()),
         }
     }
 

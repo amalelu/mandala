@@ -45,6 +45,8 @@ mod tests_mutations;
 mod tests_nodes;
 #[cfg(test)]
 mod tests_reparent;
+#[cfg(test)]
+mod tests_selection;
 
 pub use hit_test::{
     apply_drag_delta, apply_drag_delta_and_collect_patches,
@@ -52,8 +54,8 @@ pub use hit_test::{
     point_in_node_aabb, rect_select,
 };
 pub use types::{
-    AnimationInstance, EdgeRef, PortalLabelSel, SelectionState, HIGHLIGHT_COLOR,
-    REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
+    AnimationInstance, EdgeLabelSel, EdgeRef, PortalLabelSel, SelectionState,
+    HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 pub use undo_action::UndoAction;
 

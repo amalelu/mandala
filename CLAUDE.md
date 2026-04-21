@@ -94,12 +94,40 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   `src/application/app/text_edit/`.
 - Portal-mode edges (`display_mode = "portal"`): two glyph labels, one
   per endpoint, each carrying a `PortalEndpointState` (color override,
-  pinned `border_t` position, adjacent text). Single-click selects a
-  label as `SelectionState::PortalLabel`; double-click pans to the
-  opposite endpoint. Console verbs, clipboard, and the color picker all
-  route to the selected label. Dispatch wired in `event_mouse_click.rs`
-  (native) and `run_wasm.rs` via the shared `ClickHit::PortalMarker`
-  path. See `format/portal-labels.md`.
+  pinned `border_t` position, adjacent text + independent text color /
+  font clamps). Single-click on the icon selects
+  `SelectionState::PortalLabel`; single-click on the adjacent text
+  selects `SelectionState::PortalText`; double-click on either pans
+  to the opposite endpoint. Icon vs. text routes through separate
+  renderer hitbox maps (`portal_icon_hitboxes` /
+  `portal_text_hitboxes`) so per-channel operations (color / font
+  via `color text=`, `font min=`, `font max=`) target the clicked
+  sub-part. Dispatch wired in `event_mouse_click.rs` (native) and
+  `run_wasm.rs` via the shared `ClickHit::{PortalMarker, PortalText}`
+  paths. See `format/portal-labels.md`.
+- Edge-adjacent selection variants `SelectionState::{EdgeLabel,
+  PortalText}` (alongside `Edge` and `PortalLabel`). Each variant
+  carries its own clipboard / color / font channel: clipboard
+  copy/cut/paste on every edge-adjacent selection operates on the
+  resolved color hex of that channel (body, label, icon, or text),
+  and `font size= min= max=` writes to the independent font clamps
+  on the corresponding config (`glyph_connection.*`,
+  `label_config.*`, or `PortalEndpointState.text_*`). Single-click
+  on an edge label AABB selects the label; double-click opens the
+  inline editor (`open_label_edit` on native; WASM currently just
+  commits the selection — editor-on-WASM is a follow-up). Console
+  `label position_t=<f32>` / `label perpendicular=<f32>` mirror the
+  edge-label drag so WASM users can position labels without drag.
+- `connection::closest_point_on_path` — Baumhard primitive that
+  projects a cursor `Vec2` onto a `ConnectionPath` (straight or
+  cubic) and returns `(position_t, perpendicular_offset)`.
+  Straight case is direct segment projection; cubic case uses
+  uniform-t sampling + Newton refinement with a seed-vs-refined
+  fallback. Used by the native `DragState::DraggingEdgeLabel` and
+  by the cross-platform `label position_t=` / `label
+  perpendicular=` console keys — the drag is native-only, but the
+  primitive it composes is cross-target and available for any
+  future WASM gesture that needs the same math.
 - Action dispatch: the keybind → action pipeline fires on both targets.
   Representative actions include `Undo`, `CreateOrphanNode`,
   `DeleteSelection`, `EditSelection`, `CancelMode`; the full enum lives

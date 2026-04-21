@@ -2,7 +2,7 @@
 
 use super::fixtures::*;
 use super::super::*;
-use crate::mindmap::model::GlyphConnectionConfig;
+use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig};
 
 #[test]
 fn test_label_element_emitted_for_edge_with_label() {
@@ -39,7 +39,7 @@ fn test_no_label_element_for_missing_or_empty_label() {
 }
 
 #[test]
-fn test_label_position_follows_label_position_t() {
+fn test_label_position_follows_label_config_position_t() {
     // Horizontal edge from (0,0)+40x40 to (1000,0)+40x40 — center line.
     // At t=0, label should sit near the from-anchor; at t=1, near the
     // to-anchor; midpoints differ substantially.
@@ -50,7 +50,10 @@ fn test_label_position_follows_label_position_t() {
     let make = |t: f32| {
         let mut e = synthetic_edge("a", "b", "auto", "auto");
         e.label = Some("x".to_string());
-        e.label_position_t = Some(t);
+        e.label_config = Some(EdgeLabelConfig {
+            position_t: Some(t),
+            ..Default::default()
+        });
         e
     };
     let scene_start = build_scene(&synthetic_map(nodes.clone(), vec![make(0.0)]), 1.0);

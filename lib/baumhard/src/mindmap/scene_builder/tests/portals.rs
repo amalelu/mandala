@@ -8,6 +8,7 @@
 use super::fixtures::*;
 use super::super::*;
 use crate::mindmap::scene_cache::{EdgeKey, SceneConnectionCache};
+use glam::Vec2;
 use std::collections::HashMap;
 
 #[test]
@@ -234,4 +235,244 @@ fn portal_color_preview_wins_over_selection() {
     );
     assert_eq!(scene.portal_elements[0].color, "#112233");
     assert_eq!(scene.portal_elements[1].color, "#112233");
+}
+
+// ---- portal text-style resolver (text_color / text_font_size_pt /
+// text_min_font_size_pt / text_max_font_size_pt) ----
+
+#[test]
+fn portal_text_style_inherits_icon_color_when_override_absent() {
+    // Per-endpoint `text_color` is absent → resolver returns the
+    // already-resolved icon color. Preserves the pre-refactor
+    // behaviour for maps that don't opt into the new text channel.
+    use super::super::portal::resolve_portal_endpoint_text_style;
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let edge = &map.edges[0];
+    let icon_color = "#aa88cc";
+    let text_style = resolve_portal_endpoint_text_style(
+        edge,
+        None,
+        &map.canvas,
+        None,
+        icon_color,
+        1.0,
+    );
+    assert_eq!(text_style.color, icon_color);
+}
+
+#[test]
+fn portal_text_color_override_wins_over_icon_cascade() {
+    use crate::mindmap::model::PortalEndpointState;
+    use super::super::portal::resolve_portal_endpoint_text_style;
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let endpoint = PortalEndpointState {
+        text_color: Some("#00ff00".to_string()),
+        ..Default::default()
+    };
+    let text_style = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        Some(&endpoint),
+        &map.canvas,
+        None,
+        "#aa88cc",
+        1.0,
+    );
+    assert_eq!(text_style.color, "#00ff00");
+}
+
+#[test]
+fn portal_text_color_transient_override_wins_over_endpoint_override() {
+    // Selection cyan / preview hex must beat the per-endpoint
+    // `text_color` so wheel drag stays visible while a label is
+    // selected.
+    use crate::mindmap::model::PortalEndpointState;
+    use super::super::portal::resolve_portal_endpoint_text_style;
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let endpoint = PortalEndpointState {
+        text_color: Some("#00ff00".to_string()),
+        ..Default::default()
+    };
+    let text_style = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        Some(&endpoint),
+        &map.canvas,
+        Some("#ffffff"),
+        "#aa88cc",
+        1.0,
+    );
+    assert_eq!(text_style.color, "#ffffff");
+}
+
+#[test]
+fn portal_text_font_size_override_wins_over_icon_base() {
+    // Per-endpoint `text_font_size_pt` detaches the text from the
+    // icon so a coloured badge can host a smaller annotation beside
+    // it without shrinking the badge itself.
+    use crate::mindmap::model::PortalEndpointState;
+    use super::super::portal::resolve_portal_endpoint_text_style;
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let endpoint = PortalEndpointState {
+        text_font_size_pt: Some(24.0),
+        text_min_font_size_pt: Some(12.0),
+        text_max_font_size_pt: Some(96.0),
+        ..Default::default()
+    };
+    // At zoom 1.0, target screen = 24 pt, well inside [12, 96] → 24.
+    let text_style = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        Some(&endpoint),
+        &map.canvas,
+        None,
+        "#aa88cc",
+        1.0,
+    );
+    assert!(
+        (text_style.font_size_pt - 24.0).abs() < 1.0e-4,
+        "expected 24, got {}",
+        text_style.font_size_pt
+    );
+    // At zoom 0.25, target screen = 6 pt → pinned at min 12 → canvas
+    // size = 12 / 0.25 = 48.
+    let text_style_zoomed_out = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        Some(&endpoint),
+        &map.canvas,
+        None,
+        "#aa88cc",
+        0.25,
+    );
+    assert!(
+        (text_style_zoomed_out.font_size_pt - 48.0).abs() < 1.0e-4,
+        "expected 48 after zoom clamp, got {}",
+        text_style_zoomed_out.font_size_pt
+    );
+}
+
+#[test]
+fn portal_text_font_size_inherits_icon_default_when_absent() {
+    // No `text_font_size_pt` override → text size equals the icon
+    // size (which inherits from `glyph_connection` or the portal
+    // default).
+    use super::super::portal::{
+        resolve_portal_endpoint_style, resolve_portal_endpoint_text_style,
+    };
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    map.edges.push(synthetic_portal_edge("a", "b", "#aa88cc"));
+    let icon = resolve_portal_endpoint_style(
+        &map.edges[0],
+        None,
+        &map.canvas,
+        None,
+        1.0,
+    );
+    let text = resolve_portal_endpoint_text_style(
+        &map.edges[0],
+        None,
+        &map.canvas,
+        None,
+        &icon.color,
+        1.0,
+    );
+    assert!((icon.font_size_pt - text.font_size_pt).abs() < 1.0e-4);
+}
+
+#[test]
+fn portal_text_aabb_never_overlaps_icon_aabb() {
+    // Regression for the diagonal-normal AABB overlap bug: the
+    // icon and text AABBs are both world-axis-aligned, so pushing
+    // the text `center` outward by `icon_half + padding + text_half`
+    // along a ~45° normal still let the text AABB slip back into
+    // the icon's bounds for long text. The `layout_portal_text`
+    // support-function fix guarantees non-overlap for every
+    // `border_t` the user can reach. Exercise several positions
+    // around the border — including the cardinal-corner
+    // transitions in `border_outward_normal` — and every text
+    // length from 1 char to a realistic long label.
+    use super::super::portal::{layout_portal_label, layout_portal_text, PortalLabelLayout};
+    use crate::mindmap::model::PortalEndpointState;
+
+    let owner_pos = Vec2::new(100.0, 100.0);
+    let owner_size = Vec2::new(200.0, 80.0);
+    let partner_center = Vec2::new(1000.0, 500.0);
+    let icon_font = 50.0;
+    let text_font = 14.0;
+
+    // Walk the full border parameter range in 64 steps — covers
+    // every side plus the cardinal-corner transitions where the
+    // normal direction jumps.
+    for i in 0..64 {
+        let t = (i as f32 / 64.0) * 4.0;
+        let state = PortalEndpointState {
+            border_t: Some(t),
+            ..Default::default()
+        };
+        let icon = layout_portal_label(
+            owner_pos,
+            owner_size,
+            partner_center,
+            Some(&state),
+            icon_font,
+        );
+        for text in [
+            "x",
+            "hello",
+            "a much longer annotation label that could reach back",
+        ] {
+            let layout = layout_portal_text(
+                icon,
+                owner_pos,
+                owner_size,
+                partner_center,
+                Some(&state),
+                icon_font,
+                text_font,
+                text,
+            );
+            // Icon AABB.
+            let icon_min = icon.top_left;
+            let icon_max = icon.top_left + icon.bounds;
+            let text_min = layout.top_left;
+            let text_max = layout.top_left + layout.bounds;
+            // Two AABBs are disjoint iff max of one is less than
+            // min of the other on some axis.
+            let disjoint_x = text_max.x <= icon_min.x || text_min.x >= icon_max.x;
+            let disjoint_y = text_max.y <= icon_min.y || text_min.y >= icon_max.y;
+            assert!(
+                disjoint_x || disjoint_y,
+                "text AABB overlaps icon AABB at border_t={t} text={text:?}: \
+                 icon=[{:?}..{:?}] text=[{:?}..{:?}]",
+                icon_min, icon_max, text_min, text_max,
+            );
+        }
+    }
+
+    // Ensure the synthetic_* helpers are still reachable from
+    // this test module under the new test — touching to prevent
+    // a future import-pruning pass from silently deleting.
+    let _ = synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false);
+    let _ = synthetic_portal_edge("a", "b", "#aa88cc");
 }

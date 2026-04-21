@@ -19,7 +19,7 @@
 //! Module split:
 //! - [`color_value`] — the `ColorValue` parser.
 //! - [`outcome`] — the per-trait-call `Outcome` result type.
-//! - [`capabilities`] — the nine capability trait definitions.
+//! - [`capabilities`] — the capability trait definitions.
 //! - [`view`] — `TargetView` enum + per-trait impls + materialization.
 //! - [`dispatch`] — `apply_kvs` + `DispatchReport`.
 
@@ -33,8 +33,8 @@ mod view;
 mod tests;
 
 pub use capabilities::{
-    AcceptsWheelColor, HasBgColor, HasBorderColor, HasFontSize, HandlesCopy, HandlesCut,
-    HandlesPaste, HasLabel, HasTextColor,
+    AcceptsWheelColor, HasBgColor, HasBorderColor, HandlesCopy, HandlesCut, HandlesPaste,
+    HasLabel, HasTextColor,
 };
 pub use color_value::ColorValue;
 pub use dispatch::{apply_kvs, DispatchReport};

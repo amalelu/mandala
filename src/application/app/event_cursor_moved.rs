@@ -141,6 +141,37 @@ pub(super) fn handle_cursor_moved(
             *total_delta += delta;
             *pending_delta += delta;
         }
+        DragState::DraggingEdgeLabel { edge_ref, .. } => {
+            // Edge-label drag writes `position_t` +
+            // `perpendicular_offset` per mouse-move event
+            // directly — the state is two f32s on the edge,
+            // and the only visual consumer is the label
+            // pass, which rebuilds cheaply (one label per
+            // labeled edge). Bypasses the per-frame drain /
+            // undo push that `MovingNode` / `DraggingEdgeHandle`
+            // use; release commits a single `EditEdge` with
+            // the pre-drag snapshot.
+            let cursor_canvas =
+                renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
+            let edge_ref = edge_ref.clone();
+            if let Some(doc) = document.as_mut() {
+                let changed = super::edge_label_drag::apply_edge_label_drag(
+                    doc,
+                    &edge_ref,
+                    cursor_canvas,
+                );
+                if changed {
+                    // `rebuild_scene_only` — the label drag mutates
+                    // `label_config` on one edge only; node text
+                    // buffers, node backgrounds, and border trees
+                    // are all untouched. Skipping the tree rebuild
+                    // halves the per-drag-frame cost on maps with
+                    // many nodes, matching the same "scene-only"
+                    // discipline the color-picker hover uses.
+                    rebuild_scene_only(doc, app_scene, renderer);
+                }
+            }
+        }
         DragState::DraggingPortalLabel {
             edge_ref,
             endpoint_node_id,
@@ -174,13 +205,70 @@ pub(super) fn handle_cursor_moved(
             hit_node,
             hit_edge_handle,
             hit_portal_label,
+            hit_edge_label,
         } => {
             let dist_x = cursor_pos_val.0 - start_pos.0;
             let dist_y = cursor_pos_val.1 - start_pos.1;
             if dist_x * dist_x + dist_y * dist_y > 25.0 {
-                // Past threshold — decide what kind of drag
-                // this is. Portal-label > edge-handle >
-                // node > rect-select > pan.
+                // Past threshold — promote `Pending` to the
+                // appropriate drag variant. At most one of
+                // `hit_edge_label` / `hit_portal_label` is set
+                // at press time (see `event_mouse_click.rs`'s
+                // click-hit chain), so the ordering here only
+                // resolves the `hit_edge_handle`-vs-`hit_node`
+                // overlap — a handle sits above its edge's
+                // nodes, and a handle-grab drag should always
+                // beat the node behind it. Consumption order:
+                //   edge-label → portal-label → edge-handle →
+                //   node (move) → shift-rect-select → pan.
+                // Portal-text is intentionally missing: dragging
+                // a portal's text sub-part isn't a supported
+                // gesture — the icon carries the drag.
+                if let Some(edge_key) = hit_edge_label.take() {
+                    if let Some(doc) = document.as_mut() {
+                        let edge_ref = crate::application::document::EdgeRef::new(
+                            &edge_key.from_id,
+                            &edge_key.to_id,
+                            &edge_key.edge_type,
+                        );
+                        if let Some(original) = doc
+                            .mindmap
+                            .edges
+                            .iter()
+                            .find(|e| edge_ref.matches(e))
+                            .cloned()
+                        {
+                            doc.selection = SelectionState::EdgeLabel(
+                                crate::application::document::EdgeLabelSel::new(
+                                    edge_ref.clone(),
+                                ),
+                            );
+                            let prev = doc.selection.clone();
+                            scene_cache.clear();
+                            *drag_state = DragState::DraggingEdgeLabel {
+                                edge_ref,
+                                original,
+                            };
+                            // `rebuild_after_selection_change` picks
+                            // `rebuild_scene_only` when both the
+                            // previous and new selections are edge-
+                            // adjacent (no node-tree highlight to
+                            // shift). When the user was on a node
+                            // before and drag-starts an edge-label
+                            // in the same gesture, falls back to a
+                            // full rebuild to clear the old node
+                            // highlight from the tree's text buffer.
+                            rebuild_after_selection_change(
+                                &prev,
+                                doc,
+                                mindmap_tree,
+                                app_scene,
+                                renderer,
+                            );
+                            return;
+                        }
+                    }
+                }
                 if let Some((edge_key, endpoint)) = hit_portal_label.take() {
                     if let Some(doc) = document.as_mut() {
                         let edge_ref = crate::application::document::EdgeRef::new(

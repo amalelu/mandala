@@ -22,7 +22,10 @@ use glam::Vec2;
 
 use crate::mindmap::model::ControlPoint;
 
-use self::bezier::{cubic_bezier_length, cubic_bezier_point, sample_cubic_bezier};
+use self::bezier::{
+    cubic_bezier_length, cubic_bezier_point, cubic_bezier_second_derivative,
+    cubic_bezier_tangent, sample_cubic_bezier,
+};
 
 /// A single sampled point along a connection path, produced by
 /// [`sample_path`] in canvas-space coordinates. Plain data; no
@@ -153,6 +156,206 @@ pub fn point_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
             cubic_bezier_point(t, *start, *control1, *control2, *end)
         }
     }
+}
+
+/// Return the unit tangent direction of `path` at parameter `t`,
+/// clamped to `[0, 1]`. Straight paths return the normalised
+/// (end - start) vector for every `t`; cubic Bezier paths evaluate
+/// the analytical derivative at `t`. If the path is degenerate
+/// (zero length or coincident controls) the returned vector is
+/// [`Vec2::X`] — a deterministic fallback so callers computing a
+/// normal (by rotating 90°) still get a well-defined perpendicular.
+pub fn tangent_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
+    let t = t.clamp(0.0, 1.0);
+    let raw = match path {
+        ConnectionPath::Straight { start, end } => *end - *start,
+        ConnectionPath::CubicBezier { start, control1, control2, end } => {
+            cubic_bezier_tangent(t, *start, *control1, *control2, *end)
+        }
+    };
+    let len = raw.length();
+    if len < f32::EPSILON {
+        Vec2::X
+    } else {
+        raw / len
+    }
+}
+
+/// Project a cursor position onto the closest point of `path` and
+/// return `(t, perpendicular_offset)` — the parameter value of
+/// that closest point plus the signed perpendicular distance from
+/// the path to the cursor at that `t`.
+///
+/// Used by the edge-label drag: as the user drags the label
+/// glyph, each frame projects the cursor onto the edge's path to
+/// derive the new `(position_t, perpendicular_offset)` for
+/// [`crate::mindmap::model::EdgeLabelConfig`].
+///
+/// Algorithm:
+/// - Straight paths: direct point-to-segment projection; `t` is
+///   the clamped scalar projection onto `[0, 1]`.
+/// - Cubic Bezier paths: sample `CLOSEST_POINT_SAMPLES` points
+///   uniformly in `t`, pick the nearest to the cursor, then refine
+///   with `CLOSEST_POINT_NEWTON_ITERS` iterations of Newton's
+///   method on `f(t) = (B(t) - cursor) · B'(t) = 0`. This
+///   converges quadratically near the minimum and handles the
+///   curved case without requiring the arc-length table. The
+///   Newton step is guarded two ways:
+///   1. `denom ≈ 0` breaks out early to avoid a divide that would
+///      send `t` to infinity.
+///   2. After refinement, the Newton result's squared distance is
+///      compared against the sampling sweep's best. If Newton
+///      diverged (seed was better), the sweep's `best_t` is used
+///      instead. Near inflection points where `B''(t)` briefly
+///      dominates `B'(t)·B'(t)` with opposite sign, Newton can
+///      oscillate between endpoints; this fallback keeps the
+///      answer monotone in "closer to cursor".
+///
+/// The returned `perpendicular_offset` is the signed **component
+/// along the path normal** at the returned `t` — `to_cursor ·
+/// normal_at_t(t)`. For a cursor on the curve this is ±0, matching
+/// the Euclidean distance. For a cursor far enough off the
+/// curve that `t` clamped to `0` or `1`, this is only the
+/// perpendicular component at the endpoint — the tangential
+/// component is discarded. That's the right shape for the label-
+/// drag caller (the label sits on the path with a perpendicular
+/// offset; tangential drift past the endpoint just pins `t` at 0
+/// or 1), but callers that need full Euclidean distance from the
+/// path segment should use [`distance_to_path`] instead.
+/// Positive perp matches the normal direction (see `normal_at_t`
+/// for the Y-down orientation note); negative means the cursor is
+/// on the other side.
+// ---- tuning constants for the cubic closest-point search ----
+
+/// Uniform-t sample count for the cubic-Bezier closest-point
+/// search. 32 keeps the sweep well under 1µs at f32 and is
+/// sufficient to seed the Newton refiner in the neighbourhood of
+/// the true minimum for labels on typical mindmap curvatures.
+const CLOSEST_POINT_SAMPLES: usize = 32;
+
+/// Newton iterations applied after the sampling sweep. 6 is more
+/// than enough for quadratic convergence to f32 epsilon on
+/// well-conditioned curves; caps the cost.
+const CLOSEST_POINT_NEWTON_ITERS: usize = 6;
+
+/// Minimum `|f'(t)|` before the Newton iteration bails. Below
+/// this, `numer / denom` would produce a step that either flips
+/// sign (overshoot the minimum) or flies off the [0, 1] range on
+/// near-inflection cubics. The seed-vs-refined fallback below
+/// catches the cases this early-break misses.
+const CLOSEST_POINT_NEWTON_DENOM_EPSILON: f32 = f32::EPSILON;
+
+/// Step-size below which Newton has converged. Each iteration
+/// after this produces noise at f32 precision; bailing avoids
+/// burning cycles on bit-level oscillation.
+const CLOSEST_POINT_NEWTON_STEP_EPSILON: f32 = 1.0e-5;
+
+pub fn closest_point_on_path(path: &ConnectionPath, cursor: Vec2) -> (f32, f32) {
+    match path {
+        ConnectionPath::Straight { start, end } => {
+            let ab = *end - *start;
+            let len_sq = ab.length_squared();
+            if len_sq < f32::EPSILON {
+                // Degenerate segment — cursor projects to `start`
+                // with zero perpendicular offset by convention.
+                return (0.0, 0.0);
+            }
+            let t = ((cursor - *start).dot(ab) / len_sq).clamp(0.0, 1.0);
+            let closest = *start + ab * t;
+            let to_cursor = cursor - closest;
+            let tangent = ab.normalize_or_zero();
+            // Rotate tangent 90° in canvas coords (same rotation
+            // `normal_at_t` uses) — matches the display semantics
+            // of `EdgeLabelConfig::perpendicular_offset`.
+            let normal = Vec2::new(-tangent.y, tangent.x);
+            let perp = to_cursor.dot(normal);
+            (t, perp)
+        }
+        ConnectionPath::CubicBezier { start, control1, control2, end } => {
+            let p0 = *start;
+            let p1 = *control1;
+            let p2 = *control2;
+            let p3 = *end;
+            // Uniform t-sample sweep to find the neighbourhood of
+            // the closest point.
+            let mut best_t = 0.0f32;
+            let mut best_dist_sq = f32::MAX;
+            for i in 0..=CLOSEST_POINT_SAMPLES {
+                let t = i as f32 / CLOSEST_POINT_SAMPLES as f32;
+                let point = cubic_bezier_point(t, p0, p1, p2, p3);
+                let d = (point - cursor).length_squared();
+                if d < best_dist_sq {
+                    best_dist_sq = d;
+                    best_t = t;
+                }
+            }
+            // Newton refinement on f(t) = (B(t) - cursor) · B'(t).
+            // f'(t) = B'(t) · B'(t) + (B(t) - cursor) · B''(t).
+            // Bracket into [0, 1] after each step.
+            let mut t = best_t;
+            for _ in 0..CLOSEST_POINT_NEWTON_ITERS {
+                let b = cubic_bezier_point(t, p0, p1, p2, p3);
+                let bp = cubic_bezier_tangent(t, p0, p1, p2, p3);
+                let bpp = cubic_bezier_second_derivative(t, p0, p1, p2, p3);
+                let numer = (b - cursor).dot(bp);
+                let denom = bp.dot(bp) + (b - cursor).dot(bpp);
+                if denom.abs() < CLOSEST_POINT_NEWTON_DENOM_EPSILON {
+                    break;
+                }
+                let next = (t - numer / denom).clamp(0.0, 1.0);
+                if (next - t).abs() < CLOSEST_POINT_NEWTON_STEP_EPSILON {
+                    t = next;
+                    break;
+                }
+                t = next;
+            }
+            // Divergence guard: if Newton wandered worse than the
+            // sampling seed (possible near inflection points
+            // where `B''` flips sign and the step overshoots),
+            // fall back to the seed. Without this the caller can
+            // see `t` oscillate between 0 and 1 under a slow
+            // drag even though the geometric closest point is
+            // mid-curve.
+            let refined_point = cubic_bezier_point(t, p0, p1, p2, p3);
+            let refined_dist_sq = (refined_point - cursor).length_squared();
+            let (final_t, closest) = if refined_dist_sq <= best_dist_sq {
+                (t, refined_point)
+            } else {
+                (best_t, cubic_bezier_point(best_t, p0, p1, p2, p3))
+            };
+            let to_cursor = cursor - closest;
+            let tangent =
+                cubic_bezier_tangent(final_t, p0, p1, p2, p3).normalize_or_zero();
+            let normal = Vec2::new(-tangent.y, tangent.x);
+            let perp = to_cursor.dot(normal);
+            (final_t, perp)
+        }
+    }
+}
+
+// closest-point tuning constants live alongside their user
+// (`closest_point_on_path`). Kept `const` rather than inlined so a
+// future reviewer sees the tuning knobs listed together.
+
+/// Unit normal of `path` at `t`. Computed as the tangent rotated
+/// 90° in canvas coordinates via `(x, y) → (-y, x)`.
+///
+/// **Orientation note** — mandala uses a Y-grows-down canvas
+/// (`"top"` anchor has a smaller `y` than `"bottom"`, see
+/// [`resolve_anchor_point`]). `(x, y) → (-y, x)` is
+/// counter-clockwise in math coordinates but lands on the
+/// **right-hand side of the direction of travel** from `start`
+/// to `end` on screen. Downstream callers only need a stable
+/// perpendicular — a positive
+/// [`crate::mindmap::model::EdgeLabelConfig::perpendicular_offset`]
+/// pushes the label in the returned direction, a negative one
+/// pushes it the opposite way; the side is determined by the
+/// caller's sign. The app's curve-straight-edge gesture (in the
+/// mandala crate) also routes through this helper, so keyboard
+/// and mouse path-bending agree on the same side.
+pub fn normal_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
+    let tangent = tangent_at_t(path, t);
+    Vec2::new(-tangent.y, tangent.x)
 }
 
 /// Total arc length of a connection path in canvas units. Straight

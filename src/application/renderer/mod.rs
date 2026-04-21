@@ -245,7 +245,15 @@ pub struct Renderer {
     /// `handle_click` dispatcher needs to resolve a click on a
     /// portal glyph to an `EdgeKey` + the endpoint the marker sits
     /// above (the double-click jump target is the *other* endpoint).
-    portal_hitboxes: FxHashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    /// Split between the icon's AABB and the text's AABB so the
+    /// event loop can route clicks on text to
+    /// `SelectionState::PortalText` and clicks on the icon to
+    /// `SelectionState::PortalLabel`. Text entries are absent
+    /// when the endpoint has no visible text (see
+    /// `tree_builder::portal` for the load-bearing phantom-hot-
+    /// zone invariant).
+    portal_icon_hitboxes: FxHashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    portal_text_hitboxes: FxHashMap<(EdgeKey, String), (Vec2, Vec2)>,
     /// Command palette / console overlay buffers. Rendered above
     /// everything else in screen coordinates. Populated only when
     /// the console is open; cleared otherwise.
@@ -556,7 +564,8 @@ impl Renderer {
             connection_label_buffers: FxHashMap::default(),
             connection_label_hitboxes: FxHashMap::default(),
             portal_buffers: FxHashMap::default(),
-            portal_hitboxes: FxHashMap::default(),
+            portal_icon_hitboxes: FxHashMap::default(),
+            portal_text_hitboxes: FxHashMap::default(),
             console_overlay_buffers: Vec::new(),
             color_picker_backdrop: None,
             overlay_buffers: Vec::new(),

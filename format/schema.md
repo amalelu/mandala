@@ -204,7 +204,7 @@ strings. The `groups` array is indexed by the node's `color_schema.level`.
 | `line_style` | string | See [enums.md](./enums.md) |
 | `visible` | bool | Whether to render the edge |
 | `label` | string\|null | Optional label text |
-| `label_position_t` | number\|null | Parameter-space label position (0.0–1.0) |
+| `label_config` | object\|null | Per-edge label position, color, and size-clamp overrides — see [`EdgeLabelConfig`](#edgelabelconfig) |
 | `anchor_from` | string | Which side of the source node — see [enums.md](./enums.md) |
 | `anchor_to` | string | Which side of the target node |
 | `control_points` | array | Bezier offsets for curved edges |
@@ -263,9 +263,27 @@ optional.
 | `font` | string\|null | null | Font family |
 | `font_size_pt` | number | 12.0 | Target on-screen size at zoom 1.0 |
 | `min_font_size_pt` | number | 8.0 | Lower clamp |
-| `max_font_size_pt` | number | 24.0 | Upper clamp |
+| `max_font_size_pt` | number | 128.0 | Upper clamp |
 | `color` | string\|null | null | Overrides `edge.color` when set |
 | `spacing` | number | 0.0 | Gap between body glyphs |
+
+## EdgeLabelConfig
+
+Optional per-edge overrides for the text label that sits along a
+line-mode edge's path. All fields are optional; an absent config
+means "everything defaults" — the label sits at the path midpoint,
+inherits the edge color, and sizes at `body_font_size × 1.1` with
+the edge's clamps. Portal-mode edges ignore this; their per-endpoint
+text styling lives on [`PortalEndpointState`](./portal-labels.md).
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `position_t` | number\|null | 0.5 | Tangential position on the path, `[0.0, 1.0]` (from-anchor → to-anchor). |
+| `perpendicular_offset` | number\|null | 0.0 | Signed canvas-unit offset along the path normal. Set by label drag. |
+| `color` | string\|null | null | `#RRGGBB[AA]` or `var(--name)`. Cascades: own override → `glyph_connection.color` → `edge.color`. |
+| `font_size_pt` | number\|null | `body × 1.1` | Target on-screen size at zoom 1.0. |
+| `min_font_size_pt` | number\|null | inherits | Lower screen-space clamp. Falls back to the edge's `min_font_size_pt`. |
+| `max_font_size_pt` | number\|null | inherits | Upper screen-space clamp. Falls back to the edge's `max_font_size_pt`. |
 
 ## CustomMutation
 

@@ -205,9 +205,9 @@ fn effective_font_size_respects_custom_bounds() {
     assert!((cfg.effective_font_size_pt(2.0) - 7.0).abs() < EFFECTIVE_FONT_EPSILON);
 }
 
-// label_position_t + resolved_for helper.
+// label_config + resolved_for helper.
 
-fn synthetic_edge_with_label(label: Option<&str>, pos: Option<f32>) -> MindEdge {
+fn synthetic_edge_with_label(label: Option<&str>, config: Option<EdgeLabelConfig>) -> MindEdge {
     MindEdge {
         from_id: "a".to_string(),
         to_id: "b".to_string(),
@@ -217,7 +217,7 @@ fn synthetic_edge_with_label(label: Option<&str>, pos: Option<f32>) -> MindEdge 
         line_style: "solid".to_string(),
         visible: true,
         label: label.map(|s| s.to_string()),
-        label_position_t: pos,
+        label_config: config,
         anchor_from: "auto".to_string(),
         anchor_to: "auto".to_string(),
         control_points: Vec::new(),
@@ -229,32 +229,248 @@ fn synthetic_edge_with_label(label: Option<&str>, pos: Option<f32>) -> MindEdge 
 }
 
 #[test]
-fn label_position_t_round_trips_through_json() {
-    // Explicit value is preserved.
-    let edge = synthetic_edge_with_label(Some("hello"), Some(0.25));
+fn label_config_round_trips_through_json() {
+    // Explicit values are preserved across serde round-trip.
+    let cfg = EdgeLabelConfig {
+        position_t: Some(0.25),
+        perpendicular_offset: Some(12.5),
+        color: Some("#ff8800".to_string()),
+        font_size_pt: Some(18.0),
+        min_font_size_pt: Some(9.0),
+        max_font_size_pt: Some(64.0),
+    };
+    let edge = synthetic_edge_with_label(Some("hello"), Some(cfg.clone()));
     let json = serde_json::to_string(&edge).unwrap();
-    assert!(json.contains("label_position_t"), "json should include the field: {json}");
+    assert!(
+        json.contains("label_config"),
+        "json should include label_config: {json}"
+    );
     let back: MindEdge = serde_json::from_str(&json).unwrap();
     assert_eq!(back.label.as_deref(), Some("hello"));
-    assert_eq!(back.label_position_t, Some(0.25));
+    assert_eq!(back.label_config.as_ref(), Some(&cfg));
 }
 
 #[test]
-fn label_position_t_missing_defaults_to_none() {
-    // Older maps without the field must still deserialize.
+fn label_config_missing_defaults_to_none() {
+    // Older maps without the field must still deserialize — and
+    // round-trip back out without the field.
     let json = r##"{
         "from_id":"a","to_id":"b","type":"cross_link",
         "color":"#fff","width":1,"line_style":"solid","visible":true,
         "label":null,"anchor_from":"auto","anchor_to":"auto","control_points":[]
     }"##;
     let edge: MindEdge = serde_json::from_str(json).unwrap();
-    assert_eq!(edge.label_position_t, None);
-    // And round-trips back without the field (skip_serializing_if).
+    assert!(edge.label_config.is_none());
     let back_json = serde_json::to_string(&edge).unwrap();
     assert!(
-        !back_json.contains("label_position_t"),
+        !back_json.contains("label_config"),
         "None should not serialize: {back_json}"
     );
+}
+
+#[test]
+fn label_config_perpendicular_offset_only_round_trips() {
+    // Asymmetric case: only the perpendicular offset is set.
+    // Protects against a future regression that accidentally
+    // drops `skip_serializing_if` on that field.
+    let edge = synthetic_edge_with_label(
+        Some("side"),
+        Some(EdgeLabelConfig {
+            perpendicular_offset: Some(-8.5),
+            ..Default::default()
+        }),
+    );
+    let json = serde_json::to_string(&edge).unwrap();
+    assert!(json.contains("perpendicular_offset"));
+    assert!(!json.contains("position_t"));
+    assert!(!json.contains("font_size_pt"));
+    let back: MindEdge = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.label_config.as_ref().and_then(|c| c.perpendicular_offset),
+        Some(-8.5)
+    );
+    assert_eq!(
+        back.label_config.as_ref().and_then(|c| c.position_t),
+        None
+    );
+}
+
+#[test]
+fn effective_font_size_pt_partial_clamp_inheritance() {
+    // Own `min` only: resolver should pick up the label's min and
+    // fall back to the body's max. Inverts for "own max only".
+    use crate::mindmap::model::{Canvas, GlyphConnectionConfig};
+    let canvas = Canvas {
+        background_color: "#000".into(),
+        default_border: None,
+        default_connection: None,
+        theme_variables: std::collections::HashMap::new(),
+        theme_variants: std::collections::HashMap::new(),
+    };
+    let mut edge = synthetic_edge_with_label(Some("x"), None);
+    edge.glyph_connection = Some(GlyphConnectionConfig {
+        font_size_pt: 20.0,
+        min_font_size_pt: 8.0,
+        max_font_size_pt: 64.0,
+        ..GlyphConnectionConfig::default()
+    });
+    // Own `font_size_pt = 40`, own `min = 30`, no own max → body
+    // max 64 applies. At zoom 1, target 40 ∈ [30, 64] → 40.
+    let cfg_min_only = EdgeLabelConfig {
+        font_size_pt: Some(40.0),
+        min_font_size_pt: Some(30.0),
+        ..Default::default()
+    };
+    let got = EdgeLabelConfig::effective_font_size_pt(
+        Some(&cfg_min_only),
+        &edge,
+        &canvas,
+        1.0,
+    );
+    assert!((got - 40.0).abs() < 1.0e-4);
+    // At zoom 0.5, target 20 → pinned at own min 30 → canvas
+    // size = 30 / 0.5 = 60.
+    let got_zoomed = EdgeLabelConfig::effective_font_size_pt(
+        Some(&cfg_min_only),
+        &edge,
+        &canvas,
+        0.5,
+    );
+    assert!((got_zoomed - 60.0).abs() < 1.0e-4);
+
+    // Own `max = 24` only, size inherits body × factor (22).
+    // At zoom 1.0, target 22 clamps against body min 8 / own max
+    // 24 → 22 (unchanged). At zoom 2.0, target 44 → pinned at
+    // own max 24 → canvas size = 24 / 2 = 12.
+    let cfg_max_only = EdgeLabelConfig {
+        max_font_size_pt: Some(24.0),
+        ..Default::default()
+    };
+    let got_max_1 = EdgeLabelConfig::effective_font_size_pt(
+        Some(&cfg_max_only),
+        &edge,
+        &canvas,
+        1.0,
+    );
+    assert!(
+        (got_max_1 - 22.0).abs() < 1.0e-4,
+        "expected 22 (body × 1.1), got {got_max_1}"
+    );
+    let got_max_2 = EdgeLabelConfig::effective_font_size_pt(
+        Some(&cfg_max_only),
+        &edge,
+        &canvas,
+        2.0,
+    );
+    assert!(
+        (got_max_2 - 12.0).abs() < 1.0e-4,
+        "expected 12 (own max pinned), got {got_max_2}"
+    );
+}
+
+#[test]
+fn label_config_partial_fields_round_trip() {
+    // A user who only sets `position_t` keeps the rest as `None`
+    // and doesn't accidentally serialize defaults for the other
+    // fields (each field carries `skip_serializing_if`).
+    let edge = synthetic_edge_with_label(
+        Some("hi"),
+        Some(EdgeLabelConfig {
+            position_t: Some(0.75),
+            ..Default::default()
+        }),
+    );
+    let json = serde_json::to_string(&edge).unwrap();
+    assert!(json.contains("position_t"));
+    assert!(!json.contains("perpendicular_offset"));
+    assert!(!json.contains("font_size_pt"));
+    let back: MindEdge = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.label_config.as_ref().and_then(|c| c.position_t),
+        Some(0.75)
+    );
+}
+
+#[test]
+fn effective_font_size_pt_inherits_body_when_label_override_absent() {
+    use crate::mindmap::model::{Canvas, GlyphConnectionConfig, DEFAULT_LABEL_SIZE_FACTOR};
+    let canvas = Canvas {
+        background_color: "#000".into(),
+        default_border: None,
+        default_connection: None,
+        theme_variables: std::collections::HashMap::new(),
+        theme_variants: std::collections::HashMap::new(),
+    };
+    let mut edge = synthetic_edge_with_label(Some("x"), None);
+    edge.glyph_connection = Some(GlyphConnectionConfig {
+        font_size_pt: 20.0,
+        min_font_size_pt: 8.0,
+        max_font_size_pt: 64.0,
+        ..GlyphConnectionConfig::default()
+    });
+    // With no label_config, the effective size inherits body × factor.
+    let expected = 20.0 * DEFAULT_LABEL_SIZE_FACTOR;
+    let got = EdgeLabelConfig::effective_font_size_pt(None, &edge, &canvas, 1.0);
+    assert!((got - expected).abs() < 1.0e-4, "expected {expected} got {got}");
+}
+
+#[test]
+fn effective_font_size_pt_label_override_wins_over_body() {
+    use crate::mindmap::model::{Canvas, GlyphConnectionConfig};
+    let canvas = Canvas {
+        background_color: "#000".into(),
+        default_border: None,
+        default_connection: None,
+        theme_variables: std::collections::HashMap::new(),
+        theme_variants: std::collections::HashMap::new(),
+    };
+    let mut edge = synthetic_edge_with_label(Some("x"), None);
+    edge.glyph_connection = Some(GlyphConnectionConfig {
+        font_size_pt: 20.0,
+        min_font_size_pt: 8.0,
+        max_font_size_pt: 64.0,
+        ..GlyphConnectionConfig::default()
+    });
+    let label_cfg = EdgeLabelConfig {
+        font_size_pt: Some(32.0),
+        min_font_size_pt: Some(16.0),
+        max_font_size_pt: Some(64.0),
+        ..Default::default()
+    };
+    // Target-on-screen = 32 × zoom; at zoom 1.0, inside [16,64] → 32.
+    let got = EdgeLabelConfig::effective_font_size_pt(Some(&label_cfg), &edge, &canvas, 1.0);
+    assert!((got - 32.0).abs() < 1.0e-4);
+    // Zoom 2.0: target = 64 (pinned at max); canvas = 64 / 2 = 32.
+    let got2 = EdgeLabelConfig::effective_font_size_pt(Some(&label_cfg), &edge, &canvas, 2.0);
+    assert!((got2 - 32.0).abs() < 1.0e-4);
+    // Zoom 0.5: target = 16 (pinned at min); canvas = 16 / 0.5 = 32.
+    let got3 = EdgeLabelConfig::effective_font_size_pt(Some(&label_cfg), &edge, &canvas, 0.5);
+    assert!((got3 - 32.0).abs() < 1.0e-4);
+}
+
+#[test]
+fn portal_endpoint_text_fields_round_trip() {
+    // Portal text overrides round-trip cleanly and stay absent
+    // from serialized output when `None`.
+    let state = PortalEndpointState {
+        color: Some("#ff8800".to_string()),
+        border_t: Some(1.5),
+        text: Some("→ jumps".to_string()),
+        text_color: Some("#99ccff".to_string()),
+        text_font_size_pt: Some(14.0),
+        text_min_font_size_pt: Some(10.0),
+        text_max_font_size_pt: Some(48.0),
+    };
+    let json = serde_json::to_string(&state).unwrap();
+    assert!(json.contains("text_color"));
+    assert!(json.contains("text_font_size_pt"));
+    let back: PortalEndpointState = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, state);
+    // Defaults stay absent.
+    let empty = PortalEndpointState::default();
+    let empty_json = serde_json::to_string(&empty).unwrap();
+    assert!(!empty_json.contains("text_color"));
+    assert!(!empty_json.contains("text_font_size_pt"));
 }
 
 #[test]

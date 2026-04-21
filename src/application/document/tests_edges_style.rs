@@ -167,6 +167,118 @@ use super::defaults::default_cross_link_edge;
     }
 
     #[test]
+    fn test_curve_straight_edge_inserts_control_point() {
+        // On a straight edge, `curve_straight_edge` inserts one CP
+        // offset perpendicular to the anchor line. The resulting
+        // control-point count is 1 (quadratic Bezier form).
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let ok = doc.curve_straight_edge(&edge_ref);
+        assert!(ok, "curve on a straight edge should report success");
+        assert_eq!(
+            doc.mindmap.edges[edge_idx].control_points.len(),
+            1,
+            "a single CP bootstraps a quadratic Bezier"
+        );
+        assert!(doc.dirty);
+        assert_eq!(doc.undo_stack.len(), 1);
+    }
+
+    #[test]
+    fn test_curve_straight_edge_returns_false_on_zero_length_edge() {
+        // If from and to anchors collapse to the same point (e.g.
+        // both nodes fully overlap and the anchors resolve to the
+        // same side), `curve_straight_edge` has no meaningful
+        // direction to push the CP and bails early.
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        // Collapse both endpoint nodes into identical rectangles
+        // AND force both anchors to the *same* side so the resolved
+        // anchor points genuinely coincide (auto-anchor resolution
+        // picks opposite sides by default and would defeat the
+        // test).
+        let from_id = doc.mindmap.edges[edge_idx].from_id.clone();
+        let to_id = doc.mindmap.edges[edge_idx].to_id.clone();
+        if let Some(from) = doc.mindmap.nodes.get_mut(&from_id) {
+            from.position.x = 0.0;
+            from.position.y = 0.0;
+            from.size.width = 10.0;
+            from.size.height = 10.0;
+        }
+        if let Some(to) = doc.mindmap.nodes.get_mut(&to_id) {
+            to.position.x = 0.0;
+            to.position.y = 0.0;
+            to.size.width = 10.0;
+            to.size.height = 10.0;
+        }
+        doc.mindmap.edges[edge_idx].anchor_from = "top".into();
+        doc.mindmap.edges[edge_idx].anchor_to = "top".into();
+        let ok = doc.curve_straight_edge(&edge_ref);
+        assert!(!ok, "zero-length edge should return false");
+        assert!(doc.mindmap.edges[edge_idx].control_points.is_empty());
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_curve_straight_edge_missing_node_is_noop() {
+        // Defensive branch: if an endpoint node vanished between
+        // the last frame and this call, `curve_straight_edge`
+        // bails cleanly rather than panicking.
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .unwrap();
+        let er = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        // Drop the from-node while keeping the edge record — the
+        // defensive guard should return false.
+        let from_id = doc.mindmap.edges[edge_idx].from_id.clone();
+        doc.mindmap.nodes.remove(&from_id);
+        let ok = doc.curve_straight_edge(&er);
+        assert!(!ok);
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_curve_straight_edge_noop_on_already_curved() {
+        // Re-running `curve_straight_edge` on an already-curved edge
+        // is a no-op — keeps the undo stack clean for console users
+        // who repeat the command.
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible)
+            .unwrap();
+        doc.mindmap.edges[edge_idx]
+            .control_points
+            .push(ControlPoint { x: 5.0, y: 5.0 });
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        let ok = doc.curve_straight_edge(&edge_ref);
+        assert!(!ok, "curve on already-curved edge should be a no-op");
+        assert_eq!(doc.mindmap.edges[edge_idx].control_points.len(), 1);
+    }
+
+    #[test]
     fn test_set_edge_anchor_pushes_undo() {
         let mut doc = load_test_doc();
         let edge_idx = doc.mindmap.edges.iter()
@@ -527,13 +639,19 @@ use super::defaults::default_cross_link_edge;
         let er = first_testament_edge_ref(&doc);
         assert!(doc.set_edge_label_position(&er, -5.0));
         let idx = doc.edge_index(&er).unwrap();
-        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(0.0));
+        let pos = |d: &MindMapDocument, i: usize| {
+            d.mindmap.edges[i]
+                .label_config
+                .as_ref()
+                .and_then(|c| c.position_t)
+        };
+        assert_eq!(pos(&doc, idx), Some(0.0));
 
         assert!(doc.set_edge_label_position(&er, 42.0));
-        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(1.0));
+        assert_eq!(pos(&doc, idx), Some(1.0));
 
         assert!(doc.set_edge_label_position(&er, 0.75));
-        assert_eq!(doc.mindmap.edges[idx].label_position_t, Some(0.75));
+        assert_eq!(pos(&doc, idx), Some(0.75));
     }
 
     #[test]
@@ -602,4 +720,271 @@ use super::defaults::default_cross_link_edge;
         assert!(!doc.set_edge_cap_start(&er, None));
         // Undo stack didn't grow.
         assert_eq!(doc.undo_stack.len(), 0);
+    }
+
+    #[test]
+    fn test_set_portal_label_text_color_writes_and_clears() {
+        // Write path for the new `text_color` channel: setter
+        // writes into `PortalEndpointState.text_color` without
+        // touching the icon `color`, and clearing rolls back an
+        // all-default endpoint state so the undo snapshot stays
+        // clean.
+        use baumhard::mindmap::model::{is_portal_edge, portal_endpoint_state, DISPLAY_MODE_PORTAL};
+
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Convert the first edge to portal mode so the setter has
+        // a legal target (the setter itself doesn't require portal
+        // mode, but it makes the scenario realistic).
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+        assert!(is_portal_edge(&doc.mindmap.edges[idx]));
+        let endpoint_id = doc.mindmap.edges[idx].from_id.clone();
+        doc.undo_stack.clear();
+
+        // Write: installs `text_color` on the from-endpoint.
+        assert!(doc.set_portal_label_text_color(&er, &endpoint_id, Some("#11bb33")));
+        let state = portal_endpoint_state(&doc.mindmap.edges[idx], &endpoint_id);
+        assert_eq!(
+            state.and_then(|s| s.text_color.as_deref()),
+            Some("#11bb33"),
+            "text_color should be set on the endpoint"
+        );
+        // Icon color on that same endpoint must NOT have been
+        // touched — that's the whole point of the separate channel.
+        assert_eq!(state.and_then(|s| s.color.as_deref()), None);
+        assert_eq!(doc.undo_stack.len(), 1);
+
+        // Re-setting the same value is a no-op.
+        assert!(!doc.set_portal_label_text_color(&er, &endpoint_id, Some("#11bb33")));
+        assert_eq!(doc.undo_stack.len(), 1);
+
+        // Clear: `None` removes the text_color override. Since
+        // the endpoint state was otherwise default (only
+        // text_color was set), the whole state should roll back
+        // to `None`.
+        assert!(doc.set_portal_label_text_color(&er, &endpoint_id, None));
+        assert!(
+            portal_endpoint_state(&doc.mindmap.edges[idx], &endpoint_id).is_none(),
+            "clearing the sole override should roll back to no endpoint state"
+        );
+    }
+
+    #[test]
+    fn test_set_edge_font_atomic_ordering_applies_max_before_size() {
+        // User asks size=14 max=10 atomically — the setter
+        // applies max first, then clamps size against the new
+        // bound. Confirms the documented ordering; a naive
+        // size-then-max dispatch would leave the struct with
+        // size=14, max=10 (bug).
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let ok = doc.set_edge_font(&er, Some(14.0), None, Some(10.0));
+        assert!(ok);
+        let idx = doc.edge_index(&er).unwrap();
+        let cfg = doc.mindmap.edges[idx].glyph_connection.as_ref().unwrap();
+        assert!((cfg.max_font_size_pt - 10.0).abs() < 1.0e-4);
+        assert!(
+            (cfg.font_size_pt - 10.0).abs() < 1.0e-4,
+            "size should clamp to new max; got {}",
+            cfg.font_size_pt
+        );
+    }
+
+    #[test]
+    fn test_set_edge_label_font_leaves_edge_body_untouched() {
+        // Label font triple writes `label_config.*`; the edge
+        // body's `glyph_connection.*` must not move.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Seed a known baseline.
+        assert!(doc.set_edge_font(&er, Some(12.0), Some(8.0), Some(64.0)));
+        let before = {
+            let idx = doc.edge_index(&er).unwrap();
+            let cfg = doc.mindmap.edges[idx].glyph_connection.as_ref().unwrap();
+            (cfg.font_size_pt, cfg.min_font_size_pt, cfg.max_font_size_pt)
+        };
+        assert!(doc.set_edge_label_font(&er, Some(18.0), Some(10.0), Some(30.0)));
+        let idx = doc.edge_index(&er).unwrap();
+        let body = doc.mindmap.edges[idx].glyph_connection.as_ref().unwrap();
+        assert_eq!(
+            (body.font_size_pt, body.min_font_size_pt, body.max_font_size_pt),
+            before,
+            "edge body font must be unchanged by a label-only write"
+        );
+        let label = doc.mindmap.edges[idx].label_config.as_ref().unwrap();
+        assert_eq!(label.font_size_pt, Some(18.0));
+        assert_eq!(label.min_font_size_pt, Some(10.0));
+        assert_eq!(label.max_font_size_pt, Some(30.0));
+    }
+
+    #[test]
+    fn test_set_edge_label_font_size_clamps_into_inherited_body_bounds() {
+        // Label sets only `size`, no own clamps — the clamp must
+        // fall back to the edge's `glyph_connection` bounds. Here
+        // the body max is 20, so a label size of 100 clamps to 20.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        assert!(doc.set_edge_font(&er, Some(12.0), Some(8.0), Some(20.0)));
+        assert!(doc.set_edge_label_font(&er, Some(100.0), None, None));
+        let idx = doc.edge_index(&er).unwrap();
+        let label = doc.mindmap.edges[idx].label_config.as_ref().unwrap();
+        assert_eq!(
+            label.font_size_pt,
+            Some(20.0),
+            "label size should clamp into body max when label carries no own clamps"
+        );
+    }
+
+    #[test]
+    fn test_set_portal_text_font_writes_endpoint_state_only() {
+        // Portal-text triple writes endpoint_state.text_*; the
+        // icon's own font size (inherited from glyph_connection)
+        // must not move.
+        use baumhard::mindmap::model::{portal_endpoint_state, DISPLAY_MODE_PORTAL};
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+        assert!(doc.set_edge_font(&er, Some(30.0), Some(20.0), Some(60.0)));
+        let endpoint_id = doc.mindmap.edges[idx].from_id.clone();
+        assert!(doc.set_portal_text_font(&er, &endpoint_id, Some(14.0), Some(10.0), Some(48.0)));
+        let edge = &doc.mindmap.edges[idx];
+        let body = edge.glyph_connection.as_ref().unwrap();
+        assert!((body.font_size_pt - 30.0).abs() < 1.0e-4);
+        let state = portal_endpoint_state(edge, &endpoint_id).expect("endpoint state");
+        assert_eq!(state.text_font_size_pt, Some(14.0));
+        assert_eq!(state.text_min_font_size_pt, Some(10.0));
+        assert_eq!(state.text_max_font_size_pt, Some(48.0));
+    }
+
+    #[test]
+    fn test_set_edge_font_rejects_non_positive_and_nan() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // NaN and non-positive values are filtered silently (no
+        // change, no undo entry); caller's responsibility to
+        // validate at its own layer.
+        doc.undo_stack.clear();
+        assert!(!doc.set_edge_font(&er, Some(f32::NAN), None, None));
+        assert!(!doc.set_edge_font(&er, Some(-5.0), None, None));
+        assert!(!doc.set_edge_font(&er, Some(f32::INFINITY), None, None));
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_edge_label_perpendicular_offset_writes_and_clears() {
+        // Setter writes the signed offset into
+        // `label_config.perpendicular_offset`; passing `None`
+        // clears it and rolls back an all-default `EdgeLabelConfig`
+        // so the edge goes back to no label config at all.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Write a negative offset.
+        assert!(doc.set_edge_label_perpendicular_offset(&er, Some(-12.5)));
+        let idx = doc.edge_index(&er).unwrap();
+        assert_eq!(
+            doc.mindmap.edges[idx]
+                .label_config
+                .as_ref()
+                .and_then(|c| c.perpendicular_offset),
+            Some(-12.5)
+        );
+        // Re-setting the same value is a no-op.
+        let depth = doc.undo_stack.len();
+        assert!(!doc.set_edge_label_perpendicular_offset(&er, Some(-12.5)));
+        assert_eq!(doc.undo_stack.len(), depth);
+        // Clear it back — no other fields were set, so
+        // `label_config` itself should become None.
+        assert!(doc.set_edge_label_perpendicular_offset(&er, None));
+        assert!(doc.mindmap.edges[idx].label_config.is_none());
+    }
+
+    #[test]
+    fn test_set_edge_label_perpendicular_offset_rejects_non_finite() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        doc.undo_stack.clear();
+        assert!(!doc.set_edge_label_perpendicular_offset(&er, Some(f32::NAN)));
+        assert!(!doc.set_edge_label_perpendicular_offset(&er, Some(f32::INFINITY)));
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_edge_font_rejects_inverted_min_max_explicit() {
+        // Explicit inverted bounds — `min=20 max=10` — would panic
+        // `f32::clamp` on the next render frame. Setter refuses
+        // to land the pair.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        doc.undo_stack.clear();
+        assert!(!doc.set_edge_font(&er, Some(14.0), Some(20.0), Some(10.0)));
+        assert!(doc.undo_stack.is_empty(), "no undo entry for rejected triple");
+    }
+
+    #[test]
+    fn test_set_edge_font_rejects_inverted_against_existing_max() {
+        // `min=20` alone with `max` already below 20. The
+        // incoming min inverts against the struct's existing max.
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Seed a baseline with max=10.
+        assert!(doc.set_edge_font(&er, Some(8.0), Some(5.0), Some(10.0)));
+        doc.undo_stack.clear();
+        // Now try to set min=20: resolved (20, 10) is inverted.
+        assert!(!doc.set_edge_font(&er, None, Some(20.0), None));
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_edge_label_font_rejects_inverted_min_max() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        doc.undo_stack.clear();
+        assert!(!doc.set_edge_label_font(&er, Some(14.0), Some(30.0), Some(20.0)));
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_portal_text_font_rejects_inverted_min_max() {
+        use baumhard::mindmap::model::DISPLAY_MODE_PORTAL;
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+        let endpoint = doc.mindmap.edges[idx].from_id.clone();
+        doc.undo_stack.clear();
+        assert!(!doc.set_portal_text_font(&er, &endpoint, Some(14.0), Some(30.0), Some(20.0)));
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_set_portal_text_font_does_not_clear_other_endpoint_default_state() {
+        // Regression for R2.2: the pre-fix scrub block scanned
+        // both `portal_from` and `portal_to` and nuked either one
+        // that happened to be in `PortalEndpointState::default()`
+        // shape. A setter call that forks a fresh state on the
+        // `from` side must not silently discard a pre-existing
+        // default state on the `to` side.
+        use baumhard::mindmap::model::{PortalEndpointState, DISPLAY_MODE_PORTAL};
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+        // Seed the to-endpoint with a persistent default state —
+        // this shape is rare in normal flows but could arise
+        // through hand-edited JSON or a future code path that
+        // installs default without fields.
+        doc.mindmap.edges[idx].portal_to = Some(PortalEndpointState::default());
+        let from_id = doc.mindmap.edges[idx].from_id.clone();
+        // Set text font only on the from-endpoint.
+        assert!(doc.set_portal_text_font(&er, &from_id, Some(14.0), None, None));
+        // Post-call: from-endpoint got the text_font_size; to-
+        // endpoint's pre-existing state is untouched.
+        assert!(doc.mindmap.edges[idx].portal_from.is_some());
+        assert_eq!(
+            doc.mindmap.edges[idx].portal_to,
+            Some(PortalEndpointState::default()),
+            "unrelated endpoint's default state must survive"
+        );
     }

@@ -84,6 +84,24 @@ pub struct ResolvedPortalStyle {
     pub font_size_pt: f32,
 }
 
+/// Resolved rendering params for a portal endpoint's **text**
+/// label — the glyph area that sits alongside the icon. Split out
+/// from [`ResolvedPortalStyle`] so per-endpoint overrides
+/// (`text_color`, `text_font_size_pt`, `text_min_font_size_pt`,
+/// `text_max_font_size_pt`) route only to the text channel while
+/// the icon keeps reading its own cascade.
+///
+/// No `font` field: text always inherits the icon's font (which
+/// already routes through `glyph_connection.font`); a
+/// per-endpoint text-font override isn't a current requirement
+/// and the icon's resolved font reaches the tree builder via
+/// `ResolvedPortalStyle::font`.
+#[derive(Debug, Clone)]
+pub struct ResolvedPortalTextStyle {
+    pub color: String,
+    pub font_size_pt: f32,
+}
+
 /// Resolve the per-endpoint portal marker style. Merges the color
 /// cascade (preview > whole-edge-select > per-label-select >
 /// per-endpoint override > edge-level override > edge.color),
@@ -158,6 +176,78 @@ pub fn resolve_portal_endpoint_style(
     }
 }
 
+/// Resolve the text-channel style for one portal endpoint. Sibling
+/// of [`resolve_portal_endpoint_style`] — the text label carries
+/// its own color + size cascade so a coloured badge can hold a
+/// differently-coloured annotation beside it (parity with
+/// line-mode edge labels).
+///
+/// Color cascade, in order of precedence:
+/// 1. `raw_color_override` (preview / whole-edge highlight / per-label
+///    highlight) — wins so live wheel feedback and selection cyan
+///    remain visible.
+/// 2. `endpoint_state.text_color` — per-endpoint text override.
+/// 3. `icon_color` — falls back to the already-resolved icon cascade
+///    so a portal whose user has only set `color` gets a text
+///    channel that matches the icon automatically.
+///
+/// Font size inheritance:
+/// - Base: `endpoint_state.text_font_size_pt` → edge's
+///   `glyph_connection.font_size_pt` (or the hardcoded portal
+///   default when the edge carries no glyph_connection, matching
+///   the icon's fallback).
+/// - Clamps: `endpoint_state.text_min_font_size_pt` /
+///   `text_max_font_size_pt` → the edge's `glyph_connection` clamps.
+/// The clamping formula mirrors
+/// [`GlyphConnectionConfig::effective_font_size_pt`]: clamp the
+/// target-screen size into `[min, max]` and divide back through
+/// `camera_zoom`, so the text LODs the same way the icon does.
+pub fn resolve_portal_endpoint_text_style(
+    edge: &MindEdge,
+    endpoint_state: Option<&PortalEndpointState>,
+    canvas: &Canvas,
+    raw_color_override: Option<&str>,
+    icon_color: &str,
+    camera_zoom: f32,
+) -> ResolvedPortalTextStyle {
+    let cfg = GlyphConnectionConfig::resolved_for(edge, canvas);
+    let body_base = if edge.glyph_connection.is_none() {
+        DEFAULT_PORTAL_MARKER_FONT_SIZE_PT
+    } else {
+        cfg.font_size_pt
+    };
+    let base_font_size = endpoint_state
+        .and_then(|s| s.text_font_size_pt)
+        .unwrap_or(body_base);
+    let min = endpoint_state
+        .and_then(|s| s.text_min_font_size_pt)
+        .unwrap_or(cfg.min_font_size_pt);
+    let max = endpoint_state
+        .and_then(|s| s.text_max_font_size_pt)
+        .unwrap_or(cfg.max_font_size_pt);
+    let z = camera_zoom.max(f32::EPSILON);
+    let target_screen = (base_font_size * z).clamp(min, max);
+    let font_size_pt = target_screen / z;
+
+    // Text color: transient overrides first, then the per-endpoint
+    // `text_color`, then the already-resolved icon color. Falling
+    // back to the icon color (as a fully-resolved hex) rather than
+    // re-running the icon cascade keeps the two channels in sync
+    // for portals the user has only half-styled.
+    let resolved_text_color: String = if let Some(hex) = raw_color_override {
+        resolve_var(hex, &canvas.theme_variables).to_string()
+    } else if let Some(hex) = endpoint_state.and_then(|s| s.text_color.as_deref()) {
+        resolve_var(hex, &canvas.theme_variables).to_string()
+    } else {
+        icon_color.to_string()
+    };
+
+    ResolvedPortalTextStyle {
+        color: resolved_text_color,
+        font_size_pt,
+    }
+}
+
 /// Per-endpoint layout result: the top-left AABB corner plus its
 /// extent, derived from `border_t` (user override) or the
 /// directional default. The owning node's position + size have
@@ -219,18 +309,26 @@ pub(crate) struct PortalTextLayout {
 }
 
 /// Compute the AABB for a portal text label, given the icon
-/// layout and the border parameter driving the outward normal.
-/// Text extends from the icon's outward edge away from the node
-/// along the normal, with width scaled by grapheme count using
-/// the same `char_count × font_size × 0.6` heuristic connection
-/// labels use.
+/// layout, the border parameter driving the outward normal, and
+/// the icon + text font sizes. Text extends from the icon's
+/// outward edge away from the node along the normal, with width
+/// scaled by grapheme count using the same
+/// `char_count × font_size × 0.6` heuristic connection labels
+/// use.
+///
+/// `icon_font_size_pt` drives the padding between icon and text
+/// (matches [`PORTAL_TEXT_PADDING_FRAC`]'s contract — "fraction
+/// of the **icon** font size") so the visible gap stays stable
+/// when the text is resized independently. `text_font_size_pt`
+/// drives only the text AABB dimensions.
 pub(crate) fn layout_portal_text(
     icon: PortalLabelLayout,
     owner_pos: Vec2,
     owner_size: Vec2,
     partner_center: Vec2,
     endpoint_state: Option<&PortalEndpointState>,
-    font_size_pt: f32,
+    icon_font_size_pt: f32,
+    text_font_size_pt: f32,
     text: &str,
 ) -> PortalTextLayout {
     // Approximate grapheme count (cheap proxy for shaped
@@ -238,21 +336,40 @@ pub(crate) fn layout_portal_text(
     // strings get a minimum 1-char-wide slot so the buffer is
     // never zero-sized, matching the connection-label helper.
     let char_count = text.chars().count().max(1) as f32;
-    let bounds = Vec2::new(char_count * font_size_pt * 0.6, font_size_pt * 1.3);
+    let bounds = Vec2::new(char_count * text_font_size_pt * 0.6, text_font_size_pt * 1.3);
     let t = endpoint_state
         .and_then(|s| s.border_t)
         .unwrap_or_else(|| default_border_t(owner_pos, owner_size, partner_center));
     let normal = border_outward_normal(t);
-    let padding = font_size_pt * PORTAL_TEXT_PADDING_FRAC;
-    // Icon center as the anchor for text placement. Text AABB
-    // is positioned so its inner edge sits one padding beyond
-    // the icon's outer edge along the outward normal, with
-    // perpendicular centering on the icon.
+    // Padding is driven by the **icon** size so the visible gap
+    // between icon and text stays stable when the user shrinks or
+    // grows the text independently — a 6pt annotation beside a
+    // 50pt badge still sits at a consistent distance from the badge.
+    let padding = icon_font_size_pt * PORTAL_TEXT_PADDING_FRAC;
+    // Icon center as the anchor for text placement.
     let icon_center = Vec2::new(
         icon.top_left.x + icon.bounds.x * 0.5,
         icon.top_left.y + icon.bounds.y * 0.5,
     );
-    let outward_offset = icon.bounds.x * 0.5 + padding + bounds.x * 0.5;
+    // Distance along the outward normal needed to keep the text
+    // AABB entirely outside the icon AABB. Both AABBs are world-
+    // axis-aligned; their half-extent along an arbitrary normal
+    // is the "support function" of the rectangle —
+    // `|half.x * normal.x| + |half.y * normal.y|`. For cardinal
+    // normals (top/right/bottom/left sides) this collapses to the
+    // half-width and the old `icon.bounds.x * 0.5 + bounds.x * 0.5`
+    // formula. For the cardinal-corner transitions where
+    // `border_outward_normal` briefly returns a diagonal
+    // (Y-down canvas, normal from a corner), the old formula
+    // under-estimated the clearance and the text AABB could
+    // cross into the icon AABB — mis-routing icon clicks to
+    // `ClickHit::PortalText`.
+    let icon_half = icon.bounds * 0.5;
+    let text_half = bounds * 0.5;
+    let abs_normal = Vec2::new(normal.x.abs(), normal.y.abs());
+    let icon_support = icon_half.x * abs_normal.x + icon_half.y * abs_normal.y;
+    let text_support = text_half.x * abs_normal.x + text_half.y * abs_normal.y;
+    let outward_offset = icon_support + padding + text_support;
     let text_center = icon_center + normal * outward_offset;
     let top_left = Vec2::new(
         text_center.x - bounds.x * 0.5,

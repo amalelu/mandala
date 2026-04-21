@@ -602,3 +602,320 @@ fn test_bezier_sample_degenerate_returns_single_point() {
     assert_eq!(samples.len(), 1, "degenerate curve should produce single sample");
     assert!(almost_equal(samples[0].position.x, 42.0));
 }
+
+// ---- tangent / normal helpers ----
+
+#[test]
+fn tangent_at_t_straight_path_returns_endpoint_direction() {
+    // For a straight path, the tangent is the normalised
+    // end-minus-start vector regardless of `t`.
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(10.0, 0.0),
+    };
+    for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        let tangent = tangent_at_t(&path, t);
+        assert!(almost_equal(tangent.x, 1.0), "t={t} x should be 1");
+        assert!(almost_equal(tangent.y, 0.0), "t={t} y should be 0");
+    }
+}
+
+#[test]
+fn tangent_at_t_zero_length_straight_path_falls_back_to_x_axis() {
+    // Coincident endpoints produce a zero-length raw tangent;
+    // the fallback keeps callers from dividing by zero.
+    let pt = Vec2::new(5.0, 5.0);
+    let path = ConnectionPath::Straight { start: pt, end: pt };
+    let tangent = tangent_at_t(&path, 0.5);
+    assert_eq!(tangent, Vec2::X);
+}
+
+#[test]
+fn tangent_at_t_cubic_bezier_at_endpoints_uses_analytical_derivative() {
+    // At t = 0: derivative = 3(p1 - p0). At t = 1: derivative =
+    // 3(p3 - p2). Normalised.
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(10.0, 0.0);
+    let p2 = Vec2::new(20.0, 10.0);
+    let p3 = Vec2::new(30.0, 10.0);
+    let path = ConnectionPath::CubicBezier {
+        start: p0,
+        control1: p1,
+        control2: p2,
+        end: p3,
+    };
+    // t = 0: tangent ∝ (p1 - p0) = (10, 0) → normalised (1, 0).
+    let t0 = tangent_at_t(&path, 0.0);
+    assert!(almost_equal(t0.x, 1.0));
+    assert!(almost_equal(t0.y, 0.0));
+    // t = 1: tangent ∝ (p3 - p2) = (10, 0) → (1, 0).
+    let t1 = tangent_at_t(&path, 1.0);
+    assert!(almost_equal(t1.x, 1.0));
+    assert!(almost_equal(t1.y, 0.0));
+}
+
+#[test]
+fn normal_at_t_is_orthogonal_to_tangent() {
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(7.0, 3.0),
+    };
+    let tangent = tangent_at_t(&path, 0.5);
+    let normal = normal_at_t(&path, 0.5);
+    // Dot product of orthogonal unit vectors is 0.
+    assert!(tangent.dot(normal).abs() < 1.0e-5);
+    // And length is 1.
+    assert!((normal.length() - 1.0).abs() < 1.0e-5);
+}
+
+#[test]
+fn normal_at_t_rotates_canvas_90_clockwise_into_screen_space() {
+    // A tangent pointing +X in canvas space rotates to (-0, +1)
+    // by the `(x, y) → (-y, x)` formula, i.e. +Y — which on a
+    // Y-down canvas lands *below* the path (the right-hand side
+    // of travel in screen space). Pin the behaviour so a future
+    // flip of the formula or a coordinate-system change breaks
+    // this test instead of silently inverting label positioning.
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(10.0, 0.0),
+    };
+    let normal = normal_at_t(&path, 0.5);
+    assert!(almost_equal(normal.x, 0.0));
+    assert!(almost_equal(normal.y, 1.0));
+}
+
+// ---- cubic_bezier_tangent analytical derivative ----
+
+#[test]
+fn cubic_bezier_tangent_matches_finite_difference() {
+    // Spot-check the analytical derivative against a finite
+    // difference — a single bug in the coefficients (e.g. writing
+    // `2.0 * u * t` instead of `6.0 * u * t` for the middle term)
+    // would break this test.
+    use crate::mindmap::connection::bezier::{cubic_bezier_point, cubic_bezier_tangent};
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(1.0, 5.0);
+    let p2 = Vec2::new(4.0, -2.0);
+    let p3 = Vec2::new(6.0, 3.0);
+    // h = 1e-3 balances truncation error (O(h² · |f‴|) ≈ 1e-4
+    // on this cubic) against f32 cancellation in the central
+    // difference (rounding amplification ≈ 1/(2h)). Smaller h
+    // would sink under cancellation noise; larger h would let
+    // truncation dominate.
+    let h = 1.0e-3;
+    for t in [0.1, 0.3, 0.5, 0.7, 0.9] {
+        let analytical = cubic_bezier_tangent(t, p0, p1, p2, p3);
+        let fwd = cubic_bezier_point(t + h, p0, p1, p2, p3);
+        let back = cubic_bezier_point(t - h, p0, p1, p2, p3);
+        let fd = (fwd - back) / (2.0 * h);
+        // Tolerance 1e-3 sits comfortably above the combined
+        // truncation + f32 cancellation floor while still
+        // catching a single-coefficient bug — e.g. a missing
+        // factor of 2 or a `u*t` → `u+t` typo produces errors
+        // of order 1-10.
+        assert!(
+            (analytical.x - fd.x).abs() < 1.0e-3,
+            "t={t} x analytical {} vs fd {}",
+            analytical.x,
+            fd.x
+        );
+        assert!(
+            (analytical.y - fd.y).abs() < 1.0e-3,
+            "t={t} y analytical {} vs fd {}",
+            analytical.y,
+            fd.y
+        );
+    }
+}
+
+// ---- closest_point_on_path ----
+
+#[test]
+fn closest_point_on_path_straight_cursor_above_midpoint() {
+    // Horizontal segment; cursor directly above the midpoint at
+    // y = -5. Expected: t = 0.5, perp_offset = -5 (perp direction
+    // is `(-y, x)` rotation of `(1, 0)` tangent = `(0, 1)`, so
+    // cursor at `(x_mid, -5)` relative to `(x_mid, 0)` has
+    // `to_cursor = (0, -5)`, perp = dot((0,-5), (0,1)) = -5).
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(100.0, 0.0),
+    };
+    let (t, perp) = closest_point_on_path(&path, Vec2::new(50.0, -5.0));
+    assert!((t - 0.5).abs() < 1.0e-5, "t={t}");
+    assert!((perp - -5.0).abs() < 1.0e-5, "perp={perp}");
+}
+
+#[test]
+fn closest_point_on_path_straight_cursor_beyond_end_clamps_to_1() {
+    // Cursor past the `end` endpoint clamps `t` into `[0, 1]`.
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(100.0, 0.0),
+    };
+    let (t, _perp) = closest_point_on_path(&path, Vec2::new(200.0, 0.0));
+    assert!((t - 1.0).abs() < 1.0e-5, "t={t}");
+}
+
+#[test]
+fn closest_point_on_path_straight_cursor_behind_start_clamps_to_0() {
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(10.0, 10.0),
+        end: Vec2::new(50.0, 10.0),
+    };
+    let (t, _perp) = closest_point_on_path(&path, Vec2::new(-40.0, 10.0));
+    assert!(t < 1.0e-5, "t={t}");
+}
+
+#[test]
+fn closest_point_on_path_straight_zero_length_returns_defaults() {
+    // Coincident endpoints: no meaningful direction. Contract is
+    // `(0, 0)` so the caller can rely on the tuple without a
+    // `NaN` check.
+    let pt = Vec2::new(5.0, 5.0);
+    let path = ConnectionPath::Straight { start: pt, end: pt };
+    let (t, perp) = closest_point_on_path(&path, Vec2::new(20.0, 20.0));
+    assert_eq!(t, 0.0);
+    assert_eq!(perp, 0.0);
+}
+
+#[test]
+fn closest_point_on_path_cubic_cursor_on_curve_returns_zero_perp() {
+    // A cursor sitting exactly on the curve at a known `t` must
+    // recover `t` (approximately) with near-zero perp.
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(33.0, 50.0);
+    let p2 = Vec2::new(66.0, 50.0);
+    let p3 = Vec2::new(100.0, 0.0);
+    let path = ConnectionPath::CubicBezier {
+        start: p0,
+        control1: p1,
+        control2: p2,
+        end: p3,
+    };
+    // Pick a known t, evaluate the curve there, and ask the
+    // closest-point solver for that point.
+    let true_t = 0.37;
+    let on_curve = crate::mindmap::connection::bezier::cubic_bezier_point(
+        true_t, p0, p1, p2, p3,
+    );
+    let (t, perp) = closest_point_on_path(&path, on_curve);
+    assert!(
+        (t - true_t).abs() < 1.0e-3,
+        "Newton should recover t within 1e-3; got {t} vs {true_t}"
+    );
+    assert!(
+        perp.abs() < 1.0e-3,
+        "perp should be ~0 when cursor is on the curve; got {perp}"
+    );
+}
+
+#[test]
+fn closest_point_on_path_cubic_offset_cursor_produces_signed_perp() {
+    // Offset the on-curve point along the path normal by a known
+    // signed distance; the solver should recover the same signed
+    // perp value.
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(33.0, 50.0);
+    let p2 = Vec2::new(66.0, 50.0);
+    let p3 = Vec2::new(100.0, 0.0);
+    let path = ConnectionPath::CubicBezier {
+        start: p0,
+        control1: p1,
+        control2: p2,
+        end: p3,
+    };
+    let true_t = 0.42;
+    let on_curve = crate::mindmap::connection::bezier::cubic_bezier_point(
+        true_t, p0, p1, p2, p3,
+    );
+    let normal = normal_at_t(&path, true_t);
+    let offset = 12.0_f32;
+    let cursor = on_curve + normal * offset;
+    let (t, perp) = closest_point_on_path(&path, cursor);
+    assert!((t - true_t).abs() < 1.0e-2, "t={t} vs {true_t}");
+    assert!((perp - offset).abs() < 1.0e-1, "perp={perp} vs {offset}");
+}
+
+#[test]
+fn closest_point_on_path_cubic_degenerate_all_coincident() {
+    // All four control points coincident: every evaluation of
+    // B(t) returns the same point, tangent is zero everywhere.
+    // Contract: `t=0`, `perp=0` — callers get a deterministic
+    // fallback rather than NaN.
+    let pt = Vec2::new(7.0, 11.0);
+    let path = ConnectionPath::CubicBezier {
+        start: pt,
+        control1: pt,
+        control2: pt,
+        end: pt,
+    };
+    let (t, perp) = closest_point_on_path(&path, Vec2::new(50.0, 50.0));
+    assert!(t.is_finite());
+    assert!(perp.is_finite());
+    // The closest point on a degenerate curve is the coincident
+    // point; perpendicular from cursor to it projected on the
+    // zero tangent is zero by convention.
+    assert!(
+        (0.0..=1.0).contains(&t),
+        "t stayed in [0,1] under degenerate curve"
+    );
+    assert_eq!(perp, 0.0);
+}
+
+#[test]
+fn closest_point_on_path_cubic_near_inflection_never_worse_than_seed() {
+    // Cubic with an inflection point — B''(t) changes sign near
+    // the middle of the curve, which can send a naive Newton
+    // step past the true minimum. The divergence guard compares
+    // Newton's refined dist² against the sampling seed's and
+    // falls back when Newton diverged. Any cursor position
+    // must produce a path point whose distance is ≤ the best
+    // sample's distance.
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(10.0, 100.0);
+    let p2 = Vec2::new(90.0, -100.0); // inflection between p1 and p2
+    let p3 = Vec2::new(100.0, 0.0);
+    let path = ConnectionPath::CubicBezier {
+        start: p0,
+        control1: p1,
+        control2: p2,
+        end: p3,
+    };
+    // Cursor at a position that exercises the inflection region.
+    let cursors = [
+        Vec2::new(50.0, 0.0),
+        Vec2::new(50.0, 10.0),
+        Vec2::new(50.0, -10.0),
+        Vec2::new(25.0, 30.0),
+        Vec2::new(75.0, -30.0),
+    ];
+    for cursor in cursors {
+        // Compute the sampling-only seed distance for the same
+        // cursor by replicating the 32-sample sweep.
+        let mut seed_best = f32::MAX;
+        for i in 0..=32 {
+            let t = i as f32 / 32.0;
+            let d = (crate::mindmap::connection::bezier::cubic_bezier_point(
+                t, p0, p1, p2, p3,
+            ) - cursor)
+                .length_squared();
+            if d < seed_best {
+                seed_best = d;
+            }
+        }
+        let (t, _perp) = closest_point_on_path(&path, cursor);
+        let point =
+            crate::mindmap::connection::bezier::cubic_bezier_point(t, p0, p1, p2, p3);
+        let refined_dist_sq = (point - cursor).length_squared();
+        assert!(
+            refined_dist_sq <= seed_best + 1.0e-3,
+            "Newton must never be worse than seed: refined={} seed_best={} t={} cursor={:?}",
+            refined_dist_sq,
+            seed_best,
+            t,
+            cursor
+        );
+    }
+}

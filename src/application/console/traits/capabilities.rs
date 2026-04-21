@@ -34,11 +34,6 @@ pub trait HasBorderColor {
     fn set_border_color(&mut self, c: ColorValue) -> Outcome;
 }
 
-/// Target supports setting its font size in points.
-pub trait HasFontSize {
-    fn set_font_size(&mut self, pt: f32) -> Outcome;
-}
-
 /// Target supports setting or clearing a label.
 ///
 /// `None` clears the label; `Some(s)` sets it. For edges this is

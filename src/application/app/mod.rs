@@ -23,6 +23,8 @@ mod drain_frame;
 #[cfg(not(target_arch = "wasm32"))]
 mod edge_drag;
 #[cfg(not(target_arch = "wasm32"))]
+mod edge_label_drag;
+#[cfg(not(target_arch = "wasm32"))]
 mod event_cursor_moved;
 #[cfg(not(target_arch = "wasm32"))]
 mod event_keyboard;
@@ -43,9 +45,10 @@ mod run_wasm;
 
 // Cross-platform imports.
 use scene_rebuild::{
-    flush_canvas_scene_buffers, rebuild_all, rebuild_scene_only, update_border_tree_static,
-    update_border_tree_with_offsets, update_connection_label_tree, update_connection_tree,
-    update_edge_handle_tree, update_portal_tree,
+    flush_canvas_scene_buffers, rebuild_after_selection_change, rebuild_all,
+    rebuild_scene_only, update_border_tree_static, update_border_tree_with_offsets,
+    update_connection_label_tree, update_connection_tree, update_edge_handle_tree,
+    update_portal_tree,
 };
 use text_edit::{
     close_text_edit, delete_at_cursor, delete_before_cursor, handle_text_edit_key,
@@ -153,14 +156,32 @@ enum ClickHit {
     Empty,
     /// Cursor is inside node `id`'s AABB.
     Node(String),
-    /// Cursor is inside a portal marker. `edge` identifies the
-    /// owning portal-mode edge; `endpoint` is the node the hit
-    /// marker sits above (the double-click pan target is the
+    /// Cursor is inside a portal **icon** marker. `edge` identifies
+    /// the owning portal-mode edge; `endpoint` is the node the
+    /// hit marker sits above (the double-click pan target is the
     /// *other* endpoint).
     PortalMarker {
         edge: baumhard::mindmap::scene_cache::EdgeKey,
         endpoint: String,
     },
+    /// Cursor is inside a portal **text** label — the glyph area
+    /// sitting alongside a portal icon. Routes to
+    /// `SelectionState::PortalText`, distinct from the icon so
+    /// per-channel operations (color / font) target only the
+    /// clicked sub-part. Double-click inherits the same
+    /// pan-to-partner behaviour as `PortalMarker` — the
+    /// endpoint identity is shared between icon and text.
+    PortalText {
+        edge: baumhard::mindmap::scene_cache::EdgeKey,
+        endpoint: String,
+    },
+    /// Cursor is inside a line-mode edge's **label** AABB.
+    /// Routes to `SelectionState::EdgeLabel` on single click so
+    /// color / font / copy operations target the label instead
+    /// of the edge body; double-click opens the inline label
+    /// editor, matching the "click to select, dbl to edit"
+    /// idiom the `Node` variant already follows.
+    EdgeLabel(baumhard::mindmap::scene_cache::EdgeKey),
 }
 
 /// Records the previous left-click's time, screen position, and hit
@@ -335,6 +356,13 @@ enum DragState {
             baumhard::mindmap::scene_cache::EdgeKey,
             String,
         )>,
+        /// If the cursor landed on an edge-label AABB at
+        /// mouse-down, this records the owning edge key so a
+        /// drag past threshold transitions to
+        /// `DraggingEdgeLabel`. Takes precedence over
+        /// `hit_node` — a label hovering over a node behind
+        /// it should move as a label, not a node.
+        hit_edge_label: Option<baumhard::mindmap::scene_cache::EdgeKey>,
     },
     /// Dragging to pan the camera (started on empty space).
     Panning,
@@ -396,6 +424,23 @@ enum DragState {
         /// Full pre-drag `MindEdge` snapshot, used both for
         /// `UndoAction::EditEdge` at release and to skip undo
         /// entries when the drag didn't actually move `border_t`.
+        original: baumhard::mindmap::model::MindEdge,
+    },
+    /// Dragging a line-mode edge's text label along its
+    /// connection path. The cursor drags in free canvas space
+    /// and each drain frame projects that position onto the
+    /// edge's path via
+    /// [`baumhard::mindmap::connection::closest_point_on_path`],
+    /// writing the resulting
+    /// `(position_t, perpendicular_offset)` into the edge's
+    /// `label_config`. On release a single
+    /// `UndoAction::EditEdge` is pushed carrying the pre-drag
+    /// snapshot.
+    DraggingEdgeLabel {
+        edge_ref: EdgeRef,
+        /// Full pre-drag `MindEdge` snapshot — used both for
+        /// the undo entry at release and to skip pushing an
+        /// entry when the drag didn't actually move the label.
         original: baumhard::mindmap::model::MindEdge,
     },
 }

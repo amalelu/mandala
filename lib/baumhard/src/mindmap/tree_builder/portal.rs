@@ -38,7 +38,7 @@ use crate::gfx_structs::tree::Tree;
 use crate::mindmap::model::{is_portal_edge, portal_endpoint_state, MindMap, MindNode};
 use crate::mindmap::scene_builder::portal::{
     layout_portal_label, layout_portal_text, node_center, resolve_portal_endpoint_style,
-    SelectedPortalLabel,
+    resolve_portal_endpoint_text_style, SelectedPortalLabel,
 };
 use crate::mindmap::scene_builder::PortalTextEditOverride;
 use crate::mindmap::scene_cache::EdgeKey;
@@ -62,19 +62,27 @@ pub struct PortalColorPreviewRef<'a> {
     pub color: &'a str,
 }
 
-/// Result of [`build_portal_tree`]. Bundles the tree with the
-/// hitbox map the renderer consults for click dispatch. One
-/// hitbox per endpoint, spanning both the icon AABB and the
-/// text AABB — clicking the text behaves identically to
-/// clicking the icon (both select the same portal label).
+/// Result of [`build_portal_tree`]. Bundles the tree with two
+/// hitbox maps — one per clickable sub-part of a portal label
+/// (icon vs. text) — that the renderer consults for click
+/// dispatch. Splitting them lets the event loop route icon
+/// clicks to `SelectionState::PortalLabel` and text clicks to
+/// `SelectionState::PortalText`, so per-endpoint color / font
+/// / clipboard operations target the channel the user clicked.
 pub struct PortalTree {
     pub tree: Tree<GfxElement, GfxMutator>,
-    /// `(edge_key, endpoint_node_id) → (min, max)` spanning the
-    /// union of icon + text AABBs. Renderer keys this into its
-    /// portal hit-test map so click dispatch finds the endpoint
-    /// under the cursor regardless of which half of the label
-    /// was hit.
-    pub hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    /// `(edge_key, endpoint_node_id) → (min, max)` for the
+    /// **icon** AABB. One entry per visible portal-mode edge
+    /// endpoint; never absent (an endpoint always renders its
+    /// icon, even when `text` is empty).
+    pub icon_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    /// `(edge_key, endpoint_node_id) → (min, max)` for the
+    /// **text** AABB. Entries are present only for endpoints
+    /// with non-empty text — an empty-string text slot reserves
+    /// a GlyphArea channel in the tree but registers no hitbox,
+    /// so text-less portals don't grow a phantom ~30×65px hot
+    /// zone next to the icon.
+    pub text_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
 }
 
 /// Identity tuple for one portal-mode edge: the `EdgeKey` of the
@@ -85,10 +93,11 @@ pub struct PortalTree {
 pub type PortalIdentity = EdgeKey;
 
 /// Per-endpoint tree-build output: the icon + text glyph areas
-/// at their per-slot channels, the endpoint id, and a combined
-/// AABB for hit testing. Each field is computed from the same
-/// source of truth (`layout_portal_label` + `layout_portal_text`)
-/// so the scene and tree paths cannot drift.
+/// at their per-slot channels, the endpoint id, and the two
+/// hit-test rectangles (one per clickable sub-part). Each field
+/// is computed from the same source of truth
+/// (`layout_portal_label` + `layout_portal_text`) so the scene
+/// and tree paths cannot drift.
 #[derive(Clone, Debug)]
 pub struct EndpointAreas {
     /// Icon glyph area (always slot channel 1 under the
@@ -105,11 +114,15 @@ pub struct EndpointAreas {
     /// `edge.to_id`). Used by the renderer to key per-endpoint
     /// hitboxes and to route click dispatch.
     pub endpoint_node_id: String,
-    /// Combined AABB spanning both icon and text. Stored on the
-    /// pair so the renderer's hit-test map sees one rect per
-    /// endpoint — makes clicks on the text behave identically
-    /// to clicks on the icon.
-    pub hitbox: (Vec2, Vec2),
+    /// AABB for the **icon** sub-part. Always present.
+    pub icon_hitbox: (Vec2, Vec2),
+    /// AABB for the **text** sub-part. `None` when the
+    /// endpoint has no visible text — an empty-string slot
+    /// still reserves its channel in the tree, but clicking
+    /// the phantom area beside a text-less icon should fall
+    /// through to the icon hitbox or the node beneath, not
+    /// select `PortalText`.
+    pub text_hitbox: Option<(Vec2, Vec2)>,
 }
 
 /// Per-pair output of [`portal_pair_data`]. Single source of
@@ -206,6 +219,14 @@ pub fn portal_pair_data(
                 raw_color_override,
                 camera_zoom,
             );
+            let text_style = resolve_portal_endpoint_text_style(
+                edge,
+                endpoint_state,
+                &map.canvas,
+                raw_color_override,
+                &style.color,
+                camera_zoom,
+            );
             let icon_layout = layout_portal_label(
                 owner_pos,
                 owner_size,
@@ -213,8 +234,10 @@ pub fn portal_pair_data(
                 endpoint_state,
                 style.font_size_pt,
             );
-            let color_rgba =
+            let icon_color_rgba =
                 color::hex_to_rgba_safe(&style.color, [0.92, 0.92, 0.92, 1.0]);
+            let text_color_rgba =
+                color::hex_to_rgba_safe(&text_style.color, [0.92, 0.92, 0.92, 1.0]);
 
             // Inline edit preview wins over the committed `text`
             // so the user sees their buffer live. Empty string
@@ -236,6 +259,7 @@ pub fn portal_pair_data(
                 node_center(partner_pos, partner_size),
                 endpoint_state,
                 style.font_size_pt,
+                text_style.font_size_pt,
                 &text_string,
             );
 
@@ -253,15 +277,15 @@ pub fn portal_pair_data(
                 regions.submit_region(ColorFontRegion::new(
                     Range::new(0, icon_clusters),
                     None,
-                    Some(color_rgba),
+                    Some(icon_color_rgba),
                 ));
                 icon_area.regions = regions;
             }
 
             let mut text_area = GlyphArea::new_with_str(
                 &text_string,
-                style.font_size_pt,
-                style.font_size_pt,
+                text_style.font_size_pt,
+                text_style.font_size_pt,
                 text_layout.top_left,
                 text_layout.bounds,
             );
@@ -272,39 +296,38 @@ pub fn portal_pair_data(
                 regions.submit_region(ColorFontRegion::new(
                     Range::new(0, text_clusters),
                     None,
-                    Some(color_rgba),
+                    Some(text_color_rgba),
                 ));
                 text_area.regions = regions;
             }
 
-            // Combined hitbox: rectangular union of icon + text
-            // AABBs when text is present, so clicking anywhere in
-            // that rect dispatches as a click on this portal label
-            // (icon and text behave as one target). Empty-string
-            // text slots are always emitted to keep mutator
-            // channels stable, but their AABB is a 1-char-wide
-            // reserved region that shouldn't be clickable — a
-            // text-less portal would otherwise grow a phantom
-            // ~30×65 px hot zone beside the icon at default font
-            // size. Use the icon AABB alone in that case.
-            let icon_min = icon_layout.top_left;
-            let icon_max = icon_layout.top_left + icon_layout.bounds;
-            let (hitbox_min, hitbox_max) = if text_string.is_empty() {
-                (icon_min, icon_max)
+            // Two hitboxes — one per clickable sub-part. The icon
+            // hitbox always exists; the text hitbox exists only
+            // when the endpoint has visible text. An empty-string
+            // slot reserves its channel in the tree (the mutator
+            // path requires a stable channel layout) but must not
+            // accept clicks: a text-less portal would otherwise
+            // grow a phantom ~30×65 px hot zone next to the icon
+            // at default font size.
+            let icon_hitbox = (
+                icon_layout.top_left,
+                icon_layout.top_left + icon_layout.bounds,
+            );
+            let text_hitbox = if text_string.is_empty() {
+                None
             } else {
-                let text_min = text_layout.top_left;
-                let text_max = text_layout.top_left + text_layout.bounds;
-                (
-                    Vec2::new(icon_min.x.min(text_min.x), icon_min.y.min(text_min.y)),
-                    Vec2::new(icon_max.x.max(text_max.x), icon_max.y.max(text_max.y)),
-                )
+                Some((
+                    text_layout.top_left,
+                    text_layout.top_left + text_layout.bounds,
+                ))
             };
 
             EndpointAreas {
                 icon: icon_area,
                 text: text_area,
                 endpoint_node_id: owner.id.clone(),
-                hitbox: (hitbox_min, hitbox_max),
+                icon_hitbox,
+                text_hitbox,
             }
         };
 
@@ -358,7 +381,8 @@ pub fn build_portal_tree(
 /// pair data.
 pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
+    let mut icon_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
+    let mut text_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
     let mut unique_id: usize = 1;
 
     for pair in pairs {
@@ -394,20 +418,29 @@ pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
             unique_id += 1;
             endpoint_void.append(text_leaf, &mut tree.arena);
 
-            hitboxes.insert(
-                (pair.identity.clone(), ep.endpoint_node_id.clone()),
-                ep.hitbox,
-            );
+            let key = (pair.identity.clone(), ep.endpoint_node_id.clone());
+            icon_hitboxes.insert(key.clone(), ep.icon_hitbox);
+            if let Some(text_hb) = ep.text_hitbox {
+                text_hitboxes.insert(key, text_hb);
+            }
         }
     }
 
-    PortalTree { tree, hitboxes }
+    PortalTree {
+        tree,
+        icon_hitboxes,
+        text_hitboxes,
+    }
 }
 
-/// Result of [`build_portal_mutator_tree`].
+/// Result of [`build_portal_mutator_tree`]. Carries the same
+/// icon/text hitbox split as [`PortalTree`] so the renderer's
+/// click-dispatch maps stay aligned across the initial-build
+/// vs. in-place-update paths.
 pub struct PortalMutator {
     pub mutator: crate::gfx_structs::tree::MutatorTree<GfxMutator>,
-    pub hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    pub icon_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    pub text_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
 }
 
 /// Build a [`MutatorTree`](crate::gfx_structs::tree::MutatorTree)
@@ -443,7 +476,8 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
     use crate::gfx_structs::tree::MutatorTree;
 
     let mut mt: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::new_void(0));
-    let mut hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
+    let mut icon_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
+    let mut text_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
 
     for pair in pairs {
         let pair_node = mt.arena.new_node(GfxMutator::new_void(pair.pair_channel));
@@ -472,12 +506,17 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
                 endpoint_void.append(leaf, &mut mt.arena);
             }
 
-            hitboxes.insert(
-                (pair.identity.clone(), ep.endpoint_node_id.clone()),
-                ep.hitbox,
-            );
+            let key = (pair.identity.clone(), ep.endpoint_node_id.clone());
+            icon_hitboxes.insert(key.clone(), ep.icon_hitbox);
+            if let Some(text_hb) = ep.text_hitbox {
+                text_hitboxes.insert(key, text_hb);
+            }
         }
     }
 
-    PortalMutator { mutator: mt, hitboxes }
+    PortalMutator {
+        mutator: mt,
+        icon_hitboxes,
+        text_hitboxes,
+    }
 }

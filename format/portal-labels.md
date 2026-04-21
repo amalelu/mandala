@@ -36,17 +36,29 @@ from the edge's base color and auto-orients toward its partner.
 
 Each side has the same shape:
 
-| Field      | Type               | Default   | Meaning                                  |
-| ---------- | ------------------ | --------- | ---------------------------------------- |
-| `color`    | `#rrggbb` / `#rrggbbaa` / `var(--name)` | inherit | Color override for this label only. |
-| `border_t` | `f32`, `[0, 4)`    | auto      | Position along the owning node's border. |
-| `text`     | string             | absent    | Text label rendered next to the icon.    |
+| Field                    | Type                                    | Default   | Meaning                                                            |
+| ------------------------ | --------------------------------------- | --------- | ------------------------------------------------------------------ |
+| `color`                  | `#rrggbb` / `#rrggbbaa` / `var(--name)` | inherit   | Icon color override for this label only.                           |
+| `border_t`               | `f32`, `[0, 4)`                         | auto      | Position along the owning node's border.                           |
+| `text`                   | string                                  | absent    | Text label rendered next to the icon.                              |
+| `text_color`             | `#rrggbb` / `#rrggbbaa` / `var(--name)` | inherit   | Text color override — independent from the icon `color`.           |
+| `text_font_size_pt`      | `f32`                                   | inherits  | Target on-screen text size at zoom 1.0; falls back to icon size.   |
+| `text_min_font_size_pt`  | `f32`                                   | inherits  | Lower screen-space clamp for the text; falls back to the edge's.   |
+| `text_max_font_size_pt`  | `f32`                                   | inherits  | Upper screen-space clamp for the text; falls back to the edge's.   |
 
 The `text` field — when present — renders as a sibling glyph
 area next to the portal marker icon, positioned outward of the
 icon along the border normal so the text extends away from the
-owning node (never back toward it). Text inherits the icon's
-color + font cascade; there's no separate text-color field.
+owning node (never back toward it).
+
+The icon and the text each carry their own color + size channels,
+and cascade independently: `text_color` → icon color cascade
+(`color` → `glyph_connection.color` → `edge.color`), and
+`text_font_size_pt` → `glyph_connection.font_size_pt`. The two
+channels let a coloured badge carry a differently-coloured
+annotation beside it — parity with line-mode edge labels, which
+similarly detach from the edge body color.
+
 Authored via `label text="…"` or `label edit` on a portal-label
 selection (same console verbs that author edge labels —
 dispatch splits on the current selection variant).

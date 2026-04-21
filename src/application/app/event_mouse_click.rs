@@ -162,21 +162,53 @@ pub(super) fn handle_mouse_input(
                 let now = now_ms();
                 // Resolve the "what was hit" used by double-click
                 // detection. Node hits beat portal hits (a node
-                // under a portal marker is the more common target);
-                // no hit at all is `Empty` — still meaningful for
-                // empty-canvas double-click.
-                let portal_hit = if hit_node.is_none() {
-                    renderer.hit_test_portal(canvas_pos)
+                // under a portal marker is the more common target).
+                // Portal sub-parts are resolved in priority order:
+                // text first, then icon — the two AABBs don't
+                // overlap in practice but the ordering keeps the
+                // routing deterministic if geometry ever places
+                // them adjacent.
+                let portal_text_hit = if hit_node.is_none() {
+                    renderer.hit_test_portal_text(canvas_pos)
                 } else {
                     None
                 };
-                let click_hit: ClickHit = match (&hit_node, &portal_hit) {
-                    (Some(id), _) => ClickHit::Node(id.clone()),
-                    (None, Some((key, ep))) => ClickHit::PortalMarker {
+                let portal_icon_hit =
+                    if hit_node.is_none() && portal_text_hit.is_none() {
+                        renderer.hit_test_portal(canvas_pos)
+                    } else {
+                        None
+                    };
+                // Edge-label hit only when no node / portal sub-part
+                // has claimed the click. Edge labels sit along the
+                // connection path; placing them behind the portal
+                // check keeps the portal's "floating over a node"
+                // behaviour correct even if a label happens to
+                // overlap.
+                let edge_label_hit = if hit_node.is_none()
+                    && portal_text_hit.is_none()
+                    && portal_icon_hit.is_none()
+                {
+                    renderer.hit_test_any_edge_label(canvas_pos)
+                } else {
+                    None
+                };
+                let click_hit: ClickHit = if let Some(id) = &hit_node {
+                    ClickHit::Node(id.clone())
+                } else if let Some((key, ep)) = &portal_text_hit {
+                    ClickHit::PortalText {
                         edge: key.clone(),
                         endpoint: ep.clone(),
-                    },
-                    (None, None) => ClickHit::Empty,
+                    }
+                } else if let Some((key, ep)) = &portal_icon_hit {
+                    ClickHit::PortalMarker {
+                        edge: key.clone(),
+                        endpoint: ep.clone(),
+                    }
+                } else if let Some(key) = &edge_label_hit {
+                    ClickHit::EdgeLabel(key.clone())
+                } else {
+                    ClickHit::Empty
                 };
                 let already_editing_same_target = text_edit_state
                     .node_id()
@@ -216,13 +248,17 @@ pub(super) fn handle_mouse_input(
                             }
                             return;
                         }
-                        ClickHit::PortalMarker { edge, endpoint } => {
+                        ClickHit::PortalMarker { edge, endpoint }
+                        | ClickHit::PortalText { edge, endpoint } => {
                             // Portal double-click: pan the camera to
                             // the node "on the other side" of the
-                            // portal-mode edge. The hit endpoint is
-                            // the node this marker sits above; the
-                            // opposite endpoint is the navigation
-                            // target.
+                            // portal-mode edge. Works identically
+                            // for an icon or text double-click —
+                            // both share the same endpoint identity
+                            // and the same "jump to partner" intent.
+                            // The hit endpoint is the node this
+                            // marker sits above; the opposite
+                            // endpoint is the navigation target.
                             let other_id = if *endpoint == edge.from_id {
                                 edge.to_id.clone()
                             } else {
@@ -253,6 +289,49 @@ pub(super) fn handle_mouse_input(
                                     ),
                                 );
                                 rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            }
+                            return;
+                        }
+                        ClickHit::EdgeLabel(edge_key) => {
+                            // Double-click on an edge label opens
+                            // the inline label editor — the "click
+                            // to select, dbl-click to edit" idiom
+                            // the `Node` variant already follows.
+                            // Commit the EdgeLabel selection first
+                            // so the editor opens against the
+                            // authoritative selection state.
+                            if let Some(doc) = document.as_mut() {
+                                let er = crate::application::document::EdgeRef::new(
+                                    edge_key.from_id.as_str(),
+                                    edge_key.to_id.as_str(),
+                                    edge_key.edge_type.as_str(),
+                                );
+                                let prev = doc.selection.clone();
+                                doc.selection = SelectionState::EdgeLabel(
+                                    crate::application::document::EdgeLabelSel::new(er.clone()),
+                                );
+                                // Selection-change rebuild picks the
+                                // right granularity — scene-only when
+                                // both prev and new are edge-adjacent,
+                                // full rebuild when transitioning from
+                                // a node selection so the old node
+                                // highlight clears. `open_label_edit`
+                                // below will trigger any further
+                                // buffer updates it needs.
+                                rebuild_after_selection_change(
+                                    &prev,
+                                    doc,
+                                    mindmap_tree,
+                                    app_scene,
+                                    renderer,
+                                );
+                                open_label_edit(
+                                    &er,
+                                    doc,
+                                    label_edit_state,
+                                    app_scene,
+                                    renderer,
+                                );
                             }
                             return;
                         }
@@ -319,22 +398,33 @@ pub(super) fn handle_mouse_input(
                 // current selection — grabbing a marker is a
                 // valid first action, not just a follow-up to a
                 // prior click.
-                let hit_portal_label = match &portal_hit {
+                // Portal **icon** drag captures the `border_t`
+                // slide gesture — dragging the text sub-part
+                // isn't a supported interaction. Only populate
+                // this when the icon-side hit was present.
+                let hit_portal_label = match &portal_icon_hit {
                     Some((key, endpoint)) if hit_node.is_none() => {
                         Some((key.clone(), endpoint.clone()))
                     }
                     _ => None,
                 };
+                // Reuse the press-time edge-label hit captured
+                // earlier so the threshold-cross transition can
+                // promote to `DraggingEdgeLabel`. Priority
+                // ordering in `event_cursor_moved.rs` still
+                // gives portal-label / edge-handle drag higher
+                // precedence when multiple hits overlap.
                 *drag_state = DragState::Pending {
                     start_pos: cursor_pos,
                     hit_node,
                     hit_edge_handle,
                     hit_portal_label,
+                    hit_edge_label: edge_label_hit,
                 };
             } else {
                 // Released
                 match std::mem::replace(drag_state, DragState::None) {
-                    DragState::Pending { hit_node, .. } => {
+                    DragState::Pending { hit_node, hit_edge_label, .. } => {
                         // If the node text editor is open, the
                         // release decides whether to commit or
                         // swallow. If the release lands inside the
@@ -382,58 +472,56 @@ pub(super) fn handle_mouse_input(
                                 );
                             }
                         }
-                        // If an edge is selected and the cursor
-                        // hits its label, open the inline label
-                        // editor instead of processing a regular
-                        // click. Takes precedence over node / edge
-                        // selection.
-                        let mut entered_label_edit = false;
-                        if hit_node.is_none() {
-                            // First, a read-only check to see
-                            // whether we should even call the
-                            // editor (hits the selected edge's
-                            // label AABB). Split from the
-                            // `open_label_edit` call so the
-                            // mutable borrow of `document`
-                            // doesn't conflict with the
-                            // immutable read.
-                            let label_edit_target: Option<crate::application::document::EdgeRef> =
-                                if let Some(doc) = document.as_ref() {
-                                    if let SelectionState::Edge(er) = &doc.selection {
-                                        let canvas_pos = renderer.screen_to_canvas(
-                                            cursor_pos.0 as f32,
-                                            cursor_pos.1 as f32,
-                                        );
-                                        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
-                                            &er.from_id,
-                                            &er.to_id,
-                                            &er.edge_type,
-                                        );
-                                        if renderer.hit_test_edge_label(canvas_pos, &edge_key) {
-                                            Some(er.clone())
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-                            if let Some(er_clone) = label_edit_target {
+                        // Edge-label single click: route to the
+                        // `EdgeLabel` selection rather than opening
+                        // the editor. Matches the "click to select,
+                        // dbl-click to edit" idiom the node /
+                        // portal-label variants already follow —
+                        // the dbl-click branch above handles the
+                        // editor-open case.
+                        //
+                        // Consume the `hit_edge_label` captured at
+                        // press time (with its full priority chain:
+                        // node > portal_text > portal_icon >
+                        // edge_label > edge_body). Re-hit-testing
+                        // at release would ignore that chain — a
+                        // press that landed on a portal icon but
+                        // drifted a few pixels onto an overlapping
+                        // edge label before release would mis-
+                        // route to `EdgeLabel` instead of the
+                        // portal's sub-threshold single-click.
+                        let edge_label_target: Option<crate::application::document::EdgeRef> =
+                            hit_edge_label.map(|k| {
+                                crate::application::document::EdgeRef::new(
+                                    k.from_id.as_str(),
+                                    k.to_id.as_str(),
+                                    k.edge_type.as_str(),
+                                )
+                            });
+                        let entered_label_select =
+                            if let Some(er) = edge_label_target {
                                 if let Some(doc) = document.as_mut() {
-                                    open_label_edit(
-                                        &er_clone,
+                                    let prev = doc.selection.clone();
+                                    doc.selection = SelectionState::EdgeLabel(
+                                        crate::application::document::EdgeLabelSel::new(
+                                            er,
+                                        ),
+                                    );
+                                    rebuild_after_selection_change(
+                                        &prev,
                                         doc,
-                                        label_edit_state,
+                                        mindmap_tree,
                                         app_scene,
                                         renderer,
                                     );
-                                    entered_label_edit = true;
+                                    true
+                                } else {
+                                    false
                                 }
-                            }
-                        }
-                        if !entered_label_edit {
+                            } else {
+                                false
+                            };
+                        if !entered_label_select {
                             handle_click(
                                 hit_node,
                                 cursor_pos,
@@ -533,6 +621,33 @@ pub(super) fn handle_mouse_input(
                                 }
                             }
                             rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                        }
+                        mutation_throttle.reset();
+                    }
+                    DragState::DraggingEdgeLabel { edge_ref, original } => {
+                        // Per-frame drag already wrote
+                        // `label_config.{position_t,
+                        // perpendicular_offset}` directly. Commit
+                        // with a single `EditEdge` carrying the
+                        // pre-drag snapshot, skipping the undo
+                        // entry if nothing actually moved.
+                        if let Some(doc) = document.as_mut() {
+                            if let Some(idx) = doc.edge_index(&edge_ref) {
+                                let current = &doc.mindmap.edges[idx];
+                                if current.label_config != original.label_config {
+                                    doc.undo_stack.push(UndoAction::EditEdge {
+                                        index: idx,
+                                        before: original,
+                                    });
+                                    doc.dirty = true;
+                                }
+                            }
+                            // Scene-only rebuild: every per-frame
+                            // drain already used `rebuild_scene_only`
+                            // because node trees are untouched by a
+                            // label move; the release commit is
+                            // the same story.
+                            rebuild_scene_only(doc, app_scene, renderer);
                         }
                         mutation_throttle.reset();
                     }

@@ -102,26 +102,49 @@ impl EdgeRef {
 /// (every write to `document.selection` replaces the whole enum
 /// value; there's no additive "add this to the selection" API
 /// for variants of different kinds). Downstream code can rely on
-/// `Edge` and `PortalLabel` in particular never being active at
-/// the same moment: the scene builder uses that invariant when
-/// it picks which cyan highlight to apply (both-markers for
-/// `Edge`, single-marker for `PortalLabel`).
+/// at most one of `Edge`, `EdgeLabel`, `PortalLabel`, `PortalText`
+/// being active at the same moment: the scene builder uses that
+/// invariant when it picks which cyan highlight to apply.
 ///
-/// Portal-mode edges have two selectable forms: selecting the
-/// edge body (currently reachable only through the console)
-/// goes through `Edge`; selecting a single portal label (the
-/// glyph attached to one endpoint node) goes through
-/// `PortalLabel`, which carries the endpoint identity alongside
-/// the owning edge.
+/// **Four edge-adjacent forms.** An edge carries a body + a
+/// label (line mode) or two per-endpoint markers + their text
+/// siblings (portal mode). Each of those is selectable on its
+/// own so color / font / clipboard routing can target one
+/// channel without affecting the others:
+///
+/// - `Edge(EdgeRef)` — the body (line or the whole portal).
+///   Reached through direct edge hit-testing or console.
+/// - `EdgeLabel(EdgeLabelSel)` — the text label sitting along
+///   a line-mode edge's path. Click + drag moves it; `color`
+///   / `font` route to `label_config`.
+/// - `PortalLabel(PortalLabelSel)` — a portal mode edge's
+///   per-endpoint icon glyph.
+/// - `PortalText(PortalLabelSel)` — the per-endpoint text
+///   sibling of a portal icon. Shares the same
+///   `(edge_key, endpoint_node_id)` identity as its sibling
+///   `PortalLabel`; the variant tag is the only difference.
+///
+/// Portal-mode edges can still be selected through `Edge` (via
+/// the console) for whole-edge operations like flipping
+/// display mode.
 #[derive(Clone, Debug)]
 pub enum SelectionState {
     None,
     Single(String),
     Multi(Vec<String>),
     Edge(EdgeRef),
-    /// One endpoint's portal label on a portal-mode edge. See
-    /// [`PortalLabelSel`] for field documentation.
+    /// Line-mode label selection: the edge's text label sits
+    /// along the connection path and is selected independently
+    /// from the edge body. See [`EdgeLabelSel`].
+    EdgeLabel(EdgeLabelSel),
+    /// One endpoint's portal **icon** glyph on a portal-mode edge.
+    /// See [`PortalLabelSel`] for field documentation.
     PortalLabel(PortalLabelSel),
+    /// One endpoint's portal **text** label — the glyph area
+    /// sitting alongside a portal icon. Reuses [`PortalLabelSel`]
+    /// because the identity (`edge_key`, `endpoint_node_id`) is
+    /// identical to the icon; only the selection target differs.
+    PortalText(PortalLabelSel),
 }
 
 impl SelectionState {
@@ -158,8 +181,10 @@ impl SelectionState {
             SelectionState::None => false,
             SelectionState::Single(id) => id == node_id,
             SelectionState::Multi(ids) => ids.contains(&node_id.to_string()),
-            SelectionState::Edge(_) => false,
-            SelectionState::PortalLabel(_) => false,
+            SelectionState::Edge(_)
+            | SelectionState::EdgeLabel(_)
+            | SelectionState::PortalLabel(_)
+            | SelectionState::PortalText(_) => false,
         }
     }
 
@@ -168,16 +193,21 @@ impl SelectionState {
             SelectionState::None => vec![],
             SelectionState::Single(id) => vec![id.as_str()],
             SelectionState::Multi(ids) => ids.iter().map(|s| s.as_str()).collect(),
-            SelectionState::Edge(_) => vec![],
-            SelectionState::PortalLabel(_) => vec![],
+            SelectionState::Edge(_)
+            | SelectionState::EdgeLabel(_)
+            | SelectionState::PortalLabel(_)
+            | SelectionState::PortalText(_) => vec![],
         }
     }
 
-    /// Returns the selected edge, if any. A `PortalLabel`
-    /// selection does **not** report through this accessor —
-    /// portal-label selection is a distinct state and whole-edge
-    /// operations (recolor the edge body, etc.) should treat it
-    /// as "nothing selected".
+    /// Returns the selected edge, if any. The other edge-adjacent
+    /// variants (`EdgeLabel`, `PortalLabel`, `PortalText`) do **not**
+    /// report through this accessor — each is its own distinct
+    /// state, and whole-edge operations (recolor the edge body,
+    /// flip display mode) should treat them as "nothing (whole-edge)
+    /// selected". Pair with [`Self::selected_edge_or_portal_edge`]
+    /// for the wider "any edge-adjacent selection → owning edge"
+    /// collapser.
     pub fn selected_edge(&self) -> Option<&EdgeRef> {
         match self {
             SelectionState::Edge(e) => Some(e),
@@ -185,11 +215,23 @@ impl SelectionState {
         }
     }
 
+    /// Borrow the inner `EdgeLabelSel` for an `EdgeLabel`
+    /// selection, or `None` for any other variant. Mirrors
+    /// [`Self::selected_portal_label`] — label-target operations
+    /// that specifically want the label (not the edge body)
+    /// consult this accessor.
+    pub fn selected_edge_label(&self) -> Option<&EdgeLabelSel> {
+        match self {
+            SelectionState::EdgeLabel(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Borrow the inner `PortalLabelSel` for a `PortalLabel`
-    /// selection, or `None` for any other variant.
-    /// Complements `selected_edge` — the two are mutually
-    /// exclusive so at most one returns `Some` for any given
-    /// state.
+    /// selection (the portal **icon**), or `None` for any other
+    /// variant. Complements `selected_edge` — the variants are
+    /// mutually exclusive so at most one returns `Some` for any
+    /// given state.
     pub fn selected_portal_label(&self) -> Option<&PortalLabelSel> {
         match self {
             SelectionState::PortalLabel(s) => Some(s),
@@ -197,20 +239,51 @@ impl SelectionState {
         }
     }
 
-    /// Return the owning `EdgeRef` for either an `Edge` or
-    /// `PortalLabel` selection — the "which edge is the user
-    /// pointing at" form, collapsing the two selection shapes
-    /// into one. Used by console predicates + the `edge`
-    /// command so commands targeting the edge as a whole (type
-    /// change, display mode flip, reset) keep working after a
-    /// user clicks a portal marker and ends up with a
-    /// `PortalLabel` selection. Pair with `selected_edge` for
-    /// the narrower "whole-edge, not a label" form on the rare
-    /// paths that need to disambiguate.
+    /// Borrow the inner `PortalLabelSel` for a `PortalText`
+    /// selection (the portal **text** sibling of an icon), or
+    /// `None` for any other variant. Distinct from
+    /// [`Self::selected_portal_label`]: both use `PortalLabelSel`
+    /// as the identity-carrying struct, but only one of them is
+    /// active at any moment (they're separate variants).
+    pub fn selected_portal_text(&self) -> Option<&PortalLabelSel> {
+        match self {
+            SelectionState::PortalText(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Return the owning `EdgeRef` for any edge-adjacent
+    /// selection — `Edge`, `EdgeLabel`, `PortalLabel`, or
+    /// `PortalText` — collapsing all four into "which edge is
+    /// the user pointing at". Used by console predicates + the
+    /// `edge` command so commands targeting the edge as a whole
+    /// (type change, display mode flip, reset) keep working after
+    /// a user clicks any sub-part of an edge. Pair with
+    /// [`Self::selected_edge`] for the narrower "whole-edge, not
+    /// a label or text or icon" form on paths that need to
+    /// disambiguate.
     pub fn selected_edge_or_portal_edge(&self) -> Option<EdgeRef> {
         match self {
             SelectionState::Edge(e) => Some(e.clone()),
-            SelectionState::PortalLabel(s) => Some(s.edge_ref()),
+            SelectionState::EdgeLabel(s) => Some(s.edge_ref.clone()),
+            SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => {
+                Some(s.edge_ref())
+            }
+            _ => None,
+        }
+    }
+
+    /// Borrow the `PortalLabelSel` for either a `PortalLabel`
+    /// (icon) or `PortalText` (sibling text) selection — the
+    /// "user pointed at this portal endpoint" form, collapsing
+    /// the two portal sub-selections. Returns `None` for any
+    /// non-portal selection. Useful for operations that target
+    /// the whole portal endpoint (e.g. the `body glyph=` console
+    /// verb applies to the icon regardless of whether the user
+    /// clicked icon or text).
+    pub fn selected_portal_endpoint(&self) -> Option<&PortalLabelSel> {
+        match self {
+            SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => Some(s),
             _ => None,
         }
     }
@@ -221,18 +294,45 @@ impl SelectionState {
     /// without allocating a fresh key per frame. `EdgeKey` and
     /// `EdgeRef` share the same `(from, to, type)` shape — we
     /// store the key form inside `SelectionState::PortalLabel`
-    /// specifically so this borrow path is trivial.
+    /// specifically so this borrow path is trivial. `PortalText`
+    /// selections also resolve to the same scene ref so the
+    /// highlight cascade treats icon and text as one endpoint
+    /// target on the selection path; divergent highlight
+    /// behavior (icon vs. text) is a follow-up refinement.
     pub fn selected_portal_label_scene_ref(
         &self,
     ) -> Option<baumhard::mindmap::scene_builder::SelectedPortalLabel<'_>> {
         let PortalLabelSel { edge_key, endpoint_node_id } = match self {
-            SelectionState::PortalLabel(s) => s,
+            SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => s,
             _ => return None,
         };
         Some(baumhard::mindmap::scene_builder::SelectedPortalLabel {
             edge_key,
             endpoint_node_id: endpoint_node_id.as_str(),
         })
+    }
+}
+
+/// Inner state for [`SelectionState::EdgeLabel`]. A newtype
+/// wrapper around [`EdgeRef`] — kept as a named struct rather
+/// than a tuple variant so the accessor returns a single borrow
+/// with a stable type, matching the shape of [`PortalLabelSel`]
+/// (mirror pattern for the four edge-adjacent selection forms).
+///
+/// The inner `edge_ref` points at the edge whose
+/// `label_config` the selection will target for color / font /
+/// drag operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EdgeLabelSel {
+    /// Owning edge — identifies which edge's `label_config`
+    /// this selection targets.
+    pub edge_ref: EdgeRef,
+}
+
+impl EdgeLabelSel {
+    /// Construct an `EdgeLabelSel` for the given edge.
+    pub fn new(edge_ref: EdgeRef) -> Self {
+        Self { edge_ref }
     }
 }
 

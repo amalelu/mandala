@@ -113,7 +113,7 @@ enum PendingClick {
     None,
     Empty,
     Node(String),
-    /// Cursor landed on a portal marker at mouse-down. Committed
+    /// Cursor landed on a portal **icon** at mouse-down. Committed
     /// at mouse-up into a `SelectionState::PortalLabel`. Carries
     /// both the owning-edge key and the endpoint id the marker
     /// belongs to, matching the native click dispatch surface.
@@ -121,6 +121,23 @@ enum PendingClick {
         edge_key: baumhard::mindmap::scene_cache::EdgeKey,
         endpoint_node_id: String,
     },
+    /// Cursor landed on a portal **text** at mouse-down.
+    /// Committed at mouse-up into a `SelectionState::PortalText`.
+    /// Shares the identity shape with `PortalMarker`; only the
+    /// mouse-up selection routing differs.
+    PortalText {
+        edge_key: baumhard::mindmap::scene_cache::EdgeKey,
+        endpoint_node_id: String,
+    },
+    /// Cursor landed on a line-mode edge's label AABB at
+    /// mouse-down. Committed at mouse-up into
+    /// `SelectionState::EdgeLabel` so per-label color / font /
+    /// copy operations target the label instead of the edge
+    /// body. Double-click is handled inline by the press-time
+    /// dispatcher — WASM doesn't open the inline editor modal
+    /// yet so the dbl-click branch falls back to the same
+    /// selection commit for parity with single click.
+    EdgeLabel(baumhard::mindmap::scene_cache::EdgeKey),
 }
 struct WasmInputState {
     document: MindMapDocument,
@@ -467,21 +484,46 @@ app.event_loop.run(move |event, _window_target| {
                 // route double-click on a portal marker to a camera
                 // jump. The portal hit test runs only when the node
                 // hit test misses, same as native.
-                let portal_hit = if hit_node.is_none() {
-                    let mut renderer_borrow = renderer_for_events.borrow_mut();
-                    renderer_borrow
-                        .as_ref()
-                        .and_then(|r| r.hit_test_portal(canvas_pos))
-                } else {
-                    None
-                };
-                let click_hit: ClickHit = match (&hit_node, &portal_hit) {
-                    (Some(id), _) => ClickHit::Node(id.clone()),
-                    (None, Some((key, ep))) => ClickHit::PortalMarker {
+                let (portal_text_hit, portal_icon_hit, edge_label_hit) =
+                    if hit_node.is_none() {
+                        let renderer_borrow = renderer_for_events.borrow();
+                        let t = renderer_borrow
+                            .as_ref()
+                            .and_then(|r| r.hit_test_portal_text(canvas_pos));
+                        let i = if t.is_none() {
+                            renderer_borrow
+                                .as_ref()
+                                .and_then(|r| r.hit_test_portal(canvas_pos))
+                        } else {
+                            None
+                        };
+                        let l = if t.is_none() && i.is_none() {
+                            renderer_borrow
+                                .as_ref()
+                                .and_then(|r| r.hit_test_any_edge_label(canvas_pos))
+                        } else {
+                            None
+                        };
+                        (t, i, l)
+                    } else {
+                        (None, None, None)
+                    };
+                let click_hit: ClickHit = if let Some(id) = &hit_node {
+                    ClickHit::Node(id.clone())
+                } else if let Some((key, ep)) = &portal_text_hit {
+                    ClickHit::PortalText {
                         edge: key.clone(),
                         endpoint: ep.clone(),
-                    },
-                    (None, None) => ClickHit::Empty,
+                    }
+                } else if let Some((key, ep)) = &portal_icon_hit {
+                    ClickHit::PortalMarker {
+                        edge: key.clone(),
+                        endpoint: ep.clone(),
+                    }
+                } else if let Some(key) = &edge_label_hit {
+                    ClickHit::EdgeLabel(key.clone())
+                } else {
+                    ClickHit::Empty
                 };
                 let is_dblclick = !already_editing_same_target
                     && input.last_click
@@ -509,7 +551,12 @@ app.event_loop.run(move |event, _window_target| {
                                 renderer,
                             );
                         }
-                        ClickHit::PortalMarker { edge, endpoint } => {
+                        ClickHit::PortalMarker { edge, endpoint }
+                        | ClickHit::PortalText { edge, endpoint } => {
+                            // Double-click on icon or text both
+                            // jump to the partner endpoint — they
+                            // share the same endpoint identity
+                            // and the same "navigate" intent.
                             let other_id = if *endpoint == edge.from_id {
                                 edge.to_id.clone()
                             } else {
@@ -532,6 +579,48 @@ app.event_loop.run(move |event, _window_target| {
                                 ),
                             );
                             rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                        }
+                        ClickHit::EdgeLabel(edge_key) => {
+                            // Edge-label double-click is a parity
+                            // placeholder on WASM. Native opens the
+                            // inline label editor; WASM's modal
+                            // editor path isn't available here yet,
+                            // so the user falls back to the
+                            // `/label edit` console verb. The
+                            // previous single-click (release 1 in
+                            // the dbl-click pair) already committed
+                            // `SelectionState::EdgeLabel` and
+                            // rebuilt the scene — this branch has
+                            // nothing to add. Skipping the
+                            // redundant commit + rebuild is both
+                            // correct and meaningfully cheaper on
+                            // mobile browsers (§4 mobile budget).
+                            // If the selection somehow drifted
+                            // between the two clicks, the `match`
+                            // below handles re-committing; the
+                            // guard just avoids the wasted
+                            // rebuild in the common case.
+                            let expected_er = crate::application::document::EdgeRef::new(
+                                edge_key.from_id.as_str(),
+                                edge_key.to_id.as_str(),
+                                edge_key.edge_type.as_str(),
+                            );
+                            let already_selected = matches!(
+                                &input.document.selection,
+                                SelectionState::EdgeLabel(s) if s.edge_ref == expected_er
+                            );
+                            if !already_selected {
+                                input.document.selection = SelectionState::EdgeLabel(
+                                    crate::application::document::EdgeLabelSel::new(
+                                        expected_er,
+                                    ),
+                                );
+                                rebuild_scene_only(
+                                    &input.document,
+                                    &mut input.app_scene,
+                                    renderer,
+                                );
+                            }
                         }
                         ClickHit::Empty => {
                             let allow_create = !matches!(
@@ -556,18 +645,31 @@ app.event_loop.run(move |event, _window_target| {
                     return;
                 }
 
-                input.pending_click = match (hit_node.clone(), portal_hit.clone()) {
-                    (Some(id), _) => PendingClick::Node(id),
-                    // Portal-marker click — committed to
+                input.pending_click = if let Some(id) = hit_node.clone() {
+                    PendingClick::Node(id)
+                } else if let Some((key, endpoint)) = portal_text_hit.clone() {
+                    // Portal **text** click — committed to
+                    // `SelectionState::PortalText` on mouse-up.
+                    PendingClick::PortalText {
+                        edge_key: key,
+                        endpoint_node_id: endpoint,
+                    }
+                } else if let Some((key, endpoint)) = portal_icon_hit.clone() {
+                    // Portal **icon** click — committed to
                     // `SelectionState::PortalLabel` on mouse-up.
                     // Double-click already fired above so a
                     // pending marker click can only mean "select
                     // this label".
-                    (None, Some((key, endpoint))) => PendingClick::PortalMarker {
+                    PendingClick::PortalMarker {
                         edge_key: key,
                         endpoint_node_id: endpoint,
-                    },
-                    (None, None) => PendingClick::Empty,
+                    }
+                } else if let Some(key) = edge_label_hit.clone() {
+                    // Edge label click — committed to
+                    // `SelectionState::EdgeLabel` on mouse-up.
+                    PendingClick::EdgeLabel(key)
+                } else {
+                    PendingClick::Empty
                 };
                 input.last_click = Some(LastClick {
                     time: now,
@@ -616,7 +718,14 @@ app.event_loop.run(move |event, _window_target| {
                     return;
                 }
 
-                // Plain selection click
+                // Plain selection click. Snapshot the previous
+                // selection so `rebuild_after_selection_change`
+                // can pick between `rebuild_all` (needed when
+                // either side is a node selection — tree
+                // highlights must be applied or cleared) and the
+                // cheaper `rebuild_scene_only` (edge-adjacent →
+                // edge-adjacent transitions).
+                let prev_selection = input.document.selection.clone();
                 input.document.selection = match pending {
                     PendingClick::Node(node_id) => SelectionState::Single(node_id),
                     PendingClick::PortalMarker {
@@ -628,11 +737,36 @@ app.event_loop.run(move |event, _window_target| {
                             endpoint_node_id,
                         },
                     ),
+                    PendingClick::PortalText {
+                        edge_key,
+                        endpoint_node_id,
+                    } => SelectionState::PortalText(
+                        crate::application::document::PortalLabelSel {
+                            edge_key,
+                            endpoint_node_id,
+                        },
+                    ),
+                    PendingClick::EdgeLabel(edge_key) => {
+                        let er = crate::application::document::EdgeRef::new(
+                            edge_key.from_id.as_str(),
+                            edge_key.to_id.as_str(),
+                            edge_key.edge_type.as_str(),
+                        );
+                        SelectionState::EdgeLabel(
+                            crate::application::document::EdgeLabelSel::new(er),
+                        )
+                    }
                     _ => SelectionState::None,
                 };
                 let mut renderer_borrow = renderer_for_events.borrow_mut();
                 if let Some(renderer) = renderer_borrow.as_mut() {
-                    rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                    rebuild_after_selection_change(
+                        &prev_selection,
+                        &input.document,
+                        &mut input.mindmap_tree,
+                        &mut input.app_scene,
+                        renderer,
+                    );
                 }
             }
         }

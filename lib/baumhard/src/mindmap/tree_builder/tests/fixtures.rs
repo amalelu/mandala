@@ -121,7 +121,7 @@ pub(super) fn synthetic_portal_edge(a: &str, b: &str, color: &str) -> MindEdge {
         line_style: "solid".into(),
         visible: true,
         label: None,
-        label_position_t: None,
+        label_config: None,
         anchor_from: "auto".into(),
         anchor_to: "auto".into(),
         control_points: vec![],
