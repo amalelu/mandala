@@ -178,12 +178,22 @@ pub fn tangent_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
     }
 }
 
-/// Unit normal of `path` at `t` — the tangent rotated 90°
-/// counter-clockwise (i.e. to the "left" of the direction of
-/// travel from `start` to `end`). Used by label rendering to
-/// apply [`crate::mindmap::model::EdgeLabelConfig::perpendicular_offset`]:
-/// a positive offset pushes the label in the returned direction,
-/// a negative one pushes it the opposite way.
+/// Unit normal of `path` at `t`. Computed as the tangent rotated
+/// 90° in canvas coordinates via `(x, y) → (-y, x)`.
+///
+/// **Orientation note** — mandala uses a Y-grows-down canvas
+/// (`"top"` anchor has a smaller `y` than `"bottom"`, see
+/// [`resolve_anchor_point`]). `(x, y) → (-y, x)` is
+/// counter-clockwise in math coordinates but lands on the
+/// **right-hand side of the direction of travel** from `start`
+/// to `end` on screen. Downstream callers only need a stable
+/// perpendicular — a positive
+/// [`crate::mindmap::model::EdgeLabelConfig::perpendicular_offset`]
+/// pushes the label in the returned direction, a negative one
+/// pushes it the opposite way; the side is determined by the
+/// caller's sign and this helper stays internally consistent with
+/// [`crate::mindmap::document::edges`]'s curve-straight-edge math
+/// so keyboard and mouse gestures land on the same side.
 pub fn normal_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
     let tangent = tangent_at_t(path, t);
     Vec2::new(-tangent.y, tangent.x)

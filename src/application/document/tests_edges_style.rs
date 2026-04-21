@@ -192,6 +192,71 @@ use super::defaults::default_cross_link_edge;
     }
 
     #[test]
+    fn test_curve_straight_edge_returns_false_on_zero_length_edge() {
+        // If from and to anchors collapse to the same point (e.g.
+        // both nodes fully overlap and the anchors resolve to the
+        // same side), `curve_straight_edge` has no meaningful
+        // direction to push the CP and bails early.
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .unwrap();
+        let edge_ref = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        // Collapse both endpoint nodes into identical rectangles
+        // AND force both anchors to the *same* side so the resolved
+        // anchor points genuinely coincide (auto-anchor resolution
+        // picks opposite sides by default and would defeat the
+        // test).
+        let from_id = doc.mindmap.edges[edge_idx].from_id.clone();
+        let to_id = doc.mindmap.edges[edge_idx].to_id.clone();
+        if let Some(from) = doc.mindmap.nodes.get_mut(&from_id) {
+            from.position.x = 0.0;
+            from.position.y = 0.0;
+            from.size.width = 10.0;
+            from.size.height = 10.0;
+        }
+        if let Some(to) = doc.mindmap.nodes.get_mut(&to_id) {
+            to.position.x = 0.0;
+            to.position.y = 0.0;
+            to.size.width = 10.0;
+            to.size.height = 10.0;
+        }
+        doc.mindmap.edges[edge_idx].anchor_from = "top".into();
+        doc.mindmap.edges[edge_idx].anchor_to = "top".into();
+        let ok = doc.curve_straight_edge(&edge_ref);
+        assert!(!ok, "zero-length edge should return false");
+        assert!(doc.mindmap.edges[edge_idx].control_points.is_empty());
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_curve_straight_edge_missing_node_is_noop() {
+        // Defensive branch: if an endpoint node vanished between
+        // the last frame and this call, `curve_straight_edge`
+        // bails cleanly rather than panicking.
+        let mut doc = load_test_doc();
+        let edge_idx = doc.mindmap.edges.iter()
+            .position(|e| e.visible && e.control_points.is_empty())
+            .unwrap();
+        let er = EdgeRef::new(
+            &doc.mindmap.edges[edge_idx].from_id,
+            &doc.mindmap.edges[edge_idx].to_id,
+            &doc.mindmap.edges[edge_idx].edge_type,
+        );
+        // Drop the from-node while keeping the edge record — the
+        // defensive guard should return false.
+        let from_id = doc.mindmap.edges[edge_idx].from_id.clone();
+        doc.mindmap.nodes.remove(&from_id);
+        let ok = doc.curve_straight_edge(&er);
+        assert!(!ok);
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
     fn test_curve_straight_edge_noop_on_already_curved() {
         // Re-running `curve_straight_edge` on an already-curved edge
         // is a no-op — keeps the undo stack clean for console users

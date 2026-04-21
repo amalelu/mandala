@@ -354,10 +354,12 @@ pub struct EdgeLabelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_t: Option<f32>,
     /// Perpendicular offset from the path point, in canvas units,
-    /// along the path normal at `position_t`. `None` = on the
-    /// path. Positive / negative encodes the side; the drag path
-    /// derives it from the cursor's orthogonal distance to the
-    /// closest path point.
+    /// along `normal_at_t(path, position_t)`. `None` = on the
+    /// path. Positive / negative encodes the side (the normal
+    /// itself is the canvas-coords 90° rotation of the tangent —
+    /// see `connection::normal_at_t` for the Y-down orientation
+    /// note). The drag path derives this from the cursor's
+    /// orthogonal distance to the closest path point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perpendicular_offset: Option<f32>,
     /// Label color override (`#RRGGBB[AA]` or `var(--name)`).

@@ -602,3 +602,124 @@ fn test_bezier_sample_degenerate_returns_single_point() {
     assert_eq!(samples.len(), 1, "degenerate curve should produce single sample");
     assert!(almost_equal(samples[0].position.x, 42.0));
 }
+
+// ---- tangent / normal helpers ----
+
+#[test]
+fn tangent_at_t_straight_path_returns_endpoint_direction() {
+    // For a straight path, the tangent is the normalised
+    // end-minus-start vector regardless of `t`.
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(10.0, 0.0),
+    };
+    for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        let tangent = tangent_at_t(&path, t);
+        assert!(almost_equal(tangent.x, 1.0), "t={t} x should be 1");
+        assert!(almost_equal(tangent.y, 0.0), "t={t} y should be 0");
+    }
+}
+
+#[test]
+fn tangent_at_t_zero_length_straight_path_falls_back_to_x_axis() {
+    // Coincident endpoints produce a zero-length raw tangent;
+    // the fallback keeps callers from dividing by zero.
+    let pt = Vec2::new(5.0, 5.0);
+    let path = ConnectionPath::Straight { start: pt, end: pt };
+    let tangent = tangent_at_t(&path, 0.5);
+    assert_eq!(tangent, Vec2::X);
+}
+
+#[test]
+fn tangent_at_t_cubic_bezier_at_endpoints_uses_analytical_derivative() {
+    // At t = 0: derivative = 3(p1 - p0). At t = 1: derivative =
+    // 3(p3 - p2). Normalised.
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(10.0, 0.0);
+    let p2 = Vec2::new(20.0, 10.0);
+    let p3 = Vec2::new(30.0, 10.0);
+    let path = ConnectionPath::CubicBezier {
+        start: p0,
+        control1: p1,
+        control2: p2,
+        end: p3,
+    };
+    // t = 0: tangent ∝ (p1 - p0) = (10, 0) → normalised (1, 0).
+    let t0 = tangent_at_t(&path, 0.0);
+    assert!(almost_equal(t0.x, 1.0));
+    assert!(almost_equal(t0.y, 0.0));
+    // t = 1: tangent ∝ (p3 - p2) = (10, 0) → (1, 0).
+    let t1 = tangent_at_t(&path, 1.0);
+    assert!(almost_equal(t1.x, 1.0));
+    assert!(almost_equal(t1.y, 0.0));
+}
+
+#[test]
+fn normal_at_t_is_orthogonal_to_tangent() {
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(7.0, 3.0),
+    };
+    let tangent = tangent_at_t(&path, 0.5);
+    let normal = normal_at_t(&path, 0.5);
+    // Dot product of orthogonal unit vectors is 0.
+    assert!(tangent.dot(normal).abs() < 1.0e-5);
+    // And length is 1.
+    assert!((normal.length() - 1.0).abs() < 1.0e-5);
+}
+
+#[test]
+fn normal_at_t_rotates_canvas_90_clockwise_into_screen_space() {
+    // A tangent pointing +X in canvas space rotates to (-0, +1)
+    // by the `(x, y) → (-y, x)` formula, i.e. +Y — which on a
+    // Y-down canvas lands *below* the path (the right-hand side
+    // of travel in screen space). Pin the behaviour so a future
+    // flip of the formula or a coordinate-system change breaks
+    // this test instead of silently inverting label positioning.
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(10.0, 0.0),
+    };
+    let normal = normal_at_t(&path, 0.5);
+    assert!(almost_equal(normal.x, 0.0));
+    assert!(almost_equal(normal.y, 1.0));
+}
+
+// ---- cubic_bezier_tangent analytical derivative ----
+
+#[test]
+fn cubic_bezier_tangent_matches_finite_difference() {
+    // Spot-check the analytical derivative against a finite
+    // difference — a single bug in the coefficients (e.g. writing
+    // `2.0 * u * t` instead of `6.0 * u * t` for the middle term)
+    // would break this test.
+    use crate::mindmap::connection::bezier::cubic_bezier_tangent;
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(1.0, 5.0);
+    let p2 = Vec2::new(4.0, -2.0);
+    let p3 = Vec2::new(6.0, 3.0);
+    let h = 1.0e-4;
+    for t in [0.1, 0.3, 0.5, 0.7, 0.9] {
+        let analytical = cubic_bezier_tangent(t, p0, p1, p2, p3);
+        use crate::mindmap::connection::bezier::cubic_bezier_point;
+        let fwd = cubic_bezier_point(t + h, p0, p1, p2, p3);
+        let back = cubic_bezier_point(t - h, p0, p1, p2, p3);
+        let fd = (fwd - back) / (2.0 * h);
+        // The analytical derivative is unnormalised (returns raw
+        // derivative); the finite-difference estimate is also
+        // unnormalised. Allow a small tolerance for the 2nd-order
+        // central-difference error.
+        assert!(
+            (analytical.x - fd.x).abs() < 1.0e-2,
+            "t={t} x analytical {} vs fd {}",
+            analytical.x,
+            fd.x
+        );
+        assert!(
+            (analytical.y - fd.y).abs() < 1.0e-2,
+            "t={t} y analytical {} vs fd {}",
+            analytical.y,
+            fd.y
+        );
+    }
+}

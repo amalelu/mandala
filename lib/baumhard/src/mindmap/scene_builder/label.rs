@@ -256,10 +256,12 @@ pub(super) fn build_label_elements(
 }
 
 /// Apply a signed perpendicular offset to an on-path anchor,
-/// shifting it along the path normal at parameter `t`. A positive
-/// offset moves the label in the direction of
-/// [`connection::normal_at_t`] (tangent rotated 90°
-/// counter-clockwise); negative reverses. Zero is an early-out so
+/// shifting it along the path normal at parameter `t`. The
+/// normal is [`connection::normal_at_t`] — a canvas-coords 90°
+/// rotation of the tangent, whose orientation vs. "direction of
+/// travel" is documented on that helper (Y-down canvas). A
+/// positive offset moves the label in the returned normal
+/// direction, a negative one reverses. Zero is an early-out so
 /// labels with no `perpendicular_offset` skip the tangent
 /// computation entirely.
 fn apply_perpendicular_offset(

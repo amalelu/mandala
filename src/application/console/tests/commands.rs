@@ -219,6 +219,29 @@ fn test_edge_reset_straight_clears_control_points() {
 }
 
 #[test]
+fn test_edge_reset_curve_inserts_control_point_on_straight_edge() {
+    // Console wiring for the `edge reset=curve` verb: picks up
+    // the selected straight edge and drives
+    // `curve_straight_edge`, which seeds a quadratic Bezier.
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    doc.mindmap
+        .edges
+        .iter_mut()
+        .find(|e| er.matches(e))
+        .unwrap()
+        .control_points
+        .clear();
+    let _ = run("edge reset=curve", &mut doc);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    assert_eq!(
+        updated.control_points.len(),
+        1,
+        "curve should seed exactly one control point"
+    );
+}
+
+#[test]
 fn test_font_kv_size_sets_absolute_value_on_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);

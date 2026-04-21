@@ -39,7 +39,7 @@ fn test_no_label_element_for_missing_or_empty_label() {
 }
 
 #[test]
-fn test_label_position_follows_label_position_t() {
+fn test_label_position_follows_label_config_position_t() {
     // Horizontal edge from (0,0)+40x40 to (1000,0)+40x40 — center line.
     // At t=0, label should sit near the from-anchor; at t=1, near the
     // to-anchor; midpoints differ substantially.

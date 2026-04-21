@@ -143,24 +143,29 @@ impl MindMapDocument {
             &edge.anchor_to,
             &[],
         );
-        let (start, end) = match path {
-            connection::ConnectionPath::Straight { start, end } => (start, end),
+        let (start, end) = match &path {
+            connection::ConnectionPath::Straight { start, end } => (*start, *end),
             // Defensive branch — we guarded `control_points.is_empty()`
             // above, so this path builder should always return a
             // straight segment. If a future change makes that not
             // hold, bail rather than insert garbage.
             _ => return false,
         };
-        let mid = start.lerp(end, 0.5);
-        let tangent = end - start;
-        let length = tangent.length();
-        if length < f32::EPSILON {
+        // Zero-length guard — coincident endpoints produce a
+        // degenerate normal (`Vec2::X` from the tangent fallback)
+        // which would push the CP sideways instead of along a real
+        // perpendicular. Bail so the edge stays straight.
+        if (end - start).length() < f32::EPSILON {
             return false;
         }
-        // Perpendicular (tangent rotated 90° counter-clockwise).
-        // A quarter-length nudge reads as a gentle curve without
-        // looking like a bug.
-        let normal = Vec2::new(-tangent.y, tangent.x) / length;
+        let length = (end - start).length();
+        let mid = start.lerp(end, 0.5);
+        // Reuse `connection::normal_at_t` rather than hand-rolling
+        // the rotation — one source of truth for every path-normal
+        // computation, and the helper's Y-down orientation note
+        // applies here too. Quarter-length nudge reads as a gentle
+        // curve without looking like a bug.
+        let normal = connection::normal_at_t(&path, 0.5);
         let control_point_canvas = mid + normal * (length * 0.25);
         let from_center =
             Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
@@ -518,7 +523,7 @@ impl MindMapDocument {
     /// [`Self::ensure_glyph_connection`] for the body cascade — the
     /// first edit on an unstyled label forks a config onto the edge,
     /// subsequent edits reuse it.
-    pub(super) fn ensure_label_config(edge: &mut MindEdge) -> &mut EdgeLabelConfig {
+    fn ensure_label_config(edge: &mut MindEdge) -> &mut EdgeLabelConfig {
         edge.label_config.get_or_insert_with(EdgeLabelConfig::default)
     }
 

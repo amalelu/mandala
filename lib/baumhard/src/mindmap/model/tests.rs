@@ -269,6 +269,106 @@ fn label_config_missing_defaults_to_none() {
 }
 
 #[test]
+fn label_config_perpendicular_offset_only_round_trips() {
+    // Asymmetric case: only the perpendicular offset is set.
+    // Protects against a future regression that accidentally
+    // drops `skip_serializing_if` on that field.
+    let edge = synthetic_edge_with_label(
+        Some("side"),
+        Some(EdgeLabelConfig {
+            perpendicular_offset: Some(-8.5),
+            ..Default::default()
+        }),
+    );
+    let json = serde_json::to_string(&edge).unwrap();
+    assert!(json.contains("perpendicular_offset"));
+    assert!(!json.contains("position_t"));
+    assert!(!json.contains("font_size_pt"));
+    let back: MindEdge = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.label_config.as_ref().and_then(|c| c.perpendicular_offset),
+        Some(-8.5)
+    );
+    assert_eq!(
+        back.label_config.as_ref().and_then(|c| c.position_t),
+        None
+    );
+}
+
+#[test]
+fn effective_font_size_pt_partial_clamp_inheritance() {
+    // Own `min` only: resolver should pick up the label's min and
+    // fall back to the body's max. Inverts for "own max only".
+    use crate::mindmap::model::{Canvas, GlyphConnectionConfig};
+    let canvas = Canvas {
+        background_color: "#000".into(),
+        default_border: None,
+        default_connection: None,
+        theme_variables: std::collections::HashMap::new(),
+        theme_variants: std::collections::HashMap::new(),
+    };
+    let mut edge = synthetic_edge_with_label(Some("x"), None);
+    edge.glyph_connection = Some(GlyphConnectionConfig {
+        font_size_pt: 20.0,
+        min_font_size_pt: 8.0,
+        max_font_size_pt: 64.0,
+        ..GlyphConnectionConfig::default()
+    });
+    // Own `font_size_pt = 40`, own `min = 30`, no own max → body
+    // max 64 applies. At zoom 1, target 40 ∈ [30, 64] → 40.
+    let cfg_min_only = EdgeLabelConfig {
+        font_size_pt: Some(40.0),
+        min_font_size_pt: Some(30.0),
+        ..Default::default()
+    };
+    let got = EdgeLabelConfig::effective_font_size_pt(
+        Some(&cfg_min_only),
+        &edge,
+        &canvas,
+        1.0,
+    );
+    assert!((got - 40.0).abs() < 1.0e-4);
+    // At zoom 0.5, target 20 → pinned at own min 30 → canvas
+    // size = 30 / 0.5 = 60.
+    let got_zoomed = EdgeLabelConfig::effective_font_size_pt(
+        Some(&cfg_min_only),
+        &edge,
+        &canvas,
+        0.5,
+    );
+    assert!((got_zoomed - 60.0).abs() < 1.0e-4);
+
+    // Own `max = 24` only, size inherits body × factor (22).
+    // At zoom 1.0, target 22 clamps against body min 8 / own max
+    // 24 → 22 (unchanged). At zoom 2.0, target 44 → pinned at
+    // own max 24 → canvas size = 24 / 2 = 12.
+    let cfg_max_only = EdgeLabelConfig {
+        max_font_size_pt: Some(24.0),
+        ..Default::default()
+    };
+    let got_max_1 = EdgeLabelConfig::effective_font_size_pt(
+        Some(&cfg_max_only),
+        &edge,
+        &canvas,
+        1.0,
+    );
+    assert!(
+        (got_max_1 - 22.0).abs() < 1.0e-4,
+        "expected 22 (body × 1.1), got {got_max_1}"
+    );
+    let got_max_2 = EdgeLabelConfig::effective_font_size_pt(
+        Some(&cfg_max_only),
+        &edge,
+        &canvas,
+        2.0,
+    );
+    assert!(
+        (got_max_2 - 12.0).abs() < 1.0e-4,
+        "expected 12 (own max pinned), got {got_max_2}"
+    );
+}
+
+#[test]
 fn label_config_partial_fields_round_trip() {
     // A user who only sets `position_t` keeps the rest as `None`
     // and doesn't accidentally serialize defaults for the other
