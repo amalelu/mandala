@@ -3,6 +3,9 @@
 //! the mouse-move and click handlers in `app.rs`; pure function,
 //! no state.
 
+use baumhard::gfx_structs::shape::NodeShape;
+use glam::Vec2;
+
 use super::glyph_tables::CROSSHAIR_CENTER_CELL;
 use super::layout::ColorPickerLayout;
 
@@ -19,23 +22,45 @@ pub enum PickerHit {
     /// (Contextual: to the bound handle; Standalone: to the
     /// current document selection).
     Commit,
-    /// Inside the backdrop but not on any interactive element.
+    /// Inside the wheel's circle but not on any interactive element.
     /// Mouse-down here starts a wheel drag; drag ends on mouse-up.
     /// Replaces the older `Inside` fallback — every inside-but-
     /// not-glyph region is now a drag anchor by design.
     DragAnchor,
-    /// Outside the backdrop entirely.
+    /// Outside the wheel's circular outer bound. The wheel visually
+    /// reads as a disk of radius `outer_radius`, so the outer gate
+    /// matches that disk exactly — corner regions of the (still
+    /// rectangular) backdrop chrome are treated as canvas, not
+    /// picker.
     Outside,
 }
 
 /// Hit-test a screen position against the cached picker layout. The
-/// search order matches the visual layering: val bar → sat bar →
-/// hue ring → center preview glyph (commit). Inside-the-backdrop-
+/// outer gate is the wheel's circle (center, `outer_radius`), shared
+/// with the rest of the codebase via
+/// [`NodeShape::Ellipse::contains_local`] — the picker fits the same
+/// shape abstraction as any ellipse-shaped node. Inside that circle
+/// the search order matches the visual layering: val bar → sat bar →
+/// hue ring → center preview glyph (commit). Inside-the-circle-
 /// but-not-on-any-glyph is the drag anchor for the wheel. Returns
-/// `Outside` if the cursor is past the backdrop bounds.
+/// `Outside` when the cursor is past the circle.
 pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit {
-    let (bl, bt, bw, bh) = layout.backdrop;
-    if x < bl || x > bl + bw || y < bt || y > bt + bh {
+    // Outer gate: the wheel is a circle centered on `layout.center`
+    // with radius `layout.outer_radius` — the same disk the hue ring
+    // glyphs sit inside of (their outer edge is exactly
+    // `ring_r + ring_font_size * 0.5 == outer_radius`). Route through
+    // `NodeShape::Ellipse` so every circular hit-test in the app
+    // shares one implementation; a future tweak to the ellipse math
+    // propagates here for free. `outer_radius <= 0.0` (degenerate
+    // layout in a 0-px viewport) falls through the `<= 0.0` guard
+    // inside `contains_local` and reports `Outside`.
+    let r = layout.outer_radius;
+    let bounds = Vec2::new(2.0 * r, 2.0 * r);
+    let local = Vec2::new(
+        x - (layout.center.0 - r),
+        y - (layout.center.1 - r),
+    );
+    if !NodeShape::Ellipse.contains_local(local, bounds) {
         return PickerHit::Outside;
     }
 
@@ -93,8 +118,10 @@ pub fn hit_test_picker(layout: &ColorPickerLayout, x: f32, y: f32) -> PickerHit 
         return PickerHit::Commit;
     }
 
-    // Hex readout occupies a thin band below the chips; treat a click
-    // there as `DragAnchor` too — it's a display element, not
-    // interactive, so dragging from it just moves the wheel.
+    // Anywhere else inside the wheel disk is the drag anchor — the
+    // hex readout band falls naturally outside the circle now, so a
+    // click on the hex text lands in `Outside` rather than spinning
+    // the wheel. That matches the visual affordance (the hex is a
+    // display element, not a drag surface).
     PickerHit::DragAnchor
 }
