@@ -245,6 +245,7 @@ pub fn portal_pair_data(
                 owner_size,
                 node_center(partner_pos, partner_size),
                 endpoint_state,
+                style.font_size_pt,
                 text_style.font_size_pt,
                 &text_string,
             );

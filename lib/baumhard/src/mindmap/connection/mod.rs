@@ -191,9 +191,9 @@ pub fn tangent_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
 /// [`crate::mindmap::model::EdgeLabelConfig::perpendicular_offset`]
 /// pushes the label in the returned direction, a negative one
 /// pushes it the opposite way; the side is determined by the
-/// caller's sign and this helper stays internally consistent with
-/// [`crate::mindmap::document::edges`]'s curve-straight-edge math
-/// so keyboard and mouse gestures land on the same side.
+/// caller's sign. The app's curve-straight-edge gesture (in the
+/// mandala crate) also routes through this helper, so keyboard
+/// and mouse path-bending agree on the same side.
 pub fn normal_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
     let tangent = tangent_at_t(path, t);
     Vec2::new(-tangent.y, tangent.x)

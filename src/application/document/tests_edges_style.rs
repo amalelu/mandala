@@ -721,3 +721,51 @@ use super::defaults::default_cross_link_edge;
         // Undo stack didn't grow.
         assert_eq!(doc.undo_stack.len(), 0);
     }
+
+    #[test]
+    fn test_set_portal_label_text_color_writes_and_clears() {
+        // Write path for the new `text_color` channel: setter
+        // writes into `PortalEndpointState.text_color` without
+        // touching the icon `color`, and clearing rolls back an
+        // all-default endpoint state so the undo snapshot stays
+        // clean.
+        use baumhard::mindmap::model::{is_portal_edge, portal_endpoint_state, DISPLAY_MODE_PORTAL};
+
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Convert the first edge to portal mode so the setter has
+        // a legal target (the setter itself doesn't require portal
+        // mode, but it makes the scenario realistic).
+        let idx = doc.edge_index(&er).unwrap();
+        doc.mindmap.edges[idx].display_mode = Some(DISPLAY_MODE_PORTAL.to_string());
+        assert!(is_portal_edge(&doc.mindmap.edges[idx]));
+        let endpoint_id = doc.mindmap.edges[idx].from_id.clone();
+        doc.undo_stack.clear();
+
+        // Write: installs `text_color` on the from-endpoint.
+        assert!(doc.set_portal_label_text_color(&er, &endpoint_id, Some("#11bb33")));
+        let state = portal_endpoint_state(&doc.mindmap.edges[idx], &endpoint_id);
+        assert_eq!(
+            state.and_then(|s| s.text_color.as_deref()),
+            Some("#11bb33"),
+            "text_color should be set on the endpoint"
+        );
+        // Icon color on that same endpoint must NOT have been
+        // touched — that's the whole point of the separate channel.
+        assert_eq!(state.and_then(|s| s.color.as_deref()), None);
+        assert_eq!(doc.undo_stack.len(), 1);
+
+        // Re-setting the same value is a no-op.
+        assert!(!doc.set_portal_label_text_color(&er, &endpoint_id, Some("#11bb33")));
+        assert_eq!(doc.undo_stack.len(), 1);
+
+        // Clear: `None` removes the text_color override. Since
+        // the endpoint state was otherwise default (only
+        // text_color was set), the whole state should roll back
+        // to `None`.
+        assert!(doc.set_portal_label_text_color(&er, &endpoint_id, None));
+        assert!(
+            portal_endpoint_state(&doc.mindmap.edges[idx], &endpoint_id).is_none(),
+            "clearing the sole override should roll back to no endpoint state"
+        );
+    }

@@ -278,3 +278,107 @@ fn portal_marker_region_sized_by_grapheme_cluster_count_not_codepoints() {
         "region must cover 1 grapheme cluster, not 5 codepoints"
     );
 }
+
+#[test]
+fn portal_tree_text_area_carries_text_color_and_size_overrides() {
+    // Integration check for the portal text-styling wiring —
+    // a per-endpoint `text_color` + `text_font_size_pt` must
+    // reach the emitted text `GlyphArea`, not just the
+    // resolver. Guards against a regression where
+    // `resolve_portal_endpoint_text_style` stays correct while
+    // the tree builder accidentally reuses the icon's style.
+    use crate::mindmap::model::PortalEndpointState;
+    use crate::util::color::hex_to_rgba_safe;
+
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 400.0, 0.0),
+        ],
+        vec![],
+    );
+    let mut edge = synthetic_portal_edge("a", "b", "#aa88cc");
+    edge.portal_from = Some(PortalEndpointState {
+        text: Some("hi".to_string()),
+        text_color: Some("#11bb33".to_string()),
+        text_font_size_pt: Some(10.0),
+        text_min_font_size_pt: Some(4.0),
+        text_max_font_size_pt: Some(24.0),
+        ..Default::default()
+    });
+    map.edges.push(edge);
+
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
+    let pair = result.tree.root.children(&result.tree.arena).next().unwrap();
+    // Locate the endpoint void for `a` (the `from_id` side).
+    // New shape: pair → endpoint void → [icon, text]; endpoint
+    // channel 1 is the from-side per `portal_pair_data`.
+    let endpoint_void = pair.children(&result.tree.arena).next().unwrap();
+    // The text leaf is the second child (TEXT_SLOT = 2).
+    let children: Vec<_> = endpoint_void.children(&result.tree.arena).collect();
+    assert_eq!(children.len(), 2);
+    let text_area = glyph_area_of(&result.tree, children[1]);
+
+    // Text content should be the endpoint's `text` field.
+    assert_eq!(text_area.text, "hi");
+    // Color regions should carry the override (not icon color).
+    let regions = text_area.regions.all_regions();
+    assert_eq!(regions.len(), 1);
+    let expected = hex_to_rgba_safe("#11bb33", [0.0; 4]);
+    let actual = regions[0].color.expect("text region should be coloured");
+    for i in 0..4 {
+        assert!(
+            (actual[i] - expected[i]).abs() < 1.0e-4,
+            "text color channel {i} mismatch: got {:?} expected {:?}",
+            actual,
+            expected
+        );
+    }
+    // Font size must reflect the text override at zoom 1.0 (10 pt
+    // sits inside [4, 24] → canvas size 10, not the icon's size).
+    assert!(
+        (text_area.scale.0 - 10.0).abs() < 1.0e-4,
+        "text font size should be 10 pt, got {}",
+        text_area.scale.0
+    );
+}
+
+#[test]
+fn portal_tree_hitbox_excludes_reserved_text_slot_when_text_absent() {
+    // When an endpoint has no text, the combined hitbox must
+    // collapse to the icon AABB alone — otherwise a phantom
+    // ~30×65px hot zone beside the icon would steal clicks. The
+    // `text_string.is_empty()` branch in `portal_pair_data` is
+    // load-bearing against this regression.
+    let mut map = synthetic_map(
+        vec![
+            synthetic_node("a", None, 0.0, 0.0),
+            synthetic_node("b", None, 400.0, 0.0),
+        ],
+        vec![],
+    );
+    // Edge has NO text on either endpoint.
+    let edge = synthetic_portal_edge("a", "b", "#aa88cc");
+    map.edges.push(edge);
+
+    let result = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0);
+    let pair = result.tree.root.children(&result.tree.arena).next().unwrap();
+    let endpoint_void = pair.children(&result.tree.arena).next().unwrap();
+    let children: Vec<_> = endpoint_void.children(&result.tree.arena).collect();
+    let icon_area = glyph_area_of(&result.tree, children[0]);
+    // Hitbox for the from-endpoint should match the icon AABB
+    // within float tolerance, not some larger union.
+    let (min, max) = result
+        .hitboxes
+        .get(&(EdgeKey::new("a", "b", "cross_link"), "a".to_string()))
+        .expect("hitbox should be registered for from-endpoint");
+    let icon_pos = glam::Vec2::new(icon_area.position.x.0, icon_area.position.y.0);
+    let icon_extent = glam::Vec2::new(
+        icon_area.render_bounds.x.0,
+        icon_area.render_bounds.y.0,
+    );
+    assert!((min.x - icon_pos.x).abs() < 1.0e-3, "min.x");
+    assert!((min.y - icon_pos.y).abs() < 1.0e-3, "min.y");
+    assert!((max.x - (icon_pos.x + icon_extent.x)).abs() < 1.0e-3, "max.x");
+    assert!((max.y - (icon_pos.y + icon_extent.y)).abs() < 1.0e-3, "max.y");
+}

@@ -155,10 +155,10 @@ impl MindMapDocument {
         // degenerate normal (`Vec2::X` from the tangent fallback)
         // which would push the CP sideways instead of along a real
         // perpendicular. Bail so the edge stays straight.
-        if (end - start).length() < f32::EPSILON {
+        let length = (end - start).length();
+        if length < f32::EPSILON {
             return false;
         }
-        let length = (end - start).length();
         let mid = start.lerp(end, 0.5);
         // Reuse `connection::normal_at_t` rather than hand-rolling
         // the rotation — one source of truth for every path-normal
@@ -806,6 +806,57 @@ impl MindMapDocument {
             None => {
                 if let Some(existing) = slot.as_mut() {
                     existing.text = None;
+                    if existing == &PortalEndpointState::default() {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
+    /// Set (or clear, with `color = None`) the per-endpoint
+    /// **text** color override on a portal-mode edge. Sibling of
+    /// [`Self::set_portal_label_color`], which targets the icon
+    /// cascade; this setter targets `PortalEndpointState.text_color`
+    /// so a coloured badge can host a differently-coloured
+    /// annotation. Returns `true` if the value changed. Rolls back
+    /// a newly-installed empty `PortalEndpointState` when clearing
+    /// a text color would leave the state entirely default, so an
+    /// unchanged selection doesn't leave undo droppings — mirrors
+    /// the `set_portal_label_color` rollback pattern.
+    pub fn set_portal_label_text_color(
+        &mut self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+        color: Option<&str>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let slot = match portal_endpoint_state_mut(
+            &mut self.mindmap.edges[idx],
+            endpoint_node_id,
+        ) {
+            Some(s) => s,
+            None => return false,
+        };
+        let current = slot.as_ref().and_then(|s| s.text_color.clone());
+        let new_val = color.map(|s| s.to_string());
+        if current == new_val {
+            return false;
+        }
+        match new_val {
+            Some(c) => {
+                slot.get_or_insert_with(PortalEndpointState::default).text_color = Some(c);
+            }
+            None => {
+                if let Some(existing) = slot.as_mut() {
+                    existing.text_color = None;
                     if existing == &PortalEndpointState::default() {
                         *slot = None;
                     }

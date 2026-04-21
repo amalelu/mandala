@@ -693,30 +693,35 @@ fn cubic_bezier_tangent_matches_finite_difference() {
     // difference — a single bug in the coefficients (e.g. writing
     // `2.0 * u * t` instead of `6.0 * u * t` for the middle term)
     // would break this test.
-    use crate::mindmap::connection::bezier::cubic_bezier_tangent;
+    use crate::mindmap::connection::bezier::{cubic_bezier_point, cubic_bezier_tangent};
     let p0 = Vec2::new(0.0, 0.0);
     let p1 = Vec2::new(1.0, 5.0);
     let p2 = Vec2::new(4.0, -2.0);
     let p3 = Vec2::new(6.0, 3.0);
-    let h = 1.0e-4;
+    // h = 1e-3 balances truncation error (O(h² · |f‴|) ≈ 1e-4
+    // on this cubic) against f32 cancellation in the central
+    // difference (rounding amplification ≈ 1/(2h)). Smaller h
+    // would sink under cancellation noise; larger h would let
+    // truncation dominate.
+    let h = 1.0e-3;
     for t in [0.1, 0.3, 0.5, 0.7, 0.9] {
         let analytical = cubic_bezier_tangent(t, p0, p1, p2, p3);
-        use crate::mindmap::connection::bezier::cubic_bezier_point;
         let fwd = cubic_bezier_point(t + h, p0, p1, p2, p3);
         let back = cubic_bezier_point(t - h, p0, p1, p2, p3);
         let fd = (fwd - back) / (2.0 * h);
-        // The analytical derivative is unnormalised (returns raw
-        // derivative); the finite-difference estimate is also
-        // unnormalised. Allow a small tolerance for the 2nd-order
-        // central-difference error.
+        // Tolerance 1e-3 sits comfortably above the combined
+        // truncation + f32 cancellation floor while still
+        // catching a single-coefficient bug — e.g. a missing
+        // factor of 2 or a `u*t` → `u+t` typo produces errors
+        // of order 1-10.
         assert!(
-            (analytical.x - fd.x).abs() < 1.0e-2,
+            (analytical.x - fd.x).abs() < 1.0e-3,
             "t={t} x analytical {} vs fd {}",
             analytical.x,
             fd.x
         );
         assert!(
-            (analytical.y - fd.y).abs() < 1.0e-2,
+            (analytical.y - fd.y).abs() < 1.0e-3,
             "t={t} y analytical {} vs fd {}",
             analytical.y,
             fd.y

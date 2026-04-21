@@ -89,14 +89,16 @@ pub struct ResolvedPortalStyle {
 /// from [`ResolvedPortalStyle`] so per-endpoint overrides
 /// (`text_color`, `text_font_size_pt`, `text_min_font_size_pt`,
 /// `text_max_font_size_pt`) route only to the text channel while
-/// the icon keeps reading its own cascade. Font inherits from the
-/// icon unconditionally — users that need separate fonts can fork
-/// the edge's `glyph_connection.font`; per-endpoint text-font
-/// override isn't a current requirement.
+/// the icon keeps reading its own cascade.
+///
+/// No `font` field: text always inherits the icon's font (which
+/// already routes through `glyph_connection.font`); a
+/// per-endpoint text-font override isn't a current requirement
+/// and the icon's resolved font reaches the tree builder via
+/// `ResolvedPortalStyle::font`.
 #[derive(Debug, Clone)]
 pub struct ResolvedPortalTextStyle {
     pub color: String,
-    pub font: Option<String>,
     pub font_size_pt: f32,
 }
 
@@ -242,7 +244,6 @@ pub fn resolve_portal_endpoint_text_style(
 
     ResolvedPortalTextStyle {
         color: resolved_text_color,
-        font: cfg.font.clone(),
         font_size_pt,
     }
 }
@@ -308,18 +309,26 @@ pub(crate) struct PortalTextLayout {
 }
 
 /// Compute the AABB for a portal text label, given the icon
-/// layout and the border parameter driving the outward normal.
-/// Text extends from the icon's outward edge away from the node
-/// along the normal, with width scaled by grapheme count using
-/// the same `char_count × font_size × 0.6` heuristic connection
-/// labels use.
+/// layout, the border parameter driving the outward normal, and
+/// the icon + text font sizes. Text extends from the icon's
+/// outward edge away from the node along the normal, with width
+/// scaled by grapheme count using the same
+/// `char_count × font_size × 0.6` heuristic connection labels
+/// use.
+///
+/// `icon_font_size_pt` drives the padding between icon and text
+/// (matches [`PORTAL_TEXT_PADDING_FRAC`]'s contract — "fraction
+/// of the **icon** font size") so the visible gap stays stable
+/// when the text is resized independently. `text_font_size_pt`
+/// drives only the text AABB dimensions.
 pub(crate) fn layout_portal_text(
     icon: PortalLabelLayout,
     owner_pos: Vec2,
     owner_size: Vec2,
     partner_center: Vec2,
     endpoint_state: Option<&PortalEndpointState>,
-    font_size_pt: f32,
+    icon_font_size_pt: f32,
+    text_font_size_pt: f32,
     text: &str,
 ) -> PortalTextLayout {
     // Approximate grapheme count (cheap proxy for shaped
@@ -327,12 +336,16 @@ pub(crate) fn layout_portal_text(
     // strings get a minimum 1-char-wide slot so the buffer is
     // never zero-sized, matching the connection-label helper.
     let char_count = text.chars().count().max(1) as f32;
-    let bounds = Vec2::new(char_count * font_size_pt * 0.6, font_size_pt * 1.3);
+    let bounds = Vec2::new(char_count * text_font_size_pt * 0.6, text_font_size_pt * 1.3);
     let t = endpoint_state
         .and_then(|s| s.border_t)
         .unwrap_or_else(|| default_border_t(owner_pos, owner_size, partner_center));
     let normal = border_outward_normal(t);
-    let padding = font_size_pt * PORTAL_TEXT_PADDING_FRAC;
+    // Padding is driven by the **icon** size so the visible gap
+    // between icon and text stays stable when the user shrinks or
+    // grows the text independently — a 6pt annotation beside a
+    // 50pt badge still sits at a consistent distance from the badge.
+    let padding = icon_font_size_pt * PORTAL_TEXT_PADDING_FRAC;
     // Icon center as the anchor for text placement. Text AABB
     // is positioned so its inner edge sits one padding beyond
     // the icon's outer edge along the outward normal, with

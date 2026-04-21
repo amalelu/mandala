@@ -387,6 +387,14 @@ pub struct EdgeLabelConfig {
 /// derive the default label size. Keeps labels visually distinct
 /// from the sampled body glyphs without requiring every map to
 /// author a `label_config.font_size_pt`.
+///
+/// **Portal-mode edges deliberately skip this factor.** Portal
+/// icons already read as large badges (default 50pt) and their
+/// adjacent text inherits the icon size at 1:1, not 1.1× — a
+/// multiplied text would overflow beside a 50pt badge. The
+/// factor applies only to line-mode edge labels. See
+/// `scene_builder::portal::resolve_portal_endpoint_text_style`
+/// for the portal-text cascade.
 pub const DEFAULT_LABEL_SIZE_FACTOR: f32 = 1.1;
 
 impl EdgeLabelConfig {

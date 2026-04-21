@@ -232,7 +232,12 @@ fn test_edge_reset_curve_inserts_control_point_on_straight_edge() {
         .unwrap()
         .control_points
         .clear();
-    let _ = run("edge reset=curve", &mut doc);
+    let result = run("edge reset=curve", &mut doc);
+    assert!(
+        matches!(result, ExecResult::Ok(_)),
+        "edge reset=curve should succeed, got {:?}",
+        result
+    );
     let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
     assert_eq!(
         updated.control_points.len(),
