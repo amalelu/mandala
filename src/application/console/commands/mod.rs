@@ -23,6 +23,7 @@ pub mod new;
 pub mod open;
 pub mod save;
 pub mod spacing;
+pub mod zoom;
 
 /// One entry in the console command registry. Kept small and
 /// `'static` so the whole registry can live in a `const` slice.
@@ -71,6 +72,7 @@ pub const COMMANDS: &[Command] = &[
     save::COMMAND,
     open::COMMAND,
     new::COMMAND,
+    zoom::COMMAND,
 ];
 
 /// Look up a command by its name or any alias. Case-insensitive.
@@ -112,7 +114,7 @@ mod tests {
     fn test_command_registry_has_every_migrated_verb() {
         let expected = [
             "help", "anchor", "body", "cap", "color", "edge", "font",
-            "spacing", "label", "mutation", "save", "open", "new",
+            "spacing", "label", "mutation", "save", "open", "new", "zoom",
         ];
         for name in expected {
             assert!(
@@ -120,5 +122,17 @@ mod tests {
                 "command '{name}' missing from registry"
             );
         }
+    }
+
+    #[test]
+    fn test_command_by_name_finds_zoom_alias() {
+        // `visibility` is the sibling name — surfaces in help /
+        // completion so users thinking "control visibility by
+        // zoom" find the command without learning the shorter
+        // `zoom` verb first.
+        assert_eq!(
+            command_by_name("visibility").map(|c| c.name),
+            Some("zoom")
+        );
     }
 }

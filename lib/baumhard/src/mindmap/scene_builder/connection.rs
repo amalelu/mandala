@@ -176,6 +176,7 @@ pub(super) fn build_connection_elements(
                     font: cached.font.clone(),
                     font_size_pt: cached.font_size_pt,
                     color,
+                    zoom_visibility: edge.zoom_window(),
                 });
                 continue;
             }
@@ -297,6 +298,7 @@ pub(super) fn build_connection_elements(
             font: config.font.clone(),
             font_size_pt: font_size,
             color,
+            zoom_visibility: edge.zoom_window(),
         });
     }
 

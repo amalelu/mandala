@@ -15,6 +15,7 @@ use strum_macros::{Display, EnumIter};
 
 use super::area::GlyphArea;
 use super::area_fields::{GlyphAreaField, GlyphAreaFieldType, OutlineStyle};
+use super::zoom_visibility::ZoomVisibility;
 
 ////////////////////////////////////////
 /////// GlyphAreaCommand Mutator ///////
@@ -353,6 +354,21 @@ impl DeltaGlyphArea {
             self.fields.get(&GlyphAreaFieldType::Shape)
         {
             Some(*shape)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the delta's [`ZoomVisibility`] payload if one was
+    /// set on construction. `None` means the delta leaves the
+    /// area's `zoom_visibility` alone; `Some(window)` means it
+    /// replaces (under Assign/Add) or resets-to-unbounded (under
+    /// Subtract). O(1).
+    pub fn zoom_visibility(&self) -> Option<ZoomVisibility> {
+        if let Some(GlyphAreaField::ZoomVisibility(window)) =
+            self.fields.get(&GlyphAreaFieldType::ZoomVisibility)
+        {
+            Some(*window)
         } else {
             None
         }

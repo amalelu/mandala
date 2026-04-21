@@ -151,6 +151,7 @@ pub(super) fn build_label_elements(
             color,
             font: config.font.clone(),
             font_size_pt,
+            zoom_visibility: edge.label_zoom_window(label_cfg),
         });
     }
 
@@ -245,6 +246,7 @@ pub(super) fn build_label_elements(
                             color,
                             font: config.font.clone(),
                             font_size_pt,
+                            zoom_visibility: edge.label_zoom_window(label_cfg),
                         });
                     }
                 }

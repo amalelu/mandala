@@ -73,6 +73,13 @@ pub(super) fn mindnode_to_glyph_area(
     // both visuals and input together.
     area.shape = NodeShape::from_style_string(&node.style.shape);
 
+    // Stamp the node's optional zoom window onto the area. Default
+    // (both `None`) leaves the area unbounded — the renderer's
+    // final cull skips no-ops for it. Border areas inherit this
+    // same window via `MindNode::zoom_window`, so a node that
+    // disappears at high zoom takes its glyph frame with it.
+    area.zoom_visibility = node.zoom_window();
+
     // Convert text runs to ColorFontRegions
     let mut regions = ColorFontRegions::new_empty();
     for run in &node.text_runs {

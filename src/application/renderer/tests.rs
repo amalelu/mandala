@@ -617,3 +617,93 @@ fn clamp_surface_size_passes_exact_limit() {
     let (w, h) = clamp_surface_size_to_gpu_limit(8192, 8192, 8192);
     assert_eq!((w, h), (8192, 8192));
 }
+
+/// Integration-level cull: a `NodeBackgroundRect` whose
+/// spatial AABB is fully inside the viewport must still be
+/// dropped when `camera.zoom` falls outside its
+/// `zoom_visibility` window. Exercises the combined predicate
+/// that `render::render` runs on every background rect each
+/// frame; a regression that short-circuited the zoom check
+/// (e.g. `||` instead of `&&`) would leave the rect visible
+/// at every zoom and trip this test.
+#[test]
+fn background_rect_culled_when_zoom_outside_window() {
+    use baumhard::gfx_structs::camera::Camera2D;
+    use baumhard::gfx_structs::shape::NodeShape;
+    use baumhard::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let mut camera = Camera2D::new(800, 600);
+    // Rect centered at canvas origin (the camera's default
+    // position) so the spatial check is satisfied at every
+    // zoom in the camera's clamped range — we want the zoom
+    // window to be the sole rejection reason.
+    let rect = NodeBackgroundRect {
+        position: Vec2::new(-50.0, -50.0),
+        size: Vec2::new(100.0, 100.0),
+        color: [64, 64, 64, 255],
+        shape_id: NodeShape::Rectangle.shader_id(),
+        zoom_visibility: ZoomVisibility { min: Some(1.0), max: Some(2.0) },
+    };
+
+    // Inside the window: visible.
+    camera.zoom = 1.0;
+    assert!(rect.visible_at(&camera), "zoom at min bound should render");
+    camera.zoom = 1.5;
+    assert!(rect.visible_at(&camera));
+    camera.zoom = 2.0;
+    assert!(rect.visible_at(&camera), "zoom at max bound should render");
+
+    // Outside the window: culled.
+    camera.zoom = 0.5;
+    assert!(!rect.visible_at(&camera), "zoom below min should cull");
+    camera.zoom = 3.0;
+    assert!(!rect.visible_at(&camera), "zoom above max should cull");
+}
+
+/// Integration-level cull: an unbounded rect (the historical
+/// default — both bounds `None`) renders regardless of
+/// `camera.zoom`. Pins the "existing maps pay nothing" contract.
+#[test]
+fn background_rect_with_unbounded_window_renders_at_every_zoom() {
+    use baumhard::gfx_structs::camera::Camera2D;
+    use baumhard::gfx_structs::shape::NodeShape;
+    use baumhard::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let mut camera = Camera2D::new(800, 600);
+    let rect = NodeBackgroundRect {
+        position: Vec2::new(-50.0, -50.0),
+        size: Vec2::new(100.0, 100.0),
+        color: [64, 64, 64, 255],
+        shape_id: NodeShape::Rectangle.shader_id(),
+        zoom_visibility: ZoomVisibility::unbounded(),
+    };
+
+    for z in [0.05_f32, 0.5, 1.0, 2.5, 5.0] {
+        camera.zoom = z;
+        assert!(rect.visible_at(&camera), "unbounded window must render at zoom {z}");
+    }
+}
+
+/// Spatial and zoom culls compose as AND: a rect outside the
+/// viewport is dropped even if its zoom window is satisfied.
+/// Mirrors the "spatial cull short-circuits" invariant so a
+/// future refactor that reverses the two checks still sees
+/// this test stay green.
+#[test]
+fn background_rect_off_viewport_still_culled_with_matching_zoom() {
+    use baumhard::gfx_structs::camera::Camera2D;
+    use baumhard::gfx_structs::shape::NodeShape;
+    use baumhard::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let mut camera = Camera2D::new(800, 600);
+    camera.zoom = 1.0;
+    // Far off to the right of the viewport at canvas x = 10_000.
+    let rect = NodeBackgroundRect {
+        position: Vec2::new(10_000.0, 200.0),
+        size: Vec2::new(100.0, 100.0),
+        color: [64, 64, 64, 255],
+        shape_id: NodeShape::Rectangle.shader_id(),
+        zoom_visibility: ZoomVisibility { min: Some(1.0), max: Some(2.0) },
+    };
+    assert!(!rect.visible_at(&camera), "off-viewport rect must be culled regardless of zoom window");
+}

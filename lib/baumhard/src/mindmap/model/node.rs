@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::mindmap::custom_mutation::{CustomMutation, TriggerBinding};
 
 /// A single node in the mindmap: one rectangle of text + style,
@@ -40,6 +41,46 @@ pub struct MindNode {
     /// Inline custom mutations defined on this node (not shared with other nodes).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_mutations: Vec<CustomMutation>,
+    /// Lower bound on `camera.zoom` at which this node (and its
+    /// glyph border, which inherits from the node) renders.
+    /// `None` = unbounded below. Mirrors the
+    /// `min_font_size_pt` / `max_font_size_pt` pair on
+    /// [`crate::mindmap::model::edge::GlyphConnectionConfig`] —
+    /// same flat-optional posture, orthogonal concept (presence
+    /// vs. size). Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_zoom_to_render: Option<f32>,
+    /// Upper bound on `camera.zoom` at which this node renders.
+    /// `None` = unbounded above. Inclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_zoom_to_render: Option<f32>,
+}
+
+impl MindNode {
+    /// This node's authored zoom window, as a
+    /// [`ZoomVisibility`]. O(1).
+    ///
+    /// # Border inheritance
+    ///
+    /// Borders inherit this window verbatim via
+    /// [`BorderNodeData::zoom_visibility`] in
+    /// `tree_builder/border.rs` (stamped onto all four runs in
+    /// `border_node_data`) and via the same field on
+    /// `BorderElement` in `scene_builder/node_pass.rs` — both
+    /// paths call this method directly. No separate
+    /// per-border override exists today; the floating-frame-
+    /// fragment case a non-inheriting border would produce is
+    /// prevented by construction. A future
+    /// `GlyphBorderConfig.min_zoom_to_render` field would need
+    /// to revisit those two call sites together.
+    ///
+    /// [`BorderNodeData::zoom_visibility`]: crate::mindmap::tree_builder::BorderNodeData
+    pub fn zoom_window(&self) -> ZoomVisibility {
+        ZoomVisibility::from_pair(
+            self.min_zoom_to_render,
+            self.max_zoom_to_render,
+        )
+    }
 }
 
 /// Canvas-space top-left corner of a node's AABB. Units are

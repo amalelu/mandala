@@ -38,6 +38,8 @@ pub fn node(id: &str, parent_id: Option<&str>) -> MindNode {
         channel: 0,
         trigger_bindings: vec![],
         inline_mutations: vec![],
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }
 
@@ -59,5 +61,7 @@ pub fn edge(from: &str, to: &str) -> MindEdge {
         display_mode: None,
         portal_from: None,
         portal_to: None,
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
     }
 }

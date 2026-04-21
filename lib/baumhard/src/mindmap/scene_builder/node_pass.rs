@@ -99,7 +99,8 @@ pub(super) fn build_node_elements(
             });
         }
 
-        // Border element
+        // Border element — inherits the owning node's zoom window
+        // so the frame never outlives its node at any zoom level.
         if node.style.show_frame {
             let border_style = BorderStyle::default_with_color(frame_color);
             border_elements.push(BorderElement {
@@ -107,6 +108,7 @@ pub(super) fn build_node_elements(
                 border_style,
                 node_position: (pos_x, pos_y),
                 node_size: (size_x, size_y),
+                zoom_visibility: node.zoom_window(),
             });
         }
     }

@@ -15,6 +15,7 @@ use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::shape::NodeShape;
 use crate::gfx_structs::tree::Tree;
+use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::mindmap::border::{BORDER_APPROX_CHAR_WIDTH_FRAC, BORDER_CORNER_OVERLAP_FRAC};
 use crate::mindmap::model::MindMap;
 use crate::util::color;
@@ -36,6 +37,11 @@ pub struct BorderNodeData {
     pub pos_y: f32,
     pub size_x: f32,
     pub size_y: f32,
+    /// Zoom window inherited from the owning node. Stamped onto
+    /// each of the four border runs at both initial-build and
+    /// mutator-update time so the frame disappears atomically
+    /// with its node at any zoom level.
+    pub zoom_visibility: ZoomVisibility,
 }
 
 /// Compute the border layout for the current `(map, offsets)`
@@ -100,6 +106,7 @@ pub fn border_node_data(
             pos_y: node.position.y as f32 + oy,
             size_x: node.size.width as f32,
             size_y: node.size.height as f32,
+            zoom_visibility: node.zoom_window(),
         });
         parent_channel += 1;
     }
@@ -174,6 +181,7 @@ pub fn build_border_tree_from_nodes(nodes: &[BorderNodeData]) -> Tree<GfxElement
             node.size_x,
             node.size_y,
             node.parent_channel,
+            node.zoom_visibility,
             &mut unique_id,
         );
     }
@@ -293,6 +301,13 @@ pub fn build_border_mutator_tree_from_nodes(
                 GlyphAreaField::line_height(fs),
                 GlyphAreaField::ColorFontRegions(regions),
                 GlyphAreaField::Outline(None),
+                // Required per §B2: without this, a mutator
+                // rebuild would silently reset each run's zoom
+                // window to Default, and a node that "disappears
+                // above zoom 2×" would have a ghost frame the
+                // first time the border path took its in-place
+                // update path after the window was authored.
+                GlyphAreaField::ZoomVisibility(node.zoom_visibility),
                 GlyphAreaField::Operation(ApplyOperation::Assign),
             ]);
             let leaf = mt.arena.new_node(GfxMutator::new(
@@ -319,6 +334,7 @@ fn append_border_sub_tree(
     size_x: f32,
     size_y: f32,
     parent_channel: usize,
+    zoom_visibility: ZoomVisibility,
     unique_id: &mut usize,
 ) {
     let font_size = border_style.font_size_pt;
@@ -362,6 +378,7 @@ fn append_border_sub_tree(
         (pos_x - approx_char_width, top_y),
         (h_width, font_size * 1.5),
         color_rgba,
+        zoom_visibility,
     );
     *unique_id += 1;
     append_border_run(
@@ -374,6 +391,7 @@ fn append_border_sub_tree(
         (pos_x - approx_char_width, bottom_y),
         (h_width, font_size * 1.5),
         color_rgba,
+        zoom_visibility,
     );
     *unique_id += 1;
     append_border_run(
@@ -386,6 +404,7 @@ fn append_border_sub_tree(
         (pos_x - approx_char_width, pos_y),
         (v_width, size_y),
         color_rgba,
+        zoom_visibility,
     );
     *unique_id += 1;
     append_border_run(
@@ -398,6 +417,7 @@ fn append_border_sub_tree(
         (right_corner_x, pos_y),
         (v_width, size_y),
         color_rgba,
+        zoom_visibility,
     );
     *unique_id += 1;
 }
@@ -412,6 +432,7 @@ pub(super) fn append_border_run(
     position: (f32, f32),
     bounds: (f32, f32),
     color_rgba: [f32; 4],
+    zoom_visibility: ZoomVisibility,
 ) {
     let mut area = GlyphArea::new_with_str(
         text,
@@ -420,6 +441,7 @@ pub(super) fn append_border_run(
         Vec2::new(position.0, position.1),
         Vec2::new(bounds.0, bounds.1),
     );
+    area.zoom_visibility = zoom_visibility;
 
     // Single ColorFontRegion covering the whole run — the renderer
     // walker translates this into a cosmic-text `Attrs::color`

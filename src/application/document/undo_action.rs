@@ -56,6 +56,16 @@ pub enum UndoAction {
         before_style: NodeStyle,
         before_runs: Vec<TextRun>,
     },
+    /// A node's zoom-visibility window (`min_zoom_to_render` /
+    /// `max_zoom_to_render`) was edited. Kept as its own variant —
+    /// not folded into `EditNodeStyle` — because the zoom pair is
+    /// not part of `NodeStyle`; it sits on `MindNode` directly as a
+    /// presence gate orthogonal to visual styling.
+    EditNodeZoom {
+        node_id: String,
+        before_min: Option<f32>,
+        before_max: Option<f32>,
+    },
     /// Snapshot of the entire `Canvas` taken before a document action
     /// (theme switch, etc.) mutated it. The canvas is small and cloning
     /// the whole thing is cheaper than tracking field-level diffs, and

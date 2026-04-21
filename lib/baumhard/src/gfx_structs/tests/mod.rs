@@ -7,6 +7,7 @@
 //! — see TEST_CONVENTIONS.md §T2.2 and §B8.
 
 pub mod area_tests;
+pub mod zoom_visibility_tests;
 pub mod shape_tests;
 pub mod model_tests;
 pub mod mutator_tests;

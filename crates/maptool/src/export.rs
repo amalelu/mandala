@@ -135,6 +135,8 @@ mod tests {
             channel: 0,
             trigger_bindings: Vec::new(),
             inline_mutations: Vec::new(),
+            min_zoom_to_render: None,
+            max_zoom_to_render: None,
         }
     }
 

@@ -360,5 +360,8 @@ mutation on a specific node overrides the map's.
   it means for mutator targeting.
 - `format/enums.md` — the named-string convention used for
   `contexts`, `target_scope`, `behavior`.
+- `format/zoom-bounds.md` — `GlyphAreaField::ZoomVisibility` mutator
+  target for authoring zoom-triggered LOD transitions on any
+  renderable.
 - `CODE_CONVENTIONS.md §1` and `§7` — why the mutation framework lives
   in Baumhard and why its seams are preserved.

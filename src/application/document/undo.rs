@@ -78,6 +78,12 @@ impl MindMapDocument {
                         node.text_runs = before_runs;
                     }
                 }
+                UndoAction::EditNodeZoom { node_id, before_min, before_max } => {
+                    if let Some(node) = self.mindmap.nodes.get_mut(&node_id) {
+                        node.min_zoom_to_render = before_min;
+                        node.max_zoom_to_render = before_max;
+                    }
+                }
                 UndoAction::CanvasSnapshot { canvas } => {
                     self.mindmap.canvas = canvas;
                 }

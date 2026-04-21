@@ -105,3 +105,147 @@ fn test_label_color_follows_glyph_connection_color_override() {
     // The glyph_connection.color override wins over edge.color.
     assert_eq!(scene.connection_label_elements[0].color, "#112233");
 }
+
+/// Zoom-visibility cascade: when a label's
+/// `min_zoom_to_render` / `max_zoom_to_render` are both `None`,
+/// the emitted element inherits the owning edge's window verbatim.
+/// Pins the "no override → full inherit" branch of the
+/// replace-not-intersect rule.
+#[test]
+fn test_label_zoom_visibility_inherits_edge_window_when_absent() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+        synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+    ];
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.label = Some("lbl".to_string());
+    edge.min_zoom_to_render = Some(0.5);
+    edge.max_zoom_to_render = Some(2.0);
+    // No label_config → inherit.
+    let map = synthetic_map(nodes, vec![edge]);
+    let scene = build_scene(&map, 1.0);
+    assert_eq!(
+        scene.connection_label_elements[0].zoom_visibility,
+        ZoomVisibility { min: Some(0.5), max: Some(2.0) },
+    );
+}
+
+/// Zoom-visibility cascade: when **any** of the label's window
+/// bounds is `Some`, the label's pair **replaces** the edge's
+/// pair wholesale (not intersects). The label below sets only
+/// `min_zoom_to_render`; the resolved window drops the edge's
+/// max — a label setting a one-sided window means exactly that,
+/// not "narrow the edge window further". Pins the load-bearing
+/// distinction between replace and intersect semantics.
+#[test]
+fn test_label_zoom_visibility_replace_not_intersect() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+        synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+    ];
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.label = Some("lbl".to_string());
+    edge.min_zoom_to_render = Some(0.5);
+    edge.max_zoom_to_render = Some(2.0);
+    edge.label_config = Some(EdgeLabelConfig {
+        min_zoom_to_render: Some(1.0),
+        max_zoom_to_render: None,
+        ..EdgeLabelConfig::default()
+    });
+    let map = synthetic_map(nodes, vec![edge]);
+    let scene = build_scene(&map, 1.0);
+    assert_eq!(
+        scene.connection_label_elements[0].zoom_visibility,
+        ZoomVisibility { min: Some(1.0), max: None },
+        "label override must replace the edge window, not intersect it"
+    );
+}
+
+/// Default path: an edge with no zoom window and a label with
+/// no zoom window emits a label with unbounded visibility.
+/// Locks in the zero-cost default so existing maps pay nothing.
+#[test]
+fn test_label_zoom_visibility_defaults_to_unbounded() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+        synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+    ];
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.label = Some("lbl".to_string());
+    let map = synthetic_map(nodes, vec![edge]);
+    let scene = build_scene(&map, 1.0);
+    assert_eq!(
+        scene.connection_label_elements[0].zoom_visibility,
+        ZoomVisibility::unbounded(),
+    );
+}
+
+/// A `label_config` that is `Some(cfg)` but whose zoom bounds
+/// are both `None` must still inherit the edge's window —
+/// presence of the config alone does not trigger the replace
+/// branch. Pins the `cascade_replace((None, None)) → inherit`
+/// semantics at the subtly-different Some/Some(default) vs.
+/// None-config split; a regression that conflated "Some config
+/// present" with "window authored" would render labels with a
+/// default `EdgeLabelConfig` (position_t / perpendicular_offset
+/// / color set but no zoom bounds) as unbounded even when the
+/// owning edge wanted them gated.
+#[test]
+fn test_label_zoom_visibility_inherits_when_config_has_no_zoom_bounds() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+        synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+    ];
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.label = Some("lbl".to_string());
+    edge.min_zoom_to_render = Some(0.5);
+    edge.max_zoom_to_render = Some(2.0);
+    // `Some(cfg)` but `cfg.min_zoom_to_render` and
+    // `cfg.max_zoom_to_render` are both None — the label has
+    // a config for other reasons (e.g., position override) but
+    // no zoom-window opinion.
+    edge.label_config = Some(EdgeLabelConfig {
+        position_t: Some(0.75),
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
+        ..EdgeLabelConfig::default()
+    });
+    let map = synthetic_map(nodes, vec![edge]);
+    let scene = build_scene(&map, 1.0);
+    assert_eq!(
+        scene.connection_label_elements[0].zoom_visibility,
+        ZoomVisibility { min: Some(0.5), max: Some(2.0) },
+        "Some(config) with no zoom bounds must inherit the edge window, \
+         not flip to unbounded"
+    );
+}
+
+/// An edge with `visible: false` short-circuits before any
+/// zoom-visibility resolution runs — no label element is
+/// emitted regardless of whether the zoom window is set. Pins
+/// the invariant the reviewer flagged: no double-negation
+/// bug possible (the `edge.visible` check lives before the
+/// label-emission path).
+#[test]
+fn test_invisible_edge_emits_no_label_even_with_zoom_window() {
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+        synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+    ];
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.label = Some("lbl".to_string());
+    edge.visible = false;
+    edge.min_zoom_to_render = Some(0.5);
+    edge.max_zoom_to_render = Some(2.0);
+    let map = synthetic_map(nodes, vec![edge]);
+    let scene = build_scene(&map, 1.0);
+    assert_eq!(scene.connection_label_elements.len(), 0);
+}

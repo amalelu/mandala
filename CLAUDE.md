@@ -86,6 +86,28 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   pipeline's SDF fragment shader and the BVH descent. Adding a shape
   is localised: one enum variant + one WGSL `case` + one
   `contains_local` arm. See `format/enums.md#styleshape`.
+- Zoom-visibility bounds on every renderable component — nodes,
+  edges, edge labels, portal endpoints (icon + text), and node
+  borders (which inherit from the owning node). The `ZoomVisibility`
+  primitive in `lib/baumhard/src/gfx_structs/zoom_visibility.rs`
+  gates presence on `camera.zoom` via an optional inclusive `[min,
+  max]` window. Defaults unbounded, so existing maps render
+  unchanged. JSON surface is two flat optional fields
+  (`min_zoom_to_render` / `max_zoom_to_render`) on `MindNode`,
+  `MindEdge`, `EdgeLabelConfig`, `PortalEndpointState` — cascade is
+  replace-not-intersect (label / endpoint override fully replaces
+  the edge window when either bound is set). The cull runs
+  alongside the existing spatial `Camera2D::is_visible` in
+  `src/application/renderer/render.rs` — two branchless float
+  compares per `MindMapTextBuffer`, zero cosmic-text shaping or
+  buffer-cache invalidation on zoom steps. Mutator target:
+  `GlyphAreaField::ZoomVisibility` for zoom-triggered LOD
+  transitions. Runtime authoring via the `zoom` / `visibility`
+  console command (`zoom min=1.5 max=3.0`, `zoom clear`,
+  `zoom max=unset`) routing against the active selection
+  through `MindMapDocument::set_{node,edge,edge_label,portal_endpoint}_zoom_visibility`
+  with `ZoomBoundEdit::{Keep, Clear, Set(f32)}` on each side.
+  See `format/zoom-bounds.md`.
 - Document model, scene builder, tree bridge — all of `MindMapDocument`
   and `baumhard::mindmap::*`.
 - Inline node text editor: double-click / Enter / Backspace to open,

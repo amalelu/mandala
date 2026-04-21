@@ -83,6 +83,8 @@ Complete field reference for every type in `.mindmap.json`.
 | `channel` | integer | Mutation channel — see [channels.md](./channels.md); defaults to 0 |
 | `trigger_bindings` | array | Event→mutation bindings attached to this node |
 | `inline_mutations` | array | Node-local custom mutation definitions |
+| `min_zoom_to_render` | number\|null | Lower bound on `camera.zoom` at which this node (and its glyph border) renders — see [zoom-bounds.md](./zoom-bounds.md). Inclusive; absent / `null` = unbounded below |
+| `max_zoom_to_render` | number\|null | Upper bound on `camera.zoom` at which this node renders. Inclusive; absent / `null` = unbounded above |
 
 ## NodeStyle
 
@@ -210,6 +212,8 @@ strings. The `groups` array is indexed by the node's `color_schema.level`.
 | `control_points` | array | Bezier offsets for curved edges |
 | `glyph_connection` | object\|null | Per-edge glyph rendering override |
 | `display_mode` | string\|null | `"line"` (default, absent) or `"portal"`. Portal-mode edges render as two glyph markers above each endpoint instead of a line; double-click a marker to jump to the other endpoint. |
+| `min_zoom_to_render` | number\|null | Lower bound on `camera.zoom` at which this edge (body, caps, label, and portal endpoints unless overridden) renders — see [zoom-bounds.md](./zoom-bounds.md). Inclusive; absent / `null` = unbounded below |
+| `max_zoom_to_render` | number\|null | Upper bound on `camera.zoom` at which this edge renders. Inclusive; absent / `null` = unbounded above |
 
 ### Portal-mode edges
 
@@ -284,6 +288,8 @@ text styling lives on [`PortalEndpointState`](./portal-labels.md).
 | `font_size_pt` | number\|null | `body × 1.1` | Target on-screen size at zoom 1.0. |
 | `min_font_size_pt` | number\|null | inherits | Lower screen-space clamp. Falls back to the edge's `min_font_size_pt`. |
 | `max_font_size_pt` | number\|null | inherits | Upper screen-space clamp. Falls back to the edge's `max_font_size_pt`. |
+| `min_zoom_to_render` | number\|null | inherits | Lower zoom bound — replace-not-intersect cascade: when either this or `max_zoom_to_render` is set, **replaces** the parent edge's pair. Inclusive. See [zoom-bounds.md](./zoom-bounds.md). |
+| `max_zoom_to_render` | number\|null | inherits | Upper zoom bound. Same cascade rule. Inclusive. |
 
 ## CustomMutation
 

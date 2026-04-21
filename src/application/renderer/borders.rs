@@ -3,8 +3,19 @@
 //! single-row spans) all flow through these helpers so cosmic-text
 //! `Buffer::new` happens in one place per shape rather than being
 //! inlined per call site.
+//!
+//! Every helper returns a [`MindMapTextBuffer`] with
+//! [`ZoomVisibility::unbounded`] — the buffer always renders by
+//! default. Callers that route scene-builder output through these
+//! helpers (mindmap borders, line-mode connection glyphs, edge
+//! labels) overwrite `zoom_visibility` on the returned buffer to
+//! gate presence on camera zoom; overlay callers (edge handles,
+//! selection rects, console, palette) leave it at the default so
+//! they always render regardless of zoom.
 
 use cosmic_text::{Attrs, FontSystem};
+
+use baumhard::gfx_structs::zoom_visibility::ZoomVisibility;
 
 use super::MindMapTextBuffer;
 
@@ -92,7 +103,7 @@ pub(super) fn create_border_buffer_lh(
         None,
     );
     buf.shape_until_scroll(font_system, false);
-    MindMapTextBuffer { buffer: buf, pos, bounds }
+    MindMapTextBuffer { buffer: buf, pos, bounds, zoom_visibility: ZoomVisibility::unbounded() }
 }
 
 /// Multi-span variant of [`create_border_buffer`] — hands cosmic-text
@@ -122,7 +133,7 @@ pub(super) fn create_border_buffer_spans(
         None,
     );
     buf.shape_until_scroll(font_system, false);
-    MindMapTextBuffer { buffer: buf, pos, bounds }
+    MindMapTextBuffer { buffer: buf, pos, bounds, zoom_visibility: ZoomVisibility::unbounded() }
 }
 
 /// Like `create_border_buffer` but center-aligns the text within its
@@ -154,7 +165,7 @@ pub(super) fn create_centered_cell_buffer(
         Some(cosmic_text::Align::Center),
     );
     buf.shape_until_scroll(font_system, false);
-    MindMapTextBuffer { buffer: buf, pos, bounds }
+    MindMapTextBuffer { buffer: buf, pos, bounds, zoom_visibility: ZoomVisibility::unbounded() }
 }
 
 pub(super) fn parse_hex_color(hex: &str) -> Option<cosmic_text::Color> {

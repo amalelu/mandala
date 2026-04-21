@@ -473,6 +473,7 @@ pub(super) fn build_portal_elements(
                 color: style.color.clone(),
                 font: style.font.clone(),
                 font_size_pt: style.font_size_pt,
+                zoom_visibility: edge.portal_endpoint_zoom_window(endpoint_state),
             });
         }
     }

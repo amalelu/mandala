@@ -76,6 +76,16 @@ impl Renderer {
             let bottom_y = ny + nh - corner_overlap;
 
             // Fast path: cached, clean, matching glyph count.
+            // Only `.pos` is patched in place — other buffer
+            // fields (including `zoom_visibility`) are
+            // structurally stable under drag, which is the only
+            // scenario `dirty_node_ids` ever excludes.
+            // `rebuild_border_buffers_keyed` call sites today
+            // pass `dirty_node_ids = None`, forcing the slow
+            // path; a future keyed-drag optimisation that
+            // actually takes this branch must also stamp any
+            // fields that can change between builds onto
+            // `existing[i]` here.
             if !is_dirty {
                 if let Some(existing) = self.border_buffers.get_mut(&elem.node_id) {
                     if existing.len() == 4 {
@@ -111,27 +121,32 @@ impl Renderer {
             let right_text: String =
                 std::iter::repeat_n(format!("{}\n", glyph_set.right_char()), row_count).collect();
 
+            let zv = elem.zoom_visibility;
+            let with_zv = |mut buf: MindMapTextBuffer| -> MindMapTextBuffer {
+                buf.zoom_visibility = zv;
+                buf
+            };
             let entry = vec![
-                create_border_buffer(
+                with_zv(create_border_buffer(
                     &mut font_system, &top_text, &border_attrs, font_size,
                     (nx - approx_char_width, top_y),
                     (h_width, font_size * 1.5),
-                ),
-                create_border_buffer(
+                )),
+                with_zv(create_border_buffer(
                     &mut font_system, &bottom_text, &border_attrs, font_size,
                     (nx - approx_char_width, bottom_y),
                     (h_width, font_size * 1.5),
-                ),
-                create_border_buffer(
+                )),
+                with_zv(create_border_buffer(
                     &mut font_system, &left_text, &border_attrs, font_size,
                     (nx - approx_char_width, ny),
                     (v_width, nh),
-                ),
-                create_border_buffer(
+                )),
+                with_zv(create_border_buffer(
                     &mut font_system, &right_text, &border_attrs, font_size,
                     (right_corner_x, ny),
                     (v_width, nh),
-                ),
+                )),
             ];
             self.border_buffers.insert(elem.node_id.clone(), entry);
         }
@@ -239,6 +254,13 @@ impl Renderer {
             }
 
             // Fast path: clean + cached + same glyph count.
+            // Only `.pos` is patched in place — `zoom_visibility`
+            // and other structurally stable fields are
+            // preserved from the previous build. Call sites
+            // today always pass `dirty_edge_keys = None` so the
+            // slow path below runs; if a future keyed-drag
+            // optimisation enables this branch, it must also
+            // update any fields that can change between builds.
             if !is_dirty {
                 if let Some(existing) = self.connection_buffers.get_mut(&elem.edge_key) {
                     if existing.len() == visible_positions.len() {
@@ -271,34 +293,43 @@ impl Renderer {
                 .map(|(_, p)| in_view(p.0, p.1))
                 .unwrap_or(false);
 
+            // Stamp the edge's authored zoom window onto every
+            // body / cap glyph this rebuild emits so the cull
+            // runs against the same window the tree path would
+            // install.
+            let zv = elem.zoom_visibility;
+            let with_zv = |mut buf: MindMapTextBuffer| -> MindMapTextBuffer {
+                buf.zoom_visibility = zv;
+                buf
+            };
             let mut idx = 0;
             if cap_start_visible {
                 let cap_text = elem.cap_start.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
-                new_entry.push(create_border_buffer(
+                new_entry.push(with_zv(create_border_buffer(
                     &mut font_system, cap_text, &conn_attrs, font_size,
                     visible_positions[idx],
                     glyph_bounds,
-                ));
+                )));
                 idx += 1;
             }
             for &pos in &elem.glyph_positions {
                 if !in_view(pos.0, pos.1) {
                     continue;
                 }
-                new_entry.push(create_border_buffer(
+                new_entry.push(with_zv(create_border_buffer(
                     &mut font_system, &elem.body_glyph, &conn_attrs, font_size,
                     visible_positions[idx],
                     glyph_bounds,
-                ));
+                )));
                 idx += 1;
             }
             if cap_end_visible {
                 let cap_text = elem.cap_end.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
-                new_entry.push(create_border_buffer(
+                new_entry.push(with_zv(create_border_buffer(
                     &mut font_system, cap_text, &conn_attrs, font_size,
                     visible_positions[idx],
                     glyph_bounds,
-                ));
+                )));
             }
 
             self.connection_buffers.insert(elem.edge_key.clone(), new_entry);
@@ -314,6 +345,17 @@ impl Renderer {
         &mut self,
         label_elements: &[baumhard::mindmap::scene_builder::ConnectionLabelElement],
     ) {
+        // No keyed fast path today — labels are ≤ 1 per edge
+        // and cheap to reshape every scene build, so we clear
+        // and rebuild unconditionally. If a future optimisation
+        // adds a clean-cache branch here (mirroring
+        // `rebuild_border_buffers_keyed`), it must also stamp
+        // `elem.zoom_visibility` onto the preserved buffer —
+        // `zoom_visibility` is an author-authored field that
+        // changes via mutator or console edits independent of
+        // drag, so the drag-only "only .pos changes" assumption
+        // the border / connection fast paths rely on does not
+        // automatically hold for labels.
         self.connection_label_buffers.clear();
         self.connection_label_hitboxes.clear();
         if label_elements.is_empty() {
@@ -329,7 +371,7 @@ impl Renderer {
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(elem.font_size_pt, elem.font_size_pt));
 
-            let buffer = create_border_buffer(
+            let mut buffer = create_border_buffer(
                 &mut font_system,
                 &elem.text,
                 &attrs,
@@ -337,6 +379,7 @@ impl Renderer {
                 elem.position,
                 elem.bounds,
             );
+            buffer.zoom_visibility = elem.zoom_visibility;
             self.connection_label_buffers
                 .insert(elem.edge_key.clone(), buffer);
 

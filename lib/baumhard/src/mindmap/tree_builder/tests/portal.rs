@@ -162,7 +162,17 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
         ],
         vec![],
     );
-    map.edges.push(synthetic_portal_edge("a", "b", "#ff0000"));
+    let mut edge = synthetic_portal_edge("a", "b", "#ff0000");
+    // Author a non-default zoom window on the edge so the
+    // round-trip catches a regression in the portal mutator
+    // delta's `GlyphAreaField::ZoomVisibility` write (§B2):
+    // without the delta, `tree_a`'s icon + text areas would
+    // retain the unbounded default while a fresh build picks
+    // up `{0.75, 3.0}`, and the per-field assertion below
+    // would trip on `zoom_visibility`.
+    edge.min_zoom_to_render = Some(0.75);
+    edge.max_zoom_to_render = Some(3.0);
+    map.edges.push(edge);
 
     // State A: no offsets, no selection.
     let mut tree_a = build_portal_tree(&map, &HashMap::new(), None, None, None, None, 1.0).tree;
@@ -178,8 +188,8 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
     let expected = build_portal_tree(&map, &offsets, selected, None, None, None, 1.0).tree;
 
     // Walk both: per pair, per slot, GlyphArea fields (text,
-    // position, bounds, scale, line_height, regions, outline)
-    // must match.
+    // position, bounds, scale, line_height, regions, outline,
+    // zoom_visibility) must match.
     // Walk three levels: pair → endpoint voids → [icon, text].
     let actual_pairs: Vec<NodeId> = tree_a.root.children(&tree_a.arena).collect();
     let expected_pairs: Vec<NodeId> = expected.root.children(&expected.arena).collect();
@@ -204,6 +214,7 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
                 assert_eq!(a_area.line_height, e_area.line_height);
                 assert_eq!(a_area.regions, e_area.regions);
                 assert_eq!(a_area.outline, e_area.outline);
+                assert_eq!(a_area.zoom_visibility, e_area.zoom_visibility);
             }
         }
     }
