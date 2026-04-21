@@ -48,3 +48,8 @@ pub mod scene;
 pub mod util;
 /// 2D pan/zoom camera — canvas ↔ screen-space projection.
 pub mod camera;
+/// `ZoomVisibility` — per-`GlyphArea` lower/upper bound on
+/// `camera.zoom` controlling whether the element renders at all.
+/// Complements (does not replace) the connection / portal font-size
+/// clamps that reshape *size* with zoom.
+pub mod zoom_visibility;

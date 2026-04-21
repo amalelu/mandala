@@ -3,6 +3,7 @@
 
 use crate::core::primitives::{ApplyOperation, ColorFontRegions};
 use crate::gfx_structs::shape::NodeShape;
+use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::util::ordered_vec2::OrderedVec2;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,8 @@ pub enum GlyphAreaFieldType {
     Outline,
     /// Tag for [`GlyphAreaField::Shape`].
     Shape,
+    /// Tag for [`GlyphAreaField::ZoomVisibility`].
+    ZoomVisibility,
     /// Tag for [`GlyphAreaField::Operation`] — the control variant
     /// that selects `Assign`/`Add`/`Subtract` for the rest of the
     /// delta.
@@ -171,6 +174,18 @@ pub enum GlyphAreaField {
     /// the custom shape" signal. Additive merge under the `Add`
     /// impl on `GlyphAreaField` is the rhs for the same reason.
     Shape(NodeShape),
+    /// Replace the area's
+    /// [`zoom_visibility`](crate::gfx_structs::area::GlyphArea#structfield.zoom_visibility)
+    /// field — the zoom window controlling whether the element
+    /// renders at all. Under `ApplyOperation::Assign` or `Add` the
+    /// window is overwritten (windows don't compose arithmetically,
+    /// same posture as `Shape` / `Outline`); under `Subtract` the
+    /// field is reset to
+    /// [`ZoomVisibility::unbounded`](crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded)
+    /// as the clean "remove the window" signal. Additive merge
+    /// under the `Add` impl on `GlyphAreaField` is the rhs for the
+    /// same reason.
+    ZoomVisibility(ZoomVisibility),
     /// Override the arithmetic operation that governs how all sibling
     /// field deltas in the same
     /// [`DeltaGlyphArea`](crate::gfx_structs::area::DeltaGlyphArea)
@@ -247,6 +262,15 @@ impl Add for GlyphAreaField {
                         return GlyphAreaField::Shape(other);
                     }
                 }
+                GlyphAreaField::ZoomVisibility(_) => {
+                    // Zoom windows don't compose additively —
+                    // "zoom in only" + "zoom out only" has no
+                    // meaningful arithmetic. The rhs wins, matching
+                    // Outline / Shape above.
+                    if let GlyphAreaField::ZoomVisibility(other) = rhs {
+                        return GlyphAreaField::ZoomVisibility(other);
+                    }
+                }
                 GlyphAreaField::Operation(_) => {}
             }
         }
@@ -298,6 +322,7 @@ impl GlyphAreaField {
             GlyphAreaField::LineHeight(_) => GlyphAreaFieldType::LineHeight,
             GlyphAreaField::Outline(_) => GlyphAreaFieldType::Outline,
             GlyphAreaField::Shape(_) => GlyphAreaFieldType::Shape,
+            GlyphAreaField::ZoomVisibility(_) => GlyphAreaFieldType::ZoomVisibility,
             GlyphAreaField::Operation(_) => GlyphAreaFieldType::ApplyOperation,
         }
     }

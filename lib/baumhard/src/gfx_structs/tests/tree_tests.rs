@@ -528,6 +528,10 @@ pub fn area_block_commands() {
                                 // on `DeltaGlyphArea`; see
                                 // `shape::tests` in gfx_structs/shape.rs.
                             }
+                            GlyphAreaField::ZoomVisibility(_) => {
+                                // Window lives on `DeltaGlyphArea`;
+                                // see `zoom_visibility_tests.rs`.
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -621,6 +625,9 @@ pub fn area_block_commands() {
                         GlyphAreaField::Shape(_) => {
                             // Same story as Outline — see the
                             // `Add` branch arm above.
+                        }
+                        GlyphAreaField::ZoomVisibility(_) => {
+                            // Same story — see the `Add` branch.
                         }
                         GlyphAreaField::Operation(_) => {}
                     },
@@ -744,6 +751,10 @@ pub fn area_block_commands() {
                                 // Shape lives on `DeltaGlyphArea`
                                 // only; see `shape::tests`.
                             }
+                            GlyphAreaField::ZoomVisibility(_) => {
+                                // Window lives on `DeltaGlyphArea`;
+                                // see `zoom_visibility_tests.rs`.
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -856,6 +867,10 @@ pub fn area_block_commands() {
                                 // Shape lives on `DeltaGlyphArea`
                                 // only; see `shape::tests`.
                             }
+                            GlyphAreaField::ZoomVisibility(_) => {
+                                // Window lives on `DeltaGlyphArea`;
+                                // see `zoom_visibility_tests.rs`.
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -943,6 +958,9 @@ pub fn area_block_commands() {
                         }
                         GlyphAreaField::Shape(_) => {
                             // See `shape::tests`.
+                        }
+                        GlyphAreaField::ZoomVisibility(_) => {
+                            // See `zoom_visibility_tests.rs`.
                         }
                         GlyphAreaField::Operation(_) => {}
                     },
@@ -2289,6 +2307,9 @@ fn assert_element_delta(element: &GfxElement, fields: Vec<GlyphAreaField>) {
             }
             GlyphAreaField::Shape(shape) => {
                 assert_eq!(element.glyph_area().unwrap().shape, shape);
+            }
+            GlyphAreaField::ZoomVisibility(window) => {
+                assert_eq!(element.glyph_area().unwrap().zoom_visibility, window);
             }
             GlyphAreaField::Operation(_) => {}
         }

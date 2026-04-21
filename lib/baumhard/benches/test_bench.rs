@@ -2,6 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use baumhard::core::tests::primitives_tests::*;
 use baumhard::font::tests::fonts_tests::*;
 use baumhard::gfx_structs::tests::area_tests::*;
+use baumhard::gfx_structs::tests::zoom_visibility_tests::*;
 use baumhard::gfx_structs::tests::model_tests::*;
 use baumhard::gfx_structs::tests::shape_tests::*;
 use baumhard::gfx_structs::tests::mutator_tests::*;
@@ -62,6 +63,19 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("shape_subtract_resets_to_rectangle", |b| b.iter(|| do_shape_subtract_resets_to_rectangle()));
     c.bench_function("shape_changes_hash", |b| b.iter(|| do_shape_changes_hash()));
     c.bench_function("shape_field_add_picks_rhs", |b| b.iter(|| do_shape_field_add_picks_rhs()));
+    // zoom_visibility //
+    c.bench_function("zoom_visibility_default_is_unbounded", |b| b.iter(|| do_default_is_unbounded()));
+    c.bench_function("zoom_visibility_unbounded_contains_full_camera_range", |b| b.iter(|| do_unbounded_contains_full_camera_range()));
+    c.bench_function("zoom_visibility_min_only_is_inclusive", |b| b.iter(|| do_min_only_is_inclusive()));
+    c.bench_function("zoom_visibility_max_only_is_inclusive", |b| b.iter(|| do_max_only_is_inclusive()));
+    c.bench_function("zoom_visibility_closed_window_renders_inside_band", |b| b.iter(|| do_closed_window_renders_inside_band()));
+    c.bench_function("zoom_visibility_single_point_band_is_inclusive", |b| b.iter(|| do_single_point_band_is_inclusive()));
+    c.bench_function("zoom_visibility_inverted_band_never_contains", |b| b.iter(|| do_inverted_band_never_contains()));
+    c.bench_function("zoom_visibility_assign_round_trip", |b| b.iter(|| do_zoom_visibility_assign_round_trip()));
+    c.bench_function("zoom_visibility_subtract_resets_to_unbounded", |b| b.iter(|| do_zoom_visibility_subtract_resets_to_unbounded()));
+    c.bench_function("zoom_visibility_field_add_picks_rhs", |b| b.iter(|| do_zoom_visibility_field_add_picks_rhs()));
+    c.bench_function("zoom_visibility_changes_hash", |b| b.iter(|| do_zoom_visibility_changes_hash()));
+    c.bench_function("zoom_visibility_default_is_skipped_in_json", |b| b.iter(|| do_zoom_visibility_default_is_skipped_in_json()));
     // shape math (point-in-shape / shape-vs-AABB) //
     c.bench_function("shape_from_style_string_known_names", |b| b.iter(|| do_shape_from_style_string_known_names()));
     c.bench_function("shape_from_style_string_empty_and_unknown_fall_back_to_rectangle", |b| b.iter(|| do_shape_from_style_string_empty_and_unknown_fall_back_to_rectangle()));

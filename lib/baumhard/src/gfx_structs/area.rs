@@ -25,6 +25,7 @@ use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use crate::gfx_structs::util::hitbox::HitBox;
+use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 
 /// A text-region element. One `GlyphArea` corresponds to one
 /// `glyphon::TextArea` in the renderer; every field here maps
@@ -88,6 +89,17 @@ pub struct GlyphArea {
     /// is preserved on the `MindNode` and rewritten on save.
     #[serde(default)]
     pub shape: NodeShape,
+    /// Optional `[min, max]` window on `camera.zoom` controlling
+    /// whether this area is drawn. Default
+    /// [`ZoomVisibility::unbounded`] renders at every zoom — the
+    /// historical posture. When a bound is set, the renderer's
+    /// final cull skips this area whenever the current zoom falls
+    /// outside the window (see
+    /// [`ZoomVisibility::contains`]). Orthogonal to `scale` and
+    /// any per-builder font-size clamps: this gates *presence*,
+    /// not size.
+    #[serde(default, skip_serializing_if = "ZoomVisibility::is_default")]
+    pub zoom_visibility: ZoomVisibility,
     /// Click-sensitive extents. Ignored for `PartialEq` because
     /// hit-boxes are scene-builder output, not persistent identity.
     #[derivative(PartialEq = "ignore")]
@@ -108,6 +120,7 @@ impl Hash for GlyphArea {
         self.align_center.hash(state);
         self.outline.hash(state);
         self.shape.hash(state);
+        self.zoom_visibility.hash(state);
     }
 }
 
@@ -128,6 +141,7 @@ impl GlyphArea {
             align_center: false,
             outline: None,
             shape: NodeShape::Rectangle,
+            zoom_visibility: ZoomVisibility::unbounded(),
             hitbox: HitBox::new(),
         }
     }
@@ -152,6 +166,7 @@ impl GlyphArea {
             align_center: false,
             outline: None,
             shape: NodeShape::Rectangle,
+            zoom_visibility: ZoomVisibility::unbounded(),
             hitbox: HitBox::new(),
         }
     }
@@ -252,6 +267,24 @@ impl GlyphArea {
                 // counterpart of "remove the custom shape".
                 ApplyOperation::Subtract => {
                     self.shape = NodeShape::Rectangle;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(zoom_visibility) = delta.zoom_visibility() {
+            match operation {
+                // Windows don't compose arithmetically (combining
+                // "zoomed in only" with "zoomed out only" yields
+                // nothing sensible). Both Assign and Add overwrite,
+                // matching the Outline / Shape precedents above.
+                ApplyOperation::Assign | ApplyOperation::Add => {
+                    self.zoom_visibility = zoom_visibility;
+                }
+                // Subtract restores the unbounded default — the
+                // counterpart of "remove the window".
+                ApplyOperation::Subtract => {
+                    self.zoom_visibility = ZoomVisibility::unbounded();
                 }
                 _ => {}
             }

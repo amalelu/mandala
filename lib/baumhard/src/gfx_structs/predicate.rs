@@ -233,6 +233,7 @@ impl Predicate {
                     }
                     GlyphAreaField::Outline(_) => {} // Halo state isn't a predicate axis.
                     GlyphAreaField::Shape(_) => {} // Shape isn't a predicate axis.
+                    GlyphAreaField::ZoomVisibility(_) => {} // Zoom window isn't a predicate axis.
                     GlyphAreaField::Operation(_) => {}
                 },
                 Channel(channel) => {
