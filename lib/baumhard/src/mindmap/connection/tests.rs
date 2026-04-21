@@ -728,3 +728,112 @@ fn cubic_bezier_tangent_matches_finite_difference() {
         );
     }
 }
+
+// ---- closest_point_on_path ----
+
+#[test]
+fn closest_point_on_path_straight_cursor_above_midpoint() {
+    // Horizontal segment; cursor directly above the midpoint at
+    // y = -5. Expected: t = 0.5, perp_offset = -5 (perp direction
+    // is `(-y, x)` rotation of `(1, 0)` tangent = `(0, 1)`, so
+    // cursor at `(x_mid, -5)` relative to `(x_mid, 0)` has
+    // `to_cursor = (0, -5)`, perp = dot((0,-5), (0,1)) = -5).
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(100.0, 0.0),
+    };
+    let (t, perp) = closest_point_on_path(&path, Vec2::new(50.0, -5.0));
+    assert!((t - 0.5).abs() < 1.0e-5, "t={t}");
+    assert!((perp - -5.0).abs() < 1.0e-5, "perp={perp}");
+}
+
+#[test]
+fn closest_point_on_path_straight_cursor_beyond_end_clamps_to_1() {
+    // Cursor past the `end` endpoint clamps `t` into `[0, 1]`.
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(0.0, 0.0),
+        end: Vec2::new(100.0, 0.0),
+    };
+    let (t, _perp) = closest_point_on_path(&path, Vec2::new(200.0, 0.0));
+    assert!((t - 1.0).abs() < 1.0e-5, "t={t}");
+}
+
+#[test]
+fn closest_point_on_path_straight_cursor_behind_start_clamps_to_0() {
+    let path = ConnectionPath::Straight {
+        start: Vec2::new(10.0, 10.0),
+        end: Vec2::new(50.0, 10.0),
+    };
+    let (t, _perp) = closest_point_on_path(&path, Vec2::new(-40.0, 10.0));
+    assert!(t < 1.0e-5, "t={t}");
+}
+
+#[test]
+fn closest_point_on_path_straight_zero_length_returns_defaults() {
+    // Coincident endpoints: no meaningful direction. Contract is
+    // `(0, 0)` so the caller can rely on the tuple without a
+    // `NaN` check.
+    let pt = Vec2::new(5.0, 5.0);
+    let path = ConnectionPath::Straight { start: pt, end: pt };
+    let (t, perp) = closest_point_on_path(&path, Vec2::new(20.0, 20.0));
+    assert_eq!(t, 0.0);
+    assert_eq!(perp, 0.0);
+}
+
+#[test]
+fn closest_point_on_path_cubic_cursor_on_curve_returns_zero_perp() {
+    // A cursor sitting exactly on the curve at a known `t` must
+    // recover `t` (approximately) with near-zero perp.
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(33.0, 50.0);
+    let p2 = Vec2::new(66.0, 50.0);
+    let p3 = Vec2::new(100.0, 0.0);
+    let path = ConnectionPath::CubicBezier {
+        start: p0,
+        control1: p1,
+        control2: p2,
+        end: p3,
+    };
+    // Pick a known t, evaluate the curve there, and ask the
+    // closest-point solver for that point.
+    let true_t = 0.37;
+    let on_curve = crate::mindmap::connection::bezier::cubic_bezier_point(
+        true_t, p0, p1, p2, p3,
+    );
+    let (t, perp) = closest_point_on_path(&path, on_curve);
+    assert!(
+        (t - true_t).abs() < 1.0e-3,
+        "Newton should recover t within 1e-3; got {t} vs {true_t}"
+    );
+    assert!(
+        perp.abs() < 1.0e-3,
+        "perp should be ~0 when cursor is on the curve; got {perp}"
+    );
+}
+
+#[test]
+fn closest_point_on_path_cubic_offset_cursor_produces_signed_perp() {
+    // Offset the on-curve point along the path normal by a known
+    // signed distance; the solver should recover the same signed
+    // perp value.
+    let p0 = Vec2::new(0.0, 0.0);
+    let p1 = Vec2::new(33.0, 50.0);
+    let p2 = Vec2::new(66.0, 50.0);
+    let p3 = Vec2::new(100.0, 0.0);
+    let path = ConnectionPath::CubicBezier {
+        start: p0,
+        control1: p1,
+        control2: p2,
+        end: p3,
+    };
+    let true_t = 0.42;
+    let on_curve = crate::mindmap::connection::bezier::cubic_bezier_point(
+        true_t, p0, p1, p2, p3,
+    );
+    let normal = normal_at_t(&path, true_t);
+    let offset = 12.0_f32;
+    let cursor = on_curve + normal * offset;
+    let (t, perp) = closest_point_on_path(&path, cursor);
+    assert!((t - true_t).abs() < 1.0e-2, "t={t} vs {true_t}");
+    assert!((perp - offset).abs() < 1.0e-1, "perp={perp} vs {offset}");
+}

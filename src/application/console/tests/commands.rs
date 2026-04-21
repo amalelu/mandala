@@ -318,6 +318,55 @@ fn test_font_kv_invalid_value_reports_error() {
 }
 
 #[test]
+fn test_label_position_t_writes_label_config() {
+    // `label position_t=0.25` lands the value directly into
+    // `label_config.position_t`. Values outside [0, 1] clamp
+    // silently (the setter is the authority).
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    let result = run("label position_t=0.25", &mut doc);
+    assert!(matches!(result, ExecResult::Ok(_)));
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    assert_eq!(
+        updated.label_config.as_ref().and_then(|c| c.position_t),
+        Some(0.25)
+    );
+}
+
+#[test]
+fn test_label_perpendicular_writes_label_config() {
+    // `label perpendicular=12.5` writes the signed offset; an
+    // empty string clears it.
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    let _ = run("label perpendicular=12.5", &mut doc);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    assert_eq!(
+        updated
+            .label_config
+            .as_ref()
+            .and_then(|c| c.perpendicular_offset),
+        Some(12.5)
+    );
+    // Clear it back.
+    let _ = run("label perpendicular=", &mut doc);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    assert!(updated
+        .label_config
+        .as_ref()
+        .and_then(|c| c.perpendicular_offset)
+        .is_none());
+}
+
+#[test]
+fn test_label_position_t_invalid_reports_error() {
+    let mut doc = load_test_doc();
+    let _ = select_first_edge(&mut doc);
+    let result = run("label position_t=nan", &mut doc);
+    assert!(matches!(result, ExecResult::Err(_)), "got {:?}", result);
+}
+
+#[test]
 fn test_edge_type_parent_child_updates_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);

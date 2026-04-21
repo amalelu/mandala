@@ -33,6 +33,24 @@ pub(crate) fn cubic_bezier_tangent(t: f32, p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec
     3.0 * u * u * (p1 - p0) + 6.0 * u * t * (p2 - p1) + 3.0 * t * t * (p3 - p2)
 }
 
+/// Analytical second derivative of a cubic Bezier curve at
+/// parameter t. Backs the Newton refinement inside
+/// [`super::closest_point_on_path`]: Newton needs `f'(t)` where
+/// `f(t) = (B(t) - cursor) · B'(t)`, which expands to include
+/// `B''(t)`. Returns the unnormalised second-derivative vector.
+pub(crate) fn cubic_bezier_second_derivative(
+    t: f32,
+    p0: Vec2,
+    p1: Vec2,
+    p2: Vec2,
+    p3: Vec2,
+) -> Vec2 {
+    // d²/dt² [ (1-t)^3 p0 + 3(1-t)^2 t p1 + 3(1-t) t^2 p2 + t^3 p3 ]
+    //      = 6(1-t)(p2 - 2 p1 + p0) + 6 t (p3 - 2 p2 + p1)
+    let u = 1.0 - t;
+    6.0 * u * (p2 - 2.0 * p1 + p0) + 6.0 * t * (p3 - 2.0 * p2 + p1)
+}
+
 /// Total arc length of a cubic Bezier curve, approximated by walking
 /// `ARC_LENGTH_SUBDIVISIONS` straight segments between evenly-spaced
 /// parameter samples.

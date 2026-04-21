@@ -837,6 +837,61 @@ impl MindMapDocument {
         edge.label_config.get_or_insert_with(EdgeLabelConfig::default)
     }
 
+    /// Set (or clear, with `offset = None`) the label's
+    /// perpendicular offset — the signed distance from the path
+    /// point along `normal_at_t(position_t)`. Used by the label
+    /// drag and the `label perpendicular=<f32>` console key.
+    /// `None` returns the label to the on-path position.
+    /// Rolls back an all-default `EdgeLabelConfig` on clear so
+    /// unchanged selections leave no undo droppings.
+    pub fn set_edge_label_perpendicular_offset(
+        &mut self,
+        edge_ref: &EdgeRef,
+        offset: Option<f32>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let current = self.mindmap.edges[idx]
+            .label_config
+            .as_ref()
+            .and_then(|c| c.perpendicular_offset);
+        let matches = match (current, offset) {
+            (None, None) => true,
+            (Some(a), Some(b)) => (a - b).abs() < f32::EPSILON,
+            _ => false,
+        };
+        if matches {
+            return false;
+        }
+        // Reject NaN / infinity at the boundary; the label
+        // config stores only finite values.
+        if let Some(v) = offset {
+            if !v.is_finite() {
+                return false;
+            }
+        }
+        let before = self.mindmap.edges[idx].clone();
+        match offset {
+            Some(v) => {
+                Self::ensure_label_config(&mut self.mindmap.edges[idx]).perpendicular_offset =
+                    Some(v);
+            }
+            None => {
+                if let Some(cfg) = self.mindmap.edges[idx].label_config.as_mut() {
+                    cfg.perpendicular_offset = None;
+                    if cfg == &EdgeLabelConfig::default() {
+                        self.mindmap.edges[idx].label_config = None;
+                    }
+                }
+            }
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
     /// Change the `edge_type` of an edge. Refuses the change (returns
     /// `false`) if it would create a duplicate `(from_id, to_id,
     /// new_type)` against another edge. On success updates
