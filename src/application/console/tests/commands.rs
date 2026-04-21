@@ -383,6 +383,26 @@ fn test_label_position_t_invalid_reports_error() {
 }
 
 #[test]
+fn test_label_position_t_out_of_range_echoes_clamp() {
+    // `position_t=2.5` clamps silently to 1.0 on the setter;
+    // the console echoes the clamp so the user doesn't think
+    // their 2.5 was accepted literally.
+    let mut doc = load_test_doc();
+    let _ = select_first_edge(&mut doc);
+    let result = run("label position_t=2.5", &mut doc);
+    match result {
+        ExecResult::Lines(lines) => {
+            assert!(
+                lines.iter().any(|l| l.contains("clamped to 1")),
+                "expected clamp echo in output lines, got {:?}",
+                lines
+            );
+        }
+        other => panic!("expected Lines with clamp echo, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_edge_type_parent_child_updates_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);

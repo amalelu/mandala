@@ -203,14 +203,20 @@ pub(super) fn handle_cursor_moved(
             let dist_x = cursor_pos_val.0 - start_pos.0;
             let dist_y = cursor_pos_val.1 - start_pos.1;
             if dist_x * dist_x + dist_y * dist_y > 25.0 {
-                // Past threshold — decide what kind of drag
-                // this is. Priority: portal-label >
-                // edge-handle > edge-label > node >
-                // rect-select > pan. Edge-label beats node
-                // because a label may sit above a node in
-                // crowded layouts; placing it after the
-                // handle/portal checks keeps selected-edge
-                // handles reachable.
+                // Past threshold — promote `Pending` to the
+                // appropriate drag variant. At most one of
+                // `hit_edge_label` / `hit_portal_label` is set
+                // at press time (see `event_mouse_click.rs`'s
+                // click-hit chain), so the ordering here only
+                // resolves the `hit_edge_handle`-vs-`hit_node`
+                // overlap — a handle sits above its edge's
+                // nodes, and a handle-grab drag should always
+                // beat the node behind it. Consumption order:
+                //   edge-label → portal-label → edge-handle →
+                //   node (move) → shift-rect-select → pan.
+                // Portal-text is intentionally missing: dragging
+                // a portal's text sub-part isn't a supported
+                // gesture — the icon carries the drag.
                 if let Some(edge_key) = hit_edge_label.take() {
                     if let Some(doc) = document.as_mut() {
                         let edge_ref = crate::application::document::EdgeRef::new(

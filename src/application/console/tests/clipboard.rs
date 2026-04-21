@@ -142,6 +142,50 @@ fn edge_paste_invalid_content_reports_invalid() {
 }
 
 #[test]
+fn edge_paste_rejects_malformed_var_forms() {
+    // Tightened `is_valid_color_literal`: reject trailing
+    // garbage after the closing `)`, empty var name, and nested
+    // parens. The previous `starts_with / ends_with` pair let
+    // `var(--accent)extra)` slip through and be stored verbatim
+    // on the color field — the renderer then fell back to its
+    // "malformed hex" path silently.
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    // Note: the paste path trims leading/trailing whitespace
+    // before validation, so trailing-space cases aren't tested
+    // here — they normalise to a valid form.
+    for malformed in [
+        "var(--accent)extra)",  // trailing garbage before the final `)`
+        "var(--)",              // empty name
+        "var(--foo(bar))",      // nested paren
+        "var",                  // no name at all
+    ] {
+        let tid = TargetId::Edge(er.clone());
+        let mut view = view_for(&mut doc, &tid);
+        match view.clipboard_paste(malformed) {
+            Outcome::Invalid(_) => {}
+            other => panic!(
+                "expected Invalid for {:?}, got {:?}",
+                malformed, other
+            ),
+        }
+    }
+}
+
+#[test]
+fn edge_paste_accepts_mixed_case_hex() {
+    // CSS-style mixed-case hex (`#AbCdEf`) parses as an ordinary
+    // 6-digit hex code. Important that the validator doesn't
+    // reject uppercase letters; `is_ascii_hexdigit` covers both
+    // cases but the matcher needs to stay case-insensitive.
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    let tid = TargetId::Edge(er);
+    let mut view = view_for(&mut doc, &tid);
+    assert_eq!(view.clipboard_paste("#AbCdEf"), Outcome::Applied);
+}
+
+#[test]
 fn edge_paste_empty_clears_color_override() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);

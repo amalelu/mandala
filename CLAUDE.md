@@ -118,14 +118,16 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   commits the selection — editor-on-WASM is a follow-up). Console
   `label position_t=<f32>` / `label perpendicular=<f32>` mirror the
   edge-label drag so WASM users can position labels without drag.
-- `connection::closest_point_on_path` — Baumhard primitive backing
-  the edge-label drag. Projects a cursor Vec2 onto a
-  `ConnectionPath` (straight or cubic) and returns
-  `(position_t, perpendicular_offset)`. Straight case is direct
-  segment projection; cubic case uses uniform-t sampling + Newton
-  refinement. Used native-only today (the drag state it feeds is
-  native-only, see below) but available for any future WASM
-  gesture that needs the same math.
+- `connection::closest_point_on_path` — Baumhard primitive that
+  projects a cursor `Vec2` onto a `ConnectionPath` (straight or
+  cubic) and returns `(position_t, perpendicular_offset)`.
+  Straight case is direct segment projection; cubic case uses
+  uniform-t sampling + Newton refinement with a seed-vs-refined
+  fallback. Used by the native `DragState::DraggingEdgeLabel` and
+  by the cross-platform `label position_t=` / `label
+  perpendicular=` console keys — the drag is native-only, but the
+  primitive it composes is cross-target and available for any
+  future WASM gesture that needs the same math.
 - Action dispatch: the keybind → action pipeline fires on both targets.
   Representative actions include `Undo`, `CreateOrphanNode`,
   `DeleteSelection`, `EditSelection`, `CancelMode`; the full enum lives

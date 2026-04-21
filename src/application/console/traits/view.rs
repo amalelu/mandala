@@ -14,7 +14,7 @@
 
 use super::capabilities::{
     AcceptsWheelColor, HandlesCopy, HandlesCut, HandlesPaste, HasBgColor, HasBorderColor,
-    HasFontSize, HasLabel, HasTextColor,
+    HasLabel, HasTextColor,
 };
 use super::color_value::ColorValue;
 use super::outcome::{ClipboardContent, Outcome};
@@ -205,32 +205,6 @@ impl<'a> HasBorderColor for TargetView<'a> {
     }
 }
 
-impl<'a> HasFontSize for TargetView<'a> {
-    fn set_font_size(&mut self, pt: f32) -> Outcome {
-        if !(pt > 0.0) {
-            return Outcome::Invalid(format!("must be positive; got {pt}"));
-        }
-        match self {
-            TargetView::Node { doc, id } => Outcome::applied(doc.set_node_font_size(id, pt)),
-            TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_font_size(er, pt)),
-            // Sub-parts (label / portal icon / portal text) fall
-            // back to the owning-edge font size for now —
-            // independent font-size setters on the per-sub-part
-            // channels land with the `font size= min= max=`
-            // atomic-clamp setter in a follow-up commit.
-            TargetView::EdgeLabel { doc, er } => {
-                Outcome::applied(doc.set_edge_font_size(er, pt))
-            }
-            TargetView::PortalLabel { doc, er, .. } => {
-                Outcome::applied(doc.set_edge_font_size(er, pt))
-            }
-            TargetView::PortalText { doc, er, .. } => {
-                Outcome::applied(doc.set_edge_font_size(er, pt))
-            }
-        }
-    }
-}
-
 impl<'a> AcceptsWheelColor for TargetView<'a> {
     fn apply_wheel_color(&mut self, c: ColorValue) -> Outcome {
         match self {
@@ -291,27 +265,10 @@ impl<'a> HandlesCopy for TargetView<'a> {
             // (changed from the prior label-text behaviour — edge
             // label text is edited through the inline modal, which
             // handles its own OS-clipboard surface).
-            TargetView::Edge { doc, er } => {
-                let resolved = {
-                    let edge = doc.mindmap.edges.iter().find(|e| er.matches(e));
-                    edge.map(|e| {
-                        let cfg = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
-                            e,
-                            &doc.mindmap.canvas,
-                        );
-                        let raw = cfg.color.as_deref().unwrap_or(e.color.as_str());
-                        baumhard::util::color::resolve_var(
-                            raw,
-                            &doc.mindmap.canvas.theme_variables,
-                        )
-                        .to_string()
-                    })
-                };
-                match resolved {
-                    Some(hex) => ClipboardContent::Text(hex),
-                    None => ClipboardContent::NotApplicable,
-                }
-            }
+            TargetView::Edge { doc, er } => match doc.resolve_edge_color(er) {
+                Some(hex) => ClipboardContent::Text(hex),
+                None => ClipboardContent::NotApplicable,
+            },
             // Edge label copy = resolved label color hex (cascade:
             // label_config.color → glyph_connection.color →
             // edge.color). Always a concrete hex when the edge
@@ -449,21 +406,7 @@ impl<'a> HandlesCut for TargetView<'a> {
             // gets a real hex (cascade fallback always resolves
             // to one), but the visible edge body resets.
             TargetView::Edge { doc, er } => {
-                let hex = {
-                    let edge = doc.mindmap.edges.iter().find(|e| er.matches(e));
-                    edge.map(|e| {
-                        let cfg = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(
-                            e,
-                            &doc.mindmap.canvas,
-                        );
-                        let raw = cfg.color.as_deref().unwrap_or(e.color.as_str());
-                        baumhard::util::color::resolve_var(
-                            raw,
-                            &doc.mindmap.canvas.theme_variables,
-                        )
-                        .to_string()
-                    })
-                };
+                let hex = doc.resolve_edge_color(er);
                 doc.set_edge_color(er, None);
                 match hex {
                     Some(h) => ClipboardContent::Text(h),
@@ -520,12 +463,23 @@ impl<'a> HandlesCut for TargetView<'a> {
 /// writing arbitrary strings into the color field — anything else
 /// the user might paste (prose, a URL, a number) should surface
 /// as `Outcome::Invalid` instead of a corrupt model value.
+///
+/// Hex: `#` plus exactly 6 or 8 ASCII hex digits, case-insensitive
+/// (mixed case `#ABcDef` is accepted — matches CSS semantics).
+///
+/// `var(...)`: `var(--name)` with a non-empty name. Trailing
+/// characters after the closing `)` are rejected —
+/// `var(--accent)garbage` previously slipped through a `starts_with
+/// / ends_with` pair.
 fn is_valid_color_literal(s: &str) -> bool {
     if let Some(rest) = s.strip_prefix('#') {
         return (rest.len() == 6 || rest.len() == 8)
             && rest.chars().all(|c| c.is_ascii_hexdigit());
     }
-    s.starts_with("var(--") && s.ends_with(')')
+    if let Some(inner) = s.strip_prefix("var(--").and_then(|s| s.strip_suffix(')')) {
+        return !inner.is_empty() && !inner.contains(|c: char| c == '(' || c == ')');
+    }
+    false
 }
 
 fn read_edge_label(doc: &MindMapDocument, er: &EdgeRef) -> Option<String> {

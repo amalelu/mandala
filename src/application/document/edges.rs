@@ -387,28 +387,50 @@ impl MindMapDocument {
         true
     }
 
-    /// Read the resolved edge-label color for copy-to-clipboard.
-    /// Walks the label color cascade: `label_config.color` →
-    /// `glyph_connection.color` → `edge.color`, with
-    /// `var(--name)` references expanded through the theme
-    /// variable map. Returns `None` only when the edge itself is
-    /// missing; a no-override edge still produces a concrete hex
-    /// (falls back to `edge.color`) so the user gets something
-    /// pasteable in every case.
-    pub fn resolve_edge_label_color(&self, edge_ref: &EdgeRef) -> Option<String> {
+    /// Read the resolved **edge body** color for copy-to-clipboard.
+    /// Walks the body cascade: `glyph_connection.color` →
+    /// `edge.color`, with `var(--name)` references expanded
+    /// through the theme variable map. Returns `None` only when
+    /// the edge itself is missing; a no-override edge still
+    /// produces a concrete hex (`edge.color` is always present
+    /// in the model) so the user gets something pasteable. The
+    /// clipboard copy on an `Edge` selection routes through this
+    /// helper rather than duplicating the cascade inline, so a
+    /// future change to the body cascade (e.g. a third tier) only
+    /// touches one site.
+    pub fn resolve_edge_color(&self, edge_ref: &EdgeRef) -> Option<String> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
         let cfg =
             baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(edge, &self.mindmap.canvas);
-        let raw = edge
-            .label_config
-            .as_ref()
-            .and_then(|c| c.color.as_deref())
-            .or(cfg.color.as_deref())
-            .unwrap_or(edge.color.as_str());
+        let raw = cfg.color.as_deref().unwrap_or(edge.color.as_str());
         Some(
             baumhard::util::color::resolve_var(raw, &self.mindmap.canvas.theme_variables)
                 .to_string(),
         )
+    }
+
+    /// Read the resolved edge-label color for copy-to-clipboard.
+    /// Walks the label color cascade: `label_config.color` →
+    /// edge body cascade ([`Self::resolve_edge_color`]). The
+    /// label channel's own override wins; absent override falls
+    /// back to whatever the body cascade produces so the label
+    /// visually matches the edge unless explicitly detached.
+    pub fn resolve_edge_label_color(&self, edge_ref: &EdgeRef) -> Option<String> {
+        let label_override = self
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))?
+            .label_config
+            .as_ref()
+            .and_then(|c| c.color.clone());
+        if let Some(hex) = label_override {
+            return Some(
+                baumhard::util::color::resolve_var(&hex, &self.mindmap.canvas.theme_variables)
+                    .to_string(),
+            );
+        }
+        self.resolve_edge_color(edge_ref)
     }
 
     /// Read the resolved portal-text color for copy-to-clipboard.

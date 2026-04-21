@@ -204,14 +204,24 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         match target_edge.as_ref() {
             Some(er) => match value.parse::<f32>() {
                 Ok(t) if t.is_finite() => {
-                    // `set_edge_label_position` clamps into [0, 1]
-                    // silently — the user-supplied value is
-                    // normalised before landing on the model.
+                    // `set_edge_label_position` clamps into [0, 1].
+                    // Echo the clamped value when the user's input
+                    // was out of range so they notice the
+                    // normalisation — silent-clamp would look like
+                    // "worked" even though the stored value
+                    // differs from what they typed.
+                    let clamped = t.clamp(0.0, 1.0);
+                    if (t - clamped).abs() > f32::EPSILON {
+                        messages.push(format!(
+                            "position_t {} clamped to {}",
+                            value, clamped
+                        ));
+                    }
                     let changed = eff.document.set_edge_label_position(er, t);
                     any_applied |= changed;
                     if !changed {
                         messages
-                            .push(format!("position_t already ≈ {:.4}", t.clamp(0.0, 1.0)));
+                            .push(format!("position_t already ≈ {:.4}", clamped));
                     }
                 }
                 Ok(_) => {
