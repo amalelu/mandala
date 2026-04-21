@@ -186,6 +186,48 @@ fn test_label_zoom_visibility_defaults_to_unbounded() {
     );
 }
 
+/// A `label_config` that is `Some(cfg)` but whose zoom bounds
+/// are both `None` must still inherit the edge's window —
+/// presence of the config alone does not trigger the replace
+/// branch. Pins the `cascade_replace((None, None)) → inherit`
+/// semantics at the subtly-different Some/Some(default) vs.
+/// None-config split; a regression that conflated "Some config
+/// present" with "window authored" would render labels with a
+/// default `EdgeLabelConfig` (position_t / perpendicular_offset
+/// / color set but no zoom bounds) as unbounded even when the
+/// owning edge wanted them gated.
+#[test]
+fn test_label_zoom_visibility_inherits_when_config_has_no_zoom_bounds() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+        synthetic_node("b", 200.0, 0.0, 40.0, 40.0, false),
+    ];
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.label = Some("lbl".to_string());
+    edge.min_zoom_to_render = Some(0.5);
+    edge.max_zoom_to_render = Some(2.0);
+    // `Some(cfg)` but `cfg.min_zoom_to_render` and
+    // `cfg.max_zoom_to_render` are both None — the label has
+    // a config for other reasons (e.g., position override) but
+    // no zoom-window opinion.
+    edge.label_config = Some(EdgeLabelConfig {
+        position_t: Some(0.75),
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
+        ..EdgeLabelConfig::default()
+    });
+    let map = synthetic_map(nodes, vec![edge]);
+    let scene = build_scene(&map, 1.0);
+    assert_eq!(
+        scene.connection_label_elements[0].zoom_visibility,
+        ZoomVisibility { min: Some(0.5), max: Some(2.0) },
+        "Some(config) with no zoom bounds must inherit the edge window, \
+         not flip to unbounded"
+    );
+}
+
 /// An edge with `visible: false` short-circuits before any
 /// zoom-visibility resolution runs — no label element is
 /// emitted regardless of whether the zoom window is set. Pins

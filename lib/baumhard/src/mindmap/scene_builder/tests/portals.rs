@@ -569,3 +569,46 @@ fn portal_zoom_visibility_defaults_to_unbounded() {
         assert_eq!(pe.zoom_visibility, ZoomVisibility::unbounded());
     }
 }
+
+/// A `PortalEndpointState` that is `Some(state)` but whose
+/// zoom bounds are both `None` must still inherit the edge's
+/// window — presence of the state alone does not trigger the
+/// replace branch. Pins the `cascade_replace((None, None)) →
+/// inherit` semantics at the portal-endpoint level; a
+/// regression that treated any `Some(state)` as a replace
+/// would silently un-gate portals with per-endpoint color or
+/// border_t overrides.
+#[test]
+fn portal_zoom_visibility_inherits_when_endpoint_has_no_zoom_bounds() {
+    use crate::gfx_structs::zoom_visibility::ZoomVisibility;
+    use crate::mindmap::model::PortalEndpointState;
+
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 60.0, 40.0, false),
+        synthetic_node("b", 500.0, 0.0, 60.0, 40.0, false),
+    ];
+    let mut map = synthetic_map(nodes, vec![]);
+    let mut edge = synthetic_portal_edge("a", "b", "#aa88cc");
+    edge.min_zoom_to_render = Some(0.5);
+    edge.max_zoom_to_render = Some(2.0);
+    // `Some(state)` but no zoom bounds — state carries a
+    // color override, not a window.
+    edge.portal_from = Some(PortalEndpointState {
+        color: Some("#ff0000".to_string()),
+        min_zoom_to_render: None,
+        max_zoom_to_render: None,
+        ..Default::default()
+    });
+    map.edges.push(edge);
+    let scene = build_scene(&map, 1.0);
+    let from = scene
+        .portal_elements
+        .iter()
+        .find(|pe| pe.endpoint_node_id == "a")
+        .expect("portal_from endpoint present");
+    assert_eq!(
+        from.zoom_visibility,
+        ZoomVisibility { min: Some(0.5), max: Some(2.0) },
+        "Some(endpoint) with no zoom bounds must inherit the edge window"
+    );
+}

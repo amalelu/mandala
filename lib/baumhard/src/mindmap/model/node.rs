@@ -58,10 +58,23 @@ pub struct MindNode {
 
 impl MindNode {
     /// This node's authored zoom window, as a
-    /// [`ZoomVisibility`]. Borders inherit this window
-    /// verbatim — no separate per-border override today, the
-    /// reviewer-flagged "floating frame fragment" case is
-    /// prevented by construction. O(1).
+    /// [`ZoomVisibility`]. O(1).
+    ///
+    /// # Border inheritance
+    ///
+    /// Borders inherit this window verbatim via
+    /// [`BorderNodeData::zoom_visibility`] in
+    /// `tree_builder/border.rs` (stamped onto all four runs in
+    /// `border_node_data`) and via the same field on
+    /// `BorderElement` in `scene_builder/node_pass.rs` — both
+    /// paths call this method directly. No separate
+    /// per-border override exists today; the floating-frame-
+    /// fragment case a non-inheriting border would produce is
+    /// prevented by construction. A future
+    /// `GlyphBorderConfig.min_zoom_to_render` field would need
+    /// to revisit those two call sites together.
+    ///
+    /// [`BorderNodeData::zoom_visibility`]: crate::mindmap::tree_builder::BorderNodeData
     pub fn zoom_window(&self) -> ZoomVisibility {
         ZoomVisibility::from_pair(
             self.min_zoom_to_render,

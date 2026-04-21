@@ -226,4 +226,76 @@ mod tests {
         assert_eq!(v.len(), 2);
         assert!(v.iter().all(|x| x.message.contains("is not finite")));
     }
+
+    /// `EdgeLabelConfig.min_zoom_to_render = NaN` is flagged
+    /// with the `label_config.` field prefix, not the bare
+    /// pair — proves the nested-config branch reaches the
+    /// same `check_pair` helper. Without this test, a
+    /// regression that silently skipped the `edge.label_config`
+    /// / `edge.portal_from` / `edge.portal_to` branches would
+    /// let authored NaN bounds on those sub-configs slip past
+    /// load-time validation into the runtime `contains` guard
+    /// — correct end result but a missed signal at the
+    /// boundary.
+    #[test]
+    fn non_finite_on_label_config_flagged() {
+        use baumhard::mindmap::model::EdgeLabelConfig;
+        let mut map = MindMap::new_blank("t");
+        map.nodes.insert("0".into(), node("0", None));
+        map.nodes.insert("1".into(), node("1", None));
+        let mut e = edge("0", "1");
+        e.label_config = Some(EdgeLabelConfig {
+            min_zoom_to_render: Some(f32::NAN),
+            ..EdgeLabelConfig::default()
+        });
+        map.edges.push(e);
+        let v = check(&map);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("label_config.min_zoom_to_render"));
+        assert!(v[0].message.contains("is not finite"));
+    }
+
+    /// `PortalEndpointState.max_zoom_to_render = +Inf` on
+    /// `portal_from` is flagged with the `portal_from.`
+    /// prefix. Symmetric coverage for the
+    /// per-portal-endpoint cascade input.
+    #[test]
+    fn non_finite_on_portal_from_flagged() {
+        use baumhard::mindmap::model::PortalEndpointState;
+        let mut map = MindMap::new_blank("t");
+        map.nodes.insert("0".into(), node("0", None));
+        map.nodes.insert("1".into(), node("1", None));
+        let mut e = edge("0", "1");
+        e.portal_from = Some(PortalEndpointState {
+            max_zoom_to_render: Some(f32::INFINITY),
+            ..PortalEndpointState::default()
+        });
+        map.edges.push(e);
+        let v = check(&map);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("portal_from.max_zoom_to_render"));
+        assert!(v[0].message.contains("is not finite"));
+    }
+
+    /// `portal_to` path — a closed band with `min > max` on
+    /// the endpoint fires the inversion check with the
+    /// `portal_to.` prefix. Covers the third nested branch.
+    #[test]
+    fn portal_to_inversion_flagged_with_prefix() {
+        use baumhard::mindmap::model::PortalEndpointState;
+        let mut map = MindMap::new_blank("t");
+        map.nodes.insert("0".into(), node("0", None));
+        map.nodes.insert("1".into(), node("1", None));
+        let mut e = edge("0", "1");
+        e.portal_to = Some(PortalEndpointState {
+            min_zoom_to_render: Some(3.0),
+            max_zoom_to_render: Some(1.0),
+            ..PortalEndpointState::default()
+        });
+        map.edges.push(e);
+        let v = check(&map);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("portal_to.min_zoom_to_render"));
+        assert!(v[0].message.contains("portal_to.max_zoom_to_render"));
+    }
 }

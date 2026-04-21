@@ -93,10 +93,20 @@ impl ZoomVisibility {
         self.min.is_none() && self.max.is_none()
     }
 
-    /// Inclusive containment check: `true` iff `zoom` falls inside
-    /// `[min, max]` with `None` on either side treated as an open
-    /// bound. Two chained compares on at most two `Option<f32>`
-    /// values. Safe in the render-loop filter.
+    /// Inclusive containment check: `true` iff `zoom` falls
+    /// inside `[min, max]` with `None` on either side treated
+    /// as an open bound. Safe in the render-loop filter.
+    ///
+    /// # Costs
+    ///
+    /// One `is_nan` compare plus up to two `Option<f32>`
+    /// compares — all branches are predictable and hit fast
+    /// paths for the overwhelmingly common unbounded case
+    /// (both bounds `None` → two predicted not-taken branches,
+    /// no memory traffic). Well inside the §B7 hot-path
+    /// budget; `zoom_visibility_contains` bench pins it.
+    ///
+    /// # NaN handling
     ///
     /// `zoom.is_nan()` returns `false` — NaN compares as
     /// `false` against everything else, and accepting a NaN

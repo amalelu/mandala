@@ -345,6 +345,17 @@ impl Renderer {
         &mut self,
         label_elements: &[baumhard::mindmap::scene_builder::ConnectionLabelElement],
     ) {
+        // No keyed fast path today — labels are ≤ 1 per edge
+        // and cheap to reshape every scene build, so we clear
+        // and rebuild unconditionally. If a future optimisation
+        // adds a clean-cache branch here (mirroring
+        // `rebuild_border_buffers_keyed`), it must also stamp
+        // `elem.zoom_visibility` onto the preserved buffer —
+        // `zoom_visibility` is an author-authored field that
+        // changes via mutator or console edits independent of
+        // drag, so the drag-only "only .pos changes" assumption
+        // the border / connection fast paths rely on does not
+        // automatically hold for labels.
         self.connection_label_buffers.clear();
         self.connection_label_hitboxes.clear();
         if label_elements.is_empty() {
