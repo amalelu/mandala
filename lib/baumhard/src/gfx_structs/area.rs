@@ -15,6 +15,7 @@ use crate::core::primitives::{
     ApplyOperation, ColorFontRegion, ColorFontRegions, Range,
 };
 use crate::font::fonts::AppFont;
+use crate::gfx_structs::shape::NodeShape;
 use crate::util::color::FloatRgba;
 use crate::util::grapheme_chad;
 use crate::util::ordered_vec2::OrderedVec2;
@@ -71,6 +72,14 @@ pub struct GlyphArea {
     /// don't need one.
     #[serde(default)]
     pub outline: Option<OutlineStyle>,
+    /// Background / hit-test shape of the area. Default
+    /// [`NodeShape::Rectangle`] matches the historical behaviour
+    /// where every node fills its bounding box. Shared between the
+    /// renderer's rect SDF pipeline (drawn fill) and the BVH
+    /// descent (point-in-shape hit test), so changing this field
+    /// automatically moves both visuals and input together.
+    #[serde(default)]
+    pub shape: NodeShape,
     /// Click-sensitive extents. Ignored for `PartialEq` because
     /// hit-boxes are scene-builder output, not persistent identity.
     #[derivative(PartialEq = "ignore")]
@@ -90,6 +99,7 @@ impl Hash for GlyphArea {
         self.background_color.hash(state);
         self.align_center.hash(state);
         self.outline.hash(state);
+        self.shape.hash(state);
     }
 }
 
@@ -109,6 +119,7 @@ impl GlyphArea {
             background_color: None,
             align_center: false,
             outline: None,
+            shape: NodeShape::Rectangle,
             hitbox: HitBox::new(),
         }
     }
@@ -132,6 +143,7 @@ impl GlyphArea {
             background_color: None,
             align_center: false,
             outline: None,
+            shape: NodeShape::Rectangle,
             hitbox: HitBox::new(),
         }
     }
@@ -215,6 +227,23 @@ impl GlyphArea {
                 // semantic is "remove what's there".
                 ApplyOperation::Subtract => {
                     self.outline = None;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(shape) = delta.shape() {
+            match operation {
+                // Shapes don't compose (you can't "add" an ellipse
+                // to a rectangle), so `Assign` and `Add` both
+                // overwrite.
+                ApplyOperation::Assign | ApplyOperation::Add => {
+                    self.shape = shape;
+                }
+                // `Subtract` resets to the default rectangle — the
+                // counterpart of "remove the custom shape".
+                ApplyOperation::Subtract => {
+                    self.shape = NodeShape::Rectangle;
                 }
                 _ => {}
             }

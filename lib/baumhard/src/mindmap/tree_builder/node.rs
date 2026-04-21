@@ -12,6 +12,7 @@ use crate::core::primitives::{ColorFontRegion, ColorFontRegions, Range};
 use crate::gfx_structs::area::GlyphArea;
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::GfxMutator;
+use crate::gfx_structs::shape::NodeShape;
 use crate::gfx_structs::tree::Tree;
 use crate::mindmap::model::{MindMap, MindNode};
 use crate::util::color;
@@ -63,6 +64,14 @@ pub(super) fn mindnode_to_glyph_area(
             }
         }
     };
+
+    // Resolve the format-level `style.shape` string into a
+    // `NodeShape`. Unknown / empty values fall back to Rectangle
+    // (same "survive a typo" posture as `background_color` above).
+    // The renderer's rect pipeline and the BVH hit test both read
+    // this single field, so setting it here is enough to change
+    // both visuals and input together.
+    area.shape = NodeShape::from_style_string(&node.style.shape);
 
     // Convert text runs to ColorFontRegions
     let mut regions = ColorFontRegions::new_empty();

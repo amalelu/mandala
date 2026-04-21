@@ -74,6 +74,12 @@ citizens; this section tracks the current parity surface so a new
 session doesn't have to trawl `#[cfg]` guards to learn what works where.
 
 **Runs on both targets:**
+- Pluggable node shapes (rectangle, ellipse) for background fill +
+  hit-testing. One `NodeShape` enum in
+  `lib/baumhard/src/gfx_structs/shape.rs` drives both the rect
+  pipeline's SDF fragment shader and the BVH descent. Adding a shape
+  is localised: one enum variant + one WGSL `case` + one
+  `contains_local` arm. See `format/enums.md#styleshape`.
 - Document model, scene builder, tree bridge — all of `MindMapDocument`
   and `baumhard::mindmap::*`.
 - Inline node text editor: double-click / Enter / Backspace to open,

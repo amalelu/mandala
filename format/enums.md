@@ -32,9 +32,26 @@ becomes a prose exercise, not a decoding one.
 "parallelogram", "hexagon"
 ```
 
-Inherited from miMind's shape catalog. The current Mandala renderer uses
-glyph-based borders (`style.border`), so `shape` is primarily preservation
-for round-trip fidelity and future export targets. Default: `"rectangle"`.
+Inherited from miMind's shape catalog. Default: `"rectangle"`.
+
+`"rectangle"` and `"ellipse"` are **live shapes** — they drive both the
+background fill (SDF in the rect pipeline) and the hit test (BVH descent
+plus `rect_select`) via
+[`NodeShape`](../lib/baumhard/src/gfx_structs/shape.rs). A perfect circle
+is expressed as `"ellipse"` with `width == height`; stretched /
+"conical" cases are the same variant with `width != height`. `"circle"`
+is accepted as an alias for `"ellipse"`.
+
+The remaining values (`"rounded_rectangle"`, `"diamond"`,
+`"parallelogram"`, `"hexagon"`) still round-trip but currently render
+as `"rectangle"` — adding one is a small change (one `NodeShape`
+variant, one WGSL `case`, one `contains_local` arm; see the header
+doc in `shape.rs`).
+
+Today, `show_frame = true` only emits the glyph border when
+`shape == "rectangle"` — the four-run frame layout assumes an
+axis-aligned box. Non-rectangular nodes drop the frame until a
+shape-aware border lands.
 
 ### `layout.type`
 

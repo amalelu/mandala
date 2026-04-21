@@ -88,6 +88,7 @@ impl Renderer {
                     position: Vec2::new(area.position.x.0, area.position.y.0),
                     size: Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
                     color,
+                    shape_id: area.shape.shader_id(),
                 });
             }
         }

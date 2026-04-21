@@ -69,19 +69,33 @@ use glam::Vec2;
 
 
 /// Inline WGSL shader for the colored-rectangle pipeline. Draws a
-/// stream of NDC-space vertices, each carrying its own RGBA color.
-/// Kept inline (rather than in the baumhard shader table) because
-/// it's 100% renderer-local — no tree data, no camera uniforms; the
-/// CPU bakes the camera transform into each vertex before upload.
+/// stream of NDC-space vertices, each carrying its own RGBA color,
+/// a local-space `uv` in `[0, 1]`, and a `shape_id` that selects
+/// how the fragment shader treats the fill. Kept inline (rather
+/// than in the baumhard shader table) because it's 100%
+/// renderer-local — no tree data, no camera uniforms; the CPU
+/// bakes the camera transform into each vertex before upload.
+///
+/// Extending with a new shape: add a `SHAPE_*` constant and a
+/// `case` arm in `fs_main`. The shape id comes from
+/// `NodeShape::shader_id` on the baumhard side; the two must stay
+/// in lock-step.
 const RECT_SHADER_WGSL: &str = r#"
+const SHAPE_RECT: u32 = 0u;
+const SHAPE_ELLIPSE: u32 = 1u;
+
 struct VsIn {
     @location(0) pos: vec2<f32>,
-    @location(1) color: vec4<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) shape_id: u32,
 };
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) @interpolate(flat) shape_id: u32,
 };
 
 @vertex
@@ -89,27 +103,55 @@ fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     out.pos = vec4<f32>(in.pos, 0.0, 1.0);
     out.color = in.color;
+    out.uv = in.uv;
+    out.shape_id = in.shape_id;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    switch (in.shape_id) {
+        case SHAPE_ELLIPSE: {
+            // Local-space ellipse SDF: bounds map to uv in [0, 1]
+            // so the inscribed unit circle lives at |uv - 0.5| <= 0.5.
+            // Remap to [-1, 1] so the test is `dot(p, p) <= 1`.
+            let p = (in.uv - vec2<f32>(0.5, 0.5)) * 2.0;
+            let d = dot(p, p);
+            if (d > 1.0) {
+                discard;
+            }
+            return in.color;
+        }
+        default: {
+            // SHAPE_RECT (and the safe fallback for unknown ids):
+            // the whole quad is the fill.
+            return in.color;
+        }
+    }
 }
 "#;
 
 /// Bytes-per-vertex for the rect pipeline: `vec2<f32> pos +
-/// vec4<f32> color = 6 × f32 = 24 bytes`. Used when sizing /
-/// offsetting the vertex buffer. Declared as a compile-time const so
-/// the layout math is grep-able from a single place.
-const RECT_VERTEX_SIZE: u64 = 24;
+/// vec2<f32> uv + vec4<f32> color + u32 shape_id = 9 × 4 = 36 bytes`.
+/// Used when sizing / offsetting the vertex buffer. Declared as a
+/// compile-time const so the layout math is grep-able from a single
+/// place. Keep in sync with the attribute list in
+/// `create_render_pipeline` and with the per-vertex push in
+/// `push_rect_ndc`.
+const RECT_VERTEX_SIZE: u64 = 36;
+
+/// Number of `f32`-sized slots per vertex. The CPU accumulates
+/// packed floats into `main_rect_vertices` / `console_rect_vertices`;
+/// `shape_id` is stored as an `f32` holding the `u32` bit pattern
+/// via `f32::from_bits` so the whole stream stays a single `Vec<f32>`.
+pub(super) const RECT_VERTEX_FLOATS: usize = 9;
 
 /// Starting capacity (in bytes) for the rect vertex buffer. Big
 /// enough for a modest map with several hundred node backgrounds
 /// without an immediate grow; doubling-on-overflow handles anything
-/// larger. 8192 bytes = 341 vertices = ~56 rects. Deliberately small
-/// since most maps will have a handful of colored nodes and the grow
-/// path is exercised rarely.
+/// larger. 8192 bytes ÷ 36 bytes/vertex ≈ 227 vertices ≈ 37 rects.
+/// Deliberately small since most maps will have a handful of colored
+/// nodes and the grow path is exercised rarely.
 pub(super) const RECT_VBUF_INITIAL_CAPACITY: u64 = 8192;
 
 pub struct Renderer {
@@ -284,15 +326,22 @@ pub struct Renderer {
     clear_color: Color,
 }
 
-/// Canvas-space record of a filled rectangle drawn behind a node's
-/// text. Captured from `GlyphArea.background_color` during the tree
-/// walk in `rebuild_buffers_from_tree`; camera-transformed to NDC
-/// in `render` each frame.
+/// Canvas-space record of a background fill drawn behind a node's
+/// text. The CPU always uploads an axis-aligned quad covering
+/// `(position, size)`; the fragment shader then discards pixels
+/// outside the shape described by `shape_id` (rectangle keeps the
+/// whole quad, ellipse clips to the inscribed conic, future shapes
+/// add one more case). Captured from `GlyphArea.background_color`
+/// during the tree walk in `rebuild_buffers_from_tree`;
+/// camera-transformed to NDC in `render` each frame.
 #[derive(Clone, Debug)]
 pub(super) struct NodeBackgroundRect {
     pub position: Vec2,
     pub size: Vec2,
     pub color: [u8; 4],
+    /// Stable shape id from [`baumhard::gfx_structs::shape::NodeShape::shader_id`].
+    /// Flat-interpolated to the fragment shader's `switch`.
+    pub shape_id: u32,
 }
 
 impl Renderer {
@@ -360,6 +409,8 @@ impl Renderer {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: RECT_VERTEX_SIZE,
                     step_mode: wgpu::VertexStepMode::Vertex,
+                    // Layout: pos (8B) | uv (8B) | color (16B) | shape_id (4B)
+                    //         = 36B total, must match `RECT_VERTEX_SIZE`.
                     attributes: &[
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Float32x2,
@@ -367,9 +418,19 @@ impl Renderer {
                             shader_location: 0,
                         },
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
+                            format: wgpu::VertexFormat::Float32x2,
                             offset: 8,
                             shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 32,
+                            shader_location: 3,
                         },
                     ],
                 }],

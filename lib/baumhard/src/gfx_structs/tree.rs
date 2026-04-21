@@ -366,12 +366,41 @@ impl Tree<GfxElement, GfxMutator> {
                         && point.y >= min_y
                         && point.y <= max_y
                     {
-                        // Tie-break by *original* (un-slacked) area
-                        // so a physically smaller element still wins.
-                        let size = bounds.x * bounds.y;
-                        match *best {
-                            Some((_, best_size)) if best_size <= size => {}
-                            _ => *best = Some((child_id, size)),
+                        // Refine with the node's shape so a click
+                        // in the AABB corner of an ellipse counts
+                        // as a miss. `contains_local` sees the
+                        // shape in the node's own frame; we undo
+                        // the slack here so a non-rectangular
+                        // shape's fuzzy margin still grows
+                        // isotropically (callers who ask for
+                        // slack > 0 are doing fat-finger
+                        // forgiveness, not shape-hugging).
+                        let local = glam::Vec2::new(point.x - pos.x, point.y - pos.y);
+                        let shape_hit = if slack <= 0.0 {
+                            area.shape.contains_local(local, bounds)
+                        } else {
+                            // Inflate the shape's bounds by `slack`
+                            // on each side and re-test in the
+                            // shifted frame so the same tolerance
+                            // applies to a rectangle and an
+                            // ellipse alike.
+                            let inflated = glam::Vec2::new(
+                                bounds.x + 2.0 * slack,
+                                bounds.y + 2.0 * slack,
+                            );
+                            area.shape.contains_local(
+                                glam::Vec2::new(local.x + slack, local.y + slack),
+                                inflated,
+                            )
+                        };
+                        if shape_hit {
+                            // Tie-break by *original* (un-slacked) area
+                            // so a physically smaller element still wins.
+                            let size = bounds.x * bounds.y;
+                            match *best {
+                                Some((_, best_size)) if best_size <= size => {}
+                                _ => *best = Some((child_id, size)),
+                            }
                         }
                     }
                 }

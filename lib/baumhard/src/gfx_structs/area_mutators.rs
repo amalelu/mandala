@@ -5,6 +5,7 @@ use crate::core::primitives::{
     Applicable, ApplyOperation, ColorFontRegions, Range,
 };
 use crate::font::fonts::AppFont;
+use crate::gfx_structs::shape::NodeShape;
 use crate::util::color::FloatRgba;
 use glam::f32::Vec2;
 use rustc_hash::FxHashMap;
@@ -338,6 +339,20 @@ impl DeltaGlyphArea {
             self.fields.get(&GlyphAreaFieldType::Outline)
         {
             Some(*outline)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the delta's [`NodeShape`] payload if one was set on
+    /// construction. `None` means the delta leaves the area's
+    /// `shape` field alone; `Some(shape)` means it replaces (under
+    /// Assign/Add) or resets-to-rectangle (under Subtract). O(1).
+    pub fn shape(&self) -> Option<NodeShape> {
+        if let Some(GlyphAreaField::Shape(shape)) =
+            self.fields.get(&GlyphAreaFieldType::Shape)
+        {
+            Some(*shape)
         } else {
             None
         }
