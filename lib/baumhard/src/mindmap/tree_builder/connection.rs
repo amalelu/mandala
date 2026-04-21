@@ -71,9 +71,11 @@ fn connection_edge_layout(
     let glyph_bounds = Vec2::new(font_size, font_size);
     let color_rgba = color::hex_to_rgba_safe(&elem.color, [0.78, 0.78, 0.78, 1.0]);
 
+    let edge_zoom_window = elem.zoom_visibility;
     let mk_area = |text: &str, pos: Vec2| -> GlyphArea {
         let mut area =
             GlyphArea::new_with_str(text, font_size, font_size, pos, glyph_bounds);
+        area.zoom_visibility = edge_zoom_window;
         let cluster_count = crate::util::grapheme_chad::count_grapheme_clusters(text);
         if cluster_count > 0 {
             let mut regions = ColorFontRegions::new_empty();
@@ -192,6 +194,9 @@ pub fn build_connection_mutator_tree(
                 GlyphAreaField::line_height(area.line_height.0),
                 GlyphAreaField::ColorFontRegions(area.regions),
                 GlyphAreaField::Outline(area.outline),
+                // Required per §B2 — without it, mutator rebuilds
+                // would reset each glyph's zoom window to Default.
+                GlyphAreaField::ZoomVisibility(area.zoom_visibility),
                 GlyphAreaField::Operation(ApplyOperation::Assign),
             ]);
             let leaf = mt.arena.new_node(GfxMutator::new(

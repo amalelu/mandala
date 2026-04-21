@@ -57,6 +57,7 @@ fn connection_label_layout(
         pos,
         bounds,
     );
+    area.zoom_visibility = elem.zoom_visibility;
     let cluster_count = crate::util::grapheme_chad::count_grapheme_clusters(&elem.text);
     if cluster_count > 0 {
         let mut regions = ColorFontRegions::new_empty();
@@ -141,6 +142,9 @@ pub fn build_connection_label_mutator_tree(
             GlyphAreaField::line_height(area.line_height.0),
             GlyphAreaField::ColorFontRegions(area.regions),
             GlyphAreaField::Outline(area.outline),
+            // Required per §B2 — mutator rebuilds must not reset
+            // the label's authored zoom window to Default.
+            GlyphAreaField::ZoomVisibility(area.zoom_visibility),
             GlyphAreaField::Operation(ApplyOperation::Assign),
         ]);
         let leaf = mt

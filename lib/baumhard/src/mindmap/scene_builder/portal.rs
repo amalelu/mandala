@@ -26,6 +26,7 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 
+use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::mindmap::model::{
     is_portal_edge, portal_endpoint_state, Canvas, GlyphConnectionConfig, MindEdge, MindMap,
     PortalEndpointState, PORTAL_GLYPH_PRESETS,
@@ -38,6 +39,30 @@ use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color::resolve_var;
 
 use super::{PortalColorPreview, PortalElement};
+
+/// Replace-not-intersect cascade for a portal endpoint's zoom
+/// window: the endpoint's `min/max_zoom_to_render` overrides the
+/// parent edge's pair when either is `Some`; otherwise inherit the
+/// edge window unchanged. Mirrors the font-clamp cascade already
+/// used by `resolve_portal_endpoint_style` and the label cascade
+/// in `label.rs`. O(1).
+fn resolve_portal_endpoint_zoom_visibility(
+    edge: &MindEdge,
+    endpoint: Option<&PortalEndpointState>,
+) -> ZoomVisibility {
+    let edge_window = ZoomVisibility::from_pair(
+        edge.min_zoom_to_render,
+        edge.max_zoom_to_render,
+    );
+    match endpoint {
+        Some(state) => ZoomVisibility::cascade_replace(
+            edge_window,
+            state.min_zoom_to_render,
+            state.max_zoom_to_render,
+        ),
+        None => edge_window,
+    }
+}
 
 /// Default portal marker font size when no `glyph_connection`
 /// override is set. Matches the creation-time default in
@@ -473,6 +498,7 @@ pub(super) fn build_portal_elements(
                 color: style.color.clone(),
                 font: style.font.clone(),
                 font_size_pt: style.font_size_pt,
+                zoom_visibility: resolve_portal_endpoint_zoom_visibility(edge, endpoint_state),
             });
         }
     }

@@ -276,6 +276,7 @@ fn append_border_run_region_sized_by_grapheme_cluster_count_not_codepoints() {
         (0.0, 0.0),
         (100.0, 20.0),
         [1.0, 1.0, 1.0, 1.0],
+        crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
     );
 
     let run = parent.children(&tree.arena).next().unwrap();

@@ -111,27 +111,32 @@ impl Renderer {
             let right_text: String =
                 std::iter::repeat_n(format!("{}\n", glyph_set.right_char()), row_count).collect();
 
+            let zv = elem.zoom_visibility;
+            let with_zv = |mut buf: MindMapTextBuffer| -> MindMapTextBuffer {
+                buf.zoom_visibility = zv;
+                buf
+            };
             let entry = vec![
-                create_border_buffer(
+                with_zv(create_border_buffer(
                     &mut font_system, &top_text, &border_attrs, font_size,
                     (nx - approx_char_width, top_y),
                     (h_width, font_size * 1.5),
-                ),
-                create_border_buffer(
+                )),
+                with_zv(create_border_buffer(
                     &mut font_system, &bottom_text, &border_attrs, font_size,
                     (nx - approx_char_width, bottom_y),
                     (h_width, font_size * 1.5),
-                ),
-                create_border_buffer(
+                )),
+                with_zv(create_border_buffer(
                     &mut font_system, &left_text, &border_attrs, font_size,
                     (nx - approx_char_width, ny),
                     (v_width, nh),
-                ),
-                create_border_buffer(
+                )),
+                with_zv(create_border_buffer(
                     &mut font_system, &right_text, &border_attrs, font_size,
                     (right_corner_x, ny),
                     (v_width, nh),
-                ),
+                )),
             ];
             self.border_buffers.insert(elem.node_id.clone(), entry);
         }
@@ -271,34 +276,43 @@ impl Renderer {
                 .map(|(_, p)| in_view(p.0, p.1))
                 .unwrap_or(false);
 
+            // Stamp the edge's authored zoom window onto every
+            // body / cap glyph this rebuild emits so the cull
+            // runs against the same window the tree path would
+            // install.
+            let zv = elem.zoom_visibility;
+            let with_zv = |mut buf: MindMapTextBuffer| -> MindMapTextBuffer {
+                buf.zoom_visibility = zv;
+                buf
+            };
             let mut idx = 0;
             if cap_start_visible {
                 let cap_text = elem.cap_start.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
-                new_entry.push(create_border_buffer(
+                new_entry.push(with_zv(create_border_buffer(
                     &mut font_system, cap_text, &conn_attrs, font_size,
                     visible_positions[idx],
                     glyph_bounds,
-                ));
+                )));
                 idx += 1;
             }
             for &pos in &elem.glyph_positions {
                 if !in_view(pos.0, pos.1) {
                     continue;
                 }
-                new_entry.push(create_border_buffer(
+                new_entry.push(with_zv(create_border_buffer(
                     &mut font_system, &elem.body_glyph, &conn_attrs, font_size,
                     visible_positions[idx],
                     glyph_bounds,
-                ));
+                )));
                 idx += 1;
             }
             if cap_end_visible {
                 let cap_text = elem.cap_end.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
-                new_entry.push(create_border_buffer(
+                new_entry.push(with_zv(create_border_buffer(
                     &mut font_system, cap_text, &conn_attrs, font_size,
                     visible_positions[idx],
                     glyph_bounds,
-                ));
+                )));
             }
 
             self.connection_buffers.insert(elem.edge_key.clone(), new_entry);
@@ -329,7 +343,7 @@ impl Renderer {
                 .color(cosmic_color)
                 .metrics(cosmic_text::Metrics::new(elem.font_size_pt, elem.font_size_pt));
 
-            let buffer = create_border_buffer(
+            let mut buffer = create_border_buffer(
                 &mut font_system,
                 &elem.text,
                 &attrs,
@@ -337,6 +351,7 @@ impl Renderer {
                 elem.position,
                 elem.bounds,
             );
+            buffer.zoom_visibility = elem.zoom_visibility;
             self.connection_label_buffers
                 .insert(elem.edge_key.clone(), buffer);
 

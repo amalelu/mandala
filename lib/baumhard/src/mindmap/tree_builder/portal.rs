@@ -263,6 +263,21 @@ pub fn portal_pair_data(
                 &text_string,
             );
 
+            // Replace-not-intersect cascade: the endpoint's
+            // zoom window overrides the owning edge's when either
+            // bound is `Some`; otherwise inherit. Mirrors the
+            // font-clamp cascade a few lines up. Both the icon
+            // and text areas share the same resolved window so
+            // they appear / disappear together.
+            let endpoint_zoom_window = crate::gfx_structs::zoom_visibility::ZoomVisibility::cascade_replace(
+                crate::gfx_structs::zoom_visibility::ZoomVisibility::from_pair(
+                    edge.min_zoom_to_render,
+                    edge.max_zoom_to_render,
+                ),
+                endpoint_state.and_then(|s| s.min_zoom_to_render),
+                endpoint_state.and_then(|s| s.max_zoom_to_render),
+            );
+
             let mut icon_area = GlyphArea::new_with_str(
                 &style.glyph,
                 style.font_size_pt,
@@ -270,6 +285,7 @@ pub fn portal_pair_data(
                 icon_layout.top_left,
                 icon_layout.bounds,
             );
+            icon_area.zoom_visibility = endpoint_zoom_window;
             let icon_clusters =
                 crate::util::grapheme_chad::count_grapheme_clusters(&style.glyph);
             if icon_clusters > 0 {
@@ -289,6 +305,7 @@ pub fn portal_pair_data(
                 text_layout.top_left,
                 text_layout.bounds,
             );
+            text_area.zoom_visibility = endpoint_zoom_window;
             let text_clusters =
                 crate::util::grapheme_chad::count_grapheme_clusters(&text_string);
             if text_clusters > 0 {
@@ -497,6 +514,11 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
                     GlyphAreaField::line_height(area.line_height.0),
                     GlyphAreaField::ColorFontRegions(area.regions.clone()),
                     GlyphAreaField::Outline(area.outline.clone()),
+                    // Required per §B2 — without this, an in-place
+                    // mutator rebuild would reset each endpoint's
+                    // zoom window to Default, silently undoing an
+                    // authored per-endpoint visibility override.
+                    GlyphAreaField::ZoomVisibility(area.zoom_visibility),
                     GlyphAreaField::Operation(ApplyOperation::Assign),
                 ]);
                 let leaf = mt.arena.new_node(GfxMutator::new(

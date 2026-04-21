@@ -111,4 +111,34 @@ impl ZoomVisibility {
         }
         true
     }
+
+    /// Build a window from a pair of optional bounds (the flat
+    /// serde shape the mindmap model uses on
+    /// [`crate::mindmap::model::MindNode`],
+    /// [`crate::mindmap::model::MindEdge`], etc.). O(1).
+    pub const fn from_pair(min: Option<f32>, max: Option<f32>) -> Self {
+        ZoomVisibility { min, max }
+    }
+
+    /// Replace-not-intersect cascade: if `override_pair` contains
+    /// any `Some`, return a window from `override_pair` as-is;
+    /// otherwise inherit `parent` unchanged. Matches the cascade
+    /// posture the portal font-clamp resolver already uses for
+    /// `PortalEndpointState.text_{min,max}_font_size_pt`. O(1).
+    ///
+    /// "Replace" rather than "intersect" is the user-facing rule:
+    /// setting only a `min` on a label means "override the edge's
+    /// window with this single-sided one", not "narrow the
+    /// existing window further". Intersection would silently
+    /// inherit a bound the author didn't mention.
+    pub const fn cascade_replace(
+        parent: ZoomVisibility,
+        override_min: Option<f32>,
+        override_max: Option<f32>,
+    ) -> Self {
+        match (override_min, override_max) {
+            (None, None) => parent,
+            (min, max) => ZoomVisibility { min, max },
+        }
+    }
 }

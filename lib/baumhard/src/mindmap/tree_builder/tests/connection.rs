@@ -16,6 +16,7 @@ fn connection_tree_emits_one_void_per_edge_with_glyph_children() {
         font: None,
         font_size_pt: 12.0,
         color: "#ff0000".into(),
+        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
     };
     let tree = build_connection_tree(&[elem]);
     let edge_parents: Vec<NodeId> = tree.root.children(&tree.arena).collect();
@@ -42,6 +43,7 @@ fn connection_tree_skips_caps_when_absent() {
         font: None,
         font_size_pt: 12.0,
         color: "#ffffff".into(),
+        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
     };
     let tree = build_connection_tree(&[elem]);
     let edge_parent = tree.root.children(&tree.arena).next().unwrap();
@@ -64,6 +66,7 @@ fn connection_identity_sequence_changes_with_structural_shifts() {
         font: None,
         font_size_pt: 12.0,
         color: color.into(),
+        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
     };
 
     let cap_start = Some(("◀".to_string(), (0.0, 0.0)));
@@ -114,6 +117,7 @@ fn connection_mutator_round_trip_matches_full_rebuild() {
         font: None,
         font_size_pt: 12.0,
         color: color.into(),
+        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
     };
     let elem_a = mk("#ff0000");
     let elem_b = mk("#00E5FF");
@@ -168,6 +172,7 @@ fn connection_label_mutator_round_trip_handles_text_edit() {
         color: "#ffffff".into(),
         font: None,
         font_size_pt: 12.0,
+        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
     };
     let elem_a = mk("old");
     let elem_b = mk("new label");
@@ -220,6 +225,7 @@ fn connection_region_sized_by_grapheme_cluster_count_not_codepoints() {
         font: None,
         font_size_pt: 12.0,
         color: "#ffffff".into(),
+        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
     };
     let tree = build_connection_tree(&[elem]);
     let edge_parent = tree.root.children(&tree.arena).next().unwrap();
@@ -251,6 +257,7 @@ fn connection_label_region_sized_by_grapheme_cluster_count_not_codepoints() {
         color: "#ffffff".into(),
         font: None,
         font_size_pt: 12.0,
+        zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility::unbounded(),
     };
     let tree = build_connection_label_tree(&[elem]);
     let label_node = tree.tree.root.children(&tree.tree.arena).next().unwrap();

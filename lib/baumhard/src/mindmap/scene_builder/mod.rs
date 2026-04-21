@@ -95,6 +95,10 @@ pub struct BorderElement {
     pub border_style: BorderStyle,
     pub node_position: (f32, f32),
     pub node_size: (f32, f32),
+    /// Inherited from the owning node — a border appearing when its
+    /// node is culled would be a floating frame fragment, so the
+    /// border renders only when the node does.
+    pub zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility,
 }
 
 /// A connection (edge) between two nodes, with pre-computed glyph positions.
@@ -117,6 +121,11 @@ pub struct ConnectionElement {
     pub font_size_pt: f32,
     /// Color as #RRGGBB hex string.
     pub color: String,
+    /// Zoom window for the whole connection (body glyphs + caps).
+    /// Resolved directly from `MindEdge.min_zoom_to_render` /
+    /// `MindEdge.max_zoom_to_render` — edges are the authoring
+    /// unit, no per-glyph override.
+    pub zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility,
 }
 
 /// A portal marker — one half of a portal-mode edge rendered as a
@@ -151,6 +160,12 @@ pub struct PortalElement {
     pub font: Option<String>,
     /// Font size in points.
     pub font_size_pt: f32,
+    /// Zoom window for this portal marker (icon + its adjacent
+    /// text). Resolved with the replace-not-intersect cascade:
+    /// `PortalEndpointState.min/max_zoom_to_render` override
+    /// `MindEdge.min/max_zoom_to_render` when any of the pair is
+    /// `Some`; otherwise inherit the edge window unchanged.
+    pub zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility,
 }
 
 /// A text label attached to a connection edge. Rendered as a
@@ -185,6 +200,11 @@ pub struct ConnectionLabelElement {
     /// factor (1.1× the body glyph size by default) and clamped by
     /// `GlyphConnectionConfig::effective_font_size_pt`.
     pub font_size_pt: f32,
+    /// Zoom window for the label. Resolved with the replace-not-
+    /// intersect cascade: `EdgeLabelConfig.min/max_zoom_to_render`
+    /// override `MindEdge.min/max_zoom_to_render` when any of the
+    /// pair is `Some`; otherwise inherit the edge window.
+    pub zoom_visibility: crate::gfx_structs::zoom_visibility::ZoomVisibility,
 }
 
 /// Which part of a selected edge a grab-handle targets. The
