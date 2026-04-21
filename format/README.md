@@ -19,6 +19,9 @@ Each of these documents one decision, with the reasoning:
 - [`channels.md`](./channels.md) — the `channel` field and mutation targeting
 - [`enums.md`](./enums.md) — named string enums over integer codes
 - [`text-runs.md`](./text-runs.md) — rich text formatting
+- [`zoom-bounds.md`](./zoom-bounds.md) — per-element
+  `min_zoom_to_render` / `max_zoom_to_render` window gating render
+  presence on camera zoom
 - [`mutations.md`](./mutations.md) — `CustomMutation` carrier,
   four-source loader, the `mutation` console verb, and the contexts
   taxonomy

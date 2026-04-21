@@ -45,6 +45,8 @@ Each side has the same shape:
 | `text_font_size_pt`      | `f32`                                   | inherits  | Target on-screen text size at zoom 1.0; falls back to icon size.   |
 | `text_min_font_size_pt`  | `f32`                                   | inherits  | Lower screen-space clamp for the text; falls back to the edge's.   |
 | `text_max_font_size_pt`  | `f32`                                   | inherits  | Upper screen-space clamp for the text; falls back to the edge's.   |
+| `min_zoom_to_render`     | `f32`                                   | inherits  | Lower bound on `camera.zoom` at which this endpoint (icon + text) renders. Replace-not-intersect cascade vs. the edge — see [zoom-bounds.md](./zoom-bounds.md). Inclusive. |
+| `max_zoom_to_render`     | `f32`                                   | inherits  | Upper bound on `camera.zoom` at which this endpoint renders. Same cascade rule. Inclusive. |
 
 The `text` field — when present — renders as a sibling glyph
 area next to the portal marker icon, positioned outward of the

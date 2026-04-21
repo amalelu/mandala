@@ -16,6 +16,7 @@ mod palettes;
 mod references;
 mod text_runs;
 mod tree;
+mod zoom_bounds;
 
 #[cfg(test)]
 mod test_helpers;
@@ -45,5 +46,6 @@ pub fn verify(map: &MindMap) -> Vec<Violation> {
     out.extend(palettes::check(map));
     out.extend(enums::check(map));
     out.extend(text_runs::check(map));
+    out.extend(zoom_bounds::check(map));
     out
 }

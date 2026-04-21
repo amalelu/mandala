@@ -80,6 +80,17 @@ catches the typo.
 the first run wins silently, the tail is clipped. Rich text bugs are
 painful to diagnose after the fact.
 
+### Zoom bounds
+
+- Whenever both `min_zoom_to_render` and `max_zoom_to_render` are set
+  on a `MindNode`, `MindEdge`, `EdgeLabelConfig`, or
+  `PortalEndpointState`, `min <= max` holds.
+
+**Why**: an inverted pair is a well-defined but always-invisible
+window — the render-time check still terminates cleanly, but an
+element that never renders at any zoom is almost always a typo. See
+[zoom-bounds.md](./zoom-bounds.md).
+
 ## What's not checked
 
 - **Color format** (`#RRGGBB` vs `rgb(...)` vs named colors): the format
@@ -125,6 +136,7 @@ references @ edge[0]: from_id "5.5" is not a node
 palettes @ 0: palette "sunset" is not defined in map.palettes
 enums @ 0: style.shape "oblong" is not a known shape
 text_runs @ 0: run[1] overlaps run[0] (start 3 < previous end 5)
+zoom_bounds @ edge[0]: min_zoom_to_render 2 > max_zoom_to_render 0.5
 ```
 
 Each violation names its category, the location inside the file, and what
