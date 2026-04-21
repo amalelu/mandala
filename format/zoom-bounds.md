@@ -65,6 +65,33 @@ via `GlyphAreaField::ZoomVisibility(...)` — see
 window at runtime, which is the seam for zoom-triggered LOD
 transitions ("at zoom 2×, swap this cluster into its detail view").
 
+## Console
+
+Authored at runtime through the `zoom` console command (alias:
+`visibility`):
+
+```
+zoom min=1.5 max=3.0      # set both bounds on the current selection
+zoom min=0.5              # set only min, leave max untouched
+zoom max=unset            # clear just the max side (back to unbounded above)
+zoom clear                # clear both bounds
+```
+
+Routing mirrors the `font` command:
+
+| Selection | Target struct |
+|---|---|
+| `Single(node)` | `MindNode.{min,max}_zoom_to_render` |
+| `Multi(nodes)` | fans out over each node |
+| `Edge(edge)` | `MindEdge.{min,max}_zoom_to_render` |
+| `EdgeLabel(label)` | `EdgeLabelConfig.{min,max}_zoom_to_render` (replace cascade) |
+| `PortalLabel(icon)` | owning edge's top-level pair (icon inherits edge) |
+| `PortalText(text)` | `PortalEndpointState.{min,max}_zoom_to_render` (replace cascade) |
+
+Values must be positive and finite; `unset` / empty string clears
+the side back to `None` (unbounded). Inverted bounds are rejected
+with an error before any model state changes.
+
 ## Cost
 
 The render-loop cull is two branchless `Option<f32>` comparisons per

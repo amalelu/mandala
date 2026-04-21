@@ -170,6 +170,75 @@ impl MindMapDocument {
         self.dirty = true;
         true
     }
+
+    /// Write the node's zoom-visibility window. Each of `min` /
+    /// `max` is a [`crate::application::document::ZoomBoundEdit`]:
+    /// `Keep` leaves the side untouched, `Clear` sets it to
+    /// `None` (unbounded), `Set(v)` sets it to `Some(v)`. Returns
+    /// `true` if either side actually changed.
+    ///
+    /// Inversion (`min > max` after the edit) is rejected as a
+    /// no-op with `false`; the console surface catches this first,
+    /// so this is a defensive guard for programmatic callers.
+    /// Non-finite values are likewise rejected — the invariant
+    /// mirrors
+    /// [`ZoomVisibility::try_new`](baumhard::gfx_structs::zoom_visibility::ZoomVisibility::try_new).
+    pub fn set_node_zoom_visibility(
+        &mut self,
+        node_id: &str,
+        min: super::ZoomBoundEdit,
+        max: super::ZoomBoundEdit,
+    ) -> bool {
+        let node = match self.mindmap.nodes.get(node_id) {
+            Some(n) => n,
+            None => return false,
+        };
+        let before_min = node.min_zoom_to_render;
+        let before_max = node.max_zoom_to_render;
+        let new_min = min.apply(before_min);
+        let new_max = max.apply(before_max);
+        if !validate_zoom_pair(new_min, new_max) {
+            return false;
+        }
+        if new_min == before_min && new_max == before_max {
+            return false;
+        }
+        let node = self.mindmap.nodes.get_mut(node_id).expect("just checked");
+        node.min_zoom_to_render = new_min;
+        node.max_zoom_to_render = new_max;
+        self.undo_stack.push(UndoAction::EditNodeZoom {
+            node_id: node_id.to_string(),
+            before_min,
+            before_max,
+        });
+        self.dirty = true;
+        true
+    }
+}
+
+/// Guard used by every `set_*_zoom_visibility` setter. Rejects a
+/// pair whose bounds are non-finite or whose resolved
+/// `(min, max)` inverts. Mirrors the contract the verifier
+/// enforces at load time and `ZoomVisibility::try_new` enforces
+/// for programmatic callers — no panic in interactive paths per
+/// `CODE_CONVENTIONS.md` §9.
+pub(super) fn validate_zoom_pair(min: Option<f32>, max: Option<f32>) -> bool {
+    if let Some(m) = min {
+        if !m.is_finite() {
+            return false;
+        }
+    }
+    if let Some(m) = max {
+        if !m.is_finite() {
+            return false;
+        }
+    }
+    if let (Some(lo), Some(hi)) = (min, max) {
+        if lo > hi {
+            return false;
+        }
+    }
+    true
 }
 
 /// Shared body of the node-style setters that touch a single field on

@@ -28,6 +28,7 @@ mod topology;
 mod types;
 mod undo;
 mod undo_action;
+mod zoom_bounds;
 
 #[cfg(test)]
 mod tests_common;
@@ -58,6 +59,7 @@ pub use types::{
     HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
 pub use undo_action::UndoAction;
+pub use zoom_bounds::ZoomBoundEdit;
 
 /// Owns the MindMap data model and provides scene-building for the Renderer.
 pub struct MindMapDocument {

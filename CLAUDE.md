@@ -102,7 +102,12 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   compares per `MindMapTextBuffer`, zero cosmic-text shaping or
   buffer-cache invalidation on zoom steps. Mutator target:
   `GlyphAreaField::ZoomVisibility` for zoom-triggered LOD
-  transitions. See `format/zoom-bounds.md`.
+  transitions. Runtime authoring via the `zoom` / `visibility`
+  console command (`zoom min=1.5 max=3.0`, `zoom clear`,
+  `zoom max=unset`) routing against the active selection
+  through `MindMapDocument::set_{node,edge,edge_label,portal_endpoint}_zoom_visibility`
+  with `ZoomBoundEdit::{Keep, Clear, Set(f32)}` on each side.
+  See `format/zoom-bounds.md`.
 - Document model, scene builder, tree bridge — all of `MindMapDocument`
   and `baumhard::mindmap::*`.
 - Inline node text editor: double-click / Enter / Backspace to open,
