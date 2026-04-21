@@ -35,9 +35,12 @@ pub fn hit_test(canvas_pos: Vec2, tree: &mut MindMapTree) -> Option<String> {
         .map(|s| s.to_owned())
 }
 
-/// Is `canvas_pos` inside the AABB of node `node_id`? Reads the tree-side
+/// Is `canvas_pos` inside node `node_id`'s shape? Reads the tree-side
 /// glyph area so drag-preview positions count (tree is authoritative
-/// during in-flight mutations; identical to the model when idle).
+/// during in-flight mutations; identical to the model when idle). The
+/// check is shape-aware: rectangular nodes use AABB containment, and
+/// non-rectangular shapes (e.g. ellipse) delegate to
+/// `NodeShape::contains_local`, matching the BVH hit-test path.
 ///
 /// Unlike `hit_test`, this answers a point-in-specific-node question —
 /// a click over a child of `node_id` still counts as "inside" `node_id`,
@@ -52,10 +55,15 @@ pub fn point_in_node_aabb(canvas_pos: Vec2, node_id: &str, tree: &MindMapTree) -
             let y = area.position.y.0;
             let w = area.render_bounds.x.0;
             let h = area.render_bounds.y.0;
-            canvas_pos.x >= x
-                && canvas_pos.x <= x + w
-                && canvas_pos.y >= y
-                && canvas_pos.y <= y + h
+            if canvas_pos.x < x
+                || canvas_pos.x > x + w
+                || canvas_pos.y < y
+                || canvas_pos.y > y + h
+            {
+                return false;
+            }
+            let local = Vec2::new(canvas_pos.x - x, canvas_pos.y - y);
+            area.shape.contains_local(local, Vec2::new(w, h))
         })
         .unwrap_or(false)
 }
@@ -109,8 +117,11 @@ pub fn hit_test_edge(canvas_pos: Vec2, map: &MindMap, tolerance: f32) -> Option<
     best.map(|(e, _)| e)
 }
 
-/// Find all node IDs whose bounds intersect the given canvas-space rectangle.
-/// The rectangle is defined by two opposite corners (min and max are computed internally).
+/// Find all node IDs whose shape intersects the given canvas-space rectangle.
+/// The rectangle is defined by two opposite corners (min and max are computed
+/// internally). Shape-aware: rectangles fall through to an AABB overlap,
+/// ellipses use `NodeShape::intersects_local_aabb` so the corners of a
+/// node's bounding box (outside the ellipse) don't trigger a false lasso hit.
 pub fn rect_select(corner_a: Vec2, corner_b: Vec2, tree: &MindMapTree) -> Vec<String> {
     let min_x = corner_a.x.min(corner_b.x);
     let min_y = corner_a.y.min(corner_b.y);
@@ -128,8 +139,15 @@ pub fn rect_select(corner_a: Vec2, corner_b: Vec2, tree: &MindMapTree) -> Vec<St
         let w = area.render_bounds.x.0;
         let h = area.render_bounds.y.0;
 
-        // AABB overlap test
-        if x + w >= min_x && x <= max_x && y + h >= min_y && y <= max_y {
+        // Translate the selection rectangle into the node's local
+        // frame and let the shape decide. Rectangle keeps the old
+        // pure-AABB behaviour; non-rect shapes refine.
+        let local_min = Vec2::new(min_x - x, min_y - y);
+        let local_max = Vec2::new(max_x - x, max_y - y);
+        if area
+            .shape
+            .intersects_local_aabb(local_min, local_max, Vec2::new(w, h))
+        {
             hits.push(mind_id.clone());
         }
     }

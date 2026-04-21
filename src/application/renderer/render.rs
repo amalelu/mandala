@@ -10,21 +10,33 @@ use wgpu::StoreOp;
 
 use baumhard::font::fonts;
 
-use super::{Renderer, RECT_VBUF_INITIAL_CAPACITY};
+use super::{Renderer, RECT_VBUF_INITIAL_CAPACITY, RECT_VERTEX_FLOATS};
+
+use baumhard::gfx_structs::shape::SHAPE_ID_RECTANGLE;
 
 impl Renderer {
     /// Push the six vertices (two triangles) of a filled axis-aligned
     /// rectangle into `out`. Coords are already in NDC — the caller is
     /// responsible for any camera or screen→NDC transform. `color` is
-    /// the flat RGBA written to every vertex.
+    /// the flat RGBA written to every vertex; `shape_id` selects the
+    /// fragment-shader path (`0` = rectangle, `1` = ellipse, …). The
+    /// per-vertex `uv` is hard-wired to the quad's local `[0, 1]²`
+    /// frame so the fragment shader can evaluate any SDF in the shape
+    /// table without extra uniforms.
     ///
-    /// Layout: `[x_tl, y_tl, r, g, b, a, x_tr, y_tr, r, g, b, a, …]`
-    /// (6 floats per vertex, 6 vertices per rect = 36 floats per rect).
+    /// Layout per vertex: `[x, y, u, v, r, g, b, a, shape_id]`
+    /// (9 × 4 bytes = 36 bytes; must match `RECT_VERTEX_SIZE`).
+    /// `shape_id` rides the stream as a plain `f32` (`shape_id as f32`)
+    /// because wgpu's WebGL2 backend doesn't support integer vertex
+    /// attributes on every browser — the WGSL vertex stage rounds and
+    /// casts to `u32` before flat-interpolating. The round-trip is
+    /// lossless for the small integer range we use.
     fn push_rect_ndc(
         out: &mut Vec<f32>,
         ndc_min: Vec2,
         ndc_max: Vec2,
         color: [f32; 4],
+        shape_id: u32,
     ) {
         // Triangle 1: TL, BL, BR
         // Triangle 2: TL, BR, TR
@@ -36,18 +48,24 @@ impl Renderer {
         let (lx, ly) = (ndc_min.x, ndc_min.y); // bottom-left
         let (rx, ry) = (ndc_max.x, ndc_max.y); // top-right
         let [r, g, b, a] = color;
-        // TL = (lx, ry), TR = (rx, ry), BR = (rx, ly), BL = (lx, ly)
-        let push = |out: &mut Vec<f32>, x: f32, y: f32| {
-            out.extend_from_slice(&[x, y, r, g, b, a]);
+        // `shape_id` is encoded as `Float32` in the vertex buffer;
+        // WGSL rounds + casts back to `u32` before the switch. See
+        // the type-level doc on this function for the rationale.
+        let sid = shape_id as f32;
+        // UVs match the quad's local frame: TL = (0, 0), TR = (1, 0),
+        // BR = (1, 1), BL = (0, 1). The SDF cases in the fragment
+        // shader assume exactly this parameterisation.
+        let push = |out: &mut Vec<f32>, x: f32, y: f32, u: f32, v: f32| {
+            out.extend_from_slice(&[x, y, u, v, r, g, b, a, sid]);
         };
         // Triangle 1: TL, BL, BR
-        push(out, lx, ry);
-        push(out, lx, ly);
-        push(out, rx, ly);
+        push(out, lx, ry, 0.0, 0.0);
+        push(out, lx, ly, 0.0, 1.0);
+        push(out, rx, ly, 1.0, 1.0);
         // Triangle 2: TL, BR, TR
-        push(out, lx, ry);
-        push(out, rx, ly);
-        push(out, rx, ry);
+        push(out, lx, ry, 0.0, 0.0);
+        push(out, rx, ly, 1.0, 1.0);
+        push(out, rx, ry, 1.0, 0.0);
     }
 
     /// Convert a screen-space rectangle (top-left + size in pixels)
@@ -108,7 +126,13 @@ impl Renderer {
                 rect.color[2] as f32 / 255.0,
                 rect.color[3] as f32 / 255.0,
             ];
-            Self::push_rect_ndc(&mut self.main_rect_vertices, ndc_min, ndc_max, color);
+            Self::push_rect_ndc(
+                &mut self.main_rect_vertices,
+                ndc_min,
+                ndc_max,
+                color,
+                rect.shape_id,
+            );
         }
 
         // Rebuild the "palette" rect batch: one opaque backdrop
@@ -130,6 +154,7 @@ impl Renderer {
                 ndc_min,
                 ndc_max,
                 bg_color,
+                SHAPE_ID_RECTANGLE,
             );
         }
         if let Some((left, top, w, h)) = self.color_picker_backdrop {
@@ -145,6 +170,7 @@ impl Renderer {
                 ndc_min,
                 ndc_max,
                 bg_color,
+                SHAPE_ID_RECTANGLE,
             );
         }
 
@@ -189,8 +215,9 @@ impl Renderer {
                 bytes,
             );
         }
-        let main_vertex_count = (self.main_rect_vertices.len() / 6) as u32;
-        let palette_vertex_count = (self.console_rect_vertices.len() / 6) as u32;
+        let main_vertex_count = (self.main_rect_vertices.len() / RECT_VERTEX_FLOATS) as u32;
+        let palette_vertex_count =
+            (self.console_rect_vertices.len() / RECT_VERTEX_FLOATS) as u32;
 
         // Collect "main" text areas: the mindmap + borders +
         // connections + edge handles + overlays + arena buffers.

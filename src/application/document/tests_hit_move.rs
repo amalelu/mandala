@@ -631,5 +631,121 @@ use super::defaults::default_cross_link_edge;
         assert!(hits.is_empty(), "Should find no nodes in distant rect");
     }
 
+    // --- NodeShape integration tests ---
+    //
+    // These exercise the end-to-end wiring: flip a node's `shape` on
+    // the tree side to `Ellipse`, then assert that hit_test /
+    // point_in_node_aabb / rect_select all honour the new geometry.
+    // The baumhard-level math is covered exhaustively in
+    // `lib/baumhard/src/gfx_structs/shape.rs#tests`; these tests
+    // guard the plumbing.
+
+    fn set_node_shape_ellipse(
+        tree: &mut baumhard::mindmap::tree_builder::MindMapTree,
+        node_id: &str,
+    ) {
+        use baumhard::gfx_structs::shape::NodeShape;
+        let nid = *tree.node_map.get(node_id).expect("node exists");
+        let node = tree.tree.arena.get_mut(nid).expect("arena has node");
+        let area = node.get_mut().glyph_area_mut().expect("node is a GlyphArea");
+        area.shape = NodeShape::Ellipse;
+    }
+
+    fn node_bounds(
+        tree: &baumhard::mindmap::tree_builder::MindMapTree,
+        node_id: &str,
+    ) -> (Vec2, Vec2) {
+        let nid = *tree.node_map.get(node_id).unwrap();
+        let area = tree
+            .tree
+            .arena
+            .get(nid)
+            .unwrap()
+            .get()
+            .glyph_area()
+            .unwrap();
+        (
+            Vec2::new(area.position.x.0, area.position.y.0),
+            Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
+        )
+    }
+
+    #[test]
+    fn test_hit_test_ellipse_centre_hits() {
+        let mut tree = load_test_tree();
+        set_node_shape_ellipse(&mut tree, "0");
+        let (pos, bounds) = node_bounds(&tree, "0");
+        let centre = pos + bounds * 0.5;
+        assert_eq!(hit_test(centre, &mut tree), Some("0".to_string()));
+    }
+
+    #[test]
+    fn test_hit_test_ellipse_aabb_corner_misses() {
+        let mut tree = load_test_tree();
+        set_node_shape_ellipse(&mut tree, "0");
+        let (pos, _bounds) = node_bounds(&tree, "0");
+        // Epsilon just inside the AABB corner — rectangle would
+        // pick it, ellipse must not.
+        let near_corner = pos + Vec2::new(0.5, 0.5);
+        let hit = hit_test(near_corner, &mut tree);
+        assert_ne!(
+            hit,
+            Some("0".to_string()),
+            "Ellipse hit-test must reject AABB corner clicks"
+        );
+    }
+
+    #[test]
+    fn test_point_in_node_aabb_is_shape_aware() {
+        let mut tree = load_test_tree();
+        set_node_shape_ellipse(&mut tree, "0");
+        let (pos, bounds) = node_bounds(&tree, "0");
+        let centre = pos + bounds * 0.5;
+        let near_corner = pos + Vec2::new(0.5, 0.5);
+        assert!(
+            point_in_node_aabb(centre, "0", &tree),
+            "Centre must count as inside the ellipse"
+        );
+        assert!(
+            !point_in_node_aabb(near_corner, "0", &tree),
+            "AABB corner must NOT count as inside the ellipse"
+        );
+    }
+
+    #[test]
+    fn test_rect_select_ignores_ellipse_aabb_corner_only() {
+        let mut tree = load_test_tree();
+        set_node_shape_ellipse(&mut tree, "0");
+        let (pos, _bounds) = node_bounds(&tree, "0");
+        // Tiny selection rect tucked into the top-left corner —
+        // inside the AABB, outside the ellipse. The old pure-AABB
+        // `rect_select` would have returned "0"; the shape-aware
+        // version must not.
+        let hits = rect_select(pos, pos + Vec2::new(2.0, 2.0), &tree);
+        assert!(
+            !hits.contains(&"0".to_string()),
+            "Rect-select inside ellipse's AABB corner must miss"
+        );
+    }
+
+    #[test]
+    fn test_rect_select_still_catches_ellipse_through_centre() {
+        let mut tree = load_test_tree();
+        set_node_shape_ellipse(&mut tree, "0");
+        let (pos, bounds) = node_bounds(&tree, "0");
+        // Selection rect crossing the centre of the ellipse must
+        // still register a hit.
+        let centre = pos + bounds * 0.5;
+        let hits = rect_select(
+            centre - Vec2::new(5.0, 5.0),
+            centre + Vec2::new(5.0, 5.0),
+            &tree,
+        );
+        assert!(
+            hits.contains(&"0".to_string()),
+            "Rect-select crossing the ellipse centre must hit"
+        );
+    }
+
     // --- Custom mutation registry & application tests ---
 

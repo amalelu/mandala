@@ -115,7 +115,16 @@ pub(in crate::application::app) fn compute_picker_geometry(
         )},
     };
 
-    // Hex readout is visible when the cursor is inside the backdrop.
+    // Hex readout is visible when the cursor is inside the backdrop
+    // AABB. This is deliberately *not* the circular gate that
+    // `hit_test_picker` uses: the hex appears whenever the user is
+    // over the card (including the chrome corners and the band
+    // below the wheel where the hex itself is drawn), so "hover to
+    // reveal the value" reads as an attribute of the whole card,
+    // not only of the interactive disk. A click in those same
+    // corners still resolves to `PickerHit::Outside` — the split is
+    // by design.
+    //
     // Without a cached layout from a previous rebuild we can't
     // hit-test the backdrop, so the first rebuild lands without the
     // hex showing; it appears on the first hover rebuild after the

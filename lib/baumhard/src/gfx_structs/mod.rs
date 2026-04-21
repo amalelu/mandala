@@ -21,6 +21,9 @@ pub mod model;
 /// Field-level delta types for `GlyphArea` — the mutation
 /// vocabulary the pipeline uses to target a single facet.
 pub mod area_fields;
+/// Per-node background / hit-test shape enum shared by the renderer
+/// (SDF fragment path) and the BVH hit test (point-in-shape check).
+pub mod shape;
 /// `Applicable` implementations for `GlyphArea` commands and
 /// deltas, dispatched by the tree walker.
 pub mod area_mutators;

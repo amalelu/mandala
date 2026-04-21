@@ -523,6 +523,11 @@ pub fn area_block_commands() {
                                 // `DeltaGlyphArea` (see the dedicated
                                 // tests in `area_tests::do_outline_*`).
                             }
+                            GlyphAreaField::Shape(_) => {
+                                // Same story as Outline — shape lives
+                                // on `DeltaGlyphArea`; see
+                                // `shape::tests` in gfx_structs/shape.rs.
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -612,6 +617,10 @@ pub fn area_block_commands() {
                         GlyphAreaField::Outline(_) => {
                             // See the matching arm in the Add branch
                             // above — outline lives on `DeltaGlyphArea`.
+                        }
+                        GlyphAreaField::Shape(_) => {
+                            // Same story as Outline — see the
+                            // `Add` branch arm above.
                         }
                         GlyphAreaField::Operation(_) => {}
                     },
@@ -731,6 +740,10 @@ pub fn area_block_commands() {
                             GlyphAreaField::Outline(_) => {
                                 // See `do_outline_*` in area_tests.rs.
                             }
+                            GlyphAreaField::Shape(_) => {
+                                // Shape lives on `DeltaGlyphArea`
+                                // only; see `shape::tests`.
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -839,6 +852,10 @@ pub fn area_block_commands() {
                             GlyphAreaField::Outline(_) => {
                                 // See `do_outline_*` in area_tests.rs.
                             }
+                            GlyphAreaField::Shape(_) => {
+                                // Shape lives on `DeltaGlyphArea`
+                                // only; see `shape::tests`.
+                            }
                             GlyphAreaField::Operation(_) => {}
                         },
                         // This range is the expected target
@@ -923,6 +940,9 @@ pub fn area_block_commands() {
                         }
                         GlyphAreaField::Outline(_) => {
                             // See `do_outline_*` in area_tests.rs.
+                        }
+                        GlyphAreaField::Shape(_) => {
+                            // See `shape::tests`.
                         }
                         GlyphAreaField::Operation(_) => {}
                     },
@@ -2266,6 +2286,9 @@ fn assert_element_delta(element: &GfxElement, fields: Vec<GlyphAreaField>) {
             }
             GlyphAreaField::Outline(outline) => {
                 assert_eq!(element.glyph_area().unwrap().outline, outline);
+            }
+            GlyphAreaField::Shape(shape) => {
+                assert_eq!(element.glyph_area().unwrap().shape, shape);
             }
             GlyphAreaField::Operation(_) => {}
         }

@@ -2,6 +2,7 @@
 //! pipeline uses to describe which field to touch and how.
 
 use crate::core::primitives::{ApplyOperation, ColorFontRegions};
+use crate::gfx_structs::shape::NodeShape;
 use crate::util::ordered_vec2::OrderedVec2;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -115,6 +116,8 @@ pub enum GlyphAreaFieldType {
     ColorFontRegions,
     /// Tag for [`GlyphAreaField::Outline`].
     Outline,
+    /// Tag for [`GlyphAreaField::Shape`].
+    Shape,
     /// Tag for [`GlyphAreaField::Operation`] — the control variant
     /// that selects `Assign`/`Add`/`Subtract` for the rest of the
     /// delta.
@@ -159,6 +162,15 @@ pub enum GlyphAreaField {
     /// rhs (a halo is either on or off; combining two halo styles
     /// isn't meaningful).
     Outline(Option<OutlineStyle>),
+    /// Replace the area's
+    /// [`shape`](crate::gfx_structs::area::GlyphArea#structfield.shape)
+    /// field — the background / hit-test shape. Under
+    /// `ApplyOperation::Assign` or `Add` the shape is overwritten
+    /// (shapes don't compose arithmetically); under `Subtract` the
+    /// shape is reset to [`NodeShape::Rectangle`] as a clean "remove
+    /// the custom shape" signal. Additive merge under the `Add`
+    /// impl on `GlyphAreaField` is the rhs for the same reason.
+    Shape(NodeShape),
     /// Override the arithmetic operation that governs how all sibling
     /// field deltas in the same
     /// [`DeltaGlyphArea`](crate::gfx_structs::area::DeltaGlyphArea)
@@ -227,6 +239,14 @@ impl Add for GlyphAreaField {
                         return GlyphAreaField::Outline(other);
                     }
                 }
+                GlyphAreaField::Shape(_) => {
+                    // Shapes don't compose — "rectangle + ellipse"
+                    // has no arithmetic meaning. The rhs wins, same
+                    // as outline above.
+                    if let GlyphAreaField::Shape(other) = rhs {
+                        return GlyphAreaField::Shape(other);
+                    }
+                }
                 GlyphAreaField::Operation(_) => {}
             }
         }
@@ -277,6 +297,7 @@ impl GlyphAreaField {
             GlyphAreaField::ColorFontRegions(_) => GlyphAreaFieldType::ColorFontRegions,
             GlyphAreaField::LineHeight(_) => GlyphAreaFieldType::LineHeight,
             GlyphAreaField::Outline(_) => GlyphAreaFieldType::Outline,
+            GlyphAreaField::Shape(_) => GlyphAreaFieldType::Shape,
             GlyphAreaField::Operation(_) => GlyphAreaFieldType::ApplyOperation,
         }
     }

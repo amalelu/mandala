@@ -67,7 +67,8 @@ pub(in crate::application::app) fn handle_color_picker_click(
     };
 
     // RMB outside the DragAnchor region is a no-op for now — only
-    // the empty backdrop area acts as a resize handle. That keeps
+    // the empty region of the wheel disk (inside the circle, off
+    // every interactive glyph) acts as a resize handle. That keeps
     // the gesture predictable: RMB on a hue/sat/val cell or a chip
     // doesn't accidentally resize while the user is also reading
     // the live preview. In Standalone mode we return `false` so
@@ -129,11 +130,13 @@ pub(in crate::application::app) fn handle_color_picker_click(
             }
         }
         PickerHit::DragAnchor => {
-            // Start a gesture from anywhere inside the backdrop
-            // that's not on an interactive glyph. LMB → move
-            // (translate center_override); RMB → resize (mutate
-            // size_scale). The two gestures are mutually exclusive
-            // by construction — `gesture` only holds one variant.
+            // Start a gesture from anywhere inside the wheel disk
+            // that's not on an interactive glyph (hit_test_picker
+            // now gates on the circle, not the backdrop rect).
+            // LMB → move (translate center_override); RMB → resize
+            // (mutate size_scale). The two gestures are mutually
+            // exclusive by construction — `gesture` only holds one
+            // variant.
             if let ColorPickerState::Open {
                 layout: Some(layout),
                 gesture,
