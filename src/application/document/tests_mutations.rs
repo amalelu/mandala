@@ -510,6 +510,21 @@ use super::defaults::default_cross_link_edge;
             "animation must drain on overshoot, not linger"
         );
 
+        // Pin the intermediate invariant: the completing tick
+        // must write the `to` position synchronously, not defer
+        // it to a later tick. If the drain path ever stopped
+        // committing position on the no-tree branch, the final
+        // assertion below would still trip, but this intermediate
+        // check names the tick that owes the write.
+        let pos_after_first = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+        let expected = orig_x + 100.0;
+        assert!(
+            (pos_after_first - expected).abs() < 0.001,
+            "first (completing) tick should already land on to_node position, \
+             got {} expected ~{}",
+            pos_after_first, expected,
+        );
+
         let advanced_second = doc.tick_animations(u64::MAX / 2, None);
         assert!(
             !advanced_second,
@@ -517,7 +532,6 @@ use super::defaults::default_cross_link_edge;
         );
 
         let final_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
-        let expected = orig_x + 100.0;
         assert!(
             (final_x - expected).abs() < 0.001,
             "overshoot tick should land on to_node position, got {} expected ~{}",

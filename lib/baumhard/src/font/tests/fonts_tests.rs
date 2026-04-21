@@ -12,7 +12,7 @@ use cosmic_text::SwashCache;
 
 use crate::font::fonts;
 use crate::font::fonts::{
-    acquire_font_system_write_with_timeout, measure_glyph_ink_bounds,
+    acquire_font_system_write, acquire_font_system_write_with_timeout, measure_glyph_ink_bounds,
     measure_text_block_unbounded, AppFont, FONT_SYSTEM,
 };
 
@@ -25,7 +25,7 @@ fn test_measure_glyph_ink_bounds_latin_has_positive_advance() {
 /// non-empty ink rectangle. The primitive's happy path.
 pub fn do_measure_glyph_ink_bounds_latin_has_positive_advance() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let mut cache = SwashCache::new();
     let bounds = measure_glyph_ink_bounds(&mut fs, &mut cache, None, "A", 24.0);
     assert!(bounds.advance > 0.0, "Latin advance must be positive");
@@ -44,7 +44,7 @@ fn test_measure_glyph_ink_bounds_tibetan_svasti_has_sidebearing() {
 /// motivates the primitive.
 pub fn do_measure_glyph_ink_bounds_tibetan_svasti_has_sidebearing() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let mut cache = SwashCache::new();
     let bounds = measure_glyph_ink_bounds(
         &mut fs,
@@ -73,7 +73,7 @@ fn test_measure_glyph_ink_bounds_empty_string_is_zero() {
 /// no ink.
 pub fn do_measure_glyph_ink_bounds_empty_string_is_zero() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let mut cache = SwashCache::new();
     let bounds = measure_glyph_ink_bounds(&mut fs, &mut cache, None, "", 24.0);
     assert_eq!(bounds.advance, 0.0);
@@ -95,7 +95,7 @@ fn test_measure_glyph_ink_bounds_x_offset_from_advance_center() {
 /// to the right per the color picker issue).
 pub fn do_measure_glyph_ink_bounds_x_offset_from_advance_center() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let mut cache = SwashCache::new();
     let latin = measure_glyph_ink_bounds(&mut fs, &mut cache, None, "A", 24.0);
     let svasti = measure_glyph_ink_bounds(
@@ -120,7 +120,7 @@ fn test_measure_glyph_ink_bounds_reports_baseline_line_y() {
 /// edge by approximately the font's ascent.
 pub fn do_measure_glyph_ink_bounds_reports_baseline_line_y() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let mut cache = SwashCache::new();
     let bounds = measure_glyph_ink_bounds(&mut fs, &mut cache, None, "M", 24.0);
     assert!(
@@ -146,7 +146,7 @@ fn test_measure_glyph_ink_bounds_y_offset_from_box_center() {
 /// from a single per-arm Y of zero to a per-glyph Y correction.
 pub fn do_measure_glyph_ink_bounds_y_offset_from_box_center() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let mut cache = SwashCache::new();
     let font_size = 24.0;
     let deva = measure_glyph_ink_bounds(&mut fs, &mut cache, None, "अ", font_size);
@@ -189,7 +189,7 @@ fn test_measure_text_block_unbounded_empty_is_zero() {
 /// touching the shaper.
 pub fn do_measure_text_block_unbounded_empty_is_zero() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let out = measure_text_block_unbounded(&mut fs, "", 14.0, 16.8);
     assert_eq!(out.width, 0.0);
     assert_eq!(out.height, 0.0);
@@ -205,7 +205,7 @@ fn test_measure_text_block_unbounded_single_line_nonzero() {
 /// and `height == line_height`.
 pub fn do_measure_text_block_unbounded_single_line_nonzero() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let out = measure_text_block_unbounded(&mut fs, "Hello", 14.0, 16.8);
     assert_eq!(out.line_count, 1, "one line expected for no-newline input");
     assert!(out.width > 0.0, "non-empty text must produce positive width");
@@ -225,7 +225,7 @@ fn test_measure_text_block_unbounded_multiline_width_is_widest_line() {
 /// widest run and `height == line_count * line_height`.
 pub fn do_measure_text_block_unbounded_multiline_width_is_widest_line() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let narrow = measure_text_block_unbounded(&mut fs, "a", 14.0, 16.8);
     let wide = measure_text_block_unbounded(&mut fs, "ccccc", 14.0, 16.8);
     let block = measure_text_block_unbounded(&mut fs, "a\nbb\nccccc", 14.0, 16.8);
@@ -257,7 +257,7 @@ fn test_measure_text_block_unbounded_width_scales_with_font_size() {
 /// is font-dependent (kerning, hinting).
 pub fn do_measure_text_block_unbounded_width_scales_with_font_size() {
     fonts::init();
-    let mut fs = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+    let mut fs = acquire_font_system_write("fonts_tests::do_*");
     let small = measure_text_block_unbounded(&mut fs, "Hello world", 14.0, 16.8);
     let large = measure_text_block_unbounded(&mut fs, "Hello world", 28.0, 33.6);
     let ratio = large.width / small.width;
@@ -288,21 +288,26 @@ fn test_acquire_font_system_write_panics_on_timeout() {
     fonts::init();
     let (acquired_tx, acquired_rx) = mpsc::channel();
     // Spawn a thread that grabs the guard, signals us, then holds
-    // it long enough to let our acquire attempt time out. We do
-    // not join the handle — the test function panics below, and
-    // the detached thread finishes on its own.
+    // it long enough to let our acquire attempt time out *and* to
+    // cover scheduler jitter on a loaded CI runner. We do not join
+    // the handle — the test function panics below, and the
+    // detached thread finishes on its own.
     let _holder = thread::spawn(move || {
         let _guard = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
         acquired_tx.send(()).unwrap();
-        thread::sleep(Duration::from_millis(500));
+        // Hold for 5× the acquire timeout so a slow scheduler
+        // cannot let `try_write` succeed before the timeout fires.
+        thread::sleep(Duration::from_millis(1000));
     });
     acquired_rx.recv().expect("holder thread should acquire");
     // Test-scale timeout — the production constant is 5 s which
-    // would make this test slow. The contract we're pinning is
-    // "panics instead of hanging"; the panic message and the code
-    // path are identical.
+    // would make this test slow. 200 ms gives the acquire loop
+    // ~200 poll cycles (1 ms each) of margin against scheduler
+    // jitter on loaded CI runners; still well under the holder's
+    // 1 s grip. The contract we're pinning is "panics instead of
+    // hanging"; the panic message and the code path are identical.
     let _would_hang = acquire_font_system_write_with_timeout(
         "test_acquire_font_system_write_panics_on_timeout",
-        Duration::from_millis(50),
+        Duration::from_millis(200),
     );
 }

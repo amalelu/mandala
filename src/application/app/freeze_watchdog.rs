@@ -42,18 +42,14 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Maximum time the main thread may go without pinging the
-/// watchdog before the watchdog fires. Ten seconds is orders of
-/// magnitude beyond any legitimate frame budget (60 fps = 16.6 ms;
-/// even a slow scene-build is comfortably under 1 s) and
-/// conservative enough to never fire on a healthy system under
-/// legitimate load. Tune down cautiously — false positives here
-/// kill the process.
+/// Abort if the main thread is silent longer than this.
+/// Conservative enough to never fire on legitimate load
+/// (60 fps ≈ 16.6 ms/frame); tune down cautiously — false
+/// positives here kill the process.
 const FREEZE_THRESHOLD: Duration = Duration::from_secs(10);
 
-/// How often the watchdog thread wakes to check the liveness
-/// atomic. One second keeps wakeup cost negligible while still
-/// detecting a freeze within `FREEZE_THRESHOLD + 1 s`.
+/// Watchdog thread wake interval. Detection latency is
+/// `FREEZE_THRESHOLD + WATCHDOG_POLL` in the worst case.
 const WATCHDOG_POLL: Duration = Duration::from_secs(1);
 
 /// Handle to the freeze watchdog. Dropping the handle does *not*

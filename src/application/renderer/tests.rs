@@ -416,17 +416,21 @@ fn console_mutator_round_trips_to_fresh_build() {
     assert_eq!(layout_a.completion_rows, layout_b.completion_rows);
 
     let mut tree = {
-        let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+        let mut fs =
+            baumhard::font::fonts::acquire_font_system_write("renderer::tests (overlay tree)");
         build_console_overlay_tree(&g_a, &layout_a, &mut fs)
     };
     let mutator = {
-        let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+        let mut fs =
+            baumhard::font::fonts::acquire_font_system_write("renderer::tests (overlay mutator)");
         build_console_overlay_mutator(&g_b, &layout_b, &mut fs)
     };
     mutator.apply_to(&mut tree);
 
     let expected = {
-        let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+        let mut fs = baumhard::font::fonts::acquire_font_system_write(
+            "renderer::tests (overlay areas expected)",
+        );
         console_overlay_areas(&g_b, &layout_b, &mut fs)
     };
 
@@ -528,7 +532,9 @@ fn console_overlay_areas_degrades_when_scrollback_shorter_than_layout_rows() {
     g.scrollback.clear();
 
     let areas = {
-        let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+        let mut fs = baumhard::font::fonts::acquire_font_system_write(
+            "renderer::tests (scrollback degrade)",
+        );
         console_overlay_areas(&g, &layout, &mut fs)
     };
     // Survival check: we got here without aborting. Every slot the
@@ -560,8 +566,54 @@ fn console_overlay_areas_degrades_when_completions_shorter_than_layout_rows() {
     g.selected_completion = None;
 
     let areas = {
-        let mut fs = baumhard::font::fonts::FONT_SYSTEM.write().unwrap();
+        let mut fs = baumhard::font::fonts::acquire_font_system_write(
+            "renderer::tests (completion degrade)",
+        );
         console_overlay_areas(&g, &layout, &mut fs)
     };
     assert!(!areas.is_empty(), "non-completion slots still render");
+}
+
+/// Freeze-hardening regression: the surface-size clamp must leave
+/// dimensions untouched when both axes are within the GPU's
+/// `max_texture_dimension_2d` budget. Picking up an oversize
+/// request silently (not clamping at all) would defeat the guard;
+/// clamping when we didn't need to would spuriously letterbox.
+#[test]
+fn clamp_surface_size_is_identity_below_limit() {
+    // A typical 4K panel in landscape — well under any modern
+    // GPU's 2D texture limit (typically 8192 or 16384).
+    let (w, h) = clamp_surface_size_to_gpu_limit(3840, 2160, 8192);
+    assert_eq!((w, h), (3840, 2160));
+}
+
+/// The clamp must pin each axis that exceeds the GPU limit and
+/// leave the other axis alone. Ultrawide-at-max on a modest GPU
+/// is the realistic freeze-triggering scenario.
+#[test]
+fn clamp_surface_size_caps_only_the_oversized_axis() {
+    // Width over, height fine.
+    assert_eq!(
+        clamp_surface_size_to_gpu_limit(10_000, 4096, 8192),
+        (8192, 4096)
+    );
+    // Height over, width fine.
+    assert_eq!(
+        clamp_surface_size_to_gpu_limit(4096, 10_000, 8192),
+        (4096, 8192)
+    );
+    // Both over — both pinned.
+    assert_eq!(
+        clamp_surface_size_to_gpu_limit(10_000, 12_000, 8192),
+        (8192, 8192)
+    );
+}
+
+/// Boundary: exactly at the limit is not clamped. The wgpu
+/// contract is that dimensions **up to and including**
+/// `max_texture_dimension_2d` are valid.
+#[test]
+fn clamp_surface_size_passes_exact_limit() {
+    let (w, h) = clamp_surface_size_to_gpu_limit(8192, 8192, 8192);
+    assert_eq!((w, h), (8192, 8192));
 }
