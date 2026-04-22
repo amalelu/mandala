@@ -248,12 +248,18 @@ pub(super) fn drain_portal_label(
 /// tree, portal tree, connection body tree, and edge-handle tree
 /// are all untouched. `rebuild_scene_only` would also work but
 /// walks five tree updates; this walks one.
+///
+/// Threads `scene_cache` into `build_scene_with_cache` — a label
+/// drag never invalidates connection-path geometry, so every edge
+/// hits the cache's fast path and only `build_label_elements`
+/// (which runs per-frame regardless) produces new work.
 pub(super) fn drain_edge_label(
     edge_ref: &EdgeRef,
     pending_cursor: &mut Option<Vec2>,
     document: &mut Option<MindMapDocument>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
     mutation_throttle: &mut MutationFrequencyThrottle,
 ) {
     let cursor = match *pending_cursor {
@@ -274,7 +280,11 @@ pub(super) fn drain_edge_label(
             // position / perpendicular offset. Portal tree,
             // borders, node text, and connection body glyphs
             // are all invariant under a `label_config` write.
-            let scene = doc.build_scene_with_selection(renderer.camera_zoom());
+            let scene = doc.build_scene_with_cache(
+                &HashMap::new(),
+                scene_cache,
+                renderer.camera_zoom(),
+            );
             update_connection_label_tree(&scene, app_scene, renderer);
             flush_canvas_scene_buffers(app_scene, renderer);
         }

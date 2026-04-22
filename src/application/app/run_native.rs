@@ -341,6 +341,7 @@ impl InitState {
                 &mut self.document,
                 &mut self.app_scene,
                 &mut self.renderer,
+                &mut self.scene_cache,
                 &mut self.mutation_throttle,
             );
         }
