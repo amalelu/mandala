@@ -8,6 +8,7 @@
 use crate::application::document::MindMapDocument;
 
 use super::commit::apply_picker_preview;
+use super::super::throttled_interaction::ColorPickerHoverInteraction;
 
 /// Mouse-move handler for the picker. Branches on active-drag vs
 /// hover:
@@ -33,7 +34,7 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
     cursor_pos: (f64, f64),
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
-    picker_dirty: &mut bool,
+    picker_hover: &mut ColorPickerHoverInteraction,
 ) -> bool {
     use crate::application::color_picker::{
         hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value,
@@ -87,7 +88,7 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
                     .clamp(geom.resize_scale_min, geom.resize_scale_max);
             }
         }
-        *picker_dirty = true;
+        picker_hover.dirty = true;
         return true;
     }
 
@@ -177,13 +178,13 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
     // — which is fine: the readout was already showing the
     // current value.
     if state_changed {
-        *picker_dirty = true;
+        picker_hover.dirty = true;
         // Preview the updated HSV onto the (possibly contextual)
         // target so the map reflects the hover color live. No-op
         // in Standalone mode — no bound target — but the ࿕ glyph
         // in the wheel still shows the current HSV so the user
         // gets immediate color feedback on the wheel itself.
-        apply_picker_preview(state, doc, picker_dirty);
+        apply_picker_preview(state, doc, picker_hover);
     }
     true
 }

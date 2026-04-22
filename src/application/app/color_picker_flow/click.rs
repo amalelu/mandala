@@ -11,6 +11,7 @@ use super::commit::{
     apply_picker_preview, cancel_color_picker, commit_color_picker,
     commit_color_picker_to_selection,
 };
+use super::super::throttled_interaction::ColorPickerHoverInteraction;
 
 /// Click handler for the picker. Semantics:
 ///
@@ -53,7 +54,7 @@ pub(in crate::application::app) fn handle_color_picker_click(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
-    picker_dirty: &mut bool,
+    picker_hover: &mut ColorPickerHoverInteraction,
 ) -> bool {
     use crate::application::color_picker::{
         hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value,
@@ -96,21 +97,21 @@ pub(in crate::application::app) fn handle_color_picker_click(
                 *hue_deg = hue_slot_to_degrees(slot);
                 *hover_preview = None;
             }
-            apply_picker_preview(state, doc, picker_dirty);
+            apply_picker_preview(state, doc, picker_hover);
         }
         PickerHit::SatCell(i) => {
             if let ColorPickerState::Open { sat, hover_preview, .. } = state {
                 *sat = sat_cell_to_value(i);
                 *hover_preview = None;
             }
-            apply_picker_preview(state, doc, picker_dirty);
+            apply_picker_preview(state, doc, picker_hover);
         }
         PickerHit::ValCell(i) => {
             if let ColorPickerState::Open { val, hover_preview, .. } = state {
                 *val = val_cell_to_value(i);
                 *hover_preview = None;
             }
-            apply_picker_preview(state, doc, picker_dirty);
+            apply_picker_preview(state, doc, picker_hover);
         }
         PickerHit::Commit => {
             if is_standalone {

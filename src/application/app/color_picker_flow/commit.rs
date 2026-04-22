@@ -6,6 +6,7 @@ use crate::application::document::{EdgeRef, MindMapDocument};
 use crate::application::renderer::Renderer;
 
 use super::super::rebuild_all;
+use super::super::throttled_interaction::ColorPickerHoverInteraction;
 
 /// Cancel the picker: clear the transient document preview and
 /// close the modal. The committed model is untouched because the
@@ -128,11 +129,16 @@ pub(in crate::application::app) fn commit_color_picker(
 /// no model mutation, no snapshot. The scene builder reads the
 /// preview via `doc.color_picker_preview` and substitutes it in
 /// during emission.
+///
+/// Marks `picker_hover.dirty` so the per-frame throttle picks up
+/// the change on its next drain — every mouse-move on the wheel
+/// routes through here, and unguarded rebuilds would re-shape
+/// every border / connection / portal on the map at ~120 Hz.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn apply_picker_preview(
     state: &mut crate::application::color_picker::ColorPickerState,
     doc: &mut MindMapDocument,
-    picker_dirty: &mut bool,
+    picker_hover: &mut ColorPickerHoverInteraction,
 ) {
     use crate::application::color_picker::{ColorPickerState, PickerHandle};
     use crate::application::document::ColorPickerPreview;
@@ -180,14 +186,14 @@ pub(in crate::application::app) fn apply_picker_preview(
         }
     }
     // Scene + picker rebuilds are deferred to the `AboutToWait`
-    // drain via `picker_dirty`. Mouse moves come in at ~120Hz on
-    // modern hardware; without this gate every event would
-    // re-shape every border / connection / portal on the map
-    // plus the picker overlay. The drain is gated by
-    // `picker_throttle` (the same `MutationFrequencyThrottle`
+    // drain via `picker_hover.dirty`. Mouse moves come in at
+    // ~120Hz on modern hardware; without this gate every event
+    // would re-shape every border / connection / portal on the
+    // map plus the picker overlay. The drain is gated by
+    // `picker_hover.throttle` (the same `MutationFrequencyThrottle`
     // type the drag path uses), which self-tunes to keep the
     // per-frame work under the refresh budget.
-    *picker_dirty = true;
+    picker_hover.dirty = true;
 }
 
 /// Commit the picker's current HSV to every colorable item in the

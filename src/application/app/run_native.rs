@@ -121,9 +121,11 @@ pub(super) struct InitState {
     pub(super) hovered_node: Option<String>,
     pub(super) modifiers: ModifiersState,
     pub(super) cursor_is_hand: bool,
-    pub(super) mutation_throttle: MutationFrequencyThrottle,
-    pub(super) picker_throttle: MutationFrequencyThrottle,
-    pub(super) picker_dirty: bool,
+    /// Throttled, coexistent-with-drag color-picker hover.
+    /// Continues to update independently of the active drag
+    /// variant (if any), hence a sibling field rather than a
+    /// `ThrottledDrag` variant.
+    pub(super) picker_hover: super::throttled_interaction::ColorPickerHoverInteraction,
     pub(super) keybinds: ResolvedKeybinds,
 }
 
@@ -152,8 +154,7 @@ impl InitState {
             cursor_pos: &mut self.cursor_pos,
             modifiers: &self.modifiers,
             cursor_is_hand: &mut self.cursor_is_hand,
-            mutation_throttle: &mut self.mutation_throttle,
-            picker_dirty: &mut self.picker_dirty,
+            picker_hover: &mut self.picker_hover,
             keybinds: &mut self.keybinds,
         }
     }
@@ -265,86 +266,63 @@ impl InitState {
         }
     }
 
-    /// Per-frame drain: apply pending drag deltas, refresh
-    /// camera-dependent geometry, tick active color-picker
-    /// throttles and animations, then drive one render frame.
+    /// Per-frame drain: drive the active throttled drag (if any)
+    /// and the always-live picker-hover interaction through the
+    /// unified [`ThrottledInteraction::drive`] shell, then the
+    /// non-throttled drains (rect-select overlay, camera
+    /// rebuild, animation tick), then one render frame.
     fn drain_frame(&mut self) {
-        if let DragState::MovingNode {
-            ref node_ids,
-            ref mut pending_delta,
-            ref total_delta,
-            individual,
+        use super::throttled_interaction::{DrainContext, ThrottledInteraction};
+
+        // Only the moving-node drag needs to suppress the camera
+        // rebuild (it handles offset geometry itself each drain).
+        // Snapshot this before the drive() borrow takes `&mut
+        // self.drag_state`.
+        let is_moving_node = matches!(
+            self.drag_state,
+            DragState::Throttled(super::throttled_interaction::ThrottledDrag::MovingNode(_)),
+        );
+
+        // Destructure the fields the two throttled-drive call sites
+        // share so their `DrainContext` literals can reborrow via
+        // `&mut *x` instead of re-spelling `&mut self.X` six times
+        // twice. A named inherent helper (`&mut self -> DrainContext`)
+        // collides with the `&mut self.drag_state` the throttled-drag
+        // arm already holds; a closure over these bindings collides
+        // with the second call site's reborrows. Destructuring once,
+        // reborrowing per call, is what the borrow checker accepts.
+        let Self {
+            document,
+            mindmap_tree,
+            app_scene,
+            renderer,
+            scene_cache,
+            color_picker_state,
+            drag_state,
+            picker_hover,
             ..
-        } = self.drag_state
-        {
-            drain_frame::drain_moving_node(
-                node_ids,
-                pending_delta,
-                total_delta,
-                individual,
-                &mut self.mindmap_tree,
-                &self.document,
-                &mut self.app_scene,
-                &mut self.renderer,
-                &mut self.scene_cache,
-                &mut self.mutation_throttle,
-            );
+        } = self;
+
+        if let DragState::Throttled(ref mut kind) = *drag_state {
+            kind.as_dyn_mut().drive(DrainContext {
+                document: &mut *document,
+                mindmap_tree: &mut *mindmap_tree,
+                app_scene: &mut *app_scene,
+                renderer: &mut *renderer,
+                scene_cache: &mut *scene_cache,
+                color_picker_state: &mut *color_picker_state,
+            });
         }
-        if let DragState::DraggingEdgeHandle {
-            ref edge_ref,
-            ref mut handle,
-            ref mut pending_delta,
-            ref total_delta,
-            ref start_handle_pos,
-            ..
-        } = self.drag_state
-        {
-            drain_frame::drain_edge_handle(
-                edge_ref,
-                handle,
-                pending_delta,
-                total_delta,
-                start_handle_pos,
-                &mut self.document,
-                &mut self.app_scene,
-                &mut self.renderer,
-                &mut self.scene_cache,
-                &mut self.mutation_throttle,
-            );
-        }
-        if let DragState::DraggingPortalLabel {
-            ref edge_ref,
-            ref endpoint_node_id,
-            ref mut pending_cursor,
-            ..
-        } = self.drag_state
-        {
-            drain_frame::drain_portal_label(
-                edge_ref,
-                endpoint_node_id,
-                pending_cursor,
-                &mut self.document,
-                &mut self.app_scene,
-                &mut self.renderer,
-                &mut self.mutation_throttle,
-            );
-        }
-        if let DragState::DraggingEdgeLabel {
-            ref edge_ref,
-            ref mut pending_cursor,
-            ..
-        } = self.drag_state
-        {
-            drain_frame::drain_edge_label(
-                edge_ref,
-                pending_cursor,
-                &mut self.document,
-                &mut self.app_scene,
-                &mut self.renderer,
-                &mut self.scene_cache,
-                &mut self.mutation_throttle,
-            );
-        }
+
+        picker_hover.drive(DrainContext {
+            document: &mut *document,
+            mindmap_tree: &mut *mindmap_tree,
+            app_scene: &mut *app_scene,
+            renderer: &mut *renderer,
+            scene_cache: &mut *scene_cache,
+            color_picker_state: &mut *color_picker_state,
+        });
+
         if let DragState::SelectingRect {
             start_canvas,
             current_canvas,
@@ -360,20 +338,11 @@ impl InitState {
         }
 
         drain_frame::drain_camera_geometry_rebuild(
-            matches!(self.drag_state, DragState::MovingNode { .. }),
+            is_moving_node,
             &self.document,
             &mut self.app_scene,
             &mut self.renderer,
             &mut self.scene_cache,
-        );
-
-        drain_frame::drain_color_picker_hover(
-            &mut self.picker_dirty,
-            &mut self.picker_throttle,
-            &mut self.color_picker_state,
-            &mut self.document,
-            &mut self.app_scene,
-            &mut self.renderer,
         );
 
         drain_frame::drain_animation_tick(

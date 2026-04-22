@@ -1,297 +1,28 @@
-//! Per-frame drain helpers extracted from the `AboutToWait` arm of
-//! the native event loop in [`super::run_native`]. Each function
+//! Per-frame drain helpers for the non-throttled paths in the
+//! `AboutToWait` arm of the native event loop. Each function
 //! handles one self-contained drain block and takes its mutable
-//! state dependencies as parameters so the event-loop body stays
-//! a thin dispatcher.
+//! state dependencies as parameters so the event-loop body stays a
+//! thin dispatcher.
+//!
+//! Throttled, continuous-input-driven drains (node drag, edge-
+//! handle drag, portal-label drag, edge-label drag, color-picker
+//! hover) moved under [`super::throttled_interaction`] behind the
+//! unified [`ThrottledInteraction`](super::throttled_interaction::ThrottledInteraction)
+//! trait; what remains here are the three paths that deliberately
+//! skip the throttle:
+//!
+//! - [`drain_selecting_rect`] — rubber-band overlay + preview
+//!   highlight. Lightweight enough to run every frame.
+//! - [`drain_camera_geometry_rebuild`] — gated by its own
+//!   `take_connection_geometry_dirty` / viewport-dirty flags on
+//!   the renderer; layering the mutation throttle on top would
+//!   add gating without reducing work.
+//! - [`drain_animation_tick`] — paced by `now_ms()` and the
+//!   animation's own timing envelope, not mutation frequency.
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use super::*;
-
-/// Flush any accumulated drag delta (once per frame, not per mouse event),
-/// gated by the mutation-frequency throttle. When the moving
-/// average of this block's work duration exceeds the refresh
-/// budget, `should_drain()` starts returning false on some
-/// frames -- `pending_delta` stays intact and the next
-/// successful drain folds in whatever motion arrived in the
-/// meantime. This holds the governing invariant:
-/// responsiveness is preserved at the cost of briefer
-/// chunking in the visual update cadence.
-pub(super) fn drain_moving_node(
-    node_ids: &[String],
-    pending_delta: &mut Vec2,
-    total_delta: &Vec2,
-    individual: bool,
-    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    document: &Option<MindMapDocument>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    mutation_throttle: &mut MutationFrequencyThrottle,
-) {
-    if *pending_delta != Vec2::ZERO && mutation_throttle.should_drain() {
-        let work_start = Instant::now();
-
-        if let Some(tree) = mindmap_tree.as_mut() {
-            // Position-only patch: move the dragged nodes in the
-            // arena and patch the renderer's existing text buffers
-            // in place. No text reshaping, no font-system lock.
-            let mut patches = Vec::new();
-            for nid in node_ids {
-                apply_drag_delta_and_collect_patches(
-                    tree, nid,
-                    pending_delta.x, pending_delta.y,
-                    !individual,
-                    &mut patches,
-                );
-            }
-            renderer.patch_drag_positions(&patches);
-            renderer.rebuild_node_backgrounds_from_tree(&tree.tree);
-        }
-
-        // Rebuild connections and borders with position offsets.
-        //
-        // Use the cache-aware scene build so only edges whose
-        // endpoints appear in `offsets` get re-sampled. The
-        // renderer's keyed rebuild methods then only re-shape the
-        // buffers for dirty elements; stable elements have just
-        // their `pos` patched in place.
-        if let Some(doc) = document.as_ref() {
-            let mut offsets: HashMap<String, (f32, f32)> = HashMap::new();
-            let delta = (total_delta.x, total_delta.y);
-            for nid in node_ids {
-                offsets.insert(nid.clone(), delta);
-                if !individual {
-                    for desc_id in doc.mindmap.all_descendants(nid) {
-                        offsets.insert(desc_id, delta);
-                    }
-                }
-            }
-
-            // The tree-path connection rebuild
-            // currently re-shapes every edge each
-            // frame. The per-edge incremental
-            // shaping cache that would let us
-            // narrow this to a "dirty" set
-            // (computed from `scene_cache.
-            // edges_touching(nid)` per moved node)
-            // is a known regression tracked
-            // separately; until it lands the full
-            // rebuild below is correct, and we
-            // skip the dead bookkeeping that would
-            // feed it.
-            let scene = doc.build_scene_with_cache(
-                &offsets,
-                scene_cache,
-                renderer.camera_zoom(),
-            );
-
-            update_connection_tree(&scene, app_scene);
-            // Borders go through the canvas-scene
-            // tree path; drag offsets land on the
-            // tree builder via this helper. The
-            // legacy keyed border path used to
-            // patch positions in place (cheap)
-            // while the tree path re-shapes every
-            // border (more expensive) -- a known
-            // regression to address with a
-            // tree-side incremental cache.
-            update_border_tree_with_offsets(doc, &offsets, app_scene);
-            // Labels are emitted per frame (not
-            // cached) so their positions track the
-            // live drag.
-            update_connection_label_tree(&scene, app_scene, renderer);
-            // Portal markers also track the live drag.
-            update_portal_tree(
-                doc, &offsets, app_scene, renderer,
-            );
-            // Edge handles (anchor / midpoint /
-            // control-point ◆ glyphs on a selected
-            // edge) must also track the live drag.
-            // Without this the handles stay pinned
-            // to the pre-drag positions until mouse
-            // release triggers a full rebuild.
-            update_edge_handle_tree(&scene, app_scene);
-            // Single buffer-walk after the batch.
-            flush_canvas_scene_buffers(app_scene, renderer);
-        }
-
-        *pending_delta = Vec2::ZERO;
-        mutation_throttle.record_work_duration(work_start.elapsed());
-    }
-}
-
-/// Edge-handle drag drain. Mirrors the MovingNode drain above but
-/// writes the edge in place instead of moving nodes. The scene
-/// cache is invalidated for the single dirty edge so the next
-/// build re-samples just that edge; everything else rides the
-/// incremental rebuild path.
-pub(super) fn drain_edge_handle(
-    edge_ref: &EdgeRef,
-    handle: &mut baumhard::mindmap::scene_builder::EdgeHandleKind,
-    pending_delta: &mut Vec2,
-    total_delta: &Vec2,
-    start_handle_pos: &Vec2,
-    document: &mut Option<MindMapDocument>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    mutation_throttle: &mut MutationFrequencyThrottle,
-) {
-    if *pending_delta != Vec2::ZERO && mutation_throttle.should_drain() {
-        let work_start = Instant::now();
-        if let Some(doc) = document.as_mut() {
-            let new_handle = apply_edge_handle_drag(
-                doc,
-                edge_ref,
-                *handle,
-                *start_handle_pos,
-                *total_delta,
-            );
-            *handle = new_handle;
-
-            let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
-                &edge_ref.from_id,
-                &edge_ref.to_id,
-                &edge_ref.edge_type,
-            );
-            scene_cache.invalidate_edge(&edge_key);
-
-            // Single dirty edge -- the one being
-            // dragged. Once the tree-path gains
-            // an incremental shaping cache (see
-            // the matching note in the MovingNode
-            // drain above), we'll thread this in
-            // via `scene_cache.invalidate_edge`
-            // already called above.
-            let _ = edge_key;
-            let offsets: HashMap<String, (f32, f32)> = HashMap::new();
-
-            let scene = doc.build_scene_with_cache(
-                &offsets,
-                scene_cache,
-                renderer.camera_zoom(),
-            );
-            update_connection_tree(&scene, app_scene);
-            update_edge_handle_tree(&scene, app_scene);
-            // Labels are rebuilt per frame so a
-            // control-point drag keeps the label
-            // correctly anchored to the live path.
-            update_connection_label_tree(&scene, app_scene, renderer);
-            update_portal_tree(
-                doc,
-                &std::collections::HashMap::new(),
-                app_scene,
-                renderer,
-            );
-            flush_canvas_scene_buffers(app_scene, renderer);
-        }
-        *pending_delta = Vec2::ZERO;
-        mutation_throttle.record_work_duration(work_start.elapsed());
-    }
-}
-
-/// Portal-label drag drain. Mirrors `drain_moving_node` in
-/// throttle discipline: the per-frame body
-/// (`apply_portal_label_drag` + portal tree update) runs at most
-/// every N frames, where N auto-adjusts from the
-/// `MutationFrequencyThrottle` hysteresis window. Pre-drain-queue,
-/// `event_cursor_moved.rs` called this body directly from every
-/// `CursorMoved` event — on a modern 500 Hz mouse that monopolised
-/// the main thread on non-trivial maps.
-///
-/// Keeps the narrow `update_portal_tree + flush_canvas_scene_buffers`
-/// rebuild (portal-only, no node tree) because that's cheap enough
-/// already; the throttle protects against sub-budget events piling
-/// up, not against the per-invocation body being too heavy.
-pub(super) fn drain_portal_label(
-    edge_ref: &EdgeRef,
-    endpoint_node_id: &str,
-    pending_cursor: &mut Option<Vec2>,
-    document: &mut Option<MindMapDocument>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-    mutation_throttle: &mut MutationFrequencyThrottle,
-) {
-    let cursor = match *pending_cursor {
-        Some(c) => c,
-        None => return,
-    };
-    if !mutation_throttle.should_drain() {
-        // Leave `pending_cursor` intact — the next drain folds in
-        // whatever cursor motion arrived in the meantime, same
-        // invariant as `MovingNode`'s `pending_delta`.
-        return;
-    }
-    let work_start = Instant::now();
-    if let Some(doc) = document.as_mut() {
-        let changed =
-            apply_portal_label_drag(doc, edge_ref, endpoint_node_id, cursor);
-        if changed {
-            update_portal_tree(
-                doc,
-                &std::collections::HashMap::new(),
-                app_scene,
-                renderer,
-            );
-            flush_canvas_scene_buffers(app_scene, renderer);
-        }
-    }
-    *pending_cursor = None;
-    mutation_throttle.record_work_duration(work_start.elapsed());
-}
-
-/// Edge-label drag drain. Same throttle discipline as
-/// `drain_portal_label`. The rebuild narrows to
-/// `update_connection_label_tree` + buffer flush — the drag only
-/// mutates `label_config` on one edge, so the node tree, border
-/// tree, portal tree, connection body tree, and edge-handle tree
-/// are all untouched. `rebuild_scene_only` would also work but
-/// walks five tree updates; this walks one.
-///
-/// Threads `scene_cache` into `build_scene_with_cache` — a label
-/// drag never invalidates connection-path geometry, so every edge
-/// hits the cache's fast path and only `build_label_elements`
-/// (which runs per-frame regardless) produces new work.
-pub(super) fn drain_edge_label(
-    edge_ref: &EdgeRef,
-    pending_cursor: &mut Option<Vec2>,
-    document: &mut Option<MindMapDocument>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    mutation_throttle: &mut MutationFrequencyThrottle,
-) {
-    let cursor = match *pending_cursor {
-        Some(c) => c,
-        None => return,
-    };
-    if !mutation_throttle.should_drain() {
-        return;
-    }
-    let work_start = Instant::now();
-    if let Some(doc) = document.as_mut() {
-        let changed = super::edge_label_drag::apply_edge_label_drag(
-            doc, edge_ref, cursor,
-        );
-        if changed {
-            // Rebuild only the connection-label tree — the
-            // drag's visible change is the label glyph's
-            // position / perpendicular offset. Portal tree,
-            // borders, node text, and connection body glyphs
-            // are all invariant under a `label_config` write.
-            let scene = doc.build_scene_with_cache(
-                &HashMap::new(),
-                scene_cache,
-                renderer.camera_zoom(),
-            );
-            update_connection_label_tree(&scene, app_scene, renderer);
-            flush_canvas_scene_buffers(app_scene, renderer);
-        }
-    }
-    *pending_cursor = None;
-    mutation_throttle.record_work_duration(work_start.elapsed());
-}
 
 /// Update selection rectangle overlay + preview highlight (once per frame)
 pub(super) fn drain_selecting_rect(
@@ -331,17 +62,17 @@ pub(super) fn drain_selecting_rect(
 /// clear it before the rebuild re-samples.
 ///
 /// Skipped when a node drag is in progress: the
-/// MovingNode branch above rebuilds with the drag
-/// offsets on its next non-zero `pending_delta` using
-/// the current camera, and rebuilding here with
-/// empty offsets would flicker dragged connections
-/// back to their pre-drag positions for one frame.
-/// Wheel-zoom during an active drag with zero
-/// `pending_delta` leaves connections stale for one
-/// frame until the next mouse-move flush -- an
-/// acceptable tradeoff to keep the two dirty sources
-/// separate. Always take the flags (even when
-/// skipped) so they don't leak across drag frames.
+/// `MovingNode` drain rebuilds with the drag offsets
+/// on its next non-zero `pending_delta` using the
+/// current camera, and rebuilding here with empty
+/// offsets would flicker dragged connections back to
+/// their pre-drag positions for one frame. Wheel-zoom
+/// during an active drag with zero `pending_delta`
+/// leaves connections stale for one frame until the
+/// next mouse-move flush -- an acceptable tradeoff to
+/// keep the two dirty sources separate. Always take
+/// the flags (even when skipped) so they don't leak
+/// across drag frames.
 pub(super) fn drain_camera_geometry_rebuild(
     is_moving_node: bool,
     document: &Option<MindMapDocument>,
@@ -381,44 +112,6 @@ pub(super) fn drain_camera_geometry_rebuild(
             // positions until the next full rebuild.
             update_edge_handle_tree(&scene, app_scene);
             flush_canvas_scene_buffers(app_scene, renderer);
-        }
-    }
-}
-
-/// Picker hover / chip drain. Mouse-move and
-/// chip-focus handlers set `picker_dirty`
-/// whenever HSV state changes; this gate runs
-/// the actual rebuild at most once per
-/// refresh budget. `picker_throttle` self-
-/// tunes via the moving-average mechanism so
-/// a heavy map (where rebuild_scene_only is
-/// expensive) gets fewer drains per second
-/// rather than dropping frames.
-pub(super) fn drain_color_picker_hover(
-    picker_dirty: &mut bool,
-    picker_throttle: &mut MutationFrequencyThrottle,
-    color_picker_state: &mut crate::application::color_picker::ColorPickerState,
-    document: &mut Option<MindMapDocument>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-) {
-    if *picker_dirty && picker_throttle.should_drain() {
-        if let (Some(doc), true) =
-            (document.as_mut(), color_picker_state.is_open())
-        {
-            let work_start = std::time::Instant::now();
-            rebuild_scene_only(doc, app_scene, renderer);
-            rebuild_color_picker_overlay(
-                color_picker_state,
-                doc,
-                app_scene,
-                renderer,
-            );
-            *picker_dirty = false;
-            picker_throttle.record_work_duration(work_start.elapsed());
-        } else {
-            // Picker closed between event and drain -- drop the dirty flag.
-            *picker_dirty = false;
         }
     }
 }

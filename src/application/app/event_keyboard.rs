@@ -35,7 +35,7 @@ pub(super) fn handle_keyboard_input(
         hovered_node,
         cursor_pos,
         modifiers,
-        picker_dirty,
+        picker_hover,
         keybinds,
         ..
     } = ctx;
@@ -88,7 +88,7 @@ pub(super) fn handle_keyboard_input(
                 color_picker_state,
                 doc,
                 mindmap_tree,
-                picker_dirty,
+                picker_hover,
                 app_scene,
                 renderer,
             )

@@ -14,6 +14,7 @@ use super::commit::{
     apply_picker_preview, cancel_color_picker, commit_color_picker,
     commit_color_picker_to_selection,
 };
+use super::super::throttled_interaction::ColorPickerHoverInteraction;
 
 /// Route a keystroke to the picker via `action_for_context`. Returns
 /// `true` if the key was consumed, `false` to let it fall through
@@ -28,7 +29,7 @@ pub(in crate::application::app) fn handle_color_picker_key(
     state: &mut ColorPickerState,
     doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    picker_dirty: &mut bool,
+    picker_hover: &mut ColorPickerHoverInteraction,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
 ) -> bool {
@@ -51,7 +52,7 @@ pub(in crate::application::app) fn handle_color_picker_key(
         Some(Action::Paste) => {
             if let Some(text) = clipboard::read_clipboard() {
                 if let Outcome::Applied = state.clipboard_paste(&text) {
-                    apply_picker_preview(state, doc, picker_dirty);
+                    apply_picker_preview(state, doc, picker_hover);
                 }
             }
             true
@@ -80,32 +81,32 @@ pub(in crate::application::app) fn handle_color_picker_key(
             true
         }
         Some(Action::PickerNudgeHueDown) => {
-            nudge_picker(state, doc, picker_dirty, |h, _, _| {
+            nudge_picker(state, doc, picker_hover, |h, _, _| {
                 *h = (*h - 15.0).rem_euclid(360.0);
             })
         }
         Some(Action::PickerNudgeHueUp) => {
-            nudge_picker(state, doc, picker_dirty, |h, _, _| {
+            nudge_picker(state, doc, picker_hover, |h, _, _| {
                 *h = (*h + 15.0).rem_euclid(360.0);
             })
         }
         Some(Action::PickerNudgeSatDown) => {
-            nudge_picker(state, doc, picker_dirty, |_, s, _| {
+            nudge_picker(state, doc, picker_hover, |_, s, _| {
                 *s = (*s - 0.1).clamp(0.0, 1.0);
             })
         }
         Some(Action::PickerNudgeSatUp) => {
-            nudge_picker(state, doc, picker_dirty, |_, s, _| {
+            nudge_picker(state, doc, picker_hover, |_, s, _| {
                 *s = (*s + 0.1).clamp(0.0, 1.0);
             })
         }
         Some(Action::PickerNudgeValDown) => {
-            nudge_picker(state, doc, picker_dirty, |_, _, v| {
+            nudge_picker(state, doc, picker_hover, |_, _, v| {
                 *v = (*v - 0.1).clamp(0.0, 1.0);
             })
         }
         Some(Action::PickerNudgeValUp) => {
-            nudge_picker(state, doc, picker_dirty, |_, _, v| {
+            nudge_picker(state, doc, picker_hover, |_, _, v| {
                 *v = (*v + 0.1).clamp(0.0, 1.0);
             })
         }
@@ -121,13 +122,13 @@ pub(in crate::application::app) fn handle_color_picker_key(
 fn nudge_picker(
     state: &mut ColorPickerState,
     doc: &mut MindMapDocument,
-    picker_dirty: &mut bool,
+    picker_hover: &mut ColorPickerHoverInteraction,
     f: impl FnOnce(&mut f32, &mut f32, &mut f32),
 ) -> bool {
     if let ColorPickerState::Open { hue_deg, sat, val, hover_preview, .. } = state {
         f(hue_deg, sat, val);
         *hover_preview = None;
-        apply_picker_preview(state, doc, picker_dirty);
+        apply_picker_preview(state, doc, picker_hover);
         true
     } else {
         false

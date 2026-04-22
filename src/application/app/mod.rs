@@ -42,13 +42,15 @@ mod label_edit;
 mod run_native;
 #[cfg(not(target_arch = "wasm32"))]
 mod run_native_init;
+#[cfg(not(target_arch = "wasm32"))]
+mod throttled_interaction;
 #[cfg(target_arch = "wasm32")]
 mod run_wasm;
 
 // Cross-platform imports.
 use scene_rebuild::{
     flush_canvas_scene_buffers, rebuild_after_selection_change, rebuild_all,
-    rebuild_scene_only, update_border_tree_static, update_border_tree_with_offsets,
+    rebuild_scene_only, update_border_tree_static,
     update_connection_label_tree, update_connection_tree, update_edge_handle_tree,
     update_portal_tree,
 };
@@ -119,11 +121,12 @@ use crate::application::common::{InputMode, RenderDecree, WindowMode};
 use crate::application::document::{
     EdgeRef, MindMapDocument, SelectionState, UndoAction,
     hit_test, hit_test_edge, rect_select,
-    apply_drag_delta, apply_drag_delta_and_collect_patches,
+    apply_drag_delta,
     apply_tree_highlights,
     HIGHLIGHT_COLOR, REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
 };
-use crate::application::frame_throttle::MutationFrequencyThrottle;
+#[cfg(not(target_arch = "wasm32"))]
+use throttled_interaction::ThrottledDrag;
 use crate::application::keybinds::{Action, ResolvedKeybinds};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::application::console::ConsoleState;
@@ -335,6 +338,22 @@ enum AppMode {
 }
 
 /// Tracks the current drag interaction state.
+///
+/// The four continuous, high-rate-input-driven drag variants
+/// (`MovingNode`, `EdgeHandle`, `PortalLabel`, `EdgeLabel`) are
+/// collapsed behind the `Throttled` tag. Each carries its
+/// pending-state and adaptive throttle as an interaction struct
+/// implementing [`throttled_interaction::ThrottledInteraction`];
+/// the per-frame drain in
+/// [`run_native::InitState::drain_frame`] dispatches through
+/// [`ThrottledDrag::as_dyn_mut`] without naming the active kind.
+/// Adding a fifth throttled drag is a new variant on
+/// `ThrottledDrag` + a struct + a trait impl; nothing about this
+/// enum needs to grow.
+///
+/// `Panning` and `SelectingRect` are *not* throttled — panning is
+/// a camera-only decree (no mutation) and rect-select is a
+/// lightweight overlay redraw.
 #[cfg(not(target_arch = "wasm32"))]
 enum DragState {
     /// No drag in progress.
@@ -353,7 +372,7 @@ enum DragState {
         hit_edge_handle: Option<(EdgeRef, baumhard::mindmap::scene_builder::EdgeHandleKind)>,
         /// If the cursor landed on a portal marker at mouse-down,
         /// this records `(edge_key, endpoint_node_id)` so a drag
-        /// past threshold transitions to `DraggingPortalLabel`.
+        /// past threshold transitions to `Throttled(PortalLabel)`.
         /// Takes precedence over `hit_node` — the marker sits
         /// above a node, but clicking the marker is "grab this
         /// label," not "move this node." Independent of
@@ -366,114 +385,29 @@ enum DragState {
         /// If the cursor landed on an edge-label AABB at
         /// mouse-down, this records the owning edge key so a
         /// drag past threshold transitions to
-        /// `DraggingEdgeLabel`. Takes precedence over
+        /// `Throttled(EdgeLabel)`. Takes precedence over
         /// `hit_node` — a label hovering over a node behind
         /// it should move as a label, not a node.
         hit_edge_label: Option<baumhard::mindmap::scene_cache::EdgeKey>,
     },
     /// Dragging to pan the camera (started on empty space).
+    /// Unthrottled — emits a `CameraPan` decree directly, no
+    /// tree or model mutation involved.
     Panning,
-    /// Dragging node(s) to reposition them.
-    MovingNode {
-        /// The node IDs being moved. Single node, or all selected nodes (shift+drag).
-        node_ids: Vec<String>,
-        /// Accumulated total delta in canvas coords (for model sync on drop).
-        total_delta: Vec2,
-        /// Delta accumulated since last frame, applied in AboutToWait.
-        pending_delta: Vec2,
-        /// Whether dragging only the individual node(s) (alt+drag) vs subtrees.
-        individual: bool,
-    },
-    /// Dragging a grab-handle on the selected edge to reshape it.
-    /// Handles come in four kinds (see
-    /// `scene_builder::EdgeHandleKind`): two anchor endpoints, any
-    /// existing control points, and a midpoint handle on straight
-    /// edges that curves them into a quadratic Bezier on first drag.
-    DraggingEdgeHandle {
-        edge_ref: EdgeRef,
-        /// Which handle is being dragged. `Midpoint` is only the
-        /// initial kind — after the first drain frame inserts a
-        /// fresh control point, this mutates in place to
-        /// `ControlPoint(0)` so subsequent frames take the CP path.
-        handle: baumhard::mindmap::scene_builder::EdgeHandleKind,
-        /// Full snapshot of the edge at drag start, for undo and
-        /// for checking whether the drag actually changed anything
-        /// on release (single-pixel no-op shouldn't leave undo
-        /// droppings).
-        original: baumhard::mindmap::model::MindEdge,
-        /// Canvas-space position of the handle at drag start. Used
-        /// to recompute the new CP position from an absolute cursor
-        /// location instead of an accumulated delta, which avoids
-        /// drift for non-CP handles.
-        start_handle_pos: Vec2,
-        /// Accumulated delta since drag start.
-        total_delta: Vec2,
-        /// Delta accumulated since last frame, applied in AboutToWait.
-        pending_delta: Vec2,
-    },
     /// Shift+drag on empty space: rubber-band selection rectangle.
+    /// Unthrottled — overlay rectangle plus preview highlight is
+    /// cheap enough to run every frame.
     SelectingRect {
         /// Canvas-space corner where the drag started.
         start_canvas: Vec2,
         /// Canvas-space corner at current cursor position.
         current_canvas: Vec2,
     },
-    /// Dragging a portal label along its owning node's border.
-    /// The cursor drags in free canvas space and each drain frame
-    /// snaps that position to the nearest border point, mutating
-    /// the edge's `portal_from` / `portal_to.border_t` in place.
-    /// On release a single `UndoAction::EditEdge` is pushed
-    /// carrying the pre-drag edge snapshot, mirroring the
-    /// `DraggingEdgeHandle` commit path.
-    DraggingPortalLabel {
-        edge_ref: EdgeRef,
-        endpoint_node_id: String,
-        /// Full pre-drag `MindEdge` snapshot, used both for
-        /// `UndoAction::EditEdge` at release and to skip undo
-        /// entries when the drag didn't actually move `border_t`.
-        original: baumhard::mindmap::model::MindEdge,
-        /// Latest cursor position (canvas space) from the
-        /// `CursorMoved` event. Drained once per frame by
-        /// `drain_frame::drain_portal_label` — the throttle gate
-        /// ensures the per-frame `apply_portal_label_drag +
-        /// update_portal_tree` body runs at most every N frames,
-        /// auto-adjusting under load. `None` when no new cursor
-        /// position has arrived since the last drain.
-        ///
-        /// **Overwrite, not accumulate.** Unlike
-        /// `DragState::MovingNode::pending_delta` (which sums
-        /// incremental deltas via `+=`), this field stores an
-        /// absolute cursor. Each `CursorMoved` replaces the
-        /// previous value — when the throttle skips N frames the
-        /// intermediate cursors are discarded and only the
-        /// latest survives. That's the correct discipline here
-        /// because `apply_portal_label_drag` projects the cursor
-        /// onto the node's border directly; intermediate
-        /// positions carry no information the final projection
-        /// needs.
-        pending_cursor: Option<Vec2>,
-    },
-    /// Dragging a line-mode edge's text label along its
-    /// connection path. The cursor drags in free canvas space
-    /// and each drain frame projects that position onto the
-    /// edge's path via
-    /// [`baumhard::mindmap::connection::closest_point_on_path`],
-    /// writing the resulting
-    /// `(position_t, perpendicular_offset)` into the edge's
-    /// `label_config`. On release a single
-    /// `UndoAction::EditEdge` is pushed carrying the pre-drag
-    /// snapshot.
-    DraggingEdgeLabel {
-        edge_ref: EdgeRef,
-        /// Full pre-drag `MindEdge` snapshot — used both for
-        /// the undo entry at release and to skip pushing an
-        /// entry when the drag didn't actually move the label.
-        original: baumhard::mindmap::model::MindEdge,
-        /// Latest cursor position (canvas space) — same throttle
-        /// discipline as [`DragState::DraggingPortalLabel::pending_cursor`].
-        /// `None` between drains. See `drain_frame::drain_edge_label`.
-        pending_cursor: Option<Vec2>,
-    },
+    /// One of the four throttled, mutation-heavy drag gestures —
+    /// see [`ThrottledDrag`] for variants. All four share the
+    /// same adaptive-throttle shell via
+    /// [`throttled_interaction::ThrottledInteraction`].
+    Throttled(ThrottledDrag),
 }
 
 /**

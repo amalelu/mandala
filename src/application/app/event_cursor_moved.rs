@@ -10,6 +10,10 @@
 
 use super::*;
 use super::input_context::InputHandlerContext;
+use super::throttled_interaction::{
+    EdgeHandleInteraction, EdgeLabelInteraction, MovingNodeInteraction,
+    PortalLabelInteraction, ThrottledDrag,
+};
 use winit::dpi::PhysicalPosition;
 use winit::window::Window;
 
@@ -30,7 +34,7 @@ pub(super) fn handle_cursor_moved(
         color_picker_state,
         hovered_node,
         cursor_is_hand,
-        picker_dirty,
+        picker_hover,
         modifiers,
         ..
     } = ctx;
@@ -48,7 +52,7 @@ pub(super) fn handle_cursor_moved(
     // move to the picker.
     if color_picker_state.is_open() && matches!(*drag_state, DragState::None) {
         let consumed = if let Some(doc) = document.as_mut() {
-            handle_color_picker_mouse_move(cursor_pos_val, color_picker_state, doc, picker_dirty)
+            handle_color_picker_mouse_move(cursor_pos_val, color_picker_state, doc, picker_hover)
         } else {
             true
         };
@@ -112,62 +116,46 @@ pub(super) fn handle_cursor_moved(
             let dy = cursor_pos_val.1 - prev_pos.1;
             renderer.process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
         }
-        DragState::MovingNode {
-            total_delta,
-            pending_delta,
-            ..
-        } => {
+        DragState::Throttled(ThrottledDrag::MovingNode(i)) => {
             // Convert screen delta to canvas delta and accumulate.
-            // Actual mutation + rebuild happens in AboutToWait.
+            // Actual mutation + rebuild happens in AboutToWait
+            // behind the shared `ThrottledInteraction::drive` gate.
             let old_canvas = renderer.screen_to_canvas(prev_pos.0 as f32, prev_pos.1 as f32);
             let new_canvas =
                 renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
             let delta = new_canvas - old_canvas;
 
-            *total_delta += delta;
-            *pending_delta += delta;
+            i.total_delta += delta;
+            i.pending_delta += delta;
         }
-        DragState::DraggingEdgeHandle {
-            total_delta,
-            pending_delta,
-            ..
-        } => {
-            // Same accumulation pattern as MovingNode —
-            // actual edge mutation + buffer rebuild
-            // happens in `AboutToWait`.
+        DragState::Throttled(ThrottledDrag::EdgeHandle(i)) => {
+            // Same accumulation pattern as `MovingNode` — actual
+            // edge mutation + buffer rebuild happens in
+            // `AboutToWait` behind the adaptive throttle.
             let old_canvas = renderer.screen_to_canvas(prev_pos.0 as f32, prev_pos.1 as f32);
             let new_canvas =
                 renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
             let delta = new_canvas - old_canvas;
 
-            *total_delta += delta;
-            *pending_delta += delta;
+            i.total_delta += delta;
+            i.pending_delta += delta;
         }
-        DragState::DraggingEdgeLabel { pending_cursor, .. } => {
-            // Store the latest cursor — no scene work in the
-            // event handler. `drain_frame::drain_edge_label`
-            // consumes `pending_cursor` once per frame gated by
-            // `mutation_throttle.should_drain()`, matching the
-            // `MovingNode` / `DraggingEdgeHandle` discipline.
-            // Pre-drain-queue, this arm called
-            // `apply_edge_label_drag + rebuild_scene_only` per
-            // mouse-move event, which on a 500 Hz mouse blew
-            // well past the 14 ms frame budget on any non-trivial
-            // map (§4 mobile budget).
+        DragState::Throttled(ThrottledDrag::EdgeLabel(i)) => {
+            // Overwrite discipline: store the latest cursor —
+            // `EdgeLabelInteraction::drain` projects it onto the
+            // edge path at consume time, so intermediate cursors
+            // carry no information the projection needs.
             let cursor_canvas =
                 renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
-            *pending_cursor = Some(cursor_canvas);
+            i.pending_cursor = Some(cursor_canvas);
         }
-        DragState::DraggingPortalLabel { pending_cursor, .. } => {
-            // Store the latest cursor; drain + rebuild happen
-            // once per frame in `drain_frame::drain_portal_label`
-            // behind the same throttle. Pre-drain-queue this
-            // arm ran `apply_portal_label_drag +
-            // update_portal_tree + flush_canvas_scene_buffers`
-            // per event, which compounds on a high-Hz mouse.
+        DragState::Throttled(ThrottledDrag::PortalLabel(i)) => {
+            // Overwrite discipline, same as `EdgeLabel` —
+            // `PortalLabelInteraction::drain` snaps to the node
+            // border at consume time.
             let cursor_canvas =
                 renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
-            *pending_cursor = Some(cursor_canvas);
+            i.pending_cursor = Some(cursor_canvas);
         }
         DragState::Pending {
             start_pos,
@@ -214,11 +202,9 @@ pub(super) fn handle_cursor_moved(
                             );
                             let prev = doc.selection.clone();
                             scene_cache.clear();
-                            *drag_state = DragState::DraggingEdgeLabel {
-                                edge_ref,
-                                original,
-                                pending_cursor: None,
-                            };
+                            *drag_state = DragState::Throttled(ThrottledDrag::EdgeLabel(
+                                EdgeLabelInteraction::new(edge_ref, original),
+                            ));
                             // `rebuild_after_selection_change` picks
                             // `rebuild_scene_only` when both the
                             // previous and new selections are edge-
@@ -260,12 +246,9 @@ pub(super) fn handle_cursor_moved(
                                 },
                             );
                             scene_cache.clear();
-                            *drag_state = DragState::DraggingPortalLabel {
-                                edge_ref,
-                                endpoint_node_id: endpoint,
-                                original,
-                                pending_cursor: None,
-                            };
+                            *drag_state = DragState::Throttled(ThrottledDrag::PortalLabel(
+                                PortalLabelInteraction::new(edge_ref, endpoint, original),
+                            ));
                             rebuild_all(doc, mindmap_tree, app_scene, renderer);
                             return;
                         }
@@ -290,14 +273,14 @@ pub(super) fn handle_cursor_moved(
                                 .map(|(_, p)| p)
                                 .unwrap_or(canvas_pos);
                             scene_cache.clear();
-                            *drag_state = DragState::DraggingEdgeHandle {
-                                edge_ref,
-                                handle: handle_kind,
-                                original,
-                                start_handle_pos,
-                                total_delta: Vec2::ZERO,
-                                pending_delta: Vec2::ZERO,
-                            };
+                            *drag_state = DragState::Throttled(ThrottledDrag::EdgeHandle(
+                                EdgeHandleInteraction::new(
+                                    edge_ref,
+                                    handle_kind,
+                                    original,
+                                    start_handle_pos,
+                                ),
+                            ));
                             return;
                         }
                     }
@@ -344,12 +327,9 @@ pub(super) fn handle_cursor_moved(
                     // the keyed-edge rebuild picks up the moving
                     // node's edges from scratch.
                     scene_cache.clear();
-                    *drag_state = DragState::MovingNode {
-                        node_ids,
-                        total_delta: Vec2::ZERO,
-                        pending_delta: Vec2::ZERO,
-                        individual: modifiers.alt_key(),
-                    };
+                    *drag_state = DragState::Throttled(ThrottledDrag::MovingNode(
+                        MovingNodeInteraction::new(node_ids, modifiers.alt_key()),
+                    ));
                 } else if modifiers.shift_key() {
                     // Shift+drag on empty space: rubber-band selection
                     let start_canvas =

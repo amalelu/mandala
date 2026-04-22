@@ -29,11 +29,11 @@ use winit::keyboard::ModifiersState;
 use crate::application::color_picker::ColorPickerState;
 use crate::application::console::ConsoleState;
 use crate::application::document::MindMapDocument;
-use crate::application::frame_throttle::MutationFrequencyThrottle;
 use crate::application::keybinds::ResolvedKeybinds;
 use crate::application::renderer::Renderer;
 use crate::application::scene_host::AppScene;
 
+use super::throttled_interaction::ColorPickerHoverInteraction;
 use super::{
     AppMode, DragState, LabelEditState, LastClick, PortalTextEditState, TextEditState,
 };
@@ -87,11 +87,11 @@ pub(in crate::application::app) struct InputHandlerContext<'a> {
     /// Per-frame cursor-icon flag — flipped to "hand" over a button
     /// node by the cursor-move handler.
     pub cursor_is_hand: &'a mut bool,
-    /// Drag-throttle for high-frequency mutation commits (node
-    /// drags, edge-handle drags).
-    pub mutation_throttle: &'a mut MutationFrequencyThrottle,
-    /// Scene-rebuild flag set by interactive color-picker edits.
-    pub picker_dirty: &'a mut bool,
+    /// Throttled color-picker hover interaction. The picker's
+    /// input paths set `.dirty` when HSV state changes; the
+    /// per-frame drain rebuilds the scene + overlay through the
+    /// unified adaptive-throttle shell.
+    pub picker_hover: &'a mut ColorPickerHoverInteraction,
     /// Resolved user keybinds.
     pub keybinds: &'a mut ResolvedKeybinds,
 }
