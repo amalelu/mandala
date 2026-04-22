@@ -20,6 +20,7 @@ use glam::Vec2;
 use crate::mindmap::connection;
 use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig, MindMap};
 use crate::mindmap::scene_cache::EdgeKey;
+use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color::resolve_var;
 use crate::util::grapheme_chad::count_grapheme_clusters;
 
@@ -34,6 +35,7 @@ pub(super) fn build_label_elements(
     offsets: &HashMap<String, (f32, f32)>,
     label_edit_override: Option<(&EdgeKey, &str)>,
     edge_color_preview: Option<EdgeColorPreview<'_>>,
+    selected_edge_label: Option<&EdgeKey>,
     camera_zoom: f32,
 ) -> Vec<ConnectionLabelElement> {
     let vars = &map.canvas.theme_variables;
@@ -109,25 +111,38 @@ pub(super) fn build_label_elements(
         let config = GlyphConnectionConfig::resolved_for(edge, &map.canvas);
         let font_size_pt =
             EdgeLabelConfig::effective_font_size_pt(label_cfg, edge, &map.canvas, camera_zoom);
-        // Color picker preview: substitute the preview hex for this
-        // edge's label color if the preview targets it. Applied
-        // before `resolve_var` so `var(--accent)`-style preview values
-        // still theme-resolve correctly. Label color cascades: its
-        // own override → glyph_connection.color → edge.color.
-        let raw_color: &str = edge_color_preview
-            .and_then(|p| {
-                if *p.edge_key == edge_key {
-                    Some(p.color)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| {
-                label_cfg
-                    .and_then(|c| c.color.as_deref())
-                    .or(config.color.as_deref())
-                    .unwrap_or(edge.color.as_str())
-            });
+        // Color cascade, highest priority first:
+        //   1. Edge-label selection highlight — cyan tint so the
+        //      user sees which label carries focus. Wins over
+        //      every other source because "I clicked this label"
+        //      is the strongest intent signal on the screen.
+        //   2. Color picker hover preview — substitutes the
+        //      wheel-picker's in-flight hex while the user drags
+        //      around the swatch.
+        //   3. Committed color cascade — `label_config.color` →
+        //      `glyph_connection.color` → `edge.color`.
+        // `resolve_var` runs after selection so a preview value
+        // like `var(--accent)` still theme-resolves correctly.
+        let is_selected = selected_edge_label
+            .map_or(false, |key| *key == edge_key);
+        let raw_color: &str = if is_selected {
+            SELECTION_HIGHLIGHT_HEX
+        } else {
+            edge_color_preview
+                .and_then(|p| {
+                    if *p.edge_key == edge_key {
+                        Some(p.color)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    label_cfg
+                        .and_then(|c| c.color.as_deref())
+                        .or(config.color.as_deref())
+                        .unwrap_or(edge.color.as_str())
+                })
+        };
         let color = resolve_var(raw_color, vars).to_string();
 
         // Loose AABB sized from the grapheme-count approximation

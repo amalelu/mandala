@@ -35,12 +35,26 @@ use super::{EdgeColorPreview, PortalColorPreview, RenderScene};
 /// Empty context (all three fields `None`) is the common case —
 /// use [`SceneSelectionContext::default`] instead of spelling
 /// out `SceneSelectionContext { edge: None, .. }` at call sites.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SceneSelectionContext<'a> {
     /// Whole edge selection — applies the cyan highlight to both
     /// markers of a portal-mode edge (or the body glyphs of a
     /// line-mode edge). Tuple is `(from_id, to_id, edge_type)`.
     pub edge: Option<(&'a str, &'a str, &'a str)>,
+    /// Edge-label sub-selection — applies the cyan highlight to
+    /// just the line-mode label text for the named edge, without
+    /// tinting the body glyphs. Set by `SelectionState::EdgeLabel`;
+    /// mutually exclusive with `edge` by construction on the caller
+    /// side (`SelectionState` is an enum). Distinct from `edge` so
+    /// clicking just the label tints only the label, matching what
+    /// the user pointed at.
+    ///
+    /// Stored by value (not as a borrow) because `EdgeLabelSel`
+    /// holds an `EdgeRef` — three strings, which the context
+    /// assembly at the document layer converts into an `EdgeKey`
+    /// per call. The cost is three `String` clones; negligible
+    /// next to the per-frame scene build.
+    pub edge_label: Option<EdgeKey>,
     /// Per-label selection — applies the cyan highlight to just
     /// one endpoint's marker on a portal-mode edge. Mutually
     /// exclusive with `edge` by construction on the caller side
@@ -163,6 +177,7 @@ pub fn build_scene_with_cache(
 ) -> RenderScene {
     let SceneSelectionContext {
         edge: selected_edge,
+        edge_label: selected_edge_label,
         portal_label: selected_portal_label,
         label_edit: label_edit_override,
     } = selection;
@@ -192,12 +207,22 @@ pub fn build_scene_with_cache(
 
     // Label pass — sub-builder rebuilds paths per labeled edge
     // (trivial cost, no cache). Handles the label-edit override
-    // substitution + synthesis for empty committed labels.
+    // substitution + synthesis for empty committed labels, and
+    // paints the cyan highlight onto the label when the selection
+    // is either the whole edge or just the label sub-part (both
+    // map onto the label text — "selected" reads the same way on
+    // every sub-part of the edge).
+    let selected_edge_label_highlight_key: Option<EdgeKey> = selected_edge_label
+        .clone()
+        .or_else(|| {
+            selected_edge.map(|(f, t, ty)| EdgeKey::new(f, t, ty))
+        });
     let connection_label_elements = build_label_elements(
         map,
         offsets,
         label_edit_override,
         edge_color_preview,
+        selected_edge_label_highlight_key.as_ref(),
         camera_zoom,
     );
 

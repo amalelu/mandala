@@ -587,6 +587,69 @@ use super::defaults::default_cross_link_edge;
         }
     }
 
+    /// `SelectionState::EdgeLabel` paints the cyan selection
+    /// highlight onto the label's `ConnectionLabelElement` color
+    /// — the visual signal that the click landed on the label and
+    /// that the next keystroke will type into it. Other selections
+    /// on the same edge (`Edge`) inherit the same tint by design;
+    /// non-edge selections leave the label at its committed color.
+    #[test]
+    fn test_edge_label_selection_paints_label_cyan() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Give the first edge a label so the scene builder emits a
+        // ConnectionLabelElement for it.
+        doc.set_edge_label(&er, Some("hello".into()));
+        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+            er.from_id.as_str(),
+            er.to_id.as_str(),
+            er.edge_type.as_str(),
+        );
+
+        // Baseline: no selection, label takes the committed color
+        // (whatever the cascade resolves to from the model).
+        doc.selection = SelectionState::None;
+        let baseline = doc
+            .build_scene_with_selection(1.0)
+            .connection_label_elements
+            .iter()
+            .find(|c| c.edge_key == edge_key)
+            .expect("baseline label element")
+            .color
+            .clone();
+        assert_ne!(
+            baseline.to_lowercase(),
+            "#00e5ff",
+            "baseline must not already be the highlight color"
+        );
+
+        // EdgeLabel selection: label tints cyan.
+        doc.selection = SelectionState::EdgeLabel(EdgeLabelSel::new(er.clone()));
+        let highlighted = doc
+            .build_scene_with_selection(1.0)
+            .connection_label_elements
+            .iter()
+            .find(|c| c.edge_key == edge_key)
+            .expect("highlighted label element")
+            .color
+            .clone();
+        assert_eq!(highlighted.to_uppercase(), "#00E5FF");
+
+        // Whole-edge selection: same tint applied to the label so
+        // the user reads "selected" the same way regardless of
+        // which sub-part the click landed on.
+        doc.selection = SelectionState::Edge(er.clone());
+        let edge_selected = doc
+            .build_scene_with_selection(1.0)
+            .connection_label_elements
+            .iter()
+            .find(|c| c.edge_key == edge_key)
+            .expect("edge-selected label element")
+            .color
+            .clone();
+        assert_eq!(edge_selected.to_uppercase(), "#00E5FF");
+    }
+
     /// Clearing `doc.color_picker_preview` returns scene output to
     /// the pre-preview state without any model mutation.
     #[test]
