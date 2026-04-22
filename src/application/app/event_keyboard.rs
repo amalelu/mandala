@@ -35,10 +35,11 @@ pub(super) fn handle_keyboard_input(
         hovered_node,
         cursor_pos,
         modifiers,
-        picker_dirty,
+        picker_hover,
         keybinds,
         ..
     } = ctx;
+    let picker_dirty = &mut picker_hover.dirty;
     let cursor_pos = *cursor_pos;
     let key_name = crate::application::keybinds::key_to_name(&logical_key);
 

@@ -136,18 +136,13 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
         // bindings (a "button"). Tracked so we only call set_cursor
         // on transitions instead of every CursorMoved event.
         cursor_is_hand: false,
-        // Governing-invariant throttle. Per-frame work in the drag
-        // path feeds its measured duration into this tracker; when
-        // the moving average crosses the refresh budget,
-        // `should_drain()` starts returning false on some frames,
-        // coalescing multiple ticks' pending delta into a single
-        // drain.
-        mutation_throttle: MutationFrequencyThrottle::with_default_budget(),
         // Picker hover gate: cursor-moves into the picker update
         // HSV + preview synchronously (cheap), but scene + overlay
-        // rebuild is deferred to the `AboutToWait` drain.
-        picker_throttle: MutationFrequencyThrottle::with_default_budget(),
-        picker_dirty: false,
+        // rebuild runs through the unified adaptive throttle in
+        // `AboutToWait`. Each active drag gets its own
+        // `MutationFrequencyThrottle` inside its interaction
+        // struct on entry (see `event_cursor_moved`).
+        picker_hover: super::throttled_interaction::ColorPickerHoverInteraction::new(),
         keybinds,
     }
 }

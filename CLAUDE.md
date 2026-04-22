@@ -63,6 +63,23 @@ not the rules.
   expressed as a mutation cascading through the Baumhard tree, prefer
   that. Things outside the tree — edges, borders, overlays — reach the
   scene builder or renderer directly.
+- **Unified throttled-interaction seam.** Every continuous,
+  high-rate-input-driven mutation (node drag, edge-handle drag,
+  portal-label drag, edge-label drag, color-picker hover) flows
+  through the `ThrottledInteraction` trait in
+  `src/application/app/throttled_interaction/`. The trait's default
+  `drive` method is the adaptive-throttle shell — input is accepted
+  every tick, but the *application* of mutations is gated by a
+  per-interaction `MutationFrequencyThrottle`. New throttled
+  components ship as one struct + one trait impl + one
+  `ThrottledDrag` variant; the drain dispatcher never grows. Scope
+  is continuous interactive paths only; one-shots (console
+  commands, `apply_custom_mutation`) and paths gated by their own
+  dirty flags (camera geometry rebuild, animation tick) stay on
+  their existing synchronous call paths. See
+  `src/application/frame_throttle.rs` for the throttle primitive
+  and `src/application/app/throttled_interaction/mod.rs` for the
+  trait.
 - **Cross-platform reality.** Almost everything that works on native
   also compiles for wasm32. Native-only code sits behind
   `#[cfg(not(target_arch = "wasm32"))]`; WASM-only behind

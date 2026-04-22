@@ -7,6 +7,7 @@
 
 use super::*;
 use super::input_context::InputHandlerContext;
+use super::throttled_interaction::{ThrottledDrag, ThrottledInteraction};
 
 /// Dispatch a `WindowEvent::MouseInput` event. Event payload
 /// (`state`, `button`) stays as direct arguments; all persistent
@@ -35,10 +36,10 @@ pub(super) fn handle_mouse_input(
         hovered_node,
         cursor_pos,
         modifiers,
-        mutation_throttle,
-        picker_dirty,
+        picker_hover,
         ..
     } = ctx;
+    let picker_dirty = &mut picker_hover.dirty;
     let cursor_pos = *cursor_pos;
     // The console swallows mouse clicks as a close
     // gesture. Clicking anywhere while open dismisses
@@ -661,23 +662,23 @@ pub(super) fn handle_mouse_input(
                             );
                         }
                     }
-                    DragState::MovingNode { node_ids, total_delta, pending_delta, individual } => {
+                    DragState::Throttled(ThrottledDrag::MovingNode(mut i)) => {
                         // Flush any remaining pending delta to the tree before drop.
                         // This always runs regardless of the throttle — on release
                         // we want the final position committed in full, even if
                         // the throttle was mid-stretch skipping intermediate drains.
-                        if pending_delta != Vec2::ZERO {
+                        if i.pending_delta != Vec2::ZERO {
                             if let Some(tree) = mindmap_tree.as_mut() {
-                                for nid in &node_ids {
-                                    apply_drag_delta(tree, nid, pending_delta.x, pending_delta.y, !individual);
+                                for nid in &i.node_ids {
+                                    apply_drag_delta(tree, nid, i.pending_delta.x, i.pending_delta.y, !i.individual);
                                 }
                             }
                         }
                         // Drop: sync to model, full rebuild, push undo
                         if let Some(doc) = document.as_mut() {
-                            let dx = total_delta.x as f64;
-                            let dy = total_delta.y as f64;
-                            let undo_data = doc.apply_move_multiple(&node_ids, dx, dy, individual);
+                            let dx = i.total_delta.x as f64;
+                            let dy = i.total_delta.y as f64;
+                            let undo_data = doc.apply_move_multiple(&i.node_ids, dx, dy, i.individual);
                             doc.undo_stack.push(UndoAction::MoveNodes {
                                 original_positions: undo_data,
                             });
@@ -686,12 +687,17 @@ pub(super) fn handle_mouse_input(
                             // Full rebuild from model
                             rebuild_all(doc, mindmap_tree, app_scene, renderer);
                         }
-                        // Drag ended — reset the throttle so the next drag
-                        // starts at n = 1 without inheriting any residual
-                        // throttling from this one.
-                        mutation_throttle.reset();
+                        // Drag ended — reset the interaction's throttle so
+                        // a fresh drag begins at n = 1 without inheriting
+                        // residual throttling from this one. The
+                        // `MovingNodeInteraction` value drops at end of
+                        // scope; this reset call is pedantic on the
+                        // already-consumed throttle, kept for symmetry
+                        // with the other arms where the value might be
+                        // referenced again.
+                        i.reset();
                     }
-                    DragState::DraggingEdgeHandle { edge_ref, handle, original, start_handle_pos, total_delta, pending_delta: _ } => {
+                    DragState::Throttled(ThrottledDrag::EdgeHandle(mut i)) => {
                         // The drain loop has been writing
                         // each new edge state directly
                         // into the model. Before release,
@@ -708,28 +714,23 @@ pub(super) fn handle_mouse_input(
                         if let Some(doc) = document.as_mut() {
                             apply_edge_handle_drag(
                                 doc,
-                                &edge_ref,
-                                handle,
-                                start_handle_pos,
-                                total_delta,
+                                &i.edge_ref,
+                                i.handle,
+                                i.start_handle_pos,
+                                i.total_delta,
                             );
-                            if let Some(idx) = doc.edge_index(&edge_ref) {
+                            if let Some(idx) = doc.edge_index(&i.edge_ref) {
                                 doc.undo_stack.push(UndoAction::EditEdge {
                                     index: idx,
-                                    before: original,
+                                    before: i.original.clone(),
                                 });
                                 doc.dirty = true;
                             }
                             rebuild_all(doc, mindmap_tree, app_scene, renderer);
                         }
-                        mutation_throttle.reset();
+                        i.reset();
                     }
-                    DragState::DraggingPortalLabel {
-                        edge_ref,
-                        endpoint_node_id,
-                        original,
-                        pending_cursor,
-                    } => {
+                    DragState::Throttled(ThrottledDrag::PortalLabel(mut i)) => {
                         // Flush the final cursor if one is buffered.
                         // When `pending_cursor` is `None` the last
                         // drain already consumed it and no flush is
@@ -737,60 +738,55 @@ pub(super) fn handle_mouse_input(
                         // that cursor and release must commit the
                         // user's actual drop position rather than
                         // wherever the prior drain happened to land.
-                        // Bypasses `mutation_throttle` — there is no
-                        // "next frame" after release.
+                        // Bypasses the throttle — there is no "next
+                        // frame" after release.
                         if let (Some(doc), Some(cursor)) =
-                            (document.as_mut(), pending_cursor)
+                            (document.as_mut(), i.pending_cursor.take())
                         {
                             apply_portal_label_drag(
                                 doc,
-                                &edge_ref,
-                                &endpoint_node_id,
+                                &i.edge_ref,
+                                &i.endpoint_node_id,
                                 cursor,
                             );
                         }
                         // Commit with a single EditEdge undo
                         // carrying the pre-drag snapshot, matching
-                        // the DraggingEdgeHandle release path. The
-                        // no-op check only compares the two fields
-                        // this drag can touch (`portal_from` /
+                        // the EdgeHandle release path. The no-op
+                        // check compares only the two fields this
+                        // drag touches (`portal_from` /
                         // `portal_to`) — whole-edge `PartialEq`
-                        // would also read `control_points`, whose
-                        // derived float equality is fragile under
-                        // NaN and unrelated to the drag outcome.
+                        // would fold in float-fragile
+                        // `control_points`.
                         if let Some(doc) = document.as_mut() {
-                            if let Some(idx) = doc.edge_index(&edge_ref) {
+                            if let Some(idx) = doc.edge_index(&i.edge_ref) {
                                 let current = &doc.mindmap.edges[idx];
-                                if current.portal_from != original.portal_from
-                                    || current.portal_to != original.portal_to
+                                if current.portal_from != i.original.portal_from
+                                    || current.portal_to != i.original.portal_to
                                 {
                                     doc.undo_stack.push(UndoAction::EditEdge {
                                         index: idx,
-                                        before: original,
+                                        before: i.original.clone(),
                                     });
                                     doc.dirty = true;
                                 }
                             }
                             rebuild_all(doc, mindmap_tree, app_scene, renderer);
                         }
-                        mutation_throttle.reset();
+                        i.reset();
                     }
-                    DragState::DraggingEdgeLabel {
-                        edge_ref,
-                        original,
-                        pending_cursor,
-                    } => {
+                    DragState::Throttled(ThrottledDrag::EdgeLabel(mut i)) => {
                         // Flush the final cursor if one is buffered.
                         // See the portal release arm above for the
                         // rationale — `None` means the last drain
                         // already caught it, `Some` means the
                         // throttle skipped the final CursorMoved.
                         if let (Some(doc), Some(cursor)) =
-                            (document.as_mut(), pending_cursor)
+                            (document.as_mut(), i.pending_cursor.take())
                         {
                             super::edge_label_drag::apply_edge_label_drag(
                                 doc,
-                                &edge_ref,
+                                &i.edge_ref,
                                 cursor,
                             );
                         }
@@ -798,12 +794,12 @@ pub(super) fn handle_mouse_input(
                         // the pre-drag snapshot, skipping the undo
                         // entry if nothing actually moved.
                         if let Some(doc) = document.as_mut() {
-                            if let Some(idx) = doc.edge_index(&edge_ref) {
+                            if let Some(idx) = doc.edge_index(&i.edge_ref) {
                                 let current = &doc.mindmap.edges[idx];
-                                if current.label_config != original.label_config {
+                                if current.label_config != i.original.label_config {
                                     doc.undo_stack.push(UndoAction::EditEdge {
                                         index: idx,
-                                        before: original,
+                                        before: i.original.clone(),
                                     });
                                     doc.dirty = true;
                                 }
@@ -815,7 +811,7 @@ pub(super) fn handle_mouse_input(
                             // the same story.
                             rebuild_scene_only(doc, app_scene, renderer);
                         }
-                        mutation_throttle.reset();
+                        i.reset();
                     }
                     DragState::SelectingRect { start_canvas, current_canvas } => {
                         // Finalize: select all nodes in the rectangle
