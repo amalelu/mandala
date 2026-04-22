@@ -171,16 +171,30 @@ impl Predicate {
                                     false
                                 }
                             }
-                            _ => panic!("Unsupported Comparator for text"),
+                            // Text is an unordered payload — only `Equals` is
+                            // meaningful. A mutator JSON that pairs it with
+                            // `<`/`>`/`Exists` is malformed; degrade the
+                            // predicate to non-match rather than panic (§9).
+                            _ => {
+                                log::warn!(
+                                    "predicate: unsupported Comparator {:?} on GlyphArea::Text — treating as non-match",
+                                    comparator,
+                                );
+                                false
+                            }
                         };
                     }
                     Scale(scale) => {
-                        return comparator
-                            .compare_f32(element.glyph_area().unwrap().scale.0, scale.0);
+                        let Some(area) = element.glyph_area() else {
+                            return false;
+                        };
+                        return comparator.compare_f32(area.scale.0, scale.0);
                     }
                     LineHeight(line_height) => {
-                        let element_line_height = element.glyph_area().unwrap().line_height;
-                        return comparator.compare_f32(element_line_height.0, line_height.0);
+                        let Some(area) = element.glyph_area() else {
+                            return false;
+                        };
+                        return comparator.compare_f32(area.line_height.0, line_height.0);
                     }
                     ColorFontRegions(_) => {} // not a predicate axis
 
@@ -245,9 +259,14 @@ impl Predicate {
                     }
                 }
                 Region(region, color_font_region_field) => {
-                    let target_range = element.glyph_area().unwrap().regions.get(*region);
-                    if target_range.is_some() {
-                        let target = *target_range.unwrap();
+                    let Some(area) = element.glyph_area() else {
+                        // Region predicates only make sense on elements
+                        // that carry a `GlyphArea`. Degrade to non-match
+                        // for other element kinds (§9).
+                        return false;
+                    };
+                    let target_range = area.regions.get(*region);
+                    if let Some(target) = target_range.copied() {
                         return match comparator {
                             Equals(negation) => match color_font_region_field {
                                 ColorFontRegionField::Range(range) => {
@@ -267,19 +286,41 @@ impl Predicate {
                                         false
                                     }
                                 }
-                                ColorFontRegionField::This => panic!("Unsupported operation!"),
+                                // `This` is a no-payload marker used for
+                                // `Exists`-style probes; `Equals(This)` is
+                                // malformed input.
+                                ColorFontRegionField::This => {
+                                    log::warn!(
+                                        "predicate: Equals on ColorFontRegionField::This has no meaning — treating as non-match",
+                                    );
+                                    false
+                                }
                             },
                             GreaterThan(negation) => match color_font_region_field {
                                 ColorFontRegionField::Range(range) => {
                                     (target.range > *range) != *negation
                                 }
-                                _ => panic!("Unsupported operation on ColorFontRegionField"),
+                                // Only `Range` has an ordering; font / color /
+                                // this are opaque.
+                                _ => {
+                                    log::warn!(
+                                        "predicate: GreaterThan on non-Range ColorFontRegionField {:?} — treating as non-match",
+                                        color_font_region_field,
+                                    );
+                                    false
+                                }
                             },
                             LessThan(negation) => match color_font_region_field {
                                 ColorFontRegionField::Range(range) => {
                                     (target.range < *range) != *negation
                                 }
-                                _ => panic!("Unsupported operation on ColorFontRegionField"),
+                                _ => {
+                                    log::warn!(
+                                        "predicate: LessThan on non-Range ColorFontRegionField {:?} — treating as non-match",
+                                        color_font_region_field,
+                                    );
+                                    false
+                                }
                             },
                             Exists(negation) => {
                                 return match color_font_region_field {
@@ -305,8 +346,7 @@ impl Predicate {
                     }
                 }
                 GlyphModel(model_field) => {
-                    if element.glyph_model().is_some() {
-                        let target_model = element.glyph_model().unwrap();
+                    if let Some(target_model) = element.glyph_model() {
                         return match comparator {
                             Equals(negation) => match model_field {
                                 GlyphMatrix(matrix) => {
@@ -321,8 +361,14 @@ impl Predicate {
                                         false
                                     }
                                 }
+                                // `GlyphLines` is a count-based field — use
+                                // `GreaterThan`/`LessThan` against it, or
+                                // `GlyphMatrix` / `GlyphLine` for equality.
                                 GlyphLines(_) => {
-                                    panic!("Unsupported operation: equality test on lines. Use GlyphMatrix or GlyphLine")
+                                    log::warn!(
+                                        "predicate: Equals on GlyphLines (count-only field) — use GlyphMatrix or GlyphLine for equality",
+                                    );
+                                    false
                                 }
                                 Layer(layer) => (*layer == target_model.layer) != *negation,
                                 GlyphModelField::Position(vec) => {
@@ -332,8 +378,15 @@ impl Predicate {
                             },
                             GreaterThan(negation) => {
                                 match model_field {
+                                    // A matrix is a structured payload; only
+                                    // `Equals` is defined for it. Use
+                                    // `GlyphLines(n)` with `GreaterThan` for
+                                    // line-count ordering.
                                     GlyphMatrix(_) => {
-                                        panic!("Unsupported operation: GreaterThan test on glyph matrix")
+                                        log::warn!(
+                                            "predicate: GreaterThan on GlyphMatrix (structured payload) — use GlyphLines for count ordering",
+                                        );
+                                        false
                                     }
                                     GlyphLine(line_num, line) => {
                                         // maybe she's born with it, maybe it's
@@ -363,9 +416,12 @@ impl Predicate {
                             }
                             LessThan(negation) => {
                                 match model_field {
-                                    GlyphMatrix(_) => panic!(
-                                        "Unsupported operation: LessThan test on glyph matrix"
-                                    ),
+                                    GlyphMatrix(_) => {
+                                        log::warn!(
+                                            "predicate: LessThan on GlyphMatrix (structured payload) — use GlyphLines for count ordering",
+                                        );
+                                        false
+                                    }
                                     GlyphLine(line_num, line) => {
                                         if let Some(our_line) =
                                             target_model.glyph_matrix.get(*line_num)

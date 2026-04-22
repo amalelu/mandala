@@ -590,8 +590,16 @@ pub fn area_block_commands() {
                             assert_eq!(my_block.channel(), reference_block.channel() + chan);
                         }
                         GfxElementField::Id(_) => {}
+                        // AREA_COMMANDS never produces a GlyphModel field
+                        // — glyph-model deltas are covered by the
+                        // MODEL_COMMANDS pass (see `model_block_commands`).
+                        // If a new AREA_COMMANDS entry starts emitting
+                        // `GfxElementField::GlyphModel`, write the Add-branch
+                        // assertion here.
                         GfxElementField::GlyphModel(_) => {
-                            todo!()
+                            unreachable!(
+                                "AREA_COMMANDS does not emit GlyphModel on Add — see MODEL_COMMANDS",
+                            )
                         }
                         GfxElementField::Flag(_) => {}
                     }
@@ -690,11 +698,20 @@ pub fn area_block_commands() {
                     GfxElementField::Channel(chan) => {
                         assert_eq!(chan, my_block.channel());
                     }
+                    // AREA_COMMANDS does not emit Id or GlyphModel
+                    // fields on Assign; MODEL_COMMANDS is the pass that
+                    // covers glyph-model deltas. Write the Assign-branch
+                    // assertion here if a new AREA_COMMANDS entry starts
+                    // emitting either field.
                     GfxElementField::Id(_) => {
-                        todo!()
+                        unreachable!(
+                            "AREA_COMMANDS does not emit Id on Assign",
+                        )
                     }
                     GfxElementField::GlyphModel(_) => {
-                        todo!()
+                        unreachable!(
+                            "AREA_COMMANDS does not emit GlyphModel on Assign — see MODEL_COMMANDS",
+                        )
                     }
                     GfxElementField::Flag(_) => {}
                 },
@@ -811,8 +828,13 @@ pub fn area_block_commands() {
                             assert_eq!(my_block.channel(), reference_block.channel() - chan);
                         }
                         GfxElementField::Id(_) => {}
+                        // AREA_COMMANDS never produces a GlyphModel field
+                        // on Subtract; glyph-model deltas belong to
+                        // MODEL_COMMANDS.
                         GfxElementField::GlyphModel(_) => {
-                            todo!()
+                            unreachable!(
+                                "AREA_COMMANDS does not emit GlyphModel on Subtract — see MODEL_COMMANDS",
+                            )
                         }
                         GfxElementField::Flag(_) => {}
                     }
@@ -926,8 +948,13 @@ pub fn area_block_commands() {
                             assert_eq!(my_block.channel(), reference_block.channel() * chan);
                         }
                         GfxElementField::Id(_) => {}
+                        // AREA_COMMANDS never produces a GlyphModel field
+                        // on Multiply; glyph-model deltas belong to
+                        // MODEL_COMMANDS.
                         GfxElementField::GlyphModel(_) => {
-                            todo!()
+                            unreachable!(
+                                "AREA_COMMANDS does not emit GlyphModel on Multiply — see MODEL_COMMANDS",
+                            )
                         }
                         GfxElementField::Flag(_) => {}
                     }

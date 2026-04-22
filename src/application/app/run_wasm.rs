@@ -278,9 +278,22 @@ wasm_bindgen_futures::spawn_local(async move {
         if let Some(r) = renderer_for_raf.borrow_mut().as_mut() {
             r.process();
         }
-        request_animation_frame(f.borrow().as_ref().unwrap());
+        // The RAF closure is installed at line above and retained
+        // for the lifetime of the page; the `None` arm can only
+        // fire if someone cleared `f` out from under us, which no
+        // code does. Degrade instead of panicking per §9.
+        let closure_ref = f.borrow();
+        let Some(closure) = closure_ref.as_ref() else {
+            log::error!("RAF closure unexpectedly cleared — stopping render loop");
+            return;
+        };
+        request_animation_frame(closure);
     }));
-    request_animation_frame(g.borrow().as_ref().unwrap());
+    request_animation_frame(
+        g.borrow()
+            .as_ref()
+            .expect("render closure installed immediately above"),
+    );
 });
 
 // Resolve the keybind config once. `action_for(key, ctrl, shift, alt)`
@@ -813,12 +826,22 @@ app.event_loop.run(move |event, _window_target| {
 /// `requestAnimationFrame` handshake winit-web uses to drive its
 /// render ticks. Kept next to the event-loop body because that's
 /// its sole caller.
+///
+/// Called once per frame from inside the RAF closure — an
+/// interactive-path caller per `CODE_CONVENTIONS.md §9`. Missing
+/// `window` or a rejected rAF request degrades to a logged warning
+/// and a dropped frame rather than a panic. In practice the browser
+/// keeps both available for the lifetime of the page, so failure
+/// here would indicate the tab is being torn down.
 fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
     use wasm_bindgen::JsCast;
-    web_sys::window()
-        .unwrap()
-        .request_animation_frame(f.as_ref().unchecked_ref())
-        .unwrap();
+    let Some(window) = web_sys::window() else {
+        log::error!("requestAnimationFrame: no `window` available — dropping frame");
+        return;
+    };
+    if let Err(err) = window.request_animation_frame(f.as_ref().unchecked_ref()) {
+        log::error!("requestAnimationFrame rejected: {:?} — dropping frame", err);
+    }
 }
 
 /// HTTP-fetch a mindmap JSON file. Maps are bundled into the page
