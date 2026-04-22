@@ -16,6 +16,11 @@ use super::{
     rebuild_all, route_label_edit_key, update_connection_label_tree, update_portal_tree,
 };
 
+// (`update_portal_tree` imported above is used by the portal-text
+// editor; the line-mode label editor deliberately does NOT touch
+// the portal canvas because `label_edit_preview` only feeds
+// `RenderScene::connection_label_elements` — see the scene builder.)
+
 /// Inline-edit state for a connection's label. When `Open`, all
 /// keyboard input is routed to the label-edit handler (just like
 /// `ConsoleState::Open` captures keys for the console input line).
@@ -109,11 +114,16 @@ pub(in crate::application::app) fn open_label_edit(
         &edge_ref.edge_type,
     );
     doc.label_edit_preview = Some((edge_key, insert_caret(&buffer, cursor_grapheme_pos)));
-    // Rebuild labels so the caret is visible immediately. The caller
-    // already ran `rebuild_all` before this, so the scene is fresh.
+    // Rebuild the connection-label canvas so the caret is visible
+    // immediately. The caller already ran `rebuild_all` before this,
+    // so the scene is fresh elsewhere. We deliberately skip
+    // `update_portal_tree` — `label_edit_preview` only threads into
+    // `RenderScene::connection_label_elements`, and portal-mode
+    // edges have no line label to preview, so the portal canvas
+    // doesn't change on any label-edit keystroke. Keeping that call
+    // out of the hot path is the core "fast label typing" fix.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     update_connection_label_tree(&scene, app_scene, renderer);
-    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
 }
 
 /// Route a keystroke to the inline label editor. Cancel and commit
@@ -180,9 +190,11 @@ pub(in crate::application::app) fn handle_label_edit_key(
             &edge_ref.edge_type,
         );
         doc.label_edit_preview = Some((edge_key, insert_caret(buffer, *cursor_grapheme_pos)));
+        // Same scope as `open_label_edit`: only the connection-
+        // label canvas reads `label_edit_preview`, so the portal
+        // tree stays untouched on every keystroke.
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
         update_connection_label_tree(&scene, app_scene, renderer);
-        update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
     }
 }
 
