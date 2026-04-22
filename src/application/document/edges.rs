@@ -1259,6 +1259,68 @@ impl MindMapDocument {
         true
     }
 
+    /// Set (or clear, with `offset = None`) the per-endpoint
+    /// `perpendicular_offset` on a portal-mode edge — the signed
+    /// distance along the border's outward normal that pulls the
+    /// label away from (or pushes it toward) the owning node.
+    /// Used by the `label perpendicular=<f32>` console key on
+    /// portal-label selections; the portal-label drag writes the
+    /// field directly for per-frame performance. Rolls back an
+    /// all-default `PortalEndpointState` on clear so unchanged
+    /// selections leave no undo droppings.
+    pub fn set_portal_label_perpendicular_offset(
+        &mut self,
+        edge_ref: &EdgeRef,
+        endpoint_node_id: &str,
+        offset: Option<f32>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        // Reject NaN / infinity at the boundary; the model stores
+        // only finite values.
+        if let Some(v) = offset {
+            if !v.is_finite() {
+                return false;
+            }
+        }
+        let before = self.mindmap.edges[idx].clone();
+        let slot = match portal_endpoint_state_mut(
+            &mut self.mindmap.edges[idx],
+            endpoint_node_id,
+        ) {
+            Some(s) => s,
+            None => return false,
+        };
+        let current = slot.as_ref().and_then(|s| s.perpendicular_offset);
+        let matches = match (current, offset) {
+            (None, None) => true,
+            (Some(a), Some(b)) => (a - b).abs() < f32::EPSILON,
+            _ => false,
+        };
+        if matches {
+            return false;
+        }
+        match offset {
+            Some(v) => {
+                slot.get_or_insert_with(PortalEndpointState::default)
+                    .perpendicular_offset = Some(v);
+            }
+            None => {
+                if let Some(existing) = slot.as_mut() {
+                    existing.perpendicular_offset = None;
+                    if existing == &PortalEndpointState::default() {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
     /// Set (or clear, with `text = None`) the per-endpoint text
     /// label on a portal-mode edge. Empty strings are normalized
     /// to `None` so hit-test / render / serde only see one

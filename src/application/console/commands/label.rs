@@ -162,23 +162,42 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         messages.extend(report.messages);
     }
 
-    // Resolve the target edge ref once for every geometry kv —
-    // all three (position, position_t, perpendicular) address the
-    // same `label_config` on the owning edge. EdgeLabel / Edge /
-    // PortalLabel / PortalText all collapse to the owning edge
-    // via `selected_edge_or_portal_edge`; applying geometry to
-    // anything else is a user error reported as a per-key
-    // message.
-    let target_edge: Option<crate::application::document::EdgeRef> =
-        match &eff.document.selection {
-            SelectionState::Edge(er) => Some(er.clone()),
-            SelectionState::EdgeLabel(s) => Some(s.edge_ref.clone()),
-            _ => None,
-        };
+    // Geometry kv routing splits on selection:
+    //
+    // - `Edge` / `EdgeLabel` → line-mode label fields on the edge's
+    //   `label_config` (position_t in [0, 1], perpendicular in canvas
+    //   units along the path normal).
+    // - `PortalLabel` / `PortalText` → per-endpoint fields on the
+    //   owning edge's `portal_from` / `portal_to` state:
+    //   `position_t` → `border_t` in [0, 4), `perpendicular` →
+    //   `perpendicular_offset` along the border's outward normal.
+    //
+    // The `position=<start|middle|end>` shortcut is a line-mode
+    // concept only — it names anchor points on the connection path,
+    // not on a node's border — so it reports "not applicable" for
+    // portal selections.
+    enum TargetKind {
+        LineEdge(crate::application::document::EdgeRef),
+        PortalEndpoint {
+            edge_ref: crate::application::document::EdgeRef,
+            endpoint_node_id: String,
+        },
+    }
+    let target: Option<TargetKind> = match &eff.document.selection {
+        SelectionState::Edge(er) => Some(TargetKind::LineEdge(er.clone())),
+        SelectionState::EdgeLabel(s) => Some(TargetKind::LineEdge(s.edge_ref.clone())),
+        SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => {
+            Some(TargetKind::PortalEndpoint {
+                edge_ref: s.edge_ref(),
+                endpoint_node_id: s.endpoint_node_id.clone(),
+            })
+        }
+        _ => None,
+    };
 
     if let Some((_, value)) = position_kv {
-        match target_edge.as_ref() {
-            Some(er) => {
+        match target.as_ref() {
+            Some(TargetKind::LineEdge(er)) => {
                 let t = match value.as_str() {
                     "start" => 0.0,
                     "middle" => 0.5,
@@ -196,13 +215,20 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                     messages.push(format!("position already {}", value));
                 }
             }
+            Some(TargetKind::PortalEndpoint { .. }) => {
+                messages.push(
+                    "position: portal labels slide along the node border; use \
+                     position_t=<f32 in [0,4)> instead"
+                        .into(),
+                );
+            }
             None => messages.push("position: not applicable to selection".into()),
         }
     }
 
     if let Some((_, value)) = position_t_kv {
-        match target_edge.as_ref() {
-            Some(er) => match value.parse::<f32>() {
+        match target.as_ref() {
+            Some(TargetKind::LineEdge(er)) => match value.parse::<f32>() {
                 Ok(t) if t.is_finite() => {
                     // `set_edge_label_position` clamps into [0, 1].
                     // Echo the clamped value when the user's input
@@ -237,37 +263,95 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                     ))
                 }
             },
+            Some(TargetKind::PortalEndpoint {
+                edge_ref,
+                endpoint_node_id,
+            }) => match value.parse::<f32>() {
+                Ok(t) if t.is_finite() => {
+                    // Portal `border_t` is wrapped into `[0, 4)` by
+                    // the setter; echo that wrap when the user's
+                    // value falls outside the canonical range so
+                    // the stored value isn't silently shifted.
+                    let wrapped =
+                        baumhard::mindmap::portal_geometry::wrap_border_t(t);
+                    if (t - wrapped).abs() > f32::EPSILON {
+                        messages.push(format!(
+                            "position_t {} wrapped to {:.4}",
+                            value, wrapped
+                        ));
+                    }
+                    let changed = eff.document.set_portal_label_border_t(
+                        edge_ref,
+                        endpoint_node_id,
+                        Some(t),
+                    );
+                    any_applied |= changed;
+                    if !changed {
+                        messages.push(format!(
+                            "position_t already ≈ {:.4}",
+                            wrapped
+                        ));
+                    }
+                }
+                Ok(_) => {
+                    return ExecResult::err(format!(
+                        "position_t '{}' must be finite",
+                        value
+                    ))
+                }
+                Err(_) => {
+                    return ExecResult::err(format!(
+                        "position_t '{}' is not a number",
+                        value
+                    ))
+                }
+            },
             None => messages.push("position_t: not applicable to selection".into()),
         }
     }
 
     if let Some((_, value)) = perpendicular_kv {
-        match target_edge.as_ref() {
-            Some(er) => {
-                // Empty string clears back to on-path. Any other
-                // value must parse as a finite f32.
-                let offset: Option<f32> = if value.is_empty() {
-                    None
-                } else {
-                    match value.parse::<f32>() {
-                        Ok(v) if v.is_finite() => Some(v),
-                        Ok(_) => {
-                            return ExecResult::err(format!(
-                                "perpendicular '{}' must be finite",
-                                value
-                            ))
-                        }
-                        Err(_) => {
-                            return ExecResult::err(format!(
-                                "perpendicular '{}' is not a number",
-                                value
-                            ))
-                        }
-                    }
-                };
+        // Empty string clears back to default. Any other value must
+        // parse as a finite f32. Shared parse is cheap enough to
+        // inline per branch for clarity.
+        let offset: Option<f32> = if value.is_empty() {
+            None
+        } else {
+            match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => Some(v),
+                Ok(_) => {
+                    return ExecResult::err(format!(
+                        "perpendicular '{}' must be finite",
+                        value
+                    ))
+                }
+                Err(_) => {
+                    return ExecResult::err(format!(
+                        "perpendicular '{}' is not a number",
+                        value
+                    ))
+                }
+            }
+        };
+        match target.as_ref() {
+            Some(TargetKind::LineEdge(er)) => {
                 let changed = eff
                     .document
                     .set_edge_label_perpendicular_offset(er, offset);
+                any_applied |= changed;
+                if !changed {
+                    messages.push("perpendicular already applied".into());
+                }
+            }
+            Some(TargetKind::PortalEndpoint {
+                edge_ref,
+                endpoint_node_id,
+            }) => {
+                let changed = eff.document.set_portal_label_perpendicular_offset(
+                    edge_ref,
+                    endpoint_node_id,
+                    offset,
+                );
                 any_applied |= changed;
                 if !changed {
                     messages.push("perpendicular already applied".into());

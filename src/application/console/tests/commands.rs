@@ -375,6 +375,76 @@ fn test_label_perpendicular_writes_label_config() {
 }
 
 #[test]
+fn test_label_position_t_writes_portal_border_t_on_portal_label_selection() {
+    // Portal labels: `label position_t=2.5` writes to the
+    // endpoint's `border_t` (canonical range [0, 4)) instead of the
+    // line-mode `label_config.position_t`. Confirms the dispatch
+    // splits on selection and that wrapping into [0, 4) is
+    // applied.
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    // Flip to portal mode so the edge has a portal endpoint to
+    // address; clone the first edge's id triple to drive selection.
+    doc.set_edge_display_mode(&er, "portal");
+    let edge = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let endpoint = edge.from_id.clone();
+    let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+        &edge.from_id,
+        &edge.to_id,
+        &edge.edge_type,
+    );
+    doc.selection = SelectionState::PortalLabel(
+        crate::application::document::PortalLabelSel {
+            edge_key,
+            endpoint_node_id: endpoint.clone(),
+        },
+    );
+    let _ = run("label position_t=2.5", &mut doc);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let pf = updated.portal_from.as_ref().expect("portal_from installed");
+    assert_eq!(pf.border_t, Some(2.5));
+}
+
+#[test]
+fn test_label_perpendicular_writes_portal_offset_on_portal_text_selection() {
+    // Same dispatch shape as above but for `perpendicular=`.
+    // PortalText selections should land in the SAME endpoint slot
+    // as PortalLabel selections — both target the same portal
+    // endpoint, just different sub-parts.
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    doc.set_edge_display_mode(&er, "portal");
+    let edge = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let endpoint = edge.to_id.clone();
+    let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+        &edge.from_id,
+        &edge.to_id,
+        &edge.edge_type,
+    );
+    doc.selection = SelectionState::PortalText(
+        crate::application::document::PortalLabelSel {
+            edge_key,
+            endpoint_node_id: endpoint,
+        },
+    );
+    let _ = run("label perpendicular=18.5", &mut doc);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let pt = updated.portal_to.as_ref().expect("portal_to installed");
+    assert_eq!(pt.perpendicular_offset, Some(18.5));
+
+    // Clearing returns the slot to default and prunes the now-empty
+    // endpoint state — match the line-mode label_config behaviour.
+    let _ = run("label perpendicular=", &mut doc);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    assert!(updated
+        .portal_to
+        .as_ref()
+        .map(|s| s.perpendicular_offset)
+        .unwrap_or(None)
+        .is_none());
+}
+
+#[test]
 fn test_label_position_t_invalid_reports_error() {
     let mut doc = load_test_doc();
     let _ = select_first_edge(&mut doc);
