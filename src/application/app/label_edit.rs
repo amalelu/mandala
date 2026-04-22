@@ -56,6 +56,20 @@ impl LabelEditState {
     pub(in crate::application::app) fn is_open(&self) -> bool {
         matches!(self, LabelEditState::Open { .. })
     }
+
+    /// Borrow the edge currently under edit, if any. Callers use
+    /// this for the click-outside-to-commit check in
+    /// `event_mouse_click`: a release that doesn't hit the edge
+    /// whose label is open commits the buffer, mirroring the node
+    /// text editor's "click outside the node AABB → commit" rule.
+    pub(in crate::application::app) fn edited_edge_ref(
+        &self,
+    ) -> Option<&crate::application::document::EdgeRef> {
+        match self {
+            LabelEditState::Open { edge_ref, .. } => Some(edge_ref),
+            LabelEditState::Closed => None,
+        }
+    }
 }
 
 /// Transition into inline label edit mode for the given edge. Seeds
@@ -239,6 +253,24 @@ pub(in crate::application::app) enum PortalTextEditState {
 impl PortalTextEditState {
     pub(in crate::application::app) fn is_open(&self) -> bool {
         matches!(self, PortalTextEditState::Open { .. })
+    }
+
+    /// Borrow the `(edge_ref, endpoint_node_id)` currently under
+    /// edit, if any. Mirrors [`LabelEditState::edited_edge_ref`]
+    /// — the click-outside-to-commit check needs both the edge
+    /// identity and the endpoint so it can compare against
+    /// `hit_test_portal_text`.
+    pub(in crate::application::app) fn edited_endpoint(
+        &self,
+    ) -> Option<(&crate::application::document::EdgeRef, &str)> {
+        match self {
+            PortalTextEditState::Open {
+                edge_ref,
+                endpoint_node_id,
+                ..
+            } => Some((edge_ref, endpoint_node_id.as_str())),
+            PortalTextEditState::Closed => None,
+        }
     }
 }
 

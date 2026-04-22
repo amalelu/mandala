@@ -170,6 +170,91 @@ pub(super) fn handle_keyboard_input(
         return;
     }
 
+    // Type-to-edit on edge / portal label selections: when an
+    // editable selection is active, no editor is open, and the
+    // user types a printable character (no Ctrl / Alt — Shift is
+    // OK so capital letters and shifted symbols still type), open
+    // the right inline editor and replay the keystroke through it
+    // so the typed character lands in the buffer as the first
+    // edit. This makes the gesture symmetric with what the node
+    // editor offers via `EditSelectionClean` / typing on a freshly-
+    // selected node, and matches what users expect after clicking
+    // a label and starting to type.
+    if !modifiers.control_key() && !modifiers.alt_key() {
+        if let Key::Character(ref c) = logical_key {
+            // Reject empty payloads and pure-control payloads up
+            // front so single-char shortcuts that the keybind table
+            // hasn't claimed don't accidentally open an editor.
+            let has_printable = c.as_str().chars().any(|ch| !ch.is_control());
+            if has_printable {
+                if let Some(doc) = document.as_mut() {
+                    let opened = match doc.selection.clone() {
+                        SelectionState::EdgeLabel(s) => {
+                            open_label_edit(
+                                &s.edge_ref,
+                                doc,
+                                label_edit_state,
+                                app_scene,
+                                renderer,
+                            );
+                            label_edit_state.is_open()
+                        }
+                        SelectionState::PortalLabel(s)
+                        | SelectionState::PortalText(s) => {
+                            let er = s.edge_ref();
+                            open_portal_text_edit(
+                                &er,
+                                &s.endpoint_node_id,
+                                doc,
+                                portal_text_edit_state,
+                                app_scene,
+                                renderer,
+                            );
+                            portal_text_edit_state.is_open()
+                        }
+                        _ => false,
+                    };
+                    if opened {
+                        // Replay the typed character through the
+                        // newly-opened editor so the first key
+                        // ends up in the buffer instead of being
+                        // swallowed by the open gesture.
+                        if label_edit_state.is_open() {
+                            handle_label_edit_key(
+                                &key_name,
+                                &logical_key,
+                                modifiers.control_key(),
+                                modifiers.shift_key(),
+                                modifiers.alt_key(),
+                                keybinds,
+                                label_edit_state,
+                                doc,
+                                mindmap_tree,
+                                app_scene,
+                                renderer,
+                            );
+                        } else if portal_text_edit_state.is_open() {
+                            handle_portal_text_edit_key(
+                                &key_name,
+                                &logical_key,
+                                modifiers.control_key(),
+                                modifiers.shift_key(),
+                                modifiers.alt_key(),
+                                keybinds,
+                                portal_text_edit_state,
+                                doc,
+                                mindmap_tree,
+                                app_scene,
+                                renderer,
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     let action = key_name.as_deref().and_then(|k| {
         keybinds.action_for_context(
             crate::application::keybinds::InputContext::Document,
@@ -324,13 +409,33 @@ pub(super) fn handle_keyboard_input(
                             renderer,
                         );
                     }
-                    SelectionState::PortalLabel(s) => {
+                    SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => {
+                        // Both portal sub-selections (icon + text)
+                        // open the same per-endpoint text editor.
+                        // The icon doesn't carry text of its own,
+                        // so an `EditSelection` from a `PortalLabel`
+                        // selection still authors the text label
+                        // sitting next to it — matching the
+                        // "edit the thing the selection refers to"
+                        // intent on every other variant.
                         let er = s.edge_ref();
                         open_portal_text_edit(
                             &er,
                             &s.endpoint_node_id,
                             doc,
                             portal_text_edit_state,
+                            app_scene,
+                            renderer,
+                        );
+                    }
+                    SelectionState::EdgeLabel(s) => {
+                        // EdgeLabel selection → inline label editor
+                        // on the owning edge's `MindEdge.label`.
+                        // Same action surface as nodes / portals.
+                        open_label_edit(
+                            &s.edge_ref,
+                            doc,
+                            label_edit_state,
                             app_scene,
                             renderer,
                         );
