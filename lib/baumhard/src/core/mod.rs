@@ -12,5 +12,6 @@ pub mod animation;
 /// `Applicable` trait.
 pub mod primitives;
 /// Test bodies exposed through the `pub mod tests;` pattern so
-/// `benches/test_bench.rs` can reuse them as micro-benchmarks. See §B8.
+/// `benches/test_bench.rs` can reuse the `do_*()` function bodies as
+/// micro-benchmarks. See §B8.
 pub mod tests;

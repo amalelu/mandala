@@ -40,10 +40,13 @@ macro_rules! rgb {
     }};
 }
 
-/// Parse a compile-time `#RRGGBB`-style hex string literal into
-/// `[f32; 4]` RGBA (alpha defaults to 1.0). Tolerates leading `#`
-/// and falls back to 0.0 per channel on unparseable hex digits so
-/// the macro does not panic in `const`-like contexts.
+/// Parse an `#RRGGBB`-style hex string into `[f32; 4]` RGBA at the
+/// call site, with alpha pinned to 1.0. Tolerates a leading `#` and
+/// falls back to 0.0 per channel on unparseable digits so a typo in
+/// a palette entry stays visible (transparent black) instead of
+/// panicking the frame. Runs at evaluation time, not `const` time —
+/// use it from `lazy_static!` blocks or regular expressions; it
+/// cannot appear in a `const fn` body.
 #[macro_export]
 macro_rules! hex {
     ($color:expr) => {{

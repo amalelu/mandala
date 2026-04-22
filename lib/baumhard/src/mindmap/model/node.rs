@@ -30,7 +30,12 @@ pub struct MindNode {
     /// Canvas-space width and height of the node's AABB.
     pub size: Size,
     /// Primary text content. Styled-slice overrides live in
-    /// [`Self::text_runs`]; gaps inherit node-level defaults.
+    /// [`Self::text_runs`]: an empty `text_runs` vector renders the
+    /// full string in the cosmic-text default style, but any
+    /// non-empty run-set renders *only* the covered ranges —
+    /// grapheme ranges outside every run drop silently. Callers
+    /// that want the whole string styled must cover it with at
+    /// least one run.
     pub text: String,
     /// Styled slices of [`Self::text`] — see [`TextRun`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -278,13 +278,20 @@ wasm_bindgen_futures::spawn_local(async move {
         if let Some(r) = renderer_for_raf.borrow_mut().as_mut() {
             r.process();
         }
-        // The RAF closure is installed at line above and retained
-        // for the lifetime of the page; the `None` arm can only
-        // fire if someone cleared `f` out from under us, which no
-        // code does. Degrade instead of panicking per §9.
+        // Reschedule against the same closure we were called from.
+        // `f` is set to `Some(closure)` immediately below this
+        // `Closure::new(...)` expression and never cleared — the
+        // setup completes before any rAF fires, so inside this
+        // body the Option is always `Some`. The `None` arm is
+        // therefore unreachable in practice; rather than panic
+        // (§9), we log and let the loop halt — the browser is
+        // about to tear down the tab if this ever fires, and a
+        // dropped loop is the correct outcome in that case
+        // because the closure (`f`'s inner value) is the very
+        // thing that would have been rescheduled.
         let closure_ref = f.borrow();
         let Some(closure) = closure_ref.as_ref() else {
-            log::error!("RAF closure unexpectedly cleared — stopping render loop");
+            log::error!("RAF closure unexpectedly cleared — tab teardown in progress");
             return;
         };
         request_animation_frame(closure);
