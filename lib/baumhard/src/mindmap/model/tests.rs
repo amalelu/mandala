@@ -459,6 +459,7 @@ fn portal_endpoint_text_fields_round_trip() {
     let state = PortalEndpointState {
         color: Some("#ff8800".to_string()),
         border_t: Some(1.5),
+        perpendicular_offset: Some(12.5),
         text: Some("→ jumps".to_string()),
         text_color: Some("#99ccff".to_string()),
         text_font_size_pt: Some(14.0),
@@ -470,6 +471,7 @@ fn portal_endpoint_text_fields_round_trip() {
     let json = serde_json::to_string(&state).unwrap();
     assert!(json.contains("text_color"));
     assert!(json.contains("text_font_size_pt"));
+    assert!(json.contains("perpendicular_offset"));
     let back: PortalEndpointState = serde_json::from_str(&json).unwrap();
     assert_eq!(back, state);
     // Defaults stay absent.
@@ -477,6 +479,7 @@ fn portal_endpoint_text_fields_round_trip() {
     let empty_json = serde_json::to_string(&empty).unwrap();
     assert!(!empty_json.contains("text_color"));
     assert!(!empty_json.contains("text_font_size_pt"));
+    assert!(!empty_json.contains("perpendicular_offset"));
 }
 
 #[test]

@@ -202,6 +202,16 @@ pub struct PortalEndpointState {
     /// = auto-orient toward the partner endpoint. Set by drag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_t: Option<f32>,
+    /// Signed perpendicular slide in canvas units, along the border's
+    /// outward normal. Positive values push the portal label (icon
+    /// + adjacent text) further away from the owning node; negative
+    /// values pull it inward (up to the border). `None` = flush
+    /// against the default outset. Written by the portal-label drag
+    /// and by the `label perpendicular=` console verb alongside
+    /// [`Self::border_t`] so the label can sit where the user
+    /// dropped it, not just along a fixed offset from the border.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perpendicular_offset: Option<f32>,
     /// Per-endpoint text label, rendered as a sibling glyph next
     /// to the portal marker icon. `None` = no text (icon
     /// renders alone). Independent from `MindEdge.label` — edge
