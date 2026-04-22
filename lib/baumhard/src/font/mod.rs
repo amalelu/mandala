@@ -12,6 +12,8 @@ pub mod attrs;
 /// editor factories, and the `measure_glyph_ink_bounds` /
 /// `measure_text_block_unbounded` text-measurement primitives.
 pub mod fonts;
+/// Test bodies exposed through the `pub mod tests;` pattern so the
+/// benchmark harness can reuse them; see §B8.
 pub mod tests;
 
 /// Packed-RGBA colour value (`u32` internally) in the shape

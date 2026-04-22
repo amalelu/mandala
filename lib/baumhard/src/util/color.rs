@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 // `use baumhard::util::color::*` imports continue to resolve.
 pub use super::color_conversion::*;
 
+/// Compile-time `[u8; 4]` → `[f32; 4]` RGBA literal, dividing each
+/// channel by 255.0. Use in `const`-adjacent contexts where a
+/// float-RGBA is wanted without a helper call; the runtime path is
+/// [`super::color_conversion::rgba`].
 #[macro_export]
 macro_rules! rgba {
     ([$r:expr, $g:expr, $b:expr, $a:expr]) => {{
@@ -22,6 +26,8 @@ macro_rules! rgba {
     }};
 }
 
+/// Compile-time `[u8; 3]` → `[f32; 4]` RGB literal with alpha pinned
+/// to 1.0. Mirrors [`rgba!`] for the common no-alpha case.
 #[macro_export]
 macro_rules! rgb {
     ([$r:expr, $g:expr, $b:expr]) => {{
@@ -34,6 +40,10 @@ macro_rules! rgb {
     }};
 }
 
+/// Parse a compile-time `#RRGGBB`-style hex string literal into
+/// `[f32; 4]` RGBA (alpha defaults to 1.0). Tolerates leading `#`
+/// and falls back to 0.0 per channel on unparseable hex digits so
+/// the macro does not panic in `const`-like contexts.
 #[macro_export]
 macro_rules! hex {
     ($color:expr) => {{

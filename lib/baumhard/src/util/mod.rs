@@ -22,6 +22,9 @@ pub mod arena_utils;
 /// Hashable, `Eq`-able 2D float vector — each axis wrapped in
 /// `OrderedFloat` so instances can key hash maps and ordered sets.
 pub mod ordered_vec2;
+/// Test bodies exposed through the `pub mod tests;` pattern so
+/// `benches/test_bench.rs` can import `do_*()` functions as
+/// micro-benchmarks without going through `#[cfg(test)]`. See §B8.
 pub mod tests;
 /// Lazy Sieve of Eratosthenes — the prime table the region-params
 /// grid chooser consults to avoid prime dimension factors.
