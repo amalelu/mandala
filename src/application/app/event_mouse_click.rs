@@ -28,6 +28,7 @@ pub(super) fn handle_mouse_input(
         console_state,
         console_history,
         label_edit_state,
+        portal_text_edit_state,
         text_edit_state,
         color_picker_state,
         last_click,
@@ -216,10 +217,43 @@ pub(super) fn handle_mouse_input(
                 } else {
                     ClickHit::Empty
                 };
-                let already_editing_same_target = text_edit_state
-                    .node_id()
-                    .map(|id| hit_node.as_deref() == Some(id))
-                    .unwrap_or(false);
+                // Suppress the double-click → open-editor gesture when
+                // an editor is already open on the click's target. The
+                // three editor states are mutually exclusive by
+                // construction (the event-keyboard dispatch steals on
+                // whichever is open first), so one match suffices.
+                // Without this guard for the label / portal-text
+                // editors, a double-click while editing would call
+                // `open_label_edit` / `open_portal_text_edit` a second
+                // time, which re-seeds the buffer from the committed
+                // model value and silently destroys the in-progress
+                // edit.
+                let already_editing_same_target = {
+                    let node_match = text_edit_state
+                        .node_id()
+                        .map(|id| hit_node.as_deref() == Some(id))
+                        .unwrap_or(false);
+                    let edge_label_match = label_edit_state
+                        .edited_edge_ref()
+                        .zip(edge_label_hit.as_ref())
+                        .map(|(er, hit)| {
+                            hit.from_id == er.from_id.as_str()
+                                && hit.to_id == er.to_id.as_str()
+                                && hit.edge_type == er.edge_type.as_str()
+                        })
+                        .unwrap_or(false);
+                    let portal_text_match = portal_text_edit_state
+                        .edited_endpoint()
+                        .zip(portal_text_hit.as_ref())
+                        .map(|((er, ep), (hit_key, hit_ep))| {
+                            hit_key.from_id == er.from_id.as_str()
+                                && hit_key.to_id == er.to_id.as_str()
+                                && hit_key.edge_type == er.edge_type.as_str()
+                                && hit_ep.as_str() == ep
+                        })
+                        .unwrap_or(false);
+                    node_match || edge_label_match || portal_text_match
+                };
                 let is_dblclick = !already_editing_same_target
                     && last_click
                         .as_ref()
@@ -472,6 +506,94 @@ pub(super) fn handle_mouse_input(
                                     true,
                                     doc,
                                     text_edit_state,
+                                    mindmap_tree,
+                                    app_scene,
+                                    renderer,
+                                );
+                            }
+                        }
+                        // Same shape for the inline edge-label
+                        // editor: a release that doesn't hit the
+                        // edge currently being edited commits the
+                        // buffer; a release that lands back on
+                        // the same edge label keeps the editor
+                        // open. Without this branch, the only way
+                        // to close the editor was Esc / Enter,
+                        // and clicking elsewhere felt unresponsive.
+                        // Mirrors the node text editor's behaviour
+                        // so the same muscle memory transfers.
+                        if label_edit_state.is_open() {
+                            let release_canvas = renderer.screen_to_canvas(
+                                cursor_pos.0 as f32,
+                                cursor_pos.1 as f32,
+                            );
+                            let edited = label_edit_state.edited_edge_ref().cloned();
+                            let stays_on_edited_label = edited
+                                .as_ref()
+                                .and_then(|er| {
+                                    renderer
+                                        .hit_test_any_edge_label(release_canvas)
+                                        .map(|hit| {
+                                            hit.from_id == er.from_id.as_str()
+                                                && hit.to_id == er.to_id.as_str()
+                                                && hit.edge_type == er.edge_type.as_str()
+                                        })
+                                })
+                                .unwrap_or(false);
+                            if stays_on_edited_label {
+                                return;
+                            }
+                            if let Some(doc) = document.as_mut() {
+                                close_label_edit(
+                                    true,
+                                    doc,
+                                    label_edit_state,
+                                    mindmap_tree,
+                                    app_scene,
+                                    renderer,
+                                );
+                            }
+                        }
+                        // Portal-text editor uses the portal-text
+                        // hitbox instead of the edge-label hitbox,
+                        // and matches `(edge_key, endpoint)` rather
+                        // than just the edge key — clicking the
+                        // *other* endpoint of the same portal edge
+                        // commits this side and then routes the
+                        // click as a fresh selection on the new
+                        // endpoint.
+                        if portal_text_edit_state.is_open() {
+                            let release_canvas = renderer.screen_to_canvas(
+                                cursor_pos.0 as f32,
+                                cursor_pos.1 as f32,
+                            );
+                            let edited = portal_text_edit_state
+                                .edited_endpoint()
+                                .map(|(er, ep)| (er.clone(), ep.to_string()));
+                            let stays_on_edited_text = edited
+                                .as_ref()
+                                .and_then(|(er, ep)| {
+                                    renderer
+                                        .hit_test_portal_text(release_canvas)
+                                        .map(|(hit_key, hit_ep)| {
+                                            hit_key.from_id
+                                                == er.from_id.as_str()
+                                                && hit_key.to_id
+                                                    == er.to_id.as_str()
+                                                && hit_key.edge_type
+                                                    == er.edge_type.as_str()
+                                                && hit_ep == *ep
+                                        })
+                                })
+                                .unwrap_or(false);
+                            if stays_on_edited_text {
+                                return;
+                            }
+                            if let Some(doc) = document.as_mut() {
+                                close_portal_text_edit(
+                                    true,
+                                    doc,
+                                    portal_text_edit_state,
                                     mindmap_tree,
                                     app_scene,
                                     renderer,

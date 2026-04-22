@@ -299,10 +299,12 @@ mod tests {
             if let Some(pf) = edge.portal_from.as_ref() {
                 assert!(pf.min_zoom_to_render.is_none());
                 assert!(pf.max_zoom_to_render.is_none());
+                assert!(pf.perpendicular_offset.is_none());
             }
             if let Some(pt) = edge.portal_to.as_ref() {
                 assert!(pt.min_zoom_to_render.is_none());
                 assert!(pt.max_zoom_to_render.is_none());
+                assert!(pt.perpendicular_offset.is_none());
             }
         }
 
@@ -317,6 +319,10 @@ mod tests {
         assert!(
             !serialized.contains("max_zoom_to_render"),
             "testament roundtrip emitted an unexpected max_zoom_to_render key"
+        );
+        assert!(
+            !serialized.contains("perpendicular_offset"),
+            "testament roundtrip emitted an unexpected perpendicular_offset key"
         );
     }
 

@@ -167,6 +167,228 @@ use super::defaults::default_cross_link_edge;
     }
 
     #[test]
+    fn test_reset_edge_position_line_mode_and_undo_round_trip() {
+        // Line mode: reset clears non-auto anchors + label overrides.
+        // Undo must reinstate *every* cleared field from a single
+        // EditEdge snapshot — the whole point of snapshotting the
+        // pre-edit edge instead of diffing per-field.
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        // Seed non-default state on the edge: mangle both anchors,
+        // and give the label a position + perpendicular override.
+        let edge_mut = doc
+            .mindmap
+            .edges
+            .iter_mut()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        edge_mut.anchor_from = "top".into();
+        edge_mut.anchor_to = "bottom".into();
+        doc.set_edge_label_position(&edge_ref, 0.25);
+        doc.set_edge_label_perpendicular_offset(&edge_ref, Some(9.0));
+        let before = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap()
+            .clone();
+        doc.undo_stack.clear();
+        assert!(doc.reset_edge_position(&edge_ref, None));
+        let after = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert_eq!(after.anchor_from, "auto");
+        assert_eq!(after.anchor_to, "auto");
+        assert!(after.label_config.is_none());
+        // Undo must restore the full pre-reset edge.
+        doc.undo();
+        let restored = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert_eq!(restored.anchor_from, before.anchor_from);
+        assert_eq!(restored.anchor_to, before.anchor_to);
+        assert_eq!(restored.label_config, before.label_config);
+    }
+
+    #[test]
+    fn test_reset_edge_position_portal_single_endpoint() {
+        // Single-endpoint reset: clearing one side must leave the
+        // other side's `border_t` / `perpendicular_offset` intact,
+        // and a subsequent undo must restore the cleared side
+        // byte-for-byte from the one `EditEdge` snapshot — the
+        // "single snapshot restores both sides" invariant the
+        // whole reset shape rests on.
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        doc.set_edge_display_mode(&edge_ref, "portal");
+        let edge = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        let from_id = edge.from_id.clone();
+        let to_id = edge.to_id.clone();
+        doc.set_portal_label_border_t(&edge_ref, &from_id, Some(1.5));
+        doc.set_portal_label_perpendicular_offset(&edge_ref, &from_id, Some(10.0));
+        doc.set_portal_label_border_t(&edge_ref, &to_id, Some(3.0));
+        let before = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap()
+            .clone();
+        doc.undo_stack.clear();
+
+        assert!(doc.reset_edge_position(&edge_ref, Some(&from_id)));
+        let after = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert!(after.portal_from.is_none(), "from endpoint must prune");
+        assert_eq!(
+            after.portal_to.as_ref().and_then(|s| s.border_t),
+            Some(3.0),
+            "to-side border_t must survive a from-only reset"
+        );
+
+        // Undo: one snapshot, both sides restored.
+        assert_eq!(doc.undo_stack.len(), 1);
+        doc.undo();
+        let restored = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert_eq!(
+            restored.portal_from, before.portal_from,
+            "undo must restore from-side border_t + perpendicular_offset"
+        );
+        assert_eq!(
+            restored.portal_to, before.portal_to,
+            "undo must leave to-side byte-equal to pre-reset snapshot"
+        );
+    }
+
+    #[test]
+    fn test_reset_edge_position_portal_whole_edge_undo_restores_both_sides() {
+        // Whole-edge reset: clearing both endpoints must produce
+        // exactly one undo entry; undo must restore both sides
+        // from that single snapshot, not just one.
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        doc.set_edge_display_mode(&edge_ref, "portal");
+        let edge = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        let from_id = edge.from_id.clone();
+        let to_id = edge.to_id.clone();
+        doc.set_portal_label_border_t(&edge_ref, &from_id, Some(1.0));
+        doc.set_portal_label_perpendicular_offset(&edge_ref, &from_id, Some(5.0));
+        doc.set_portal_label_border_t(&edge_ref, &to_id, Some(2.0));
+        doc.set_portal_label_perpendicular_offset(&edge_ref, &to_id, Some(-8.0));
+        let before = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap()
+            .clone();
+        doc.undo_stack.clear();
+
+        assert!(doc.reset_edge_position(&edge_ref, None));
+        assert_eq!(doc.undo_stack.len(), 1, "one snapshot covers both sides");
+        doc.undo();
+        let restored = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert_eq!(restored.portal_from, before.portal_from);
+        assert_eq!(restored.portal_to, before.portal_to);
+    }
+
+    #[test]
+    fn test_reset_edge_position_portal_preserves_non_position_endpoint_state() {
+        // The reset clears only `border_t` and
+        // `perpendicular_offset`. Sibling fields (color, text,
+        // text_color, font clamps, zoom bounds) must survive
+        // unchanged — verifies the "prune if all-default, else
+        // preserve" contract on `PortalEndpointState`.
+        use baumhard::mindmap::model::PortalEndpointState;
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        doc.set_edge_display_mode(&edge_ref, "portal");
+        let edge = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        let from_id = edge.from_id.clone();
+        let edge_idx = doc
+            .mindmap
+            .edges
+            .iter()
+            .position(|e| edge_ref.matches(e))
+            .unwrap();
+        doc.mindmap.edges[edge_idx].portal_from = Some(PortalEndpointState {
+            color: Some("#ff0000".into()),
+            border_t: Some(1.25),
+            perpendicular_offset: Some(7.5),
+            ..PortalEndpointState::default()
+        });
+        doc.undo_stack.clear();
+
+        assert!(doc.reset_edge_position(&edge_ref, Some(&from_id)));
+        let after = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        let pf = after.portal_from.as_ref().expect("color must keep slot alive");
+        assert_eq!(pf.color.as_deref(), Some("#ff0000"));
+        assert!(pf.border_t.is_none());
+        assert!(pf.perpendicular_offset.is_none());
+    }
+
+    #[test]
+    fn test_reset_edge_position_already_default_is_noop() {
+        // The no-op contract: if every targeted field already holds
+        // its default, the reset reports false and does not push an
+        // undo entry (no dead snapshots for idempotent console
+        // invocations).
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        // First reset: may or may not mutate — the testament edge
+        // could carry non-auto anchors. Run it and discard any
+        // resulting undo entries so the second call starts clean.
+        doc.reset_edge_position(&edge_ref, None);
+        doc.undo_stack.clear();
+        assert!(
+            !doc.reset_edge_position(&edge_ref, None),
+            "second reset must be a no-op"
+        );
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
     fn test_curve_straight_edge_inserts_control_point() {
         // On a straight edge, `curve_straight_edge` inserts one CP
         // offset perpendicular to the anchor line. The resulting
@@ -479,6 +701,69 @@ use super::defaults::default_cross_link_edge;
             assert_eq!(conn.color, "#abcdef",
                 "preview should beat selection override on the previewed edge");
         }
+    }
+
+    /// `SelectionState::EdgeLabel` paints the cyan selection
+    /// highlight onto the label's `ConnectionLabelElement` color
+    /// — the visual signal that the click landed on the label and
+    /// that the next keystroke will type into it. Other selections
+    /// on the same edge (`Edge`) inherit the same tint by design;
+    /// non-edge selections leave the label at its committed color.
+    #[test]
+    fn test_edge_label_selection_paints_label_cyan() {
+        let mut doc = load_test_doc();
+        let er = first_testament_edge_ref(&doc);
+        // Give the first edge a label so the scene builder emits a
+        // ConnectionLabelElement for it.
+        doc.set_edge_label(&er, Some("hello".into()));
+        let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+            er.from_id.as_str(),
+            er.to_id.as_str(),
+            er.edge_type.as_str(),
+        );
+
+        // Baseline: no selection, label takes the committed color
+        // (whatever the cascade resolves to from the model).
+        doc.selection = SelectionState::None;
+        let baseline = doc
+            .build_scene_with_selection(1.0)
+            .connection_label_elements
+            .iter()
+            .find(|c| c.edge_key == edge_key)
+            .expect("baseline label element")
+            .color
+            .clone();
+        assert_ne!(
+            baseline.to_lowercase(),
+            "#00e5ff",
+            "baseline must not already be the highlight color"
+        );
+
+        // EdgeLabel selection: label tints cyan.
+        doc.selection = SelectionState::EdgeLabel(EdgeLabelSel::new(er.clone()));
+        let highlighted = doc
+            .build_scene_with_selection(1.0)
+            .connection_label_elements
+            .iter()
+            .find(|c| c.edge_key == edge_key)
+            .expect("highlighted label element")
+            .color
+            .clone();
+        assert_eq!(highlighted.to_uppercase(), "#00E5FF");
+
+        // Whole-edge selection: same tint applied to the label so
+        // the user reads "selected" the same way regardless of
+        // which sub-part the click landed on.
+        doc.selection = SelectionState::Edge(er.clone());
+        let edge_selected = doc
+            .build_scene_with_selection(1.0)
+            .connection_label_elements
+            .iter()
+            .find(|c| c.edge_key == edge_key)
+            .expect("edge-selected label element")
+            .color
+            .clone();
+        assert_eq!(edge_selected.to_uppercase(), "#00E5FF");
     }
 
     /// Clearing `doc.color_picker_preview` returns scene output to

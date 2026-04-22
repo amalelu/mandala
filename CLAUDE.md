@@ -116,7 +116,8 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   `src/application/app/text_edit/`.
 - Portal-mode edges (`display_mode = "portal"`): two glyph labels, one
   per endpoint, each carrying a `PortalEndpointState` (color override,
-  pinned `border_t` position, adjacent text + independent text color /
+  pinned `border_t` position, signed `perpendicular_offset` along the
+  border's outward normal, adjacent text + independent text color /
   font clamps). Single-click on the icon selects
   `SelectionState::PortalLabel`; single-click on the adjacent text
   selects `SelectionState::PortalText`; double-click on either pans
@@ -135,11 +136,22 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   and `font size= min= max=` writes to the independent font clamps
   on the corresponding config (`glyph_connection.*`,
   `label_config.*`, or `PortalEndpointState.text_*`). Single-click
-  on an edge label AABB selects the label; double-click opens the
-  inline editor (`open_label_edit` on native; WASM currently just
-  commits the selection — editor-on-WASM is a follow-up). Console
+  on an edge label AABB selects the label and tints it cyan via
+  the same `SceneSelectionContext::edge_label` channel the
+  scene_builder paints whole-edge selections with; double-click,
+  the `EditSelection` action, or simply typing a printable key
+  while the selection is active opens the inline editor
+  (`open_label_edit` on native; WASM currently just commits the
+  selection — editor-on-WASM is a follow-up). Console
   `label position_t=<f32>` / `label perpendicular=<f32>` mirror the
-  edge-label drag so WASM users can position labels without drag.
+  edge-label drag so WASM users can position labels without drag,
+  and dispatch on portal selections too — `position_t=` writes
+  `PortalEndpointState.border_t`, `perpendicular=` writes the new
+  `perpendicular_offset` field. `edge reset=position` clears the
+  position overrides on whichever selection is active (line edge
+  → anchors back to "auto" + label position cleared; portal whole
+  edge → both endpoints' `border_t` + `perpendicular_offset`
+  cleared; single portal endpoint selection → only that side).
 - `connection::closest_point_on_path` — Baumhard primitive that
   projects a cursor `Vec2` onto a `ConnectionPath` (straight or
   cubic) and returns `(position_t, perpendicular_offset)`.
@@ -180,6 +192,9 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   label editor, portal-label text editor. The `mutation` console verb
   (`list` / `apply` / `help` / `inspect`) inherits this scope — the
   loader + registry run on both targets, only the UI shell is native.
+  The label / portal-text editors commit on click outside the
+  edited target's AABB (mirroring the node text editor); WASM
+  reaches the same operations via console verbs.
 - Hover-based UI: `hovered_node` tracking, cursor-change on button
   nodes, `OnClick` trigger dispatch.
 - Clipboard copy/paste — `arboard` on native; WASM `clipboard.rs` stubs

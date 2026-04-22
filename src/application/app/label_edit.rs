@@ -16,6 +16,11 @@ use super::{
     rebuild_all, route_label_edit_key, update_connection_label_tree, update_portal_tree,
 };
 
+// (`update_portal_tree` imported above is used by the portal-text
+// editor; the line-mode label editor deliberately does NOT touch
+// the portal canvas because `label_edit_preview` only feeds
+// `RenderScene::connection_label_elements` — see the scene builder.)
+
 /// Inline-edit state for a connection's label. When `Open`, all
 /// keyboard input is routed to the label-edit handler (just like
 /// `ConsoleState::Open` captures keys for the console input line).
@@ -56,13 +61,30 @@ impl LabelEditState {
     pub(in crate::application::app) fn is_open(&self) -> bool {
         matches!(self, LabelEditState::Open { .. })
     }
+
+    /// Borrow the edge currently under edit, if any. Callers use
+    /// this for the click-outside-to-commit check in
+    /// `event_mouse_click`: a release that doesn't hit the edge
+    /// whose label is open commits the buffer, mirroring the node
+    /// text editor's "click outside the node AABB → commit" rule.
+    pub(in crate::application::app) fn edited_edge_ref(
+        &self,
+    ) -> Option<&crate::application::document::EdgeRef> {
+        match self {
+            LabelEditState::Open { edge_ref, .. } => Some(edge_ref),
+            LabelEditState::Closed => None,
+        }
+    }
 }
 
 /// Transition into inline label edit mode for the given edge. Seeds
 /// the buffer from the edge's current label (or the empty string)
 /// and installs a preview override on the renderer so the caret
-/// shows up immediately. Callers must ensure the edge still exists
-/// in `doc.mindmap.edges` — the function silently returns otherwise.
+/// shows up immediately. If the edge isn't in `doc.mindmap.edges`
+/// any more (e.g. an undo popped it between selection and the open
+/// gesture), logs via `log::warn!` and returns without mutating
+/// state — callers read `label_edit_state.is_open()` to detect
+/// this case.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn open_label_edit(
     edge_ref: &crate::application::document::EdgeRef,
@@ -73,7 +95,15 @@ pub(in crate::application::app) fn open_label_edit(
 ) {
     let edge = match doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)) {
         Some(e) => e,
-        None => return,
+        None => {
+            log::warn!(
+                "open_label_edit: edge {}→{} ({}) not found; editor stays closed",
+                edge_ref.from_id,
+                edge_ref.to_id,
+                edge_ref.edge_type
+            );
+            return;
+        }
     };
     let original = edge.label.clone();
     let buffer = original.clone().unwrap_or_default();
@@ -95,11 +125,16 @@ pub(in crate::application::app) fn open_label_edit(
         &edge_ref.edge_type,
     );
     doc.label_edit_preview = Some((edge_key, insert_caret(&buffer, cursor_grapheme_pos)));
-    // Rebuild labels so the caret is visible immediately. The caller
-    // already ran `rebuild_all` before this, so the scene is fresh.
+    // Rebuild the connection-label canvas so the caret is visible
+    // immediately. The caller already ran `rebuild_all` before this,
+    // so the scene is fresh elsewhere. We deliberately skip
+    // `update_portal_tree` — `label_edit_preview` only threads into
+    // `RenderScene::connection_label_elements`, and portal-mode
+    // edges have no line label to preview, so the portal canvas
+    // doesn't change on any label-edit keystroke. Keeping that call
+    // out of the hot path is the core "fast label typing" fix.
     let scene = doc.build_scene_with_selection(renderer.camera_zoom());
     update_connection_label_tree(&scene, app_scene, renderer);
-    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
 }
 
 /// Route a keystroke to the inline label editor. Cancel and commit
@@ -144,11 +179,7 @@ pub(in crate::application::app) fn handle_label_edit_key(
         return;
     };
 
-    let typed = match logical_key {
-        Key::Character(c) => Some(c.as_str()),
-        _ => None,
-    };
-    if !route_label_edit_key(name, typed, buffer, cursor) {
+    if !route_label_edit_key(logical_key, buffer, cursor) {
         return;
     }
 
@@ -170,9 +201,11 @@ pub(in crate::application::app) fn handle_label_edit_key(
             &edge_ref.edge_type,
         );
         doc.label_edit_preview = Some((edge_key, insert_caret(buffer, *cursor_grapheme_pos)));
+        // Same scope as `open_label_edit`: only the connection-
+        // label canvas reads `label_edit_preview`, so the portal
+        // tree stays untouched on every keystroke.
         let scene = doc.build_scene_with_selection(renderer.camera_zoom());
         update_connection_label_tree(&scene, app_scene, renderer);
-        update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
     }
 }
 
@@ -244,6 +277,24 @@ impl PortalTextEditState {
     pub(in crate::application::app) fn is_open(&self) -> bool {
         matches!(self, PortalTextEditState::Open { .. })
     }
+
+    /// Borrow the `(edge_ref, endpoint_node_id)` currently under
+    /// edit, if any. Mirrors [`LabelEditState::edited_edge_ref`]
+    /// — the click-outside-to-commit check needs both the edge
+    /// identity and the endpoint so it can compare against
+    /// `hit_test_portal_text`.
+    pub(in crate::application::app) fn edited_endpoint(
+        &self,
+    ) -> Option<(&crate::application::document::EdgeRef, &str)> {
+        match self {
+            PortalTextEditState::Open {
+                edge_ref,
+                endpoint_node_id,
+                ..
+            } => Some((edge_ref, endpoint_node_id.as_str())),
+            PortalTextEditState::Closed => None,
+        }
+    }
 }
 
 /// Transition into inline portal-text edit mode for the given
@@ -263,12 +314,28 @@ pub(in crate::application::app) fn open_portal_text_edit(
     // Verify the edge + endpoint still exist before entering
     // edit mode. If either vanished between the selection and
     // the open gesture (e.g. an undo raced with EditSelection),
-    // silently return rather than install a stale editor.
+    // log and return rather than install a stale editor.
+    // Callers read `state.is_open()` to detect the skipped-open
+    // case; they don't need a return value to disambiguate.
     let edge = match doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)) {
         Some(e) => e,
-        None => return,
+        None => {
+            log::warn!(
+                "open_portal_text_edit: edge {}→{} ({}) not found; editor stays closed",
+                edge_ref.from_id,
+                edge_ref.to_id,
+                edge_ref.edge_type
+            );
+            return;
+        }
     };
     if endpoint_node_id != edge.from_id && endpoint_node_id != edge.to_id {
+        log::warn!(
+            "open_portal_text_edit: endpoint {} is neither from ({}) nor to ({}); editor stays closed",
+            endpoint_node_id,
+            edge.from_id,
+            edge.to_id,
+        );
         return;
     }
     let original =
@@ -371,11 +438,7 @@ pub(in crate::application::app) fn handle_portal_text_edit_key(
         return;
     };
 
-    let typed = match logical_key {
-        Key::Character(c) => Some(c.as_str()),
-        _ => None,
-    };
-    if !route_label_edit_key(name, typed, buffer, cursor) {
+    if !route_label_edit_key(logical_key, buffer, cursor) {
         return;
     }
 
@@ -445,13 +508,22 @@ mod tests {
     //! No winit event loop needed; the router is a pure function.
 
     use super::*;
+    use winit::keyboard::{Key, NamedKey, SmolStr};
+
+    fn named(k: NamedKey) -> Key {
+        Key::Named(k)
+    }
+    fn ch(s: &str) -> Key {
+        Key::Character(SmolStr::new(s))
+    }
 
     #[test]
     fn test_route_label_edit_backspace_deletes_grapheme_before_cursor() {
         let mut buf = String::from("café");
         // 4 graphemes: c a f é. Cursor at end; backspace removes é.
         let mut cursor = 4;
-        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        let changed =
+            route_label_edit_key(&named(NamedKey::Backspace), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "caf");
         assert_eq!(cursor, 3);
@@ -461,7 +533,8 @@ mod tests {
     fn test_route_label_edit_backspace_at_zero_is_noop() {
         let mut buf = String::from("abc");
         let mut cursor = 0;
-        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        let changed =
+            route_label_edit_key(&named(NamedKey::Backspace), &mut buf, &mut cursor);
         assert!(!changed);
         assert_eq!(buf, "abc");
         assert_eq!(cursor, 0);
@@ -471,7 +544,7 @@ mod tests {
     fn test_route_label_edit_delete_at_end_is_noop() {
         let mut buf = String::from("abc");
         let mut cursor = 3;
-        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&named(NamedKey::Delete), &mut buf, &mut cursor);
         assert!(!changed);
         assert_eq!(buf, "abc");
         assert_eq!(cursor, 3);
@@ -481,7 +554,7 @@ mod tests {
     fn test_route_label_edit_delete_removes_grapheme_at_cursor() {
         let mut buf = String::from("abc");
         let mut cursor = 1;
-        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&named(NamedKey::Delete), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "ac");
         assert_eq!(cursor, 1);
@@ -492,12 +565,12 @@ mod tests {
         let mut buf = String::from("café");
         let mut cursor = 4;
         // Left past é, f, a — landing on the c boundary.
-        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::ArrowLeft), &mut buf, &mut cursor));
         assert_eq!(cursor, 3);
-        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::ArrowLeft), &mut buf, &mut cursor));
         assert_eq!(cursor, 2);
         // Right brings us back.
-        assert!(route_label_edit_key(Some("arrowright"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::ArrowRight), &mut buf, &mut cursor));
         assert_eq!(cursor, 3);
     }
 
@@ -505,7 +578,7 @@ mod tests {
     fn test_route_label_edit_arrow_left_at_zero_is_noop() {
         let mut buf = String::from("abc");
         let mut cursor = 0;
-        assert!(!route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert!(!route_label_edit_key(&named(NamedKey::ArrowLeft), &mut buf, &mut cursor));
         assert_eq!(cursor, 0);
     }
 
@@ -513,15 +586,15 @@ mod tests {
     fn test_route_label_edit_home_end_jump_to_ends() {
         let mut buf = String::from("café");
         let mut cursor = 2;
-        assert!(route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::Home), &mut buf, &mut cursor));
         assert_eq!(cursor, 0);
         // Home again is a no-op.
-        assert!(!route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert!(!route_label_edit_key(&named(NamedKey::Home), &mut buf, &mut cursor));
         assert_eq!(cursor, 0);
-        assert!(route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::End), &mut buf, &mut cursor));
         assert_eq!(cursor, 4);
         // End again is a no-op.
-        assert!(!route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert!(!route_label_edit_key(&named(NamedKey::End), &mut buf, &mut cursor));
         assert_eq!(cursor, 4);
     }
 
@@ -529,7 +602,7 @@ mod tests {
     fn test_route_label_edit_printable_inserts_and_advances() {
         let mut buf = String::from("ab");
         let mut cursor = 1;
-        let changed = route_label_edit_key(None, Some("X"), &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&ch("X"), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "aXb");
         assert_eq!(cursor, 2);
@@ -542,7 +615,7 @@ mod tests {
     fn test_route_label_edit_multichar_typed_payload() {
         let mut buf = String::from("");
         let mut cursor = 0;
-        let changed = route_label_edit_key(None, Some("né"), &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&ch("né"), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "né");
         assert_eq!(cursor, 2);
@@ -555,10 +628,58 @@ mod tests {
     fn test_route_label_edit_typed_control_chars_are_skipped() {
         let mut buf = String::from("");
         let mut cursor = 0;
-        let changed = route_label_edit_key(None, Some("a\tb"), &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&ch("a\tb"), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "ab");
         assert_eq!(cursor, 2);
+    }
+
+    /// `Key::Named(NamedKey::Backspace)` dispatches through the
+    /// enum variant, not through `key_to_name`'s debug-formatted
+    /// string. The node editor already worked this way
+    /// (`text_edit/editor.rs:430`); the router now matches it, so
+    /// structural keys can't be misread as printable even if a
+    /// future platform or IME routes backspace through
+    /// `Key::Character` instead of `Key::Named`.
+    #[test]
+    fn test_route_backspace_via_named_key_does_not_insert_payload() {
+        let mut buf = String::from("abc");
+        let mut cursor = 3;
+        let changed =
+            route_label_edit_key(&named(NamedKey::Backspace), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "ab", "backspace must delete the previous grapheme");
+        assert_eq!(cursor, 2, "cursor must move back exactly one grapheme");
+    }
+
+    /// Regression companion: the same shape for `Delete` — a
+    /// `Key::Named(NamedKey::Delete)` event must never insert a
+    /// printable glyph as a side effect.
+    #[test]
+    fn test_route_delete_via_named_key_does_not_insert_payload() {
+        let mut buf = String::from("abc");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(&named(NamedKey::Delete), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "bc", "delete must remove the grapheme at the cursor");
+        assert_eq!(cursor, 0, "delete must leave the cursor in place");
+    }
+
+    /// Unprintable winit `Key` variants (dead keys, identifier-only,
+    /// modifiers reaching the dispatcher) must not insert anything
+    /// and must not panic.
+    #[test]
+    fn test_route_unhandled_key_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 1;
+        let changed = route_label_edit_key(
+            &Key::Named(NamedKey::Shift),
+            &mut buf,
+            &mut cursor,
+        );
+        assert!(!changed);
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 1);
     }
 }
 

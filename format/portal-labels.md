@@ -40,6 +40,7 @@ Each side has the same shape:
 | ------------------------ | --------------------------------------- | --------- | ------------------------------------------------------------------ |
 | `color`                  | `#rrggbb` / `#rrggbbaa` / `var(--name)` | inherit   | Icon color override for this label only.                           |
 | `border_t`               | `f32`, `[0, 4)`                         | auto      | Position along the owning node's border.                           |
+| `perpendicular_offset`   | `f32` (canvas units)                    | flush     | Signed distance along the border's outward normal. Positive pulls the label further out; negative pulls it inward toward (or past) the border. Written by the portal-label drag and the `label perpendicular=` console verb. Cleared by `edge reset=position`. |
 | `text`                   | string                                  | absent    | Text label rendered next to the icon.                              |
 | `text_color`             | `#rrggbb` / `#rrggbbaa` / `var(--name)` | inherit   | Text color override — independent from the icon `color`.           |
 | `text_font_size_pt`      | `f32`                                   | inherits  | Target on-screen text size at zoom 1.0; falls back to icon size.   |
@@ -109,6 +110,24 @@ always *faces* its partner, even as either node moves.
 **Pinned (field present):** the user dragged the label to that
 specific perimeter parameter. Subsequent partner-position changes
 do not reflow the label.
+
+## Position — `perpendicular_offset`
+
+Signed distance along the border's outward normal, in canvas
+units. The icon sits at a small default outset from the border
+(a fraction of `font_size_pt`); `perpendicular_offset` adds to
+that outset. Positive values push the label further from the
+owning node; negative values pull it inward toward or past the
+border.
+
+The portal-label drag writes both `border_t` and
+`perpendicular_offset` on every frame of the gesture: the
+cursor is projected onto the nearest border point to compute
+`border_t`, and its signed distance from that projection along
+the outward normal gives `perpendicular_offset`. Small
+magnitudes (under `0.5` canvas units) snap back to `None`, so
+releasing near the border restores the flush-to-border default
+without having to open the console.
 
 ## Load-time behavior
 

@@ -29,7 +29,7 @@ use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 
 pub const KEYS: &[&str] = &["type", "reset", "display_mode"];
 pub const EDGE_TYPES: &[&str] = &[EDGE_TYPE_CROSS_LINK, EDGE_TYPE_PARENT_CHILD];
-pub const RESETS: &[&str] = &["straight", "curve", "style"];
+pub const RESETS: &[&str] = &["straight", "curve", "style", "position"];
 pub const DISPLAY_MODES: &[&str] = &[
     baumhard::mindmap::model::DISPLAY_MODE_LINE,
     baumhard::mindmap::model::DISPLAY_MODE_PORTAL,
@@ -38,8 +38,8 @@ pub const DISPLAY_MODES: &[&str] = &[
 pub const COMMAND: Command = Command {
     name: "edge",
     aliases: &[],
-    summary: "Convert edge type, switch display mode, curve/straighten, or reset style",
-    usage: "edge type=<cross_link|parent_child>   |   edge display_mode=<line|portal>   |   edge reset=<straight|curve|style>",
+    summary: "Convert edge type, switch display mode, curve/straighten, or reset style/position",
+    usage: "edge type=<cross_link|parent_child>   |   edge display_mode=<line|portal>   |   edge reset=<straight|curve|style|position>",
     tags: &[
         "edge",
         "type",
@@ -90,7 +90,7 @@ fn execute_edge(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         .collect();
     if kvs.is_empty() {
         return ExecResult::err(
-            "usage: edge type=<...>   |   edge display_mode=<...>   |   edge reset=<straight|style>",
+            "usage: edge type=<...>   |   edge display_mode=<...>   |   edge reset=<straight|curve|style|position>",
         );
     }
 
@@ -166,9 +166,37 @@ fn execute_edge(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                         messages.push("no style override to reset".into());
                     }
                 }
+                "position" => {
+                    // Scope depends on the selection:
+                    // - Edge / EdgeLabel: whole edge (anchors → auto
+                    //   + label position clear on line mode, both
+                    //   portal endpoints on portal mode).
+                    // - PortalLabel / PortalText: just the chosen
+                    //   endpoint (leaves the other side alone).
+                    // The document method ignores the endpoint arg
+                    // for line-mode edges, so selections that collapse
+                    // to a line-mode edge always get the whole-edge
+                    // behaviour regardless of shape.
+                    use crate::application::document::SelectionState;
+                    let endpoint: Option<String> = match &eff.document.selection {
+                        SelectionState::PortalLabel(s)
+                        | SelectionState::PortalText(s) => {
+                            Some(s.endpoint_node_id.clone())
+                        }
+                        _ => None,
+                    };
+                    let changed = eff
+                        .document
+                        .reset_edge_position(&er, endpoint.as_deref());
+                    if changed {
+                        any_applied = true;
+                    } else {
+                        messages.push("position already at default".into());
+                    }
+                }
                 other => {
                     messages.push(format!(
-                        "reset '{}' must be straight, curve, or style",
+                        "reset '{}' must be straight, curve, style, or position",
                         other
                     ));
                 }

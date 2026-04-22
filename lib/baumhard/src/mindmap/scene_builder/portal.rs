@@ -278,12 +278,19 @@ pub(crate) fn layout_portal_label(
     let anchor = border_point_at(owner_pos, owner_size, t);
     let normal = border_outward_normal(t);
     let outset = font_size_pt * PORTAL_OUTSET_FRAC;
+    // Drag-authored perpendicular slide. Sums into the outset so the
+    // user can pull the label further away from the border (positive)
+    // or back toward it (negative). `None` falls through to a flush
+    // outset, matching the pre-field behaviour.
+    let perp = endpoint_state
+        .and_then(|s| s.perpendicular_offset)
+        .unwrap_or(0.0);
     // Translate from anchor to AABB top-left: shift by half-extent
     // toward the label origin, then outward along the normal so the
     // label sits just outside the border.
     let top_left = Vec2::new(
-        anchor.x - bounds.x * 0.5 + normal.x * (bounds.x * 0.5 + outset),
-        anchor.y - bounds.y * 0.5 + normal.y * (bounds.y * 0.5 + outset),
+        anchor.x - bounds.x * 0.5 + normal.x * (bounds.x * 0.5 + outset + perp),
+        anchor.y - bounds.y * 0.5 + normal.y * (bounds.y * 0.5 + outset + perp),
     );
     PortalLabelLayout { top_left, bounds }
 }

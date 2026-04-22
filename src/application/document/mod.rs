@@ -308,6 +308,24 @@ impl MindMapDocument {
             .selection
             .selected_edge()
             .map(|e| (e.from_id.as_str(), e.to_id.as_str(), e.edge_type.as_str()));
+        // Edge-label sub-selection: when the user clicked just
+        // the label (not the whole edge), only the label text
+        // tints cyan. The scene builder upgrades a whole-edge
+        // selection to also paint the label, so we don't need to
+        // fill `edge_label` in for `Edge` selections here. The
+        // `EdgeLabelSel` stores an `EdgeRef`, so we build an
+        // owned `EdgeKey` per call — three small string clones,
+        // negligible next to the per-frame scene build.
+        let edge_label = match &self.selection {
+            crate::application::document::SelectionState::EdgeLabel(s) => {
+                Some(baumhard::mindmap::scene_cache::EdgeKey::new(
+                    s.edge_ref.from_id.as_str(),
+                    s.edge_ref.to_id.as_str(),
+                    s.edge_ref.edge_type.as_str(),
+                ))
+            }
+            _ => None,
+        };
         let portal_label = self.selection.selected_portal_label_scene_ref();
         let label_edit = self
             .label_edit_preview
@@ -315,6 +333,7 @@ impl MindMapDocument {
             .map(|(k, s)| (k, s.as_str()));
         let selection = scene_builder::SceneSelectionContext {
             edge,
+            edge_label,
             portal_label,
             label_edit,
         };
