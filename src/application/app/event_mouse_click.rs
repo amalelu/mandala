@@ -217,10 +217,43 @@ pub(super) fn handle_mouse_input(
                 } else {
                     ClickHit::Empty
                 };
-                let already_editing_same_target = text_edit_state
-                    .node_id()
-                    .map(|id| hit_node.as_deref() == Some(id))
-                    .unwrap_or(false);
+                // Suppress the double-click → open-editor gesture when
+                // an editor is already open on the click's target. The
+                // three editor states are mutually exclusive by
+                // construction (the event-keyboard dispatch steals on
+                // whichever is open first), so one match suffices.
+                // Without this guard for the label / portal-text
+                // editors, a double-click while editing would call
+                // `open_label_edit` / `open_portal_text_edit` a second
+                // time, which re-seeds the buffer from the committed
+                // model value and silently destroys the in-progress
+                // edit.
+                let already_editing_same_target = {
+                    let node_match = text_edit_state
+                        .node_id()
+                        .map(|id| hit_node.as_deref() == Some(id))
+                        .unwrap_or(false);
+                    let edge_label_match = label_edit_state
+                        .edited_edge_ref()
+                        .zip(edge_label_hit.as_ref())
+                        .map(|(er, hit)| {
+                            hit.from_id == er.from_id.as_str()
+                                && hit.to_id == er.to_id.as_str()
+                                && hit.edge_type == er.edge_type.as_str()
+                        })
+                        .unwrap_or(false);
+                    let portal_text_match = portal_text_edit_state
+                        .edited_endpoint()
+                        .zip(portal_text_hit.as_ref())
+                        .map(|((er, ep), (hit_key, hit_ep))| {
+                            hit_key.from_id == er.from_id.as_str()
+                                && hit_key.to_id == er.to_id.as_str()
+                                && hit_key.edge_type == er.edge_type.as_str()
+                                && hit_ep.as_str() == ep
+                        })
+                        .unwrap_or(false);
+                    node_match || edge_label_match || portal_text_match
+                };
                 let is_dblclick = !already_editing_same_target
                     && last_click
                         .as_ref()

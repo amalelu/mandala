@@ -170,17 +170,32 @@ pub(super) fn handle_keyboard_input(
         return;
     }
 
+    let action = key_name.as_deref().and_then(|k| {
+        keybinds.action_for_context(
+            crate::application::keybinds::InputContext::Document,
+            k,
+            modifiers.control_key(),
+            modifiers.shift_key(),
+            modifiers.alt_key(),
+        )
+    });
+
     // Type-to-edit on edge / portal label selections: when an
-    // editable selection is active, no editor is open, and the
-    // user types a printable character (no Ctrl / Alt — Shift is
-    // OK so capital letters and shifted symbols still type), open
-    // the right inline editor and replay the keystroke through it
-    // so the typed character lands in the buffer as the first
-    // edit. This makes the gesture symmetric with what the node
-    // editor offers via `EditSelectionClean` / typing on a freshly-
-    // selected node, and matches what users expect after clicking
-    // a label and starting to type.
-    if !modifiers.control_key() && !modifiers.alt_key() {
+    // editable selection is active, no editor is open, no action
+    // claims the key (so custom mutations / keybind rebinds always
+    // win), and the user types a printable character (no Ctrl /
+    // Alt — Shift is OK so capital letters and shifted symbols
+    // still type), open the right inline editor and replay the
+    // keystroke through it so the typed character lands in the
+    // buffer as the first edit. This makes the gesture symmetric
+    // with what the node editor offers via `EditSelectionClean` /
+    // typing on a freshly-selected node. The action-first check
+    // means rebinding `'a'` to a Document action keeps that
+    // binding alive even when an edge label is selected.
+    if action.is_none()
+        && !modifiers.control_key()
+        && !modifiers.alt_key()
+    {
         if let Key::Character(ref c) = logical_key {
             // Reject empty payloads and pure-control payloads up
             // front so single-char shortcuts that the keybind table
@@ -250,20 +265,24 @@ pub(super) fn handle_keyboard_input(
                         }
                         return;
                     }
+                    // `open_*` silently returned without opening an
+                    // editor — the selection's target evaporated
+                    // (edge deleted by a background undo, portal
+                    // edge flipped to line mode, etc). Log and drop
+                    // the keystroke rather than falling through to
+                    // action dispatch with a stale selection — the
+                    // user's mental model was "I'm about to type
+                    // into this selected thing", not "trigger a
+                    // Document action".
+                    log::warn!(
+                        "type-to-edit: selected edge / portal endpoint \
+                         vanished before editor could open; keystroke dropped"
+                    );
+                    return;
                 }
             }
         }
     }
-
-    let action = key_name.as_deref().and_then(|k| {
-        keybinds.action_for_context(
-            crate::application::keybinds::InputContext::Document,
-            k,
-            modifiers.control_key(),
-            modifiers.shift_key(),
-            modifiers.alt_key(),
-        )
-    });
 
     match action {
         Some(Action::OpenConsole) => {
