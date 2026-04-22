@@ -3,39 +3,43 @@
 //! (Pressed state only) through the modal-steal ladder
 //! (console, color picker, label / portal / node text editors)
 //! down to the action table and finally to the
-//! custom-mutation key bindings. Follows the same "state tuple
-//! of mutable refs" shape as [`super::event_mouse_click`].
+//! custom-mutation key bindings. Persistent state flows in through
+//! [`super::input_context::InputHandlerContext`].
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use super::*;
-use baumhard::mindmap::tree_builder::MindMapTree;
+use super::input_context::InputHandlerContext;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::Key;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_keyboard_input(
     logical_key: Key,
-    modifiers: &ModifiersState,
-    cursor_pos: (f64, f64),
-    document: &mut Option<MindMapDocument>,
-    mindmap_tree: &mut Option<MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    app_mode: &mut AppMode,
-    console_state: &mut ConsoleState,
-    console_history: &mut Vec<String>,
-    label_edit_state: &mut LabelEditState,
-    portal_text_edit_state: &mut PortalTextEditState,
-    text_edit_state: &mut TextEditState,
-    color_picker_state: &mut crate::application::color_picker::ColorPickerState,
-    last_click: &mut Option<LastClick>,
-    hovered_node: &mut Option<String>,
-    picker_dirty: &mut bool,
-    keybinds: &mut ResolvedKeybinds,
     _event_loop: &ActiveEventLoop,
+    ctx: InputHandlerContext<'_>,
 ) {
+    let InputHandlerContext {
+        document,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+        app_mode,
+        console_state,
+        console_history,
+        label_edit_state,
+        portal_text_edit_state,
+        text_edit_state,
+        color_picker_state,
+        last_click,
+        hovered_node,
+        cursor_pos,
+        modifiers,
+        picker_dirty,
+        keybinds,
+        ..
+    } = ctx;
+    let cursor_pos = *cursor_pos;
     let key_name = crate::application::keybinds::key_to_name(&logical_key);
 
     // When the console is open, it steals all

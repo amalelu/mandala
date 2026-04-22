@@ -249,3 +249,94 @@ fn test_invisible_edge_emits_no_label_even_with_zoom_window() {
     let scene = build_scene(&map, 1.0);
     assert_eq!(scene.connection_label_elements.len(), 0);
 }
+
+/// Label AABB width is driven by grapheme count, not Unicode-scalar
+/// count. A family-ZWJ emoji (`👨‍👩‍👧` — 7 scalars, 1 grapheme)
+/// between two ASCII letters must produce the same bounds as three
+/// plain graphemes; using `.chars().count()` would size it at 9
+/// slots instead of 3. Pins §B3 against a revert to `.chars().count()`
+/// on the label-sizing path.
+#[test]
+fn test_label_bounds_use_grapheme_count_not_scalar_count() {
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+        synthetic_node("b", 1000.0, 0.0, 40.0, 40.0, false),
+    ];
+    let plain = {
+        let mut e = synthetic_edge("a", "b", "auto", "auto");
+        e.label = Some("XYZ".to_string());
+        e
+    };
+    let zwj = {
+        let mut e = synthetic_edge("a", "b", "auto", "auto");
+        // "A👨\u{200D}👩\u{200D}👧B" — 9 Unicode scalars across 3
+        // extended grapheme clusters (A, family-ZWJ, B).
+        e.label = Some("A\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}B".to_string());
+        e
+    };
+    let plain_scene = build_scene(&synthetic_map(nodes.clone(), vec![plain]), 1.0);
+    let zwj_scene = build_scene(&synthetic_map(nodes, vec![zwj]), 1.0);
+    assert_eq!(plain_scene.connection_label_elements.len(), 1);
+    assert_eq!(zwj_scene.connection_label_elements.len(), 1);
+    let plain_w = plain_scene.connection_label_elements[0].bounds.0;
+    let zwj_w = zwj_scene.connection_label_elements[0].bounds.0;
+    assert!(
+        (plain_w - zwj_w).abs() < f32::EPSILON,
+        "grapheme-sized bounds expected; got plain={plain_w} zwj={zwj_w}",
+    );
+}
+
+/// Broader Unicode grapheme-class coverage for the label-sizing
+/// path: a regional-indicator pair, a skin-tone modifier, and a
+/// combining mark each form a single grapheme out of two scalars.
+/// All three must produce the same bounds width as a one-grapheme
+/// ASCII baseline — §T1 asks for heavy fundamentals coverage, and
+/// each of these represents a distinct grapheme-formation mechanism
+/// the ZWJ family test does not exercise.
+#[test]
+fn test_label_bounds_regional_indicator_pair_is_single_grapheme() {
+    assert_label_one_grapheme_equivalent("\u{1F1EF}\u{1F1F5}"); // 🇯🇵
+}
+
+#[test]
+fn test_label_bounds_skin_tone_modifier_is_single_grapheme() {
+    assert_label_one_grapheme_equivalent("\u{1F44B}\u{1F3FE}"); // 👋🏾
+}
+
+#[test]
+fn test_label_bounds_combining_mark_is_single_grapheme() {
+    // Lowercase 'n' + combining tilde — renders as 'ñ'. Two scalars,
+    // one grapheme. Non-emoji path.
+    assert_label_one_grapheme_equivalent("n\u{0303}");
+}
+
+/// Builds a map with a one-grapheme label and asserts the emitted
+/// connection-label AABB matches what a single-ASCII-character
+/// label produces. Helper for the grapheme-class tests above.
+fn assert_label_one_grapheme_equivalent(label: &str) {
+    let nodes = vec![
+        synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+        synthetic_node("b", 1000.0, 0.0, 40.0, 40.0, false),
+    ];
+    let baseline = {
+        let mut e = synthetic_edge("a", "b", "auto", "auto");
+        e.label = Some("X".to_string());
+        e
+    };
+    let under_test = {
+        let mut e = synthetic_edge("a", "b", "auto", "auto");
+        e.label = Some(label.to_string());
+        e
+    };
+    let baseline_scene =
+        build_scene(&synthetic_map(nodes.clone(), vec![baseline]), 1.0);
+    let actual_scene =
+        build_scene(&synthetic_map(nodes, vec![under_test]), 1.0);
+    let baseline_w = baseline_scene.connection_label_elements[0].bounds.0;
+    let actual_w = actual_scene.connection_label_elements[0].bounds.0;
+    assert!(
+        (baseline_w - actual_w).abs() < f32::EPSILON,
+        "label {:?} should size as one grapheme; got {actual_w} vs. baseline {baseline_w}",
+        label,
+    );
+}

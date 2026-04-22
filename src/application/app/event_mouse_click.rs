@@ -6,33 +6,39 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use super::*;
+use super::input_context::InputHandlerContext;
 
-/// Dispatch a `WindowEvent::MouseInput` event. Called from the native
-/// event loop with the full mutable state tuple so the match arm in
-/// `run_native` stays a one-line delegation.
-#[allow(clippy::too_many_arguments)]
+/// Dispatch a `WindowEvent::MouseInput` event. Event payload
+/// (`state`, `button`) stays as direct arguments; all persistent
+/// app state arrives through [`InputHandlerContext`] instead of the
+/// twenty-ref tuple this function used to carry. See that type's
+/// header for the rationale.
 pub(super) fn handle_mouse_input(
     state: ElementState,
     button: MouseButton,
-    cursor_pos: (f64, f64),
-    modifiers: &ModifiersState,
-    document: &mut Option<MindMapDocument>,
-    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-    _scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    drag_state: &mut DragState,
-    app_mode: &mut AppMode,
-    console_state: &mut ConsoleState,
-    console_history: &[String],
-    label_edit_state: &mut LabelEditState,
-    text_edit_state: &mut TextEditState,
-    color_picker_state: &mut crate::application::color_picker::ColorPickerState,
-    last_click: &mut Option<LastClick>,
-    hovered_node: &mut Option<String>,
-    mutation_throttle: &mut MutationFrequencyThrottle,
-    picker_dirty: &mut bool,
+    ctx: InputHandlerContext<'_>,
 ) {
+    let InputHandlerContext {
+        document,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        drag_state,
+        app_mode,
+        console_state,
+        console_history,
+        label_edit_state,
+        text_edit_state,
+        color_picker_state,
+        last_click,
+        hovered_node,
+        cursor_pos,
+        modifiers,
+        mutation_throttle,
+        picker_dirty,
+        ..
+    } = ctx;
+    let cursor_pos = *cursor_pos;
     // The console swallows mouse clicks as a close
     // gesture. Clicking anywhere while open dismisses
     // the console without running a command, mirroring

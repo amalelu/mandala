@@ -612,3 +612,184 @@ fn portal_zoom_visibility_inherits_when_endpoint_has_no_zoom_bounds() {
         "Some(endpoint) with no zoom bounds must inherit the edge window"
     );
 }
+
+/// Portal-text AABB width is driven by grapheme count, not Unicode-
+/// scalar count. A family-ZWJ emoji between two letters is three
+/// graphemes but nine scalars; without §B3 compliance the AABB
+/// would be sized at nine slots. Guards against a revert to
+/// `.chars().count()` on the portal-text layout path.
+#[test]
+fn test_portal_text_bounds_use_grapheme_count_not_scalar_count() {
+    use super::super::portal::{layout_portal_label, layout_portal_text};
+    use crate::mindmap::model::PortalEndpointState;
+
+    let owner_pos = Vec2::new(100.0, 100.0);
+    let owner_size = Vec2::new(200.0, 80.0);
+    let partner_center = Vec2::new(1000.0, 500.0);
+    let icon_font = 50.0;
+    let text_font = 14.0;
+    let state = PortalEndpointState {
+        border_t: Some(0.0),
+        ..Default::default()
+    };
+    let icon = layout_portal_label(
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+    );
+    let plain = layout_portal_text(
+        icon,
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+        text_font,
+        "XYZ",
+    );
+    // "A👨\u{200D}👩\u{200D}👧B" — 9 scalars, 3 graphemes.
+    let zwj = layout_portal_text(
+        icon,
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+        text_font,
+        "A\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}B",
+    );
+    assert!(
+        (plain.bounds.x - zwj.bounds.x).abs() < f32::EPSILON,
+        "grapheme-sized bounds expected; got plain={} zwj={}",
+        plain.bounds.x, zwj.bounds.x,
+    );
+}
+
+/// Portal-text layout must size one-grapheme labels the same across
+/// every grapheme-formation mechanism: regional-indicator pairs,
+/// skin-tone modifiers, and combining marks. Each of the three uses
+/// a distinct Unicode mechanism that the ZWJ family emoji above does
+/// not exercise, and §T1 asks Unicode fundamentals to be tested
+/// broadly.
+#[test]
+fn test_portal_text_bounds_regional_indicator_pair_is_single_grapheme() {
+    assert_portal_text_one_grapheme_equivalent("\u{1F1EF}\u{1F1F5}"); // 🇯🇵
+}
+
+#[test]
+fn test_portal_text_bounds_skin_tone_modifier_is_single_grapheme() {
+    assert_portal_text_one_grapheme_equivalent("\u{1F44B}\u{1F3FE}"); // 👋🏾
+}
+
+#[test]
+fn test_portal_text_bounds_combining_mark_is_single_grapheme() {
+    assert_portal_text_one_grapheme_equivalent("n\u{0303}");
+}
+
+/// An empty portal-text string must still produce a non-zero AABB:
+/// `layout_portal_text`'s `.max(1)` floor holds the slot to at
+/// least one grapheme's width so an empty buffer doesn't collapse
+/// to a zero-sized layout the scene builder would then try to
+/// divide by. Pins that clamp.
+#[test]
+fn test_portal_text_bounds_empty_string_uses_one_grapheme_floor() {
+    use super::super::portal::{layout_portal_label, layout_portal_text};
+    use crate::mindmap::model::PortalEndpointState;
+
+    let owner_pos = Vec2::new(100.0, 100.0);
+    let owner_size = Vec2::new(200.0, 80.0);
+    let partner_center = Vec2::new(1000.0, 500.0);
+    let icon_font = 50.0;
+    let text_font = 14.0;
+    let state = PortalEndpointState {
+        border_t: Some(0.0),
+        ..Default::default()
+    };
+    let icon = layout_portal_label(
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+    );
+    let empty = layout_portal_text(
+        icon,
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+        text_font,
+        "",
+    );
+    let one_char = layout_portal_text(
+        icon,
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+        text_font,
+        "X",
+    );
+    assert!(
+        (empty.bounds.x - one_char.bounds.x).abs() < f32::EPSILON,
+        "empty portal-text should match 1-grapheme width via the .max(1) floor; got empty={} one_char={}",
+        empty.bounds.x, one_char.bounds.x,
+    );
+    assert!(
+        empty.bounds.x > 0.0,
+        "empty portal-text bounds must be strictly positive",
+    );
+}
+
+/// Helper — build a portal-text layout for a one-grapheme string
+/// and assert its bounds match a single-ASCII-character baseline.
+fn assert_portal_text_one_grapheme_equivalent(text: &str) {
+    use super::super::portal::{layout_portal_label, layout_portal_text};
+    use crate::mindmap::model::PortalEndpointState;
+
+    let owner_pos = Vec2::new(100.0, 100.0);
+    let owner_size = Vec2::new(200.0, 80.0);
+    let partner_center = Vec2::new(1000.0, 500.0);
+    let icon_font = 50.0;
+    let text_font = 14.0;
+    let state = PortalEndpointState {
+        border_t: Some(0.0),
+        ..Default::default()
+    };
+    let icon = layout_portal_label(
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+    );
+    let baseline = layout_portal_text(
+        icon,
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+        text_font,
+        "X",
+    );
+    let actual = layout_portal_text(
+        icon,
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+        text_font,
+        text,
+    );
+    assert!(
+        (baseline.bounds.x - actual.bounds.x).abs() < f32::EPSILON,
+        "portal text {:?} should size as one grapheme; got {} vs. baseline {}",
+        text, actual.bounds.x, baseline.bounds.x,
+    );
+}

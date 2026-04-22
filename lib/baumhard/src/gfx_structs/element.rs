@@ -528,50 +528,52 @@ impl Debug for GfxElement {
 
 impl PartialEq for GfxElement {
     fn eq(&self, other: &Self) -> bool {
-        if self.get_type() == other.get_type() {
-            return match self.get_type() {
-                GfxElementType::GlyphArea => {
-                    *(self.glyph_area().unwrap()) == *(other.glyph_area().unwrap())
-                }
-                GfxElementType::GlyphModel => {
-                    *self.glyph_model().unwrap() == *other.glyph_model().unwrap()
-                }
-                GfxElementType::Void => true,
-            };
+        // Match both discriminants in one step so each arm binds the
+        // payload directly — no `get_type()` + `unwrap()` dance, and
+        // no mixed-variant unwrap panic is reachable by construction.
+        match (self, other) {
+            (
+                GfxElement::GlyphArea { glyph_area: a, .. },
+                GfxElement::GlyphArea { glyph_area: b, .. },
+            ) => a == b,
+            (
+                GfxElement::GlyphModel { glyph_model: a, .. },
+                GfxElement::GlyphModel { glyph_model: b, .. },
+            ) => a == b,
+            (GfxElement::Void { .. }, GfxElement::Void { .. }) => true,
+            _ => false,
         }
-        false
     }
 }
 
 impl Clone for GfxElement {
     fn clone(&self) -> Self {
-        match self.get_type() {
-            GfxElementType::GlyphArea => {
-                let mut output = GfxElement::new_area_non_indexed_with_id(
-                    self.glyph_area().unwrap().clone(),
+        // Direct pattern-match on `self` binds the payload without
+        // needing a second `get_type()` dispatch + `unwrap()` on the
+        // accessor. The subscriber copy is a common tail handled once.
+        let mut output = match self {
+            GfxElement::GlyphArea { glyph_area, .. } => {
+                // `glyph_area` is `Box<GlyphArea>`; deref + clone hands
+                // the constructor a bare `GlyphArea` by value.
+                GfxElement::new_area_non_indexed_with_id(
+                    (**glyph_area).clone(),
                     self.channel(),
                     self.unique_id(),
-                );
-
-                *output.subscribers_mut() = self.subscribers_as_ref().clone();
-                output
+                )
             }
-            GfxElementType::GlyphModel => {
-                let mut output = GfxElement::new_model_non_indexed_with_id(
-                    self.glyph_model().unwrap().clone(),
+            GfxElement::GlyphModel { glyph_model, .. } => {
+                GfxElement::new_model_non_indexed_with_id(
+                    (**glyph_model).clone(),
                     self.channel(),
                     self.unique_id(),
-                );
-
-                *output.subscribers_mut() = self.subscribers_as_ref().clone();
-                output
+                )
             }
-            GfxElementType::Void => {
-                let mut output = GfxElement::new_void_with_id(self.channel(), self.unique_id());
-                *output.subscribers_mut() = self.subscribers_as_ref().clone();
-                output
+            GfxElement::Void { .. } => {
+                GfxElement::new_void_with_id(self.channel(), self.unique_id())
             }
-        }
+        };
+        *output.subscribers_mut() = self.subscribers_as_ref().clone();
+        output
     }
 }
 

@@ -250,6 +250,18 @@ const CLOSEST_POINT_NEWTON_DENOM_EPSILON: f32 = f32::EPSILON;
 /// burning cycles on bit-level oscillation.
 const CLOSEST_POINT_NEWTON_STEP_EPSILON: f32 = 1.0e-5;
 
+/// Project `cursor` onto the closest point of `path` and return
+/// `(t, perpendicular_offset)` — the path parameter at the
+/// projection plus the signed normal-component offset from the
+/// path to the cursor. Straight segments are projected directly;
+/// cubic Bezier segments use the uniform-sample seed plus Newton
+/// refinement described on the constants above. See the module
+/// header for the straight/cubic dispatch shape and the edge-label
+/// drag that drives the caller.
+///
+/// Cost: straight is O(1); cubic is O(`CLOSEST_POINT_SAMPLE_COUNT`)
+/// for the seed plus up to `CLOSEST_POINT_NEWTON_ITERS` Newton
+/// steps, no allocation.
 pub fn closest_point_on_path(path: &ConnectionPath, cursor: Vec2) -> (f32, f32) {
     match path {
         ConnectionPath::Straight { start, end } => {

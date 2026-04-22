@@ -10,6 +10,7 @@
 use super::*;
 
 use super::freeze_watchdog::FreezeWatchdog;
+use super::input_context::InputHandlerContext;
 use baumhard::mindmap::tree_builder::MindMapTree;
 use winit::application::ApplicationHandler;
 use winit::event::StartCause;
@@ -127,6 +128,36 @@ pub(super) struct InitState {
 }
 
 impl InitState {
+    /// Build the [`InputHandlerContext`] view over this state for a
+    /// single dispatcher call. Rebuilt per event because the
+    /// returned borrow is tied to `&mut self` — `'_` expires as
+    /// soon as the handler returns.
+    pub(super) fn input_context(&mut self) -> InputHandlerContext<'_> {
+        InputHandlerContext {
+            document: &mut self.document,
+            mindmap_tree: &mut self.mindmap_tree,
+            app_scene: &mut self.app_scene,
+            renderer: &mut self.renderer,
+            scene_cache: &mut self.scene_cache,
+            drag_state: &mut self.drag_state,
+            app_mode: &mut self.app_mode,
+            console_state: &mut self.console_state,
+            console_history: &mut self.console_history,
+            label_edit_state: &mut self.label_edit_state,
+            portal_text_edit_state: &mut self.portal_text_edit_state,
+            text_edit_state: &mut self.text_edit_state,
+            color_picker_state: &mut self.color_picker_state,
+            last_click: &mut self.last_click,
+            hovered_node: &mut self.hovered_node,
+            cursor_pos: &mut self.cursor_pos,
+            modifiers: &self.modifiers,
+            cursor_is_hand: &mut self.cursor_is_hand,
+            mutation_throttle: &mut self.mutation_throttle,
+            picker_dirty: &mut self.picker_dirty,
+            keybinds: &mut self.keybinds,
+        }
+    }
+
     /// Per-event dispatch. Most of the per-event work lives in
     /// [`super::event_mouse_click`], [`super::event_cursor_moved`],
     /// and [`super::event_keyboard`]; this method handles the
@@ -175,28 +206,7 @@ impl InitState {
                 event: WindowEvent::MouseInput { state, button, .. },
                 ..
             } => {
-                event_mouse_click::handle_mouse_input(
-                    state,
-                    button,
-                    self.cursor_pos,
-                    &self.modifiers,
-                    &mut self.document,
-                    &mut self.mindmap_tree,
-                    &mut self.app_scene,
-                    &mut self.renderer,
-                    &mut self.scene_cache,
-                    &mut self.drag_state,
-                    &mut self.app_mode,
-                    &mut self.console_state,
-                    &self.console_history,
-                    &mut self.label_edit_state,
-                    &mut self.text_edit_state,
-                    &mut self.color_picker_state,
-                    &mut self.last_click,
-                    &mut self.hovered_node,
-                    &mut self.mutation_throttle,
-                    &mut self.picker_dirty,
-                );
+                event_mouse_click::handle_mouse_input(state, button, self.input_context());
             }
             Event::WindowEvent {
                 event: WindowEvent::MouseWheel { delta, .. },
@@ -217,22 +227,11 @@ impl InitState {
                 event: WindowEvent::CursorMoved { position, .. },
                 ..
             } => {
+                let window = self.window.clone();
                 event_cursor_moved::handle_cursor_moved(
                     position,
-                    &self.modifiers,
-                    self.window.as_ref(),
-                    &mut self.document,
-                    &mut self.mindmap_tree,
-                    &mut self.app_scene,
-                    &mut self.renderer,
-                    &mut self.scene_cache,
-                    &mut self.cursor_pos,
-                    &mut self.drag_state,
-                    &mut self.app_mode,
-                    &mut self.color_picker_state,
-                    &mut self.hovered_node,
-                    &mut self.cursor_is_hand,
-                    &mut self.picker_dirty,
+                    window.as_ref(),
+                    self.input_context(),
                 );
             }
             //// KEYBOARD ////
@@ -257,25 +256,8 @@ impl InitState {
             } => {
                 event_keyboard::handle_keyboard_input(
                     logical_key,
-                    &self.modifiers,
-                    self.cursor_pos,
-                    &mut self.document,
-                    &mut self.mindmap_tree,
-                    &mut self.app_scene,
-                    &mut self.renderer,
-                    &mut self.scene_cache,
-                    &mut self.app_mode,
-                    &mut self.console_state,
-                    &mut self.console_history,
-                    &mut self.label_edit_state,
-                    &mut self.portal_text_edit_state,
-                    &mut self.text_edit_state,
-                    &mut self.color_picker_state,
-                    &mut self.last_click,
-                    &mut self.hovered_node,
-                    &mut self.picker_dirty,
-                    &mut self.keybinds,
                     event_loop,
+                    self.input_context(),
                 );
             }
             Event::AboutToWait => self.drain_frame(),

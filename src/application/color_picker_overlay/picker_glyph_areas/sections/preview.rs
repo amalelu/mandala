@@ -7,7 +7,7 @@ use baumhard::font::fonts::AppFont;
 use baumhard::gfx_structs::area::OutlineStyle;
 
 use super::super::areas::{PickerAreas, PickerSection};
-use super::super::make_area::make_area;
+use super::super::make_area::{make_area, PickerAreaStyle};
 use crate::application::color_picker::{
     center_preview_glyph, picker_channel, ColorPickerLayout, ColorPickerOverlayGeometry, PickerHit,
 };
@@ -52,17 +52,19 @@ pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
         picker_channel("preview", 0),
         make_area(
             center_preview_glyph(),
-            commit_color,
-            scaled_preview,
-            scaled_preview,
             (
                 preview_glyph_center.0 - preview_box_w * 0.5,
                 preview_glyph_center.1 - preview_box_h * 0.5,
             ),
             (preview_box_w, preview_box_h),
-            true,
-            center_font,
-            outline,
+            PickerAreaStyle {
+                color: commit_color,
+                font_size: scaled_preview,
+                line_height: scaled_preview,
+                centered: true,
+                font: center_font,
+                outline,
+            },
         ),
     );
 }

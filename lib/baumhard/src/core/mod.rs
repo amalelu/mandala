@@ -11,4 +11,7 @@ pub mod animation;
 /// styled regions, `ApplyOperation`, anchors, flags, and the
 /// `Applicable` trait.
 pub mod primitives;
+/// Test bodies exposed through the `pub mod tests;` pattern so
+/// `benches/test_bench.rs` can reuse the `do_*()` function bodies as
+/// micro-benchmarks. See §B8.
 pub mod tests;

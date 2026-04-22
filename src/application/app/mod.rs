@@ -33,6 +33,8 @@ mod event_mouse_click;
 #[cfg(not(target_arch = "wasm32"))]
 mod freeze_watchdog;
 #[cfg(not(target_arch = "wasm32"))]
+mod input_context;
+#[cfg(not(target_arch = "wasm32"))]
 mod portal_label_drag;
 #[cfg(not(target_arch = "wasm32"))]
 mod label_edit;

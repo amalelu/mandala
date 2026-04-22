@@ -278,9 +278,29 @@ wasm_bindgen_futures::spawn_local(async move {
         if let Some(r) = renderer_for_raf.borrow_mut().as_mut() {
             r.process();
         }
-        request_animation_frame(f.borrow().as_ref().unwrap());
+        // Reschedule against the same closure we were called from.
+        // `f` is set to `Some(closure)` immediately below this
+        // `Closure::new(...)` expression and never cleared — the
+        // setup completes before any rAF fires, so inside this
+        // body the Option is always `Some`. The `None` arm is
+        // therefore unreachable in practice; rather than panic
+        // (§9), we log and let the loop halt — the browser is
+        // about to tear down the tab if this ever fires, and a
+        // dropped loop is the correct outcome in that case
+        // because the closure (`f`'s inner value) is the very
+        // thing that would have been rescheduled.
+        let closure_ref = f.borrow();
+        let Some(closure) = closure_ref.as_ref() else {
+            log::error!("RAF closure unexpectedly cleared — tab teardown in progress");
+            return;
+        };
+        request_animation_frame(closure);
     }));
-    request_animation_frame(g.borrow().as_ref().unwrap());
+    request_animation_frame(
+        g.borrow()
+            .as_ref()
+            .expect("render closure installed immediately above"),
+    );
 });
 
 // Resolve the keybind config once. `action_for(key, ctrl, shift, alt)`
@@ -813,12 +833,22 @@ app.event_loop.run(move |event, _window_target| {
 /// `requestAnimationFrame` handshake winit-web uses to drive its
 /// render ticks. Kept next to the event-loop body because that's
 /// its sole caller.
+///
+/// Called once per frame from inside the RAF closure — an
+/// interactive-path caller per `CODE_CONVENTIONS.md §9`. Missing
+/// `window` or a rejected rAF request degrades to a logged warning
+/// and a dropped frame rather than a panic. In practice the browser
+/// keeps both available for the lifetime of the page, so failure
+/// here would indicate the tab is being torn down.
 fn request_animation_frame(f: &wasm_bindgen::closure::Closure<dyn FnMut()>) {
     use wasm_bindgen::JsCast;
-    web_sys::window()
-        .unwrap()
-        .request_animation_frame(f.as_ref().unchecked_ref())
-        .unwrap();
+    let Some(window) = web_sys::window() else {
+        log::error!("requestAnimationFrame: no `window` available — dropping frame");
+        return;
+    };
+    if let Err(err) = window.request_animation_frame(f.as_ref().unchecked_ref()) {
+        log::error!("requestAnimationFrame rejected: {:?} — dropping frame", err);
+    }
 }
 
 /// HTTP-fetch a mindmap JSON file. Maps are bundled into the page

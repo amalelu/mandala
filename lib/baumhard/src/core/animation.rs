@@ -11,6 +11,7 @@ use std::rc::Rc;
 /// Something that mutates a [`Mutable`] value in-place. The simplest
 /// knob the animation system turns.
 pub trait Mutator<T: Mutable> {
+    /// Apply this mutator's change to `value` in place. O(impl).
     fn mutate(&self, value: &mut T);
 }
 
@@ -18,6 +19,7 @@ pub trait Mutator<T: Mutable> {
 /// whatever notion of "update" the implementation implements. Called
 /// once per frame by the animation scheduler.
 pub trait AnimationMutator<T: Mutable> {
+    /// Advance `instance` by one scheduler tick. O(impl).
     fn update(instance: AnimationInstance<T>);
 }
 

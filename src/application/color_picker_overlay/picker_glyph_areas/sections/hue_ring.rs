@@ -5,7 +5,7 @@
 use baumhard::gfx_structs::area::OutlineStyle;
 
 use super::super::areas::{PickerAreas, PickerSection};
-use super::super::make_area::make_area;
+use super::super::make_area::{make_area, PickerAreaStyle};
 use crate::application::color_picker::{
     hue_ring_glyphs, hue_slot_to_degrees, picker_channel, ColorPickerLayout,
     ColorPickerOverlayGeometry, PickerHit,
@@ -46,14 +46,16 @@ pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
             picker_channel("hue_ring", i),
             make_area(
                 ring_glyph,
-                color,
-                fs,
-                fs,
                 (pos.0 - bw * 0.5, pos.1 - fs * 0.5),
                 (bw, fs * 1.5),
-                true,
-                None,
-                outline,
+                PickerAreaStyle {
+                    color,
+                    font_size: fs,
+                    line_height: fs,
+                    centered: true,
+                    font: None,
+                    outline,
+                },
             ),
         );
     }
