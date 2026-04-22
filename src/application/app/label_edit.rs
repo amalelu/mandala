@@ -80,8 +80,11 @@ impl LabelEditState {
 /// Transition into inline label edit mode for the given edge. Seeds
 /// the buffer from the edge's current label (or the empty string)
 /// and installs a preview override on the renderer so the caret
-/// shows up immediately. Callers must ensure the edge still exists
-/// in `doc.mindmap.edges` — the function silently returns otherwise.
+/// shows up immediately. If the edge isn't in `doc.mindmap.edges`
+/// any more (e.g. an undo popped it between selection and the open
+/// gesture), logs via `log::warn!` and returns without mutating
+/// state — callers read `label_edit_state.is_open()` to detect
+/// this case.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn open_label_edit(
     edge_ref: &crate::application::document::EdgeRef,
@@ -92,7 +95,15 @@ pub(in crate::application::app) fn open_label_edit(
 ) {
     let edge = match doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)) {
         Some(e) => e,
-        None => return,
+        None => {
+            log::warn!(
+                "open_label_edit: edge {}→{} ({}) not found; editor stays closed",
+                edge_ref.from_id,
+                edge_ref.to_id,
+                edge_ref.edge_type
+            );
+            return;
+        }
     };
     let original = edge.label.clone();
     let buffer = original.clone().unwrap_or_default();
@@ -303,12 +314,28 @@ pub(in crate::application::app) fn open_portal_text_edit(
     // Verify the edge + endpoint still exist before entering
     // edit mode. If either vanished between the selection and
     // the open gesture (e.g. an undo raced with EditSelection),
-    // silently return rather than install a stale editor.
+    // log and return rather than install a stale editor.
+    // Callers read `state.is_open()` to detect the skipped-open
+    // case; they don't need a return value to disambiguate.
     let edge = match doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)) {
         Some(e) => e,
-        None => return,
+        None => {
+            log::warn!(
+                "open_portal_text_edit: edge {}→{} ({}) not found; editor stays closed",
+                edge_ref.from_id,
+                edge_ref.to_id,
+                edge_ref.edge_type
+            );
+            return;
+        }
     };
     if endpoint_node_id != edge.from_id && endpoint_node_id != edge.to_id {
+        log::warn!(
+            "open_portal_text_edit: endpoint {} is neither from ({}) nor to ({}); editor stays closed",
+            endpoint_node_id,
+            edge.from_id,
+            edge.to_id,
+        );
         return;
     }
     let original =
@@ -607,16 +634,13 @@ mod tests {
         assert_eq!(cursor, 2);
     }
 
-    /// Regression: `Key::Named(NamedKey::Backspace)` must delete
-    /// regardless of what `key_to_name` reports for the same event.
-    /// Some IME stacks attach a Unicode payload (e.g. a media-control
-    /// glyph) to the named-backspace event, then return `None` from
-    /// `key_to_name` because the named-key debug string was eaten by
-    /// the payload. The previous router keyed solely on the lowercase
-    /// name and fell through to the printable-char branch with the
-    /// payload still attached, stamping the glyph into the buffer
-    /// (the reported "huge pause icon on backspace" symptom). The
-    /// `Key`-first dispatch closes that hole.
+    /// `Key::Named(NamedKey::Backspace)` dispatches through the
+    /// enum variant, not through `key_to_name`'s debug-formatted
+    /// string. The node editor already worked this way
+    /// (`text_edit/editor.rs:430`); the router now matches it, so
+    /// structural keys can't be misread as printable even if a
+    /// future platform or IME routes backspace through
+    /// `Key::Character` instead of `Key::Named`.
     #[test]
     fn test_route_backspace_via_named_key_does_not_insert_payload() {
         let mut buf = String::from("abc");
