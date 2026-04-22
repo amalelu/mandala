@@ -70,6 +70,123 @@ impl MindMapDocument {
         best.map(|(k, p, _)| (k, p))
     }
 
+    /// Clear every position override the user can author on an
+    /// edge, routing through one `UndoAction::EditEdge` per applied
+    /// reset. The scope depends on the edge's display mode and on
+    /// `endpoint`:
+    ///
+    /// - **Line-mode edge, `endpoint = None`.** Reset `anchor_from`
+    ///   and `anchor_to` to `"auto"` (which lets the renderer pick
+    ///   the closest border side per frame as either node moves)
+    ///   and clear the label's `position_t` and
+    ///   `perpendicular_offset`. Curve control points (handled by
+    ///   `reset_edge_to_straight`) are deliberately left alone —
+    ///   the user asked for "re-attach the edge to both nodes",
+    ///   not "straighten it out".
+    /// - **Portal-mode edge, `endpoint = None`.** Clear `border_t`
+    ///   and `perpendicular_offset` on both `portal_from` and
+    ///   `portal_to`. Either endpoint state that becomes all-
+    ///   default after the clear is pruned back to `None` so the
+    ///   serialized JSON stays minimal.
+    /// - **Portal-mode edge, `endpoint = Some("<node_id>")`.**
+    ///   Clear `border_t` and `perpendicular_offset` on just the
+    ///   named endpoint. `endpoint` must match one of
+    ///   `edge.from_id` / `edge.to_id` — any other value is a
+    ///   no-op (the console layer ensures the id came from a
+    ///   portal-label hit-test, so this guard is defensive, not
+    ///   a user-visible behaviour).
+    /// - **Line-mode edge, `endpoint = Some(_)`.** Currently a
+    ///   no-op: line-mode edges have no per-endpoint state to
+    ///   reset, and the console layer never passes an endpoint
+    ///   through for a line-mode selection. Left as a silent
+    ///   no-op rather than a panic so a future selection-kind
+    ///   addition doesn't accidentally crash the interactive
+    ///   path.
+    ///
+    /// Returns `true` when at least one field actually changed;
+    /// `false` when every target field was already at its default
+    /// (the "nothing to reset" case — lets the console verb print
+    /// a helpful "already at default" message instead of a dead
+    /// undo entry).
+    pub fn reset_edge_position(
+        &mut self,
+        edge_ref: &EdgeRef,
+        endpoint: Option<&str>,
+    ) -> bool {
+        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
+            Some(i) => i,
+            None => return false,
+        };
+        let before = self.mindmap.edges[idx].clone();
+        let is_portal =
+            baumhard::mindmap::model::is_portal_edge(&self.mindmap.edges[idx]);
+        let mut changed = false;
+
+        if is_portal {
+            // Decide which endpoints to reset: the named one only,
+            // or both. Collect owned ids up-front so the mutable
+            // borrow on `edges[idx]` below doesn't collide.
+            let edge = &self.mindmap.edges[idx];
+            let targets: Vec<String> = match endpoint {
+                Some(id) if id == edge.from_id || id == edge.to_id => {
+                    vec![id.to_string()]
+                }
+                Some(_) => Vec::new(),
+                None => vec![edge.from_id.clone(), edge.to_id.clone()],
+            };
+            for target in &targets {
+                let slot = match portal_endpoint_state_mut(
+                    &mut self.mindmap.edges[idx],
+                    target,
+                ) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if let Some(existing) = slot.as_mut() {
+                    if existing.border_t.is_some() || existing.perpendicular_offset.is_some() {
+                        existing.border_t = None;
+                        existing.perpendicular_offset = None;
+                        changed = true;
+                        if existing == &PortalEndpointState::default() {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Line mode: reset anchors to "auto" and clear the
+            // label's position overrides. Endpoint argument is
+            // ignored for line-mode edges (no per-endpoint state).
+            let edge = &mut self.mindmap.edges[idx];
+            const AUTO: &str = "auto";
+            if edge.anchor_from != AUTO {
+                edge.anchor_from = AUTO.to_string();
+                changed = true;
+            }
+            if edge.anchor_to != AUTO {
+                edge.anchor_to = AUTO.to_string();
+                changed = true;
+            }
+            if let Some(cfg) = edge.label_config.as_mut() {
+                if cfg.position_t.is_some() || cfg.perpendicular_offset.is_some() {
+                    cfg.position_t = None;
+                    cfg.perpendicular_offset = None;
+                    changed = true;
+                    if cfg == &EdgeLabelConfig::default() {
+                        edge.label_config = None;
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            return false;
+        }
+        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
+        self.dirty = true;
+        true
+    }
+
     /// Clear an edge's `control_points` so it renders as a straight
     /// line. Returns `true` if the edge existed and had control
     /// points to clear; `false` if the edge was already straight or

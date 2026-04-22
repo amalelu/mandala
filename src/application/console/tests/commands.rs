@@ -247,6 +247,115 @@ fn test_edge_reset_curve_inserts_control_point_on_straight_edge() {
 }
 
 #[test]
+fn test_edge_reset_position_line_mode_restores_auto_anchors_and_clears_label() {
+    // Line-mode `edge reset=position` is the "re-attach to defaults"
+    // verb: anchors go back to "auto", label position overrides
+    // clear. Curve control points stay — that's a separate
+    // `edge reset=straight`.
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    let edge_mut = doc.mindmap.edges.iter_mut().find(|e| er.matches(e)).unwrap();
+    edge_mut.anchor_from = "top".into();
+    edge_mut.anchor_to = "bottom".into();
+    // Seed label position overrides so the reset has something to
+    // clear on the label side too.
+    doc.set_edge_label_position(&er, 0.75);
+    doc.set_edge_label_perpendicular_offset(&er, Some(42.0));
+    // Drop the "preseed" undo entries so the test asserts against
+    // the commit-time state, not the edits-to-fixture state.
+    doc.undo_stack.clear();
+
+    let result = run("edge reset=position", &mut doc);
+    assert!(matches!(result, ExecResult::Ok(_)), "got {:?}", result);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    assert_eq!(updated.anchor_from, "auto");
+    assert_eq!(updated.anchor_to, "auto");
+    assert!(updated.label_config.is_none(), "label_config must prune");
+    // One undo entry for the reset — snapshot the whole pre-edit
+    // edge so a later undo round-trips every cleared field in one
+    // user-visible step.
+    assert_eq!(doc.undo_stack.len(), 1);
+}
+
+#[test]
+fn test_edge_reset_position_portal_whole_edge_clears_both_endpoints() {
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    doc.set_edge_display_mode(&er, "portal");
+    // Seed both endpoint overrides so reset has something to clear.
+    let edge = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let from_id = edge.from_id.clone();
+    let to_id = edge.to_id.clone();
+    doc.set_portal_label_border_t(&er, &from_id, Some(1.5));
+    doc.set_portal_label_perpendicular_offset(&er, &from_id, Some(10.0));
+    doc.set_portal_label_border_t(&er, &to_id, Some(3.25));
+    doc.set_portal_label_perpendicular_offset(&er, &to_id, Some(7.5));
+    doc.undo_stack.clear();
+
+    let result = run("edge reset=position", &mut doc);
+    assert!(matches!(result, ExecResult::Ok(_)), "got {:?}", result);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    // Portal endpoint states must be fully pruned since every
+    // override we seeded got cleared and nothing else was set.
+    assert!(updated.portal_from.is_none(), "portal_from must prune");
+    assert!(updated.portal_to.is_none(), "portal_to must prune");
+    assert_eq!(doc.undo_stack.len(), 1);
+}
+
+#[test]
+fn test_edge_reset_position_portal_label_selection_clears_only_that_endpoint() {
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    doc.set_edge_display_mode(&er, "portal");
+    let edge = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    let from_id = edge.from_id.clone();
+    let to_id = edge.to_id.clone();
+    doc.set_portal_label_border_t(&er, &from_id, Some(1.5));
+    doc.set_portal_label_border_t(&er, &to_id, Some(3.25));
+    // Select the `from` endpoint's icon so the reset only affects
+    // that side.
+    let edge_key = baumhard::mindmap::scene_cache::EdgeKey::new(
+        &er.from_id,
+        &er.to_id,
+        &er.edge_type,
+    );
+    doc.selection = SelectionState::PortalLabel(
+        crate::application::document::PortalLabelSel {
+            edge_key,
+            endpoint_node_id: from_id.clone(),
+        },
+    );
+    doc.undo_stack.clear();
+
+    let _ = run("edge reset=position", &mut doc);
+    let updated = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    assert!(updated.portal_from.is_none(), "only `from` must reset");
+    assert_eq!(
+        updated.portal_to.as_ref().and_then(|s| s.border_t),
+        Some(3.25),
+        "to-side border_t must survive a from-only reset"
+    );
+}
+
+#[test]
+fn test_edge_reset_position_idempotent_second_call_reports_no_op() {
+    // Two consecutive `edge reset=position` calls: the first may
+    // or may not actually change the edge (depending on whether
+    // the testament fixture already has non-auto anchors), but
+    // the second must always be a no-op — both anchors are "auto"
+    // and the label_config is pruned by that point.
+    let mut doc = load_test_doc();
+    let _ = select_first_edge(&mut doc);
+    let _ = run("edge reset=position", &mut doc);
+    let second = run("edge reset=position", &mut doc);
+    assert!(
+        matches!(second, ExecResult::Err(_) | ExecResult::Lines(_)),
+        "expected no-op message on second call, got {:?}",
+        second
+    );
+}
+
+#[test]
 fn test_font_kv_size_sets_absolute_value_on_edge() {
     let mut doc = load_test_doc();
     let er = select_first_edge(&mut doc);

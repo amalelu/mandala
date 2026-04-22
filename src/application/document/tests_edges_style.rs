@@ -167,6 +167,112 @@ use super::defaults::default_cross_link_edge;
     }
 
     #[test]
+    fn test_reset_edge_position_line_mode_and_undo_round_trip() {
+        // Line mode: reset clears non-auto anchors + label overrides.
+        // Undo must reinstate *every* cleared field from a single
+        // EditEdge snapshot — the whole point of snapshotting the
+        // pre-edit edge instead of diffing per-field.
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        // Seed non-default state on the edge: mangle both anchors,
+        // and give the label a position + perpendicular override.
+        let edge_mut = doc
+            .mindmap
+            .edges
+            .iter_mut()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        edge_mut.anchor_from = "top".into();
+        edge_mut.anchor_to = "bottom".into();
+        doc.set_edge_label_position(&edge_ref, 0.25);
+        doc.set_edge_label_perpendicular_offset(&edge_ref, Some(9.0));
+        let before = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap()
+            .clone();
+        doc.undo_stack.clear();
+        assert!(doc.reset_edge_position(&edge_ref, None));
+        let after = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert_eq!(after.anchor_from, "auto");
+        assert_eq!(after.anchor_to, "auto");
+        assert!(after.label_config.is_none());
+        // Undo must restore the full pre-reset edge.
+        doc.undo();
+        let restored = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert_eq!(restored.anchor_from, before.anchor_from);
+        assert_eq!(restored.anchor_to, before.anchor_to);
+        assert_eq!(restored.label_config, before.label_config);
+    }
+
+    #[test]
+    fn test_reset_edge_position_portal_single_endpoint() {
+        // Single-endpoint reset: clearing one side must leave the
+        // other side's `border_t` / `perpendicular_offset` intact.
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        doc.set_edge_display_mode(&edge_ref, "portal");
+        let edge = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        let from_id = edge.from_id.clone();
+        let to_id = edge.to_id.clone();
+        doc.set_portal_label_border_t(&edge_ref, &from_id, Some(1.5));
+        doc.set_portal_label_perpendicular_offset(&edge_ref, &from_id, Some(10.0));
+        doc.set_portal_label_border_t(&edge_ref, &to_id, Some(3.0));
+        doc.undo_stack.clear();
+
+        assert!(doc.reset_edge_position(&edge_ref, Some(&from_id)));
+        let after = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert!(after.portal_from.is_none(), "from endpoint must prune");
+        assert_eq!(
+            after.portal_to.as_ref().and_then(|s| s.border_t),
+            Some(3.0),
+            "to-side border_t must survive a from-only reset"
+        );
+    }
+
+    #[test]
+    fn test_reset_edge_position_already_default_is_noop() {
+        // The no-op contract: if every targeted field already holds
+        // its default, the reset reports false and does not push an
+        // undo entry (no dead snapshots for idempotent console
+        // invocations).
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        // First reset: may or may not mutate — the testament edge
+        // could carry non-auto anchors. Run it and discard any
+        // resulting undo entries so the second call starts clean.
+        doc.reset_edge_position(&edge_ref, None);
+        doc.undo_stack.clear();
+        assert!(
+            !doc.reset_edge_position(&edge_ref, None),
+            "second reset must be a no-op"
+        );
+        assert!(doc.undo_stack.is_empty());
+    }
+
+    #[test]
     fn test_curve_straight_edge_inserts_control_point() {
         // On a straight edge, `curve_straight_edge` inserts one CP
         // offset perpendicular to the anchor line. The resulting
