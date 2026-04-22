@@ -191,6 +191,98 @@ pub(super) fn drain_edge_handle(
     }
 }
 
+/// Portal-label drag drain. Mirrors `drain_moving_node` in
+/// throttle discipline: the per-frame body
+/// (`apply_portal_label_drag` + portal tree update) runs at most
+/// every N frames, where N auto-adjusts from the
+/// `MutationFrequencyThrottle` hysteresis window. Pre-drain-queue,
+/// `event_cursor_moved.rs` called this body directly from every
+/// `CursorMoved` event — on a modern 500 Hz mouse that monopolised
+/// the main thread on non-trivial maps.
+///
+/// Keeps the narrow `update_portal_tree + flush_canvas_scene_buffers`
+/// rebuild (portal-only, no node tree) because that's cheap enough
+/// already; the throttle protects against sub-budget events piling
+/// up, not against the per-invocation body being too heavy.
+pub(super) fn drain_portal_label(
+    edge_ref: &EdgeRef,
+    endpoint_node_id: &str,
+    pending_cursor: &mut Option<Vec2>,
+    document: &mut Option<MindMapDocument>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+    mutation_throttle: &mut MutationFrequencyThrottle,
+) {
+    let cursor = match *pending_cursor {
+        Some(c) => c,
+        None => return,
+    };
+    if !mutation_throttle.should_drain() {
+        // Leave `pending_cursor` intact — the next drain folds in
+        // whatever cursor motion arrived in the meantime, same
+        // invariant as `MovingNode`'s `pending_delta`.
+        return;
+    }
+    let work_start = Instant::now();
+    if let Some(doc) = document.as_mut() {
+        let changed =
+            apply_portal_label_drag(doc, edge_ref, endpoint_node_id, cursor);
+        if changed {
+            update_portal_tree(
+                doc,
+                &std::collections::HashMap::new(),
+                app_scene,
+                renderer,
+            );
+            flush_canvas_scene_buffers(app_scene, renderer);
+        }
+    }
+    *pending_cursor = None;
+    mutation_throttle.record_work_duration(work_start.elapsed());
+}
+
+/// Edge-label drag drain. Same throttle discipline as
+/// `drain_portal_label`. The rebuild narrows to
+/// `update_connection_label_tree` + buffer flush — the drag only
+/// mutates `label_config` on one edge, so the node tree, border
+/// tree, portal tree, connection body tree, and edge-handle tree
+/// are all untouched. `rebuild_scene_only` would also work but
+/// walks five tree updates; this walks one.
+pub(super) fn drain_edge_label(
+    edge_ref: &EdgeRef,
+    pending_cursor: &mut Option<Vec2>,
+    document: &mut Option<MindMapDocument>,
+    app_scene: &mut crate::application::scene_host::AppScene,
+    renderer: &mut Renderer,
+    mutation_throttle: &mut MutationFrequencyThrottle,
+) {
+    let cursor = match *pending_cursor {
+        Some(c) => c,
+        None => return,
+    };
+    if !mutation_throttle.should_drain() {
+        return;
+    }
+    let work_start = Instant::now();
+    if let Some(doc) = document.as_mut() {
+        let changed = super::edge_label_drag::apply_edge_label_drag(
+            doc, edge_ref, cursor,
+        );
+        if changed {
+            // Rebuild only the connection-label tree — the
+            // drag's visible change is the label glyph's
+            // position / perpendicular offset. Portal tree,
+            // borders, node text, and connection body glyphs
+            // are all invariant under a `label_config` write.
+            let scene = doc.build_scene_with_selection(renderer.camera_zoom());
+            update_connection_label_tree(&scene, app_scene, renderer);
+            flush_canvas_scene_buffers(app_scene, renderer);
+        }
+    }
+    *pending_cursor = None;
+    mutation_throttle.record_work_duration(work_start.elapsed());
+}
+
 /// Update selection rectangle overlay + preview highlight (once per frame)
 pub(super) fn drain_selecting_rect(
     start_canvas: Vec2,

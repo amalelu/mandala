@@ -312,6 +312,38 @@ impl InitState {
                 &mut self.mutation_throttle,
             );
         }
+        if let DragState::DraggingPortalLabel {
+            ref edge_ref,
+            ref endpoint_node_id,
+            ref mut pending_cursor,
+            ..
+        } = self.drag_state
+        {
+            drain_frame::drain_portal_label(
+                edge_ref,
+                endpoint_node_id,
+                pending_cursor,
+                &mut self.document,
+                &mut self.app_scene,
+                &mut self.renderer,
+                &mut self.mutation_throttle,
+            );
+        }
+        if let DragState::DraggingEdgeLabel {
+            ref edge_ref,
+            ref mut pending_cursor,
+            ..
+        } = self.drag_state
+        {
+            drain_frame::drain_edge_label(
+                edge_ref,
+                pending_cursor,
+                &mut self.document,
+                &mut self.app_scene,
+                &mut self.renderer,
+                &mut self.mutation_throttle,
+            );
+        }
         if let DragState::SelectingRect {
             start_canvas,
             current_canvas,
