@@ -608,15 +608,15 @@ pub(super) fn handle_mouse_input(
                         original,
                         pending_cursor,
                     } => {
-                        // Flush the final cursor unconditionally —
-                        // the throttle may have skipped the last
-                        // CursorMoved event, and release must
-                        // commit the user's final drop position,
-                        // not wherever the last drain happened to
-                        // land. Bypasses `mutation_throttle`
-                        // because there is no "next frame" after
-                        // release; this is the one last chance to
-                        // converge on the user's intent.
+                        // Flush the final cursor if one is buffered.
+                        // When `pending_cursor` is `None` the last
+                        // drain already consumed it and no flush is
+                        // needed; when `Some`, the throttle skipped
+                        // that cursor and release must commit the
+                        // user's actual drop position rather than
+                        // wherever the prior drain happened to land.
+                        // Bypasses `mutation_throttle` — there is no
+                        // "next frame" after release.
                         if let (Some(doc), Some(cursor)) =
                             (document.as_mut(), pending_cursor)
                         {
@@ -658,11 +658,11 @@ pub(super) fn handle_mouse_input(
                         original,
                         pending_cursor,
                     } => {
-                        // Flush the final cursor — see the portal
-                        // release arm above for the rationale. The
-                        // helper bypasses the throttle so the
-                        // user's drop position lands even if the
-                        // last CursorMoved didn't trigger a drain.
+                        // Flush the final cursor if one is buffered.
+                        // See the portal release arm above for the
+                        // rationale — `None` means the last drain
+                        // already caught it, `Some` means the
+                        // throttle skipped the final CursorMoved.
                         if let (Some(doc), Some(cursor)) =
                             (document.as_mut(), pending_cursor)
                         {

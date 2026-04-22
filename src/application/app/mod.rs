@@ -433,9 +433,19 @@ enum DragState {
         /// ensures the per-frame `apply_portal_label_drag +
         /// update_portal_tree` body runs at most every N frames,
         /// auto-adjusting under load. `None` when no new cursor
-        /// position has arrived since the last drain. Absolute
-        /// (not a delta) because `apply_portal_label_drag`
-        /// projects the cursor onto the node's border directly.
+        /// position has arrived since the last drain.
+        ///
+        /// **Overwrite, not accumulate.** Unlike
+        /// `DragState::MovingNode::pending_delta` (which sums
+        /// incremental deltas via `+=`), this field stores an
+        /// absolute cursor. Each `CursorMoved` replaces the
+        /// previous value — when the throttle skips N frames the
+        /// intermediate cursors are discarded and only the
+        /// latest survives. That's the correct discipline here
+        /// because `apply_portal_label_drag` projects the cursor
+        /// onto the node's border directly; intermediate
+        /// positions carry no information the final projection
+        /// needs.
         pending_cursor: Option<Vec2>,
     },
     /// Dragging a line-mode edge's text label along its
