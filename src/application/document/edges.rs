@@ -95,13 +95,16 @@ impl MindMapDocument {
     ///   no-op (the console layer ensures the id came from a
     ///   portal-label hit-test, so this guard is defensive, not
     ///   a user-visible behaviour).
-    /// - **Line-mode edge, `endpoint = Some(_)`.** Currently a
-    ///   no-op: line-mode edges have no per-endpoint state to
-    ///   reset, and the console layer never passes an endpoint
-    ///   through for a line-mode selection. Left as a silent
-    ///   no-op rather than a panic so a future selection-kind
-    ///   addition doesn't accidentally crash the interactive
-    ///   path.
+    /// - **Line-mode edge, `endpoint = Some(_)`.** Identical to
+    ///   the `endpoint = None` line-mode case above — line-mode
+    ///   edges have no per-endpoint state to reset, so the
+    ///   `endpoint` argument is ignored. The console layer only
+    ///   passes a `Some(endpoint)` for portal-label / portal-text
+    ///   selections, which route to the portal branch above; the
+    ///   line-mode-with-endpoint combination isn't a user-reachable
+    ///   path today. Handled permissively rather than with a guard
+    ///   so a future selection-kind addition doesn't accidentally
+    ///   crash the interactive path.
     ///
     /// Returns `true` when at least one field actually changed;
     /// `false` when every target field was already at its default

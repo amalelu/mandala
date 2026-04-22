@@ -220,7 +220,11 @@ use super::defaults::default_cross_link_edge;
     #[test]
     fn test_reset_edge_position_portal_single_endpoint() {
         // Single-endpoint reset: clearing one side must leave the
-        // other side's `border_t` / `perpendicular_offset` intact.
+        // other side's `border_t` / `perpendicular_offset` intact,
+        // and a subsequent undo must restore the cleared side
+        // byte-for-byte from the one `EditEdge` snapshot — the
+        // "single snapshot restores both sides" invariant the
+        // whole reset shape rests on.
         let mut doc = load_test_doc();
         let edge_ref = first_testament_edge_ref(&doc);
         doc.set_edge_display_mode(&edge_ref, "portal");
@@ -235,6 +239,13 @@ use super::defaults::default_cross_link_edge;
         doc.set_portal_label_border_t(&edge_ref, &from_id, Some(1.5));
         doc.set_portal_label_perpendicular_offset(&edge_ref, &from_id, Some(10.0));
         doc.set_portal_label_border_t(&edge_ref, &to_id, Some(3.0));
+        let before = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap()
+            .clone();
         doc.undo_stack.clear();
 
         assert!(doc.reset_edge_position(&edge_ref, Some(&from_id)));
@@ -250,6 +261,111 @@ use super::defaults::default_cross_link_edge;
             Some(3.0),
             "to-side border_t must survive a from-only reset"
         );
+
+        // Undo: one snapshot, both sides restored.
+        assert_eq!(doc.undo_stack.len(), 1);
+        doc.undo();
+        let restored = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert_eq!(
+            restored.portal_from, before.portal_from,
+            "undo must restore from-side border_t + perpendicular_offset"
+        );
+        assert_eq!(
+            restored.portal_to, before.portal_to,
+            "undo must leave to-side byte-equal to pre-reset snapshot"
+        );
+    }
+
+    #[test]
+    fn test_reset_edge_position_portal_whole_edge_undo_restores_both_sides() {
+        // Whole-edge reset: clearing both endpoints must produce
+        // exactly one undo entry; undo must restore both sides
+        // from that single snapshot, not just one.
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        doc.set_edge_display_mode(&edge_ref, "portal");
+        let edge = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        let from_id = edge.from_id.clone();
+        let to_id = edge.to_id.clone();
+        doc.set_portal_label_border_t(&edge_ref, &from_id, Some(1.0));
+        doc.set_portal_label_perpendicular_offset(&edge_ref, &from_id, Some(5.0));
+        doc.set_portal_label_border_t(&edge_ref, &to_id, Some(2.0));
+        doc.set_portal_label_perpendicular_offset(&edge_ref, &to_id, Some(-8.0));
+        let before = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap()
+            .clone();
+        doc.undo_stack.clear();
+
+        assert!(doc.reset_edge_position(&edge_ref, None));
+        assert_eq!(doc.undo_stack.len(), 1, "one snapshot covers both sides");
+        doc.undo();
+        let restored = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        assert_eq!(restored.portal_from, before.portal_from);
+        assert_eq!(restored.portal_to, before.portal_to);
+    }
+
+    #[test]
+    fn test_reset_edge_position_portal_preserves_non_position_endpoint_state() {
+        // The reset clears only `border_t` and
+        // `perpendicular_offset`. Sibling fields (color, text,
+        // text_color, font clamps, zoom bounds) must survive
+        // unchanged — verifies the "prune if all-default, else
+        // preserve" contract on `PortalEndpointState`.
+        use baumhard::mindmap::model::PortalEndpointState;
+        let mut doc = load_test_doc();
+        let edge_ref = first_testament_edge_ref(&doc);
+        doc.set_edge_display_mode(&edge_ref, "portal");
+        let edge = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        let from_id = edge.from_id.clone();
+        let edge_idx = doc
+            .mindmap
+            .edges
+            .iter()
+            .position(|e| edge_ref.matches(e))
+            .unwrap();
+        doc.mindmap.edges[edge_idx].portal_from = Some(PortalEndpointState {
+            color: Some("#ff0000".into()),
+            border_t: Some(1.25),
+            perpendicular_offset: Some(7.5),
+            ..PortalEndpointState::default()
+        });
+        doc.undo_stack.clear();
+
+        assert!(doc.reset_edge_position(&edge_ref, Some(&from_id)));
+        let after = doc
+            .mindmap
+            .edges
+            .iter()
+            .find(|e| edge_ref.matches(e))
+            .unwrap();
+        let pf = after.portal_from.as_ref().expect("color must keep slot alive");
+        assert_eq!(pf.color.as_deref(), Some("#ff0000"));
+        assert!(pf.border_t.is_none());
+        assert!(pf.perpendicular_offset.is_none());
     }
 
     #[test]

@@ -166,22 +166,86 @@ mod tests {
 
     #[test]
     fn test_cursor_inside_node_writes_negative_perpendicular() {
-        // Cursor deep inside the node. The right border is the
-        // closest (cursor_x = 30 is 30 units from left, 70 from
-        // right — 70 < 30? no, 30 is closer to left. Use y=0 which
-        // is on top border, so snap changes. Pick x=60 so the
-        // nearest border is still the right edge (distance 40)
-        // and the perpendicular is ~ -40.
-        let (_t, perp) = project_cursor_to_portal_params(
+        // Cursor pressed against the interior of the right border —
+        // `(95, 25)` sits at the vertical midline of the node, 5
+        // units inside the right edge (distance 5 from x=100, 25
+        // from the nearer of top / bottom). `nearest_border_t`
+        // picks the right edge; the outward normal is `+x`; the
+        // signed perpendicular is `95 - 100 = -5`. Verifies the
+        // "drag pulled back past the border" branch produces a
+        // negative offset rather than flipping to the opposite
+        // side's outward normal.
+        let (t, perp) = project_cursor_to_portal_params(
             POS,
             SIZE,
-            Vec2::new(60.0, 45.0),
+            Vec2::new(95.0, 25.0),
+        );
+        assert!(
+            (1.0..2.0).contains(&t),
+            "cursor must project onto the right edge (t in [1, 2)), got t={t}"
         );
         let perp = perp.expect("inside-border drag must produce Some");
         assert!(
-            perp < -1.0,
-            "expected negative perpendicular (cursor inside node), got {perp}"
+            (perp - (-5.0)).abs() < 0.5,
+            "expected ~-5 (cursor 5 units inside the right border), got {perp}"
         );
+    }
+
+    /// Coverage across all four sides of the node border so a
+    /// refactor that quietly broke one side's sign or projection
+    /// can't pass CI with only right-side tests.
+    #[test]
+    fn test_cursor_projects_onto_each_border_side_with_correct_sign() {
+        struct Case {
+            name: &'static str,
+            cursor: Vec2,
+            t_range: std::ops::Range<f32>,
+            expected_perp: f32,
+        }
+        let cases = [
+            Case {
+                name: "top — cursor 10 above, normal -y, perp ~10",
+                cursor: Vec2::new(50.0, -10.0),
+                t_range: 0.0..1.0,
+                expected_perp: 10.0,
+            },
+            Case {
+                name: "right — cursor 30 past x=100, normal +x, perp ~30",
+                cursor: Vec2::new(130.0, 25.0),
+                t_range: 1.0..2.0,
+                expected_perp: 30.0,
+            },
+            Case {
+                name: "bottom — cursor 8 below y=50, normal +y, perp ~8",
+                cursor: Vec2::new(50.0, 58.0),
+                t_range: 2.0..3.0,
+                expected_perp: 8.0,
+            },
+            Case {
+                name: "left — cursor 15 left of x=0, normal -x, perp ~15",
+                cursor: Vec2::new(-15.0, 25.0),
+                t_range: 3.0..4.0,
+                expected_perp: 15.0,
+            },
+        ];
+        for c in cases {
+            let (t, perp) = project_cursor_to_portal_params(POS, SIZE, c.cursor);
+            assert!(
+                c.t_range.contains(&t),
+                "{}: t={t} not in {:?}",
+                c.name,
+                c.t_range
+            );
+            let perp = perp.unwrap_or_else(|| {
+                panic!("{}: perpendicular must be Some outside snap epsilon", c.name)
+            });
+            assert!(
+                (perp - c.expected_perp).abs() < 0.5,
+                "{}: expected ~{} but got {perp}",
+                c.name,
+                c.expected_perp
+            );
+        }
     }
 
     #[test]
