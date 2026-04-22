@@ -79,9 +79,18 @@ impl TextEditState {
     }
 }
 
-/// Glyph rendered at the cursor position while a node text editor
-/// is open. Shared with `LabelEditState`.
-const TEXT_EDIT_CARET: char = '\u{258C}';
+/// Glyph rendered at the cursor position while a node, edge-label,
+/// or portal-text editor is open. ASCII `|` (U+007C) is deliberate:
+/// the earlier pick `▌` (U+258C, Left Half Block) fell through
+/// cosmic-text's font fallback to a different face for connection
+/// labels — the Block Elements range isn't in the edge-label body
+/// font, so the block renders at the fallback face's em height,
+/// which on many fonts is visibly larger than the surrounding
+/// text. Users reported the stray caret as "a huge pause icon
+/// replacing the last character" after backspacing a label. ASCII
+/// `|` is in every text font we ship against, so the caret always
+/// matches the body font's metrics.
+const TEXT_EDIT_CARET: char = '|';
 
 
 // Text-edit cursor helpers.

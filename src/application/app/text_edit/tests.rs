@@ -136,19 +136,19 @@ fn test_move_cursor_down_line_last_line_is_noop() {
 #[test]
 fn test_insert_caret_middle() {
     let out = insert_caret("abcd", 2);
-    assert_eq!(out, "ab\u{258C}cd");
+    assert_eq!(out, "ab|cd");
 }
 
 #[test]
 fn test_insert_caret_end() {
     let out = insert_caret("abc", 3);
-    assert_eq!(out, "abc\u{258C}");
+    assert_eq!(out, "abc|");
 }
 
 #[test]
 fn test_insert_caret_empty() {
     let out = insert_caret("", 0);
-    assert_eq!(out, "\u{258C}");
+    assert_eq!(out, "|");
 }
 
 
@@ -201,7 +201,7 @@ fn test_text_edit_mutation_with_caret_glyph_via_baumhard() {
     ]);
     delta.apply_to(&mut area);
     // Caret after "hello", before " world".
-    assert_eq!(area.text, "hello\u{258C} world");
+    assert_eq!(area.text, "hello| world");
     assert_eq!(area.text, display_text);
 }
 
@@ -248,14 +248,14 @@ fn test_text_edit_preserves_multi_run_regions_on_insertion() {
     // Apply the delta to a mock area the same way the production
     // path does.
     let mut area = GlyphArea::new_with_str(
-        "Helmo\u{258C}", // placeholder, will be overwritten
+        "Helmo|", // placeholder, will be overwritten
         14.0,
         16.8,
         Vec2::new(0.0, 0.0),
         Vec2::new(100.0, 30.0),
     );
     let delta = DeltaGlyphArea::new(vec![
-        GlyphAreaField::Text("HelXmo\u{258C}".to_string()),
+        GlyphAreaField::Text("HelXmo|".to_string()),
         GlyphAreaField::ColorFontRegions(display_regions),
         GlyphAreaField::Operation(ApplyOperation::Assign),
     ]);
@@ -384,7 +384,7 @@ fn test_insert_caret_with_multibyte_prefix() {
     // 'é' is a 2-byte UTF-8 char. insert_caret must not split it.
     let out = insert_caret("café", 3);
     // "caf" + caret + "é"
-    assert_eq!(out, "caf\u{258C}é");
+    assert_eq!(out, "caf|é");
 }
 
 #[test]
@@ -453,5 +453,5 @@ fn test_cursor_edit_with_emoji_delete_forward() {
 fn test_insert_caret_after_emoji() {
     // Caret rendered after a pizza emoji should not split it.
     let out = insert_caret("ab🍕cd", 3);
-    assert_eq!(out, "ab🍕\u{258C}cd");
+    assert_eq!(out, "ab🍕|cd");
 }
