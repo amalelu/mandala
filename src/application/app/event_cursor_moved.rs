@@ -143,64 +143,31 @@ pub(super) fn handle_cursor_moved(
             *total_delta += delta;
             *pending_delta += delta;
         }
-        DragState::DraggingEdgeLabel { edge_ref, .. } => {
-            // Edge-label drag writes `position_t` +
-            // `perpendicular_offset` per mouse-move event
-            // directly — the state is two f32s on the edge,
-            // and the only visual consumer is the label
-            // pass, which rebuilds cheaply (one label per
-            // labeled edge). Bypasses the per-frame drain /
-            // undo push that `MovingNode` / `DraggingEdgeHandle`
-            // use; release commits a single `EditEdge` with
-            // the pre-drag snapshot.
+        DragState::DraggingEdgeLabel { pending_cursor, .. } => {
+            // Store the latest cursor — no scene work in the
+            // event handler. `drain_frame::drain_edge_label`
+            // consumes `pending_cursor` once per frame gated by
+            // `mutation_throttle.should_drain()`, matching the
+            // `MovingNode` / `DraggingEdgeHandle` discipline.
+            // Pre-drain-queue, this arm called
+            // `apply_edge_label_drag + rebuild_scene_only` per
+            // mouse-move event, which on a 500 Hz mouse blew
+            // well past the 14 ms frame budget on any non-trivial
+            // map (§4 mobile budget).
             let cursor_canvas =
                 renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
-            let edge_ref = edge_ref.clone();
-            if let Some(doc) = document.as_mut() {
-                let changed = super::edge_label_drag::apply_edge_label_drag(
-                    doc,
-                    &edge_ref,
-                    cursor_canvas,
-                );
-                if changed {
-                    // `rebuild_scene_only` — the label drag mutates
-                    // `label_config` on one edge only; node text
-                    // buffers, node backgrounds, and border trees
-                    // are all untouched. Skipping the tree rebuild
-                    // halves the per-drag-frame cost on maps with
-                    // many nodes, matching the same "scene-only"
-                    // discipline the color-picker hover uses.
-                    rebuild_scene_only(doc, app_scene, renderer);
-                }
-            }
+            *pending_cursor = Some(cursor_canvas);
         }
-        DragState::DraggingPortalLabel {
-            edge_ref,
-            endpoint_node_id,
-            ..
-        } => {
-            // Portal label drag writes `border_t` per
-            // mouse-move event directly — the state is
-            // a single `f32` on the edge, and the only
-            // visual consumer is the portal tree, which
-            // rebuilds cheaply (O(portal-mode edges)).
+        DragState::DraggingPortalLabel { pending_cursor, .. } => {
+            // Store the latest cursor; drain + rebuild happen
+            // once per frame in `drain_frame::drain_portal_label`
+            // behind the same throttle. Pre-drain-queue this
+            // arm ran `apply_portal_label_drag +
+            // update_portal_tree + flush_canvas_scene_buffers`
+            // per event, which compounds on a high-Hz mouse.
             let cursor_canvas =
                 renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
-            let edge_ref = edge_ref.clone();
-            let endpoint_node_id = endpoint_node_id.clone();
-            if let Some(doc) = document.as_mut() {
-                let changed =
-                    apply_portal_label_drag(doc, &edge_ref, &endpoint_node_id, cursor_canvas);
-                if changed {
-                    update_portal_tree(
-                        doc,
-                        &std::collections::HashMap::new(),
-                        app_scene,
-                        renderer,
-                    );
-                    flush_canvas_scene_buffers(app_scene, renderer);
-                }
-            }
+            *pending_cursor = Some(cursor_canvas);
         }
         DragState::Pending {
             start_pos,
@@ -250,6 +217,7 @@ pub(super) fn handle_cursor_moved(
                             *drag_state = DragState::DraggingEdgeLabel {
                                 edge_ref,
                                 original,
+                                pending_cursor: None,
                             };
                             // `rebuild_after_selection_change` picks
                             // `rebuild_scene_only` when both the
@@ -296,6 +264,7 @@ pub(super) fn handle_cursor_moved(
                                 edge_ref,
                                 endpoint_node_id: endpoint,
                                 original,
+                                pending_cursor: None,
                             };
                             rebuild_all(doc, mindmap_tree, app_scene, renderer);
                             return;

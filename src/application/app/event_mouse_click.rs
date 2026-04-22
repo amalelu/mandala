@@ -602,9 +602,32 @@ pub(super) fn handle_mouse_input(
                         }
                         mutation_throttle.reset();
                     }
-                    DragState::DraggingPortalLabel { edge_ref, original, .. } => {
-                        // Per-frame CursorMoved already mutated the
-                        // edge. Commit with a single EditEdge undo
+                    DragState::DraggingPortalLabel {
+                        edge_ref,
+                        endpoint_node_id,
+                        original,
+                        pending_cursor,
+                    } => {
+                        // Flush the final cursor if one is buffered.
+                        // When `pending_cursor` is `None` the last
+                        // drain already consumed it and no flush is
+                        // needed; when `Some`, the throttle skipped
+                        // that cursor and release must commit the
+                        // user's actual drop position rather than
+                        // wherever the prior drain happened to land.
+                        // Bypasses `mutation_throttle` — there is no
+                        // "next frame" after release.
+                        if let (Some(doc), Some(cursor)) =
+                            (document.as_mut(), pending_cursor)
+                        {
+                            apply_portal_label_drag(
+                                doc,
+                                &edge_ref,
+                                &endpoint_node_id,
+                                cursor,
+                            );
+                        }
+                        // Commit with a single EditEdge undo
                         // carrying the pre-drag snapshot, matching
                         // the DraggingEdgeHandle release path. The
                         // no-op check only compares the two fields
@@ -630,12 +653,27 @@ pub(super) fn handle_mouse_input(
                         }
                         mutation_throttle.reset();
                     }
-                    DragState::DraggingEdgeLabel { edge_ref, original } => {
-                        // Per-frame drag already wrote
-                        // `label_config.{position_t,
-                        // perpendicular_offset}` directly. Commit
-                        // with a single `EditEdge` carrying the
-                        // pre-drag snapshot, skipping the undo
+                    DragState::DraggingEdgeLabel {
+                        edge_ref,
+                        original,
+                        pending_cursor,
+                    } => {
+                        // Flush the final cursor if one is buffered.
+                        // See the portal release arm above for the
+                        // rationale — `None` means the last drain
+                        // already caught it, `Some` means the
+                        // throttle skipped the final CursorMoved.
+                        if let (Some(doc), Some(cursor)) =
+                            (document.as_mut(), pending_cursor)
+                        {
+                            super::edge_label_drag::apply_edge_label_drag(
+                                doc,
+                                &edge_ref,
+                                cursor,
+                            );
+                        }
+                        // Commit with a single `EditEdge` carrying
+                        // the pre-drag snapshot, skipping the undo
                         // entry if nothing actually moved.
                         if let Some(doc) = document.as_mut() {
                             if let Some(idx) = doc.edge_index(&edge_ref) {

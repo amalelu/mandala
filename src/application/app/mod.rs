@@ -427,6 +427,26 @@ enum DragState {
         /// `UndoAction::EditEdge` at release and to skip undo
         /// entries when the drag didn't actually move `border_t`.
         original: baumhard::mindmap::model::MindEdge,
+        /// Latest cursor position (canvas space) from the
+        /// `CursorMoved` event. Drained once per frame by
+        /// `drain_frame::drain_portal_label` — the throttle gate
+        /// ensures the per-frame `apply_portal_label_drag +
+        /// update_portal_tree` body runs at most every N frames,
+        /// auto-adjusting under load. `None` when no new cursor
+        /// position has arrived since the last drain.
+        ///
+        /// **Overwrite, not accumulate.** Unlike
+        /// `DragState::MovingNode::pending_delta` (which sums
+        /// incremental deltas via `+=`), this field stores an
+        /// absolute cursor. Each `CursorMoved` replaces the
+        /// previous value — when the throttle skips N frames the
+        /// intermediate cursors are discarded and only the
+        /// latest survives. That's the correct discipline here
+        /// because `apply_portal_label_drag` projects the cursor
+        /// onto the node's border directly; intermediate
+        /// positions carry no information the final projection
+        /// needs.
+        pending_cursor: Option<Vec2>,
     },
     /// Dragging a line-mode edge's text label along its
     /// connection path. The cursor drags in free canvas space
@@ -444,6 +464,10 @@ enum DragState {
         /// the undo entry at release and to skip pushing an
         /// entry when the drag didn't actually move the label.
         original: baumhard::mindmap::model::MindEdge,
+        /// Latest cursor position (canvas space) — same throttle
+        /// discipline as [`DragState::DraggingPortalLabel::pending_cursor`].
+        /// `None` between drains. See `drain_frame::drain_edge_label`.
+        pending_cursor: Option<Vec2>,
     },
 }
 
