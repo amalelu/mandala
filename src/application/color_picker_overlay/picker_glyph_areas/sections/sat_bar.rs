@@ -7,7 +7,7 @@
 use baumhard::gfx_structs::area::OutlineStyle;
 
 use super::super::areas::{PickerAreas, PickerSection};
-use super::super::make_area::make_area;
+use super::super::make_area::{make_area, PickerAreaStyle};
 use crate::application::color_picker::{
     arm_left_glyphs, arm_right_glyphs, picker_channel, sat_cell_to_value, ColorPickerLayout,
     ColorPickerOverlayGeometry, PickerHit, CROSSHAIR_CENTER_CELL, SAT_CELL_COUNT,
@@ -63,14 +63,16 @@ pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
             picker_channel("sat_bar", i),
             make_area(
                 glyph,
-                color,
-                fs,
-                fs,
                 (cx - bw * 0.5, cy - fs * 0.5),
                 (bw, fs * 1.5),
-                true,
-                None,
-                outline,
+                PickerAreaStyle {
+                    color,
+                    font_size: fs,
+                    line_height: fs,
+                    centered: true,
+                    font: None,
+                    outline,
+                },
             ),
         );
     }

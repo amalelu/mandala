@@ -6,7 +6,7 @@
 use baumhard::gfx_structs::area::OutlineStyle;
 
 use super::super::areas::{PickerAreas, PickerSection};
-use super::super::make_area::make_area;
+use super::super::make_area::{make_area, PickerAreaStyle};
 use crate::application::color_picker::{picker_channel, ColorPickerLayout, ColorPickerOverlayGeometry};
 use crate::application::color_picker_overlay::color::rgb_to_cosmic_color;
 use crate::application::widgets::color_picker_widget::ColorPickerWidgetSpec;
@@ -37,14 +37,16 @@ pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
         picker_channel("title", 0),
         make_area(
             &title_text,
-            preview_color,
-            font_size,
-            font_size,
             layout.title_pos,
             (font_size * 24.0, font_size * 1.5),
-            false,
-            None,
-            outline,
+            PickerAreaStyle {
+                color: preview_color,
+                font_size,
+                line_height: font_size,
+                centered: false,
+                font: None,
+                outline,
+            },
         ),
     );
 }

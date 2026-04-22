@@ -7,7 +7,7 @@
 use baumhard::gfx_structs::area::OutlineStyle;
 
 use super::super::areas::{PickerAreas, PickerSection};
-use super::super::make_area::make_area;
+use super::super::make_area::{make_area, PickerAreaStyle};
 use crate::application::color_picker::{picker_channel, ColorPickerLayout, ColorPickerOverlayGeometry};
 use crate::application::color_picker_overlay::color::rgb_to_cosmic_color;
 use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
@@ -36,14 +36,16 @@ pub(in crate::application::color_picker_overlay::picker_glyph_areas) fn build(
         picker_channel("hex", 0),
         make_area(
             &hex_text,
-            preview_color,
-            font_size,
-            font_size,
             hex_pos,
             hex_bounds,
-            false,
-            None,
-            outline,
+            PickerAreaStyle {
+                color: preview_color,
+                font_size,
+                line_height: font_size,
+                centered: false,
+                font: None,
+                outline,
+            },
         ),
     );
 }

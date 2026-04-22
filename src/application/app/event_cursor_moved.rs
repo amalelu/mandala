@@ -3,35 +3,37 @@
 //! (pending → Panning / MovingNode / SelectingRect /
 //! DraggingEdgeHandle / DraggingPortalLabel), plus hover
 //! highlights for Reparent / Connect modes and the button-
-//! cursor swap for trigger-bearing nodes. Follows the same
-//! "state tuple of mutable refs" shape as
-//! [`super::event_mouse_click`].
+//! cursor swap for trigger-bearing nodes. Persistent state flows
+//! in through [`super::input_context::InputHandlerContext`].
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use super::*;
-use baumhard::mindmap::tree_builder::MindMapTree;
+use super::input_context::InputHandlerContext;
 use winit::dpi::PhysicalPosition;
 use winit::window::Window;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_cursor_moved(
     position: PhysicalPosition<f64>,
-    modifiers: &ModifiersState,
     window: &Window,
-    document: &mut Option<MindMapDocument>,
-    mindmap_tree: &mut Option<MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    cursor_pos: &mut (f64, f64),
-    drag_state: &mut DragState,
-    app_mode: &mut AppMode,
-    color_picker_state: &mut crate::application::color_picker::ColorPickerState,
-    hovered_node: &mut Option<String>,
-    cursor_is_hand: &mut bool,
-    picker_dirty: &mut bool,
+    ctx: InputHandlerContext<'_>,
 ) {
+    let InputHandlerContext {
+        document,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+        cursor_pos,
+        drag_state,
+        app_mode,
+        color_picker_state,
+        hovered_node,
+        cursor_is_hand,
+        picker_dirty,
+        modifiers,
+        ..
+    } = ctx;
     let prev_pos = *cursor_pos;
     *cursor_pos = (position.x, position.y);
     let cursor_pos_val = *cursor_pos;

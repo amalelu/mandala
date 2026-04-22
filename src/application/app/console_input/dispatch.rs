@@ -74,7 +74,7 @@ pub(in crate::application::app) fn handle_console_key(
     // Submit executes the line; keeps its own flow because it needs
     // scene/tree/renderer access to run commands.
     if let Some(Action::ConsoleSubmit) = action {
-        submit_line(
+        submit_line(SubmitLineContext {
             console_state,
             console_history,
             label_edit_state,
@@ -86,7 +86,7 @@ pub(in crate::application::app) fn handle_console_key(
             renderer,
             scene_cache,
             keybinds,
-        );
+        });
         return;
     }
 
@@ -166,23 +166,42 @@ fn after_state_change(
     }
 }
 
+/// Console-submit context — the narrow view the line executor needs
+/// into app state. Mirrors the `InputHandlerContext` shape but
+/// scoped to console submission, and kept inside this module because
+/// no code outside the submit path constructs it.
+#[cfg(not(target_arch = "wasm32"))]
+struct SubmitLineContext<'a> {
+    console_state: &'a mut ConsoleState,
+    console_history: &'a mut Vec<String>,
+    label_edit_state: &'a mut LabelEditState,
+    portal_text_edit_state: &'a mut PortalTextEditState,
+    color_picker_state: &'a mut ColorPickerState,
+    document: &'a mut Option<MindMapDocument>,
+    mindmap_tree: &'a mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    app_scene: &'a mut crate::application::scene_host::AppScene,
+    renderer: &'a mut Renderer,
+    scene_cache: &'a mut baumhard::mindmap::scene_cache::SceneConnectionCache,
+    keybinds: &'a ResolvedKeybinds,
+}
+
 /// Take the current input line, append to history + scrollback,
 /// execute via `execute_console_line`, and rebuild the overlay.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-fn submit_line(
-    console_state: &mut ConsoleState,
-    console_history: &mut Vec<String>,
-    label_edit_state: &mut LabelEditState,
-    portal_text_edit_state: &mut PortalTextEditState,
-    color_picker_state: &mut ColorPickerState,
-    document: &mut Option<MindMapDocument>,
-    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
-    keybinds: &ResolvedKeybinds,
-) {
+fn submit_line(ctx: SubmitLineContext<'_>) {
+    let SubmitLineContext {
+        console_state,
+        console_history,
+        label_edit_state,
+        portal_text_edit_state,
+        color_picker_state,
+        document,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+        keybinds,
+    } = ctx;
     let line = match console_state {
         ConsoleState::Open { input, .. } => std::mem::take(input),
         ConsoleState::Closed => return,
