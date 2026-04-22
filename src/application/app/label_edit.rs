@@ -144,11 +144,7 @@ pub(in crate::application::app) fn handle_label_edit_key(
         return;
     };
 
-    let typed = match logical_key {
-        Key::Character(c) => Some(c.as_str()),
-        _ => None,
-    };
-    if !route_label_edit_key(name, typed, buffer, cursor) {
+    if !route_label_edit_key(logical_key, buffer, cursor) {
         return;
     }
 
@@ -371,11 +367,7 @@ pub(in crate::application::app) fn handle_portal_text_edit_key(
         return;
     };
 
-    let typed = match logical_key {
-        Key::Character(c) => Some(c.as_str()),
-        _ => None,
-    };
-    if !route_label_edit_key(name, typed, buffer, cursor) {
+    if !route_label_edit_key(logical_key, buffer, cursor) {
         return;
     }
 
@@ -445,13 +437,22 @@ mod tests {
     //! No winit event loop needed; the router is a pure function.
 
     use super::*;
+    use winit::keyboard::{Key, NamedKey, SmolStr};
+
+    fn named(k: NamedKey) -> Key {
+        Key::Named(k)
+    }
+    fn ch(s: &str) -> Key {
+        Key::Character(SmolStr::new(s))
+    }
 
     #[test]
     fn test_route_label_edit_backspace_deletes_grapheme_before_cursor() {
         let mut buf = String::from("café");
         // 4 graphemes: c a f é. Cursor at end; backspace removes é.
         let mut cursor = 4;
-        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        let changed =
+            route_label_edit_key(&named(NamedKey::Backspace), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "caf");
         assert_eq!(cursor, 3);
@@ -461,7 +462,8 @@ mod tests {
     fn test_route_label_edit_backspace_at_zero_is_noop() {
         let mut buf = String::from("abc");
         let mut cursor = 0;
-        let changed = route_label_edit_key(Some("backspace"), None, &mut buf, &mut cursor);
+        let changed =
+            route_label_edit_key(&named(NamedKey::Backspace), &mut buf, &mut cursor);
         assert!(!changed);
         assert_eq!(buf, "abc");
         assert_eq!(cursor, 0);
@@ -471,7 +473,7 @@ mod tests {
     fn test_route_label_edit_delete_at_end_is_noop() {
         let mut buf = String::from("abc");
         let mut cursor = 3;
-        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&named(NamedKey::Delete), &mut buf, &mut cursor);
         assert!(!changed);
         assert_eq!(buf, "abc");
         assert_eq!(cursor, 3);
@@ -481,7 +483,7 @@ mod tests {
     fn test_route_label_edit_delete_removes_grapheme_at_cursor() {
         let mut buf = String::from("abc");
         let mut cursor = 1;
-        let changed = route_label_edit_key(Some("delete"), None, &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&named(NamedKey::Delete), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "ac");
         assert_eq!(cursor, 1);
@@ -492,12 +494,12 @@ mod tests {
         let mut buf = String::from("café");
         let mut cursor = 4;
         // Left past é, f, a — landing on the c boundary.
-        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::ArrowLeft), &mut buf, &mut cursor));
         assert_eq!(cursor, 3);
-        assert!(route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::ArrowLeft), &mut buf, &mut cursor));
         assert_eq!(cursor, 2);
         // Right brings us back.
-        assert!(route_label_edit_key(Some("arrowright"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::ArrowRight), &mut buf, &mut cursor));
         assert_eq!(cursor, 3);
     }
 
@@ -505,7 +507,7 @@ mod tests {
     fn test_route_label_edit_arrow_left_at_zero_is_noop() {
         let mut buf = String::from("abc");
         let mut cursor = 0;
-        assert!(!route_label_edit_key(Some("arrowleft"), None, &mut buf, &mut cursor));
+        assert!(!route_label_edit_key(&named(NamedKey::ArrowLeft), &mut buf, &mut cursor));
         assert_eq!(cursor, 0);
     }
 
@@ -513,15 +515,15 @@ mod tests {
     fn test_route_label_edit_home_end_jump_to_ends() {
         let mut buf = String::from("café");
         let mut cursor = 2;
-        assert!(route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::Home), &mut buf, &mut cursor));
         assert_eq!(cursor, 0);
         // Home again is a no-op.
-        assert!(!route_label_edit_key(Some("home"), None, &mut buf, &mut cursor));
+        assert!(!route_label_edit_key(&named(NamedKey::Home), &mut buf, &mut cursor));
         assert_eq!(cursor, 0);
-        assert!(route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert!(route_label_edit_key(&named(NamedKey::End), &mut buf, &mut cursor));
         assert_eq!(cursor, 4);
         // End again is a no-op.
-        assert!(!route_label_edit_key(Some("end"), None, &mut buf, &mut cursor));
+        assert!(!route_label_edit_key(&named(NamedKey::End), &mut buf, &mut cursor));
         assert_eq!(cursor, 4);
     }
 
@@ -529,7 +531,7 @@ mod tests {
     fn test_route_label_edit_printable_inserts_and_advances() {
         let mut buf = String::from("ab");
         let mut cursor = 1;
-        let changed = route_label_edit_key(None, Some("X"), &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&ch("X"), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "aXb");
         assert_eq!(cursor, 2);
@@ -542,7 +544,7 @@ mod tests {
     fn test_route_label_edit_multichar_typed_payload() {
         let mut buf = String::from("");
         let mut cursor = 0;
-        let changed = route_label_edit_key(None, Some("né"), &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&ch("né"), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "né");
         assert_eq!(cursor, 2);
@@ -555,10 +557,61 @@ mod tests {
     fn test_route_label_edit_typed_control_chars_are_skipped() {
         let mut buf = String::from("");
         let mut cursor = 0;
-        let changed = route_label_edit_key(None, Some("a\tb"), &mut buf, &mut cursor);
+        let changed = route_label_edit_key(&ch("a\tb"), &mut buf, &mut cursor);
         assert!(changed);
         assert_eq!(buf, "ab");
         assert_eq!(cursor, 2);
+    }
+
+    /// Regression: `Key::Named(NamedKey::Backspace)` must delete
+    /// regardless of what `key_to_name` reports for the same event.
+    /// Some IME stacks attach a Unicode payload (e.g. a media-control
+    /// glyph) to the named-backspace event, then return `None` from
+    /// `key_to_name` because the named-key debug string was eaten by
+    /// the payload. The previous router keyed solely on the lowercase
+    /// name and fell through to the printable-char branch with the
+    /// payload still attached, stamping the glyph into the buffer
+    /// (the reported "huge pause icon on backspace" symptom). The
+    /// `Key`-first dispatch closes that hole.
+    #[test]
+    fn test_route_backspace_via_named_key_does_not_insert_payload() {
+        let mut buf = String::from("abc");
+        let mut cursor = 3;
+        let changed =
+            route_label_edit_key(&named(NamedKey::Backspace), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "ab", "backspace must delete the previous grapheme");
+        assert_eq!(cursor, 2, "cursor must move back exactly one grapheme");
+    }
+
+    /// Regression companion: the same shape for `Delete` — a
+    /// `Key::Named(NamedKey::Delete)` event must never insert a
+    /// printable glyph as a side effect.
+    #[test]
+    fn test_route_delete_via_named_key_does_not_insert_payload() {
+        let mut buf = String::from("abc");
+        let mut cursor = 0;
+        let changed = route_label_edit_key(&named(NamedKey::Delete), &mut buf, &mut cursor);
+        assert!(changed);
+        assert_eq!(buf, "bc", "delete must remove the grapheme at the cursor");
+        assert_eq!(cursor, 0, "delete must leave the cursor in place");
+    }
+
+    /// Unprintable winit `Key` variants (dead keys, identifier-only,
+    /// modifiers reaching the dispatcher) must not insert anything
+    /// and must not panic.
+    #[test]
+    fn test_route_unhandled_key_is_noop() {
+        let mut buf = String::from("abc");
+        let mut cursor = 1;
+        let changed = route_label_edit_key(
+            &Key::Named(NamedKey::Shift),
+            &mut buf,
+            &mut cursor,
+        );
+        assert!(!changed);
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 1);
     }
 }
 

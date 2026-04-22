@@ -229,60 +229,65 @@ fn is_double_click(
     &prev.hit == new_hit
 }
 
-/// Pure router for the label-edit key loop. Given the winit
-/// key-name lowercased (`"backspace"`, `"arrowleft"`, ...) and
-/// the optional character payload from `Key::Character` (IME /
-/// dead-key sequences can carry multiple chars), mutates
-/// `(buffer, cursor)` in place through the same
-/// `grapheme_chad` helpers `handle_text_edit_key` uses and
-/// returns `true` iff any state changed. Separated out so the
-/// routing logic is testable without standing up a winit event
-/// loop; `handle_label_edit_key` is the thin shell that routes
-/// scene / renderer plumbing around this.
+/// Pure router for the label-edit key loop. Dispatches a winit
+/// `logical_key` against the buffer + grapheme cursor and mutates
+/// both in place through the `grapheme_chad` helpers, returning
+/// `true` iff any state changed.
+///
+/// Mirrors `handle_text_edit_key`'s `Key::Named(NamedKey::*)`-first
+/// dispatch: structural keys (backspace, delete, arrows, home, end)
+/// resolve through the `Key::Named` variant directly, *not* through
+/// the lowercased `key_name` string. Some platforms (notably certain
+/// IME stacks) attach a Unicode-payload to a `Key::Named(Backspace)`
+/// event whose name string then comes back as `None` from
+/// `key_to_name` — the previous string-only match would fall into
+/// the printable-char branch and stamp the payload glyph into the
+/// buffer (the reported "huge pause icon on backspace" symptom).
+/// Matching the `Key` enum first closes that hole.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn route_label_edit_key(
-    name: Option<&str>,
-    typed: Option<&str>,
+    logical_key: &winit::keyboard::Key,
     buffer: &mut String,
     cursor: &mut usize,
 ) -> bool {
-    match name {
-        Some("backspace") => {
+    use winit::keyboard::{Key, NamedKey};
+    match logical_key {
+        Key::Named(NamedKey::Backspace) => {
             if *cursor > 0 {
                 *cursor = delete_before_cursor(buffer, *cursor);
                 return true;
             }
             false
         }
-        Some("delete") => {
+        Key::Named(NamedKey::Delete) => {
             if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
                 *cursor = delete_at_cursor(buffer, *cursor);
                 return true;
             }
             false
         }
-        Some("arrowleft") => {
+        Key::Named(NamedKey::ArrowLeft) => {
             if *cursor > 0 {
                 *cursor -= 1;
                 return true;
             }
             false
         }
-        Some("arrowright") => {
+        Key::Named(NamedKey::ArrowRight) => {
             if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
                 *cursor += 1;
                 return true;
             }
             false
         }
-        Some("home") => {
+        Key::Named(NamedKey::Home) => {
             if *cursor != 0 {
                 *cursor = 0;
                 return true;
             }
             false
         }
-        Some("end") => {
+        Key::Named(NamedKey::End) => {
             let end = grapheme_chad::count_grapheme_clusters(buffer);
             if *cursor != end {
                 *cursor = end;
@@ -290,16 +295,14 @@ pub(in crate::application::app) fn route_label_edit_key(
             }
             false
         }
-        _ => {
+        Key::Character(c) => {
             // Printable character: accept each non-control char.
-            // Mirrors `handle_text_edit_key` — winit's
-            // `Key::Character` can carry IME / dead-key
-            // sequences, so iterate.
-            let Some(typed) = typed else {
-                return false;
-            };
+            // `Key::Character` payloads can carry IME / dead-key
+            // multi-char sequences, so iterate. Control chars
+            // (and any non-printing payload winit attaches to a
+            // structural key) are filtered.
             let mut changed = false;
-            for ch in typed.chars() {
+            for ch in c.as_str().chars() {
                 if !ch.is_control() {
                     *cursor = insert_at_cursor(buffer, *cursor, ch);
                     changed = true;
@@ -307,6 +310,7 @@ pub(in crate::application::app) fn route_label_edit_key(
             }
             changed
         }
+        _ => false,
     }
 }
 
