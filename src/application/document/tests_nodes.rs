@@ -22,6 +22,7 @@ use baumhard::mindmap::model::{
 };
 use baumhard::mindmap::scene_builder::EdgeHandleKind;
 use baumhard::mindmap::model::ControlPoint;
+use baumhard::util::grapheme_chad::count_grapheme_clusters;
 use glam::Vec2;
 
 use super::defaults::default_cross_link_edge;
@@ -37,7 +38,7 @@ use super::defaults::default_cross_link_edge;
         assert_eq!(node.text, "Hello world");
         assert_eq!(node.text_runs.len(), 1);
         assert_eq!(node.text_runs[0].start, 0);
-        assert_eq!(node.text_runs[0].end, "Hello world".chars().count());
+        assert_eq!(node.text_runs[0].end, count_grapheme_clusters("Hello world"));
         assert!(doc.dirty);
         assert!(matches!(
             doc.undo_stack.last(),
@@ -95,7 +96,7 @@ use super::defaults::default_cross_link_edge;
         assert_eq!(node.text, "line 1\nline 2\nline 3");
         // Collapsed single run spans the full char count, including newlines.
         assert_eq!(node.text_runs.len(), 1);
-        assert_eq!(node.text_runs[0].end, "line 1\nline 2\nline 3".chars().count());
+        assert_eq!(node.text_runs[0].end, count_grapheme_clusters("line 1\nline 2\nline 3"));
     }
 
     #[test]
@@ -118,7 +119,7 @@ use super::defaults::default_cross_link_edge;
             if node.text_runs.is_empty() {
                 node.text_runs.push(TextRun {
                     start: 0,
-                    end: node.text.chars().count(),
+                    end: count_grapheme_clusters(&node.text),
                     bold: false,
                     italic: false,
                     underline: false,

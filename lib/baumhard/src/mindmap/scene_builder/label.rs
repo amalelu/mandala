@@ -21,6 +21,7 @@ use crate::mindmap::connection;
 use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig, MindMap};
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::util::color::resolve_var;
+use crate::util::grapheme_chad::count_grapheme_clusters;
 
 use super::{ConnectionLabelElement, EdgeColorPreview};
 
@@ -129,12 +130,14 @@ pub(super) fn build_label_elements(
             });
         let color = resolve_var(raw_color, vars).to_string();
 
-        // Loose AABB sized from the glyph-count approximation
-        // (`font_size * 0.6` per glyph — same constant the connection
-        // body sampler uses). Height is one font-size plus a small
-        // vertical margin.
-        let char_count = rendered_label.chars().count() as f32;
-        let bounds_w = (char_count * font_size_pt * 0.6).max(font_size_pt);
+        // Loose AABB sized from the grapheme-count approximation
+        // (`font_size * 0.6` per grapheme — same constant the
+        // connection body sampler uses). Height is one font-size plus
+        // a small vertical margin. Counting graphemes (not Unicode
+        // scalars) keeps a family-ZWJ emoji at one slot wide instead
+        // of eleven (§B3).
+        let grapheme_count = count_grapheme_clusters(&rendered_label) as f32;
+        let bounds_w = (grapheme_count * font_size_pt * 0.6).max(font_size_pt);
         let bounds_h = font_size_pt * 1.3;
         // Center the AABB on the path anchor.
         let top_left = (anchor.x - bounds_w * 0.5, anchor.y - bounds_h * 0.5);
@@ -233,8 +236,8 @@ pub(super) fn build_label_elements(
                             });
                         let color = resolve_var(raw_color, vars).to_string();
                         let rendered = format!("{buffer}\u{258C}");
-                        let char_count = rendered.chars().count() as f32;
-                        let bounds_w = (char_count * font_size_pt * 0.6).max(font_size_pt);
+                        let grapheme_count = count_grapheme_clusters(&rendered) as f32;
+                        let bounds_w = (grapheme_count * font_size_pt * 0.6).max(font_size_pt);
                         let bounds_h = font_size_pt * 1.3;
                         let top_left =
                             (anchor.x - bounds_w * 0.5, anchor.y - bounds_h * 0.5);

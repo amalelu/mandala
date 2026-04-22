@@ -612,3 +612,57 @@ fn portal_zoom_visibility_inherits_when_endpoint_has_no_zoom_bounds() {
         "Some(endpoint) with no zoom bounds must inherit the edge window"
     );
 }
+
+/// Portal-text AABB width is driven by grapheme count, not Unicode-
+/// scalar count. A family-ZWJ emoji between two letters is three
+/// graphemes but nine scalars; without §B3 compliance the AABB
+/// would be sized at nine slots. Guards against a revert to
+/// `.chars().count()` on the portal-text layout path.
+#[test]
+fn test_portal_text_bounds_use_grapheme_count_not_scalar_count() {
+    use super::super::portal::{layout_portal_label, layout_portal_text};
+    use crate::mindmap::model::PortalEndpointState;
+
+    let owner_pos = Vec2::new(100.0, 100.0);
+    let owner_size = Vec2::new(200.0, 80.0);
+    let partner_center = Vec2::new(1000.0, 500.0);
+    let icon_font = 50.0;
+    let text_font = 14.0;
+    let state = PortalEndpointState {
+        border_t: Some(0.0),
+        ..Default::default()
+    };
+    let icon = layout_portal_label(
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+    );
+    let plain = layout_portal_text(
+        icon,
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+        text_font,
+        "XYZ",
+    );
+    // "A👨\u{200D}👩\u{200D}👧B" — 9 scalars, 3 graphemes.
+    let zwj = layout_portal_text(
+        icon,
+        owner_pos,
+        owner_size,
+        partner_center,
+        Some(&state),
+        icon_font,
+        text_font,
+        "A\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}B",
+    );
+    assert!(
+        (plain.bounds.x - zwj.bounds.x).abs() < f32::EPSILON,
+        "grapheme-sized bounds expected; got plain={} zwj={}",
+        plain.bounds.x, zwj.bounds.x,
+    );
+}

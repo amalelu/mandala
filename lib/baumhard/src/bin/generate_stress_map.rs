@@ -54,6 +54,7 @@ use baumhard::mindmap::model::{
     Canvas, MindEdge, MindMap, MindNode, NodeLayout, NodeStyle, Position, Size,
     TextRun,
 };
+use baumhard::util::grapheme_chad::count_grapheme_clusters;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -227,7 +228,7 @@ fn make_node(id: String, parent_id: Option<String>, x: f64, y: f64, depth: usize
     let text = format!("{}", id);
     let text_runs = vec![TextRun {
         start: 0,
-        end: text.chars().count(),
+        end: count_grapheme_clusters(&text),
         bold: false,
         italic: false,
         underline: false,

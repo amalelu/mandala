@@ -36,6 +36,7 @@ use crate::mindmap::portal_geometry::{
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color::resolve_var;
+use crate::util::grapheme_chad::count_grapheme_clusters;
 
 use super::{PortalColorPreview, PortalElement};
 
@@ -331,12 +332,14 @@ pub(crate) fn layout_portal_text(
     text_font_size_pt: f32,
     text: &str,
 ) -> PortalTextLayout {
-    // Approximate grapheme count (cheap proxy for shaped
-    // width — cosmic-text will reshape on render anyway). Empty
-    // strings get a minimum 1-char-wide slot so the buffer is
-    // never zero-sized, matching the connection-label helper.
-    let char_count = text.chars().count().max(1) as f32;
-    let bounds = Vec2::new(char_count * text_font_size_pt * 0.6, text_font_size_pt * 1.3);
+    // Grapheme-cluster count as a cheap proxy for shaped width —
+    // cosmic-text will reshape on render anyway. Empty strings get
+    // a minimum 1-grapheme-wide slot so the buffer is never
+    // zero-sized, matching the connection-label helper. Counting
+    // graphemes (not Unicode scalars) keeps a family-ZWJ emoji at
+    // one slot wide instead of eleven (§B3).
+    let grapheme_count = count_grapheme_clusters(text).max(1) as f32;
+    let bounds = Vec2::new(grapheme_count * text_font_size_pt * 0.6, text_font_size_pt * 1.3);
     let t = endpoint_state
         .and_then(|s| s.border_t)
         .unwrap_or_else(|| default_border_t(owner_pos, owner_size, partner_center));

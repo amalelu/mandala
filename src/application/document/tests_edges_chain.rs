@@ -22,6 +22,7 @@ use baumhard::mindmap::model::{
 };
 use baumhard::mindmap::scene_builder::EdgeHandleKind;
 use baumhard::mindmap::model::ControlPoint;
+use baumhard::util::grapheme_chad::count_grapheme_clusters;
 use glam::Vec2;
 
 use super::defaults::default_cross_link_edge;
@@ -72,7 +73,7 @@ use super::defaults::default_cross_link_edge;
     fn synthetic_single_node_map(text: &str, w: f64, h: f64) -> MindMap {
             let text_runs = vec![TextRun {
             start: 0,
-            end: text.chars().count(),
+            end: count_grapheme_clusters(text),
             bold: false,
             italic: false,
             underline: false,
