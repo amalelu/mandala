@@ -43,6 +43,14 @@
 //! calling `should_drain()` on an idle interaction would advance
 //! the skip counter on a throttle that has no work, pushing the
 //! first real drain out of cadence.
+//!
+//! The ordering predicate lives on
+//! [`ThrottledInteraction::should_perform_drain`], independent of
+//! the `DrainContext` and the GPU resources it transitively reaches.
+//! `drive` is a thin wrapper around that predicate plus the timing
+//! envelope, which lets per-implementor tests exercise the
+//! ordering against real interaction values without standing up a
+//! renderer (see §T8).
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -152,13 +160,23 @@ pub(in crate::application::app) trait ThrottledInteraction {
         self.throttle().reset();
     }
 
+    /// Pure predicate: true iff this tick should perform the drain
+    /// body. Encodes the `has_pending`-before-`should_drain`
+    /// ordering invariant (see module docs) as a standalone check.
+    /// Callable without a [`DrainContext`]; separated from
+    /// [`drive`](Self::drive) so tests can exercise the ordering
+    /// against real interaction values.
+    fn should_perform_drain(&mut self) -> bool {
+        if !self.has_pending() {
+            return false;
+        }
+        self.throttle().should_drain()
+    }
+
     /// The unified six-step shell. Not meant to be overridden —
     /// overriding defeats the purpose of the trait.
     fn drive(&mut self, ctx: DrainContext<'_>) {
-        if !self.has_pending() {
-            return;
-        }
-        if !self.throttle().should_drain() {
+        if !self.should_perform_drain() {
             return;
         }
         let work_start = Instant::now();
@@ -170,176 +188,151 @@ pub(in crate::application::app) trait ThrottledInteraction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use baumhard::mindmap::model::MindEdge;
+    use baumhard::mindmap::scene_builder::EdgeHandleKind;
+    use glam::Vec2;
     use std::time::Duration;
 
-    /// Minimal test-only interaction: tracks how many times
-    /// `drain()` and `reset()` were called, and a synthetic work
-    /// duration fed into the throttle.
-    struct MockInteraction {
-        pending: bool,
-        throttle: MutationFrequencyThrottle,
-        drain_count: usize,
-        reset_count: usize,
-        /// Work the mock "does" inside `drain()` — actually just
-        /// a synthetic elapsed time the outer shell records.
-        work: Duration,
+    use crate::application::document::EdgeRef;
+
+    fn fixture_edge() -> MindEdge {
+        MindEdge {
+            from_id: "a".to_string(),
+            to_id: "b".to_string(),
+            edge_type: "parent_child".to_string(),
+            color: "#888888".to_string(),
+            width: 4,
+            line_style: "solid".to_string(),
+            visible: true,
+            label: None,
+            label_config: None,
+            anchor_from: "auto".to_string(),
+            anchor_to: "auto".to_string(),
+            control_points: Vec::new(),
+            glyph_connection: None,
+            display_mode: None,
+            portal_from: None,
+            portal_to: None,
+            min_zoom_to_render: None,
+            max_zoom_to_render: None,
+        }
     }
 
-    impl MockInteraction {
-        fn new(budget: Duration) -> Self {
-            Self {
-                pending: false,
-                throttle: MutationFrequencyThrottle::new(budget),
-                drain_count: 0,
-                reset_count: 0,
-                work: Duration::from_micros(100),
+    /// Push the throttle's average over-budget until `n > 1`. Returns
+    /// the final drain divisor for assertion plumbing.
+    fn drive_throttle_over_budget(t: &mut MutationFrequencyThrottle) -> u32 {
+        for _ in 0..80 {
+            if t.should_drain() {
+                t.record_work_duration(Duration::from_micros(50_000));
             }
         }
-    }
-
-    impl ThrottledInteraction for MockInteraction {
-        fn has_pending(&self) -> bool {
-            self.pending
-        }
-        fn throttle(&mut self) -> &mut MutationFrequencyThrottle {
-            &mut self.throttle
-        }
-        fn drain(&mut self, _ctx: DrainContext<'_>) {
-            self.drain_count += 1;
-            // Drain is responsible for clearing its own pending
-            // state per the trait contract.
-            self.pending = false;
-        }
-        fn reset(&mut self) {
-            self.reset_count += 1;
-            self.throttle.reset();
-        }
-    }
-
-    /// The harness `drive()` wants a `DrainContext`, but the mock
-    /// interaction ignores every field inside it. We build the
-    /// scaffolding only as needed for the tests that actually
-    /// reach into the context — the pure-ordering tests below
-    /// use [`drive_on_mock`] which runs a `drive`-shaped trigger
-    /// without constructing a context, by inlining the default
-    /// method's logic against a mock we can poke directly.
-    ///
-    /// This is a deliberate trade: building a real `DrainContext`
-    /// here would require a renderer + wgpu surface (a GPU
-    /// resource we don't have in a unit-test process). The tests
-    /// that matter are about the *ordering* of `has_pending ->
-    /// should_drain -> drain -> record_work_duration`, and that
-    /// ordering is observable on the mock without a real
-    /// context. See `TEST_CONVENTIONS.md §T-no-gpu`.
-    fn drive_on_mock(m: &mut MockInteraction) {
-        if !m.has_pending() {
-            return;
-        }
-        if !m.throttle().should_drain() {
-            return;
-        }
-        let started = Instant::now();
-        m.drain_count += 1;
-        m.pending = false;
-        // Substitute the synthetic `work` value for the actual
-        // elapsed time so the test is deterministic across
-        // machines. Real `drive()` uses `started.elapsed()`;
-        // equivalence is that both feed some `Duration` into
-        // `record_work_duration`.
-        let _ = started;
-        m.throttle.record_work_duration(m.work);
-    }
-
-    fn do_drive_skips_when_no_pending() {
-        let mut m = MockInteraction::new(Duration::from_micros(14_000));
-        // pending stays false
-        drive_on_mock(&mut m);
-        drive_on_mock(&mut m);
-        assert_eq!(m.drain_count, 0);
-    }
-
-    fn do_drive_skips_when_throttle_says_no() {
-        let mut m = MockInteraction::new(Duration::from_micros(14_000));
-        // Drive n above 1 with heavy "work".
-        m.work = Duration::from_micros(50_000);
-        m.pending = true;
-        for _ in 0..60 {
-            drive_on_mock(&mut m);
-            m.pending = true;
-        }
-        assert!(m.throttle().current_n() > 1);
-        // With n > 1, at least one of the next few drive()
-        // calls must return without draining.
-        let before = m.drain_count;
-        for _ in 0..(m.throttle().current_n() as usize) {
-            drive_on_mock(&mut m);
-            m.pending = true;
-        }
-        let after = m.drain_count;
-        // Exactly one drain per n calls — so at n>1 some calls skipped.
-        let calls = m.throttle().current_n() as usize;
-        assert!(after - before < calls, "expected at least one skipped drive");
-    }
-
-    fn do_drive_records_elapsed() {
-        let mut m = MockInteraction::new(Duration::from_millis(100));
-        m.work = Duration::from_millis(5);
-        m.pending = true;
-        drive_on_mock(&mut m);
-        // The synthetic 5ms should be reflected in the throttle's
-        // moving average.
-        assert_eq!(m.throttle().moving_average(), Duration::from_millis(5));
-    }
-
-    fn do_idle_drive_does_not_advance_counter() {
-        // If drive() consulted should_drain() before has_pending(),
-        // idle ticks would advance frames_since_drain. We verify
-        // the opposite: two idle drives, then one pending drive,
-        // must still drain on that first pending tick (n is still
-        // 1 and the counter is still 0).
-        let mut m = MockInteraction::new(Duration::from_millis(100));
-        assert_eq!(m.throttle().current_n(), 1);
-        drive_on_mock(&mut m);
-        drive_on_mock(&mut m);
-        drive_on_mock(&mut m);
-        assert_eq!(m.drain_count, 0);
-        m.pending = true;
-        drive_on_mock(&mut m);
-        assert_eq!(m.drain_count, 1);
-    }
-
-    fn do_reset_returns_fresh_state() {
-        let mut m = MockInteraction::new(Duration::from_millis(10));
-        m.work = Duration::from_millis(50);
-        m.pending = true;
-        for _ in 0..80 {
-            drive_on_mock(&mut m);
-            m.pending = true;
-        }
-        assert!(m.throttle().current_n() > 1);
-        m.reset();
-        assert_eq!(m.throttle().current_n(), 1);
-        assert_eq!(m.reset_count, 1);
+        t.current_n()
     }
 
     #[test]
-    fn test_drive_skips_when_no_pending() {
-        do_drive_skips_when_no_pending();
+    fn test_as_dyn_mut_routes_to_moving_node() {
+        let mut inner = MovingNodeInteraction::new(vec!["x".into()], false);
+        // Non-zero pending flips `has_pending` to true; if dispatch
+        // reached the wrong struct the bit wouldn't survive.
+        inner.pending_delta = Vec2::new(1.0, 0.0);
+        let mut drag = ThrottledDrag::MovingNode(inner);
+        assert!(drag.as_dyn_mut().has_pending());
     }
+
     #[test]
-    fn test_drive_skips_when_throttle_says_no() {
-        do_drive_skips_when_throttle_says_no();
+    fn test_as_dyn_mut_routes_to_edge_handle() {
+        let mut inner = EdgeHandleInteraction::new(
+            EdgeRef::new("a", "b", "parent_child"),
+            EdgeHandleKind::AnchorFrom,
+            fixture_edge(),
+            Vec2::ZERO,
+        );
+        inner.pending_delta = Vec2::new(0.0, 2.0);
+        let mut drag = ThrottledDrag::EdgeHandle(inner);
+        assert!(drag.as_dyn_mut().has_pending());
     }
+
     #[test]
-    fn test_drive_records_elapsed() {
-        do_drive_records_elapsed();
+    fn test_as_dyn_mut_routes_to_portal_label() {
+        let mut inner = PortalLabelInteraction::new(
+            EdgeRef::new("a", "b", "parent_child"),
+            "a".to_string(),
+            fixture_edge(),
+        );
+        inner.pending_cursor = Some(Vec2::new(10.0, 20.0));
+        let mut drag = ThrottledDrag::PortalLabel(inner);
+        assert!(drag.as_dyn_mut().has_pending());
     }
+
     #[test]
-    fn test_idle_drive_does_not_advance_counter() {
-        do_idle_drive_does_not_advance_counter();
+    fn test_as_dyn_mut_routes_to_edge_label() {
+        let mut inner = EdgeLabelInteraction::new(
+            EdgeRef::new("a", "b", "parent_child"),
+            fixture_edge(),
+        );
+        inner.pending_cursor = Some(Vec2::new(5.0, 5.0));
+        let mut drag = ThrottledDrag::EdgeLabel(inner);
+        assert!(drag.as_dyn_mut().has_pending());
     }
+
     #[test]
-    fn test_reset_returns_fresh_state() {
-        do_reset_returns_fresh_state();
+    fn test_as_dyn_mut_throttle_mutations_reach_underlying_struct() {
+        let inner = MovingNodeInteraction::new(vec!["x".into()], false);
+        let mut drag = ThrottledDrag::MovingNode(inner);
+        let n = drive_throttle_over_budget(drag.as_dyn_mut().throttle());
+        assert!(n > 1, "expected n > 1 after over-budget work, got {}", n);
+        // Unwrap the variant and confirm the mutation reached the real
+        // struct's throttle, not a transient copy.
+        let ThrottledDrag::MovingNode(real) = drag else {
+            panic!("variant changed unexpectedly");
+        };
+        assert_eq!(real.throttle.current_n(), n);
+    }
+
+    #[test]
+    fn test_default_reset_resets_throttle_only() {
+        // The trait's default `reset` impl is "throttle().reset()" and
+        // nothing else — pending / domain state must survive. Exercise
+        // through a real implementor that does NOT override `reset`.
+        let mut inner = MovingNodeInteraction::new(vec!["n".into()], true);
+        inner.pending_delta = Vec2::new(3.0, 4.0);
+        inner.total_delta = Vec2::new(7.0, 0.0);
+        drive_throttle_over_budget(&mut inner.throttle);
+        assert!(inner.throttle.current_n() > 1);
+
+        // Default reset from the trait.
+        (&mut inner as &mut dyn ThrottledInteraction).reset();
+
+        assert_eq!(inner.throttle.current_n(), 1);
+        // Pending and domain state are untouched — per the trait contract
+        // they belong to the implementor and are expected to be empty
+        // already or dropped with `self`.
+        assert_eq!(inner.pending_delta, Vec2::new(3.0, 4.0));
+        assert_eq!(inner.total_delta, Vec2::new(7.0, 0.0));
+        assert_eq!(inner.node_ids, vec!["n".to_string()]);
+        assert!(inner.individual);
+    }
+
+    #[test]
+    fn test_should_perform_drain_through_dyn_mut_reflects_underlying_state() {
+        // The default `should_perform_drain` body reads through
+        // `has_pending()` and `throttle()` — two trait methods that the
+        // enum routes via `as_dyn_mut`. If routing returned a stale or
+        // wrong-variant borrow the predicate would disagree with the
+        // real struct's state.
+        let mut idle = MovingNodeInteraction::new(vec!["n".into()], false);
+        let mut idle_drag = ThrottledDrag::MovingNode(idle);
+        assert!(
+            !idle_drag.as_dyn_mut().should_perform_drain(),
+            "idle interaction through dyn_mut must report no drain"
+        );
+
+        idle = MovingNodeInteraction::new(vec!["n".into()], false);
+        idle.pending_delta = Vec2::new(1.0, 0.0);
+        let mut pending_drag = ThrottledDrag::MovingNode(idle);
+        assert!(
+            pending_drag.as_dyn_mut().should_perform_drain(),
+            "pending interaction through dyn_mut must drain on fresh throttle"
+        );
     }
 }

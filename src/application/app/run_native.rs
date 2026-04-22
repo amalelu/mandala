@@ -283,24 +283,44 @@ impl InitState {
             DragState::Throttled(super::throttled_interaction::ThrottledDrag::MovingNode(_)),
         );
 
-        if let DragState::Throttled(ref mut kind) = self.drag_state {
+        // Destructure the fields the two throttled-drive call sites
+        // share so their `DrainContext` literals can reborrow via
+        // `&mut *x` instead of re-spelling `&mut self.X` six times
+        // twice. A named inherent helper (`&mut self -> DrainContext`)
+        // collides with the `&mut self.drag_state` the throttled-drag
+        // arm already holds; a closure over these bindings collides
+        // with the second call site's reborrows. Destructuring once,
+        // reborrowing per call, is what the borrow checker accepts.
+        let Self {
+            document,
+            mindmap_tree,
+            app_scene,
+            renderer,
+            scene_cache,
+            color_picker_state,
+            drag_state,
+            picker_hover,
+            ..
+        } = self;
+
+        if let DragState::Throttled(ref mut kind) = *drag_state {
             kind.as_dyn_mut().drive(DrainContext {
-                document: &mut self.document,
-                mindmap_tree: &mut self.mindmap_tree,
-                app_scene: &mut self.app_scene,
-                renderer: &mut self.renderer,
-                scene_cache: &mut self.scene_cache,
-                color_picker_state: &mut self.color_picker_state,
+                document: &mut *document,
+                mindmap_tree: &mut *mindmap_tree,
+                app_scene: &mut *app_scene,
+                renderer: &mut *renderer,
+                scene_cache: &mut *scene_cache,
+                color_picker_state: &mut *color_picker_state,
             });
         }
 
-        self.picker_hover.drive(DrainContext {
-            document: &mut self.document,
-            mindmap_tree: &mut self.mindmap_tree,
-            app_scene: &mut self.app_scene,
-            renderer: &mut self.renderer,
-            scene_cache: &mut self.scene_cache,
-            color_picker_state: &mut self.color_picker_state,
+        picker_hover.drive(DrainContext {
+            document: &mut *document,
+            mindmap_tree: &mut *mindmap_tree,
+            app_scene: &mut *app_scene,
+            renderer: &mut *renderer,
+            scene_cache: &mut *scene_cache,
+            color_picker_state: &mut *color_picker_state,
         });
 
         if let DragState::SelectingRect {

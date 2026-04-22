@@ -74,3 +74,102 @@ impl ThrottledInteraction for ColorPickerHoverInteraction {
         self.dirty = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn drive_throttle_over_budget(t: &mut MutationFrequencyThrottle) -> u32 {
+        for _ in 0..80 {
+            if t.should_drain() {
+                t.record_work_duration(Duration::from_micros(50_000));
+            }
+        }
+        t.current_n()
+    }
+
+    #[test]
+    fn test_default_is_not_dirty() {
+        let i = ColorPickerHoverInteraction::default();
+        assert!(!i.dirty);
+        assert_eq!(i.throttle.current_n(), 1);
+    }
+
+    #[test]
+    fn test_new_equals_default() {
+        // `new` is the canonical constructor; `Default` must mirror it
+        // so call sites that reach for either land in the same state.
+        let a = ColorPickerHoverInteraction::new();
+        let b = ColorPickerHoverInteraction::default();
+        assert_eq!(a.dirty, b.dirty);
+        assert_eq!(a.throttle.current_n(), b.throttle.current_n());
+    }
+
+    #[test]
+    fn test_has_pending_matches_dirty_flag() {
+        let mut i = ColorPickerHoverInteraction::new();
+        assert!(!i.has_pending());
+        i.dirty = true;
+        assert!(i.has_pending());
+        i.dirty = false;
+        assert!(!i.has_pending());
+    }
+
+    #[test]
+    fn test_reset_does_not_clear_dirty() {
+        // Reset is throttle-only; the dirty flag is cleared inside
+        // `drain` (or when the picker closes), not here.
+        let mut i = ColorPickerHoverInteraction::new();
+        i.dirty = true;
+        drive_throttle_over_budget(&mut i.throttle);
+        assert!(i.throttle.current_n() > 1);
+
+        i.reset();
+
+        assert_eq!(i.throttle.current_n(), 1);
+        assert!(i.dirty);
+    }
+
+    #[test]
+    fn test_should_perform_drain_false_when_idle() {
+        let mut i = ColorPickerHoverInteraction::new();
+        assert!(!i.should_perform_drain());
+    }
+
+    #[test]
+    fn test_should_perform_drain_true_when_dirty_and_throttle_fresh() {
+        let mut i = ColorPickerHoverInteraction::new();
+        i.dirty = true;
+        assert!(i.should_perform_drain());
+    }
+
+    #[test]
+    fn test_should_perform_drain_false_when_throttle_skipping() {
+        let mut i = ColorPickerHoverInteraction::new();
+        drive_throttle_over_budget(&mut i.throttle);
+        assert!(i.throttle.current_n() > 1);
+
+        let n = i.throttle.current_n() as usize;
+        i.dirty = true;
+        let mut saw_skip = false;
+        for _ in 0..(n * 2) {
+            if !i.should_perform_drain() {
+                saw_skip = true;
+            }
+            i.throttle.record_work_duration(Duration::from_micros(50_000));
+            i.dirty = true;
+        }
+        assert!(saw_skip);
+    }
+
+    #[test]
+    fn test_idle_should_perform_drain_does_not_advance_throttle() {
+        let mut i = ColorPickerHoverInteraction::new();
+        for _ in 0..5 {
+            assert!(!i.should_perform_drain());
+        }
+        i.dirty = true;
+        assert!(i.should_perform_drain());
+    }
+}

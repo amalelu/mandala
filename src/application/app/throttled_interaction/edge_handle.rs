@@ -117,3 +117,154 @@ impl ThrottledInteraction for EdgeHandleInteraction {
         self.pending_delta = Vec2::ZERO;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baumhard::mindmap::model::MindEdge;
+    use baumhard::mindmap::scene_builder::EdgeHandleKind;
+    use std::time::Duration;
+
+    /// Construct a minimally-valid `MindEdge` for the tests. The drag
+    /// state only references the snapshot for its pre-drag identity
+    /// bookkeeping; no field inside it is under test here.
+    fn fixture_edge() -> MindEdge {
+        MindEdge {
+            from_id: "a".to_string(),
+            to_id: "b".to_string(),
+            edge_type: "parent_child".to_string(),
+            color: "#888888".to_string(),
+            width: 4,
+            line_style: "solid".to_string(),
+            visible: true,
+            label: None,
+            label_config: None,
+            anchor_from: "auto".to_string(),
+            anchor_to: "auto".to_string(),
+            control_points: Vec::new(),
+            glyph_connection: None,
+            display_mode: None,
+            portal_from: None,
+            portal_to: None,
+            min_zoom_to_render: None,
+            max_zoom_to_render: None,
+        }
+    }
+
+    fn fixture_interaction() -> EdgeHandleInteraction {
+        EdgeHandleInteraction::new(
+            EdgeRef::new("a", "b", "parent_child"),
+            EdgeHandleKind::AnchorFrom,
+            fixture_edge(),
+            Vec2::new(10.0, 20.0),
+        )
+    }
+
+    fn drive_throttle_over_budget(t: &mut MutationFrequencyThrottle) -> u32 {
+        for _ in 0..80 {
+            if t.should_drain() {
+                t.record_work_duration(Duration::from_micros(50_000));
+            }
+        }
+        t.current_n()
+    }
+
+    #[test]
+    fn test_new_initialises_fields_with_zero_deltas() {
+        let i = fixture_interaction();
+        assert_eq!(i.edge_ref.from_id, "a");
+        assert_eq!(i.edge_ref.to_id, "b");
+        assert_eq!(i.edge_ref.edge_type, "parent_child");
+        assert_eq!(i.handle, EdgeHandleKind::AnchorFrom);
+        assert_eq!(i.start_handle_pos, Vec2::new(10.0, 20.0));
+        assert_eq!(i.pending_delta, Vec2::ZERO);
+        assert_eq!(i.total_delta, Vec2::ZERO);
+        assert_eq!(i.throttle.current_n(), 1);
+    }
+
+    #[test]
+    fn test_has_pending_false_for_zero_delta() {
+        let i = fixture_interaction();
+        assert!(!i.has_pending());
+    }
+
+    #[test]
+    fn test_has_pending_true_for_nonzero_delta() {
+        let mut i = fixture_interaction();
+        i.pending_delta = Vec2::new(0.0, 3.0);
+        assert!(i.has_pending());
+    }
+
+    #[test]
+    fn test_reset_resets_only_throttle() {
+        let mut i = fixture_interaction();
+        i.pending_delta = Vec2::new(1.0, 2.0);
+        i.total_delta = Vec2::new(4.0, 5.0);
+        drive_throttle_over_budget(&mut i.throttle);
+        assert!(i.throttle.current_n() > 1);
+
+        i.reset();
+
+        assert_eq!(i.throttle.current_n(), 1);
+        assert_eq!(i.pending_delta, Vec2::new(1.0, 2.0));
+        assert_eq!(i.total_delta, Vec2::new(4.0, 5.0));
+        assert_eq!(i.start_handle_pos, Vec2::new(10.0, 20.0));
+        assert_eq!(i.handle, EdgeHandleKind::AnchorFrom);
+    }
+
+    #[test]
+    fn test_should_perform_drain_false_when_idle() {
+        let mut i = fixture_interaction();
+        assert!(!i.should_perform_drain());
+    }
+
+    #[test]
+    fn test_should_perform_drain_true_when_pending_and_throttle_fresh() {
+        let mut i = fixture_interaction();
+        i.pending_delta = Vec2::new(2.0, 0.0);
+        assert!(i.should_perform_drain());
+    }
+
+    #[test]
+    fn test_should_perform_drain_false_when_throttle_skipping() {
+        let mut i = fixture_interaction();
+        drive_throttle_over_budget(&mut i.throttle);
+        assert!(i.throttle.current_n() > 1);
+
+        let n = i.throttle.current_n() as usize;
+        i.pending_delta = Vec2::new(2.0, 0.0);
+        let mut saw_skip = false;
+        for _ in 0..(n * 2) {
+            if !i.should_perform_drain() {
+                saw_skip = true;
+            }
+            i.throttle.record_work_duration(Duration::from_micros(50_000));
+            i.pending_delta = Vec2::new(2.0, 0.0);
+        }
+        assert!(saw_skip);
+    }
+
+    #[test]
+    fn test_idle_should_perform_drain_does_not_advance_throttle() {
+        let mut i = fixture_interaction();
+        for _ in 0..5 {
+            assert!(!i.should_perform_drain());
+        }
+        i.pending_delta = Vec2::new(2.0, 0.0);
+        assert!(i.should_perform_drain());
+    }
+
+    #[test]
+    fn test_handle_variant_round_trips_control_point() {
+        // Midpoint is only the initial kind — the drag promotes it to
+        // ControlPoint(0) on first drain. The constructor accepts any
+        // variant; verify a non-trivial one round-trips through `new`.
+        let i = EdgeHandleInteraction::new(
+            EdgeRef::new("a", "b", "parent_child"),
+            EdgeHandleKind::Midpoint,
+            fixture_edge(),
+            Vec2::ZERO,
+        );
+        assert_eq!(i.handle, EdgeHandleKind::Midpoint);
+    }
+}

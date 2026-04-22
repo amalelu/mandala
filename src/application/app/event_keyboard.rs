@@ -39,7 +39,6 @@ pub(super) fn handle_keyboard_input(
         keybinds,
         ..
     } = ctx;
-    let picker_dirty = &mut picker_hover.dirty;
     let cursor_pos = *cursor_pos;
     let key_name = crate::application::keybinds::key_to_name(&logical_key);
 
@@ -89,7 +88,7 @@ pub(super) fn handle_keyboard_input(
                 color_picker_state,
                 doc,
                 mindmap_tree,
-                picker_dirty,
+                picker_hover,
                 app_scene,
                 renderer,
             )

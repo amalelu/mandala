@@ -38,7 +38,6 @@ pub(super) fn handle_cursor_moved(
         modifiers,
         ..
     } = ctx;
-    let picker_dirty = &mut picker_hover.dirty;
     let prev_pos = *cursor_pos;
     *cursor_pos = (position.x, position.y);
     let cursor_pos_val = *cursor_pos;
@@ -53,7 +52,7 @@ pub(super) fn handle_cursor_moved(
     // move to the picker.
     if color_picker_state.is_open() && matches!(*drag_state, DragState::None) {
         let consumed = if let Some(doc) = document.as_mut() {
-            handle_color_picker_mouse_move(cursor_pos_val, color_picker_state, doc, picker_dirty)
+            handle_color_picker_mouse_move(cursor_pos_val, color_picker_state, doc, picker_hover)
         } else {
             true
         };

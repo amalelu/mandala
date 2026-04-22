@@ -137,3 +137,139 @@ impl ThrottledInteraction for MovingNodeInteraction {
         self.pending_delta = Vec2::ZERO;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Push the throttle's moving average over budget until `n > 1`.
+    /// Separated from the trait tests' helper so each per-interaction
+    /// suite is self-contained.
+    fn drive_throttle_over_budget(t: &mut MutationFrequencyThrottle) -> u32 {
+        for _ in 0..80 {
+            if t.should_drain() {
+                t.record_work_duration(Duration::from_micros(50_000));
+            }
+        }
+        t.current_n()
+    }
+
+    #[test]
+    fn test_new_initialises_fields_with_zero_deltas() {
+        let i = MovingNodeInteraction::new(
+            vec!["a".to_string(), "b".to_string()],
+            true,
+        );
+        assert_eq!(i.node_ids, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(i.pending_delta, Vec2::ZERO);
+        assert_eq!(i.total_delta, Vec2::ZERO);
+        assert!(i.individual);
+        assert_eq!(i.throttle.current_n(), 1);
+    }
+
+    #[test]
+    fn test_has_pending_false_for_zero_delta() {
+        let i = MovingNodeInteraction::new(vec!["n".into()], false);
+        assert!(!i.has_pending());
+    }
+
+    #[test]
+    fn test_has_pending_true_for_nonzero_delta() {
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
+        i.pending_delta = Vec2::new(3.0, -2.0);
+        assert!(i.has_pending());
+    }
+
+    #[test]
+    fn test_has_pending_true_for_tiny_nonzero_delta() {
+        // Confirms the strict `!= ZERO` comparison — a sub-pixel
+        // accumulator from one high-frequency cursor tick must still
+        // count as pending, because the sum across skipped frames is
+        // the contract drive() relies on.
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
+        i.pending_delta = Vec2::new(1e-6, 0.0);
+        assert!(i.has_pending());
+    }
+
+    #[test]
+    fn test_throttle_accessor_reaches_owned_instance() {
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
+        drive_throttle_over_budget(i.throttle());
+        // The accessor must hand out the field, not a transient copy —
+        // mutations through it have to survive into the struct.
+        assert!(i.throttle.current_n() > 1);
+    }
+
+    #[test]
+    fn test_reset_resets_only_throttle() {
+        let mut i = MovingNodeInteraction::new(vec!["a".into(), "b".into()], true);
+        i.pending_delta = Vec2::new(5.0, 7.0);
+        i.total_delta = Vec2::new(11.0, 13.0);
+        drive_throttle_over_budget(&mut i.throttle);
+        assert!(i.throttle.current_n() > 1);
+
+        i.reset();
+
+        assert_eq!(i.throttle.current_n(), 1);
+        // Pending / total / identity survive — reset is throttle-only
+        // per the trait's default impl.
+        assert_eq!(i.pending_delta, Vec2::new(5.0, 7.0));
+        assert_eq!(i.total_delta, Vec2::new(11.0, 13.0));
+        assert_eq!(i.node_ids, vec!["a".to_string(), "b".to_string()]);
+        assert!(i.individual);
+    }
+
+    #[test]
+    fn test_should_perform_drain_false_when_idle() {
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
+        assert!(!i.should_perform_drain());
+    }
+
+    #[test]
+    fn test_should_perform_drain_true_when_pending_and_throttle_fresh() {
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
+        i.pending_delta = Vec2::new(1.0, 0.0);
+        assert!(i.should_perform_drain());
+    }
+
+    #[test]
+    fn test_should_perform_drain_false_when_throttle_skipping() {
+        // Throttle cadence under sustained over-budget load: at n > 1,
+        // should_perform_drain must return false on the skipped frames
+        // even when pending_delta is non-zero.
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
+        drive_throttle_over_budget(&mut i.throttle);
+        assert!(i.throttle.current_n() > 1);
+
+        let n = i.throttle.current_n() as usize;
+        i.pending_delta = Vec2::new(1.0, 0.0);
+        let mut saw_skip = false;
+        for _ in 0..(n * 2) {
+            if !i.should_perform_drain() {
+                saw_skip = true;
+            }
+            // Keep n stable while probing cadence.
+            i.throttle.record_work_duration(Duration::from_micros(50_000));
+            i.pending_delta = Vec2::new(1.0, 0.0);
+        }
+        assert!(saw_skip, "expected at least one skipped drain at n > 1");
+    }
+
+    #[test]
+    fn test_idle_should_perform_drain_does_not_advance_throttle() {
+        // Invariant — if should_perform_drain consulted should_drain
+        // first, this would be off by n: several idle calls would
+        // advance `frames_since_drain` and the next pending tick
+        // would skip instead of drain.
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
+        for _ in 0..5 {
+            assert!(!i.should_perform_drain());
+        }
+        i.pending_delta = Vec2::new(1.0, 0.0);
+        assert!(
+            i.should_perform_drain(),
+            "first pending tick after idles must drain: throttle counter advanced anyway"
+        );
+    }
+}
