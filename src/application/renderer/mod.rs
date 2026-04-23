@@ -42,6 +42,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
+use web_time::Instant;
 
 use cosmic_text::{Attrs, AttrsList, Buffer, FontSystem};
 use cosmic_text::{Family, Style};
@@ -57,7 +58,7 @@ use wgpu::{
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch};
+use crate::application::common::{FpsDisplayMode, PollTimer, RedrawMode, RenderDecree, StopWatch};
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
 #[cfg(test)]
@@ -152,6 +153,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// `push_rect_ndc`.
 const RECT_VERTEX_SIZE: u64 = 36;
 
+/// How many frames `FpsDisplayMode::Snapshot` waits between readout
+/// refreshes, and how many frames `FpsDisplayMode::Debug` averages
+/// over. 200 at 60 fps ≈ 3.3 s — short enough to react to sustained
+/// perf changes, long enough to smooth out per-frame jitter.
+const FPS_WINDOW: usize = 200;
+
 /// Number of `f32`-sized slots per vertex. The CPU accumulates
 /// packed floats into `main_rect_vertices` / `console_rect_vertices`;
 /// `shape_id` is stored as an `f32` holding the `u32` bit pattern
@@ -198,20 +205,43 @@ pub struct Renderer {
     run: bool,
     should_render: bool,
     fps: Option<usize>,
-    /// When true, `render()` shapes an "FPS: N" readout into
-    /// `fps_overlay_buffers` and draws it as a screen-space HUD in
-    /// the upper-left corner. Toggled via the `fps on` / `fps off`
-    /// console verb, which routes through `RenderDecree::DisplayFps`.
-    fps_display_enabled: bool,
+    /// Which FPS readout to display, if any. `Snapshot` samples one
+    /// frame's interval every `FPS_WINDOW` frames; `Debug` averages the
+    /// last `FPS_WINDOW` frame intervals and updates every frame.
+    /// Toggled via `fps on` / `fps debug` / `fps off`.
+    fps_display_mode: FpsDisplayMode,
     /// Screen-space text buffer(s) carrying the yellow FPS readout.
     /// Chained into `palette_text_areas` at render time so the readout
     /// draws at `scale: 1.0` with no camera transform. Empty whenever
-    /// `fps_display_enabled` is false.
+    /// `fps_display_mode` is `Off`.
     fps_overlay_buffers: Vec<MindMapTextBuffer>,
     /// The `self.fps` value that was shaped into `fps_overlay_buffers`
-    /// last. Used to skip re-shaping when the 100-frame FPS cadence
-    /// hasn't produced a new value yet.
+    /// last. Used to skip re-shaping when the integer value hasn't
+    /// changed since the last rebuild.
     last_fps_shaped: Option<usize>,
+    /// Wall-clock timestamp of the previous rendered frame. The
+    /// difference between consecutive values is the actual frame
+    /// interval, which is what FPS is derived from. Measuring
+    /// wall-clock here rather than `last_render_time` is load-bearing:
+    /// `render()` can early-return on font-system lock contention
+    /// under heavy interaction, which would otherwise make
+    /// `last_render_time` shrink to near-zero and inflate FPS to a
+    /// false huge value.
+    last_frame_instant: Option<Instant>,
+    /// Frame counter used by `FpsDisplayMode::Snapshot` to refresh the
+    /// displayed value only every `FPS_WINDOW` frames. Increments
+    /// every frame regardless of mode; meaningful only in Snapshot.
+    fps_clock: usize,
+    /// Ring buffer of the last `FPS_WINDOW` frame intervals in
+    /// microseconds, consumed by `FpsDisplayMode::Debug` to compute a
+    /// rolling average. Entries past `fps_ring_filled` are zero and
+    /// must not be counted — the divisor is `fps_ring_filled`, not
+    /// the array length, so the readout settles smoothly on cold
+    /// start instead of reporting a zero-inflated average.
+    fps_ring: [u128; FPS_WINDOW],
+    fps_ring_idx: usize,
+    fps_ring_sum: u128,
+    fps_ring_filled: usize,
 
     camera: Camera2D,
     mindmap_buffers: FxHashMap<String, MindMapTextBuffer>,
@@ -582,9 +612,15 @@ impl Renderer {
             fps: None,
             redraw_mode: RedrawMode::NoLimit,
             run: true,
-            fps_display_enabled: false,
+            fps_display_mode: FpsDisplayMode::Off,
             fps_overlay_buffers: Vec::new(),
             last_fps_shaped: None,
+            last_frame_instant: None,
+            fps_clock: 0,
+            fps_ring: [0u128; FPS_WINDOW],
+            fps_ring_idx: 0,
+            fps_ring_sum: 0,
+            fps_ring_filled: 0,
             glyphon_cache,
             viewport,
             camera,
@@ -652,11 +688,11 @@ impl Renderer {
         };
     }
 
-    /// Toggle the screen-space FPS readout. Routes through the
+    /// Set the screen-space FPS readout mode. Routes through the
     /// decree bus so `should_render` / `StartRender` / `StopRender`
     /// and the FPS toggle share a single in-renderer mutation point.
-    pub fn set_fps_display(&mut self, enabled: bool) {
-        self.process_decree(RenderDecree::DisplayFps(enabled));
+    pub fn set_fps_display(&mut self, mode: FpsDisplayMode) {
+        self.process_decree(RenderDecree::DisplayFps(mode));
     }
 
 
@@ -693,7 +729,7 @@ impl Renderer {
                     } else {
                         self.timer.expire_in(delta_duration);
                     }
-                    self.calculate_fps(delta_duration);
+                    self.tick_fps();
                     self.rebuild_fps_overlay_if_needed();
                     let sw = StopWatch::new_start();
                     self.render();
@@ -701,7 +737,7 @@ impl Renderer {
                 }
             }
             RedrawMode::NoLimit => {
-                self.calculate_no_limit_fps();
+                self.tick_fps();
                 self.rebuild_fps_overlay_if_needed();
                 let sw = StopWatch::new_start();
                 self.render();
@@ -720,7 +756,7 @@ impl Renderer {
     /// retries.
     #[inline]
     fn rebuild_fps_overlay_if_needed(&mut self) {
-        if !self.fps_display_enabled {
+        if matches!(self.fps_display_mode, FpsDisplayMode::Off) {
             return;
         }
         if self.fps == self.last_fps_shaped && !self.fps_overlay_buffers.is_empty() {
@@ -744,26 +780,48 @@ impl Renderer {
         self.last_fps_shaped = self.fps;
     }
 
+    /// Capture the wall-clock interval since the previous frame and
+    /// update `self.fps` according to the active display mode.
+    /// Wall-clock (rather than `last_render_time`) is load-bearing:
+    /// `render()` can early-return on a contended font-system lock
+    /// under heavy drag / scene-rebuild load, which would otherwise
+    /// shrink `last_render_time` to a near-zero early-return cost and
+    /// inflate the reported FPS into the hundreds of thousands.
     #[inline]
-    fn calculate_no_limit_fps(&mut self) {
-        let micros = self.last_render_time.as_micros();
-        if micros == 0 {
-            return;
-        }
-        self.fps = Some((1_000_000u128 / micros) as usize);
-    }
+    fn tick_fps(&mut self) {
+        let now = Instant::now();
+        let frame_micros = self
+            .last_frame_instant
+            .map(|prev| now.duration_since(prev).as_micros())
+            .unwrap_or(0);
+        self.last_frame_instant = Some(now);
 
-    #[inline]
-    fn calculate_fps(&mut self, delta_time: Duration) {
-        let frame_micros = (self.last_render_time
-            + Duration::max(delta_time, Self::ZERO_DURATION.clone()))
-        .as_micros();
-        // Guard against divide-by-zero on the first frame when both
-        // last_render_time and delta_time are zero.
-        if frame_micros == 0 {
-            return;
+        match self.fps_display_mode {
+            FpsDisplayMode::Off => {}
+            FpsDisplayMode::Snapshot => {
+                if self.fps_clock % FPS_WINDOW == 0 && frame_micros > 0 {
+                    self.fps = Some((1_000_000u128 / frame_micros) as usize);
+                }
+                self.fps_clock = self.fps_clock.wrapping_add(1);
+            }
+            FpsDisplayMode::Debug => {
+                if frame_micros > 0 {
+                    let old = self.fps_ring[self.fps_ring_idx];
+                    self.fps_ring_sum = self.fps_ring_sum - old + frame_micros;
+                    self.fps_ring[self.fps_ring_idx] = frame_micros;
+                    self.fps_ring_idx = (self.fps_ring_idx + 1) % FPS_WINDOW;
+                    if self.fps_ring_filled < FPS_WINDOW {
+                        self.fps_ring_filled += 1;
+                    }
+                }
+                if self.fps_ring_filled > 0 {
+                    let avg = self.fps_ring_sum / self.fps_ring_filled as u128;
+                    if avg > 0 {
+                        self.fps = Some((1_000_000u128 / avg) as usize);
+                    }
+                }
+            }
         }
-        self.fps = Some((1_000_000u128 / frame_micros) as usize);
     }
 
     #[inline]

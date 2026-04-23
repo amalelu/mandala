@@ -5,9 +5,9 @@
 
 use glam::Vec2;
 
-use crate::application::common::{RedrawMode, RenderDecree};
+use crate::application::common::{FpsDisplayMode, RedrawMode, RenderDecree};
 
-use super::Renderer;
+use super::{Renderer, FPS_WINDOW};
 
 impl Renderer {
     /// Process a single decree directly
@@ -17,9 +17,19 @@ impl Renderer {
 
     fn handle_render_decree(&mut self, decree: RenderDecree) {
         match decree {
-            RenderDecree::DisplayFps(enabled) => {
-                self.fps_display_enabled = enabled;
-                if !enabled {
+            RenderDecree::DisplayFps(mode) => {
+                self.fps_display_mode = mode;
+                // Reset per-mode state on every transition: snapshot
+                // clock zeroes so the first readout appears on the
+                // next frame rather than after a full window, and the
+                // debug ring resets so a prior debug run's samples
+                // don't bleed into a fresh window.
+                self.fps_clock = 0;
+                self.fps_ring = [0u128; FPS_WINDOW];
+                self.fps_ring_idx = 0;
+                self.fps_ring_sum = 0;
+                self.fps_ring_filled = 0;
+                if matches!(mode, FpsDisplayMode::Off) {
                     self.fps_overlay_buffers.clear();
                     self.last_fps_shaped = None;
                 }
