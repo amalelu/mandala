@@ -748,12 +748,14 @@ impl Renderer {
     }
 
     /// Re-shape the yellow "FPS: N" screen-space overlay when the
-    /// `self.fps` value has changed since the last shape. Called
-    /// from `process()` alongside the fps calculation so the
-    /// rebuild cadence piggybacks on the ~100-frame fps refresh
-    /// instead of adding a per-frame shaping cost. Silent on
-    /// font-system lock contention — the next process() cycle
-    /// retries.
+    /// integer `self.fps` value has changed since the last shape.
+    /// Called from `process()` after `tick_fps`. In Snapshot mode
+    /// the value only changes every `FPS_WINDOW` frames, so most
+    /// rebuilds early-return; in Debug mode the value can change
+    /// every frame, but cosmic-text shaping a 6-glyph string is
+    /// cheap and only fires when the rounded integer actually
+    /// shifts. Silent on font-system lock contention — the next
+    /// process() cycle retries.
     #[inline]
     fn rebuild_fps_overlay_if_needed(&mut self) {
         if matches!(self.fps_display_mode, FpsDisplayMode::Off) {

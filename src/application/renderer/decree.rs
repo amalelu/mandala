@@ -19,19 +19,29 @@ impl Renderer {
         match decree {
             RenderDecree::DisplayFps(mode) => {
                 self.fps_display_mode = mode;
-                // Reset per-mode state on every transition: snapshot
-                // clock zeroes so the first readout appears on the
-                // next frame rather than after a full window, and the
-                // debug ring resets so a prior debug run's samples
-                // don't bleed into a fresh window.
+                // Reset every per-mode bit on every transition so a
+                // prior mode's state can't bleed into the new one:
+                //  - `last_frame_instant` so the first delta in the new
+                //    mode isn't measured against a stale timestamp from
+                //    seconds (or longer) ago, which would yield a one-
+                //    frame FPS of ~0 right after toggling.
+                //  - `fps_clock` so Snapshot's first sample fires on the
+                //    next frame rather than after a full window.
+                //  - the debug ring so a prior debug run's samples
+                //    don't seed a fresh window.
+                //  - `last_fps_shaped` so the overlay re-shapes with
+                //    the new mode's first reading even if it happens
+                //    to round to the same integer the previous mode
+                //    last displayed.
+                self.last_frame_instant = None;
                 self.fps_clock = 0;
                 self.fps_ring = [0u128; FPS_WINDOW];
                 self.fps_ring_idx = 0;
                 self.fps_ring_sum = 0;
                 self.fps_ring_filled = 0;
+                self.last_fps_shaped = None;
                 if matches!(mode, FpsDisplayMode::Off) {
                     self.fps_overlay_buffers.clear();
-                    self.last_fps_shaped = None;
                 }
             }
             RenderDecree::StartRender => {
