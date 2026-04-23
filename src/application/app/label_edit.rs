@@ -154,17 +154,18 @@ pub(in crate::application::app) fn handle_label_edit_key(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let name = key_name.as_deref();
     let action = name.and_then(|n| {
         keybinds.action_for_context(InputContext::LabelEdit, n, ctrl, shift, alt)
     });
     if action == Some(Action::LabelEditCancel) {
-        close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer);
+        close_label_edit(false, doc, label_edit_state, mindmap_tree, app_scene, renderer, scene_cache);
         return;
     }
     if action == Some(Action::LabelEditCommit) {
-        close_label_edit(true, doc, label_edit_state, mindmap_tree, app_scene, renderer);
+        close_label_edit(true, doc, label_edit_state, mindmap_tree, app_scene, renderer, scene_cache);
         return;
     }
 
@@ -222,6 +223,7 @@ pub(in crate::application::app) fn close_label_edit(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let (edge_ref, buffer, original) = match std::mem::replace(label_edit_state, LabelEditState::Closed) {
         LabelEditState::Open { edge_ref, buffer, original, .. } => (edge_ref, buffer, original),
@@ -238,7 +240,7 @@ pub(in crate::application::app) fn close_label_edit(
     }
     // Rebuild so the label reflects the model state (or vanishes if
     // the buffer was empty + original was None).
-    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
 }
 
 /// Inline-edit state for a portal label's text. Parallel to
@@ -382,6 +384,7 @@ pub(in crate::application::app) fn handle_portal_text_edit_key(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let name = key_name.as_deref();
     let action = name.and_then(|n| {
@@ -414,16 +417,16 @@ pub(in crate::application::app) fn handle_portal_text_edit_key(
         PortalTextEditState::Closed => return,
     };
     if !edge_still_valid {
-        close_portal_text_edit(false, doc, state, mindmap_tree, app_scene, renderer);
+        close_portal_text_edit(false, doc, state, mindmap_tree, app_scene, renderer, scene_cache);
         return;
     }
 
     if action == Some(Action::LabelEditCancel) {
-        close_portal_text_edit(false, doc, state, mindmap_tree, app_scene, renderer);
+        close_portal_text_edit(false, doc, state, mindmap_tree, app_scene, renderer, scene_cache);
         return;
     }
     if action == Some(Action::LabelEditCommit) {
-        close_portal_text_edit(true, doc, state, mindmap_tree, app_scene, renderer);
+        close_portal_text_edit(true, doc, state, mindmap_tree, app_scene, renderer, scene_cache);
         return;
     }
 
@@ -476,6 +479,7 @@ pub(in crate::application::app) fn close_portal_text_edit(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let (edge_ref, endpoint_node_id, buffer, original) =
         match std::mem::replace(state, PortalTextEditState::Closed) {
@@ -495,7 +499,7 @@ pub(in crate::application::app) fn close_portal_text_edit(
             doc.set_portal_label_text(&edge_ref, &endpoint_node_id, new_val);
         }
     }
-    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
 }
 
 #[cfg(test)]

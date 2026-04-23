@@ -101,7 +101,7 @@ pub(in crate::application::app) fn execute_console_line(
 
     // Any successful command may have mutated the doc; rebuild.
     scene_cache.clear();
-    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
 
     if let Some(er) = label_edit_req {
         open_label_edit(&er, doc, label_edit_state, app_scene, renderer);
@@ -119,11 +119,11 @@ pub(in crate::application::app) fn execute_console_line(
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(app_scene, None);
     } else if let Some(target) = color_picker_req {
-        open_color_picker_contextual(target, doc, color_picker_state, app_scene, renderer);
+        open_color_picker_contextual(target, doc, color_picker_state, app_scene, renderer, scene_cache);
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(app_scene, None);
     } else if color_picker_standalone_req {
-        open_color_picker_standalone(doc, color_picker_state, app_scene, renderer);
+        open_color_picker_standalone(doc, color_picker_state, app_scene, renderer, scene_cache);
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(app_scene, None);
     } else if color_picker_close_req {
@@ -133,6 +133,7 @@ pub(in crate::application::app) fn execute_console_line(
             mindmap_tree,
             app_scene,
             renderer,
+            scene_cache,
         );
         *console_state = ConsoleState::Closed;
         renderer.rebuild_console_overlay_buffers(app_scene, None);

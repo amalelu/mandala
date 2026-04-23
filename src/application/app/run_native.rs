@@ -350,6 +350,7 @@ impl InitState {
             &mut self.mindmap_tree,
             &mut self.app_scene,
             &mut self.renderer,
+            &mut self.scene_cache,
         );
 
         // Drive the render loop each frame

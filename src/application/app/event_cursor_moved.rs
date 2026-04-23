@@ -79,6 +79,7 @@ pub(super) fn handle_cursor_moved(
                     mindmap_tree,
                     app_scene,
                     renderer,
+                    scene_cache,
                 );
             }
         }
@@ -220,6 +221,7 @@ pub(super) fn handle_cursor_moved(
                                 mindmap_tree,
                                 app_scene,
                                 renderer,
+                                scene_cache,
                             );
                             return;
                         }
@@ -249,7 +251,7 @@ pub(super) fn handle_cursor_moved(
                             *drag_state = DragState::Throttled(ThrottledDrag::PortalLabel(
                                 PortalLabelInteraction::new(edge_ref, endpoint, original),
                             ));
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                             return;
                         }
                     }

@@ -91,6 +91,7 @@ pub(super) fn handle_keyboard_input(
                 picker_hover,
                 app_scene,
                 renderer,
+                scene_cache,
             )
         } else {
             false
@@ -117,6 +118,7 @@ pub(super) fn handle_keyboard_input(
                 mindmap_tree,
                 app_scene,
                 renderer,
+                scene_cache,
             );
         }
         return;
@@ -140,6 +142,7 @@ pub(super) fn handle_keyboard_input(
                 mindmap_tree,
                 app_scene,
                 renderer,
+                scene_cache,
             );
         }
         return;
@@ -165,6 +168,7 @@ pub(super) fn handle_keyboard_input(
                 mindmap_tree,
                 app_scene,
                 renderer,
+                scene_cache,
             );
         }
         return;
@@ -247,6 +251,7 @@ pub(super) fn handle_keyboard_input(
                                 mindmap_tree,
                                 app_scene,
                                 renderer,
+                                scene_cache,
                             );
                         } else if portal_text_edit_state.is_open() {
                             handle_portal_text_edit_key(
@@ -261,6 +266,7 @@ pub(super) fn handle_keyboard_input(
                                 mindmap_tree,
                                 app_scene,
                                 renderer,
+                                scene_cache,
                             );
                         }
                         return;
@@ -313,7 +319,12 @@ pub(super) fn handle_keyboard_input(
                     doc.fast_forward_animations(mindmap_tree.as_mut());
                 }
                 if doc.undo() {
-                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                    // Undo restores node positions / edge paths in
+                    // place; cached connection samples key off those
+                    // coordinates and would be served stale. Clear
+                    // before the rebuild resamples.
+                    scene_cache.clear();
+                    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                 }
             }
         }
@@ -333,6 +344,7 @@ pub(super) fn handle_keyboard_input(
                         mindmap_tree,
                         app_scene,
                         renderer,
+                        scene_cache,
                     );
                 }
             }
@@ -356,6 +368,7 @@ pub(super) fn handle_keyboard_input(
                         mindmap_tree,
                         app_scene,
                         renderer,
+                        scene_cache,
                     );
                 }
             }
@@ -375,6 +388,7 @@ pub(super) fn handle_keyboard_input(
                         mindmap_tree,
                         app_scene,
                         renderer,
+                        scene_cache,
                     );
                 }
             }
@@ -382,7 +396,7 @@ pub(super) fn handle_keyboard_input(
         Some(Action::DeleteSelection) => {
             if let Some(doc) = document.as_mut() {
                 if doc.apply_delete_selection() {
-                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                 }
             }
         }
@@ -391,13 +405,13 @@ pub(super) fn handle_keyboard_input(
                 let canvas_pos =
                     renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
                 doc.create_orphan_and_select(canvas_pos);
-                rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
             }
         }
         Some(Action::OrphanSelection) => {
             if let Some(doc) = document.as_mut() {
                 if doc.apply_orphan_selection_with_undo() {
-                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                 }
             }
         }
@@ -499,7 +513,7 @@ pub(super) fn handle_keyboard_input(
                         }
                     }
                     if any_applied {
-                        rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                        rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                     }
                 }
             }
@@ -531,7 +545,7 @@ pub(super) fn handle_keyboard_input(
                         if let (Some(m), Some(tree)) = (mutation, mindmap_tree.as_mut()) {
                             doc.apply_custom_mutation(&m, &nid, Some(tree));
                             scene_cache.clear();
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                         }
                     }
                 }

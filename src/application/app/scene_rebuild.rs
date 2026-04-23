@@ -61,11 +61,12 @@ pub(in crate::application::app) fn rebuild_after_selection_change(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     if selection_change_touches_tree(prev_selection, &doc.selection) {
-        rebuild_all(doc, mindmap_tree, app_scene, renderer);
+        rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
     } else {
-        rebuild_scene_only(doc, app_scene, renderer);
+        rebuild_scene_only(doc, app_scene, renderer, scene_cache);
     }
 }
 
@@ -192,6 +193,7 @@ pub(in crate::application::app) fn rebuild_all(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let mut new_tree = doc.build_tree();
     apply_tree_highlights(
@@ -203,7 +205,7 @@ pub(in crate::application::app) fn rebuild_all(
     );
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
-    rebuild_scene_only(doc, app_scene, renderer);
+    rebuild_scene_only(doc, app_scene, renderer, scene_cache);
 
     *mindmap_tree = Some(new_tree);
 }
@@ -215,12 +217,24 @@ pub(in crate::application::app) fn rebuild_all(
 /// color preview doesn't change node text, borders, or positions,
 /// so the tree rebuild is wasted work. Halves the hot-path cost vs
 /// `rebuild_all` on maps with many nodes.
+///
+/// Uses the cache-aware `build_scene_with_cache` entry point so
+/// unchanged edge geometry (`sample_path` samples) is reused from
+/// the persistent `SceneConnectionCache`. This matches what the
+/// drag drains (`MovingNode`, `EdgeHandle`, `EdgeLabel`,
+/// `PortalLabel`) already do — every throttled consumer that
+/// reaches this helper now inherits the same optimization.
 pub(in crate::application::app) fn rebuild_scene_only(
     doc: &MindMapDocument,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
-    let scene = doc.build_scene_with_selection(renderer.camera_zoom());
+    let scene = doc.build_scene_with_cache(
+        &std::collections::HashMap::new(),
+        scene_cache,
+        renderer.camera_zoom(),
+    );
     update_connection_tree(&scene, app_scene);
     update_border_tree_static(doc, app_scene);
     update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);

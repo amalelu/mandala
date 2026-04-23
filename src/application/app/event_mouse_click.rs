@@ -24,6 +24,7 @@ pub(super) fn handle_mouse_input(
         mindmap_tree,
         app_scene,
         renderer,
+        scene_cache,
         drag_state,
         app_mode,
         console_state,
@@ -83,6 +84,7 @@ pub(super) fn handle_mouse_input(
                     mindmap_tree,
                     app_scene,
                     renderer,
+                    scene_cache,
                     picker_hover,
                 )
             } else {
@@ -121,6 +123,7 @@ pub(super) fn handle_mouse_input(
                         mindmap_tree,
                         app_scene,
                         renderer,
+                        scene_cache,
                     );
                     // Mode-exit via target click — clear any stale
                     // click so the first post-mode click can't be
@@ -138,6 +141,7 @@ pub(super) fn handle_mouse_input(
                         mindmap_tree,
                         app_scene,
                         renderer,
+                        scene_cache,
                     );
                     *last_click = None;
                 }
@@ -275,7 +279,7 @@ pub(super) fn handle_mouse_input(
                                 // DeltaGlyphArea's selective field
                                 // application) so the highlight
                                 // regions survive untouched.
-                                rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                                rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                                 open_text_edit(
                                     &nid,
                                     false,
@@ -328,7 +332,7 @@ pub(super) fn handle_mouse_input(
                                         &edge.edge_type,
                                     ),
                                 );
-                                rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                                rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                             }
                             return;
                         }
@@ -364,6 +368,7 @@ pub(super) fn handle_mouse_input(
                                     mindmap_tree,
                                     app_scene,
                                     renderer,
+                                    scene_cache,
                                 );
                                 open_label_edit(
                                     &er,
@@ -387,7 +392,7 @@ pub(super) fn handle_mouse_input(
                             if allow_create {
                                 if let Some(doc) = document.as_mut() {
                                     let new_id = doc.create_orphan_and_select(canvas_pos);
-                                    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                                    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                                     open_text_edit(
                                         &new_id,
                                         true,
@@ -509,6 +514,7 @@ pub(super) fn handle_mouse_input(
                                     mindmap_tree,
                                     app_scene,
                                     renderer,
+                                    scene_cache,
                                 );
                             }
                         }
@@ -551,6 +557,7 @@ pub(super) fn handle_mouse_input(
                                     mindmap_tree,
                                     app_scene,
                                     renderer,
+                                    scene_cache,
                                 );
                             }
                         }
@@ -597,6 +604,7 @@ pub(super) fn handle_mouse_input(
                                     mindmap_tree,
                                     app_scene,
                                     renderer,
+                                    scene_cache,
                                 );
                             }
                         }
@@ -641,6 +649,7 @@ pub(super) fn handle_mouse_input(
                                         mindmap_tree,
                                         app_scene,
                                         renderer,
+                                        scene_cache,
                                     );
                                     true
                                 } else {
@@ -658,6 +667,7 @@ pub(super) fn handle_mouse_input(
                                 mindmap_tree,
                                 app_scene,
                                 renderer,
+                                scene_cache,
                             );
                         }
                     }
@@ -684,7 +694,7 @@ pub(super) fn handle_mouse_input(
                             doc.dirty = true;
 
                             // Full rebuild from model
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                         }
                     }
                     DragState::Throttled(ThrottledDrag::EdgeHandle(i)) => {
@@ -724,7 +734,7 @@ pub(super) fn handle_mouse_input(
                                 });
                                 doc.dirty = true;
                             }
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                         }
                     }
                     DragState::Throttled(ThrottledDrag::PortalLabel(i)) => {
@@ -775,7 +785,7 @@ pub(super) fn handle_mouse_input(
                                     doc.dirty = true;
                                 }
                             }
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                         }
                     }
                     DragState::Throttled(ThrottledDrag::EdgeLabel(i)) => {
@@ -818,7 +828,7 @@ pub(super) fn handle_mouse_input(
                             // because node trees are untouched by a
                             // label move; the release commit is
                             // the same story.
-                            rebuild_scene_only(doc, app_scene, renderer);
+                            rebuild_scene_only(doc, app_scene, renderer, scene_cache);
                         }
                     }
                     DragState::SelectingRect { start_canvas, current_canvas } => {
@@ -827,7 +837,7 @@ pub(super) fn handle_mouse_input(
                         if let (Some(doc), Some(tree)) = (document.as_mut(), mindmap_tree.as_ref()) {
                             let hits = rect_select(start_canvas, current_canvas, tree);
                             doc.selection = SelectionState::from_ids(hits);
-                            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+                            rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                         }
                     }
                     DragState::Panning | DragState::None => {}

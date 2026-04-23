@@ -152,6 +152,11 @@ struct WasmInputState {
     /// works identically on WASM. Threaded into every
     /// `rebuild_all` / `rebuild_scene_only` call below.
     app_scene: crate::application::scene_host::AppScene,
+    /// Mirror of native's `scene_cache` so the cache-aware
+    /// `build_scene_with_cache` entry point skips `sample_path`
+    /// work for unchanged edges. Threaded into every rebuild
+    /// helper the same way native does.
+    scene_cache: baumhard::mindmap::scene_cache::SceneConnectionCache,
 }
 
 let renderer_rc: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
@@ -264,6 +269,7 @@ wasm_bindgen_futures::spawn_local(async move {
             pending_click: PendingClick::None,
             modifiers: winit::keyboard::ModifiersState::empty(),
             app_scene: crate::application::scene_host::AppScene::new(),
+            scene_cache: baumhard::mindmap::scene_cache::SceneConnectionCache::new(),
         });
     }
 
@@ -375,6 +381,7 @@ app.event_loop.run(move |event, _window_target| {
                     &mut input.mindmap_tree,
                     &mut input.app_scene,
                     renderer,
+                    &mut input.scene_cache,
                 );
                 suppress_for_events.set(input.text_edit_state.is_open());
                 return;
@@ -393,7 +400,10 @@ app.event_loop.run(move |event, _window_target| {
             match action {
                 Some(Action::Undo) => {
                     if input.document.undo() {
-                        rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                        // Mirror native: positions restored in place invalidate
+                        // cached connection samples.
+                        input.scene_cache.clear();
+                        rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer, &mut input.scene_cache);
                     }
                 }
                 Some(Action::CreateOrphanNode) => {
@@ -402,16 +412,16 @@ app.event_loop.run(move |event, _window_target| {
                         input.cursor_pos.1 as f32,
                     );
                     input.document.create_orphan_and_select(canvas_pos);
-                    rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                    rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer, &mut input.scene_cache);
                 }
                 Some(Action::OrphanSelection) => {
                     if input.document.apply_orphan_selection_with_undo() {
-                        rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                        rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer, &mut input.scene_cache);
                     }
                 }
                 Some(Action::DeleteSelection) => {
                     if input.document.apply_delete_selection() {
-                        rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                        rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer, &mut input.scene_cache);
                     }
                 }
                 Some(a @ (Action::EditSelection | Action::EditSelectionClean)) => {
@@ -561,7 +571,7 @@ app.event_loop.run(move |event, _window_target| {
                         ClickHit::Node(node_id) => {
                             let nid = node_id.clone();
                             input.document.selection = SelectionState::Single(nid.clone());
-                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer, &mut input.scene_cache);
                             open_text_edit(
                                 &nid, false,
                                 &mut input.document,
@@ -598,7 +608,7 @@ app.event_loop.run(move |event, _window_target| {
                                     &edge.edge_type,
                                 ),
                             );
-                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                            rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer, &mut input.scene_cache);
                         }
                         ClickHit::EdgeLabel(edge_key) => {
                             // Edge-label double-click is a parity
@@ -639,6 +649,7 @@ app.event_loop.run(move |event, _window_target| {
                                     &input.document,
                                     &mut input.app_scene,
                                     renderer,
+                                    &mut input.scene_cache,
                                 );
                             }
                         }
@@ -649,7 +660,7 @@ app.event_loop.run(move |event, _window_target| {
                             );
                             if allow_create {
                                 let new_id = input.document.create_orphan_and_select(canvas_pos);
-                                rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer);
+                                rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer, &mut input.scene_cache);
                                 open_text_edit(
                                     &new_id, true,
                                     &mut input.document,
@@ -733,6 +744,7 @@ app.event_loop.run(move |event, _window_target| {
                         &mut input.mindmap_tree,
                         &mut input.app_scene,
                         renderer,
+                        &mut input.scene_cache,
                     );
                     suppress_for_events.set(false);
                     return;
@@ -786,6 +798,7 @@ app.event_loop.run(move |event, _window_target| {
                         &mut input.mindmap_tree,
                         &mut input.app_scene,
                         renderer,
+                        &mut input.scene_cache,
                     );
                 }
             }
@@ -820,7 +833,7 @@ app.event_loop.run(move |event, _window_target| {
                 // Zoom touches scene geometry (connection glyph
                 // sample spacing, viewport cull rect) but not the
                 // node text tree — scene-only rebuild is enough.
-                rebuild_scene_only(&input.document, &mut input.app_scene, renderer);
+                rebuild_scene_only(&input.document, &mut input.app_scene, renderer, &mut input.scene_cache);
             }
         }
 

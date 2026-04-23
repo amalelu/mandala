@@ -36,6 +36,7 @@ pub(super) fn handle_click(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let doc = match document.as_mut() {
         Some(d) => d,
@@ -62,6 +63,11 @@ pub(super) fn handle_click(
                     doc.start_animation(&cm, id, now_ms() as u64);
                 } else if let Some(tree) = mindmap_tree.as_mut() {
                     doc.apply_custom_mutation(&cm, id, Some(tree));
+                    // Custom mutations can touch any cached field
+                    // (node positions, edge colors, glyph_connection
+                    // font). Match the keyboard-triggered-mutation
+                    // site (event_keyboard.rs) that already clears.
+                    scene_cache.clear();
                 }
                 doc.apply_document_actions(&cm);
             }
@@ -162,7 +168,7 @@ pub(super) fn handle_click(
     }
 
     // Rebuild tree with selection highlight applied
-    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
 }
 
 /// Rebuild tree, connections, and borders like `rebuild_all`, but additionally
@@ -177,6 +183,7 @@ pub(super) fn rebuild_all_with_mode(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let mut new_tree = doc.build_tree();
 
@@ -218,13 +225,7 @@ pub(super) fn rebuild_all_with_mode(
     apply_tree_highlights(&mut new_tree, highlights);
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
-    let scene = doc.build_scene_with_selection(renderer.camera_zoom());
-    update_connection_tree(&scene, app_scene);
-    update_border_tree_static(doc, app_scene);
-    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
-    update_edge_handle_tree(&scene, app_scene);
-    update_connection_label_tree(&scene, app_scene, renderer);
-    flush_canvas_scene_buffers(app_scene, renderer);
+    rebuild_scene_only(doc, app_scene, renderer, scene_cache);
 
     *mindmap_tree = Some(new_tree);
 }
@@ -243,6 +244,7 @@ pub(super) fn handle_connect_target_click(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let source = match std::mem::replace(app_mode, AppMode::Normal) {
         AppMode::Connect { source } => source,
@@ -272,7 +274,7 @@ pub(super) fn handle_connect_target_click(
         }
         // Full rebuild regardless — exiting the mode requires clearing
         // orange/green highlights.
-        rebuild_all(doc, mindmap_tree, app_scene, renderer);
+        rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
     }
 }
 
@@ -288,6 +290,7 @@ pub(super) fn handle_reparent_target_click(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let sources = match std::mem::replace(app_mode, AppMode::Normal) {
         AppMode::Reparent { sources } => sources,
@@ -314,6 +317,6 @@ pub(super) fn handle_reparent_target_click(
         }
         // Full rebuild: tree structure changed even if a no-op, the mode exit
         // requires clearing the orange/green highlights.
-        rebuild_all(doc, mindmap_tree, app_scene, renderer);
+        rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
     }
 }
