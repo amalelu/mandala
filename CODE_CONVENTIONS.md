@@ -148,7 +148,7 @@ it. This is the single strongest rule in the document.
   own the close.
 - **Pre-existing deviations do not justify new ones.** The current state
   of the code does not rewrite the conventions.
-- **Every commit is a state we would ship.** Tests green, formatted, no
+- **Every (merge) commit is a state we would ship.** Tests green, formatted, no
   broken paths, no half-features behind flags, no commented-out blocks,
   no dead code.
 - **No `// TODO`, no `// FIXME`, no `// HACK`.** If it needs doing, do
