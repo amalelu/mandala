@@ -707,3 +707,93 @@ fn background_rect_off_viewport_still_culled_with_matching_zoom() {
     };
     assert!(!rect.visible_at(&camera), "off-viewport rect must be culled regardless of zoom window");
 }
+
+// --- FrameIntervalRing --------------------------------------------------
+// Fundamentals coverage for the sum invariant backing
+// `FpsDisplayMode::Debug`'s rolling average. Pure arithmetic, no clock.
+
+#[test]
+fn frame_interval_ring_new_is_empty() {
+    let ring = FrameIntervalRing::new();
+    assert_eq!(ring.avg_micros(), None, "empty ring has no average");
+}
+
+#[test]
+fn frame_interval_ring_single_push_is_that_value() {
+    let mut ring = FrameIntervalRing::new();
+    ring.push(16_666);
+    assert_eq!(ring.avg_micros(), Some(16_666));
+}
+
+#[test]
+fn frame_interval_ring_partial_fill_averages_visible_samples() {
+    let mut ring = FrameIntervalRing::new();
+    ring.push(10);
+    ring.push(20);
+    ring.push(30);
+    // Divisor is `filled` (3), not `FPS_WINDOW` — zero-padding the array
+    // on cold start must not pull the reported average toward zero.
+    assert_eq!(ring.avg_micros(), Some(20));
+}
+
+#[test]
+fn frame_interval_ring_exact_fill_reports_uniform_value() {
+    let mut ring = FrameIntervalRing::new();
+    for _ in 0..FPS_WINDOW {
+        ring.push(1_000);
+    }
+    assert_eq!(ring.avg_micros(), Some(1_000));
+}
+
+#[test]
+fn frame_interval_ring_wrap_drops_oldest_sample() {
+    let mut ring = FrameIntervalRing::new();
+    // Seed with a distinctive sentinel so we can confirm it leaves the
+    // window on wraparound.
+    let sentinel = 999_999u128;
+    ring.push(sentinel);
+    for _ in 0..(FPS_WINDOW - 1) {
+        ring.push(1_000);
+    }
+    // Ring is exactly full; sentinel + (FPS_WINDOW - 1) * 1000 in the
+    // window. Average:
+    //   (999_999 + 199 * 1000) / 200 = (999_999 + 199_000) / 200 = 5994
+    let expected_with_sentinel = (sentinel + 1_000u128 * (FPS_WINDOW as u128 - 1))
+        / FPS_WINDOW as u128;
+    assert_eq!(ring.avg_micros(), Some(expected_with_sentinel));
+
+    // Push one more — the sentinel falls out of the window, and the
+    // running sum must update accordingly. After this, the ring holds
+    // FPS_WINDOW copies of 1_000.
+    ring.push(1_000);
+    assert_eq!(
+        ring.avg_micros(),
+        Some(1_000),
+        "oldest sample must drop out of the rolling sum on wraparound"
+    );
+}
+
+#[test]
+fn frame_interval_ring_zero_value_still_occupies_slot() {
+    let mut ring = FrameIntervalRing::new();
+    ring.push(0);
+    ring.push(200);
+    // Two samples, sum 200 → avg 100. The zero push did NOT refuse the
+    // slot; it contributed zero to the sum but advanced `filled`.
+    assert_eq!(ring.avg_micros(), Some(100));
+}
+
+#[test]
+fn frame_interval_ring_clear_restores_empty_state() {
+    let mut ring = FrameIntervalRing::new();
+    for i in 0..50 {
+        ring.push((i + 1) as u128 * 100);
+    }
+    assert!(ring.avg_micros().is_some());
+    ring.clear();
+    assert_eq!(ring.avg_micros(), None);
+    // And a fresh push lands cleanly on top — prior state did not
+    // leak through clear().
+    ring.push(42);
+    assert_eq!(ring.avg_micros(), Some(42));
+}

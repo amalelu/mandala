@@ -234,7 +234,7 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   on font-system lock contention and would collapse the reported
   frame cost to near zero. The render-side plumbing
   (`Renderer::{fps_display_mode, fps_overlay_buffers,
-  set_fps_display, tick_fps}`, `RenderDecree::DisplayFps(FpsDisplayMode)`,
+  set_fps_display, tick_fps}`, `RenderDecree::SetFpsDisplay(FpsDisplayMode)`,
   `rebuild_fps_overlay_if_needed`) compiles on both targets; only
   the `fps` console verb is native-gated because the console itself
   is. Browsers expose FPS via DevTools so the parity gap is

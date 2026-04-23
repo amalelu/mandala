@@ -7,7 +7,7 @@ use glam::Vec2;
 
 use crate::application::common::{FpsDisplayMode, RedrawMode, RenderDecree};
 
-use super::{Renderer, FPS_WINDOW};
+use super::Renderer;
 
 impl Renderer {
     /// Process a single decree directly
@@ -17,7 +17,7 @@ impl Renderer {
 
     fn handle_render_decree(&mut self, decree: RenderDecree) {
         match decree {
-            RenderDecree::DisplayFps(mode) => {
+            RenderDecree::SetFpsDisplay(mode) => {
                 self.fps_display_mode = mode;
                 // Reset every per-mode bit on every transition so a
                 // prior mode's state can't bleed into the new one:
@@ -35,10 +35,7 @@ impl Renderer {
                 //    last displayed.
                 self.last_frame_instant = None;
                 self.fps_clock = 0;
-                self.fps_ring = [0u128; FPS_WINDOW];
-                self.fps_ring_idx = 0;
-                self.fps_ring_sum = 0;
-                self.fps_ring_filled = 0;
+                self.fps_ring.clear();
                 self.last_fps_shaped = None;
                 if matches!(mode, FpsDisplayMode::Off) {
                     self.fps_overlay_buffers.clear();

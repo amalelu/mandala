@@ -159,6 +159,55 @@ const RECT_VERTEX_SIZE: u64 = 36;
 /// perf changes, long enough to smooth out per-frame jitter.
 const FPS_WINDOW: usize = 200;
 
+/// Fixed-size ring buffer of frame intervals (microseconds) with an
+/// O(1) running sum. Backs `FpsDisplayMode::Debug`'s rolling-average
+/// readout. Encapsulates the sum invariant — `sum` is always
+/// consistent with `samples[..filled.min(FPS_WINDOW)]` — so the
+/// four-field state can never drift out of sync via direct access.
+/// Private to this module.
+pub(super) struct FrameIntervalRing {
+    samples: [u128; FPS_WINDOW],
+    idx: usize,
+    sum: u128,
+    filled: usize,
+}
+
+impl FrameIntervalRing {
+    pub(super) fn new() -> Self {
+        Self {
+            samples: [0u128; FPS_WINDOW],
+            idx: 0,
+            sum: 0,
+            filled: 0,
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.samples = [0u128; FPS_WINDOW];
+        self.idx = 0;
+        self.sum = 0;
+        self.filled = 0;
+    }
+
+    pub(super) fn push(&mut self, micros: u128) {
+        let old = self.samples[self.idx];
+        self.sum = self.sum - old + micros;
+        self.samples[self.idx] = micros;
+        self.idx = (self.idx + 1) % FPS_WINDOW;
+        if self.filled < FPS_WINDOW {
+            self.filled += 1;
+        }
+    }
+
+    pub(super) fn avg_micros(&self) -> Option<u128> {
+        if self.filled == 0 {
+            None
+        } else {
+            Some(self.sum / self.filled as u128)
+        }
+    }
+}
+
 /// Number of `f32`-sized slots per vertex. The CPU accumulates
 /// packed floats into `main_rect_vertices` / `console_rect_vertices`;
 /// `shape_id` is stored as an `f32` holding the `u32` bit pattern
@@ -232,16 +281,11 @@ pub struct Renderer {
     /// displayed value only every `FPS_WINDOW` frames. Increments
     /// every frame regardless of mode; meaningful only in Snapshot.
     fps_clock: usize,
-    /// Ring buffer of the last `FPS_WINDOW` frame intervals in
-    /// microseconds, consumed by `FpsDisplayMode::Debug` to compute a
-    /// rolling average. Entries past `fps_ring_filled` are zero and
-    /// must not be counted — the divisor is `fps_ring_filled`, not
-    /// the array length, so the readout settles smoothly on cold
-    /// start instead of reporting a zero-inflated average.
-    fps_ring: [u128; FPS_WINDOW],
-    fps_ring_idx: usize,
-    fps_ring_sum: u128,
-    fps_ring_filled: usize,
+    /// Rolling window of the last `FPS_WINDOW` frame intervals,
+    /// consumed by `FpsDisplayMode::Debug` to compute a rolling
+    /// average. The sum / divisor invariant is enforced by the
+    /// `FrameIntervalRing` wrapper — no direct field access here.
+    fps_ring: FrameIntervalRing,
 
     camera: Camera2D,
     mindmap_buffers: FxHashMap<String, MindMapTextBuffer>,
@@ -617,10 +661,7 @@ impl Renderer {
             last_fps_shaped: None,
             last_frame_instant: None,
             fps_clock: 0,
-            fps_ring: [0u128; FPS_WINDOW],
-            fps_ring_idx: 0,
-            fps_ring_sum: 0,
-            fps_ring_filled: 0,
+            fps_ring: FrameIntervalRing::new(),
             glyphon_cache,
             viewport,
             camera,
@@ -692,7 +733,7 @@ impl Renderer {
     /// decree bus so `should_render` / `StartRender` / `StopRender`
     /// and the FPS toggle share a single in-renderer mutation point.
     pub fn set_fps_display(&mut self, mode: FpsDisplayMode) {
-        self.process_decree(RenderDecree::DisplayFps(mode));
+        self.process_decree(RenderDecree::SetFpsDisplay(mode));
     }
 
 
@@ -808,16 +849,9 @@ impl Renderer {
             }
             FpsDisplayMode::Debug => {
                 if frame_micros > 0 {
-                    let old = self.fps_ring[self.fps_ring_idx];
-                    self.fps_ring_sum = self.fps_ring_sum - old + frame_micros;
-                    self.fps_ring[self.fps_ring_idx] = frame_micros;
-                    self.fps_ring_idx = (self.fps_ring_idx + 1) % FPS_WINDOW;
-                    if self.fps_ring_filled < FPS_WINDOW {
-                        self.fps_ring_filled += 1;
-                    }
+                    self.fps_ring.push(frame_micros);
                 }
-                if self.fps_ring_filled > 0 {
-                    let avg = self.fps_ring_sum / self.fps_ring_filled as u128;
+                if let Some(avg) = self.fps_ring.avg_micros() {
                     if avg > 0 {
                         self.fps = Some((1_000_000u128 / avg) as usize);
                     }
