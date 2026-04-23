@@ -198,7 +198,6 @@ pub struct Renderer {
     run: bool,
     should_render: bool,
     fps: Option<usize>,
-    fps_clock: usize,
     /// When true, `render()` shapes an "FPS: N" readout into
     /// `fps_overlay_buffers` and draws it as a screen-space HUD in
     /// the upper-left corner. Toggled via the `fps on` / `fps off`
@@ -583,7 +582,6 @@ impl Renderer {
             fps: None,
             redraw_mode: RedrawMode::NoLimit,
             run: true,
-            fps_clock: 0,
             fps_display_enabled: false,
             fps_overlay_buffers: Vec::new(),
             last_fps_shaped: None,
@@ -695,10 +693,7 @@ impl Renderer {
                     } else {
                         self.timer.expire_in(delta_duration);
                     }
-                    if self.fps_clock % 100 == 0 {
-                        self.calculate_fps(delta_duration);
-                    }
-                    self.fps_clock += 1;
+                    self.calculate_fps(delta_duration);
                     self.rebuild_fps_overlay_if_needed();
                     let sw = StopWatch::new_start();
                     self.render();
@@ -706,10 +701,7 @@ impl Renderer {
                 }
             }
             RedrawMode::NoLimit => {
-                if self.fps_clock % 100 == 0 {
-                    self.calculate_no_limit_fps();
-                }
-                self.fps_clock += 1;
+                self.calculate_no_limit_fps();
                 self.rebuild_fps_overlay_if_needed();
                 let sw = StopWatch::new_start();
                 self.render();
