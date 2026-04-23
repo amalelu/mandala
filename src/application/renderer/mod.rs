@@ -34,7 +34,6 @@ use console_pass::{
     console_overlay_signature,
 };
 #[cfg(test)]
-use render::glyph_position_in_viewport;
 #[cfg(test)]
 use tree_walker::walk_tree_into_buffers;
 
@@ -296,12 +295,6 @@ pub struct Renderer {
     /// the dominant cost here, skipping it for unmoved borders is what
     /// keeps drag interactive.
     border_buffers: FxHashMap<String, Vec<MindMapTextBuffer>>,
-    /// Per-edge connection glyph buffers, keyed by `(from_id, to_id,
-    /// edge_type)`. Each entry is the `Vec` of already-shaped glyph
-    /// buffers for that edge. Keyed so unchanged edges survive across
-    /// drag frames — the big win for the "long cross-link, dragging
-    /// something else" scenario.
-    connection_buffers: FxHashMap<EdgeKey, Vec<MindMapTextBuffer>>,
     /// Edge grab-handle buffers for the connection reshape surface.
     /// Populated only when an edge is selected; rebuilt fresh every
     /// time the scene is rebuilt with a selected edge. Bounded cost
@@ -659,7 +652,6 @@ impl Renderer {
             camera,
             mindmap_buffers: Default::default(),
             border_buffers: FxHashMap::default(),
-            connection_buffers: FxHashMap::default(),
             edge_handle_buffers: Vec::new(),
             connection_label_buffers: FxHashMap::default(),
             connection_label_hitboxes: FxHashMap::default(),
