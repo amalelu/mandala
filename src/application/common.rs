@@ -21,7 +21,7 @@ pub enum InputMode {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderDecree {
     Noop,
-    DisplayFps,
+    DisplayFps(bool),
     StartRender,
     StopRender,
     ReinitAdapter,

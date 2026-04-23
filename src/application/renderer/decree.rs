@@ -17,7 +17,13 @@ impl Renderer {
 
     fn handle_render_decree(&mut self, decree: RenderDecree) {
         match decree {
-            RenderDecree::DisplayFps => {}
+            RenderDecree::DisplayFps(enabled) => {
+                self.fps_display_enabled = enabled;
+                if !enabled {
+                    self.fps_overlay_buffers.clear();
+                    self.last_fps_shaped = None;
+                }
+            }
             RenderDecree::StartRender => {
                 self.should_render = true;
             }
