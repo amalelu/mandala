@@ -137,6 +137,11 @@ pub(super) fn drain_animation_tick(
     };
     if animation_advanced {
         if let Some(doc) = document.as_ref() {
+            // Animation ticks lerp positions (and on completion
+            // route through `apply_custom_mutation`) in place; the
+            // cache's `pre_clip_positions` go stale under both
+            // paths. Clear before re-sampling.
+            scene_cache.clear();
             rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
         }
     }

@@ -319,6 +319,11 @@ pub(super) fn handle_keyboard_input(
                     doc.fast_forward_animations(mindmap_tree.as_mut());
                 }
                 if doc.undo() {
+                    // Undo restores node positions / edge paths in
+                    // place; cached connection samples key off those
+                    // coordinates and would be served stale. Clear
+                    // before the rebuild resamples.
+                    scene_cache.clear();
                     rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
                 }
             }

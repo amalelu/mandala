@@ -123,6 +123,11 @@ pub(in crate::application::app) fn commit_color_picker(
     }
 
     renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
+    // `set_edge_color` / `set_node_*_color` mutate edge/node color
+    // fields that `build_scene_with_cache` caches per-edge (body
+    // glyph, color, font). Clear so the rebuild re-samples against
+    // the committed model.
+    scene_cache.clear();
     rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
 }
 
@@ -197,6 +202,15 @@ pub(in crate::application::app) fn apply_picker_preview(
     // type the drag path uses), which self-tunes to keep the
     // per-frame work under the refresh budget.
     picker_hover.dirty = true;
+    // Additionally flag the canvas dirty: `doc.color_picker_preview`
+    // drives a per-edge color override that the scene builder reads
+    // during emission. Only `apply_picker_preview` writes to that
+    // preview — gesture-only paths (Move / Resize in `mouse.rs`)
+    // leave it clear, which is what lets the drain skip
+    // `rebuild_scene_only` during a wheel drag. Keyboard nudges,
+    // however, land here even mid-drag; they must still trigger the
+    // canvas rebuild so the targeted edge repaints.
+    picker_hover.canvas_dirty = true;
 }
 
 /// Commit the picker's current HSV to every colorable item in the
@@ -256,6 +270,10 @@ pub(in crate::application::app) fn commit_color_picker_to_selection(
     }
 
     if any_accepted {
+        // Same rationale as `commit_color_picker`: the wheel-color
+        // writes land on cached edge fields, so clear before the
+        // rebuild.
+        scene_cache.clear();
         // Rebuild the whole scene so the newly-colored items repaint
         // next frame. The picker itself stays open — no state change
         // needed on `state`.

@@ -63,6 +63,11 @@ pub(super) fn handle_click(
                     doc.start_animation(&cm, id, now_ms() as u64);
                 } else if let Some(tree) = mindmap_tree.as_mut() {
                     doc.apply_custom_mutation(&cm, id, Some(tree));
+                    // Custom mutations can touch any cached field
+                    // (node positions, edge colors, glyph_connection
+                    // font). Match the keyboard-triggered-mutation
+                    // site (event_keyboard.rs) that already clears.
+                    scene_cache.clear();
                 }
                 doc.apply_document_actions(&cm);
             }

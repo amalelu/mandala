@@ -400,6 +400,9 @@ app.event_loop.run(move |event, _window_target| {
             match action {
                 Some(Action::Undo) => {
                     if input.document.undo() {
+                        // Mirror native: positions restored in place invalidate
+                        // cached connection samples.
+                        input.scene_cache.clear();
                         rebuild_all(&input.document, &mut input.mindmap_tree, &mut input.app_scene, renderer, &mut input.scene_cache);
                     }
                 }
