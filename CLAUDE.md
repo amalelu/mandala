@@ -223,6 +223,15 @@ session doesn't have to trawl `#[cfg]` guards to learn what works where.
   "unresponsive tab" dialog for free, so no equivalent is wired;
   a Worker-based liveness check can slot in when a concrete need
   arises.
+- FPS overlay (`fps on` / `fps off`) — a yellow screen-space
+  "FPS: N" readout in the upper-left, toggled from the console.
+  The render-side plumbing
+  (`Renderer::{fps_display_enabled, fps_overlay_buffers,
+  set_fps_display}`, `RenderDecree::DisplayFps(bool)`,
+  `rebuild_fps_overlay_if_needed`) compiles on both targets;
+  only the `fps` console verb is native-gated because the console
+  itself is. Browsers expose FPS via DevTools so the parity gap
+  is low-value to close.
 
 **Absent on both targets** (named so they're visible as gaps, not
 mistaken for "handled somewhere"):

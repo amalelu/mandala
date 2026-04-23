@@ -61,6 +61,7 @@ pub(in crate::application::app) fn execute_console_line(
     let color_picker_standalone_req = effects.open_color_picker_standalone;
     let color_picker_close_req = effects.close_color_picker;
     let close_after = effects.close_console;
+    let fps_display_req = effects.set_fps_display.take();
     let replace_doc = effects.replace_document.take();
 
     // Emit the command's result lines into the scrollback.
@@ -88,6 +89,14 @@ pub(in crate::application::app) fn execute_console_line(
         *label_edit_state = LabelEditState::Closed;
         *portal_text_edit_state = PortalTextEditState::Closed;
         *color_picker_state = ColorPickerState::Closed;
+    }
+
+    // `fps on` / `fps off` — forward to the renderer. The decree bus
+    // clears the overlay buffers when toggled off; the rebuild helper
+    // in `Renderer::process()` re-shapes them on the next frame when
+    // toggled on.
+    if let Some(enabled) = fps_display_req {
+        renderer.set_fps_display(enabled);
     }
 
     // Any successful command may have mutated the doc; rebuild.

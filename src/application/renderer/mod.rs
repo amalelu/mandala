@@ -57,7 +57,7 @@ use wgpu::{
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::application::common::{PollTimer, RedrawMode, StopWatch};
+use crate::application::common::{PollTimer, RedrawMode, RenderDecree, StopWatch};
 use baumhard::font::fonts;
 use baumhard::font::fonts::AppFont;
 #[cfg(test)]
@@ -198,7 +198,20 @@ pub struct Renderer {
     run: bool,
     should_render: bool,
     fps: Option<usize>,
-    fps_clock: usize,
+    /// When true, `render()` shapes an "FPS: N" readout into
+    /// `fps_overlay_buffers` and draws it as a screen-space HUD in
+    /// the upper-left corner. Toggled via the `fps on` / `fps off`
+    /// console verb, which routes through `RenderDecree::DisplayFps`.
+    fps_display_enabled: bool,
+    /// Screen-space text buffer(s) carrying the yellow FPS readout.
+    /// Chained into `palette_text_areas` at render time so the readout
+    /// draws at `scale: 1.0` with no camera transform. Empty whenever
+    /// `fps_display_enabled` is false.
+    fps_overlay_buffers: Vec<MindMapTextBuffer>,
+    /// The `self.fps` value that was shaped into `fps_overlay_buffers`
+    /// last. Used to skip re-shaping when the 100-frame FPS cadence
+    /// hasn't produced a new value yet.
+    last_fps_shaped: Option<usize>,
 
     camera: Camera2D,
     mindmap_buffers: FxHashMap<String, MindMapTextBuffer>,
@@ -569,7 +582,9 @@ impl Renderer {
             fps: None,
             redraw_mode: RedrawMode::NoLimit,
             run: true,
-            fps_clock: 0,
+            fps_display_enabled: false,
+            fps_overlay_buffers: Vec::new(),
+            last_fps_shaped: None,
             glyphon_cache,
             viewport,
             camera,
@@ -637,6 +652,13 @@ impl Renderer {
         };
     }
 
+    /// Toggle the screen-space FPS readout. Routes through the
+    /// decree bus so `should_render` / `StartRender` / `StopRender`
+    /// and the FPS toggle share a single in-renderer mutation point.
+    pub fn set_fps_display(&mut self, enabled: bool) {
+        self.process_decree(RenderDecree::DisplayFps(enabled));
+    }
+
 
     /// Returns and resets the connection viewport-dirty flag. Called by
     /// the event loop once per frame in `AboutToWait`; a `true` return
@@ -671,26 +693,55 @@ impl Renderer {
                     } else {
                         self.timer.expire_in(delta_duration);
                     }
-                    if self.fps_clock % 100 == 0 {
-                        self.calculate_fps(delta_duration);
-                    }
-                    self.fps_clock += 1;
+                    self.calculate_fps(delta_duration);
+                    self.rebuild_fps_overlay_if_needed();
                     let sw = StopWatch::new_start();
                     self.render();
                     self.last_render_time = sw.stop();
                 }
             }
             RedrawMode::NoLimit => {
-                if self.fps_clock % 100 == 0 {
-                    self.calculate_no_limit_fps();
-                }
-                self.fps_clock += 1;
+                self.calculate_no_limit_fps();
+                self.rebuild_fps_overlay_if_needed();
                 let sw = StopWatch::new_start();
                 self.render();
                 self.last_render_time = sw.stop();
             }
         }
         self.run
+    }
+
+    /// Re-shape the yellow "FPS: N" screen-space overlay when the
+    /// `self.fps` value has changed since the last shape. Called
+    /// from `process()` alongside the fps calculation so the
+    /// rebuild cadence piggybacks on the ~100-frame fps refresh
+    /// instead of adding a per-frame shaping cost. Silent on
+    /// font-system lock contention — the next process() cycle
+    /// retries.
+    #[inline]
+    fn rebuild_fps_overlay_if_needed(&mut self) {
+        if !self.fps_display_enabled {
+            return;
+        }
+        if self.fps == self.last_fps_shaped && !self.fps_overlay_buffers.is_empty() {
+            return;
+        }
+        let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
+            return;
+        };
+        let text = format!("FPS: {}", self.fps.unwrap_or(0));
+        let attrs = Attrs::new().color(cosmic_text::Color::rgba(255, 235, 0, 255));
+        let buf = borders::create_border_buffer(
+            &mut font_system,
+            &text,
+            &attrs,
+            16.0,
+            (8.0, 8.0),
+            (200.0, 24.0),
+        );
+        self.fps_overlay_buffers.clear();
+        self.fps_overlay_buffers.push(buf);
+        self.last_fps_shaped = self.fps;
     }
 
     #[inline]

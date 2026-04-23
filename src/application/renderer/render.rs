@@ -261,6 +261,7 @@ impl Renderer {
         // console.
         let palette_text_areas: Vec<TextArea> = self.console_overlay_buffers.iter()
             .chain(self.overlay_scene_buffers.iter())
+            .chain(self.fps_overlay_buffers.iter())
             .map(|tb| TextArea {
                 buffer: &tb.buffer,
                 left: tb.pos.0,
