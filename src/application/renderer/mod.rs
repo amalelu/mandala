@@ -367,14 +367,6 @@ pub struct Renderer {
     /// rect pipeline so GlyphArea fills on migrated components
     /// render beneath their glyphs.
     canvas_scene_background_rects: Vec<NodeBackgroundRect>,
-    /// Set whenever the camera's viewport rect changes (pan, zoom,
-    /// resize) and `connection_buffers` was cleared as a result.
-    /// Consumed once per frame by the event loop in `AboutToWait` to
-    /// rebuild the connection buffers against the new viewport.
-    /// Without this flag, clearing the map on camera change would leave
-    /// it empty until the next structural change, which is why
-    /// connections used to vanish on pan.
-    connection_viewport_dirty: bool,
     /// Set whenever the camera *zoom* changes. The document-side
     /// `SceneConnectionCache` stores pre-clip samples whose spacing
     /// depends on `GlyphConnectionConfig::effective_font_size_pt`, which
@@ -382,7 +374,7 @@ pub struct Renderer {
     /// before the next scene build re-samples. `SceneConnectionCache`
     /// enforces this internally via `ensure_zoom`, but we still raise
     /// this flag so the event loop can explicitly clear the cache and
-    /// order the rebuild readably alongside the viewport-dirty path.
+    /// re-run the connection rebuild.
     connection_geometry_dirty: bool,
     /// Filled-rectangle rendering pipeline. Used to draw node
     /// backgrounds (from `GlyphArea.background_color`), the command
@@ -679,7 +671,6 @@ impl Renderer {
             overlay_scene_buffers: Vec::new(),
             canvas_scene_buffers: Vec::new(),
             canvas_scene_background_rects: Vec::new(),
-            connection_viewport_dirty: false,
             connection_geometry_dirty: false,
             rect_pipeline,
             rect_vertex_buffer,
@@ -736,14 +727,6 @@ impl Renderer {
         self.process_decree(RenderDecree::SetFpsDisplay(mode));
     }
 
-
-    /// Returns and resets the connection viewport-dirty flag. Called by
-    /// the event loop once per frame in `AboutToWait`; a `true` return
-    /// means the viewport rect changed since the last frame and the
-    /// per-glyph viewport cull needs to run again.
-    pub fn take_connection_viewport_dirty(&mut self) -> bool {
-        std::mem::replace(&mut self.connection_viewport_dirty, false)
-    }
 
     /// Returns and resets the connection geometry-dirty flag. Called by
     /// the event loop once per frame; a `true` return means the zoom

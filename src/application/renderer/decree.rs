@@ -79,14 +79,11 @@ impl Renderer {
                         factor,
                     },
                 );
-                // Zoom invalidates both the renderer-side cull cache
-                // (viewport-dirty) AND the document-side sample cache
-                // (geometry-dirty), because the effective font size —
-                // and therefore sample spacing along the path — is a
-                // function of zoom via
+                // Zoom invalidates the document-side sample cache:
+                // the effective font size — and therefore sample
+                // spacing along connection paths — is a function of
+                // zoom via
                 // `GlyphConnectionConfig::effective_font_size_pt`.
-                self.connection_buffers.clear();
-                self.connection_viewport_dirty = true;
                 self.connection_geometry_dirty = true;
             }
         }

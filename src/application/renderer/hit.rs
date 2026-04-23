@@ -225,12 +225,10 @@ impl Renderer {
             // The fit typically changes both pan and zoom. Today this
             // is only called from `load_mindmap`, which follows up
             // with a full connection rebuild against the new zoom —
-            // but raise both dirty flags so any future caller (e.g. a
-            // "fit to selection" command) automatically gets a
-            // rebuild on the next frame instead of silently leaving
-            // stale buffers behind.
-            self.connection_buffers.clear();
-            self.connection_viewport_dirty = true;
+            // but raise `geometry_dirty` so any future caller (e.g.
+            // a "fit to selection" command) automatically gets a
+            // scene-cache flush + rebuild on the next frame instead
+            // of silently leaving stale samples behind.
             self.connection_geometry_dirty = true;
         }
     }
