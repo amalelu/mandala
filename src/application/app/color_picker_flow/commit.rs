@@ -19,6 +19,7 @@ pub(in crate::application::app) fn cancel_color_picker(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     use crate::application::color_picker::ColorPickerState;
 
@@ -28,7 +29,7 @@ pub(in crate::application::app) fn cancel_color_picker(
     *state = ColorPickerState::Closed;
     doc.color_picker_preview = None;
     renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
-    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
 }
 
 /// Close the standalone color picker without committing. Called by
@@ -44,8 +45,9 @@ pub(in crate::application::app) fn close_color_picker_standalone(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
-    cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
+    cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer, scene_cache);
 }
 
 /// Commit the picker's currently-previewed HSV value via the regular
@@ -63,6 +65,7 @@ pub(in crate::application::app) fn commit_color_picker(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     use crate::application::color_picker::{ColorPickerState, NodeColorAxis, PickerHandle};
     use baumhard::util::color::hsv_to_hex;
@@ -120,7 +123,7 @@ pub(in crate::application::app) fn commit_color_picker(
     }
 
     renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
-    rebuild_all(doc, mindmap_tree, app_scene, renderer);
+    rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
 }
 
 /// Apply the current picker HSV to the document's transient color
@@ -215,6 +218,7 @@ pub(in crate::application::app) fn commit_color_picker_to_selection(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     use crate::application::color_picker::{request_error_flash, ColorPickerState, FlashKind};
     use crate::application::console::traits::{
@@ -255,6 +259,6 @@ pub(in crate::application::app) fn commit_color_picker_to_selection(
         // Rebuild the whole scene so the newly-colored items repaint
         // next frame. The picker itself stays open — no state change
         // needed on `state`.
-        rebuild_all(doc, mindmap_tree, app_scene, renderer);
+        rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
     }
 }

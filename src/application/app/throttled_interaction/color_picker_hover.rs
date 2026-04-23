@@ -11,6 +11,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use crate::application::color_picker::ColorPickerState;
 use crate::application::frame_throttle::MutationFrequencyThrottle;
 
 use super::super::color_picker_flow::rebuild_color_picker_overlay;
@@ -41,6 +42,25 @@ impl Default for ColorPickerHoverInteraction {
     }
 }
 
+/// Gate for the canvas rebuild inside [`ColorPickerHoverInteraction::drain`].
+///
+/// Returns `true` when a picker-drag gesture (Move / Resize) is
+/// active — those frames mutate only picker-local geometry and
+/// leave document state untouched, so the canvas rebuild is
+/// redundant. Returns `false` for the hover-preview path, where a
+/// swatch change fans out to the document's color_picker_preview
+/// and the canvas must be rebuilt to reflect the new preview.
+///
+/// Pulled out of `drain` so the shape of the decision is
+/// independently testable without standing up a full `DrainContext`
+/// (renderer, app_scene, scene_cache, …).
+fn canvas_rebuild_is_redundant(state: &ColorPickerState) -> bool {
+    matches!(
+        state,
+        ColorPickerState::Open { gesture: Some(_), .. },
+    )
+}
+
 impl ThrottledInteraction for ColorPickerHoverInteraction {
     fn has_pending(&self) -> bool {
         self.dirty
@@ -55,6 +75,7 @@ impl ThrottledInteraction for ColorPickerHoverInteraction {
             document,
             app_scene,
             renderer,
+            scene_cache,
             color_picker_state,
             ..
         } = ctx;
@@ -67,8 +88,20 @@ impl ThrottledInteraction for ColorPickerHoverInteraction {
             return;
         }
 
+        // Gesture-active (Move / Resize) drains are picker-overlay
+        // only — `color_picker_flow::mouse` writes just
+        // `center_override` / `size_scale` on those frames and never
+        // touches document state, so a canvas rebuild is pure waste.
+        // The drag drains (MovingNode, EdgeHandle, …) already avoid
+        // this path by walking their own targeted rebuild; the picker
+        // is the one throttled consumer that was still paying
+        // O(edges) for a screen-space overlay translation.
+        let skip_canvas = canvas_rebuild_is_redundant(color_picker_state);
+
         if let Some(doc) = document.as_mut() {
-            rebuild_scene_only(doc, app_scene, renderer);
+            if !skip_canvas {
+                rebuild_scene_only(doc, app_scene, renderer, scene_cache);
+            }
             rebuild_color_picker_overlay(color_picker_state, doc, app_scene, renderer);
         }
         self.dirty = false;
@@ -171,5 +204,119 @@ mod tests {
         }
         i.dirty = true;
         assert!(i.should_perform_drain());
+    }
+
+    #[test]
+    fn test_canvas_rebuild_redundant_for_closed_state() {
+        // Closed: nothing on-screen to rebuild for. Drain returns
+        // early before checking the gate, but the gate itself should
+        // report "redundant" for safety.
+        let state = ColorPickerState::Closed;
+        assert!(!canvas_rebuild_is_redundant(&state));
+    }
+
+    #[test]
+    fn test_canvas_rebuild_not_redundant_for_hover_open_state() {
+        // Open with no active gesture → hover preview. The swatch
+        // under the cursor changes the document's color_picker_preview,
+        // so the canvas must be rebuilt to show the preview color.
+        use crate::application::color_picker::{ColorPickerState, PickerMode};
+        let state = ColorPickerState::Open {
+            mode: PickerMode::Standalone,
+            hue_deg: 0.0,
+            sat: 1.0,
+            val: 1.0,
+            last_cursor_pos: None,
+            max_cell_advance: 1.0,
+            max_ring_advance: 1.0,
+            measurement_font_size: 10.0,
+            arm_top_ink_offsets: Default::default(),
+            arm_bottom_ink_offsets: Default::default(),
+            arm_left_ink_offsets: Default::default(),
+            arm_right_ink_offsets: Default::default(),
+            preview_ink_offset: (0.0, 0.0),
+            layout: None,
+            center_override: None,
+            size_scale: 1.0,
+            gesture: None,
+            hovered_hit: None,
+            hover_preview: None,
+            pending_error_flash: false,
+            last_dynamic_apply: None,
+        };
+        assert!(!canvas_rebuild_is_redundant(&state));
+    }
+
+    #[test]
+    fn test_canvas_rebuild_redundant_during_move_gesture() {
+        // Move gesture active: only `center_override` changes each
+        // frame; no document-facing mutation. Canvas rebuild is
+        // pure waste — the gate must report redundant.
+        use crate::application::color_picker::{
+            ColorPickerState, PickerGesture, PickerMode,
+        };
+        let state = ColorPickerState::Open {
+            mode: PickerMode::Standalone,
+            hue_deg: 0.0,
+            sat: 1.0,
+            val: 1.0,
+            last_cursor_pos: None,
+            max_cell_advance: 1.0,
+            max_ring_advance: 1.0,
+            measurement_font_size: 10.0,
+            arm_top_ink_offsets: Default::default(),
+            arm_bottom_ink_offsets: Default::default(),
+            arm_left_ink_offsets: Default::default(),
+            arm_right_ink_offsets: Default::default(),
+            preview_ink_offset: (0.0, 0.0),
+            layout: None,
+            center_override: None,
+            size_scale: 1.0,
+            gesture: Some(PickerGesture::Move {
+                grab_offset: (0.0, 0.0),
+            }),
+            hovered_hit: None,
+            hover_preview: None,
+            pending_error_flash: false,
+            last_dynamic_apply: None,
+        };
+        assert!(canvas_rebuild_is_redundant(&state));
+    }
+
+    #[test]
+    fn test_canvas_rebuild_redundant_during_resize_gesture() {
+        // Resize gesture: only `size_scale` changes each frame.
+        // Same rationale as Move — skip the canvas rebuild.
+        use crate::application::color_picker::{
+            ColorPickerState, PickerGesture, PickerMode,
+        };
+        let state = ColorPickerState::Open {
+            mode: PickerMode::Standalone,
+            hue_deg: 0.0,
+            sat: 1.0,
+            val: 1.0,
+            last_cursor_pos: None,
+            max_cell_advance: 1.0,
+            max_ring_advance: 1.0,
+            measurement_font_size: 10.0,
+            arm_top_ink_offsets: Default::default(),
+            arm_bottom_ink_offsets: Default::default(),
+            arm_left_ink_offsets: Default::default(),
+            arm_right_ink_offsets: Default::default(),
+            preview_ink_offset: (0.0, 0.0),
+            layout: None,
+            center_override: None,
+            size_scale: 1.0,
+            gesture: Some(PickerGesture::Resize {
+                anchor_radius: 1.0,
+                anchor_scale: 1.0,
+                anchor_center: (0.0, 0.0),
+            }),
+            hovered_hit: None,
+            hover_preview: None,
+            pending_error_flash: false,
+            last_dynamic_apply: None,
+        };
+        assert!(canvas_rebuild_is_redundant(&state));
     }
 }

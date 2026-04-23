@@ -32,6 +32,7 @@ pub(in crate::application::app) fn handle_color_picker_key(
     picker_hover: &mut ColorPickerHoverInteraction,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) -> bool {
     let name = match key_name.as_deref() {
         Some(n) => n,
@@ -67,16 +68,16 @@ pub(in crate::application::app) fn handle_color_picker_key(
             if state.is_standalone() {
                 return false;
             }
-            cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
+            cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer, scene_cache);
             true
         }
         Some(Action::PickerCommit) => {
             if state.is_standalone() {
                 commit_color_picker_to_selection(
-                    state, doc, mindmap_tree, app_scene, renderer,
+                    state, doc, mindmap_tree, app_scene, renderer, scene_cache,
                 );
             } else {
-                commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
+                commit_color_picker(state, doc, mindmap_tree, app_scene, renderer, scene_cache);
             }
             true
         }

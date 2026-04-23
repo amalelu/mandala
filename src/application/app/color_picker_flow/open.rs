@@ -24,6 +24,7 @@ pub(in crate::application::app) fn open_color_picker_contextual(
     state: &mut crate::application::color_picker::ColorPickerState,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     use crate::application::color_picker::{current_hsv_at, PickerMode};
 
@@ -60,6 +61,7 @@ pub(in crate::application::app) fn open_color_picker_contextual(
         state,
         app_scene,
         renderer,
+        scene_cache,
     );
 }
 
@@ -72,6 +74,7 @@ pub(in crate::application::app) fn open_color_picker_standalone(
     state: &mut crate::application::color_picker::ColorPickerState,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     use crate::application::color_picker::PickerMode;
 
@@ -81,7 +84,7 @@ pub(in crate::application::app) fn open_color_picker_standalone(
     // 12-o'clock slot so the wheel opens with the ring's "start" cell
     // highlighted.
     let hsv = (0.0_f32, 1.0_f32, 1.0_f32);
-    open_picker_inner(PickerMode::Standalone, hsv, doc, state, app_scene, renderer);
+    open_picker_inner(PickerMode::Standalone, hsv, doc, state, app_scene, renderer, scene_cache);
 }
 
 /// Shared picker-open core: measures glyph advances (one font-system
@@ -96,6 +99,7 @@ pub(in crate::application::app) fn open_picker_inner(
     state: &mut crate::application::color_picker::ColorPickerState,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     use crate::application::color_picker::{
         arm_bottom_font, arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs,
@@ -229,7 +233,7 @@ pub(in crate::application::app) fn open_picker_inner(
     };
 
     rebuild_color_picker_overlay(state, doc, app_scene, renderer);
-    rebuild_scene_only(doc, app_scene, renderer);
+    rebuild_scene_only(doc, app_scene, renderer, scene_cache);
 }
 
 /// Helper: write the initial HSV into `doc.color_picker_preview` on

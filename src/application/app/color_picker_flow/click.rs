@@ -54,6 +54,7 @@ pub(in crate::application::app) fn handle_color_picker_click(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
     picker_hover: &mut ColorPickerHoverInteraction,
 ) -> bool {
     use crate::application::color_picker::{
@@ -90,7 +91,7 @@ pub(in crate::application::app) fn handle_color_picker_click(
                 return false;
             }
             // Contextual mode: click outside cancels.
-            cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer);
+            cancel_color_picker(state, doc, mindmap_tree, app_scene, renderer, scene_cache);
         }
         PickerHit::Hue(slot) => {
             if let ColorPickerState::Open { hue_deg, hover_preview, .. } = state {
@@ -123,11 +124,12 @@ pub(in crate::application::app) fn handle_color_picker_click(
                     mindmap_tree,
                     app_scene,
                     renderer,
+                    scene_cache,
                 );
             } else {
                 // Contextual mode: commit to the bound target,
                 // close.
-                commit_color_picker(state, doc, mindmap_tree, app_scene, renderer);
+                commit_color_picker(state, doc, mindmap_tree, app_scene, renderer, scene_cache);
             }
         }
         PickerHit::DragAnchor => {

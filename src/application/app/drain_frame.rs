@@ -127,6 +127,7 @@ pub(super) fn drain_animation_tick(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let animation_advanced = match document.as_mut() {
         Some(doc) if doc.has_active_animations() => {
@@ -136,7 +137,7 @@ pub(super) fn drain_animation_tick(
     };
     if animation_advanced {
         if let Some(doc) = document.as_ref() {
-            rebuild_all(doc, mindmap_tree, app_scene, renderer);
+            rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
         }
     }
 }

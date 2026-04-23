@@ -208,6 +208,7 @@ pub(in crate::application::app) fn close_text_edit(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let snapshot = match std::mem::replace(text_edit_state, TextEditState::Closed) {
         TextEditState::Open {
@@ -223,7 +224,7 @@ pub(in crate::application::app) fn close_text_edit(
     if commit {
         doc.set_node_text(&node_id, buffer);
         // Commit changed the model — pull the tree back to it.
-        rebuild_all(doc, mindmap_tree, app_scene, renderer);
+        rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
     } else {
         // Cancel: model is untouched, so we only need to revert the
         // edited node's transient caret-bearing text/regions to the
@@ -331,13 +332,14 @@ pub(in crate::application::app) fn handle_text_edit_key(
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
     renderer: &mut Renderer,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let name = key_name.as_deref();
     let action = name.and_then(|n| {
         keybinds.action_for_context(InputContext::TextEdit, n, ctrl, shift, alt)
     });
     if action == Some(Action::TextEditCancel) {
-        close_text_edit(false, doc, text_edit_state, mindmap_tree, app_scene, renderer);
+        close_text_edit(false, doc, text_edit_state, mindmap_tree, app_scene, renderer, scene_cache);
         return;
     }
 
