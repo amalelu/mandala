@@ -64,18 +64,13 @@ impl Renderer {
                         screen_delta: Vec2::new(dx, dy),
                     },
                 );
-                // The per-edge off-screen glyph cull is a function of
-                // the camera, so moving the camera invalidates the
-                // cached per-edge visible-glyph layout. Clear the
-                // renderer-side connection cache so the next rebuild
-                // re-runs the cull from scratch, and raise the
-                // viewport-dirty flag so the event loop actually
-                // triggers the rebuild. The document-side
-                // `SceneConnectionCache` holds canvas-space samples
-                // whose spacing doesn't depend on pan, so it is NOT
-                // cleared here — geometry stays cached across pans.
-                self.connection_buffers.clear();
-                self.connection_viewport_dirty = true;
+                // Pan is a pure camera-matrix update. Canvas-space
+                // glyph positions and shaped buffers do not change;
+                // the shader applies the transform at draw time and
+                // the per-frame `MindMapTextBuffer::visible_at`
+                // check in `render.rs` handles viewport containment
+                // cheaply. No rebuild is needed, so no dirty flag
+                // is raised.
             }
             RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
                 self.camera.apply_mutation(

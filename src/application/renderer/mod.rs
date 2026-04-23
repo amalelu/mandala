@@ -885,13 +885,10 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
         self.viewport.update(&self.queue, Resolution { width, height });
         self.camera.set_viewport_size(width, height);
-        // Viewport changed → the per-edge off-screen glyph cull
-        // needs to re-run for every edge. Drop the keyed connection
-        // buffer cache so the next rebuild rebuilds from a clean
-        // slate, and raise the viewport-dirty flag so the event loop
-        // actually triggers that rebuild.
-        self.connection_buffers.clear();
-        self.connection_viewport_dirty = true;
+        // Canvas-space glyph positions and shaped buffers survive a
+        // viewport resize; the per-frame `visible_at` cull handles
+        // whether each buffer falls inside the new bounds. No
+        // rebuild is needed.
     }
 
 
