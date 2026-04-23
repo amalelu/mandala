@@ -5,7 +5,7 @@
 
 use glam::Vec2;
 
-use crate::application::common::{RedrawMode, RenderDecree};
+use crate::application::common::{FpsDisplayMode, RedrawMode, RenderDecree};
 
 use super::Renderer;
 
@@ -17,11 +17,28 @@ impl Renderer {
 
     fn handle_render_decree(&mut self, decree: RenderDecree) {
         match decree {
-            RenderDecree::DisplayFps(enabled) => {
-                self.fps_display_enabled = enabled;
-                if !enabled {
+            RenderDecree::SetFpsDisplay(mode) => {
+                self.fps_display_mode = mode;
+                // Reset every per-mode bit on every transition so a
+                // prior mode's state can't bleed into the new one:
+                //  - `last_frame_instant` so the first delta in the new
+                //    mode isn't measured against a stale timestamp from
+                //    seconds (or longer) ago, which would yield a one-
+                //    frame FPS of ~0 right after toggling.
+                //  - `fps_clock` so Snapshot's first sample fires on the
+                //    next frame rather than after a full window.
+                //  - the debug ring so a prior debug run's samples
+                //    don't seed a fresh window.
+                //  - `last_fps_shaped` so the overlay re-shapes with
+                //    the new mode's first reading even if it happens
+                //    to round to the same integer the previous mode
+                //    last displayed.
+                self.last_frame_instant = None;
+                self.fps_clock = 0;
+                self.fps_ring.clear();
+                self.last_fps_shaped = None;
+                if matches!(mode, FpsDisplayMode::Off) {
                     self.fps_overlay_buffers.clear();
-                    self.last_fps_shaped = None;
                 }
             }
             RenderDecree::StartRender => {

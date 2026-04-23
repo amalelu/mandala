@@ -21,7 +21,7 @@ pub enum InputMode {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderDecree {
     Noop,
-    DisplayFps(bool),
+    SetFpsDisplay(FpsDisplayMode),
     StartRender,
     StopRender,
     ReinitAdapter,
@@ -29,6 +29,18 @@ pub enum RenderDecree {
     Terminate,
     CameraPan(f32, f32),
     CameraZoom { screen_x: f32, screen_y: f32, factor: f32 },
+}
+
+/// Which FPS readout the renderer should display, if any.
+/// `Snapshot` matches the legacy behavior: one frame's interval,
+/// sampled every ~200 frames, held on screen in between.
+/// `Debug` maintains a rolling average of the last ~200 frame
+/// intervals and updates every frame for diagnostic use.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FpsDisplayMode {
+    Off,
+    Snapshot,
+    Debug,
 }
 
 impl Default for RenderDecree {

@@ -33,6 +33,7 @@
 //! - [`visuals`] — palette and glyph constants.
 
 use crate::application::color_picker::ColorTarget;
+use crate::application::common::FpsDisplayMode;
 use crate::application::document::{EdgeRef, MindMapDocument};
 
 pub mod commands;
@@ -99,10 +100,10 @@ pub struct ConsoleEffects<'a> {
     /// console even on a successful command (e.g. `quit`, or after a
     /// modal handoff).
     pub close_console: bool,
-    /// If `Some(b)` when `execute` returns, the dispatcher forwards
-    /// `b` to `Renderer::set_fps_display`. Set by the `fps on` /
-    /// `fps off` verb to toggle the yellow screen-space FPS readout.
-    pub set_fps_display: Option<bool>,
+    /// If `Some(mode)` when `execute` returns, the dispatcher
+    /// forwards `mode` to `Renderer::set_fps_display`. Set by
+    /// `fps on` (Snapshot), `fps debug` (Debug), `fps off` (Off).
+    pub set_fps_display: Option<FpsDisplayMode>,
     /// If set when `execute` returns, the dispatcher swaps the
     /// app's document for this one. Set by `open` and `new` —
     /// commands that wholesale replace the current map. The

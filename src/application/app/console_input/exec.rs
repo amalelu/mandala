@@ -95,8 +95,8 @@ pub(in crate::application::app) fn execute_console_line(
     // clears the overlay buffers when toggled off; the rebuild helper
     // in `Renderer::process()` re-shapes them on the next frame when
     // toggled on.
-    if let Some(enabled) = fps_display_req {
-        renderer.set_fps_display(enabled);
+    if let Some(mode) = fps_display_req {
+        renderer.set_fps_display(mode);
     }
 
     // Any successful command may have mutated the doc; rebuild.
