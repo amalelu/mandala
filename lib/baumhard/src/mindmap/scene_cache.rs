@@ -231,6 +231,46 @@ impl SceneConnectionCache {
         }
     }
 
+    /// Rigid-body translate of a cached entry's geometry in place.
+    /// Shifts `pre_clip_positions` and both caps by `delta`, stamps
+    /// `base_from` / `base_to` to the new reference endpoints.
+    /// Returns a borrow of the mutated entry so the scene builder's
+    /// translate path can emit the `ConnectionElement` without a
+    /// follow-up `get`.
+    ///
+    /// Why a dedicated method instead of `insert`: this runs on
+    /// every internal edge of a subtree drag every drain. Routing
+    /// through `insert` would reindex both `by_node` buckets (two
+    /// `retain` scans + two `push` calls per edge) and clone
+    /// `body_glyph` / `font` / `color` — none of which change under
+    /// a pure translation. On a 500-edge drag that's ~1000 bucket
+    /// scans and ~1500 string clones per drain the translate path
+    /// is specifically trying to avoid.
+    ///
+    /// Returns `None` if the key isn't cached. Callers should fall
+    /// back to the slow path in that case.
+    pub fn translate_in_place(
+        &mut self,
+        key: &EdgeKey,
+        delta: Vec2,
+        new_base_from: Vec2,
+        new_base_to: Vec2,
+    ) -> Option<&CachedConnection> {
+        let entry = self.entries.get_mut(key)?;
+        for p in &mut entry.pre_clip_positions {
+            *p += delta;
+        }
+        if let Some((_, p)) = entry.cap_start.as_mut() {
+            *p += delta;
+        }
+        if let Some((_, p)) = entry.cap_end.as_mut() {
+            *p += delta;
+        }
+        entry.base_from = new_base_from;
+        entry.base_to = new_base_to;
+        Some(&*entry)
+    }
+
     /// After a scene build, evict any cache entries whose keys are not in
     /// the "seen this frame" set. Handles edges that were deleted from the
     /// model between builds.

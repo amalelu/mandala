@@ -235,103 +235,97 @@ pub(super) fn build_connection_elements(
         // The common case inside a subtree drag: both endpoints of an
         // internal edge are in `offsets` with the SAME delta, so the
         // edge is a pure translation of its last-sampled geometry.
-        // When the cache has a fresh entry at the same font size, we
-        // can skip `build_connection_path` + `sample_path` entirely
-        // and just shift the cached samples by the shared delta.
+        // When the cache has a fresh entry at the same font size AND
+        // the same glyph-config snapshot (body / font), we can skip
+        // `build_connection_path` + `sample_path` entirely and shift
+        // the cached samples by the shared delta.
         //
-        // Boundary edges (one endpoint in offsets, one not) and
-        // zoom-change frames (`font_size != cached.font_size_pt`)
-        // produce unequal deltas or different densities and fall
-        // through to the slow path below. The slow path's cache-write
-        // re-stamps `base_from` / `base_to` so the next frame's
-        // translate-path check uses current positions.
-        if let Some(cached) = cache.get(&edge_key) {
-            if (cached.font_size_pt - font_size).abs() < f32::EPSILON {
-                let delta_from = from_pos - cached.base_from;
-                let delta_to = to_pos - cached.base_to;
-                if (delta_from - delta_to).length_squared() < TRANSLATE_DELTA_EPSILON_SQ {
-                    let delta = delta_from;
-                    let stored_color = cached.color.clone();
-                    let color = if let Some(p) = preview_for_this_edge {
-                        resolve_var(p, vars).to_string()
-                    } else if is_selected {
-                        SELECTED_EDGE_COLOR.to_string()
-                    } else {
-                        stored_color.clone()
-                    };
-                    let pre_clip_positions: Vec<Vec2> = cached
-                        .pre_clip_positions
-                        .iter()
-                        .map(|p| *p + delta)
-                        .collect();
-                    let translated_cap_start = cached
-                        .cap_start
-                        .as_ref()
-                        .map(|(g, p)| (g.clone(), *p + delta));
-                    let translated_cap_end = cached
-                        .cap_end
-                        .as_ref()
-                        .map(|(g, p)| (g.clone(), *p + delta));
-                    let body_glyph = cached.body_glyph.clone();
-                    let font = cached.font.clone();
-                    let cached_font_size = cached.font_size_pt;
-
-                    cache.insert(
-                        edge_key.clone(),
-                        CachedConnection {
-                            pre_clip_positions: pre_clip_positions.clone(),
-                            cap_start: translated_cap_start.clone(),
-                            cap_end: translated_cap_end.clone(),
-                            body_glyph: body_glyph.clone(),
-                            font: font.clone(),
-                            font_size_pt: cached_font_size,
-                            color: stored_color,
-                            base_from: from_pos,
-                            base_to: to_pos,
-                        },
-                    );
-
-                    // Clip filter runs every frame against this
-                    // frame's node_aabbs — an unrelated moved node
-                    // passing through a translated edge must still
-                    // clip out the glyphs inside it.
-                    let cap_start = match translated_cap_start {
-                        Some((g, p)) if !point_inside_any_node(p, node_aabbs) => {
-                            Some((g, (p.x, p.y)))
-                        }
-                        _ => None,
-                    };
-                    let cap_end = match translated_cap_end {
-                        Some((g, p)) if !point_inside_any_node(p, node_aabbs) => {
-                            Some((g, (p.x, p.y)))
-                        }
-                        _ => None,
-                    };
-                    let glyph_positions: Vec<(f32, f32)> = pre_clip_positions
-                        .iter()
-                        .filter(|p| !point_inside_any_node(**p, node_aabbs))
-                        .map(|p| (p.x, p.y))
-                        .collect();
-                    if glyph_positions.is_empty()
-                        && cap_start.is_none()
-                        && cap_end.is_none()
-                    {
-                        continue;
-                    }
-                    connection_elements.push(ConnectionElement {
-                        edge_key,
-                        glyph_positions,
-                        body_glyph,
-                        cap_start,
-                        cap_end,
-                        font,
-                        font_size_pt: font_size,
-                        color,
-                        zoom_visibility: edge.zoom_window(),
-                    });
-                    continue;
-                }
+        // Fall-throughs to the slow path:
+        // - Boundary edges (one endpoint moved, one not; or both moved
+        //   by different deltas — a rotating / stretching edge).
+        // - Zoom-change frames (`font_size != cached.font_size_pt`).
+        // - Glyph-config mutation mid-drag (console edits to
+        //   `edge.glyph_connection.body` / `font`) — cached values are
+        //   frozen at sample time, so the slow path resamples and
+        //   re-caches with the new config.
+        //
+        // The probe is split in two phases so the borrow checker lets
+        // us mutate the cache after reading it: first a read-only
+        // `cache.get` computes the delta (returned as a value), then
+        // `cache.translate_in_place` mutates the entry's positions
+        // without re-indexing `by_node` or cloning the string fields.
+        let translate_delta = cache.get(&edge_key).and_then(|cached| {
+            if (cached.font_size_pt - font_size).abs() >= f32::EPSILON {
+                return None;
             }
+            if cached.body_glyph != config.body {
+                return None;
+            }
+            if cached.font != config.font {
+                return None;
+            }
+            let delta_from = from_pos - cached.base_from;
+            let delta_to = to_pos - cached.base_to;
+            if (delta_from - delta_to).length_squared() >= TRANSLATE_DELTA_EPSILON_SQ {
+                return None;
+            }
+            Some(delta_from)
+        });
+
+        if let Some(delta) = translate_delta {
+            // Mutate the cached entry in place. No by_node reindex,
+            // no string clones on the hot path. `translate_in_place`
+            // returns a borrow of the mutated entry so we can emit
+            // the element without a follow-up `get`.
+            let entry = cache
+                .translate_in_place(&edge_key, delta, from_pos, to_pos)
+                .expect("entry was present in the guard above");
+
+            let color = if let Some(p) = preview_for_this_edge {
+                resolve_var(p, vars).to_string()
+            } else if is_selected {
+                SELECTED_EDGE_COLOR.to_string()
+            } else {
+                entry.color.clone()
+            };
+
+            // Clip filter runs every frame against this frame's
+            // node_aabbs — an unrelated moved node passing through
+            // a translated edge must still clip out the glyphs
+            // inside it.
+            let cap_start = match entry.cap_start.as_ref() {
+                Some((g, p)) if !point_inside_any_node(*p, node_aabbs) => {
+                    Some((g.clone(), (p.x, p.y)))
+                }
+                _ => None,
+            };
+            let cap_end = match entry.cap_end.as_ref() {
+                Some((g, p)) if !point_inside_any_node(*p, node_aabbs) => {
+                    Some((g.clone(), (p.x, p.y)))
+                }
+                _ => None,
+            };
+            let glyph_positions: Vec<(f32, f32)> = entry
+                .pre_clip_positions
+                .iter()
+                .filter(|p| !point_inside_any_node(**p, node_aabbs))
+                .map(|p| (p.x, p.y))
+                .collect();
+            if glyph_positions.is_empty() && cap_start.is_none() && cap_end.is_none() {
+                continue;
+            }
+            connection_elements.push(ConnectionElement {
+                edge_key,
+                glyph_positions,
+                body_glyph: entry.body_glyph.clone(),
+                cap_start,
+                cap_end,
+                font: entry.font.clone(),
+                font_size_pt: font_size,
+                color,
+                zoom_visibility: edge.zoom_window(),
+            });
+            continue;
         }
 
         // --- Slow path: sample fresh and update the cache ---

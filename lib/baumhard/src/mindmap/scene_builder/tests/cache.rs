@@ -2,7 +2,9 @@
 
 use super::fixtures::*;
 use super::super::*;
-use crate::mindmap::loader; use crate::mindmap::scene_cache::{CachedConnection, SceneConnectionCache};
+use crate::mindmap::loader;
+use crate::mindmap::model::GlyphConnectionConfig;
+use crate::mindmap::scene_cache::{CachedConnection, SceneConnectionCache};
 use std::collections::HashMap;
 use glam::Vec2;
 
@@ -478,19 +480,24 @@ fn test_translate_path_reuses_cache_on_shared_delta_subtree_drag() {
     let key = EdgeKey::new("a", "b", "cross_link");
     let real = cache.get(&key).unwrap().clone();
     let sample_count = real.pre_clip_positions.len();
-    // Pick a sentinel position well clear of both node AABBs so the
-    // translated samples aren't swallowed by the clip filter —
-    // `a`'s AABB after the drag is ([15,55] × [7,47]), `b`'s is
-    // ([415,455] × [7,47]); (200, 200) + (15, 7) = (215, 207) is
-    // between the nodes on X and well below them on Y.
+    // Overwrite `pre_clip_positions` with a distinctive uniform
+    // value so we can prove the translate path fired: if the slow
+    // path had resampled, positions would spread along the edge
+    // from (0,0)-ish to (400,0)-ish, not cluster at (215, 207).
+    // `body_glyph` / `font` must match the live config so the new
+    // glyph-config guard doesn't force a fall-through here — the
+    // guard is exercised by `test_translate_path_falls_through_on_glyph_config_change`.
+    // Position choice: (200, 200) + (15, 7) = (215, 207) is between
+    // the nodes on X and well below them on Y — clears both AABBs.
+    let live_config = GlyphConnectionConfig::default();
     cache.insert(
         key.clone(),
         CachedConnection {
             pre_clip_positions: vec![Vec2::new(200.0, 200.0); sample_count],
             cap_start: None,
             cap_end: None,
-            body_glyph: "TRANSLATE_SENTINEL".into(),
-            font: None,
+            body_glyph: live_config.body.clone(),
+            font: live_config.font.clone(),
             font_size_pt: real.font_size_pt,
             color: "#abcdef".into(),
             base_from: real.base_from,
@@ -513,11 +520,10 @@ fn test_translate_path_reuses_cache_on_shared_delta_subtree_drag() {
     );
 
     let elem = &second.connection_elements[0];
-    assert_eq!(
-        elem.body_glyph, "TRANSLATE_SENTINEL",
-        "translate path should have reused the cached entry, not resampled"
-    );
     // Every sample is the cached (200, 200) shifted by (15, 7) = (215, 207).
+    // If the slow path had fired instead it would have resampled the
+    // real edge geometry from (~40, 20) to (~400, 20) — these
+    // position assertions would all fail.
     assert_eq!(elem.glyph_positions.len(), sample_count);
     for (x, y) in &elem.glyph_positions {
         assert!(
@@ -592,6 +598,81 @@ fn test_translate_path_falls_through_on_mismatched_deltas() {
         second.connection_elements[0].body_glyph,
         "NO_TRANSLATE_SENTINEL",
         "mismatched endpoint deltas must fall through to the slow path"
+    );
+}
+
+#[test]
+fn test_translate_path_falls_through_on_glyph_config_change() {
+    // Edge-case guard for a mid-drag glyph-config mutation (a
+    // console edit that flips `glyph_connection.body` while a drag
+    // is in flight). The cached entry is frozen at the pre-edit
+    // glyph, so serving it on the next translate frame would emit
+    // a stale glyph. The translate path must notice `cached.body_glyph
+    // != config.body` and fall through to the slow path, which
+    // resamples and caches with the new glyph.
+    let map = two_node_edge_map();
+    let mut cache = SceneConnectionCache::new();
+    let _first = build_scene_with_cache(
+        &map,
+        &HashMap::new(),
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    let key = EdgeKey::new("a", "b", "cross_link");
+    let real = cache.get(&key).unwrap().clone();
+    // Overwrite with a body_glyph that DIFFERS from what the live
+    // config (defaulted `·`) would resolve to. The delta + font
+    // guards would otherwise pass — only the glyph mismatch should
+    // cause the fall-through.
+    cache.insert(
+        key.clone(),
+        CachedConnection {
+            pre_clip_positions: vec![Vec2::new(999.0, 999.0); real.pre_clip_positions.len()],
+            cap_start: None,
+            cap_end: None,
+            body_glyph: "X".into(),
+            font: None,
+            font_size_pt: real.font_size_pt,
+            color: real.color.clone(),
+            base_from: real.base_from,
+            base_to: real.base_to,
+        },
+    );
+
+    // Subtree drag with matching deltas — would hit translate path
+    // if the glyph-guard weren't in place.
+    let mut offsets = HashMap::new();
+    offsets.insert("a".to_string(), (5.0, 0.0));
+    offsets.insert("b".to_string(), (5.0, 0.0));
+    let second = build_scene_with_cache(
+        &map,
+        &offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    // Emitted body_glyph must be the live config's, not the cached
+    // "X" — proves the slow path resampled instead of translating.
+    assert_ne!(
+        second.connection_elements[0].body_glyph, "X",
+        "mid-drag body_glyph change must force the slow path so the emitted glyph tracks the live config"
+    );
+    // And the cache entry must now reflect the fresh resample.
+    let refreshed = cache.get(&key).unwrap();
+    assert_ne!(
+        refreshed.body_glyph, "X",
+        "slow path resample must overwrite the stale body_glyph"
+    );
+    assert!(
+        refreshed.pre_clip_positions.iter().all(|p| *p != Vec2::new(999.0, 999.0)),
+        "slow path must overwrite the placeholder sentinel positions"
     );
 }
 
