@@ -64,18 +64,12 @@ impl Renderer {
                         screen_delta: Vec2::new(dx, dy),
                     },
                 );
-                // The per-edge off-screen glyph cull is a function of
-                // the camera, so moving the camera invalidates the
-                // cached per-edge visible-glyph layout. Clear the
-                // renderer-side connection cache so the next rebuild
-                // re-runs the cull from scratch, and raise the
-                // viewport-dirty flag so the event loop actually
-                // triggers the rebuild. The document-side
-                // `SceneConnectionCache` holds canvas-space samples
-                // whose spacing doesn't depend on pan, so it is NOT
-                // cleared here — geometry stays cached across pans.
-                self.connection_buffers.clear();
-                self.connection_viewport_dirty = true;
+                // Pan is a pure camera-matrix update. Canvas-space
+                // glyph positions and shaped buffers do not change;
+                // the shader applies the transform at draw time and
+                // the per-frame `MindMapTextBuffer::visible_at`
+                // check in `render.rs` handles viewport containment
+                // cheaply.
             }
             RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
                 self.camera.apply_mutation(
@@ -84,14 +78,11 @@ impl Renderer {
                         factor,
                     },
                 );
-                // Zoom invalidates both the renderer-side cull cache
-                // (viewport-dirty) AND the document-side sample cache
-                // (geometry-dirty), because the effective font size —
-                // and therefore sample spacing along the path — is a
-                // function of zoom via
+                // Zoom invalidates the document-side sample cache:
+                // the effective font size — and therefore sample
+                // spacing along connection paths — is a function of
+                // zoom via
                 // `GlyphConnectionConfig::effective_font_size_pt`.
-                self.connection_buffers.clear();
-                self.connection_viewport_dirty = true;
                 self.connection_geometry_dirty = true;
             }
         }

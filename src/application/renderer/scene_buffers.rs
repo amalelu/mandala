@@ -9,13 +9,11 @@
 //! stores them in a keyed cache (`FxHashMap`) or a flat `Vec`.
 
 use baumhard::font::fonts;
-use baumhard::mindmap::scene_builder::{BorderElement, ConnectionElement};
-use baumhard::mindmap::scene_cache::EdgeKey;
+use baumhard::mindmap::scene_builder::BorderElement;
 use cosmic_text::Attrs;
 use glam::Vec2;
 
 use super::borders::{create_border_buffer, parse_hex_color};
-use super::render::glyph_position_in_viewport;
 use super::{MindMapTextBuffer, Renderer};
 
 impl Renderer {
@@ -154,12 +152,6 @@ impl Renderer {
         self.border_buffers.retain(|k, _| seen.contains(k));
     }
 
-    /// Full (non-keyed) connection rebuild.
-    pub fn rebuild_connection_buffers(&mut self, connection_elements: &[ConnectionElement]) {
-        self.connection_buffers.clear();
-        self.rebuild_connection_buffers_keyed(connection_elements, None);
-    }
-
     /// Rebuild the edge grab-handle overlay buffers. Called after every
     /// scene build — the handles are bounded (≤ 5 per selected edge)
     /// and always rebuilt from scratch, so no keyed cache is used.
@@ -196,147 +188,6 @@ impl Renderer {
         }
     }
 
-    /// Keyed connection rebuild. See [`Self::rebuild_border_buffers_keyed`] for
-    /// the general pattern.
-    pub fn rebuild_connection_buffers_keyed(
-        &mut self,
-        connection_elements: &[ConnectionElement],
-        dirty_edge_keys: Option<&std::collections::HashSet<EdgeKey>>,
-    ) {
-        let mut font_system =
-            fonts::acquire_font_system_write("rebuild_connection_buffers_keyed");
-
-        let vp_w = self.config.width as f32;
-        let vp_h = self.config.height as f32;
-        let corner_tl = self.camera.screen_to_canvas(Vec2::new(0.0, 0.0));
-        let corner_br = self.camera.screen_to_canvas(Vec2::new(vp_w, vp_h));
-        let vp_min = corner_tl.min(corner_br);
-        let vp_max = corner_tl.max(corner_br);
-
-        let mut seen: std::collections::HashSet<EdgeKey> =
-            std::collections::HashSet::with_capacity(connection_elements.len());
-
-        for elem in connection_elements {
-            seen.insert(elem.edge_key.clone());
-            let is_dirty = dirty_edge_keys
-                .map(|set| set.contains(&elem.edge_key))
-                .unwrap_or(true);
-
-            let font_size = elem.font_size_pt;
-            let half_glyph = font_size * 0.3;
-            let half_height = font_size * 0.5;
-            let glyph_bounds = (font_size, font_size);
-
-            let in_view = |x: f32, y: f32| -> bool {
-                glyph_position_in_viewport(x, y, vp_min, vp_max, font_size)
-            };
-            let mut visible_positions: Vec<(f32, f32)> =
-                Vec::with_capacity(elem.glyph_positions.len() + 2);
-            if let Some((_, cap_pos)) = &elem.cap_start {
-                if in_view(cap_pos.0, cap_pos.1) {
-                    visible_positions.push((cap_pos.0 - half_glyph, cap_pos.1 - half_height));
-                }
-            }
-            for &pos in &elem.glyph_positions {
-                if in_view(pos.0, pos.1) {
-                    visible_positions.push((pos.0 - half_glyph, pos.1 - half_height));
-                }
-            }
-            if let Some((_, cap_pos)) = &elem.cap_end {
-                if in_view(cap_pos.0, cap_pos.1) {
-                    visible_positions.push((cap_pos.0 - half_glyph, cap_pos.1 - half_height));
-                }
-            }
-
-            if visible_positions.is_empty() {
-                self.connection_buffers.remove(&elem.edge_key);
-                continue;
-            }
-
-            // Fast path: clean + cached + same glyph count.
-            // Only `.pos` is patched in place — `zoom_visibility`
-            // and other structurally stable fields are
-            // preserved from the previous build. Call sites
-            // today always pass `dirty_edge_keys = None` so the
-            // slow path below runs; if a future keyed-drag
-            // optimisation enables this branch, it must also
-            // update any fields that can change between builds.
-            if !is_dirty {
-                if let Some(existing) = self.connection_buffers.get_mut(&elem.edge_key) {
-                    if existing.len() == visible_positions.len() {
-                        for (buf, new_pos) in existing.iter_mut().zip(visible_positions.iter()) {
-                            buf.pos = *new_pos;
-                        }
-                        continue;
-                    }
-                }
-            }
-
-            // Slow path: re-shape.
-            let conn_color = parse_hex_color(&elem.color)
-                .unwrap_or(cosmic_text::Color::rgba(200, 200, 200, 255));
-            let conn_attrs = Attrs::new()
-                .color(conn_color)
-                .metrics(cosmic_text::Metrics::new(font_size, font_size));
-
-            let mut new_entry: Vec<MindMapTextBuffer> =
-                Vec::with_capacity(visible_positions.len());
-
-            let cap_start_visible = elem
-                .cap_start
-                .as_ref()
-                .map(|(_, p)| in_view(p.0, p.1))
-                .unwrap_or(false);
-            let cap_end_visible = elem
-                .cap_end
-                .as_ref()
-                .map(|(_, p)| in_view(p.0, p.1))
-                .unwrap_or(false);
-
-            // Stamp the edge's authored zoom window onto every
-            // body / cap glyph this rebuild emits so the cull
-            // runs against the same window the tree path would
-            // install.
-            let zv = elem.zoom_visibility;
-            let with_zv = |mut buf: MindMapTextBuffer| -> MindMapTextBuffer {
-                buf.zoom_visibility = zv;
-                buf
-            };
-            let mut idx = 0;
-            if cap_start_visible {
-                let cap_text = elem.cap_start.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
-                new_entry.push(with_zv(create_border_buffer(
-                    &mut font_system, cap_text, &conn_attrs, font_size,
-                    visible_positions[idx],
-                    glyph_bounds,
-                )));
-                idx += 1;
-            }
-            for &pos in &elem.glyph_positions {
-                if !in_view(pos.0, pos.1) {
-                    continue;
-                }
-                new_entry.push(with_zv(create_border_buffer(
-                    &mut font_system, &elem.body_glyph, &conn_attrs, font_size,
-                    visible_positions[idx],
-                    glyph_bounds,
-                )));
-                idx += 1;
-            }
-            if cap_end_visible {
-                let cap_text = elem.cap_end.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
-                new_entry.push(with_zv(create_border_buffer(
-                    &mut font_system, cap_text, &conn_attrs, font_size,
-                    visible_positions[idx],
-                    glyph_bounds,
-                )));
-            }
-
-            self.connection_buffers.insert(elem.edge_key.clone(), new_entry);
-        }
-
-        self.connection_buffers.retain(|k, _| seen.contains(k));
-    }
 
     /// Rebuild the per-edge label buffers from a freshly computed
     /// scene. Labels are ≤ 1 per edge and rebuilt every scene build

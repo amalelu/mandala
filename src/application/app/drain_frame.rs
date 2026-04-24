@@ -81,17 +81,12 @@ pub(super) fn drain_camera_geometry_rebuild(
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let geometry_dirty = renderer.take_connection_geometry_dirty();
-    let viewport_dirty = renderer.take_connection_viewport_dirty();
-    if (geometry_dirty || viewport_dirty) && !is_moving_node {
+    if geometry_dirty && !is_moving_node {
         if let Some(doc) = document.as_ref() {
-            if geometry_dirty {
-                // `ensure_zoom` inside
-                // `build_scene_with_cache` would also
-                // catch this, but clearing explicitly
-                // here keeps the ordering readable
-                // next to the rebuild.
-                scene_cache.clear();
-            }
+            // `ensure_zoom` inside `build_scene_with_cache` would
+            // also catch this, but clearing explicitly here keeps
+            // the ordering readable next to the rebuild.
+            scene_cache.clear();
             let scene = doc.build_scene_with_cache(
                 &HashMap::new(),
                 scene_cache,

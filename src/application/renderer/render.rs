@@ -226,7 +226,6 @@ impl Renderer {
         // between them, hence the split).
         let main_text_areas: Vec<TextArea> = self.mindmap_buffers.values()
             .chain(self.border_buffers.values().flat_map(|v| v.iter()))
-            .chain(self.connection_buffers.values().flat_map(|v| v.iter()))
             .chain(self.connection_label_buffers.values())
             .chain(self.edge_handle_buffers.iter())
             .chain(self.overlay_buffers.iter())
@@ -387,26 +386,4 @@ impl Renderer {
         frame.present();
         self.atlas.trim();
     }
-}
-
-/// Viewport containment test used by `rebuild_connection_buffers` to cull
-/// off-screen connection glyphs before building cosmic-text buffers. The
-/// visible canvas rect is padded by `margin` on every side so glyphs whose
-/// anchor lands just outside the visible region still get drawn (avoiding
-/// visible popping at the viewport edge during pan).
-///
-/// Extracted as a free function so the core cull decision is
-/// unit-testable without needing a real `Renderer` / wgpu context.
-#[inline]
-pub(super) fn glyph_position_in_viewport(
-    x: f32,
-    y: f32,
-    vp_min: Vec2,
-    vp_max: Vec2,
-    margin: f32,
-) -> bool {
-    x >= vp_min.x - margin
-        && x <= vp_max.x + margin
-        && y >= vp_min.y - margin
-        && y <= vp_max.y + margin
 }

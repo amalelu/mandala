@@ -179,15 +179,12 @@ impl Renderer {
     /// Pan the camera so `target` (canvas coordinates) is centred
     /// on the viewport at the current zoom. Used by the portal
     /// double-click handler to jump to the other side of a portal
-    /// edge. Sets both viewport-dirty flags so the next frame
-    /// rebuilds the connection buffers at the new pan.
+    /// edge. Pure pan — no dirty flag raised; the shader transform
+    /// plus render-time `visible_at` handle the new view.
     pub fn set_camera_center(&mut self, target: Vec2) {
         self.camera.apply_mutation(
             &baumhard::gfx_structs::camera::CameraMutation::SetPosition { canvas_pos: target },
         );
-        self.connection_buffers.clear();
-        self.connection_viewport_dirty = true;
-        self.connection_geometry_dirty = true;
     }
 
     /// Fit the camera to show a Baumhard tree's content.
@@ -228,12 +225,10 @@ impl Renderer {
             // The fit typically changes both pan and zoom. Today this
             // is only called from `load_mindmap`, which follows up
             // with a full connection rebuild against the new zoom —
-            // but raise both dirty flags so any future caller (e.g. a
-            // "fit to selection" command) automatically gets a
-            // rebuild on the next frame instead of silently leaving
-            // stale buffers behind.
-            self.connection_buffers.clear();
-            self.connection_viewport_dirty = true;
+            // but raise `geometry_dirty` so any future caller (e.g.
+            // a "fit to selection" command) automatically gets a
+            // scene-cache flush + rebuild on the next frame instead
+            // of silently leaving stale samples behind.
             self.connection_geometry_dirty = true;
         }
     }

@@ -34,7 +34,6 @@ use console_pass::{
     console_overlay_signature,
 };
 #[cfg(test)]
-use render::glyph_position_in_viewport;
 #[cfg(test)]
 use tree_walker::walk_tree_into_buffers;
 
@@ -296,12 +295,6 @@ pub struct Renderer {
     /// the dominant cost here, skipping it for unmoved borders is what
     /// keeps drag interactive.
     border_buffers: FxHashMap<String, Vec<MindMapTextBuffer>>,
-    /// Per-edge connection glyph buffers, keyed by `(from_id, to_id,
-    /// edge_type)`. Each entry is the `Vec` of already-shaped glyph
-    /// buffers for that edge. Keyed so unchanged edges survive across
-    /// drag frames — the big win for the "long cross-link, dragging
-    /// something else" scenario.
-    connection_buffers: FxHashMap<EdgeKey, Vec<MindMapTextBuffer>>,
     /// Edge grab-handle buffers for the connection reshape surface.
     /// Populated only when an edge is selected; rebuilt fresh every
     /// time the scene is rebuilt with a selected edge. Bounded cost
@@ -367,14 +360,6 @@ pub struct Renderer {
     /// rect pipeline so GlyphArea fills on migrated components
     /// render beneath their glyphs.
     canvas_scene_background_rects: Vec<NodeBackgroundRect>,
-    /// Set whenever the camera's viewport rect changes (pan, zoom,
-    /// resize) and `connection_buffers` was cleared as a result.
-    /// Consumed once per frame by the event loop in `AboutToWait` to
-    /// rebuild the connection buffers against the new viewport.
-    /// Without this flag, clearing the map on camera change would leave
-    /// it empty until the next structural change, which is why
-    /// connections used to vanish on pan.
-    connection_viewport_dirty: bool,
     /// Set whenever the camera *zoom* changes. The document-side
     /// `SceneConnectionCache` stores pre-clip samples whose spacing
     /// depends on `GlyphConnectionConfig::effective_font_size_pt`, which
@@ -382,7 +367,7 @@ pub struct Renderer {
     /// before the next scene build re-samples. `SceneConnectionCache`
     /// enforces this internally via `ensure_zoom`, but we still raise
     /// this flag so the event loop can explicitly clear the cache and
-    /// order the rebuild readably alongside the viewport-dirty path.
+    /// re-run the connection rebuild.
     connection_geometry_dirty: bool,
     /// Filled-rectangle rendering pipeline. Used to draw node
     /// backgrounds (from `GlyphArea.background_color`), the command
@@ -667,7 +652,6 @@ impl Renderer {
             camera,
             mindmap_buffers: Default::default(),
             border_buffers: FxHashMap::default(),
-            connection_buffers: FxHashMap::default(),
             edge_handle_buffers: Vec::new(),
             connection_label_buffers: FxHashMap::default(),
             connection_label_hitboxes: FxHashMap::default(),
@@ -679,7 +663,6 @@ impl Renderer {
             overlay_scene_buffers: Vec::new(),
             canvas_scene_buffers: Vec::new(),
             canvas_scene_background_rects: Vec::new(),
-            connection_viewport_dirty: false,
             connection_geometry_dirty: false,
             rect_pipeline,
             rect_vertex_buffer,
@@ -736,14 +719,6 @@ impl Renderer {
         self.process_decree(RenderDecree::SetFpsDisplay(mode));
     }
 
-
-    /// Returns and resets the connection viewport-dirty flag. Called by
-    /// the event loop once per frame in `AboutToWait`; a `true` return
-    /// means the viewport rect changed since the last frame and the
-    /// per-glyph viewport cull needs to run again.
-    pub fn take_connection_viewport_dirty(&mut self) -> bool {
-        std::mem::replace(&mut self.connection_viewport_dirty, false)
-    }
 
     /// Returns and resets the connection geometry-dirty flag. Called by
     /// the event loop once per frame; a `true` return means the zoom
@@ -885,13 +860,9 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
         self.viewport.update(&self.queue, Resolution { width, height });
         self.camera.set_viewport_size(width, height);
-        // Viewport changed → the per-edge off-screen glyph cull
-        // needs to re-run for every edge. Drop the keyed connection
-        // buffer cache so the next rebuild rebuilds from a clean
-        // slate, and raise the viewport-dirty flag so the event loop
-        // actually triggers that rebuild.
-        self.connection_buffers.clear();
-        self.connection_viewport_dirty = true;
+        // Canvas-space glyph positions and shaped buffers survive a
+        // viewport resize; the per-frame `visible_at` cull handles
+        // whether each buffer falls inside the new bounds.
     }
 
 

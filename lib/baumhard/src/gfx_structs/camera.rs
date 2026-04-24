@@ -347,4 +347,52 @@ mod tests {
         cam.apply_mutation(&CameraMutation::SetPosition { canvas_pos: target });
         assert_eq!(cam.position, target);
     }
+
+    /// Pan is a pure position change. The renderer's camera-pan
+    /// perf fix skips the canvas rebuild on exactly this
+    /// invariant — a future Pan variant that also adjusts zoom
+    /// would silently desync the scene against the new sample
+    /// spacing.
+    #[test]
+    fn test_pan_leaves_zoom_and_viewport_size_untouched() {
+        let mut cam = Camera2D::new(800, 600);
+        cam.zoom = 2.5;
+        let initial_zoom = cam.zoom;
+        let initial_viewport = cam.viewport_size;
+        cam.apply_mutation(&CameraMutation::Pan { screen_delta: Vec2::new(15.0, -22.5) });
+        assert_eq!(cam.zoom, initial_zoom);
+        assert_eq!(cam.viewport_size, initial_viewport);
+    }
+
+    /// Companion to pan: `SetPosition` (used by
+    /// `Renderer::set_camera_center` for portal double-click
+    /// pan-to) must also leave zoom / viewport_size alone.
+    #[test]
+    fn test_set_position_leaves_zoom_and_viewport_size_untouched() {
+        let mut cam = Camera2D::new(800, 600);
+        cam.zoom = 0.75;
+        let initial_zoom = cam.zoom;
+        let initial_viewport = cam.viewport_size;
+        cam.apply_mutation(&CameraMutation::SetPosition {
+            canvas_pos: Vec2::new(-150.0, 425.5),
+        });
+        assert_eq!(cam.zoom, initial_zoom);
+        assert_eq!(cam.viewport_size, initial_viewport);
+    }
+
+    /// `set_viewport_size` (used by `Renderer::update_surface_size`
+    /// for window resize) is a pure viewport change. The
+    /// resize-doesn't-rebuild path depends on it leaving zoom
+    /// and position untouched.
+    #[test]
+    fn test_set_viewport_size_leaves_zoom_and_position_untouched() {
+        let mut cam = Camera2D::new(800, 600);
+        cam.zoom = 1.5;
+        cam.position = Vec2::new(100.0, 200.0);
+        let initial_zoom = cam.zoom;
+        let initial_position = cam.position;
+        cam.set_viewport_size(1920, 1080);
+        assert_eq!(cam.zoom, initial_zoom);
+        assert_eq!(cam.position, initial_position);
+    }
 }
