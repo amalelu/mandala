@@ -74,6 +74,15 @@ impl EdgeKey {
 /// moved-but-unrelated node's AABB can still push glyphs out of the
 /// connection on the next frame: the clip filter is cheap (arithmetic over
 /// cached `Vec2`s), the sampler is not.
+///
+/// `base_from` / `base_to` record the endpoint canvas positions that the
+/// samples were taken at (i.e. `model.pos + offset_at_write`). When the next
+/// frame brings a drag offset that moves both endpoints by the same delta
+/// — the common subtree-drag case — the scene builder can skip the Bezier
+/// sampler entirely and just translate the cached samples by that shared
+/// delta. Anything that changes the edge's *shape* (endpoints moving by
+/// different deltas, control-point edits, font-size / zoom clamp
+/// transitions) falls through to a full resample.
 #[derive(Clone, Debug)]
 pub struct CachedConnection {
     pub pre_clip_positions: Vec<Vec2>,
@@ -83,6 +92,8 @@ pub struct CachedConnection {
     pub font: Option<String>,
     pub font_size_pt: f32,
     pub color: String,
+    pub base_from: Vec2,
+    pub base_to: Vec2,
 }
 
 /// Per-edge cache of sampled connection geometry, plus a reverse
@@ -220,6 +231,46 @@ impl SceneConnectionCache {
         }
     }
 
+    /// Rigid-body translate of a cached entry's geometry in place.
+    /// Shifts `pre_clip_positions` and both caps by `delta`, stamps
+    /// `base_from` / `base_to` to the new reference endpoints.
+    /// Returns a borrow of the mutated entry so the scene builder's
+    /// translate path can emit the `ConnectionElement` without a
+    /// follow-up `get`.
+    ///
+    /// Why a dedicated method instead of `insert`: this runs on
+    /// every internal edge of a subtree drag every drain. Routing
+    /// through `insert` would reindex both `by_node` buckets (two
+    /// `retain` scans + two `push` calls per edge) and clone
+    /// `body_glyph` / `font` / `color` — none of which change under
+    /// a pure translation. On a 500-edge drag that's ~1000 bucket
+    /// scans and ~1500 string clones per drain the translate path
+    /// is specifically trying to avoid.
+    ///
+    /// Returns `None` if the key isn't cached. Callers should fall
+    /// back to the slow path in that case.
+    pub fn translate_in_place(
+        &mut self,
+        key: &EdgeKey,
+        delta: Vec2,
+        new_base_from: Vec2,
+        new_base_to: Vec2,
+    ) -> Option<&CachedConnection> {
+        let entry = self.entries.get_mut(key)?;
+        for p in &mut entry.pre_clip_positions {
+            *p += delta;
+        }
+        if let Some((_, p)) = entry.cap_start.as_mut() {
+            *p += delta;
+        }
+        if let Some((_, p)) = entry.cap_end.as_mut() {
+            *p += delta;
+        }
+        entry.base_from = new_base_from;
+        entry.base_to = new_base_to;
+        Some(&*entry)
+    }
+
     /// After a scene build, evict any cache entries whose keys are not in
     /// the "seen this frame" set. Handles edges that were deleted from the
     /// model between builds.
@@ -249,6 +300,8 @@ mod tests {
             font: None,
             font_size_pt: 12.0,
             color: color.into(),
+            base_from: Vec2::ZERO,
+            base_to: Vec2::ZERO,
         }
     }
 

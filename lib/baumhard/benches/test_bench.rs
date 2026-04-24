@@ -18,6 +18,84 @@ use baumhard::util::tests::geometry_tests::*;
 use baumhard::util::tests::grapheme_chad_tests::*;
 use baumhard::util::tests::primes_test::do_primes;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use baumhard::mindmap::loader;
+use baumhard::mindmap::model::MindMap;
+use baumhard::mindmap::scene_builder::{
+    build_scene_with_cache, SceneSelectionContext,
+};
+use baumhard::mindmap::scene_cache::SceneConnectionCache;
+
+/// Load the testament fixture for the drag-drain benchmark. Panics
+/// if the fixture is missing — this is benchmark code, not a test,
+/// and a missing fixture means the benchmark binary can't do its job.
+fn load_testament_map() -> MindMap {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop();
+    path.pop();
+    path.push("maps/testament.mindmap.json");
+    loader::load_from_file(&path).expect("testament map should load for bench")
+}
+
+/// One drain of the translate path: re-enter `build_scene_with_cache`
+/// with a fresh offset carrying the same delta for every dragged
+/// node. The cache is already warm from the previous drain, so
+/// every internal edge of the "subtree" falls into the translate
+/// path.
+fn do_subtree_drag_translate_path(
+    map: &MindMap,
+    cache: &mut SceneConnectionCache,
+    dragged_ids: &[String],
+    dx: f32,
+    dy: f32,
+    zoom: f32,
+) {
+    let mut offsets: HashMap<String, (f32, f32)> = HashMap::with_capacity(dragged_ids.len());
+    for id in dragged_ids {
+        offsets.insert(id.clone(), (dx, dy));
+    }
+    let _ = build_scene_with_cache(
+        map,
+        &offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        cache,
+        zoom,
+    );
+}
+
+/// Baseline: simulate the pre-translate-path behaviour by clearing
+/// the cache before every drain. Every edge falls into the slow
+/// path (`build_connection_path` + `sample_path`). The ratio
+/// between this and `do_subtree_drag_translate_path` is the
+/// headline number the translate path buys.
+fn do_subtree_drag_slow_path(
+    map: &MindMap,
+    cache: &mut SceneConnectionCache,
+    dragged_ids: &[String],
+    dx: f32,
+    dy: f32,
+    zoom: f32,
+) {
+    cache.clear();
+    let mut offsets: HashMap<String, (f32, f32)> = HashMap::with_capacity(dragged_ids.len());
+    for id in dragged_ids {
+        offsets.insert(id.clone(), (dx, dy));
+    }
+    let _ = build_scene_with_cache(
+        map,
+        &offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        cache,
+        zoom,
+    );
+}
+
 // We run all tests as benchmarks also, because the tests provides a good coverage of potential flows
 fn criterion_benchmark(c: &mut Criterion) {
     // glyph_model //
@@ -248,6 +326,73 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("arena_utils_clone", |b| b.iter(|| do_clone()));
     // primes //
     c.bench_function("primes", |b| b.iter(|| do_primes()));
+
+    // subtree-drag drain — translate path vs. slow path, at two
+    // zoom levels.
+    //
+    // Warmed once per bench case (outside the iter closure) so the
+    // first-frame cold miss doesn't dominate the translate-path
+    // sample. Each iter simulates one drag drain: fold every node
+    // into `offsets` with a shared delta, call the scene builder.
+    // The delta is rotated every iter so the translate math runs
+    // on non-zero shifts.
+    //
+    // The `slow_path` variant clears the cache before every iter,
+    // forcing the slow path on every edge. The ratio between
+    // translate and slow, especially at high zoom where the
+    // `max_font_size_pt` clamp inflates per-edge sample count, is
+    // the headline number the translate path buys on a 60 Hz drag.
+    let bench_map = load_testament_map();
+    let dragged_ids: Vec<String> = bench_map.nodes.keys().cloned().collect();
+    // Zoom = 1.0: default config doesn't hit the clamp, so sample
+    // count per edge is modest and the win is proportionally
+    // smaller (dominated by non-sampling work).
+    let mut translate_cache_1 = SceneConnectionCache::new();
+    do_subtree_drag_translate_path(&bench_map, &mut translate_cache_1, &dragged_ids, 0.0, 0.0, 1.0);
+    let mut slow_cache_1 = SceneConnectionCache::new();
+    c.bench_function("subtree_drag_translate_path_zoom_1", |b| {
+        let mut i = 0u32;
+        b.iter(|| {
+            i = i.wrapping_add(1);
+            let dx = (i as f32) * 0.1;
+            let dy = (i as f32) * 0.05;
+            do_subtree_drag_translate_path(&bench_map, &mut translate_cache_1, &dragged_ids, dx, dy, 1.0);
+        })
+    });
+    c.bench_function("subtree_drag_slow_path_zoom_1", |b| {
+        let mut i = 0u32;
+        b.iter(|| {
+            i = i.wrapping_add(1);
+            let dx = (i as f32) * 0.1;
+            let dy = (i as f32) * 0.05;
+            do_subtree_drag_slow_path(&bench_map, &mut slow_cache_1, &dragged_ids, dx, dy, 1.0);
+        })
+    });
+    // Zoom = 30.0: the `font_size * zoom` target has hit the max
+    // clamp at default config, so effective_spacing shrinks and
+    // per-edge sample count scales up — the regime the user's
+    // "zoom-in drag feels laggy" symptom lives in.
+    let mut translate_cache_30 = SceneConnectionCache::new();
+    do_subtree_drag_translate_path(&bench_map, &mut translate_cache_30, &dragged_ids, 0.0, 0.0, 30.0);
+    let mut slow_cache_30 = SceneConnectionCache::new();
+    c.bench_function("subtree_drag_translate_path_zoom_30", |b| {
+        let mut i = 0u32;
+        b.iter(|| {
+            i = i.wrapping_add(1);
+            let dx = (i as f32) * 0.1;
+            let dy = (i as f32) * 0.05;
+            do_subtree_drag_translate_path(&bench_map, &mut translate_cache_30, &dragged_ids, dx, dy, 30.0);
+        })
+    });
+    c.bench_function("subtree_drag_slow_path_zoom_30", |b| {
+        let mut i = 0u32;
+        b.iter(|| {
+            i = i.wrapping_add(1);
+            let dx = (i as f32) * 0.1;
+            let dy = (i as f32) * 0.05;
+            do_subtree_drag_slow_path(&bench_map, &mut slow_cache_30, &dragged_ids, dx, dy, 30.0);
+        })
+    });
 }
 
 criterion_group!(benches, criterion_benchmark);

@@ -1,10 +1,20 @@
 //! Connection element emission — the cache-coupled pass. For each
-//! visible edge: fast path if the endpoints haven't moved AND the
-//! cache already has a pre-clip sample set; slow path otherwise
-//! (build path, sample, write cache). The cheap clip filter runs
-//! against the current frame's `node_aabbs` on both paths so a
-//! stable edge correctly clips around third nodes that moved
-//! through its path this frame.
+//! visible edge, one of three paths runs:
+//!
+//! - **Fast path** (no endpoint in `offsets`, cache hit): reuse the
+//!   cached pre-clip samples verbatim; rerun only the cheap
+//!   `node_aabbs` clip filter.
+//! - **Translate path** (both endpoints in `offsets` with the same
+//!   delta, cache hit at matching font size): shift the cached
+//!   samples by the shared delta and rerun the clip filter. Skips
+//!   `build_connection_path` + `sample_path` entirely — the
+//!   subtree-drag hot path.
+//! - **Slow path** (otherwise): build the path, resample, write
+//!   the cache.
+//!
+//! The clip filter runs against the current frame's `node_aabbs`
+//! on all three paths so a stable edge correctly clips around
+//! third nodes that moved through its path this frame.
 //!
 //! Cache lifecycle: `ensure_zoom` is caller-managed (the
 //! orchestrator flushes on zoom change before any pass starts);
@@ -29,6 +39,16 @@ use super::edge_handle::build_edge_handles;
 use super::{
     ConnectionElement, EdgeColorPreview, EdgeHandleElement, SELECTED_EDGE_COLOR,
 };
+
+/// Squared-length threshold below which `delta_from` and `delta_to`
+/// count as "the same delta" for the translate path. In the
+/// target case — subtree drag with `MovingNode`'s shared-delta
+/// offsets — the two subtractions produce byte-identical f32
+/// pairs, so the compare passes at zero. The epsilon only absorbs
+/// any future drift from non-identical arithmetic paths; keep it
+/// tight so mixed-delta edges (boundary edges at the subtree root)
+/// still fall through to the slow path.
+const TRANSLATE_DELTA_EPSILON_SQ: f32 = 1.0e-6;
 
 /// Emit connection elements + edge-handle elements. Consumes
 /// `node_aabbs` from the node pass for the clip filter; mutates
@@ -182,27 +202,16 @@ pub(super) fn build_connection_elements(
             }
         }
 
-        // --- Slow path: sample fresh and update the cache ---
-        let stored_color = {
-            // The color we STORE in the cache is the resolved-but-unselected
-            // color. Selection overrides are applied at read time above so
-            // selection changes don't invalidate the cache.
-            let raw = config.color.as_deref().unwrap_or(edge.color.as_str());
-            resolve_var(raw, vars).to_string()
-        };
-        let color = if let Some(p) = preview_for_this_edge {
-            resolve_var(p, vars).to_string()
-        } else if is_selected {
-            SELECTED_EDGE_COLOR.to_string()
-        } else {
-            stored_color.clone()
-        };
         // Canvas-space font size clamped to keep the on-screen glyph
         // size inside [min_font_size_pt, max_font_size_pt]. At extreme
         // zoom-out this inflates the canvas-space size so sample
         // spacing grows and the per-edge glyph count falls — the LOD
         // mechanism that keeps zoomed-out connections from becoming a
-        // dust cloud.
+        // dust cloud. Inversely, at extreme zoom-in the effective font
+        // size shrinks, spacing shrinks, and per-edge sample count
+        // rises linearly with zoom — which is what blows the drag
+        // drain budget at high zoom. The translate path below is what
+        // keeps subtree-drag cost bounded there.
         let font_size = config.effective_font_size_pt(camera_zoom);
         let approx_glyph_width = font_size * 0.6;
         let effective_spacing = approx_glyph_width + config.spacing;
@@ -220,6 +229,120 @@ pub(super) fn build_connection_elements(
             to_node.position.y as f32 + toy,
         );
         let to_size = Vec2::new(to_node.size.width as f32, to_node.size.height as f32);
+
+        // --- Translate path: rigid-body subtree-drag optimization ---
+        //
+        // The common case inside a subtree drag: both endpoints of an
+        // internal edge are in `offsets` with the SAME delta, so the
+        // edge is a pure translation of its last-sampled geometry.
+        // When the cache has a fresh entry at the same font size AND
+        // the same glyph-config snapshot (body / font), we can skip
+        // `build_connection_path` + `sample_path` entirely and shift
+        // the cached samples by the shared delta.
+        //
+        // Fall-throughs to the slow path:
+        // - Boundary edges (one endpoint moved, one not; or both moved
+        //   by different deltas — a rotating / stretching edge).
+        // - Zoom-change frames (`font_size != cached.font_size_pt`).
+        // - Glyph-config mutation mid-drag (console edits to
+        //   `edge.glyph_connection.body` / `font`) — cached values are
+        //   frozen at sample time, so the slow path resamples and
+        //   re-caches with the new config.
+        //
+        // The probe is split in two phases so the borrow checker lets
+        // us mutate the cache after reading it: first a read-only
+        // `cache.get` computes the delta (returned as a value), then
+        // `cache.translate_in_place` mutates the entry's positions
+        // without re-indexing `by_node` or cloning the string fields.
+        let translate_delta = cache.get(&edge_key).and_then(|cached| {
+            if (cached.font_size_pt - font_size).abs() >= f32::EPSILON {
+                return None;
+            }
+            if cached.body_glyph != config.body {
+                return None;
+            }
+            if cached.font != config.font {
+                return None;
+            }
+            let delta_from = from_pos - cached.base_from;
+            let delta_to = to_pos - cached.base_to;
+            if (delta_from - delta_to).length_squared() >= TRANSLATE_DELTA_EPSILON_SQ {
+                return None;
+            }
+            Some(delta_from)
+        });
+
+        if let Some(delta) = translate_delta {
+            // Mutate the cached entry in place. No by_node reindex,
+            // no string clones on the hot path. `translate_in_place`
+            // returns a borrow of the mutated entry so we can emit
+            // the element without a follow-up `get`.
+            let entry = cache
+                .translate_in_place(&edge_key, delta, from_pos, to_pos)
+                .expect("entry was present in the guard above");
+
+            let color = if let Some(p) = preview_for_this_edge {
+                resolve_var(p, vars).to_string()
+            } else if is_selected {
+                SELECTED_EDGE_COLOR.to_string()
+            } else {
+                entry.color.clone()
+            };
+
+            // Clip filter runs every frame against this frame's
+            // node_aabbs — an unrelated moved node passing through
+            // a translated edge must still clip out the glyphs
+            // inside it.
+            let cap_start = match entry.cap_start.as_ref() {
+                Some((g, p)) if !point_inside_any_node(*p, node_aabbs) => {
+                    Some((g.clone(), (p.x, p.y)))
+                }
+                _ => None,
+            };
+            let cap_end = match entry.cap_end.as_ref() {
+                Some((g, p)) if !point_inside_any_node(*p, node_aabbs) => {
+                    Some((g.clone(), (p.x, p.y)))
+                }
+                _ => None,
+            };
+            let glyph_positions: Vec<(f32, f32)> = entry
+                .pre_clip_positions
+                .iter()
+                .filter(|p| !point_inside_any_node(**p, node_aabbs))
+                .map(|p| (p.x, p.y))
+                .collect();
+            if glyph_positions.is_empty() && cap_start.is_none() && cap_end.is_none() {
+                continue;
+            }
+            connection_elements.push(ConnectionElement {
+                edge_key,
+                glyph_positions,
+                body_glyph: entry.body_glyph.clone(),
+                cap_start,
+                cap_end,
+                font: entry.font.clone(),
+                font_size_pt: font_size,
+                color,
+                zoom_visibility: edge.zoom_window(),
+            });
+            continue;
+        }
+
+        // --- Slow path: sample fresh and update the cache ---
+        let stored_color = {
+            // The color we STORE in the cache is the resolved-but-unselected
+            // color. Selection overrides are applied at read time above so
+            // selection changes don't invalidate the cache.
+            let raw = config.color.as_deref().unwrap_or(edge.color.as_str());
+            resolve_var(raw, vars).to_string()
+        };
+        let color = if let Some(p) = preview_for_this_edge {
+            resolve_var(p, vars).to_string()
+        } else if is_selected {
+            SELECTED_EDGE_COLOR.to_string()
+        } else {
+            stored_color.clone()
+        };
 
         let path = connection::build_connection_path(
             from_pos,
@@ -264,6 +387,8 @@ pub(super) fn build_connection_elements(
                 font: config.font.clone(),
                 font_size_pt: font_size,
                 color: stored_color,
+                base_from: from_pos,
+                base_to: to_pos,
             },
         );
 

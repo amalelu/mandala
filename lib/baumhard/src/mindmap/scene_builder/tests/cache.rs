@@ -2,7 +2,9 @@
 
 use super::fixtures::*;
 use super::super::*;
-use crate::mindmap::loader; use crate::mindmap::scene_cache::{CachedConnection, SceneConnectionCache};
+use crate::mindmap::loader;
+use crate::mindmap::model::GlyphConnectionConfig;
+use crate::mindmap::scene_cache::{CachedConnection, SceneConnectionCache};
 use std::collections::HashMap;
 use glam::Vec2;
 
@@ -46,6 +48,8 @@ fn test_cache_hit_preserves_sample_identity() {
             font: None,
             font_size_pt: 12.0,
             color: "#ff00ff".into(),
+            base_from: Vec2::ZERO,
+            base_to: Vec2::ZERO,
         },
     );
 
@@ -80,6 +84,8 @@ fn test_cache_invalidated_on_endpoint_offset() {
             font: None,
             font_size_pt: 12.0,
             color: "#ff00ff".into(),
+            base_from: Vec2::ZERO,
+            base_to: Vec2::ZERO,
         },
     );
 
@@ -126,6 +132,8 @@ fn test_cache_preserves_unrelated_edge_under_drag() {
             font: None,
             font_size_pt: 12.0,
             color: "#00ff00".into(),
+            base_from: Vec2::ZERO,
+            base_to: Vec2::ZERO,
         },
     );
 
@@ -312,6 +320,8 @@ fn test_cache_selection_change_does_not_invalidate() {
             font: None,
             font_size_pt: 12.0,
             color: stored_color.clone(),
+            base_from: Vec2::ZERO,
+            base_to: Vec2::ZERO,
         },
     );
 
@@ -387,6 +397,8 @@ fn test_cache_fast_path_serves_stale_when_model_moved_without_offsets() {
             font: None,
             font_size_pt: 12.0,
             color: "#ff00ff".into(),
+            base_from: Vec2::ZERO,
+            base_to: Vec2::ZERO,
         },
     );
 
@@ -435,6 +447,293 @@ fn test_cache_fast_path_serves_stale_when_model_moved_without_offsets() {
     assert!(
         !after_clear.connection_elements[0].glyph_positions.is_empty(),
         "freshly-sampled edge should emit glyphs"
+    );
+}
+
+#[test]
+fn test_translate_path_reuses_cache_on_shared_delta_subtree_drag() {
+    // Performance regression for the "zoom-in drag feels laggy"
+    // symptom. A subtree drag pushes every moved node into `offsets`
+    // with the same delta, so every edge internal to the subtree has
+    // both endpoints moved by the same amount — a pure translation of
+    // last-sampled geometry. The translate path must skip the Bezier
+    // sampler and just shift the cached samples.
+    //
+    // Sentinel body_glyph tells us whether the builder re-sampled
+    // (sentinel gone → slow path fired) or translated (sentinel
+    // survives → translate path fired).
+    let map = two_node_edge_map();
+    let mut cache = SceneConnectionCache::new();
+    let _first = build_scene_with_cache(
+        &map,
+        &HashMap::new(),
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    // Overwrite the cache with a sentinel whose `base_from` / `base_to`
+    // match the first-build endpoint positions so the translate path's
+    // delta check gets clean numbers to compare.
+    let key = EdgeKey::new("a", "b", "cross_link");
+    let real = cache.get(&key).unwrap().clone();
+    let sample_count = real.pre_clip_positions.len();
+    // Overwrite `pre_clip_positions` with a distinctive uniform
+    // value so we can prove the translate path fired: if the slow
+    // path had resampled, positions would spread along the edge
+    // from (0,0)-ish to (400,0)-ish, not cluster at (215, 207).
+    // `body_glyph` / `font` must match the live config so the new
+    // glyph-config guard doesn't force a fall-through here — the
+    // guard is exercised by `test_translate_path_falls_through_on_glyph_config_change`.
+    // Position choice: (200, 200) + (15, 7) = (215, 207) is between
+    // the nodes on X and well below them on Y — clears both AABBs.
+    let live_config = GlyphConnectionConfig::default();
+    cache.insert(
+        key.clone(),
+        CachedConnection {
+            pre_clip_positions: vec![Vec2::new(200.0, 200.0); sample_count],
+            cap_start: None,
+            cap_end: None,
+            body_glyph: live_config.body.clone(),
+            font: live_config.font.clone(),
+            font_size_pt: real.font_size_pt,
+            color: "#abcdef".into(),
+            base_from: real.base_from,
+            base_to: real.base_to,
+        },
+    );
+
+    // Subtree drag: both endpoints move by the same (dx, dy).
+    let mut offsets = HashMap::new();
+    offsets.insert("a".to_string(), (15.0, 7.0));
+    offsets.insert("b".to_string(), (15.0, 7.0));
+    let second = build_scene_with_cache(
+        &map,
+        &offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    let elem = &second.connection_elements[0];
+    // Every sample is the cached (200, 200) shifted by (15, 7) = (215, 207).
+    // If the slow path had fired instead it would have resampled the
+    // real edge geometry from (~40, 20) to (~400, 20) — these
+    // position assertions would all fail.
+    assert_eq!(elem.glyph_positions.len(), sample_count);
+    for (x, y) in &elem.glyph_positions {
+        assert!(
+            (x - 215.0).abs() < 1e-4 && (y - 207.0).abs() < 1e-4,
+            "translated sample should be (215, 207), got ({}, {})",
+            x, y
+        );
+    }
+
+    // The cache's base positions must advance to the current endpoints
+    // so the NEXT drain's translate check sees the new reference.
+    let after = cache.get(&key).unwrap();
+    let from_node = map.nodes.get("a").unwrap();
+    let to_node = map.nodes.get("b").unwrap();
+    let expected_from = Vec2::new(from_node.position.x as f32 + 15.0, from_node.position.y as f32 + 7.0);
+    let expected_to = Vec2::new(to_node.position.x as f32 + 15.0, to_node.position.y as f32 + 7.0);
+    assert!((after.base_from - expected_from).length_squared() < 1e-6);
+    assert!((after.base_to - expected_to).length_squared() < 1e-6);
+}
+
+#[test]
+fn test_translate_path_falls_through_on_mismatched_deltas() {
+    // Boundary-edge case: only one endpoint (or endpoints with
+    // different deltas) means the edge's shape — not just position —
+    // changed. The slow path must fire to resample the new geometry;
+    // translating by either delta would misplace samples.
+    let map = two_node_edge_map();
+    let mut cache = SceneConnectionCache::new();
+    let _first = build_scene_with_cache(
+        &map,
+        &HashMap::new(),
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    let key = EdgeKey::new("a", "b", "cross_link");
+    let real = cache.get(&key).unwrap().clone();
+    cache.insert(
+        key.clone(),
+        CachedConnection {
+            pre_clip_positions: vec![Vec2::new(999.0, 999.0); real.pre_clip_positions.len()],
+            cap_start: None,
+            cap_end: None,
+            body_glyph: "NO_TRANSLATE_SENTINEL".into(),
+            font: None,
+            font_size_pt: real.font_size_pt,
+            color: "#deadbe".into(),
+            base_from: real.base_from,
+            base_to: real.base_to,
+        },
+    );
+
+    // Different deltas on each endpoint — a rotating / stretching edge,
+    // not a translation.
+    let mut offsets = HashMap::new();
+    offsets.insert("a".to_string(), (10.0, 0.0));
+    offsets.insert("b".to_string(), (0.0, 10.0));
+    let second = build_scene_with_cache(
+        &map,
+        &offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    assert_ne!(
+        second.connection_elements[0].body_glyph,
+        "NO_TRANSLATE_SENTINEL",
+        "mismatched endpoint deltas must fall through to the slow path"
+    );
+}
+
+#[test]
+fn test_translate_path_falls_through_on_glyph_config_change() {
+    // Edge-case guard for a mid-drag glyph-config mutation (a
+    // console edit that flips `glyph_connection.body` while a drag
+    // is in flight). The cached entry is frozen at the pre-edit
+    // glyph, so serving it on the next translate frame would emit
+    // a stale glyph. The translate path must notice `cached.body_glyph
+    // != config.body` and fall through to the slow path, which
+    // resamples and caches with the new glyph.
+    let map = two_node_edge_map();
+    let mut cache = SceneConnectionCache::new();
+    let _first = build_scene_with_cache(
+        &map,
+        &HashMap::new(),
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    let key = EdgeKey::new("a", "b", "cross_link");
+    let real = cache.get(&key).unwrap().clone();
+    // Overwrite with a body_glyph that DIFFERS from what the live
+    // config (defaulted `·`) would resolve to. The delta + font
+    // guards would otherwise pass — only the glyph mismatch should
+    // cause the fall-through.
+    cache.insert(
+        key.clone(),
+        CachedConnection {
+            pre_clip_positions: vec![Vec2::new(999.0, 999.0); real.pre_clip_positions.len()],
+            cap_start: None,
+            cap_end: None,
+            body_glyph: "X".into(),
+            font: None,
+            font_size_pt: real.font_size_pt,
+            color: real.color.clone(),
+            base_from: real.base_from,
+            base_to: real.base_to,
+        },
+    );
+
+    // Subtree drag with matching deltas — would hit translate path
+    // if the glyph-guard weren't in place.
+    let mut offsets = HashMap::new();
+    offsets.insert("a".to_string(), (5.0, 0.0));
+    offsets.insert("b".to_string(), (5.0, 0.0));
+    let second = build_scene_with_cache(
+        &map,
+        &offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    // Emitted body_glyph must be the live config's, not the cached
+    // "X" — proves the slow path resampled instead of translating.
+    assert_ne!(
+        second.connection_elements[0].body_glyph, "X",
+        "mid-drag body_glyph change must force the slow path so the emitted glyph tracks the live config"
+    );
+    // And the cache entry must now reflect the fresh resample.
+    let refreshed = cache.get(&key).unwrap();
+    assert_ne!(
+        refreshed.body_glyph, "X",
+        "slow path resample must overwrite the stale body_glyph"
+    );
+    assert!(
+        refreshed.pre_clip_positions.iter().all(|p| *p != Vec2::new(999.0, 999.0)),
+        "slow path must overwrite the placeholder sentinel positions"
+    );
+}
+
+#[test]
+fn test_translate_path_still_applies_clip_filter() {
+    // Governing invariant: every path in the builder runs the
+    // `node_aabbs` clip filter against the current frame's geometry,
+    // including the translate path. An unrelated blocker node whose
+    // AABB covers some translated samples must still clip them out.
+    //
+    // Setup: three-node map where the edge a↔b passes clear of `c`
+    // initially (c is well south of the connection). Populate the
+    // cache. Then subtree-drag (a, b) together so the translate path
+    // fires — but move `c` into the middle of the translated edge at
+    // the same time. The clip filter must notice `c`'s new AABB and
+    // drop samples inside it, even though the edge itself came from
+    // the cache.
+    let map = synthetic_map(
+        vec![
+            synthetic_node("a", 0.0, 0.0, 40.0, 40.0, false),
+            synthetic_node("b", 400.0, 0.0, 40.0, 40.0, false),
+            synthetic_node("c", 180.0, -500.0, 80.0, 40.0, false),
+        ],
+        vec![synthetic_edge("a", "b", "right", "left")],
+    );
+
+    let mut cache = SceneConnectionCache::new();
+    let first = build_scene_with_cache(
+        &map,
+        &HashMap::new(),
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+    let baseline_count = first.connection_elements[0].glyph_positions.len();
+
+    // Subtree drag: move a and b together; AT THE SAME TIME move c
+    // into the translated edge's path. The offsets map carries all
+    // three nodes; a's and b's deltas match (translate path fires),
+    // but c's delta is different (and c isn't an endpoint anyway).
+    let mut offsets = HashMap::new();
+    offsets.insert("a".to_string(), (0.0, 20.0));
+    offsets.insert("b".to_string(), (0.0, 20.0));
+    offsets.insert("c".to_string(), (0.0, 520.0));
+    let second = build_scene_with_cache(
+        &map,
+        &offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+    let after_count = second.connection_elements[0].glyph_positions.len();
+    assert!(
+        after_count < baseline_count,
+        "blocker `c` moved into the translated edge path should clip samples: {} -> {}",
+        baseline_count,
+        after_count,
     );
 }
 
