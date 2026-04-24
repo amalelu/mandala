@@ -90,7 +90,7 @@ around in the app. See [`CODE_CONVENTIONS.md §1`](./CODE_CONVENTIONS.md).
 ### Mutation-first
 
 Any change to the data model is expressed as a **mutator** applied to
-a **tree** ([§2: `Tree`](#tree-t-m), [§2: `MutatorTree`](#mutatortree-m),
+a **tree** ([§2: `Tree`](#treet-m), [§2: `MutatorTree`](#mutatortreem),
 [§2: `Applicable`](#applicablet)). Clone-edit-reinsert is never the
 shape of a change. This is the single most pervasive discipline in
 the codebase: it is what makes incremental updates cheap, what lets
@@ -255,7 +255,7 @@ glitch on one frame; the cost of a panic is a lost document.
 
 ### `ApplyOperation`
 
-**Summary.** The arithmetic selector a delta carries — `Add`,
+**Summary.** The operation selector a delta carries — `Add`,
 `Assign`, `Subtract`, `Multiply`, `Delete`, or `Noop`.
 
 **What it's for.** A single `DeltaGlyphArea` does not hardcode
@@ -314,7 +314,7 @@ builder from the rest of the fields, not part of identity. One
 `GlyphArea` maps to one cosmic-text `TextArea` in the renderer.
 
 **Caveat.** The `text: String` is edited with grapheme-aware
-helpers ([`grapheme_chad`](#grapheme_chad-color-geometry)); byte
+helpers ([`grapheme_chad`](#utilities--grapheme_chad-color-geometry)); byte
 offsets from user-facing counts will land mid-cluster on the
 first emoji.
 
@@ -379,7 +379,12 @@ transient live-edit previews.
 by `BTreeSet<ColorFontRegion>` keyed on the `Range`, so lookups
 by range are `O(log n)` but two regions with the same range and
 different payloads collide (last write wins) — this is
-deliberate, not a bug. Five mutation primitives keep the set
+deliberate, not a bug. The `Range` indices are **Unicode
+code-point offsets** when the caller comes from mindmap text
+runs (matching [`text runs`](#text-runs)); the primitive itself
+just holds `usize` pairs and does not enforce a unit, so
+consumers that reach in from elsewhere must agree on the same
+convention. Five mutation primitives keep the set
 consistent under text edit: `insert_regions_at`,
 `shrink_regions_after`, `split_and_separate`,
 `shift_regions_after`, `set_or_insert`. A spatial index
@@ -427,10 +432,14 @@ implement it. The walker calls it to align children. In the
 mindmap domain, `MindNode.channel` is where this surfaces to
 end users; see [§3: Channels](#channels-mindmap-level).
 
-**Caveat.** Siblings within a parent **must be sorted by
-ascending `(channel, id_sort_key)`** for the walker to produce
-correct results. This invariant is established by the tree
-builder and preserved through every mutation.
+**Caveat.** Children arrive at the walker in **Dewey-id order**
+(`id_sort_key`), not in channel order — the tree builder sorts
+by id, not by channel. Channel matching happens within whatever
+sibling order the map defines. Authoring custom mutations that
+target specific channels therefore means arranging children so
+that channel order and id order agree, or reaching for the
+[`MapChildren`](#instruction) instruction to pair strictly by
+sibling position instead.
 
 ### `Flag` / `Flaggable` / `AnchorBox`
 
@@ -441,7 +450,7 @@ the trait that queries them.
 rendering sense but *status* — "this node is focused", "this
 node is in edit mode", "this node is anchored to a specific
 screen corner". Flags provide a uniform place to store those,
-queryable by [predicates](#predicate-comparator) without
+queryable by [predicates](#predicate-and-comparator) without
 extending the element's data fields.
 
 **Under the hood.** `lib/baumhard/src/core/primitives.rs`. Current
@@ -497,7 +506,7 @@ decides whether to recurse.
 Pure data (serialisable); typical predicates carry one or two
 fields, so evaluation is effectively `O(1)`. Float comparisons
 use `almost_equal` with a `1e-5` epsilon
-([`util/geometry.rs`](#grapheme_chad-color-geometry)). The
+([`util/geometry.rs`](#utilities--grapheme_chad-color-geometry)). The
 `Comparator` uses a *negation flag* pattern: `Equals(false)` is
 `==`, `Equals(true)` is `!=`, halving the variant count.
 
@@ -586,6 +595,30 @@ for the field enum and `OutlineStyle`; `area_mutators.rs` for
 shared across all fields in the batch, so "move this node 10
 units right" and "set this node's text" use the same delta type
 with different field lists and a different operation.
+
+### `GlyphModelField`, `DeltaGlyphModel`, `GlyphModelCommand`
+
+**Summary.** The `GlyphModel` mutation surface — the parallel of
+the area-side delta and command trio, applied to composed-glyph
+structures rather than plain text.
+
+**What it's for.** Everything the area side offers
+([`GlyphAreaField`](#glyphareafield-and-deltaglypharea),
+[`GlyphAreaCommand`](#glyphareacommand)), the model side needs
+too — position nudges, matrix inserts and replacements, colour
+and font edits on individual components. Same operation vocab
+(`ApplyOperation`), same `Applicable` dispatch, same walker
+path; different target type.
+
+**Under the hood.**
+`lib/baumhard/src/gfx_structs/model/mutator.rs`. `GlyphModelField`
+variants cover the structural bits (matrix inserts, component
+edits, model position). `DeltaGlyphModel` wraps them with an
+`ApplyOperation`. `GlyphModelCommand` is the named-operation
+counterpart for things that don't fit arithmetic — row pops,
+matrix-coordinate moves, rotations. All three ride in the
+`Mutation::ModelDelta` / `Mutation::ModelCommand` variants of
+[`GfxMutator`](#gfxmutator).
 
 ### `GlyphAreaCommand`
 
@@ -812,7 +845,7 @@ panicking. The indexer keeps in sync with the tree via the
 that path, or the index drifts silently.
 
 **Vision.** Per-tree spatial indexing is a seam
-([`Tree::region_params` / `region_index` fields](#tree-t-m));
+([`Tree::region_params` / `region_index` fields](#treet-m));
 currently the index is scene-wide but the plumbing to push it
 per-tree already exists.
 
@@ -902,12 +935,39 @@ walk the data on demand rather than caching.
 
 **Under the hood.**
 `lib/baumhard/src/mindmap/model/mod.rs`. The shape is a flat
-`HashMap<String, MindNode>` (keyed by Dewey id), a `Vec<MindEdge>`,
-a `canvas: Canvas`, a `palettes: HashMap<String, Palette>`, and
+`HashMap<String, MindNode>` (keyed by Dewey id), a
+`Vec<MindEdge>`, a [`canvas: Canvas`](#canvas), a `palettes:
+HashMap<String, Palette>`, and
 `custom_mutations: Vec<CustomMutation>`. See
 [`format/schema.md`](./format/schema.md) for the JSON surface and
 [`format/README.md`](./format/README.md) for a minimum-viable
 example.
+
+### `Canvas`
+
+**Summary.** The per-map shared rendering context: background
+colour, default node and connection styles, live theme-variable
+map, named theme presets.
+
+**What it's for.** Some things are per-map rather than per-node:
+the canvas background colour, the defaults nodes and edges fall
+back to when their fields are absent, the `var(--name)` theme
+variables colours reference, and the presets theme-switching
+mutations copy into those live variables. `Canvas` is that
+shared state. It sits on `MindMap` directly (`canvas: Canvas`)
+and is consulted at scene-build time for defaults and theme
+resolution.
+
+**Under the hood.**
+`lib/baumhard/src/mindmap/model/canvas.rs`. Key fields:
+`background_color`, default-style records for nodes and
+connections, `theme_variables: HashMap<String, String>` (live
+values), `theme_variants: HashMap<String, HashMap<String,
+String>>` (named presets). The
+[`SetThemeVariant`](#document-actions) document action copies
+a preset into the live map;
+[`SetThemeVariables`](#document-actions) patches individual
+entries.
 
 ### `MindNode`
 
@@ -1018,10 +1078,17 @@ it pulls from. Level-clamping (last group when out of range) makes
 deep subtrees degrade gracefully.
 
 **Under the hood.**
-`lib/baumhard/src/mindmap/model/palette.rs`. `resolve_theme_colors`
-on `MindMap` does the lookup. Validation requires every referenced
-palette to exist with at least one group. Full reference:
-[`format/palettes.md`](./format/palettes.md).
+`lib/baumhard/src/mindmap/model/palette.rs`. A node's binding
+lives in its optional `color_schema` field, a `ColorSchema`
+record with `palette: String` (the key into `map.palettes`),
+`level: usize` (which `ColorGroup` to pull from), and two
+flags — `starts_at_root` (does level 0 apply to the schema
+root or to its children?) and `connections_colored` (do edges
+inherit the palette stroke colour?). `resolve_theme_colors` on
+`MindMap` does the lookup; out-of-range `level` clamps to the
+last group rather than failing. Validation requires every
+referenced palette to exist with at least one group. Full
+reference: [`format/palettes.md`](./format/palettes.md).
 
 **Vision.** Animated palette transitions are the seam — the data
 shape is already mutation-friendly; the runtime would need to
@@ -1030,22 +1097,36 @@ interpolate `ColorGroup` fields on a clock.
 ### Text runs
 
 **Summary.** Non-overlapping styled character ranges within a
-node's text — bold, italic, font, size, colour, hyperlink.
+node's text — bold, italic, underline, font, size, colour,
+hyperlink.
 
 **What it's for.** A single node can have rich text without being
 fragmented into multiple nodes. Text runs are the mindmap-side
-surface that the renderer translates into `ColorFontRegions` for
-shaping.
+surface that the renderer translates into `ColorFontRegions`
+spans for shaping. The user-visible effect is a per-span
+override: emphasis on the first word, a coloured annotation in
+the middle, a link at the end — all on one node.
 
 **Under the hood.** `lib/baumhard/src/mindmap/model/node.rs`.
-Indexed by **Unicode code points**, not bytes and not graphemes —
-this matches `ColorFontRegions` and the legacy miMind format.
-Validation: non-overlapping, ascending, in-bounds. Uncovered
-ranges inherit the node-level style; if `text_runs` is non-empty,
-**only covered ranges render** — uncovered graphemes drop
-silently, so authors must cover everything they want visible.
-Full reference:
+Each run carries `start`, `end`, `bold`, `italic`, `underline`,
+optional `font`, optional `size_pt`, optional `color`, optional
+`hyperlink`. Indexed by **Unicode code points**, not bytes and
+not graphemes — this matches `ColorFontRegions` and the legacy
+miMind format. Indices are stable across round-trip even when
+text contains characters outside the BMP (more bytes than code
+points) or combining marks (more code points than graphemes).
+Validation: non-overlapping, ascending, `end <= text's
+code-point count`. Uncovered ranges inherit the node-level
+style. Full reference:
 [`format/text-runs.md`](./format/text-runs.md).
+
+**Caveat.** If `text_runs` is non-empty, **only covered ranges
+render** — uncovered graphemes drop silently. So authors must
+cover every grapheme they want visible, not just the ones they
+want to restyle. This is by design (it simplifies the
+renderer's region pass) but it is the single biggest trap in
+the format; `maptool verify` does not catch partial-coverage
+intent vs. accident.
 
 ### Theme variables
 
@@ -1098,18 +1179,75 @@ also serve as anchor surfaces for portal endpoints, which sit at
 parametric positions along the border perimeter.
 
 **Under the hood.** `lib/baumhard/src/mindmap/border.rs`. The
-`GlyphBorderConfig` per-node record carries `preset`
-(`"light"` / `"heavy"` / `"double"` / `"rounded"` / `"custom"`),
-`font`, `font_size_pt`, `color`, optional `glyphs` (when custom),
-and `padding`. Geometry constants
-(`BORDER_CORNER_OVERLAP_FRAC`,
-`BORDER_APPROX_CHAR_WIDTH_FRAC`) are shared between the renderer
-and tree builder; they must agree, or corner alignment drifts.
+`GlyphBorderConfig` per-node record (in
+`lib/baumhard/src/mindmap/model/node.rs`) carries:
+
+- `preset: String` — one of `"light"` (`─ │ ┌ ┐ └ ┘`),
+  `"heavy"` (`━ ┃ ┏ ┓ ┗ ┛`), `"double"` (`═ ║ ╔ ╗ ╚ ╝`),
+  `"rounded"` (`─ │ ╭ ╮ ╰ ╯`, the default), or `"custom"`.
+- `font: Option<String>` — font family override; `None` =
+  system default.
+- `font_size_pt: f32` — glyph size.
+- `color: Option<String>` — `#RRGGBB` override; `None` =
+  inherit from `style.frame_color`.
+- `glyphs: Option<CustomBorderGlyphs>` — per-side glyph
+  overrides (top / bottom / left / right / four corners); only
+  consulted when `preset = "custom"`.
+- `padding: f32` — border-to-content gap in pixels.
+
+Geometry constants (`BORDER_CORNER_OVERLAP_FRAC`,
+`BORDER_APPROX_CHAR_WIDTH_FRAC`) are shared between the
+renderer and tree builder; they must agree, or corner
+alignment drifts.
 
 **Caveat.** Borders today only render on rectangular nodes
 (`NodeShape::Rectangle` and `style.show_frame = true`). Ellipse
 borders need shape-aware glyph layout — a named seam in
 [§8](#8-named-trajectory--vision).
+
+### `GlyphConnectionConfig`
+
+**Summary.** The per-edge rendering configuration: body glyph,
+caps, font, font size, screen-space font clamps, color.
+
+**What it's for.** Every `MindEdge` carries one. `GlyphBorderConfig`
+is to a node what `GlyphConnectionConfig` is to an edge: the
+shape of the glyphs that draw the thing. The body glyph is
+repeated along the connection path; `cap_start` and `cap_end`
+override the terminal glyphs if present. Font size is
+interpreted as the target *on-screen* size at zoom = 1.0;
+`min_font_size_pt` and `max_font_size_pt` clamp the effective
+screen-space size as the camera zooms, so a long edge stays
+readable both zoomed in and zoomed out.
+
+**Under the hood.** `lib/baumhard/src/mindmap/model/edge.rs:335+`.
+Fields: `body: String` (default mid-dot `·`), `cap_start` /
+`cap_end: Option<String>`, `font: Option<String>`, `font_size_pt:
+f32`, `min_font_size_pt` / `max_font_size_pt: Option<f32>`,
+`color: Option<String>`. Colour cascade priority (highest
+first): edge-label → `glyph_connection.color` → `edge.color`.
+`effective_font_size_pt(zoom)` is the helper callers reach for
+to derive the clamped screen-space size.
+
+### `ControlPoint`
+
+**Summary.** An author-set Bézier offset on a `MindEdge`,
+expressed as an offset from a node centre rather than an
+absolute canvas coordinate.
+
+**What it's for.** Straight line-mode edges can become curved
+when the author specifies control points. Zero control points
+is a straight segment; one promotes to a cubic Bézier (via
+quadratic-to-cubic lifting); two or more define a cubic
+directly. Control points live as offsets from endpoint centres
+so a node move drags the curve along without the author
+having to re-tune the path.
+
+**Under the hood.**
+`lib/baumhard/src/mindmap/model/edge.rs`. Consumed by
+[connection path construction](#connection-paths), where
+`build_connection_path` converts control points from offsets
+into cubic control coordinates in canvas space.
 
 ### Portals
 
@@ -1250,13 +1388,31 @@ endpoints don't move.
 
 **Under the hood.** `lib/baumhard/src/mindmap/scene_builder/`.
 Per-role modules: `node_pass` (text + borders + clip AABBs),
-`connection`, `label`, `portal`, `edge_handle`. Output:
-`RenderScene { text_elements, border_elements,
-connection_elements, portal_elements, edge_handles,
-connection_label_elements, background_color }`. Selection
-highlight is applied at emission time, not stored on the model.
-Drag-preview offsets and color-picker previews are read from the
-document but never committed back.
+`connection`, `label`, `portal`, `edge_handle`. Output is the
+`RenderScene` struct, whose fields are plain-data element
+lists:
+
+- `text_elements: Vec<TextElement>` — node text, position,
+  size, style runs.
+- `border_elements: Vec<BorderElement>` — glyph-drawn frames
+  around nodes, including zoom visibility.
+- `connection_elements: Vec<ConnectionElement>` — sampled
+  glyph positions along each line-mode edge, with body/cap
+  glyphs and colour.
+- `portal_elements: Vec<PortalElement>` — per-endpoint glyph
+  markers for portal-mode edges.
+- `connection_label_elements: Vec<ConnectionLabelElement>` —
+  positioned text labels along connection paths.
+- `edge_handles: Vec<EdgeHandleElement>` — grab-handle glyphs
+  on the selected edge (anchors, control points, midpoint).
+- `background_color: String` — canvas fill colour.
+
+These element structs are the intermediate representation that
+sits between the Baumhard tree side of the pipeline and the GPU
+commands the renderer actually submits. Selection highlight is
+applied at emission time, not stored on the model; drag-preview
+offsets and color-picker previews are read from the document
+but never committed back.
 
 ### Scene cache
 
@@ -1352,6 +1508,12 @@ Map and inline are loaded from the document on every load. Each
 layer is best-effort — user file parse failures log a warning
 and skip; app bundle failures log an error (a build-time invariant
 violation).
+
+The provenance of each merged mutation is tracked in
+`MindMapDocument::mutation_sources` as a `MutationSource`
+enum (`App` / `User` / `Map` / `Inline`), so
+`mutation help <id>` on the console can report which layer
+won a given id.
 
 ### Declarative path — `MutatorNode` AST
 
@@ -1575,7 +1737,7 @@ trigger a flurry of scene rebuilds.
 on every winit `AboutToWait` event. Step order:
 
 1. Drive any active throttled interaction
-   ([`ThrottledInteraction`](#throttledinteraction-and-throtteddrag)) —
+   ([`ThrottledInteraction`](#throttledinteraction-and-throttleddrag)) —
    apply pending delta if the throttle says drain.
 2. Advance running animations; on completion, push undo entry.
 3. Rebuild connection geometry if edges moved.
@@ -1746,7 +1908,7 @@ budget does not bias an edge-label drag's average.
 
 ### `UndoAction`
 
-**Summary.** A 13-variant tagged union; one variant per
+**Summary.** A 12-variant tagged union; one variant per
 user-facing mutation, dispatched through `MindMapDocument::undo`
 to reverse it.
 
@@ -1758,14 +1920,16 @@ mutation means adding a new variant, snapshotting the right
 same commit.
 
 **Under the hood.**
-`src/application/document/undo_action.rs:10-88`. Variants:
-`MoveNodes`, `CustomMutation`, `ReparentNodes`, `DeleteEdge`,
-`CreateEdge`, `EditEdge`, `CreateNode`, `EditNodeText`,
-`EditNodeStyle`, `EditNodeZoom`, `CanvasSnapshot`, `DeleteNode`,
-plus the `CustomMutation` that snapshots the
-`target_scope`-defined window. Every arm is bounds-checked
-(e.g. `index < edges.len()`) before mutating, so undo is always
-safe — never panics, even on a partially-deleted state.
+`src/application/document/undo_action.rs:10-88`. The twelve
+variants: `MoveNodes`, `CustomMutation`, `ReparentNodes`,
+`DeleteEdge`, `CreateEdge`, `EditEdge`, `CreateNode`,
+`EditNodeText`, `EditNodeStyle`, `EditNodeZoom`,
+`CanvasSnapshot`, `DeleteNode`. `CustomMutation` is the general
+bucket — it snapshots the `target_scope`-defined window so any
+declarative or imperative mutation replays cleanly. Every arm is
+bounds-checked (e.g. `index < edges.len()`) before mutating, so
+undo is always safe — never panics, even on a partially-deleted
+state.
 
 ### `Renderer`
 
@@ -2173,6 +2337,12 @@ the following are speculation; each has a concrete seam and a
 concrete consumer in mind. None are committed timelines either —
 the project moves at the pace of one cathedral stone at a time.
 
+Entries in this section are prose rather than layered concepts
+— they are pointers into the rest of the document, not
+definitions. Many of them mirror `Vision` layers on the
+concepts they attach to; the duplication is intentional, local
+context in the concept entry, cross-cutting picture here.
+
 ### Plugins and the Baumhard script API
 
 The largest seam. Plugins will reach into the
@@ -2209,7 +2379,7 @@ many.
 
 The [`PlatformContext::Touch`](#platformcontext) variant is the
 route. Tap, pinch, and long-press recognisers will feed the
-same [`ThrottledDrag`](#throttledinteraction-and-throtteddrag)
+same [`ThrottledDrag`](#throttledinteraction-and-throttleddrag)
 variants the mouse path uses today, so the mutation pipeline
 does not change — only the input adapters.
 
@@ -2305,6 +2475,8 @@ its full treatment above.
   [§3: Portal geometry](#portal-geometry).
 - **`BranchChannel`** — the walker-alignment trait. See
   [§2: Channel and BranchChannel](#channel-and-branchchannel).
+- **`Canvas`** — per-map rendering context (background, theme
+  variables, defaults). See [§3: Canvas](#canvas).
 - **`Camera2D` / `CameraMutation`** — pan/zoom projection and
   intent vocabulary. See [§2: Camera2D and CameraMutation](#camera2d-and-cameramutation).
 - **canvas / overlay roles** — the two `AppScene` slot kinds.
@@ -2323,10 +2495,14 @@ its full treatment above.
   hover live-preview. See [§6: Glyph-wheel color picker](#glyph-wheel-color-picker).
 - **`ColorFontRegions`** — character-range span table. See
   [§2: ColorFontRegions](#colorfontregions).
+- **`ColorSchema`** — a `MindNode`'s palette binding
+  (`palette`, `level`, flags). See [§3: Palettes](#palettes).
 - **`Comparator`** — comparison operator inside a `Predicate`.
   See [§2: Predicate and Comparator](#predicate-and-comparator).
 - **connection paths** — straight or cubic Bézier between
   endpoints. See [§3: Connection paths](#connection-paths).
+- **`ControlPoint`** — author-set Bézier offset from a node
+  centre on a `MindEdge`. See [§3: ControlPoint](#controlpoint).
 - **console** — native CLI command palette. See
   [§6: Console](#console).
 - **contexts taxonomy** — `internal` / `map` / `map.node` /
@@ -2390,6 +2566,9 @@ its full treatment above.
   `GlyphArea`. See [§2: GlyphAreaField and DeltaGlyphArea](#glyphareafield-and-deltaglypharea).
 - **`GlyphBorderConfig`** — per-node border style record. See
   [§3: Border geometry](#border-geometry).
+- **`GlyphConnectionConfig`** — per-edge glyph rendering config
+  (body, caps, font, size clamps, colour). See
+  [§3: GlyphConnectionConfig](#glyphconnectionconfig).
 - **glyph-wheel color picker** — modal HSV picker. See
   [§6: Glyph-wheel color picker](#glyph-wheel-color-picker).
 - **`GlyphComponent`** — text + font + colour triplet, leaf of
@@ -2399,6 +2578,9 @@ its full treatment above.
 - **`GlyphMatrix`** — vertical stack of lines. See same.
 - **`GlyphModel`** — composed-glyph shape, child of a `GlyphArea`.
   See same.
+- **`GlyphModelField` / `DeltaGlyphModel` / `GlyphModelCommand`**
+  — the mutation surface for `GlyphModel`, parallel to the area
+  trio. See [§2: GlyphModelField, DeltaGlyphModel, GlyphModelCommand](#glyphmodelfield-deltaglyphmodel-glyphmodelcommand).
 - **`GlyphTreeEvent` / `GlyphTreeEventInstance`** — event kinds
   and timestamped instances. See
   [§2: Event, GlyphTreeEvent, ...](#event-glyphtreeevent-glyphtreeeventinstance-eventsubscriber).
@@ -2440,6 +2622,9 @@ its full treatment above.
   [§2: Mutation enum](#mutation-enum).
 - **mutation-first** — every change is a mutator applied to a
   tree. See [§1: Mutation-first](#mutation-first).
+- **`MutationSource`** — provenance tag (App / User / Map /
+  Inline) on each merged custom mutation. See
+  [§4: Four-source loader](#four-source-loader).
 - **`MutationFrequencyThrottle`** — adaptive frame throttle. See
   [§5: MutationFrequencyThrottle](#mutationfrequencythrottle-and-frame_throttle).
 - **mutator builder DSL** — `MutatorNode` AST and
@@ -2448,7 +2633,7 @@ its full treatment above.
 - **`MutatorNode`** — serde-friendly mutator AST. See same and
   [§4: Declarative path](#declarative-path--mutatornode-ast).
 - **`MutatorTree<M>`** — mutation-side tree mirror. See
-  [§2: MutatorTree](#mutatortree-m).
+  [§2: MutatorTree](#mutatortreem).
 - **named trajectory** — explicit future directions. See
   [§8: Named trajectory — vision](#8-named-trajectory--vision).
 - **`NodeShape`** — pluggable hit-test shape. See
@@ -2481,6 +2666,11 @@ its full treatment above.
   [§2: RegionParams, RegionIndexer, RegionError](#regionparams-regionindexer-regionerror).
 - **`Renderer`** — GPU resource holder. See
   [§5: Renderer](#renderer).
+- **`RenderScene` elements** — flat element structs
+  (`TextElement`, `BorderElement`, `ConnectionElement`,
+  `PortalElement`, `ConnectionLabelElement`, `EdgeHandleElement`)
+  forming the scene builder's output. See
+  [§3: Scene builder](#scene-builder).
 - **`RepeatWhile`** — predicate-gated loop instruction. See
   [§2: Instruction](#instruction).
 - **runtime hole** — `Runtime("<label>")` value resolved by
@@ -2511,7 +2701,7 @@ its full treatment above.
   as `var(--name)`. See [§3: Theme variables](#theme-variables).
 - **`ThrottledDrag` / `ThrottledInteraction`** — adaptive-throttle
   drag enum and its trait. See
-  [§5: ThrottledInteraction and ThrottledDrag](#throttledinteraction-and-throtteddrag).
+  [§5: ThrottledInteraction and ThrottledDrag](#throttledinteraction-and-throttleddrag).
 - **`Timeline` / `TimelineEvent`** — animation event sequence.
   See [§2: Animation primitives](#animation-primitives--animationdef-animationinstance-timeline-timelineevent).
 - **toggle behavior** — `Behavior::Toggle` on a custom mutation;
@@ -2519,12 +2709,12 @@ its full treatment above.
 - **tree builder** — `MindMap` → `Tree<GfxElement, GfxMutator>`.
   See [§3: Tree builder](#tree-builder).
 - **`Tree<T, M>`** — arena-backed glyph forest. See
-  [§2: Tree](#tree-t-m).
+  [§2: Tree](#treet-m).
 - **`TreeWalker`** — mutation dispatch engine
   (`walk_tree_from`). See [§2: TreeWalker](#treewalker).
 - **trigger bindings** — per-node input → custom-mutation
   dispatch. See [§3: Trigger bindings](#trigger-bindings).
-- **`UndoAction`** — 13-variant undo enum. See
+- **`UndoAction`** — 12-variant undo enum. See
   [§5: UndoAction](#undoaction).
 - **`Void`** — no-op tree node. See [§2: Void](#void).
 - **`ZoomVisibility`** — presence-gating zoom window. See
