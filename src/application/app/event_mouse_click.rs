@@ -676,7 +676,8 @@ pub(super) fn handle_mouse_input(
                         // This always runs regardless of the throttle — on release
                         // we want the final position committed in full, even if
                         // the throttle was mid-stretch skipping intermediate drains.
-                        if i.pending_delta != Vec2::ZERO {
+                        let had_pending = i.pending_delta != Vec2::ZERO;
+                        if had_pending {
                             if let Some(tree) = mindmap_tree.as_mut() {
                                 for nid in &i.node_ids {
                                     apply_drag_delta(tree, nid, i.pending_delta.x, i.pending_delta.y, !i.individual);
@@ -692,6 +693,25 @@ pub(super) fn handle_mouse_input(
                                 original_positions: undo_data,
                             });
                             doc.dirty = true;
+
+                            // Under rapid drag the throttle can skip the last
+                            // drain or two, leaving `pending_delta` stranded
+                            // in the accumulator. The flush above syncs the
+                            // tree and `apply_move_multiple` above syncs the
+                            // model, but the `SceneConnectionCache`'s
+                            // `pre_clip_positions` still reflect the
+                            // second-to-last drain's `offsets` (short of the
+                            // committed position by `pending_delta`). The
+                            // subsequent `rebuild_all` → `rebuild_scene_only`
+                            // runs with empty offsets, so the cache's fast
+                            // path returns those stale samples and the edges
+                            // appear glued to the node's pre-flush position
+                            // until the next cache-invalidating event
+                            // (mutation or zoom). Clearing here forces a
+                            // resample from the now-authoritative model.
+                            if had_pending {
+                                scene_cache.clear();
+                            }
 
                             // Full rebuild from model
                             rebuild_all(doc, mindmap_tree, app_scene, renderer, scene_cache);
