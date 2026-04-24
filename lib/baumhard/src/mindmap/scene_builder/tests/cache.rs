@@ -338,6 +338,107 @@ fn test_cache_selection_change_does_not_invalidate() {
 }
 
 #[test]
+fn test_cache_fast_path_serves_stale_when_model_moved_without_offsets() {
+    // Regression for "edges stuck at pre-drag position after rapid
+    // node drag" (b41a638). The `MovingNode` throttle can skip the
+    // final drain or two under fast cursor motion, stranding
+    // `pending_delta` outside the cache. On release the tree is
+    // flushed and `apply_move_multiple` advances the model by
+    // `total_delta` — exceeding the cached `offsets = total_delta -
+    // pending_delta` that the last successful drain wrote. The
+    // follow-up `rebuild_scene_only` runs with empty offsets, so
+    // every edge hits the fast path here and returns the stale
+    // samples.
+    //
+    // This test pins the baumhard-side invariant: a cached entry
+    // whose endpoint has moved in the model (and not in the offsets
+    // map) is stale, and the cache-aware builder will serve it. The
+    // fix is for the release-side caller to invalidate the cache
+    // before the rebuild. If that clear is ever removed this test
+    // documents the invariant the caller must uphold.
+    let mut map = two_node_edge_map();
+
+    // Simulate a drag drain: offsets carry the current total_delta,
+    // populating the cache with samples at `model + offset`.
+    let mut cache = SceneConnectionCache::new();
+    let mut drain_offsets = HashMap::new();
+    drain_offsets.insert("a".to_string(), (30.0_f32, 0.0));
+    let _ = build_scene_with_cache(
+        &map,
+        &drain_offsets,
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+
+    // Overwrite the cache entry with a sentinel so we can observe
+    // whether the next build read through the cache (sentinel) or
+    // re-sampled (non-sentinel).
+    let key = EdgeKey::new("a", "b", "cross_link");
+    cache.insert(
+        key.clone(),
+        CachedConnection {
+            pre_clip_positions: vec![Vec2::new(123.0, 456.0)],
+            cap_start: None,
+            cap_end: None,
+            body_glyph: "STALE_SENTINEL".into(),
+            font: None,
+            font_size_pt: 12.0,
+            color: "#ff00ff".into(),
+        },
+    );
+
+    // Simulate release: `apply_move_multiple` commits the full
+    // `total_delta = drain_offset + pending_delta` to the model,
+    // advancing node `a` beyond where the drain sampled.
+    map.nodes.get_mut("a").unwrap().position.x = 35.0;
+
+    // Release's `rebuild_all` path: empty offsets. Endpoint `a` is
+    // not in offsets, so the fast path fires — and returns the
+    // sentinel, exactly as it returned the stale `pre_clip_positions`
+    // in production before the fix.
+    let without_clear = build_scene_with_cache(
+        &map,
+        &HashMap::new(),
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+    assert_eq!(
+        without_clear.connection_elements[0].body_glyph,
+        "STALE_SENTINEL",
+        "cache fast-path serves cached samples when neither endpoint appears in offsets, \
+         even if the model endpoint has moved since the entry was written"
+    );
+
+    // The fix: the release-side caller must clear the cache so the
+    // rebuild resamples from the committed model.
+    cache.clear();
+    let after_clear = build_scene_with_cache(
+        &map,
+        &HashMap::new(),
+        SceneSelectionContext::default(),
+        None,
+        None,
+        &mut cache,
+        1.0,
+    );
+    assert_ne!(
+        after_clear.connection_elements[0].body_glyph,
+        "STALE_SENTINEL",
+        "after scene_cache.clear() the rebuild must resample from the committed model"
+    );
+    assert!(
+        !after_clear.connection_elements[0].glyph_positions.is_empty(),
+        "freshly-sampled edge should emit glyphs"
+    );
+}
+
+#[test]
 fn test_scene_build_still_works_on_real_map() {
     // Smoke test: loading the testament map and building a scene
     // should not crash, and connections should still render (the
