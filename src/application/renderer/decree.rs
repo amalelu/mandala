@@ -69,8 +69,7 @@ impl Renderer {
                 // the shader applies the transform at draw time and
                 // the per-frame `MindMapTextBuffer::visible_at`
                 // check in `render.rs` handles viewport containment
-                // cheaply. No rebuild is needed, so no dirty flag
-                // is raised.
+                // cheaply.
             }
             RenderDecree::CameraZoom { screen_x, screen_y, factor } => {
                 self.camera.apply_mutation(

@@ -862,8 +862,7 @@ impl Renderer {
         self.camera.set_viewport_size(width, height);
         // Canvas-space glyph positions and shaped buffers survive a
         // viewport resize; the per-frame `visible_at` cull handles
-        // whether each buffer falls inside the new bounds. No
-        // rebuild is needed.
+        // whether each buffer falls inside the new bounds.
     }
 
 
