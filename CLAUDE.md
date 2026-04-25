@@ -14,6 +14,11 @@ borders, connection paths — is laid out as positioned font glyphs.
 
 ## Where to look first
 
+- **`CONCEPTS.md`** — the conceptual building-blocks reference: what
+  each named concept (`GlyphArea`, `MutatorTree`, `Channel`, `Portal`,
+  `ZoomVisibility`, `CustomMutation`, ...) is, what problem it solves,
+  and where it lives. Start here when a term is unfamiliar or for a
+  top-down orientation across both crates.
 - **`CODE_CONVENTIONS.md`** — the workspace-wide coding spec:
   architectural invariants, how to use baumhard, complexity and KISS
   heuristics, error-handling posture, and documentation standards.
