@@ -82,6 +82,8 @@ mod label_edit;
 #[cfg(not(target_arch = "wasm32"))]
 mod portal_label_drag;
 #[cfg(not(target_arch = "wasm32"))]
+mod run_headless;
+#[cfg(not(target_arch = "wasm32"))]
 mod run_native;
 #[cfg(not(target_arch = "wasm32"))]
 mod run_native_init;
@@ -571,7 +573,11 @@ impl Application {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn run(self) {
-        run_native::run(self)
+        if self.options.headless {
+            run_headless::run(self)
+        } else {
+            run_native::run(self)
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -629,6 +635,19 @@ pub struct Options {
     /// defaults). The event loop resolves this into a `ResolvedKeybinds`
     /// at startup and dispatches keyboard events through it.
     pub keybind_config: crate::application::keybinds::KeybindConfig,
+    /// Dev-only IPC server bind address. `Some(addr)` when launched
+    /// with `--ipc-port=N`; `None` for a normal interactive run.
+    /// Always `127.0.0.1` (loopback) — never accept network-supplied
+    /// hosts; this is a developer feedback tool, not a production
+    /// service. Excluded on WASM (no IPC server there).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub ipc_addr: Option<std::net::SocketAddr>,
+    /// `true` when launched with `--headless`. Skips winit window
+    /// creation and wgpu Renderer bootstrap; the binary runs as a
+    /// pure IPC server. Requires `ipc_addr.is_some()` (enforced at
+    /// CLI parse). Anthropic-VM / CI use case.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub headless: bool,
 }
 
 // Unit tests for pure helpers (cursor math, caret insertion,
