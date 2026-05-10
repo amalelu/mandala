@@ -47,6 +47,12 @@ pub(crate) mod common;
 pub(crate) mod console;
 pub(crate) mod document;
 pub(crate) mod frame_throttle;
+/// HTTP + SSE IPC server for the Claude Code feedback loop. Dev-only
+/// and native-only — gated behind the `--ipc-port` / `--headless`
+/// CLI flags and excluded from WASM by `cfg`. See `docs/ipc.md` and
+/// the module-level docs for the wire format.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod ipc;
 pub(crate) mod keybinds;
 pub(crate) mod macros;
 /// Platform-input value types — the inward seam over winit's
