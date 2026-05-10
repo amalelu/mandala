@@ -19,6 +19,8 @@ pub fn router(handle: IpcHandle) -> Router {
     Router::new()
         .route("/healthz", get(routes::healthz))
         .route("/state", get(routes::get_state))
+        .route("/state/document", get(routes::get_document))
+        .route("/scene", get(routes::get_scene))
         .route("/events", get(sse::events_handler))
         .with_state(handle)
 }

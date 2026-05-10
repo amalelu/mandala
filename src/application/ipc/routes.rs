@@ -55,6 +55,34 @@ pub async fn get_state(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("serialise: {e}")))
 }
 
+/// `GET /state/document` — just the `MindMap` JSON, read from the
+/// cached snapshot.
+pub async fn get_document(
+    State(handle): State<IpcHandle>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snap = handle
+        .snapshot
+        .read()
+        .map_err(|_| ApiError::unavailable("snapshot lock poisoned"))?;
+    match snap.document.mindmap.clone() {
+        Some(mm) => Ok(Json(mm)),
+        None => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no document loaded".into(),
+        )),
+    }
+}
+
+/// `GET /scene` — request a freshly-serialised view of the document
+/// from the main thread. Works in both windowed and headless modes;
+/// `/screenshot` is the windowed-only PNG version.
+pub async fn get_scene(
+    State(handle): State<IpcHandle>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let resp = run_on_main(&handle, IpcRequestPayload::Scene).await?;
+    response_into_json(resp)
+}
+
 /// Dispatch helper that posts a payload to the main thread and
 /// awaits the response on a fresh oneshot. Used by every mutating
 /// route handler.
