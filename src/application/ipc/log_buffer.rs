@@ -74,10 +74,14 @@ impl log::Log for IpcLogger {
     }
 }
 
-/// Replace the global `log` logger with an [`IpcLogger`]. Must be
-/// called once at startup, *before* the first `log!()` macro fires.
-/// Idempotent across reentry: a second call is a no-op because
-/// `log::set_boxed_logger` returns `Err` on the second install.
+/// Install the [`IpcLogger`] as the global `log` backend. Must be
+/// the FIRST and ONLY logger init for the process — call this from
+/// `main()` instead of `baumhard::util::log::init()` when launching
+/// with `--headless`. A panic-with-message is the right failure
+/// mode here per `CODE_CONVENTIONS §9` ("Startup paths use
+/// `expect(...)`"): if a logger is already installed when we get
+/// here, the wire promise of `/logs` and SSE `Log` events would
+/// silently break — we'd rather fail loudly at boot.
 pub fn init_with_ipc(buf: Arc<Mutex<VecDeque<LogLine>>>, event_tx: broadcast::Sender<IpcEvent>) {
     let inner = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
@@ -90,7 +94,8 @@ pub fn init_with_ipc(buf: Arc<Mutex<VecDeque<LogLine>>>, event_tx: broadcast::Se
         seq: AtomicU64::new(0),
     };
     log::set_max_level(log::LevelFilter::Trace);
-    let _ = log::set_boxed_logger(Box::new(logger));
+    log::set_boxed_logger(Box::new(logger))
+        .expect("install IpcLogger — another logger already installed");
 }
 
 /// Filter the ring buffer by the per-request `since` cursor and

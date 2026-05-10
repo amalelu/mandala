@@ -6,23 +6,45 @@
 
 use std::net::SocketAddr;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 use super::routes;
 use super::sse;
 use super::IpcHandle;
 
-/// Build the route table. Read-only paths today (`/healthz`,
-/// `/state`, `/events`); the mutating routes land in a follow-up.
+/// Build the route table.
+///
+/// Two tiers of routes:
+///
+/// 1. **Implemented today** — snapshot-derived GETs (`/healthz`,
+///    `/state`, `/state/document`, `/actions`) and the SSE stream
+///    (`/events`).
+/// 2. **Deferred** — registered with stub handlers that route through
+///    `routes::run_on_main` → `handle_main_stub` and return 503 with a
+///    machine-readable `not implemented yet` body so clients see a
+///    documented surface rather than 404. Replaced by real handlers
+///    in the next milestone. Per CLAUDE.md §3, the deferral is
+///    explicit at the route table rather than hidden by absent routes.
 pub fn router(handle: IpcHandle) -> Router {
     Router::new()
+        // Implemented.
         .route("/healthz", get(routes::healthz))
         .route("/state", get(routes::get_state))
         .route("/state/document", get(routes::get_document))
-        .route("/scene", get(routes::get_scene))
         .route("/actions", get(routes::list_actions))
         .route("/events", get(sse::events_handler))
+        // Deferred — 503 stubs.
+        .route("/state/selection", get(routes::stub_get))
+        .route("/state/camera", get(routes::stub_get))
+        .route("/state/console", get(routes::stub_get))
+        .route("/state/interaction_mode", get(routes::stub_get))
+        .route("/logs", get(routes::stub_get))
+        .route("/hit_test", get(routes::stub_hit_test))
+        .route("/screenshot", get(routes::stub_screenshot))
+        .route("/actions/dispatch", post(routes::stub_dispatch_action))
+        .route("/console", post(routes::stub_console))
+        .route("/mutations/:id", post(routes::stub_custom_mutation))
         .with_state(handle)
 }
 

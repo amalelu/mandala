@@ -55,6 +55,17 @@ fn parse_cli() -> CliArgs {
         eprintln!("--headless requires --ipc-port=<port>");
         std::process::exit(2);
     }
+    // Windowed IPC wiring is a later milestone — until it lands,
+    // `--ipc-port` only does something useful with `--headless`. Rejecting
+    // the combo at parse time keeps the CLI contract honest (per CLAUDE.md
+    // §3: deviations from the documented options must be explicit).
+    if ipc_addr.is_some() && !headless {
+        eprintln!(
+            "--ipc-port currently requires --headless; windowed-mode IPC \
+             wiring is not yet implemented"
+        );
+        std::process::exit(2);
+    }
     CliArgs {
         mindmap_path: mindmap_path.unwrap_or_else(|| DEFAULT_MINDMAP.to_string()),
         keybinds_path,
@@ -118,12 +129,23 @@ fn create_options() -> Options {
 // drive the dev-only HTTP IPC server which doesn't exist on WASM.
 
 fn main() {
-    baumhard::util::log::init();
+    // Logger install must happen before any `log::*!` macro fires.
+    // Headless mode owns its own logger (the IPC tee-logger replaces
+    // env_logger entirely so `/logs` and SSE `Log` events see records);
+    // the windowed and WASM paths use the standard baumhard init.
     #[cfg(not(target_arch = "wasm32"))]
-    info!("Starting Mandala (native)");
+    {
+        let options = create_options();
+        if !options.headless {
+            baumhard::util::log::init();
+            info!("Starting Mandala (native)");
+        }
+        Application::new(options).run();
+    }
     #[cfg(target_arch = "wasm32")]
-    info!("Starting Mandala (WASM)");
-
-    let app = Application::new(create_options());
-    app.run();
+    {
+        baumhard::util::log::init();
+        info!("Starting Mandala (WASM)");
+        Application::new(create_options()).run();
+    }
 }

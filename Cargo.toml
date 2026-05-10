@@ -60,12 +60,13 @@ arboard = "3.6.1"
 # the WASM build is unaffected.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 axum = { version = "0.7", features = ["json", "macros", "tokio"] }
-tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 crossbeam-channel = "0.5"
 png = "0.17"
 env_logger = "0.11"
+# `tower` / `tower-http` will be added when they're actually used
+# (integration-test harness via `ServiceExt::oneshot`; CORS at the
+# next milestone). CODE_CONVENTIONS §5 forbids dead dependencies.
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.118"

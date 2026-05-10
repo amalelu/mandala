@@ -9,7 +9,7 @@
 /// eligible for a given key event. Each context has a parent;
 /// if the context allows fallthrough, unmatched keys try the
 /// parent. The root is `Document`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum_macros::IntoStaticStr)]
 pub enum InputContext {
     /// No modal open. All global actions are eligible.
     Document,

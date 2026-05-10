@@ -29,6 +29,12 @@ use crate::application::ipc::{
     self, log_buffer, IpcEvent, IpcRequest, IpcRequestPayload, IpcResponse, RequestSink, RunMode,
 };
 
+/// ~60 Hz idle wake-up. Each tick the loop processes any queued IPC
+/// requests and republishes the state snapshot. The cadence matches
+/// the windowed renderer's redraw frequency so future animations
+/// step at a comparable rate when driven through IPC.
+const HEADLESS_TICK: Duration = Duration::from_millis(16);
+
 /// Headless-mode application state. Owns the document and any
 /// future cross-platform model state. No window, no renderer.
 struct HeadlessState {
@@ -37,20 +43,23 @@ struct HeadlessState {
 
 impl HeadlessState {
     fn new(mindmap_path: &str) -> Self {
-        let document = match MindMapDocument::load(mindmap_path) {
+        match MindMapDocument::load(mindmap_path) {
             Ok(mut doc) => {
                 let (app_mutations, user_mutations) =
                     crate::application::document::mutations_loader::load_app_and_user(None);
                 doc.build_mutation_registry_with_app_and_user(&app_mutations, &user_mutations);
                 crate::application::document::mutations::register_builtin_handlers(&mut doc);
-                Some(doc)
+                Self { document: Some(doc) }
             }
             Err(e) => {
-                log::error!("headless: failed to load `{mindmap_path}`: {e}");
-                None
+                // Startup-path: a missing/invalid mindmap is fatal. There is
+                // no in-band way to recover today (no `POST /console open ...`
+                // route yet). Exit code 2 matches the CLI-error idiom used
+                // by `parse_cli` for `--headless`/`--ipc-port` mismatches.
+                eprintln!("headless: failed to load `{mindmap_path}`: {e}");
+                std::process::exit(2);
             }
-        };
-        Self { document }
+        }
     }
 
     fn build_snapshot(&self) -> StateSnapshot {
@@ -82,14 +91,20 @@ pub(super) fn run(app: Application) {
 
     let (req_tx, req_rx) = crossbeam_channel::unbounded::<IpcRequest>();
     let snapshot = Arc::new(RwLock::new(StateSnapshot::default()));
-    let (event_tx, _event_rx_dropper) =
-        tokio::sync::broadcast::channel::<IpcEvent>(1024);
+    // The initial receiver is dropped immediately on purpose — capacity
+    // and aliveness are owned by the `Sender`. SSE handlers `subscribe()`
+    // their own receiver per connection.
+    let (event_tx, _) = tokio::sync::broadcast::channel::<IpcEvent>(1024);
     let log_buf = Arc::new(Mutex::new(VecDeque::with_capacity(
         log_buffer::LOG_RING_CAPACITY,
     )));
 
-    // Install the tee logger before the IPC thread starts so the
-    // first server log lines are captured.
+    // Install the tee logger as the FIRST and ONLY logger init for the
+    // process. `main()` skips `baumhard::util::log::init()` when
+    // `--headless` is set so this call wins the global `log` backend
+    // unopposed; if it didn't, `/logs` and SSE `Log` events would be
+    // silent (the second `set_boxed_logger` would `Err` and the new
+    // logger would be dropped). See CODE_CONVENTIONS §9.
     log_buffer::init_with_ipc(log_buf.clone(), event_tx.clone());
 
     ipc::boot(
@@ -111,15 +126,14 @@ pub(super) fn run(app: Application) {
         "mandala headless: serving IPC on {addr} (no window, no wgpu); ctrl-c to exit"
     );
 
-    // Tick loop: handle pending requests, then re-publish the
-    // snapshot so /state reflects any mutations. Naps up to one
-    // tick when idle.
-    let tick = Duration::from_millis(16);
+    // Tick loop: handle pending requests then republish the snapshot.
+    // We republish every tick — not only after a request — so future
+    // animations, timer-driven mutations, and the planned
+    // SelectionChanged SSE diff work correctly when the loop is
+    // idle-from-HTTP but the model is evolving on its own.
     loop {
-        let mut had_request = false;
-        match req_rx.recv_timeout(tick) {
+        match req_rx.recv_timeout(HEADLESS_TICK) {
             Ok(req) => {
-                had_request = true;
                 let resp = handle_request(&mut state, req.payload);
                 let _ = req.responder.send(resp);
                 while let Ok(req) = req_rx.try_recv() {
@@ -130,9 +144,7 @@ pub(super) fn run(app: Application) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        if had_request {
-            *snapshot.write().expect("snapshot lock") = state.build_snapshot();
-        }
+        *snapshot.write().expect("snapshot lock") = state.build_snapshot();
     }
 }
 
@@ -142,22 +154,10 @@ fn handle_request(state: &mut HeadlessState, payload: IpcRequestPayload) -> IpcR
         IpcRequestPayload::FullState => IpcResponse::Ok(
             serde_json::to_value(state.build_snapshot()).unwrap_or(serde_json::Value::Null),
         ),
-        IpcRequestPayload::Scene => match state.document.as_ref() {
-            Some(doc) => match serde_json::to_value(&doc.mindmap) {
-                Ok(v) => IpcResponse::Ok(v),
-                Err(e) => IpcResponse::Err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("scene serialise: {e}"),
-                ),
-            },
-            None => IpcResponse::Err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no document loaded".into(),
-            ),
-        },
         IpcRequestPayload::Screenshot { .. } => IpcResponse::Err(
             StatusCode::NOT_IMPLEMENTED,
-            "screenshot unavailable in headless mode; use /scene for the document JSON".into(),
+            "screenshot unavailable in headless mode; render the document JSON via /state/document"
+                .into(),
         ),
         other => crate::application::ipc::routes::handle_main_stub(other),
     }

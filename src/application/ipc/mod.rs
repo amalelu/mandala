@@ -71,14 +71,13 @@ pub enum IpcRequestPayload {
     /// `GET /screenshot?width=&height=` — windowed-only; returns
     /// 501 in headless.
     Screenshot { width: u32, height: u32 },
-    /// `GET /scene` — returns the `RenderScene` JSON. Works in
-    /// both windowed and headless modes.
-    Scene,
     /// `GET /hit_test?x=&y=` — returns the document hit at canvas
     /// coordinates `(x, y)`.
     HitTest { x: f64, y: f64 },
     /// `GET /state` fallback when the snapshot is stale (e.g. first
-    /// frame before the main thread has run a drain).
+    /// frame before the main thread has run a drain). Also used by
+    /// the deferred-route stubs (`/state/{selection,camera,...}`,
+    /// `/logs`) until they get dedicated dispatcher arms.
     FullState,
 }
 

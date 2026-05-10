@@ -12,20 +12,26 @@ use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::{Stream, StreamExt};
 use serde::Serialize;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 
 use super::log_buffer::LogLine;
 use super::state_view::SelectionView;
 use super::IpcHandle;
+use crate::application::keybinds::Action;
 
 /// One event broadcast to SSE subscribers. Serialised as JSON with
 /// an externally-tagged `type` field (e.g.
 /// `{"type":"selection_changed", ...}`) so clients can switch on it.
+///
+/// `Action` is carried by its typed serde form rather than a
+/// `serde_json::Value` so variant renames stay caught at the
+/// compiler boundary instead of silently drifting on the wire.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcEvent {
     SelectionChanged { selection: SelectionView },
-    ActionDispatched { action: serde_json::Value, outcome: String },
+    ActionDispatched { action: Action, outcome: String },
     MutationApplied { id: String, target: Option<String> },
     FrameRendered { ts_ms: u64 },
     Log(LogLine),
@@ -42,7 +48,13 @@ pub async fn events_handler(
                 Ok(e) => Some(Ok(e)),
                 Err(_) => None,
             },
-            Err(_lag) => Some(Ok(Event::default().event("lagged").data("dropped"))),
+            // The broadcast channel dropped events because this
+            // subscriber was too slow. Surface the dropped count so
+            // clients can decide whether to reconnect or live with
+            // the gap.
+            Err(BroadcastStreamRecvError::Lagged(n)) => {
+                Some(Ok(Event::default().event("lagged").data(n.to_string())))
+            }
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
