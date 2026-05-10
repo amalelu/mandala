@@ -83,6 +83,27 @@ pub async fn get_scene(
     response_into_json(resp)
 }
 
+/// `GET /actions` — list every Action variant the binary knows
+/// about along with its classifier metadata (destructive flag,
+/// input context, WASM compatibility). Snapshot-derived, so no
+/// main-thread round-trip.
+pub async fn list_actions() -> Json<serde_json::Value> {
+    use crate::application::keybinds::ActionKind;
+    use strum::IntoEnumIterator;
+
+    let entries: Vec<serde_json::Value> = ActionKind::iter()
+        .map(|k| {
+            serde_json::json!({
+                "kind": format!("{k:?}"),
+                "destructive": k.is_destructive(),
+                "context": format!("{:?}", k.context()),
+                "wasm_compatibility": format!("{:?}", k.wasm_compatibility()),
+            })
+        })
+        .collect();
+    Json(serde_json::Value::Array(entries))
+}
+
 /// Dispatch helper that posts a payload to the main thread and
 /// awaits the response on a fresh oneshot. Used by every mutating
 /// route handler.
