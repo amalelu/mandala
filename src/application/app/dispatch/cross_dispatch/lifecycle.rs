@@ -66,7 +66,7 @@ pub(in crate::application::app) fn apply_create_orphan_node_and_edit(
         text_edit_state,
         rc.mindmap_tree,
         rc.app_scene,
-        rc.renderer,
+        rc.host,
     );
 }
 
@@ -178,7 +178,7 @@ pub(in crate::application::app) fn apply_enter_node_edit(
                 text_edit_state,
                 rc.mindmap_tree,
                 rc.app_scene,
-                rc.renderer,
+                rc.host,
             );
             true
         }
@@ -267,7 +267,7 @@ pub(in crate::application::app) fn apply_enter_section_edit(
                 text_edit_state,
                 rc.mindmap_tree,
                 rc.app_scene,
-                rc.renderer,
+                rc.host,
             );
             true
         }

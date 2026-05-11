@@ -18,10 +18,9 @@
 
 use crate::application::common::RenderDecree;
 use crate::application::document::{MindMapDocument, OptionEdit, SelectionState};
-use crate::application::renderer::Renderer;
 use baumhard::mindmap::tree_builder::MindMapTree;
 
-use super::{apply_with_rebuild, RebuildContext};
+use super::{apply_with_rebuild, RebuildContext, RebuildHost};
 
 /// Direction of a single keyboard / wheel zoom step. Typed so
 /// callers don't have to pass `&Action` and the helper doesn't
@@ -38,13 +37,13 @@ pub(in crate::application::app) enum ZoomDir {
 pub(in crate::application::app) fn apply_zoom_step(
     dir: ZoomDir,
     cursor_pos: (f64, f64),
-    renderer: &mut Renderer,
+    host: &mut dyn RebuildHost,
 ) {
     let factor = match dir {
         ZoomDir::In => 1.1f32,
         ZoomDir::Out => 1.0f32 / 1.1f32,
     };
-    renderer.process_decree(RenderDecree::CameraZoom {
+    host.process_decree(RenderDecree::CameraZoom {
         screen_x: cursor_pos.0 as f32,
         screen_y: cursor_pos.1 as f32,
         factor,
@@ -59,11 +58,11 @@ pub(in crate::application::app) fn apply_zoom_step(
 /// place. Computing the factor inverse against current zoom keeps
 /// the multiplicative path; using screen-centre as the focus
 /// cancels the position shift algebraically.
-pub(in crate::application::app) fn apply_zoom_reset(renderer: &mut Renderer) {
-    let zoom = renderer.camera_zoom().max(f32::EPSILON);
-    renderer.process_decree(RenderDecree::CameraZoom {
-        screen_x: renderer.surface_width() as f32 * 0.5,
-        screen_y: renderer.surface_height() as f32 * 0.5,
+pub(in crate::application::app) fn apply_zoom_reset(host: &mut dyn RebuildHost) {
+    let zoom = host.camera_zoom().max(f32::EPSILON);
+    host.process_decree(RenderDecree::CameraZoom {
+        screen_x: host.surface_width() as f32 * 0.5,
+        screen_y: host.surface_height() as f32 * 0.5,
         factor: 1.0f32 / zoom,
     });
 }
@@ -72,10 +71,10 @@ pub(in crate::application::app) fn apply_zoom_reset(renderer: &mut Renderer) {
 /// tree has been built yet.
 pub(in crate::application::app) fn apply_zoom_fit(
     mindmap_tree: &Option<MindMapTree>,
-    renderer: &mut Renderer,
+    host: &mut dyn RebuildHost,
 ) {
     if let Some(tree) = mindmap_tree.as_ref() {
-        renderer.fit_camera_to_tree(&tree.tree);
+        host.fit_camera_to_tree(&tree.tree);
     }
 }
 
@@ -94,7 +93,7 @@ pub(in crate::application::app) enum PanDir {
 /// Keyboard nudge — fixed step in screen pixels, then converted
 /// to a `CameraPan` decree like the LeftDrag path emits per cursor
 /// move. Step size matches a coarse but perceptible nudge.
-pub(in crate::application::app) fn apply_pan_camera(dir: PanDir, renderer: &mut Renderer) {
+pub(in crate::application::app) fn apply_pan_camera(dir: PanDir, host: &mut dyn RebuildHost) {
     const PAN_STEP_PX: f32 = 50.0;
     let (dx, dy) = match dir {
         PanDir::North => (0.0, -PAN_STEP_PX),
@@ -102,7 +101,7 @@ pub(in crate::application::app) fn apply_pan_camera(dir: PanDir, renderer: &mut 
         PanDir::East => (-PAN_STEP_PX, 0.0),
         PanDir::West => (PAN_STEP_PX, 0.0),
     };
-    renderer.process_decree(RenderDecree::CameraPan(dx, dy));
+    host.process_decree(RenderDecree::CameraPan(dx, dy));
 }
 
 /// Centre the camera on the centroid of the currently-selected
@@ -110,7 +109,7 @@ pub(in crate::application::app) fn apply_pan_camera(dir: PanDir, renderer: &mut 
 /// portal-marker selection, which carries no point centroid).
 pub(in crate::application::app) fn apply_center_on_selection(
     document: &MindMapDocument,
-    renderer: &mut Renderer,
+    host: &mut dyn RebuildHost,
 ) {
     let ids: Vec<&str> = document.selection.selected_ids();
     if ids.is_empty() {
@@ -125,7 +124,7 @@ pub(in crate::application::app) fn apply_center_on_selection(
         }
     }
     if count > 0 {
-        renderer.set_camera_center(sum / count as f32);
+        host.set_camera_center(sum / count as f32);
     }
 }
 
@@ -152,10 +151,12 @@ pub(in crate::application::app) fn jump_to_root_in(doc: &mut MindMapDocument) ->
 /// it. No-op when the document is empty.
 pub(in crate::application::app) fn apply_jump_to_root(rc: &mut RebuildContext<'_>) {
     if let Some(centre) = jump_to_root_in(rc.document) {
-        rc.renderer.set_camera_center(centre);
+        rc.host.set_camera_center(centre);
         rc.rebuild_after_selection_change();
     }
 }
+
+// rc.host accessor is on the trait — see `super::RebuildHost`.
 
 /// Set the per-element zoom-visibility window (`min_zoom_to_render`,
 /// `max_zoom_to_render`) on every node / edge / portal in the

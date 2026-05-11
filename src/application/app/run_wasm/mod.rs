@@ -170,7 +170,7 @@ impl WasmInputState {
             document: Some(&mut self.document),
             mindmap_tree: &mut self.mindmap_tree,
             app_scene: &mut self.app_scene,
-            renderer,
+            host: renderer,
             scene_cache: &mut self.scene_cache,
             text_edit_state: &mut self.text_edit_state,
             last_click: &mut self.last_click,

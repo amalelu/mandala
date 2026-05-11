@@ -36,9 +36,9 @@ use crate::application::platform::input::Modifiers as ModifiersState;
 use crate::application::document::MindMapDocument;
 use crate::application::keybinds::ResolvedKeybinds;
 use crate::application::macros::MacroRegistry;
-use crate::application::renderer::Renderer;
 use crate::application::scene_host::AppScene;
 
+use super::dispatch::cross_dispatch::RebuildHost;
 use super::text_edit::TextEditState;
 use super::LastClick;
 
@@ -67,8 +67,12 @@ pub(in crate::application::app) struct InputContextCore<'a> {
     pub mindmap_tree: &'a mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     /// App-layer scene host owning every tree-rendered component.
     pub app_scene: &'a mut AppScene,
-    /// The active renderer.
-    pub renderer: &'a mut Renderer,
+    /// Renderer-side host: camera reads/writes, FPS toggles, scene-
+    /// buffer rebuilds, and hitbox updates. Native binds this to the
+    /// real [`crate::application::renderer::Renderer`]; headless
+    /// binds it to a no-op host with virtual camera state so
+    /// `dispatch_compatible` and `rebuild_all` work GPU-less.
+    pub host: &'a mut dyn RebuildHost,
     /// Per-edge connection glyph cache.
     pub scene_cache: &'a mut baumhard::mindmap::scene_cache::SceneConnectionCache,
     /// Inline node text editor state — modal-steal target on both

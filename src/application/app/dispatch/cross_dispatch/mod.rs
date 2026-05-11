@@ -51,11 +51,17 @@
 //! keep the existing `super::cross_dispatch::apply_*` import
 //! surface working unchanged.
 
+use crate::application::common::{FpsDisplayMode, RenderDecree};
 use crate::application::document::MindMapDocument;
 use crate::application::renderer::Renderer;
 use crate::application::scene_host::AppScene;
-use baumhard::mindmap::scene_cache::SceneConnectionCache;
+use baumhard::gfx_structs::element::GfxElement;
+use baumhard::gfx_structs::mutator::GfxMutator;
+use baumhard::gfx_structs::tree::Tree;
+use baumhard::mindmap::scene_cache::{EdgeKey, SceneConnectionCache};
 use baumhard::mindmap::tree_builder::MindMapTree;
+use glam::Vec2;
+use std::collections::HashMap;
 
 use super::super::scene_rebuild::rebuild_all;
 
@@ -76,6 +82,122 @@ pub(in crate::application::app) use fps::*;
 pub(in crate::application::app) use lifecycle::*;
 pub(in crate::application::app) use selection::*;
 pub(in crate::application::app) use style::*;
+
+/// Abstract surface every cross-platform `Action` arm + the scene
+/// rebuild plumbing uses on the rendering side. Native binds to
+/// the real [`Renderer`]; headless binds to a no-op host with a
+/// virtual camera so `dispatch_compatible` and `rebuild_all` work
+/// against a GPU-less app.
+///
+/// **Scope.** Strictly the methods reached from
+/// [`super::action_core::dispatch_compatible`], its helpers
+/// ([`apply_zoom_step`], [`apply_pan_camera`],
+/// [`apply_toggle_fps`], …), and
+/// [`super::super::scene_rebuild::rebuild_all`]. Modal flows
+/// (color picker, label editor, console) keep using `&mut Renderer`
+/// directly because they're native-only and unreachable from
+/// headless dispatch.
+///
+/// **Naming.** Camera reads are `&self`, camera writes are
+/// `&mut self`. Each method mirrors a `Renderer` method 1:1 so
+/// the impl is a thin forward; a future widening can absorb
+/// additional methods without changing call sites.
+pub(in crate::application::app) trait RebuildHost {
+    // ── Camera reads ────────────────────────────────────────────
+    fn camera_zoom(&self) -> f32;
+    fn surface_width(&self) -> u32;
+    fn surface_height(&self) -> u32;
+    fn fps_display_mode(&self) -> FpsDisplayMode;
+
+    // ── Camera writes ───────────────────────────────────────────
+    fn process_decree(&mut self, decree: RenderDecree);
+    fn set_camera_center(&mut self, target: Vec2);
+    fn fit_camera_to_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>);
+    fn set_fps_display(&mut self, mode: FpsDisplayMode);
+
+    // ── Rebuild plumbing ────────────────────────────────────────
+    fn rebuild_buffers_from_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>);
+    fn rebuild_canvas_scene_buffers(&mut self, app_scene: &mut AppScene);
+    fn set_mode_status_text(&mut self, text: Option<String>);
+    fn set_portal_icon_hitboxes(
+        &mut self,
+        hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    );
+    fn set_portal_text_hitboxes(
+        &mut self,
+        hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    );
+    fn set_connection_label_hitboxes(&mut self, hitboxes: HashMap<EdgeKey, (Vec2, Vec2)>);
+
+    // ── Geometry ────────────────────────────────────────────────
+    fn screen_to_canvas(&self, screen_x: f32, screen_y: f32) -> Vec2;
+    fn reshape_buffer_for(
+        &mut self,
+        arena_id: indextree::NodeId,
+        tree: &Tree<GfxElement, GfxMutator>,
+    );
+}
+
+impl RebuildHost for Renderer {
+    fn camera_zoom(&self) -> f32 {
+        Renderer::camera_zoom(self)
+    }
+    fn surface_width(&self) -> u32 {
+        Renderer::surface_width(self)
+    }
+    fn surface_height(&self) -> u32 {
+        Renderer::surface_height(self)
+    }
+    fn fps_display_mode(&self) -> FpsDisplayMode {
+        Renderer::fps_display_mode(self)
+    }
+    fn process_decree(&mut self, decree: RenderDecree) {
+        Renderer::process_decree(self, decree)
+    }
+    fn set_camera_center(&mut self, target: Vec2) {
+        Renderer::set_camera_center(self, target)
+    }
+    fn fit_camera_to_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>) {
+        Renderer::fit_camera_to_tree(self, tree)
+    }
+    fn set_fps_display(&mut self, mode: FpsDisplayMode) {
+        Renderer::set_fps_display(self, mode)
+    }
+    fn rebuild_buffers_from_tree(&mut self, tree: &Tree<GfxElement, GfxMutator>) {
+        Renderer::rebuild_buffers_from_tree(self, tree)
+    }
+    fn rebuild_canvas_scene_buffers(&mut self, app_scene: &mut AppScene) {
+        Renderer::rebuild_canvas_scene_buffers(self, app_scene)
+    }
+    fn set_mode_status_text(&mut self, text: Option<String>) {
+        Renderer::set_mode_status_text(self, text)
+    }
+    fn set_portal_icon_hitboxes(
+        &mut self,
+        hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    ) {
+        Renderer::set_portal_icon_hitboxes(self, hitboxes)
+    }
+    fn set_portal_text_hitboxes(
+        &mut self,
+        hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    ) {
+        Renderer::set_portal_text_hitboxes(self, hitboxes)
+    }
+    fn set_connection_label_hitboxes(&mut self, hitboxes: HashMap<EdgeKey, (Vec2, Vec2)>) {
+        Renderer::set_connection_label_hitboxes(self, hitboxes)
+    }
+    fn screen_to_canvas(&self, screen_x: f32, screen_y: f32) -> Vec2 {
+        Renderer::screen_to_canvas(self, screen_x, screen_y)
+    }
+    fn reshape_buffer_for(
+        &mut self,
+        arena_id: indextree::NodeId,
+        tree: &Tree<GfxElement, GfxMutator>,
+    ) {
+        Renderer::reshape_buffer_for(self, arena_id, tree)
+    }
+}
 
 /// Pure inner helper for the keybind-triggered custom-mutation path.
 /// Runs the same animation-aware apply + always-`apply_document_actions`
@@ -147,7 +269,7 @@ pub(in crate::application::app) struct RebuildContext<'a> {
     pub document: &'a mut MindMapDocument,
     pub mindmap_tree: &'a mut Option<MindMapTree>,
     pub app_scene: &'a mut AppScene,
-    pub renderer: &'a mut Renderer,
+    pub host: &'a mut dyn RebuildHost,
     pub scene_cache: &'a mut SceneConnectionCache,
     /// Active interaction mode. Mutable because `EnterResizeMode` /
     /// `ExitMode` / `EnterReparentMode` etc. dispatch arms write
@@ -177,7 +299,7 @@ impl<'a> RebuildContext<'a> {
             &*self.interaction_mode,
             self.mindmap_tree,
             self.app_scene,
-            self.renderer,
+            self.host,
             self.scene_cache,
         );
     }
@@ -195,7 +317,7 @@ impl<'a> RebuildContext<'a> {
             &*self.interaction_mode,
             self.mindmap_tree,
             self.app_scene,
-            self.renderer,
+            self.host,
             self.scene_cache,
         );
     }
@@ -220,7 +342,7 @@ macro_rules! rebuild_ctx {
             document: $doc,
             mindmap_tree: $ctx.mindmap_tree,
             app_scene: $ctx.app_scene,
-            renderer: $ctx.renderer,
+            host: $ctx.host,
             scene_cache: $ctx.scene_cache,
             interaction_mode: $ctx.interaction_mode,
         }

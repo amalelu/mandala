@@ -128,7 +128,7 @@ impl<'a> InputHandlerContext<'a> {
                 document: self.document.as_mut(),
                 mindmap_tree: &mut *self.mindmap_tree,
                 app_scene: &mut *self.app_scene,
-                renderer: &mut *self.renderer,
+                host: &mut *self.renderer,
                 scene_cache: &mut *self.scene_cache,
                 text_edit_state: &mut *self.text_edit_state,
                 last_click: &mut *self.last_click,

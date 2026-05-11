@@ -255,7 +255,7 @@ fn handle_post_rebuild_side_effect(
                 document: doc,
                 mindmap_tree,
                 app_scene,
-                renderer,
+                host: renderer,
                 scene_cache,
                 interaction_mode,
             };

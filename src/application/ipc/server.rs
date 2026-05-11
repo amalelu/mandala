@@ -34,11 +34,14 @@ pub fn router(handle: IpcHandle) -> Router {
         .route("/state/document", get(routes::get_document))
         .route("/actions", get(routes::list_actions))
         .route("/events", get(sse::events_handler))
+        // Substate projections from the live snapshot (no main-thread
+        // round-trip; the headless / windowed tick already publishes a
+        // fresh snapshot on each frame).
+        .route("/state/selection", get(routes::get_selection))
+        .route("/state/camera", get(routes::get_camera))
+        .route("/state/interaction_mode", get(routes::get_interaction_mode))
         // Deferred — 503 stubs.
-        .route("/state/selection", get(routes::stub_get))
-        .route("/state/camera", get(routes::stub_get))
         .route("/state/console", get(routes::stub_get))
-        .route("/state/interaction_mode", get(routes::stub_get))
         .route("/logs", get(routes::stub_get))
         .route("/hit_test", get(routes::stub_hit_test))
         .route("/screenshot", get(routes::stub_screenshot))

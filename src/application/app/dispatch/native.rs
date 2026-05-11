@@ -239,7 +239,7 @@ pub(in crate::application::app) fn dispatch_action(
                     document: doc,
                     mindmap_tree: core.mindmap_tree,
                     app_scene: core.app_scene,
-                    renderer: core.renderer,
+                    host: core.host,
                     scene_cache: core.scene_cache,
                     interaction_mode: core.interaction_mode,
                 };
@@ -261,7 +261,7 @@ pub(in crate::application::app) fn dispatch_action(
                     document: doc,
                     mindmap_tree: core.mindmap_tree,
                     app_scene: core.app_scene,
-                    renderer: core.renderer,
+                    host: core.host,
                     scene_cache: core.scene_cache,
                     interaction_mode: core.interaction_mode,
                 };

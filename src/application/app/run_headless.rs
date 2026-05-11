@@ -24,7 +24,7 @@ use crossbeam_channel::RecvTimeoutError;
 
 use super::Application;
 use crate::application::document::MindMapDocument;
-use crate::application::ipc::state_view::{DocumentView, SelectionView, StateSnapshot};
+use crate::application::ipc::state_view::{CameraView, DocumentView, SelectionView, StateSnapshot};
 use crate::application::ipc::{
     self, log_buffer, IpcEvent, IpcRequest, IpcRequestPayload, IpcResponse, RequestSink, RunMode,
 };
@@ -39,9 +39,225 @@ const HEADLESS_TICK: Duration = Duration::from_millis(16);
 /// future cross-platform model state. No window, no renderer.
 struct HeadlessState {
     document: Option<MindMapDocument>,
+    /// Virtual camera. Headless has no canvas so this isn't a real
+    /// viewport; agents can still drive it via `Action::ZoomIn` /
+    /// `PanCameraNorth` / etc. The state is read by `/state/camera`
+    /// so an agent can build a consistent mental model of "where is
+    /// the camera now." Defaults to the same `Camera2D::default()`
+    /// shape the renderer boots with (centre at origin, zoom 1.0).
+    camera: baumhard::gfx_structs::camera::Camera2D,
+    /// Mirror of `Renderer.fps_display_mode` so `Action::ToggleFps` /
+    /// `ToggleFpsDebug` round-trip through the dispatcher cleanly.
+    /// Has no visible effect in headless; future `/state` consumers
+    /// can read it.
+    fps_mode: crate::application::common::FpsDisplayMode,
+    /// Cached `mindmap_tree` projection — rebuilt on each dispatch
+    /// via `rebuild_all`. `Option` to match the windowed shape
+    /// (`InitState.mindmap_tree`) and the `InputContextCore`
+    /// signature.
+    mindmap_tree: Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    /// Per-edge connection sample cache. Real wgpu builds clear /
+    /// repopulate this every rebuild; in headless it's purely
+    /// internal state the dispatcher's `apply_*` arms touch.
+    scene_cache: baumhard::mindmap::scene_cache::SceneConnectionCache,
+    /// App-scene slot table. Same posture as `scene_cache`: shape-
+    /// only state, no GPU resources.
+    app_scene: crate::application::scene_host::AppScene,
+    /// Cross-platform interaction mode. Headless will rarely leave
+    /// `Default`, but `Action::EnterReparentMode` etc. need somewhere
+    /// to write — and `/state/interaction_mode` reads from here.
+    interaction_mode: crate::application::app::InteractionMode,
+    /// Cross-platform text-edit modal state. Mirrors
+    /// `InputContextCore.text_edit_state` so `Action::TextEditCancel`
+    /// / `TextEditCommit` find a target. Headless never has an open
+    /// text editor — the dispatcher path is essentially a no-op —
+    /// but the field has to exist.
+    text_edit_state: crate::application::app::text_edit::TextEditState,
+    /// Last click — required by `InputContextCore`. Headless emits
+    /// none; the field is permanently `None`.
+    last_click: Option<crate::application::app::LastClick>,
+    /// Cursor position in synthetic screen space. Defaults to (0,0).
+    /// `Action::ZoomIn` reads it to compute the zoom anchor; agents
+    /// could in principle write to it via a future endpoint.
+    cursor_pos: (f64, f64),
+    /// Empty resolved keybinds — headless dispatch never resolves
+    /// keys from gestures, but the funnel reads `keybinds` for a
+    /// handful of binding-existence queries.
+    keybinds: crate::application::keybinds::ResolvedKeybinds,
+    /// Empty modifier state.
+    modifiers: crate::application::platform::input::Modifiers,
+    /// Macro registry — populated alongside the document.
+    macros: crate::application::macros::MacroRegistry,
+}
+
+/// `RebuildHost` impl for headless mode. Every method is a no-op
+/// except:
+/// - camera reads (`camera_zoom`, `surface_width/height`,
+///   `screen_to_canvas`) return values derived from the virtual
+///   camera so dispatch arms that read these (e.g. `apply_zoom_step`
+///   anchors to cursor, `screen_to_canvas` for orphan creation)
+///   produce sensible outputs;
+/// - `process_decree` interprets `RenderDecree::Camera*` against the
+///   virtual camera state — so `Action::ZoomIn` / `PanCameraNorth`
+///   etc. actually update something an agent can observe via
+///   `/state/camera`;
+/// - `fit_camera_to_tree` updates the virtual camera to the tree's
+///   bounds;
+/// - `set_camera_center` updates the virtual camera's position;
+/// - `set_fps_display` / `fps_display_mode` round-trip through a
+///   mirror field.
+///
+/// Methods that touch real GPU resources (`rebuild_buffers_from_tree`,
+/// `rebuild_canvas_scene_buffers`, hitbox setters, `reshape_buffer_for`)
+/// do nothing — there's no GPU and no on-screen output. The internal
+/// scene-cache + app-scene mutations performed *outside* the host
+/// (by `rebuild_all`) still happen on the headless fields, so any
+/// dispatch arm that consults them will see consistent state.
+struct HeadlessHost<'a> {
+    camera: &'a mut baumhard::gfx_structs::camera::Camera2D,
+    fps_mode: &'a mut crate::application::common::FpsDisplayMode,
+}
+
+impl<'a> crate::application::app::dispatch::cross_dispatch::RebuildHost for HeadlessHost<'a> {
+    fn camera_zoom(&self) -> f32 {
+        self.camera.zoom
+    }
+    fn surface_width(&self) -> u32 {
+        // 1920×1080 is a stable synthetic viewport. Agents driving a
+        // headless mandala don't have a real surface; this constant
+        // keeps zoom/pan math finite and predictable.
+        1920
+    }
+    fn surface_height(&self) -> u32 {
+        1080
+    }
+    fn fps_display_mode(&self) -> crate::application::common::FpsDisplayMode {
+        *self.fps_mode
+    }
+    fn process_decree(&mut self, decree: crate::application::common::RenderDecree) {
+        use crate::application::common::RenderDecree as D;
+        match decree {
+            D::CameraPan(dx, dy) => {
+                // Inverse-zoom transform from screen-px to canvas-px,
+                // mirroring the real renderer's pan handling.
+                let inv = 1.0_f32 / self.camera.zoom.max(f32::EPSILON);
+                self.camera.position.x -= dx * inv;
+                self.camera.position.y -= dy * inv;
+            }
+            D::CameraZoom {
+                screen_x,
+                screen_y,
+                factor,
+            } => {
+                // Zoom around the synthetic screen point. The exact
+                // formula matches `Camera2D::zoom_at`'s contract: keep
+                // the canvas point under (screen_x, screen_y) fixed.
+                let before = self.camera.screen_to_canvas(glam::Vec2::new(screen_x, screen_y));
+                self.camera.zoom = (self.camera.zoom * factor).clamp(0.01, 100.0);
+                let after = self.camera.screen_to_canvas(glam::Vec2::new(screen_x, screen_y));
+                self.camera.position += before - after;
+            }
+            // Other decrees (resize, terminate, ...) have no headless effect.
+            _ => {}
+        }
+    }
+    fn set_camera_center(&mut self, target: glam::Vec2) {
+        self.camera.position = target;
+    }
+    fn fit_camera_to_tree(
+        &mut self,
+        _tree: &baumhard::gfx_structs::tree::Tree<
+            baumhard::gfx_structs::element::GfxElement,
+            baumhard::gfx_structs::mutator::GfxMutator,
+        >,
+    ) {
+        // Tree-bound computation lives on Renderer (uses surface
+        // dimensions). Headless picks a neutral identity instead —
+        // zoom 1.0 at origin — so the camera is at least reset rather
+        // than left at a wild value after `Action::ZoomFit`.
+        self.camera.zoom = 1.0;
+        self.camera.position = glam::Vec2::ZERO;
+    }
+    fn set_fps_display(&mut self, mode: crate::application::common::FpsDisplayMode) {
+        *self.fps_mode = mode;
+    }
+    fn rebuild_buffers_from_tree(
+        &mut self,
+        _tree: &baumhard::gfx_structs::tree::Tree<
+            baumhard::gfx_structs::element::GfxElement,
+            baumhard::gfx_structs::mutator::GfxMutator,
+        >,
+    ) {
+        // No GPU buffers to rebuild.
+    }
+    fn rebuild_canvas_scene_buffers(
+        &mut self,
+        _app_scene: &mut crate::application::scene_host::AppScene,
+    ) {
+        // No GPU buffers.
+    }
+    fn set_mode_status_text(&mut self, _text: Option<String>) {
+        // No overlay.
+    }
+    fn set_portal_icon_hitboxes(
+        &mut self,
+        _hitboxes: std::collections::HashMap<
+            (baumhard::mindmap::scene_cache::EdgeKey, String),
+            (glam::Vec2, glam::Vec2),
+        >,
+    ) {
+    }
+    fn set_portal_text_hitboxes(
+        &mut self,
+        _hitboxes: std::collections::HashMap<
+            (baumhard::mindmap::scene_cache::EdgeKey, String),
+            (glam::Vec2, glam::Vec2),
+        >,
+    ) {
+    }
+    fn set_connection_label_hitboxes(
+        &mut self,
+        _hitboxes: std::collections::HashMap<
+            baumhard::mindmap::scene_cache::EdgeKey,
+            (glam::Vec2, glam::Vec2),
+        >,
+    ) {
+    }
+    fn screen_to_canvas(&self, screen_x: f32, screen_y: f32) -> glam::Vec2 {
+        self.camera.screen_to_canvas(glam::Vec2::new(screen_x, screen_y))
+    }
+    fn reshape_buffer_for(
+        &mut self,
+        _arena_id: indextree::NodeId,
+        _tree: &baumhard::gfx_structs::tree::Tree<
+            baumhard::gfx_structs::element::GfxElement,
+            baumhard::gfx_structs::mutator::GfxMutator,
+        >,
+    ) {
+        // No buffers to reshape.
+    }
 }
 
 impl HeadlessState {
+    fn empty() -> Self {
+        Self {
+            document: None,
+            camera: baumhard::gfx_structs::camera::Camera2D::new(1920, 1080),
+            fps_mode: crate::application::common::FpsDisplayMode::Off,
+            mindmap_tree: None,
+            scene_cache: baumhard::mindmap::scene_cache::SceneConnectionCache::default(),
+            app_scene: crate::application::scene_host::AppScene::new(),
+            interaction_mode: crate::application::app::InteractionMode::Default,
+            text_edit_state:
+                crate::application::app::text_edit::TextEditState::Closed,
+            last_click: None,
+            cursor_pos: (0.0, 0.0),
+            keybinds: crate::application::keybinds::KeybindConfig::default().resolve(),
+            modifiers: crate::application::platform::input::Modifiers::default(),
+            macros: crate::application::macros::MacroRegistry::new(),
+        }
+    }
+
     fn new(mindmap_path: &str) -> Self {
         match MindMapDocument::load(mindmap_path) {
             Ok(mut doc) => {
@@ -49,7 +265,9 @@ impl HeadlessState {
                     crate::application::document::mutations_loader::load_app_and_user(None);
                 doc.build_mutation_registry_with_app_and_user(&app_mutations, &user_mutations);
                 crate::application::document::mutations::register_builtin_handlers(&mut doc);
-                Self { document: Some(doc) }
+                let mut state = Self::empty();
+                state.document = Some(doc);
+                state
             }
             Err(e) => {
                 // Startup-path: a missing/invalid mindmap is fatal. There is
@@ -63,8 +281,16 @@ impl HeadlessState {
     }
 
     fn build_snapshot(&self) -> StateSnapshot {
+        let camera = CameraView {
+            x: self.camera.position.x,
+            y: self.camera.position.y,
+            zoom: self.camera.zoom,
+        };
         let Some(doc) = &self.document else {
-            return StateSnapshot::default();
+            return StateSnapshot {
+                camera,
+                ..Default::default()
+            };
         };
         StateSnapshot {
             document: DocumentView {
@@ -75,6 +301,7 @@ impl HeadlessState {
                 active_animation_count: doc.active_animations.len(),
             },
             selection: SelectionView::from_state(&doc.selection),
+            camera,
             ..Default::default()
         }
     }
@@ -131,20 +358,34 @@ pub(super) fn run(app: Application) {
     // animations, timer-driven mutations, and the planned
     // SelectionChanged SSE diff work correctly when the loop is
     // idle-from-HTTP but the model is evolving on its own.
+    // Closure: handle one request, rebuild the snapshot, THEN send
+    // the response. The order matters — sending the response unblocks
+    // the HTTP handler, which may immediately fire a follow-up GET
+    // against `Arc<RwLock<StateSnapshot>>`. If the snapshot were
+    // rebuilt after the response send, the follow-up GET could race
+    // ahead of the rebuild and read a stale snapshot.
+    let handle = |state: &mut HeadlessState, req: IpcRequest| {
+        let resp = handle_request(state, &event_tx, req.payload);
+        *snapshot.write().expect("snapshot lock") = state.build_snapshot();
+        let _ = req.responder.send(resp);
+    };
+
     loop {
         match req_rx.recv_timeout(HEADLESS_TICK) {
             Ok(req) => {
-                let resp = handle_request(&mut state, &event_tx, req.payload);
-                let _ = req.responder.send(resp);
+                handle(&mut state, req);
                 while let Ok(req) = req_rx.try_recv() {
-                    let resp = handle_request(&mut state, &event_tx, req.payload);
-                    let _ = req.responder.send(resp);
+                    handle(&mut state, req);
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                // Idle tick — republish so any tick-driven state
+                // (future animations, timer-driven mutations) lands
+                // in `/state` without an HTTP nudge.
+                *snapshot.write().expect("snapshot lock") = state.build_snapshot();
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        *snapshot.write().expect("snapshot lock") = state.build_snapshot();
     }
 }
 
@@ -253,90 +494,76 @@ fn handle_custom_mutation(
     }))
 }
 
-/// `POST /actions/dispatch` (headless) — runs a curated subset of
-/// the [`Action`](crate::application::keybinds::Action) surface
-/// that is reachable without a `Renderer` / `AppScene` /
-/// `SceneConnectionCache`. Tagged
+/// `POST /actions/dispatch` (headless) — routes the request through
+/// the canonical cross-platform funnel
+/// [`dispatch_compatible`](crate::application::app::dispatch::action_core::dispatch_compatible)
+/// against an [`InputContextCore`] built from this process's
+/// `HeadlessState` + a [`HeadlessHost`] (no-op renderer, virtual
+/// camera). Tagged
 /// [`MacroSource::Ipc`](crate::application::macros::MacroSource::Ipc).
 ///
-/// **§3 funnel deviation, documented.** The windowed dispatcher
-/// is the canonical single funnel for `Action`s. Headless can't
-/// reach `dispatch_compatible` because that function takes an
-/// `InputContextCore` carrying GPU/scene state we don't have. This
-/// handler instead calls the same `pub(in crate::application::app)`
-/// `*_in(doc) -> bool` primitives that the dispatcher's `apply_*`
-/// helpers wrap — i.e. it shares the document-mutation logic and
-/// only skips the scene-rebuild call (headless has no scene to
-/// rebuild; the next snapshot tick re-publishes the document).
-/// The full windowed-mode wiring is the next milestone — once
-/// `EventLoop<UserEvent>` lands, the windowed path will reach
-/// `dispatch_compatible` and the curated subset becomes the
-/// headless-only fallback.
-///
-/// Unsupported Actions (everything that needs camera / scene /
-/// renderer state, every NativeOnly modal, every clipboard verb)
-/// return 501 NOT_IMPLEMENTED with a message naming the variant.
+/// The funnel handles **every cross-platform compatible Action**
+/// (~80 variants) directly. NativeOnly Actions (modal flows that
+/// need `NativeContextExt` state) fall through to the
+/// `Unhandled` outcome — see `Action::wasm_compatibility()`. The
+/// HTTP response distinguishes:
+///   - `"handled"` — dispatch_compatible returned `Handled` and
+///     a model mutation may have occurred.
+///   - `"unhandled"` — variant is not cross-platform-reachable
+///     (NativeOnly). 200 OK with `outcome=unhandled` rather than
+///     501 because the variant *is* recognised; it's just that
+///     the headless dispatcher has nowhere to deliver it.
 fn handle_dispatch_action(
     state: &mut HeadlessState,
     event_tx: &tokio::sync::broadcast::Sender<IpcEvent>,
     action: crate::application::keybinds::Action,
 ) -> IpcResponse {
     use axum::http::StatusCode;
-    use crate::application::app::dispatch::cross_dispatch as cd;
-    use crate::application::keybinds::Action;
+    use crate::application::app::dispatch::cross_dispatch::DispatchOutcome;
 
-    let Some(doc) = state.document.as_mut() else {
+    if state.document.is_none() {
         return IpcResponse::Err(
             StatusCode::SERVICE_UNAVAILABLE,
             "no document loaded".into(),
         );
+    }
+
+    let outcome = {
+        let mut host = HeadlessHost {
+            camera: &mut state.camera,
+            fps_mode: &mut state.fps_mode,
+        };
+        let mut core =
+            crate::application::app::input_context_core::InputContextCore {
+                document: state.document.as_mut(),
+                mindmap_tree: &mut state.mindmap_tree,
+                app_scene: &mut state.app_scene,
+                host: &mut host,
+                scene_cache: &mut state.scene_cache,
+                text_edit_state: &mut state.text_edit_state,
+                last_click: &mut state.last_click,
+                cursor_pos: &mut state.cursor_pos,
+                modifiers: &state.modifiers,
+                keybinds: &state.keybinds,
+                macros: &mut state.macros,
+                interaction_mode: &mut state.interaction_mode,
+            };
+        crate::application::app::dispatch::action_core::dispatch_compatible(
+            &action, &mut core,
+        )
     };
 
-    let changed = match &action {
-        Action::Undo => {
-            // Fast-forward any in-flight animation snapshot first
-            // (mirrors `apply_undo`'s native body so behaviour is
-            // platform-uniform even though headless never ticks
-            // animations).
-            doc.fast_forward_animations(None);
-            doc.undo()
-        }
-        Action::SelectAll => cd::select_all_in(doc),
-        Action::DeselectAll => cd::deselect_all_in(doc),
-        Action::InvertSelection => cd::invert_selection_in(doc),
-        Action::SelectParent => cd::select_parent_in(doc),
-        Action::SelectChild => cd::select_child_in(doc),
-        Action::SelectNextSibling => cd::select_sibling_in(doc, true),
-        Action::SelectPrevSibling => cd::select_sibling_in(doc, false),
-        Action::JumpToRoot => {
-            // The native body returns the root's canvas position so
-            // the camera can re-centre; headless has no camera, so
-            // we discard the position. The selection move (root node
-            // becomes the single selection) is what an agent reads.
-            cd::jump_to_root_in(doc).is_some()
-        }
-        _ => {
-            return IpcResponse::Err(
-                StatusCode::NOT_IMPLEMENTED,
-                format!(
-                    "Action variant not yet reachable in headless mode: {:?}. \
-                     Headless dispatch is limited to a curated document-only \
-                     subset; the full Action surface lands once windowed-mode \
-                     IPC wiring goes through dispatch_compatible.",
-                    action
-                ),
-            );
-        }
+    let outcome_str = match outcome {
+        DispatchOutcome::Handled => "handled",
+        DispatchOutcome::Unhandled => "unhandled",
     };
-
-    let outcome = if changed { "handled" } else { "unchanged" };
     let _ = event_tx.send(IpcEvent::ActionDispatched {
         action: action.clone(),
-        outcome: outcome.into(),
+        outcome: outcome_str.into(),
     });
 
     IpcResponse::Ok(serde_json::json!({
-        "outcome": outcome,
+        "outcome": outcome_str,
     }))
 }
 
@@ -358,7 +585,9 @@ mod tests {
             crate::application::document::mutations_loader::load_app_and_user(None);
         doc.build_mutation_registry_with_app_and_user(&app_mutations, &user_mutations);
         crate::application::document::mutations::register_builtin_handlers(&mut doc);
-        HeadlessState { document: Some(doc) }
+        let mut state = HeadlessState::empty();
+        state.document = Some(doc);
+        state
     }
 
     fn test_event_tx() -> tokio::sync::broadcast::Sender<IpcEvent> {
@@ -385,12 +614,16 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_deselect_all_on_empty_selection_is_unchanged() {
+    fn test_dispatch_deselect_all_on_empty_selection_is_handled() {
+        // Post-refactor: dispatch_compatible always reports `Handled`
+        // for cross-platform variants whether or not the inner
+        // mutation made a difference. (The funnel doesn't surface
+        // the "no-op" granularity — agents read /state/selection to
+        // observe model deltas.)
         let mut state = test_state();
         let tx = test_event_tx();
         let resp = handle_dispatch_action(&mut state, &tx, Action::DeselectAll);
-        // A fresh testament starts with selection=None, so deselect is a no-op.
-        assert_eq!(json_outcome(&resp).as_deref(), Some("unchanged"));
+        assert_eq!(json_outcome(&resp).as_deref(), Some("handled"));
     }
 
     #[test]
@@ -406,21 +639,16 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_unsupported_action_returns_501() {
+    fn test_dispatch_native_only_action_returns_unhandled() {
+        // NativeOnly variants (modal flows like the console) are
+        // recognised but unreachable from the cross-platform funnel.
+        // The dispatcher returns 200 with `outcome=unhandled` rather
+        // than 501 — the *variant* exists; it's just that headless
+        // has nowhere to deliver it.
         let mut state = test_state();
         let tx = test_event_tx();
-        // `OpenConsole` requires modal state that headless doesn't carry.
         let resp = handle_dispatch_action(&mut state, &tx, Action::OpenConsole);
-        match resp {
-            IpcResponse::Err(code, msg) => {
-                assert_eq!(code, axum::http::StatusCode::NOT_IMPLEMENTED);
-                assert!(
-                    msg.contains("OpenConsole"),
-                    "error message should name the variant; got: {msg}"
-                );
-            }
-            other => panic!("expected NOT_IMPLEMENTED error, got {other:?}"),
-        }
+        assert_eq!(json_outcome(&resp).as_deref(), Some("unhandled"));
     }
 
     #[test]
@@ -453,8 +681,80 @@ mod tests {
     }
 
     #[test]
+    fn test_dispatch_zoom_in_updates_virtual_camera() {
+        let mut state = test_state();
+        let tx = test_event_tx();
+        let before = state.camera.zoom;
+        let resp = handle_dispatch_action(&mut state, &tx, Action::ZoomIn);
+        assert_eq!(json_outcome(&resp).as_deref(), Some("handled"));
+        assert!(
+            state.camera.zoom > before,
+            "ZoomIn must increase virtual camera zoom (was {before}, now {})",
+            state.camera.zoom
+        );
+    }
+
+    #[test]
+    fn test_dispatch_pan_camera_updates_virtual_position() {
+        let mut state = test_state();
+        let tx = test_event_tx();
+        let before = state.camera.position;
+        let _ = handle_dispatch_action(&mut state, &tx, Action::PanCameraNorth);
+        let after_north = state.camera.position;
+        assert_ne!(
+            after_north, before,
+            "PanCameraNorth must move the virtual camera"
+        );
+        // PanCameraNorth uses `dy = -PAN_STEP_PX`. With the inverse-zoom
+        // transform, the camera position's y component shifts by
+        // `-(-PAN_STEP_PX) * (1/zoom) = +PAN_STEP_PX/zoom`. Sign-only
+        // check is enough.
+        assert!(after_north.y > before.y, "PanCameraNorth y direction");
+    }
+
+    #[test]
+    fn test_dispatch_zoom_reset_returns_camera_to_unity_relative() {
+        let mut state = test_state();
+        let tx = test_event_tx();
+        // Zoom in twice then reset.
+        let _ = handle_dispatch_action(&mut state, &tx, Action::ZoomIn);
+        let _ = handle_dispatch_action(&mut state, &tx, Action::ZoomIn);
+        let _ = handle_dispatch_action(&mut state, &tx, Action::ZoomReset);
+        assert!(
+            (state.camera.zoom - 1.0).abs() < 1e-3,
+            "ZoomReset should land near zoom=1.0; got {}",
+            state.camera.zoom
+        );
+    }
+
+    #[test]
+    fn test_dispatch_toggle_fps_rotates_through_modes() {
+        use crate::application::common::FpsDisplayMode;
+        let mut state = test_state();
+        let tx = test_event_tx();
+        assert_eq!(state.fps_mode, FpsDisplayMode::Off);
+        let _ = handle_dispatch_action(&mut state, &tx, Action::ToggleFps);
+        assert_eq!(state.fps_mode, FpsDisplayMode::Snapshot);
+        let _ = handle_dispatch_action(&mut state, &tx, Action::ToggleFps);
+        assert_eq!(state.fps_mode, FpsDisplayMode::Off);
+    }
+
+    #[test]
+    fn test_dispatch_delete_selection_requires_a_selection() {
+        // DeleteSelection on an empty selection is a no-op from the
+        // model's perspective, but the funnel reports `Handled`. The
+        // important assertion is that node count is unchanged.
+        let mut state = test_state();
+        let tx = test_event_tx();
+        let before = state.document.as_ref().unwrap().mindmap.nodes.len();
+        let _ = handle_dispatch_action(&mut state, &tx, Action::DeleteSelection);
+        let after = state.document.as_ref().unwrap().mindmap.nodes.len();
+        assert_eq!(after, before, "no selection -> no deletion");
+    }
+
+    #[test]
     fn test_dispatch_no_document_returns_503() {
-        let mut state = HeadlessState { document: None };
+        let mut state = HeadlessState::empty();
         let tx = test_event_tx();
         let resp = handle_dispatch_action(&mut state, &tx, Action::Undo);
         match resp {

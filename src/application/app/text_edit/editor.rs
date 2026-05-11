@@ -17,7 +17,6 @@ use baumhard::util::grapheme_chad;
 
 use crate::application::document::MindMapDocument;
 use crate::application::keybinds::{InputContext, ResolvedKeybinds};
-use crate::application::renderer::Renderer;
 
 use super::super::scene_rebuild::rebuild_all;
 use super::{insert_at_cursor, insert_caret, TextEditState};
@@ -41,7 +40,7 @@ pub(in crate::application::app) fn open_text_edit(
     text_edit_state: &mut TextEditState,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     _app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::super::dispatch::cross_dispatch::RebuildHost,
 ) {
     open_text_edit_with_close_target(
         node_id,
@@ -51,7 +50,7 @@ pub(in crate::application::app) fn open_text_edit(
         text_edit_state,
         mindmap_tree,
         _app_scene,
-        renderer,
+        host,
     );
 }
 
@@ -72,7 +71,7 @@ pub(in crate::application::app) fn open_text_edit_with_close_target(
     text_edit_state: &mut TextEditState,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     _app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::super::dispatch::cross_dispatch::RebuildHost,
 ) {
     // Resolve the section index from the document's selection.
     // `Section { node_id: id, section_idx }` opens the editor on
@@ -138,7 +137,7 @@ pub(in crate::application::app) fn open_text_edit_with_close_target(
         &buffer_regions,
         cursor_grapheme_pos,
         mindmap_tree,
-        renderer,
+        host,
     );
 }
 
@@ -244,13 +243,13 @@ pub(in crate::application::app) fn revert_node_text_on_tree(
     text: String,
     regions: baumhard::core::primitives::ColorFontRegions,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    renderer: &mut Renderer,
+    host: &mut dyn super::super::dispatch::cross_dispatch::RebuildHost,
 ) {
     if !apply_text_and_regions_delta(node_id, section_idx, text, regions, mindmap_tree) {
         return;
     }
     if let Some(tree) = mindmap_tree.as_ref() {
-        renderer.rebuild_buffers_from_tree(&tree.tree);
+        host.rebuild_buffers_from_tree(&tree.tree);
     }
 }
 
@@ -307,7 +306,7 @@ pub(in crate::application::app) fn close_text_edit(
     text_edit_state: &mut TextEditState,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::super::dispatch::cross_dispatch::RebuildHost,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let snapshot = match std::mem::replace(text_edit_state, TextEditState::Closed) {
@@ -399,7 +398,7 @@ pub(in crate::application::app) fn close_text_edit(
         // them before the rebuild. The drag drop path already
         // does the equivalent (`event_mouse_click.rs`).
         scene_cache.clear();
-        rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+        rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, host, scene_cache);
     } else {
         // Cancel: model is untouched, so we only need to revert the
         // edited section's transient caret-bearing text/regions to
@@ -412,7 +411,7 @@ pub(in crate::application::app) fn close_text_edit(
             original_text,
             original_regions,
             mindmap_tree,
-            renderer,
+            host,
         );
     }
 }
@@ -432,7 +431,7 @@ pub(in crate::application::app) fn apply_text_edit_to_tree(
     buffer_regions: &baumhard::core::primitives::ColorFontRegions,
     cursor_grapheme_pos: usize,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    renderer: &mut Renderer,
+    host: &mut dyn super::super::dispatch::cross_dispatch::RebuildHost,
 ) {
     use baumhard::core::primitives::{Applicable, ApplyOperation, ColorFontRegion, Range};
     use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphAreaField};
@@ -501,7 +500,7 @@ pub(in crate::application::app) fn apply_text_edit_to_tree(
     // The arena id was already resolved at the top of the function;
     // pass it through directly so the renderer skips an O(arena)
     // descendant scan to re-find the element.
-    renderer.reshape_buffer_for(indextree_node_id, &tree.tree);
+    host.reshape_buffer_for(indextree_node_id, &tree.tree);
 }
 
 /// Apply a literal-character keystroke (Enter, Tab, or printable
@@ -623,7 +622,7 @@ pub(in crate::application::app) fn handle_text_edit_key(
     _doc: &mut MindMapDocument,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     _app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::super::dispatch::cross_dispatch::RebuildHost,
     _scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let name = key_name.as_deref();
@@ -672,7 +671,7 @@ pub(in crate::application::app) fn handle_text_edit_key(
             buffer_regions,
             *cursor_grapheme_pos,
             mindmap_tree,
-            renderer,
+            host,
         );
     }
 }

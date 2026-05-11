@@ -147,7 +147,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                         document: doc,
                         mindmap_tree: core.mindmap_tree,
                         app_scene: core.app_scene,
-                        renderer: core.renderer,
+                        host: core.host,
                         scene_cache: core.scene_cache,
                         interaction_mode: core.interaction_mode,
                     };
@@ -202,7 +202,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                         document: doc,
                         mindmap_tree: core.mindmap_tree,
                         app_scene: core.app_scene,
-                        renderer: core.renderer,
+                        host: core.host,
                         scene_cache: core.scene_cache,
                         interaction_mode: core.interaction_mode,
                     };
@@ -226,7 +226,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                     document: doc,
                     mindmap_tree: core.mindmap_tree,
                     app_scene: core.app_scene,
-                    renderer: core.renderer,
+                    host: core.host,
                     scene_cache: core.scene_cache,
                     interaction_mode: core.interaction_mode,
                 };
@@ -272,7 +272,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                     core.text_edit_state,
                     core.mindmap_tree,
                     core.app_scene,
-                    core.renderer,
+                    core.host,
                     core.scene_cache,
                 );
             }
@@ -287,7 +287,7 @@ pub(in crate::application::app) fn dispatch_compatible(
         }
         Action::CreateOrphanNode => {
             let canvas_pos = core
-                .renderer
+                .host
                 .screen_to_canvas(core.cursor_pos.0 as f32, core.cursor_pos.1 as f32);
             with_doc_rebuild(core, |rc| {
                 super::cross_dispatch::apply_create_orphan_node(canvas_pos, rc)
@@ -297,38 +297,38 @@ pub(in crate::application::app) fn dispatch_compatible(
         Action::ZoomIn => super::cross_dispatch::apply_zoom_step(
             super::cross_dispatch::ZoomDir::In,
             *core.cursor_pos,
-            core.renderer,
+            core.host,
         ),
         Action::ZoomOut => super::cross_dispatch::apply_zoom_step(
             super::cross_dispatch::ZoomDir::Out,
             *core.cursor_pos,
-            core.renderer,
+            core.host,
         ),
-        Action::ZoomReset => super::cross_dispatch::apply_zoom_reset(core.renderer),
-        Action::ZoomFit => super::cross_dispatch::apply_zoom_fit(core.mindmap_tree, core.renderer),
+        Action::ZoomReset => super::cross_dispatch::apply_zoom_reset(core.host),
+        Action::ZoomFit => super::cross_dispatch::apply_zoom_fit(core.mindmap_tree, core.host),
         Action::PanCameraNorth => {
-            super::cross_dispatch::apply_pan_camera(super::cross_dispatch::PanDir::North, core.renderer)
+            super::cross_dispatch::apply_pan_camera(super::cross_dispatch::PanDir::North, core.host)
         }
         Action::PanCameraSouth => {
-            super::cross_dispatch::apply_pan_camera(super::cross_dispatch::PanDir::South, core.renderer)
+            super::cross_dispatch::apply_pan_camera(super::cross_dispatch::PanDir::South, core.host)
         }
         Action::PanCameraEast => {
-            super::cross_dispatch::apply_pan_camera(super::cross_dispatch::PanDir::East, core.renderer)
+            super::cross_dispatch::apply_pan_camera(super::cross_dispatch::PanDir::East, core.host)
         }
         Action::PanCameraWest => {
-            super::cross_dispatch::apply_pan_camera(super::cross_dispatch::PanDir::West, core.renderer)
+            super::cross_dispatch::apply_pan_camera(super::cross_dispatch::PanDir::West, core.host)
         }
         Action::CenterOnSelection => {
             // Read-only on document; doesn't fit `with_doc_rebuild`'s
             // `&mut RebuildContext` shape.
             if let Some(doc) = core.document.as_deref() {
-                super::cross_dispatch::apply_center_on_selection(doc, core.renderer);
+                super::cross_dispatch::apply_center_on_selection(doc, core.host);
             }
         }
         Action::JumpToRoot => with_doc_rebuild(core, |rc| super::cross_dispatch::apply_jump_to_root(rc)),
         // ── FPS overlay ────────────────────────────────────────
-        Action::ToggleFps => super::cross_dispatch::apply_toggle_fps(core.renderer),
-        Action::ToggleFpsDebug => super::cross_dispatch::apply_toggle_fps_debug(core.renderer),
+        Action::ToggleFps => super::cross_dispatch::apply_toggle_fps(core.host),
+        Action::ToggleFpsDebug => super::cross_dispatch::apply_toggle_fps_debug(core.host),
         // ── Selection navigation ───────────────────────────────
         Action::SelectAll
         | Action::DeselectAll
@@ -534,7 +534,7 @@ pub(in crate::application::app) fn dispatch_compatible(
         // path — uses `cursor_pos` here.
         Action::CreateOrphanNodeAndEdit => {
             let canvas_pos = core
-                .renderer
+                .host
                 .screen_to_canvas(core.cursor_pos.0 as f32, core.cursor_pos.1 as f32);
             if let Some(doc) = core.document.as_deref_mut() {
                 let mut rc = super::cross_dispatch::rebuild_ctx!(core, doc);

@@ -8,7 +8,6 @@
 //! rebuild and §B2 in-place mutator via `AppScene`'s signature.
 
 use crate::application::document::{apply_tree_highlights, MindMapDocument, SelectionState, HIGHLIGHT_COLOR};
-use crate::application::renderer::Renderer;
 
 /// Pure predicate for [`rebuild_after_selection_change`]'s
 /// dispatch. Returns `true` when transitioning from `prev` to
@@ -64,13 +63,13 @@ pub(in crate::application::app) fn rebuild_after_selection_change(
     interaction_mode: &super::InteractionMode,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::dispatch::cross_dispatch::RebuildHost,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     if selection_change_touches_tree(prev_selection, &doc.selection) {
-        rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+        rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, host, scene_cache);
     } else {
-        rebuild_scene_only(doc, interaction_mode, app_scene, renderer, scene_cache);
+        rebuild_scene_only(doc, interaction_mode, app_scene, host, scene_cache);
     }
 }
 
@@ -369,15 +368,15 @@ pub(in crate::application::app) fn rebuild_all(
     interaction_mode: &super::InteractionMode,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::dispatch::cross_dispatch::RebuildHost,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let mut new_tree = doc.build_tree();
     apply_tree_highlights(&mut new_tree, selection_highlight_entries(&doc.selection));
-    renderer.rebuild_buffers_from_tree(&new_tree.tree);
+    host.rebuild_buffers_from_tree(&new_tree.tree);
 
-    rebuild_scene_only(doc, interaction_mode, app_scene, renderer, scene_cache);
-    renderer.set_mode_status_text(mode_status_line(interaction_mode, doc));
+    rebuild_scene_only(doc, interaction_mode, app_scene, host, scene_cache);
+    host.set_mode_status_text(mode_status_line(interaction_mode, doc));
 
     *mindmap_tree = Some(new_tree);
 }
@@ -521,24 +520,24 @@ pub(in crate::application::app) fn rebuild_scene_only(
     doc: &MindMapDocument,
     interaction_mode: &super::InteractionMode,
     app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::dispatch::cross_dispatch::RebuildHost,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     let scene = doc.build_scene_with_cache(
         &std::collections::HashMap::new(),
         scene_cache,
-        renderer.camera_zoom(),
+        host.camera_zoom(),
         interaction_mode.resize_handle_overrides(),
     );
     update_connection_tree(&scene, app_scene);
     update_border_tree_static(doc, app_scene);
-    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
+    update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, host);
     update_edge_handle_tree(&scene, app_scene);
     update_section_resize_handle_tree(&scene, app_scene);
     update_node_resize_handle_tree(&scene, app_scene);
     update_section_frame_tree(&scene, app_scene);
-    update_connection_label_tree(&scene, app_scene, renderer);
-    flush_canvas_scene_buffers(app_scene, renderer);
+    update_connection_label_tree(&scene, app_scene, host);
+    flush_canvas_scene_buffers(app_scene, host);
 }
 
 // =====================================================================
@@ -633,7 +632,7 @@ pub(in crate::application::app) fn update_portal_tree(
     doc: &MindMapDocument,
     offsets: &std::collections::HashMap<String, (f32, f32)>,
     app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::dispatch::cross_dispatch::RebuildHost,
 ) {
     use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
     use baumhard::mindmap::scene_builder::SelectedPortalLabel;
@@ -683,21 +682,21 @@ pub(in crate::application::app) fn update_portal_tree(
         selected_portal_label,
         preview,
         portal_text_edit,
-        renderer.camera_zoom(),
+        host.camera_zoom(),
     );
     let signature = hash_canvas_signature(&portal_identity_sequence(&pairs));
 
     match app_scene.canvas_dispatch(CanvasRole::Portals, signature) {
         CanvasDispatch::InPlaceMutator => {
             let result = build_portal_mutator_tree_from_pairs(&pairs);
-            renderer.set_portal_icon_hitboxes(result.icon_hitboxes);
-            renderer.set_portal_text_hitboxes(result.text_hitboxes);
+            host.set_portal_icon_hitboxes(result.icon_hitboxes);
+            host.set_portal_text_hitboxes(result.text_hitboxes);
             app_scene.apply_canvas_mutator(CanvasRole::Portals, &result.mutator);
         }
         CanvasDispatch::FullRebuild => {
             let result = build_portal_tree_from_pairs(&pairs);
-            renderer.set_portal_icon_hitboxes(result.icon_hitboxes);
-            renderer.set_portal_text_hitboxes(result.text_hitboxes);
+            host.set_portal_icon_hitboxes(result.icon_hitboxes);
+            host.set_portal_text_hitboxes(result.text_hitboxes);
             app_scene.register_canvas(CanvasRole::Portals, result.tree, glam::Vec2::ZERO);
             app_scene.set_canvas_signature(CanvasRole::Portals, signature);
         }
@@ -754,7 +753,7 @@ pub(in crate::application::app) fn update_connection_tree(
 pub(in crate::application::app) fn update_connection_label_tree(
     scene: &baumhard::mindmap::scene_builder::RenderScene,
     app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::dispatch::cross_dispatch::RebuildHost,
 ) {
     use crate::application::scene_host::{hash_canvas_signature, CanvasDispatch, CanvasRole};
     use baumhard::mindmap::tree_builder::{
@@ -767,12 +766,12 @@ pub(in crate::application::app) fn update_connection_label_tree(
     match app_scene.canvas_dispatch(CanvasRole::ConnectionLabels, signature) {
         CanvasDispatch::InPlaceMutator => {
             let result = build_connection_label_mutator_tree(&scene.connection_label_elements);
-            renderer.set_connection_label_hitboxes(result.hitboxes);
+            host.set_connection_label_hitboxes(result.hitboxes);
             app_scene.apply_canvas_mutator(CanvasRole::ConnectionLabels, &result.mutator);
         }
         CanvasDispatch::FullRebuild => {
             let result = build_connection_label_tree(&scene.connection_label_elements);
-            renderer.set_connection_label_hitboxes(result.hitboxes);
+            host.set_connection_label_hitboxes(result.hitboxes);
             app_scene.register_canvas(CanvasRole::ConnectionLabels, result.tree, glam::Vec2::ZERO);
             app_scene.set_canvas_signature(CanvasRole::ConnectionLabels, signature);
         }
@@ -965,9 +964,9 @@ fn update_handle_canvas_role<E: baumhard::mindmap::tree_builder::HandleVisual>(
 /// roles touched.
 pub(in crate::application::app) fn flush_canvas_scene_buffers(
     app_scene: &mut crate::application::scene_host::AppScene,
-    renderer: &mut Renderer,
+    host: &mut dyn super::dispatch::cross_dispatch::RebuildHost,
 ) {
-    renderer.rebuild_canvas_scene_buffers(app_scene);
+    host.rebuild_canvas_scene_buffers(app_scene);
 }
 
 /// Feed the three handle-tree canvas roles synthetic 8-element

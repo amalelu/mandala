@@ -82,6 +82,40 @@ pub async fn get_document(
     }
 }
 
+/// `GET /state/selection` — selection projection from the snapshot.
+pub async fn get_selection(
+    State(handle): State<IpcHandle>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snap = read_snapshot(&handle);
+    serde_json::to_value(&snap.selection).map(Json).map_err(|e| {
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("serialise: {e}"))
+    })
+}
+
+/// `GET /state/camera` — camera position + zoom from the snapshot.
+/// In headless mode this is the virtual camera; in windowed mode
+/// it will read from the live renderer once windowed IPC lands.
+pub async fn get_camera(
+    State(handle): State<IpcHandle>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snap = read_snapshot(&handle);
+    serde_json::to_value(&snap.camera).map(Json).map_err(|e| {
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("serialise: {e}"))
+    })
+}
+
+/// `GET /state/interaction_mode` — current modal state.
+pub async fn get_interaction_mode(
+    State(handle): State<IpcHandle>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snap = read_snapshot(&handle);
+    serde_json::to_value(&snap.interaction_mode)
+        .map(Json)
+        .map_err(|e| {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("serialise: {e}"))
+        })
+}
+
 /// `GET /actions` — list every Action variant with its classifier
 /// metadata. Wire names come from `strum::IntoStaticStr`, NOT from
 /// `Debug` — variant renames stay caught by the compiler and the
