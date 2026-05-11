@@ -62,6 +62,30 @@ pub enum MacroSource {
     /// Highest precedence — overrides Map / User / App on id
     /// collision.
     Inline,
+    /// Dev-only IPC tier. Reachable ONLY when the binary is launched
+    /// with `--ipc-port=…` (currently requires `--headless`; windowed
+    /// IPC lands in a later milestone). Every Action / console line /
+    /// custom mutation dispatched over HTTP is tagged with this
+    /// source. Privilege posture: **fully unrestricted** —
+    /// `allows_console_line` and `allows_action` both return `true`
+    /// for every variant including destructive ones. Rationale:
+    ///
+    /// 1. The IPC server binds to loopback only (enforced at CLI
+    ///    parse — `parse_ipc_port` constructs `127.0.0.1:N`, never
+    ///    a user-supplied host).
+    /// 2. The server only spawns when the operator explicitly opts
+    ///    in via the `--ipc-port` flag.
+    /// 3. It exists to let Claude Code agents drive the running
+    ///    app the same way a developer would type into their own
+    ///    client; treating the agent as less privileged than the
+    ///    user it represents would defeat the feedback loop.
+    ///
+    /// NEVER ship a public binary that auto-enables `--ipc-port`.
+    /// `Ipc`-tagged macros are dispatcher-only — they are never
+    /// inserted into the persistent `MacroRegistry`, so the
+    /// shadow-stack semantics around App / User / Map / Inline are
+    /// unaffected.
+    Ipc,
 }
 
 impl MacroSource {
@@ -70,7 +94,7 @@ impl MacroSource {
     /// app-bundled / map-inline / node-inline macros loaded from
     /// untrusted sources cannot execute arbitrary console verbs.
     pub fn allows_console_line(self) -> bool {
-        matches!(self, MacroSource::User)
+        matches!(self, MacroSource::User | MacroSource::Ipc)
     }
 
     /// Whether macros from this source may invoke the given Action
@@ -94,7 +118,7 @@ impl MacroSource {
     /// silently bypassed the gate. A real `LabelEditOnSelection`
     /// gap surfaced from that pattern.)
     pub fn allows_action(self, action: &Action) -> bool {
-        if matches!(self, MacroSource::User) {
+        if matches!(self, MacroSource::User | MacroSource::Ipc) {
             return true;
         }
         !action.is_destructive()
@@ -182,12 +206,18 @@ impl MacroSource {
     /// future re-ordering and `#[non_exhaustive]` keeps it honest.
     /// Higher index = higher precedence. Module-private — only the
     /// registry's slot array consumes it.
-    const fn index(self) -> usize {
+    ///
+    /// Returns `None` for [`MacroSource::Ipc`]: that tier is dispatcher-
+    /// only — IPC requests reach `dispatch_action` / `apply_custom_mutation`
+    /// directly without ever being inserted into the registry, so it
+    /// has no slot. [`MacroRegistry::insert`] asserts on this.
+    const fn index(self) -> Option<usize> {
         match self {
-            MacroSource::App => 0,
-            MacroSource::User => 1,
-            MacroSource::Map => 2,
-            MacroSource::Inline => 3,
+            MacroSource::App => Some(0),
+            MacroSource::User => Some(1),
+            MacroSource::Map => Some(2),
+            MacroSource::Inline => Some(3),
+            MacroSource::Ipc => None,
         }
     }
 }
@@ -226,12 +256,15 @@ impl MacroRegistry {
     /// Within-tier last-writer-wins; cross-tier coexistence is
     /// preserved.
     pub fn insert(&mut self, m: Macro, source: MacroSource) -> Option<Macro> {
+        let idx = source
+            .index()
+            .expect("MacroRegistry::insert called with dispatcher-only MacroSource::Ipc");
         let id = m.id.clone();
         let slots = self
             .macros
             .entry(id)
             .or_insert_with(|| std::array::from_fn(|_| None));
-        slots[source.index()].replace(m)
+        slots[idx].replace(m)
     }
 
     /// Look up the highest-tier macro for `id`. Walks the slot
@@ -250,7 +283,8 @@ impl MacroRegistry {
     /// Look up the highest-tier macro for `id` and the tier that
     /// holds it. The dispatcher uses this pair to consult the
     /// privilege gate (`MacroSource::allows_console_line`,
-    /// `allows_action`). Same walk order as `get`.
+    /// `allows_action`). Same walk order as `get`. Skips
+    /// [`MacroSource::Ipc`] — that tier is dispatcher-only.
     pub fn get_with_source(&self, id: &str) -> Option<(&Macro, MacroSource)> {
         let slots = self.macros.get(id)?;
         // Walk tiers high-to-low. The list is hand-written so the
@@ -262,8 +296,10 @@ impl MacroRegistry {
             MacroSource::User,
             MacroSource::App,
         ] {
-            if let Some(m) = &slots[tier.index()] {
-                return Some((m, tier));
+            if let Some(idx) = tier.index() {
+                if let Some(m) = &slots[idx] {
+                    return Some((m, tier));
+                }
             }
         }
         None
@@ -311,7 +347,9 @@ impl MacroRegistry {
     /// previously-shadowed User-tier entries re-emerge naturally
     /// in subsequent lookups.
     pub fn clear_tier(&mut self, source: MacroSource) {
-        let idx = source.index();
+        let idx = source
+            .index()
+            .expect("MacroRegistry::clear_tier called with dispatcher-only MacroSource::Ipc");
         self.macros.retain(|_, slots| {
             slots[idx] = None;
             slots.iter().any(Option::is_some)

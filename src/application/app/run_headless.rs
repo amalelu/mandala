@@ -24,7 +24,7 @@ use crossbeam_channel::RecvTimeoutError;
 
 use super::Application;
 use crate::application::document::MindMapDocument;
-use crate::application::ipc::state_view::{DocumentView, StateSnapshot};
+use crate::application::ipc::state_view::{DocumentView, SelectionView, StateSnapshot};
 use crate::application::ipc::{
     self, log_buffer, IpcEvent, IpcRequest, IpcRequestPayload, IpcResponse, RequestSink, RunMode,
 };
@@ -63,18 +63,18 @@ impl HeadlessState {
     }
 
     fn build_snapshot(&self) -> StateSnapshot {
-        let document = match &self.document {
-            Some(doc) => DocumentView {
+        let Some(doc) = &self.document else {
+            return StateSnapshot::default();
+        };
+        StateSnapshot {
+            document: DocumentView {
                 mindmap: serde_json::to_value(&doc.mindmap).ok(),
                 file_path: doc.file_path.clone(),
                 dirty: doc.dirty,
                 undo_depth: doc.undo_stack.len(),
-                active_animation_count: 0,
+                active_animation_count: doc.active_animations.len(),
             },
-            None => DocumentView::default(),
-        };
-        StateSnapshot {
-            document,
+            selection: SelectionView::from_state(&doc.selection),
             ..Default::default()
         }
     }
@@ -134,10 +134,10 @@ pub(super) fn run(app: Application) {
     loop {
         match req_rx.recv_timeout(HEADLESS_TICK) {
             Ok(req) => {
-                let resp = handle_request(&mut state, req.payload);
+                let resp = handle_request(&mut state, &event_tx, req.payload);
                 let _ = req.responder.send(resp);
                 while let Ok(req) = req_rx.try_recv() {
-                    let resp = handle_request(&mut state, req.payload);
+                    let resp = handle_request(&mut state, &event_tx, req.payload);
                     let _ = req.responder.send(resp);
                 }
             }
@@ -148,12 +148,19 @@ pub(super) fn run(app: Application) {
     }
 }
 
-fn handle_request(state: &mut HeadlessState, payload: IpcRequestPayload) -> IpcResponse {
+fn handle_request(
+    state: &mut HeadlessState,
+    event_tx: &tokio::sync::broadcast::Sender<IpcEvent>,
+    payload: IpcRequestPayload,
+) -> IpcResponse {
     use axum::http::StatusCode;
     match payload {
         IpcRequestPayload::FullState => IpcResponse::Ok(
             serde_json::to_value(state.build_snapshot()).unwrap_or(serde_json::Value::Null),
         ),
+        IpcRequestPayload::CustomMutation { id, target } => {
+            handle_custom_mutation(state, event_tx, &id, target.as_deref())
+        }
         IpcRequestPayload::Screenshot { .. } => IpcResponse::Err(
             StatusCode::NOT_IMPLEMENTED,
             "screenshot unavailable in headless mode; render the document JSON via /state/document"
@@ -161,4 +168,84 @@ fn handle_request(state: &mut HeadlessState, payload: IpcRequestPayload) -> IpcR
         ),
         other => crate::application::ipc::routes::handle_main_stub(other),
     }
+}
+
+/// `POST /mutations/{id}` — apply a registered custom mutation against
+/// the live document. Resolves the target node id from the request
+/// body (`{"target": "node-id"}`); falls back to the current
+/// `doc.selection` when the request supplies `null` / no target and
+/// the selection identifies a single node. Tagged
+/// [`MacroSource::Ipc`](crate::application::macros::MacroSource::Ipc)
+/// — the privilege gate permits every CustomMutation, including
+/// destructive ones, per the dev-only IPC contract.
+fn handle_custom_mutation(
+    state: &mut HeadlessState,
+    event_tx: &tokio::sync::broadcast::Sender<IpcEvent>,
+    id: &str,
+    target: Option<&str>,
+) -> IpcResponse {
+    use axum::http::StatusCode;
+    use crate::application::macros::MacroSource;
+
+    let Some(doc) = state.document.as_mut() else {
+        return IpcResponse::Err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no document loaded".into(),
+        );
+    };
+
+    let Some(custom) = doc.mutation_registry.get(id).cloned() else {
+        return IpcResponse::Err(
+            StatusCode::NOT_FOUND,
+            format!("unknown custom mutation '{id}'"),
+        );
+    };
+
+    // Resolve the target node. Body wins; otherwise honour a single
+    // selected node. Multi-selection / edge-selection / no-selection
+    // without an explicit target is a 400 — the caller has to be
+    // explicit when the selection isn't unambiguously a node.
+    let resolved_target: String = if let Some(t) = target {
+        t.to_string()
+    } else {
+        match &doc.selection {
+            crate::application::document::SelectionState::Single(id) => id.clone(),
+            _ => {
+                return IpcResponse::Err(
+                    StatusCode::BAD_REQUEST,
+                    "no target supplied and current selection is not a single node".into(),
+                );
+            }
+        }
+    };
+
+    if !doc.mindmap.nodes.contains_key(&resolved_target) {
+        return IpcResponse::Err(
+            StatusCode::BAD_REQUEST,
+            format!("target node '{resolved_target}' does not exist"),
+        );
+    }
+
+    // Privilege tier: IPC-originated dispatches are tagged with
+    // [`MacroSource::Ipc`] — unrestricted by design. The current
+    // `apply_custom_mutation` path doesn't take a `MacroSource`
+    // argument (no per-tier gating exists yet on this verb), so the
+    // tag is informational. When custom-mutation privilege gating
+    // lands, plumb `_source` through `apply_custom_mutation` to
+    // surface the tier inside the verb.
+    let _source = MacroSource::Ipc;
+
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&custom, &resolved_target, Some(&mut tree));
+
+    let _ = event_tx.send(IpcEvent::MutationApplied {
+        id: id.to_string(),
+        target: Some(resolved_target.clone()),
+    });
+
+    IpcResponse::Ok(serde_json::json!({
+        "applied": true,
+        "id": id,
+        "target": resolved_target,
+    }))
 }

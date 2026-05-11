@@ -67,6 +67,51 @@ fn macro_source_console_line_gating() {
     assert!(!MacroSource::App.allows_console_line());
     assert!(!MacroSource::Map.allows_console_line());
     assert!(!MacroSource::Inline.allows_console_line());
+    // Ipc is unrestricted by design.
+    assert!(MacroSource::Ipc.allows_console_line());
+}
+
+#[test]
+fn macro_source_ipc_tier_allows_every_destructive_action() {
+    for a in [
+        Action::SaveDocument,
+        Action::DeleteSelection,
+        Action::Cut,
+        Action::Paste,
+        Action::OrphanSelection,
+        Action::CreateOrphanNode,
+        Action::CreateOrphanNodeAndEdit,
+        Action::NewDocument,
+        Action::Undo,
+    ] {
+        assert!(
+            MacroSource::Ipc.allows_action(&a),
+            "Ipc tier must allow destructive action {:?}",
+            a
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "dispatcher-only MacroSource::Ipc")]
+fn macro_registry_insert_panics_on_ipc_tier() {
+    let mut reg = MacroRegistry::new();
+    reg.insert(
+        Macro {
+            id: "x".into(),
+            name: "x".into(),
+            description: String::new(),
+            steps: vec![],
+        },
+        MacroSource::Ipc,
+    );
+}
+
+#[test]
+#[should_panic(expected = "dispatcher-only MacroSource::Ipc")]
+fn macro_registry_clear_tier_panics_on_ipc_tier() {
+    let mut reg = MacroRegistry::new();
+    reg.clear_tier(MacroSource::Ipc);
 }
 
 #[test]
