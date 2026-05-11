@@ -161,6 +161,9 @@ fn handle_request(
         IpcRequestPayload::CustomMutation { id, target } => {
             handle_custom_mutation(state, event_tx, &id, target.as_deref())
         }
+        IpcRequestPayload::DispatchAction(action) => {
+            handle_dispatch_action(state, event_tx, action)
+        }
         IpcRequestPayload::Screenshot { .. } => IpcResponse::Err(
             StatusCode::NOT_IMPLEMENTED,
             "screenshot unavailable in headless mode; render the document JSON via /state/document"
@@ -248,4 +251,218 @@ fn handle_custom_mutation(
         "id": id,
         "target": resolved_target,
     }))
+}
+
+/// `POST /actions/dispatch` (headless) — runs a curated subset of
+/// the [`Action`](crate::application::keybinds::Action) surface
+/// that is reachable without a `Renderer` / `AppScene` /
+/// `SceneConnectionCache`. Tagged
+/// [`MacroSource::Ipc`](crate::application::macros::MacroSource::Ipc).
+///
+/// **§3 funnel deviation, documented.** The windowed dispatcher
+/// is the canonical single funnel for `Action`s. Headless can't
+/// reach `dispatch_compatible` because that function takes an
+/// `InputContextCore` carrying GPU/scene state we don't have. This
+/// handler instead calls the same `pub(in crate::application::app)`
+/// `*_in(doc) -> bool` primitives that the dispatcher's `apply_*`
+/// helpers wrap — i.e. it shares the document-mutation logic and
+/// only skips the scene-rebuild call (headless has no scene to
+/// rebuild; the next snapshot tick re-publishes the document).
+/// The full windowed-mode wiring is the next milestone — once
+/// `EventLoop<UserEvent>` lands, the windowed path will reach
+/// `dispatch_compatible` and the curated subset becomes the
+/// headless-only fallback.
+///
+/// Unsupported Actions (everything that needs camera / scene /
+/// renderer state, every NativeOnly modal, every clipboard verb)
+/// return 501 NOT_IMPLEMENTED with a message naming the variant.
+fn handle_dispatch_action(
+    state: &mut HeadlessState,
+    event_tx: &tokio::sync::broadcast::Sender<IpcEvent>,
+    action: crate::application::keybinds::Action,
+) -> IpcResponse {
+    use axum::http::StatusCode;
+    use crate::application::app::dispatch::cross_dispatch as cd;
+    use crate::application::keybinds::Action;
+
+    let Some(doc) = state.document.as_mut() else {
+        return IpcResponse::Err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no document loaded".into(),
+        );
+    };
+
+    let changed = match &action {
+        Action::Undo => {
+            // Fast-forward any in-flight animation snapshot first
+            // (mirrors `apply_undo`'s native body so behaviour is
+            // platform-uniform even though headless never ticks
+            // animations).
+            doc.fast_forward_animations(None);
+            doc.undo()
+        }
+        Action::SelectAll => cd::select_all_in(doc),
+        Action::DeselectAll => cd::deselect_all_in(doc),
+        Action::InvertSelection => cd::invert_selection_in(doc),
+        Action::SelectParent => cd::select_parent_in(doc),
+        Action::SelectChild => cd::select_child_in(doc),
+        Action::SelectNextSibling => cd::select_sibling_in(doc, true),
+        Action::SelectPrevSibling => cd::select_sibling_in(doc, false),
+        Action::JumpToRoot => {
+            // The native body returns the root's canvas position so
+            // the camera can re-centre; headless has no camera, so
+            // we discard the position. The selection move (root node
+            // becomes the single selection) is what an agent reads.
+            cd::jump_to_root_in(doc).is_some()
+        }
+        _ => {
+            return IpcResponse::Err(
+                StatusCode::NOT_IMPLEMENTED,
+                format!(
+                    "Action variant not yet reachable in headless mode: {:?}. \
+                     Headless dispatch is limited to a curated document-only \
+                     subset; the full Action surface lands once windowed-mode \
+                     IPC wiring goes through dispatch_compatible.",
+                    action
+                ),
+            );
+        }
+    };
+
+    let outcome = if changed { "handled" } else { "unchanged" };
+    let _ = event_tx.send(IpcEvent::ActionDispatched {
+        action: action.clone(),
+        outcome: outcome.into(),
+    });
+
+    IpcResponse::Ok(serde_json::json!({
+        "outcome": outcome,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::keybinds::Action;
+
+    /// Build a `HeadlessState` from the canonical test fixture without
+    /// going through `HeadlessState::new` (which `process::exit(2)`s
+    /// on load failure — fatal in a test runner).
+    fn test_state() -> HeadlessState {
+        let path = format!(
+            "{}/maps/testament.mindmap.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut doc = MindMapDocument::load(&path).expect("load testament");
+        let (app_mutations, user_mutations) =
+            crate::application::document::mutations_loader::load_app_and_user(None);
+        doc.build_mutation_registry_with_app_and_user(&app_mutations, &user_mutations);
+        crate::application::document::mutations::register_builtin_handlers(&mut doc);
+        HeadlessState { document: Some(doc) }
+    }
+
+    fn test_event_tx() -> tokio::sync::broadcast::Sender<IpcEvent> {
+        tokio::sync::broadcast::channel::<IpcEvent>(16).0
+    }
+
+    fn json_outcome(resp: &IpcResponse) -> Option<String> {
+        match resp {
+            IpcResponse::Ok(v) => v.get("outcome").and_then(|s| s.as_str()).map(String::from),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_dispatch_select_all_handled_changes_selection() {
+        let mut state = test_state();
+        let tx = test_event_tx();
+        let resp = handle_dispatch_action(&mut state, &tx, Action::SelectAll);
+        assert_eq!(json_outcome(&resp).as_deref(), Some("handled"));
+        assert!(matches!(
+            state.document.as_ref().unwrap().selection,
+            crate::application::document::SelectionState::Multi(_),
+        ));
+    }
+
+    #[test]
+    fn test_dispatch_deselect_all_on_empty_selection_is_unchanged() {
+        let mut state = test_state();
+        let tx = test_event_tx();
+        let resp = handle_dispatch_action(&mut state, &tx, Action::DeselectAll);
+        // A fresh testament starts with selection=None, so deselect is a no-op.
+        assert_eq!(json_outcome(&resp).as_deref(), Some("unchanged"));
+    }
+
+    #[test]
+    fn test_dispatch_jump_to_root_selects_root_node() {
+        let mut state = test_state();
+        let tx = test_event_tx();
+        let resp = handle_dispatch_action(&mut state, &tx, Action::JumpToRoot);
+        assert_eq!(json_outcome(&resp).as_deref(), Some("handled"));
+        assert!(matches!(
+            state.document.as_ref().unwrap().selection,
+            crate::application::document::SelectionState::Single(_),
+        ));
+    }
+
+    #[test]
+    fn test_dispatch_unsupported_action_returns_501() {
+        let mut state = test_state();
+        let tx = test_event_tx();
+        // `OpenConsole` requires modal state that headless doesn't carry.
+        let resp = handle_dispatch_action(&mut state, &tx, Action::OpenConsole);
+        match resp {
+            IpcResponse::Err(code, msg) => {
+                assert_eq!(code, axum::http::StatusCode::NOT_IMPLEMENTED);
+                assert!(
+                    msg.contains("OpenConsole"),
+                    "error message should name the variant; got: {msg}"
+                );
+            }
+            other => panic!("expected NOT_IMPLEMENTED error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dispatch_undo_after_a_mutation_decrements_undo_stack() {
+        let mut state = test_state();
+        let tx = test_event_tx();
+        // Apply a mutation so there's something to undo. Use the
+        // root node "0" since testament's IDs start from 0.
+        let custom = state
+            .document
+            .as_ref()
+            .unwrap()
+            .mutation_registry
+            .get("flower-layout")
+            .expect("flower-layout registered")
+            .clone();
+        let mut tree = state.document.as_ref().unwrap().build_tree();
+        state
+            .document
+            .as_mut()
+            .unwrap()
+            .apply_custom_mutation(&custom, "0", Some(&mut tree));
+        let before = state.document.as_ref().unwrap().undo_stack.len();
+        assert!(before >= 1, "mutation should have pushed onto undo stack");
+
+        let resp = handle_dispatch_action(&mut state, &tx, Action::Undo);
+        assert_eq!(json_outcome(&resp).as_deref(), Some("handled"));
+        let after = state.document.as_ref().unwrap().undo_stack.len();
+        assert!(after < before, "undo should pop the stack");
+    }
+
+    #[test]
+    fn test_dispatch_no_document_returns_503() {
+        let mut state = HeadlessState { document: None };
+        let tx = test_event_tx();
+        let resp = handle_dispatch_action(&mut state, &tx, Action::Undo);
+        match resp {
+            IpcResponse::Err(code, msg) => {
+                assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+                assert!(msg.contains("no document"), "msg: {msg}");
+            }
+            other => panic!("expected 503, got {other:?}"),
+        }
+    }
 }
