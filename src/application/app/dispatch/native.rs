@@ -243,11 +243,7 @@ pub(in crate::application::app) fn dispatch_action(
                     scene_cache: core.scene_cache,
                     interaction_mode: core.interaction_mode,
                 };
-                let _ = super::cross_dispatch::apply_enter_node_edit(
-                    clean,
-                    &mut rc,
-                    core.text_edit_state,
-                );
+                let _ = super::cross_dispatch::apply_enter_node_edit(clean, &mut rc, core.text_edit_state);
             }
             DispatchOutcome::Handled
         }
@@ -265,11 +261,7 @@ pub(in crate::application::app) fn dispatch_action(
                     scene_cache: core.scene_cache,
                     interaction_mode: core.interaction_mode,
                 };
-                let _ = super::cross_dispatch::apply_enter_section_edit(
-                    false,
-                    &mut rc,
-                    core.text_edit_state,
-                );
+                let _ = super::cross_dispatch::apply_enter_section_edit(false, &mut rc, core.text_edit_state);
             }
             DispatchOutcome::Handled
         }
@@ -463,12 +455,10 @@ pub(in crate::application::app) fn dispatch_action(
                         // section[1] opened the editor on
                         // section[0].
                         doc.selection = match section_idx {
-                            Some(idx) => SelectionState::Section(
-                                crate::application::document::SectionSel {
-                                    node_id: nid.clone(),
-                                    section_idx: *idx,
-                                },
-                            ),
+                            Some(idx) => SelectionState::Section(crate::application::document::SectionSel {
+                                node_id: nid.clone(),
+                                section_idx: *idx,
+                            }),
                             None => SelectionState::Single(nid.clone()),
                         };
                         rebuild_all(
@@ -1110,14 +1100,16 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
         let aabb_size = Vec2::new(start_size.width as f32, start_size.height as f32);
         let side = infer_resize_anchor(h.canvas_pos, aabb_pos, aabb_size);
         ctx.scene_cache.clear();
-        *ctx.drag_state = DragState::Throttled(ThrottledDrag::SectionResize(
-            SectionResizeInteraction::new(
-                node_id, section_idx, side, start_offset, start_size,
-                // Fast-resize gesture (`PendingRight` promotion) — the
-                // right-button release path may finalize this drag.
-                true,
-            ),
-        ));
+        *ctx.drag_state = DragState::Throttled(ThrottledDrag::SectionResize(SectionResizeInteraction::new(
+            node_id,
+            section_idx,
+            side,
+            start_offset,
+            start_size,
+            // Fast-resize gesture (`PendingRight` promotion) — the
+            // right-button release path may finalize this drag.
+            true,
+        )));
     } else {
         let Some(node) = doc.mindmap.nodes.get(&node_id) else {
             log::debug!("FastResizeStart: node '{}' not found; skipping", node_id);
@@ -1130,9 +1122,13 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
         let aabb_size = Vec2::new(start_size.width as f32, start_size.height as f32);
         let side = infer_resize_anchor(h.canvas_pos, aabb_pos, aabb_size);
         ctx.scene_cache.clear();
-        *ctx.drag_state = DragState::Throttled(ThrottledDrag::NodeResize(
-            NodeResizeInteraction::new(node_id, side, start_position, start_size, true),
-        ));
+        *ctx.drag_state = DragState::Throttled(ThrottledDrag::NodeResize(NodeResizeInteraction::new(
+            node_id,
+            side,
+            start_position,
+            start_size,
+            true,
+        )));
     }
 }
 

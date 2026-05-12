@@ -174,7 +174,11 @@ fn format_border_readout(
         .as_ref()
         .and_then(|c| c.font.as_deref())
         .map(|_| "per-node override")
-        .or_else(|| canvas_default.and_then(|c| c.font.as_deref()).map(|_| "canvas default"))
+        .or_else(|| {
+            canvas_default
+                .and_then(|c| c.font.as_deref())
+                .map(|_| "canvas default")
+        })
         .unwrap_or("hardcoded floor");
     lines.push(OutputLine::plain(format!(
         "font:    {} ({} pt)  (override: `border font <family>`, source: {})",
@@ -191,11 +195,7 @@ fn format_border_readout(
             "  style.frame_color    = {}          # set via `color border=`",
             node.style.frame_color
         )));
-        let per_node_color = node
-            .style
-            .border
-            .as_ref()
-            .and_then(|c| c.color.as_deref());
+        let per_node_color = node.style.border.as_ref().and_then(|c| c.color.as_deref());
         let cascade_target = per_node_color.unwrap_or(node.style.frame_color.as_str());
         let per_node_label = per_node_color.unwrap_or("(unset)");
         lines.push(OutputLine::plain(format!(

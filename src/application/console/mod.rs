@@ -107,10 +107,7 @@ pub enum ConsoleSideEffect {
     /// opens the editor. Single source of truth for "open
     /// section editor"; the verb is the only producer of this
     /// variant.
-    OpenSectionEdit {
-        node_id: String,
-        section_idx: usize,
-    },
+    OpenSectionEdit { node_id: String, section_idx: usize },
 }
 
 impl std::fmt::Debug for ConsoleSideEffect {

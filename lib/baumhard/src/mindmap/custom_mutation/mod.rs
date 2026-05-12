@@ -276,8 +276,8 @@ pub fn apply_mutations_to_element(
 /// walker path is phased in for size-aware mutations in a separate
 /// session.
 pub fn flat_mutations(mutator: &MutatorNode) -> Option<Vec<crate::gfx_structs::mutator::Mutation>> {
-    use crate::mutator_builder::{InstructionSpec, MutationListSrc, MutatorNode as N};
     use crate::gfx_structs::predicate::Comparator;
+    use crate::mutator_builder::{InstructionSpec, MutationListSrc, MutatorNode as N};
     match mutator {
         N::Macro {
             mutations: MutationListSrc::Literal(list),

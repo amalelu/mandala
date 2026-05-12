@@ -125,9 +125,7 @@ fn color_as_string(c: &ColorValue, default: &str) -> String {
 fn write_edge_adjacent_color(view: &mut TargetView, override_str: Option<&str>) -> Outcome {
     match view {
         TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_color(er, override_str)),
-        TargetView::EdgeLabel { doc, er } => {
-            Outcome::applied(doc.set_edge_label_color(er, override_str))
-        }
+        TargetView::EdgeLabel { doc, er } => Outcome::applied(doc.set_edge_label_color(er, override_str)),
         TargetView::PortalLabel {
             doc,
             er,
@@ -206,7 +204,12 @@ impl<'a> HasTextColor for TargetView<'a> {
             TargetView::Node { doc, id } => {
                 Outcome::applied(doc.set_node_text_color(id, color_as_string(&c, "#ffffff")))
             }
-            TargetView::Section { doc, id, section_idx, range } => {
+            TargetView::Section {
+                doc,
+                id,
+                section_idx,
+                range,
+            } => {
                 let color_str = color_as_string(&c, "#ffffff");
                 let applied = match range {
                     Some((rs, re)) => doc.set_section_text_color_range(id, *section_idx, *rs, *re, color_str),
@@ -285,7 +288,12 @@ impl<'a> AcceptsFontFamily for TargetView<'a> {
             // Section: per-section font family override, leaves
             // sibling sections' runs alone. With a `range` set,
             // routes to the range-aware setter instead.
-            TargetView::Section { doc, id, section_idx, range } => {
+            TargetView::Section {
+                doc,
+                id,
+                section_idx,
+                range,
+            } => {
                 let applied = match range {
                     Some((rs, re)) => doc.set_section_font_family_range(id, *section_idx, *rs, *re, family),
                     None => doc.set_section_font_family(id, *section_idx, family),
@@ -343,7 +351,9 @@ impl<'a> HandlesCopy for TargetView<'a> {
             // back to whole-section copy. The semantic is
             // safe for copy (non-destructive) but Cut+Paste below
             // explicitly reject the range to prevent surprise.
-            TargetView::Section { doc, id, section_idx, .. } => match doc
+            TargetView::Section {
+                doc, id, section_idx, ..
+            } => match doc
                 .mindmap
                 .nodes
                 .get(id)
@@ -422,7 +432,12 @@ impl<'a> HandlesPaste for TargetView<'a> {
             // Whole-section: structured payload via the in-process
             // buffer when its snapshot matches the untrimmed
             // probe; falls back to plain-text template inheritance.
-            TargetView::Section { doc, id, section_idx, range } => {
+            TargetView::Section {
+                doc,
+                id,
+                section_idx,
+                range,
+            } => {
                 if let Some((rs, re)) = *range {
                     return paste_section_range(doc, id, *section_idx, rs, re, content);
                 }
@@ -472,7 +487,12 @@ impl<'a> HandlesCut for TargetView<'a> {
             // section dissolved." Range-aware cut removes only the
             // in-range graphemes, returns them as plain text, and
             // shifts later runs left.
-            TargetView::Section { doc, id, section_idx, range } => {
+            TargetView::Section {
+                doc,
+                id,
+                section_idx,
+                range,
+            } => {
                 if let Some((rs, re)) = *range {
                     return cut_section_range(doc, id, *section_idx, rs, re);
                 }
@@ -698,7 +718,11 @@ pub fn selection_targets(sel: &SelectionState) -> Vec<TargetId> {
 pub fn view_for<'a>(doc: &'a mut MindMapDocument, id: &TargetId) -> TargetView<'a> {
     match id {
         TargetId::Node(nid) => TargetView::Node { doc, id: nid.clone() },
-        TargetId::Section { node_id, section_idx, range } => TargetView::Section {
+        TargetId::Section {
+            node_id,
+            section_idx,
+            range,
+        } => TargetView::Section {
             doc,
             id: node_id.clone(),
             section_idx: *section_idx,
@@ -751,10 +775,10 @@ fn cut_section_range(
     if range_start >= clamped_end {
         return ClipboardContent::Empty;
     }
-    let byte_start = grapheme_chad::find_byte_index_of_grapheme(&section.text, range_start)
-        .unwrap_or(section.text.len());
-    let byte_end = grapheme_chad::find_byte_index_of_grapheme(&section.text, clamped_end)
-        .unwrap_or(section.text.len());
+    let byte_start =
+        grapheme_chad::find_byte_index_of_grapheme(&section.text, range_start).unwrap_or(section.text.len());
+    let byte_end =
+        grapheme_chad::find_byte_index_of_grapheme(&section.text, clamped_end).unwrap_or(section.text.len());
     let cut_text = section.text[byte_start..byte_end].to_string();
     let mut new_text = String::with_capacity(section.text.len() - (byte_end - byte_start));
     new_text.push_str(&section.text[..byte_start]);
@@ -818,13 +842,11 @@ fn paste_section_range(
     if range_start > clamped_end {
         return Outcome::NotApplicable;
     }
-    let byte_start = grapheme_chad::find_byte_index_of_grapheme(&section.text, range_start)
-        .unwrap_or(section.text.len());
-    let byte_end = grapheme_chad::find_byte_index_of_grapheme(&section.text, clamped_end)
-        .unwrap_or(section.text.len());
-    let mut new_text = String::with_capacity(
-        section.text.len() - (byte_end - byte_start) + content.len(),
-    );
+    let byte_start =
+        grapheme_chad::find_byte_index_of_grapheme(&section.text, range_start).unwrap_or(section.text.len());
+    let byte_end =
+        grapheme_chad::find_byte_index_of_grapheme(&section.text, clamped_end).unwrap_or(section.text.len());
+    let mut new_text = String::with_capacity(section.text.len() - (byte_end - byte_start) + content.len());
     new_text.push_str(&section.text[..byte_start]);
     new_text.push_str(content);
     new_text.push_str(&section.text[byte_end..]);
@@ -836,36 +858,34 @@ fn paste_section_range(
     // section's first run for boundary cases (insertion at a
     // gap), and to a hardcoded default when the section has no
     // runs.
-    let template = baumhard::mindmap::model::text_run_ops::find_run_containing(
-        &section.text_runs,
-        range_start,
-    )
-    .or_else(|| {
-        // At a run boundary `find_run_containing` returns None;
-        // prefer the run ending at the boundary (left neighbour)
-        // since the user is conceptually typing "after" it.
-        if range_start == 0 {
-            None
-        } else {
-            baumhard::mindmap::model::text_run_ops::find_run_containing(
-                &section.text_runs,
-                range_start - 1,
-            )
-        }
-    })
-    .map(|idx| section.text_runs[idx].clone())
-    .or_else(|| section.text_runs.first().cloned())
-    .unwrap_or_else(|| baumhard::mindmap::model::TextRun {
-        start: 0,
-        end: 0,
-        bold: false,
-        italic: false,
-        underline: false,
-        font: "LiberationSans".to_string(),
-        size_pt: 24,
-        color: node.style.text_color.clone(),
-        hyperlink: None,
-    });
+    let template =
+        baumhard::mindmap::model::text_run_ops::find_run_containing(&section.text_runs, range_start)
+            .or_else(|| {
+                // At a run boundary `find_run_containing` returns None;
+                // prefer the run ending at the boundary (left neighbour)
+                // since the user is conceptually typing "after" it.
+                if range_start == 0 {
+                    None
+                } else {
+                    baumhard::mindmap::model::text_run_ops::find_run_containing(
+                        &section.text_runs,
+                        range_start - 1,
+                    )
+                }
+            })
+            .map(|idx| section.text_runs[idx].clone())
+            .or_else(|| section.text_runs.first().cloned())
+            .unwrap_or_else(|| baumhard::mindmap::model::TextRun {
+                start: 0,
+                end: 0,
+                bold: false,
+                italic: false,
+                underline: false,
+                font: "LiberationSans".to_string(),
+                size_pt: 24,
+                color: node.style.text_color.clone(),
+                hyperlink: None,
+            });
     baumhard::mindmap::model::text_run_ops::splice_range(
         &mut new_runs,
         range_start,

@@ -10,8 +10,8 @@ use cosmic_text::SwashCache;
 
 use crate::font::fonts;
 use crate::font::fonts::{
-    acquire_font_system_write, app_font_by_family, family_name_of, list_loaded_families, loaded_families_iter,
-    measure_glyph_ink_bounds, measure_text_block_unbounded, AppFont,
+    acquire_font_system_write, app_font_by_family, family_name_of, list_loaded_families,
+    loaded_families_iter, measure_glyph_ink_bounds, measure_text_block_unbounded, AppFont,
 };
 
 #[test]

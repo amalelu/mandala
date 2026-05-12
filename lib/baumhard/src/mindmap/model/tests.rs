@@ -536,7 +536,12 @@ fn portal_glyph_presets_are_nonempty_and_unique() {
 /// fires the same test.
 #[test]
 fn zoom_window_skip_default_and_round_trip_on_every_struct() {
-    fn check_pair(label: &str, default_json: &str, authored_min: f32, mut set_pair: impl FnMut(Option<f32>, Option<f32>) -> (String, Option<f32>, Option<f32>)) {
+    fn check_pair(
+        label: &str,
+        default_json: &str,
+        authored_min: f32,
+        mut set_pair: impl FnMut(Option<f32>, Option<f32>) -> (String, Option<f32>, Option<f32>),
+    ) {
         // Default: neither key emitted.
         assert!(
             !default_json.contains("min_zoom_to_render"),
@@ -557,7 +562,10 @@ fn zoom_window_skip_default_and_round_trip_on_every_struct() {
         // One-sided: only min present, max absent both in JSON and after round-trip.
         let (json, back_min, back_max) = set_pair(Some(authored_min), None);
         assert!(json.contains(&format!("\"min_zoom_to_render\":{authored_min}")));
-        assert!(!json.contains("max_zoom_to_render"), "{label}: one-sided max leaked: {json}");
+        assert!(
+            !json.contains("max_zoom_to_render"),
+            "{label}: one-sided max leaked: {json}"
+        );
         assert_eq!(back_min, Some(authored_min));
         assert!(back_max.is_none());
     }
@@ -784,7 +792,10 @@ fn mindsection_channel_option_round_trip() {
     // None ⇒ skip-serialize.
     let none_section = MindSection::new_default("a".into(), Vec::new());
     let none_json = serde_json::to_string(&none_section).unwrap();
-    assert!(!none_json.contains("channel"), "default channel must skip-serialize");
+    assert!(
+        !none_json.contains("channel"),
+        "default channel must skip-serialize"
+    );
     let parsed_none: MindSection = serde_json::from_str("{\"text\":\"a\"}").unwrap();
     assert_eq!(parsed_none.channel, None, "absent field parses as None");
 
@@ -914,7 +925,11 @@ fn test_canvas_section_frame_defaults_round_trip() {
         theme_variants: HashMap::new(),
     };
     let json = serde_json::to_string(&plain).expect("serialises");
-    assert!(!json.contains("default_section_frame_border"), "None skips: {}", json);
+    assert!(
+        !json.contains("default_section_frame_border"),
+        "None skips: {}",
+        json
+    );
     assert!(!json.contains("default_focused_section_frame_border"));
 
     // Authored canvas: both fields land + round-trip.
@@ -942,7 +957,9 @@ fn test_canvas_section_frame_defaults_round_trip() {
     let json = serde_json::to_string(&authored).expect("serialises");
     let back: Canvas = serde_json::from_str(&json).expect("round-trips");
     let unfocused = back.default_section_frame_border.expect("unfocused survives");
-    let focused = back.default_focused_section_frame_border.expect("focused survives");
+    let focused = back
+        .default_focused_section_frame_border
+        .expect("focused survives");
     assert_eq!(unfocused.preset, "double");
     assert_eq!(unfocused.color.as_deref(), Some("#aaaaaa"));
     assert_eq!(focused.preset, "heavy");

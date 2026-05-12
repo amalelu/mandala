@@ -50,9 +50,7 @@ pub fn load_from_str(json: &str) -> Result<MindMap, String> {
             //   here when the typed map carries the symptom
             //   (zero-section node, or the substring marker
             //   indicates a dropped field).
-            if map.nodes.values().any(|n| n.sections.is_empty())
-                || has_legacy_marker(json)
-            {
+            if map.nodes.values().any(|n| n.sections.is_empty()) || has_legacy_marker(json) {
                 if let Some(err) = detect_legacy_shape(json) {
                     return Err(err);
                 }
@@ -162,8 +160,7 @@ fn detect_legacy_shape(json: &str) -> Option<String> {
 /// error describing the path + underlying cause.
 pub fn save_to_file(path: &Path, map: &MindMap) -> Result<(), String> {
     let value = serde_json::to_value(map).map_err(|e| format!("failed to serialize map: {e}"))?;
-    let json =
-        serde_json::to_string_pretty(&value).map_err(|e| format!("failed to render map JSON: {e}"))?;
+    let json = serde_json::to_string_pretty(&value).map_err(|e| format!("failed to render map JSON: {e}"))?;
     write_atomic(path, &json)
 }
 
@@ -180,8 +177,7 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
         .ok_or_else(|| format!("invalid path: {}", path.display()))?
         .to_string_lossy();
     let tmp_path = dir.join(format!(".{}.{}.tmp", file_name, std::process::id()));
-    fs::write(&tmp_path, contents)
-        .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
+    fs::write(&tmp_path, contents).map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
     fs::rename(&tmp_path, path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         format!(

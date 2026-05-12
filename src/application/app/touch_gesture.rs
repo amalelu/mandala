@@ -480,7 +480,9 @@ mod tests {
         rec.ingest(Phase::Started, 1, (100.0, 200.0), t);
         // 2px move — under 4px threshold.
         rec.ingest(Phase::Moved, 1, (102.0, 200.0), t + Duration::from_millis(2));
-        let g = rec.tick(t + Duration::from_millis(15)).expect("LongPress despite jitter");
+        let g = rec
+            .tick(t + Duration::from_millis(15))
+            .expect("LongPress despite jitter");
         // Long-press emits the *current* position, not the
         // started position — surfaces the jittered location.
         assert_eq!(g, RecognizedGesture::LongPress { pos: (102.0, 200.0) });
@@ -536,9 +538,7 @@ mod tests {
         rec.ingest(Phase::Started, 1, (100.0, 100.0), t);
         rec.ingest(Phase::Started, 2, (200.0, 100.0), t);
         // 2px finger jitter → ~1px centroid shift.
-        assert!(rec
-            .ingest(Phase::Moved, 1, (102.0, 100.0), t)
-            .is_none());
+        assert!(rec.ingest(Phase::Moved, 1, (102.0, 100.0), t).is_none());
     }
 
     /// Each "drag step" past the threshold fires once.

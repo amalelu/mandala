@@ -35,7 +35,8 @@ fn doc_with_two_uniform_sections() -> (crate::application::document::MindMapDocu
 #[test]
 fn current_color_at_section_reads_unanimous_run_color() {
     let (doc, id) = doc_with_two_uniform_sections();
-    let handle = PickerHandle::Section { range: None,
+    let handle = PickerHandle::Section {
+        range: None,
         node_id: id,
         section_idx: 1,
         axis: SectionColorAxis::Text,
@@ -72,7 +73,8 @@ fn current_color_at_section_falls_back_to_node_default_on_run_disagreement() {
             hyperlink: None,
         });
     }
-    let handle = PickerHandle::Section { range: None,
+    let handle = PickerHandle::Section {
+        range: None,
         node_id: id,
         section_idx: 1,
         axis: SectionColorAxis::Text,
@@ -91,13 +93,15 @@ fn current_color_at_section_falls_back_to_node_default_on_run_disagreement() {
 #[test]
 fn color_target_section_resolves_to_picker_handle() {
     let (doc, id) = doc_with_two_uniform_sections();
-    let target = ColorTarget::Section { range: None,
+    let target = ColorTarget::Section {
+        range: None,
         node_id: id.clone(),
         section_idx: 1,
         axis: SectionColorAxis::Text,
     };
     match target.resolve(&doc) {
-        Some(PickerHandle::Section { range: None,
+        Some(PickerHandle::Section {
+            range: None,
             node_id,
             section_idx,
             axis,
@@ -117,7 +121,8 @@ fn color_target_section_resolves_to_picker_handle() {
 #[test]
 fn color_target_section_resolves_to_none_when_index_out_of_range() {
     let (doc, id) = doc_with_two_uniform_sections();
-    let target = ColorTarget::Section { range: None,
+    let target = ColorTarget::Section {
+        range: None,
         node_id: id,
         section_idx: 99,
         axis: SectionColorAxis::Text,

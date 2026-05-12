@@ -28,11 +28,7 @@ use super::text_edit::{insert_at_cursor, insert_caret};
 /// shadowed user config.
 ///
 /// Returns `true` iff a printable character was inserted.
-pub(super) fn route_label_edit_key(
-    logical_key: &Key,
-    buffer: &mut String,
-    cursor: &mut usize,
-) -> bool {
+pub(super) fn route_label_edit_key(logical_key: &Key, buffer: &mut String, cursor: &mut usize) -> bool {
     if let Key::Character(c) = logical_key {
         // `Key::Character` payloads can carry IME / dead-key multi-
         // char sequences, so iterate. Control chars (and any non-
@@ -293,7 +289,14 @@ pub(in crate::application::app) fn close_label_edit(
     }
     // Rebuild so the label reflects the model state (or vanishes if
     // the buffer was empty + original was None).
-    rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+    rebuild_all(
+        doc,
+        interaction_mode,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+    );
 }
 
 /// Inline-edit state for a portal label's text. Parallel to
@@ -463,7 +466,16 @@ pub(in crate::application::app) fn handle_portal_text_edit_key(
         PortalTextEditState::Closed => return,
     };
     if !edge_still_valid {
-        close_portal_text_edit(false, doc, interaction_mode, state, mindmap_tree, app_scene, renderer, scene_cache);
+        close_portal_text_edit(
+            false,
+            doc,
+            interaction_mode,
+            state,
+            mindmap_tree,
+            app_scene,
+            renderer,
+            scene_cache,
+        );
         return;
     }
 
@@ -549,7 +561,14 @@ pub(in crate::application::app) fn close_portal_text_edit(
             doc.set_portal_label_text(&edge_ref, &endpoint_node_id, new_val);
         }
     }
-    rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+    rebuild_all(
+        doc,
+        interaction_mode,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+    );
 }
 
 #[cfg(test)]

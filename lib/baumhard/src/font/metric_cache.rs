@@ -55,16 +55,14 @@
 //!   `font_size` line-height even when their natural height is
 //!   smaller, producing visible gaps between glyphs).
 
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 use cosmic_text::SwashCache;
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 use lazy_static::lazy_static;
 use ordered_float::OrderedFloat;
 use rustc_hash::FxHashMap;
 use std::sync::{Mutex, RwLock};
 
-use crate::font::fonts::{
-    face_family_name_for_pin, measure_glyph_ink_bounds, AppFont, FONT_SYSTEM,
-};
+use crate::font::fonts::{face_family_name_for_pin, measure_glyph_ink_bounds, AppFont, FONT_SYSTEM};
 
 type CacheKey = (Option<AppFont>, OrderedFloat<f32>, String);
 
@@ -175,10 +173,7 @@ pub fn glyph_ink_height(face: Option<AppFont>, size_pt: f32, grapheme: &str) -> 
 /// Convenience for the border-rail math where the side pattern's
 /// `cluster: Vec<String>` field is already split per grapheme.
 pub fn cluster_width(face: Option<AppFont>, size_pt: f32, graphemes: &[String]) -> f32 {
-    graphemes
-        .iter()
-        .map(|g| glyph_advance(face, size_pt, g))
-        .sum()
+    graphemes.iter().map(|g| glyph_advance(face, size_pt, g)).sum()
 }
 
 /// Full ink extent of `grapheme` at `face` × `size_pt`:
@@ -217,13 +212,7 @@ fn shape_ink_extent(face: Option<AppFont>, size_pt: f32, grapheme: &str) -> InkE
     let mut swash_guard = SWASH_CACHE
         .lock()
         .expect("SWASH_CACHE poisoned in metric_cache::shape_ink_extent");
-    let bounds = measure_glyph_ink_bounds(
-        &mut font_system_guard,
-        &mut swash_guard,
-        face,
-        grapheme,
-        size_pt,
-    );
+    let bounds = measure_glyph_ink_bounds(&mut font_system_guard, &mut swash_guard, face, grapheme, size_pt);
     let ink_height = (bounds.y_max - bounds.y_min).max(0.0);
     if ink_height > 0.0 && bounds.advance > 0.0 {
         InkExtent {
@@ -372,7 +361,8 @@ mod tests {
         assert!(
             (summed - direct).abs() < 0.01,
             "cluster_width should equal sum of per-grapheme advances; got {} vs {}",
-            summed, direct
+            summed,
+            direct
         );
     }
 
@@ -389,7 +379,8 @@ mod tests {
         assert!(
             big > small,
             "24pt advance ({}) should exceed 12pt advance ({})",
-            big, small
+            big,
+            small
         );
         let ratio = big / small;
         assert!(

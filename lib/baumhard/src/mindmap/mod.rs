@@ -39,9 +39,9 @@ pub mod scene_cache;
 /// per-canvas-role sub-builders.
 pub mod tree_builder;
 
+mod border_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
-mod border_tests;
 
 /// Cyan selection highlight applied at scene / tree emission time
 /// (selected edges, edge handles, portal markers, portal mutator

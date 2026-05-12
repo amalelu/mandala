@@ -331,9 +331,9 @@ impl Mutation {
             // `apply_to` filters `Event` before reaching here.
             // A direct caller hitting this arm is a regression in
             // the dispatch invariant, not a runtime user error.
-            Event(_) => unreachable!(
-                "Event reached apply_to_area; apply_to() must filter Event before dispatch"
-            ),
+            Event(_) => {
+                unreachable!("Event reached apply_to_area; apply_to() must filter Event before dispatch")
+            }
         }
     }
 
@@ -350,9 +350,9 @@ impl Mutation {
                 debug!("Tried to apply an area mutation to a model, ignoring.");
             }
             Mutation::None => {}
-            Event(_) => unreachable!(
-                "Event reached apply_to_model; apply_to() must filter Event before dispatch"
-            ),
+            Event(_) => {
+                unreachable!("Event reached apply_to_model; apply_to() must filter Event before dispatch")
+            }
         }
     }
 

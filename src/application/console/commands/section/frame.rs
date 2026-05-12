@@ -29,8 +29,7 @@
 use baumhard::mindmap::border::resolve_section_frame_border;
 
 use crate::application::console::commands::border::{
-    custom_preset_hint, edits_has_glyph_field, nodes_in_selection, stage_kv,
-    KEYS as BORDER_KEYS,
+    custom_preset_hint, edits_has_glyph_field, nodes_in_selection, stage_kv, KEYS as BORDER_KEYS,
 };
 use crate::application::console::completion::{
     kv_key_completions_with_hints, prefix_filter, Completion, CompletionContext, CompletionState,
@@ -203,12 +202,8 @@ fn apply_edits(args: &Args, eff: &mut ConsoleEffects, edits: BorderConfigEdits) 
             .get(node_id)
             .map(|n| n.sections.len())
             .unwrap_or(0);
-        let section_idx = match resolve_section_idx_for(
-            &eff.document.selection,
-            node_id,
-            kv_idx,
-            n_sections,
-        ) {
+        let section_idx = match resolve_section_idx_for(&eff.document.selection, node_id, kv_idx, n_sections)
+        {
             Ok(idx) => idx,
             Err(msg) => return ExecResult::err(msg),
         };
@@ -328,12 +323,7 @@ fn execute_show(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         .get(&node_id)
         .map(|n| n.sections.len())
         .unwrap_or(0);
-    let section_idx = match resolve_section_idx_for(
-        &eff.document.selection,
-        &node_id,
-        kv_idx,
-        n_sections,
-    ) {
+    let section_idx = match resolve_section_idx_for(&eff.document.selection, &node_id, kv_idx, n_sections) {
         Ok(idx) => idx,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -410,10 +400,7 @@ fn push_resolved_section_frame(
     } else {
         canvas.default_section_frame_border.as_ref()
     };
-    let chosen_cfg: Option<&GlyphBorderConfig> = section
-        .frame_border
-        .as_ref()
-        .or(canvas_default_for_focus);
+    let chosen_cfg: Option<&GlyphBorderConfig> = section.frame_border.as_ref().or(canvas_default_for_focus);
     lines.push(format!("  [{}]", header));
     lines.push(format!("    source:    {}", source));
     lines.push(format!(
@@ -564,10 +551,8 @@ fn execute_section_frame_preview(args: &Args, eff: &mut ConsoleEffects) -> ExecR
             // `cross_dispatch/style.rs` already uses for the same
             // case.
             if let SelectionState::MultiSection(sels) = sel {
-                let pairs: Vec<(String, usize)> = sels
-                    .iter()
-                    .map(|s| (s.node_id.clone(), s.section_idx))
-                    .collect();
+                let pairs: Vec<(String, usize)> =
+                    sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect();
                 return Ok(BorderPreviewTarget::Sections(pairs));
             }
             let node_ids = nodes_in_selection(sel, "section frame preview")?;
@@ -620,10 +605,7 @@ mod tests {
         let result = run("section frame preset=heavy", &mut doc);
         match result {
             ExecResult::Ok(_) | ExecResult::Lines(_) => {}
-            other => panic!(
-                "expected single-section auto-resolve to succeed, got {:?}",
-                other
-            ),
+            other => panic!("expected single-section auto-resolve to succeed, got {:?}", other),
         }
         let cfg = doc.mindmap.nodes.get(&id).unwrap().sections[0]
             .frame_border
@@ -647,11 +629,7 @@ mod tests {
             other => panic!("expected Err, got {:?}", other),
         };
         assert!(msg.contains("has 2 sections"), "missing count: {}", msg);
-        assert!(
-            msg.contains("section=<idx>"),
-            "missing kv hint: {}",
-            msg
-        );
+        assert!(msg.contains("section=<idx>"), "missing kv hint: {}", msg);
     }
 
     #[test]
@@ -1053,11 +1031,8 @@ mod tests {
         // Synthesise an edge selection. Any edge will do — the
         // verb's branch fires before any per-edge inspection runs.
         if let Some(edge) = doc.mindmap.edges.first() {
-            let edge_ref = crate::application::document::EdgeRef::new(
-                &edge.from_id,
-                &edge.to_id,
-                &edge.edge_type,
-            );
+            let edge_ref =
+                crate::application::document::EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type);
             doc.selection = SelectionState::Edge(edge_ref);
             assert_exec_err_contains(
                 run("section frame preset=heavy", &mut doc),

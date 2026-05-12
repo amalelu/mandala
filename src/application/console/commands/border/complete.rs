@@ -468,10 +468,7 @@ mod plan_5_9_tests {
         crate::application::document::tests_common::load_test_doc()
     }
 
-    fn at_token1<'a>(
-        partial: &'a str,
-        tokens: &'a [String],
-    ) -> CompletionState<'a> {
+    fn at_token1<'a>(partial: &'a str, tokens: &'a [String]) -> CompletionState<'a> {
         CompletionState {
             tokens,
             cursor_token: 1,
@@ -480,10 +477,7 @@ mod plan_5_9_tests {
         }
     }
 
-    fn at_token2<'a>(
-        partial: &'a str,
-        tokens: &'a [String],
-    ) -> CompletionState<'a> {
+    fn at_token2<'a>(partial: &'a str, tokens: &'a [String]) -> CompletionState<'a> {
         CompletionState {
             tokens,
             cursor_token: 2,
@@ -499,10 +493,7 @@ mod plan_5_9_tests {
         let ctx = ConsoleContext::from_document(&doc);
         let tokens = vec!["border".to_string(), "preset".to_string()];
         let s = at_token1("", &tokens);
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
         for p in &["light", "heavy", "double", "rounded", "custom", "cycle"] {
             assert!(
                 labels.iter().any(|l| l == p),
@@ -526,10 +517,7 @@ mod plan_5_9_tests {
                 key: "preset".to_string(),
             },
         };
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
         assert!(
             labels.iter().any(|l| l == "cycle"),
             "preset= completion missing 'cycle': {:?}",
@@ -543,10 +531,7 @@ mod plan_5_9_tests {
         let ctx = ConsoleContext::from_document(&doc);
         let tokens = vec!["border".to_string(), "side".to_string()];
         let s = at_token1("", &tokens);
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
         for v in &["top", "bottom", "left", "right", "all"] {
             assert!(
                 labels.iter().any(|l| l == v),
@@ -563,10 +548,7 @@ mod plan_5_9_tests {
         let ctx = ConsoleContext::from_document(&doc);
         let tokens = vec!["border".to_string(), "corner".to_string()];
         let s = at_token1("", &tokens);
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
         for v in &["tl", "tr", "bl", "br", "all"] {
             assert!(
                 labels.iter().any(|l| l == v),
@@ -583,10 +565,7 @@ mod plan_5_9_tests {
         let ctx = ConsoleContext::from_document(&doc);
         let tokens = vec!["border".to_string(), "side".to_string(), "top".to_string()];
         let s = at_token2("", &tokens);
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
         assert!(labels.iter().any(|l| l == "reset"));
     }
 
@@ -596,10 +575,7 @@ mod plan_5_9_tests {
         let ctx = ConsoleContext::from_document(&doc);
         let tokens = vec!["border".to_string(), "corner".to_string(), "tl".to_string()];
         let s = at_token2("", &tokens);
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
         assert!(labels.iter().any(|l| l == "reset"));
     }
 
@@ -609,10 +585,7 @@ mod plan_5_9_tests {
         let ctx = ConsoleContext::from_document(&doc);
         let tokens = vec!["border".to_string(), "show".to_string()];
         let s = at_token1("", &tokens);
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
         assert!(labels.iter().any(|l| l == "side="));
         assert!(labels.iter().any(|l| l == "verbose"));
     }
@@ -626,11 +599,11 @@ mod plan_5_9_tests {
         let ctx = ConsoleContext::from_document(&doc);
         let tokens = vec!["border".to_string(), "palette".to_string()];
         let s = at_token1("", &tokens);
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
-        assert!(labels.iter().any(|l| l == "off"), "palette positional missing 'off'");
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
+        assert!(
+            labels.iter().any(|l| l == "off"),
+            "palette positional missing 'off'"
+        );
         // At least one palette name should surface (testament fixture has palettes).
         assert!(
             labels.iter().any(|l| l != "off"),
@@ -645,10 +618,7 @@ mod plan_5_9_tests {
         let ctx = ConsoleContext::from_document(&doc);
         let tokens = vec!["border".to_string(), "color".to_string()];
         let s = at_token1("", &tokens);
-        let labels: Vec<String> = complete_border(&s, &ctx)
-            .into_iter()
-            .map(|c| c.display)
-            .collect();
+        let labels: Vec<String> = complete_border(&s, &ctx).into_iter().map(|c| c.display).collect();
         // COLOR_PRESETS includes `accent`, `edge`, `fg`, `reset`.
         assert!(labels.iter().any(|l| l == "accent"));
         assert!(labels.iter().any(|l| l == "reset"));

@@ -31,11 +31,7 @@ pub fn execute_border(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         // subverb name (e.g. "Palette") is coincidental and should
         // route to the quoting-hint branch below, not the
         // positional dispatcher.
-        let first_token_is_positional = args
-            .tokens()
-            .first()
-            .map(|t| !t.contains('='))
-            .unwrap_or(false);
+        let first_token_is_positional = args.tokens().first().map(|t| !t.contains('=')).unwrap_or(false);
         // C14: case-insensitive subverb match — same posture as
         // `border preview` already uses, and as `canvas …` and
         // top-level command lookup. Without normalising here,
@@ -45,7 +41,9 @@ pub fn execute_border(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             // `border on preset=heavy` doesn't silently drop the kv.
             "on" => return reject_extras(args, "on", &[]).unwrap_or_else(|| apply_set_visible(eff, true)),
             "off" => return reject_extras(args, "off", &[]).unwrap_or_else(|| apply_set_visible(eff, false)),
-            "toggle" => return reject_extras(args, "toggle", &[]).unwrap_or_else(|| apply_toggle_visible(eff)),
+            "toggle" => {
+                return reject_extras(args, "toggle", &[]).unwrap_or_else(|| apply_toggle_visible(eff))
+            }
             "show" => return execute_border_show(args, eff),
             "reset" => return reject_extras(args, "reset", &[]).unwrap_or_else(|| apply_reset(eff)),
             "preview" => return super::preview::execute_border_preview(args, eff),
@@ -145,11 +143,7 @@ fn unknown_subverb_message(verb: &str) -> String {
 /// extra positional, otherwise `None`. Lets bare-positional
 /// subverbs (`on`/`off`/`toggle`/`reset`) reject typos that
 /// would otherwise silently drop arguments.
-fn reject_extras(
-    args: &Args,
-    subverb: &'static str,
-    expected_kvs: &[&'static str],
-) -> Option<ExecResult> {
+fn reject_extras(args: &Args, subverb: &'static str, expected_kvs: &[&'static str]) -> Option<ExecResult> {
     let extra_kvs: Vec<&str> = args
         .kvs()
         .filter(|(k, _)| !expected_kvs.contains(k))
@@ -255,9 +249,7 @@ fn apply_preset_positional(args: &Args, eff: &mut ConsoleEffects) -> ExecResult 
     let value = match args.positional(1) {
         Some(v) => v,
         None => {
-            return ExecResult::err(
-                "usage: border preset <light|heavy|double|rounded|custom|cycle>",
-            );
+            return ExecResult::err("usage: border preset <light|heavy|double|rounded|custom|cycle>");
         }
     };
     if let Some(extra) = args.positionals().nth(2) {
@@ -315,9 +307,7 @@ fn apply_color_positional(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     let value = match args.positional(1) {
         Some(v) => v,
         None => {
-            return ExecResult::err(
-                "usage: border color <#hex|var(--name)|preset|reset>",
-            );
+            return ExecResult::err("usage: border color <#hex|var(--name)|preset|reset>");
         }
     };
     if let Some(extra) = args.positionals().nth(2) {
@@ -361,9 +351,7 @@ fn apply_palette_positional(args: &Args, eff: &mut ConsoleEffects) -> ExecResult
     let value = match args.positional(1) {
         Some(v) => v,
         None => {
-            return ExecResult::err(
-                "usage: border palette <name|off> [field=<frame|background|text|title>]",
-            );
+            return ExecResult::err("usage: border palette <name|off> [field=<frame|background|text|title>]");
         }
     };
     let mut edits = BorderConfigEdits::default();
@@ -408,9 +396,7 @@ fn apply_side_positional(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     let which = match args.positional(1) {
         Some(v) => v,
         None => {
-            return ExecResult::err(
-                "usage: border side <top|bottom|left|right|all> <pattern|reset>",
-            );
+            return ExecResult::err("usage: border side <top|bottom|left|right|all> <pattern|reset>");
         }
     };
     let pattern = match args.positional(2) {
@@ -446,8 +432,7 @@ fn apply_side_positional(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         // CustomBorderGlyphs stores per-side glyphs as plain
         // Strings, so `OptionEdit::Clear` is a no-op. Restoring
         // means writing the preset's own default glyph back.
-        let glyph_set =
-            baumhard::mindmap::border::preset_glyph_set(&first_selection_preset(eff));
+        let glyph_set = baumhard::mindmap::border::preset_glyph_set(&first_selection_preset(eff));
         for side in sides {
             let ch = match side {
                 BorderSide::Top => glyph_set.top,
@@ -550,9 +535,7 @@ fn apply_corner_positional(args: &Args, eff: &mut ConsoleEffects) -> ExecResult 
     }
     let mut edits = BorderConfigEdits::default();
     let reset = glyph.eq_ignore_ascii_case("reset");
-    let glyph_set = reset.then(|| {
-        baumhard::mindmap::border::preset_glyph_set(&first_selection_preset(eff))
-    });
+    let glyph_set = reset.then(|| baumhard::mindmap::border::preset_glyph_set(&first_selection_preset(eff)));
     for corner in corners {
         // CODE_CONVENTIONS §9: interactive paths must not panic.
         // `parse_corner_selector` currently only emits the four

@@ -796,8 +796,7 @@ fn test_shift_home_seeds_anchor_at_line_start() {
 fn test_lift_anchor_lifts_to_section_when_anchor_below_cursor() {
     use super::editor::lift_anchor_to_section_range;
     use crate::application::document::SelectionState;
-    let lifted =
-        lift_anchor_to_section_range(Some(3), 7, "node-1", 2).expect("anchor != cursor → lift");
+    let lifted = lift_anchor_to_section_range(Some(3), 7, "node-1", 2).expect("anchor != cursor → lift");
     match lifted {
         SelectionState::Section(sel) => {
             assert_eq!(sel.node_id, "node-1");
@@ -811,8 +810,7 @@ fn test_lift_anchor_lifts_to_section_when_anchor_below_cursor() {
 fn test_lift_anchor_lifts_to_section_when_anchor_above_cursor() {
     use super::editor::lift_anchor_to_section_range;
     use crate::application::document::SelectionState;
-    let lifted =
-        lift_anchor_to_section_range(Some(7), 3, "node-1", 2).expect("anchor != cursor → lift");
+    let lifted = lift_anchor_to_section_range(Some(7), 3, "node-1", 2).expect("anchor != cursor → lift");
     assert!(matches!(lifted, SelectionState::Section(_)));
 }
 
@@ -850,18 +848,11 @@ fn test_literal_char_typing_clears_anchor() {
     let mut s = open_editor_state("abcdef", 3);
     // Seed an anchor by pretending the user shift-selected
     // forward by one grapheme.
-    if let TextEditState::Open {
-        selection_anchor, ..
-    } = &mut s
-    {
+    if let TextEditState::Open { selection_anchor, .. } = &mut s {
         *selection_anchor = Some(2);
     }
     // Now type a literal `x`.
-    let changed = apply_literal_char_insert(
-        None,
-        &Key::Character("x".into()),
-        &mut s,
-    );
+    let changed = apply_literal_char_insert(None, &Key::Character("x".into()), &mut s);
     assert!(changed);
     let (_, anchor) = cursor_and_anchor(&s);
     assert_eq!(anchor, None, "literal-char typing must clear anchor");
@@ -874,10 +865,7 @@ fn test_literal_enter_clears_anchor() {
     use super::editor::apply_literal_char_insert;
     use crate::application::platform::input::Key;
     let mut s = open_editor_state("abcdef", 3);
-    if let TextEditState::Open {
-        selection_anchor, ..
-    } = &mut s
-    {
+    if let TextEditState::Open { selection_anchor, .. } = &mut s {
         *selection_anchor = Some(2);
     }
     let changed = apply_literal_char_insert(
@@ -897,10 +885,7 @@ fn test_literal_tab_clears_anchor() {
     use super::editor::apply_literal_char_insert;
     use crate::application::platform::input::Key;
     let mut s = open_editor_state("abcdef", 3);
-    if let TextEditState::Open {
-        selection_anchor, ..
-    } = &mut s
-    {
+    if let TextEditState::Open { selection_anchor, .. } = &mut s {
         *selection_anchor = Some(2);
     }
     let changed = apply_literal_char_insert(

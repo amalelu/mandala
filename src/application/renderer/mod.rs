@@ -583,10 +583,7 @@ impl Renderer {
     /// adapter/device init is Promise-backed so this stays async
     /// like the native form.
     #[cfg(target_arch = "wasm32")]
-    pub async fn bootstrap_wasm(
-        window: Arc<Window>,
-        canvas: web_sys::HtmlCanvasElement,
-    ) -> Renderer {
+    pub async fn bootstrap_wasm(window: Arc<Window>, canvas: web_sys::HtmlCanvasElement) -> Renderer {
         let instance = wgpu::Instance::default();
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))

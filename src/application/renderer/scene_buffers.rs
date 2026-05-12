@@ -6,8 +6,8 @@
 //! spans go through `baumhard::font::attrs`.
 
 use baumhard::font::fonts;
-use baumhard::mindmap::scene_builder::BorderElement;
 use baumhard::font::{buffer, Attrs, Color, Metrics, SHAPING_ADVANCED};
+use baumhard::mindmap::scene_builder::BorderElement;
 use glam::Vec2;
 
 use super::borders::create_border_buffer;
@@ -98,8 +98,7 @@ impl Renderer {
         }
         let mut font_system = fonts::acquire_font_system_write("rebuild_edge_handle_buffers");
         for handle in handles {
-            let cosmic_color =
-                hex_to_cosmic_color(&handle.color).unwrap_or(Color::rgba(0, 229, 255, 255));
+            let cosmic_color = hex_to_cosmic_color(&handle.color).unwrap_or(Color::rgba(0, 229, 255, 255));
             let attrs = Attrs::new()
                 .color(cosmic_color)
                 .metrics(Metrics::new(handle.font_size_pt, handle.font_size_pt));
@@ -135,8 +134,7 @@ impl Renderer {
         let mut font_system = fonts::acquire_font_system_write("rebuild_connection_label_buffers");
 
         for elem in label_elements {
-            let cosmic_color =
-                hex_to_cosmic_color(&elem.color).unwrap_or(Color::rgba(235, 235, 235, 255));
+            let cosmic_color = hex_to_cosmic_color(&elem.color).unwrap_or(Color::rgba(235, 235, 235, 255));
             let attrs = Attrs::new()
                 .color(cosmic_color)
                 .metrics(Metrics::new(elem.font_size_pt, elem.font_size_pt));
@@ -182,9 +180,9 @@ impl Renderer {
 
         let positions = [
             (min.x - approx_char_width, min.y - font_size), // top
-            (min.x - approx_char_width, max.y),              // bottom
-            (min.x - approx_char_width, min.y),              // left
-            (max.x, min.y),                                  // right
+            (min.x - approx_char_width, max.y),             // bottom
+            (min.x - approx_char_width, min.y),             // left
+            (max.x, min.y),                                 // right
         ];
         let bounds = [
             (h_width, font_size * 1.5),
@@ -193,8 +191,7 @@ impl Renderer {
             (v_width, h),
         ];
 
-        if self.selection_rect_shape_cache == Some((char_count, row_count))
-            && self.overlay_buffers.len() == 4
+        if self.selection_rect_shape_cache == Some((char_count, row_count)) && self.overlay_buffers.len() == 4
         {
             for (i, tb) in self.overlay_buffers.iter_mut().enumerate() {
                 tb.pos = positions[i];

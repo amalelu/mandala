@@ -74,7 +74,11 @@ fn test_selection_targets_multisection_fans_out_per_entry() {
     assert_eq!(out.len(), 3);
     for (i, target) in out.iter().enumerate() {
         match target {
-            TargetId::Section { node_id, section_idx, range } => {
+            TargetId::Section {
+                node_id,
+                section_idx,
+                range,
+            } => {
                 assert_eq!(node_id, &secs[i].node_id);
                 assert_eq!(*section_idx, secs[i].section_idx);
                 assert!(range.is_none(), "MultiSection fan-out has no sub-range");
@@ -97,7 +101,11 @@ fn test_selection_targets_section_range_carries_range() {
     let out = selection_targets(&sel);
     assert_eq!(out.len(), 1);
     match &out[0] {
-        TargetId::Section { node_id, section_idx, range } => {
+        TargetId::Section {
+            node_id,
+            section_idx,
+            range,
+        } => {
             assert_eq!(node_id, "a");
             assert_eq!(*section_idx, 1);
             assert_eq!(*range, Some((3, 7)));

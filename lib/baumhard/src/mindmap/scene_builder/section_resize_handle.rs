@@ -140,11 +140,7 @@ impl ResizeHandleSide {
 /// Quadrant boundaries are split at the AABB centre. A cursor
 /// exactly on the centreline rounds south and east (`>=` on both
 /// axes). Tested as a pure function — no GPU, no scene state.
-pub fn infer_resize_anchor(
-    cursor_canvas: Vec2,
-    aabb_pos: Vec2,
-    aabb_size: Vec2,
-) -> ResizeHandleSide {
+pub fn infer_resize_anchor(cursor_canvas: Vec2, aabb_pos: Vec2, aabb_size: Vec2) -> ResizeHandleSide {
     let center = aabb_pos + aabb_size * 0.5;
     let east = cursor_canvas.x >= center.x;
     let south = cursor_canvas.y >= center.y;
@@ -227,10 +223,7 @@ pub const SECTION_RESIZE_HANDLE_FONT_SIZE_PT: f32 = 14.0;
 /// when the size is non-finite or non-positive — no meaningful
 /// handles can be drawn. Single source of truth for the position
 /// layout shared by node and section resize-handle builders.
-pub fn resize_handle_positions(
-    pos: Vec2,
-    size: Vec2,
-) -> Option<[(ResizeHandleSide, (f32, f32)); 8]> {
+pub fn resize_handle_positions(pos: Vec2, size: Vec2) -> Option<[(ResizeHandleSide, (f32, f32)); 8]> {
     if !size.x.is_finite() || !size.y.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
         return None;
     }

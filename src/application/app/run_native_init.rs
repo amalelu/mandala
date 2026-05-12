@@ -273,4 +273,3 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
         touch_recognizer: super::touch_gesture::TouchGestureRecognizer::new(),
     }
 }
-

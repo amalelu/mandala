@@ -71,7 +71,9 @@ fn build_arc_length_table(start: Vec2, control1: Vec2, control2: Vec2, end: Vec2
 /// walking `ARC_LENGTH_SUBDIVISIONS` straight segments between
 /// evenly-spaced parameter samples.
 pub(super) fn cubic_bezier_length(start: Vec2, control1: Vec2, control2: Vec2, end: Vec2) -> f32 {
-    *build_arc_length_table(start, control1, control2, end).last().unwrap()
+    *build_arc_length_table(start, control1, control2, end)
+        .last()
+        .unwrap()
 }
 
 pub(super) fn sample_cubic_bezier(

@@ -168,10 +168,7 @@ fn run(args: &[String]) -> Result<(), CliError> {
                 parsed.cmd_args,
             )?;
             if parsed.dry_run {
-                eprintln!(
-                    "dry-run: would modify {} target(s):",
-                    changed.len()
-                );
+                eprintln!("dry-run: would modify {} target(s):", changed.len());
                 for (id, section_idx) in &changed {
                     if parsed.target_notes {
                         eprintln!("  {id} (notes)");
@@ -416,11 +413,7 @@ fn parse_apply_args(args: &[String]) -> Result<ApplyArgs<'_>, CliError> {
 ///
 /// Sort: numeric on `node_id` then `section_idx` for stable
 /// output across runs.
-fn select_section_targets(
-    map: &MindMap,
-    regex: &Regex,
-    target_notes: bool,
-) -> Vec<(String, usize)> {
+fn select_section_targets(map: &MindMap, regex: &Regex, target_notes: bool) -> Vec<(String, usize)> {
     let mut targets: Vec<(String, usize)> = Vec::new();
     for node in map.nodes.values() {
         if target_notes {
@@ -895,7 +888,10 @@ mod tests {
             .get_mut("0.1")
             .unwrap()
             .sections
-            .push(MindSection::new_default("hello-from-section-1".into(), Vec::new()));
+            .push(MindSection::new_default(
+                "hello-from-section-1".into(),
+                Vec::new(),
+            ));
         let targets = select_section_targets(&map, &rx("hello-from-section-1", false), false);
         assert_eq!(targets, vec![("0.1".to_string(), 1)]);
     }

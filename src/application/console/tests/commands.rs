@@ -147,7 +147,9 @@ fn test_color_text_no_value_on_edge_opens_picker_on_edge() {
     let _ = (cmd.execute)(&Args::new(&toks), &mut eff);
     assert!(matches!(
         eff.side_effect,
-        Some(super::super::ConsoleSideEffect::OpenColorPicker(ColorTarget::Edge(_)))
+        Some(super::super::ConsoleSideEffect::OpenColorPicker(
+            ColorTarget::Edge(_)
+        ))
     ));
 }
 

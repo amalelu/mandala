@@ -1,4 +1,3 @@
-
 // -----------------------------------------------------------------
 // Tests
 //
@@ -11,9 +10,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::mindmap::border::{border_run_specs, count_clusters,
-                                 resolve_border_style, BorderGlyphSet, BorderStyle};
-
+    use crate::mindmap::border::{
+        border_run_specs, count_clusters, resolve_border_style, BorderGlyphSet, BorderStyle,
+    };
 
     /// `border_run_specs` produces four runs in the contractually
     /// required channel order (top=1, bottom=2, left=3, right=4)
@@ -92,12 +91,16 @@ mod tests {
         assert!(
             left.position.1 + left.bounds.1 <= 110.0,
             "left rail (y={} + h={}) = {} must fit within node height 110",
-            left.position.1, left.bounds.1, left.position.1 + left.bounds.1
+            left.position.1,
+            left.bounds.1,
+            left.position.1 + left.bounds.1
         );
         assert!(
             right.position.1 + right.bounds.1 <= 110.0,
             "right rail (y={} + h={}) = {} must fit within node height 110",
-            right.position.1, right.bounds.1, right.position.1 + right.bounds.1
+            right.position.1,
+            right.bounds.1,
+            right.position.1 + right.bounds.1
         );
     }
 
@@ -117,7 +120,8 @@ mod tests {
         // TL.position.x = node.x = 0.
         assert!(
             (tl.position.0 - 0.0).abs() < 0.01,
-            "TL position.x = {} expected 0.0", tl.position.0
+            "TL position.x = {} expected 0.0",
+            tl.position.0
         );
         // TR.position.x + TR.bounds.0 should equal node.x + node.width.
         // bounds.0 is at least the corner advance, may include slack.
@@ -126,18 +130,21 @@ mod tests {
         let tr_right_edge = tr.position.0 + tr.bounds.0;
         assert!(
             (tr_right_edge - 360.0).abs() < 5.0,
-            "TR right edge = {} expected ≈ 360.0", tr_right_edge
+            "TR right edge = {} expected ≈ 360.0",
+            tr_right_edge
         );
         // BL.position.x = 0.
         assert!(
             (bl.position.0 - 0.0).abs() < 0.01,
-            "BL position.x = {} expected 0.0", bl.position.0
+            "BL position.x = {} expected 0.0",
+            bl.position.0
         );
         // BR right edge ≈ 360.
         let br_right_edge = br.position.0 + br.bounds.0;
         assert!(
             (br_right_edge - 360.0).abs() < 5.0,
-            "BR right edge = {} expected ≈ 360.0", br_right_edge
+            "BR right edge = {} expected ≈ 360.0",
+            br_right_edge
         );
     }
 
@@ -177,12 +184,16 @@ mod tests {
         assert!(
             top.position.0 + top.bounds.0 <= 360.0,
             "top rail (x={} + w={}) = {} must fit within node width 360",
-            top.position.0, top.bounds.0, top.position.0 + top.bounds.0
+            top.position.0,
+            top.bounds.0,
+            top.position.0 + top.bounds.0
         );
         assert!(
             bottom.position.0 + bottom.bounds.0 <= 360.0,
             "bottom rail (x={} + w={}) = {} must fit within node width 360",
-            bottom.position.0, bottom.bounds.0, bottom.position.0 + bottom.bounds.0
+            bottom.position.0,
+            bottom.bounds.0,
+            bottom.position.0 + bottom.bounds.0
         );
 
         // bounds.0 should be reasonably close to (node_width - 2*corner_w)
@@ -190,7 +201,8 @@ mod tests {
         assert!(
             top.bounds.0 >= 360.0 * 0.7,
             "top rail bounds.0 = {} should use ≥ 70% of node width {} (otherwise the rail leaves a huge gap)",
-            top.bounds.0, 360.0
+            top.bounds.0,
+            360.0
         );
     }
 
@@ -216,11 +228,16 @@ mod tests {
         assert!(
             left.position.1 + left.bounds.1 <= 100.0,
             "left rail (y={} + h={}) must fit within node.height 100",
-            left.position.1, left.bounds.1
+            left.position.1,
+            left.bounds.1
         );
         // At least 1 row of fill rendered (rail isn't empty).
         let left_rows = left.text.matches('\n').count() + 1;
-        assert!(left_rows >= 1, "left rail should render ≥ 1 row, got {}", left_rows);
+        assert!(
+            left_rows >= 1,
+            "left rail should render ≥ 1 row, got {}",
+            left_rows
+        );
     }
 
     /// The light preset's top border at width 5 is corners + 3 fill

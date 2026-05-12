@@ -26,7 +26,10 @@ use crate::application::document::{InteractionModeOverrides, SelectionState};
 
 /// Resolve and run a `mode` console line, returning the side
 /// effect (the dispatcher consumes this in the production path).
-fn run_mode_line(line: &str, doc: &mut crate::application::document::MindMapDocument) -> Option<ConsoleSideEffect> {
+fn run_mode_line(
+    line: &str,
+    doc: &mut crate::application::document::MindMapDocument,
+) -> Option<ConsoleSideEffect> {
     let cmd = &crate::application::console::commands::mode::COMMAND;
     let parsed = crate::application::console::parser::parse(line);
     let args = match parsed {
@@ -35,7 +38,11 @@ fn run_mode_line(line: &str, doc: &mut crate::application::document::MindMapDocu
     };
     let mut eff = ConsoleEffects::new(doc);
     let result = (cmd.execute)(&Args::new(&args), &mut eff);
-    assert!(matches!(result, ExecResult::Ok { .. }), "verb errored: {:?}", line);
+    assert!(
+        matches!(result, ExecResult::Ok { .. }),
+        "verb errored: {:?}",
+        line
+    );
     eff.side_effect.take()
 }
 

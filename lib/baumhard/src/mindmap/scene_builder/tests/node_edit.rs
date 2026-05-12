@@ -63,7 +63,10 @@ fn node_with_text(id: &str, x: f64, y: f64, text: &str) -> crate::mindmap::model
 #[test]
 fn test_node_edit_dim_off_renders_full_alpha() {
     let map = synthetic_map(
-        vec![node_with_text("a", 0.0, 0.0, "alpha"), node_with_text("b", 400.0, 0.0, "beta")],
+        vec![
+            node_with_text("a", 0.0, 0.0, "alpha"),
+            node_with_text("b", 400.0, 0.0, "beta"),
+        ],
         vec![],
     );
     let scene = build_scene_with_offsets_selection_and_overrides(
@@ -99,7 +102,10 @@ fn test_node_edit_dim_off_renders_full_alpha() {
 #[test]
 fn test_node_edit_active_node_keeps_full_alpha() {
     let map = synthetic_map(
-        vec![node_with_text("a", 0.0, 0.0, "alpha"), node_with_text("b", 400.0, 0.0, "beta")],
+        vec![
+            node_with_text("a", 0.0, 0.0, "alpha"),
+            node_with_text("b", 400.0, 0.0, "beta"),
+        ],
         vec![],
     );
     let scene = build_scene_with_offsets_selection_and_overrides(
@@ -135,7 +141,10 @@ fn test_node_edit_active_node_keeps_full_alpha() {
 #[test]
 fn test_node_edit_inactive_node_dims_to_half_alpha() {
     let map = synthetic_map(
-        vec![node_with_text("a", 0.0, 0.0, "alpha"), node_with_text("b", 400.0, 0.0, "beta")],
+        vec![
+            node_with_text("a", 0.0, 0.0, "alpha"),
+            node_with_text("b", 400.0, 0.0, "beta"),
+        ],
         vec![],
     );
     let scene = build_scene_with_offsets_selection_and_overrides(

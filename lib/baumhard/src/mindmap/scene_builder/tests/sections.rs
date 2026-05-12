@@ -117,10 +117,7 @@ fn test_negative_size_section_skipped() {
 fn test_nan_offset_section_skipped() {
     let mut node = synthetic_node("n", 0.0, 0.0, 200.0, 200.0, false);
     node.sections[0].text = "nan".into();
-    node.sections[0].offset = Position {
-        x: f64::NAN,
-        y: 0.0,
-    };
+    node.sections[0].offset = Position { x: f64::NAN, y: 0.0 };
     let map = synthetic_map(vec![node], vec![]);
     let scene = build_scene(&map, 1.0);
     assert!(

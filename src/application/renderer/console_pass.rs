@@ -8,8 +8,8 @@
 use glam::Vec2;
 
 use baumhard::core::primitives::{ColorFontRegion, ColorFontRegions, Range as ColorFontRange};
-use baumhard::font::fonts::app_font_by_family;
 use baumhard::font::color::cosmic_color_to_rgba;
+use baumhard::font::fonts::app_font_by_family;
 use baumhard::font::{Color, FontSystem};
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::element::GfxElement;

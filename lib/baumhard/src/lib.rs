@@ -15,14 +15,14 @@
 /// Low-level primitives: colour regions, outlines, apply-operations,
 /// and pure-data value types.
 pub mod core;
+/// Font loading, shaping, and glyph-metric lookups backed by
+/// cosmic-text. Owns the long-lived font cache.
+pub mod font;
 /// On-disk format primitives — the JSON loader facade for
 /// non-mindmap configs (keybinds, user macros, embedded widget
 /// specs). The mindmap format itself lives under
 /// [`mindmap::loader`].
 pub mod format;
-/// Font loading, shaping, and glyph-metric lookups backed by
-/// cosmic-text. Owns the long-lived font cache.
-pub mod font;
 /// GPU-facing structs: `GfxElement`, `GfxMutator`, `GlyphArea`,
 /// `Tree`/`MutatorTree`, predicates, and the instruction vocabulary.
 pub mod gfx_structs;

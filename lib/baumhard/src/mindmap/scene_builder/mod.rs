@@ -557,11 +557,11 @@ mod edge_handle;
 mod label;
 mod node_pass;
 mod node_resize_handle;
-mod section_frame;
 /// Portal-marker emission — one `PortalElement` per endpoint of
 /// each `display_mode = "portal"` edge, attached to its owning
 /// node's border at the point facing the opposite endpoint.
 pub mod portal;
+mod section_frame;
 mod section_resize_handle;
 
 #[cfg(test)]

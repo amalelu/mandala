@@ -68,14 +68,38 @@ pub(in crate::application::app) fn handle_color_picker_key(
             if state.is_standalone() {
                 return false;
             }
-            cancel_color_picker(state, doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+            cancel_color_picker(
+                state,
+                doc,
+                interaction_mode,
+                mindmap_tree,
+                app_scene,
+                renderer,
+                scene_cache,
+            );
             true
         }
         Some(Action::PickerCommit) => {
             if state.is_standalone() {
-                commit_color_picker_to_selection(state, doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+                commit_color_picker_to_selection(
+                    state,
+                    doc,
+                    interaction_mode,
+                    mindmap_tree,
+                    app_scene,
+                    renderer,
+                    scene_cache,
+                );
             } else {
-                commit_color_picker(state, doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+                commit_color_picker(
+                    state,
+                    doc,
+                    interaction_mode,
+                    mindmap_tree,
+                    app_scene,
+                    renderer,
+                    scene_cache,
+                );
             }
             true
         }

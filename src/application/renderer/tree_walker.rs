@@ -8,8 +8,8 @@
 
 use glam::Vec2;
 
-use baumhard::font::{buffer, Align, Attrs, Color, FontSystem, SHAPING_ADVANCED};
 use baumhard::font::attrs::{rich_text_spans_from_regions, RegionFamilies};
+use baumhard::font::{buffer, Align, Attrs, Color, FontSystem, SHAPING_ADVANCED};
 use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::tree::Tree;
@@ -72,7 +72,10 @@ pub(super) fn extract_background_rect(
     } else {
         (
             Vec2::new(pos.x - pad.left(), pos.y - pad.top()),
-            Vec2::new(size.x + pad.left() + pad.right(), size.y + pad.top() + pad.bottom()),
+            Vec2::new(
+                size.x + pad.left() + pad.right(),
+                size.y + pad.top() + pad.bottom(),
+            ),
         )
     };
     Some(NodeBackgroundRect {
@@ -203,4 +206,3 @@ pub(super) fn shape_one_element_into_buffers(
     let main_spans = rich_text_spans_from_regions(text, &families, scale, line_height, None);
     shape_and_yield(main_spans, 0.0, 0.0, font_system);
 }
-

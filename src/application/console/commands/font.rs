@@ -224,14 +224,14 @@ fn parse_font_args(args: &Args) -> Result<FontArgs, ExecResult> {
             "min" => out.min = Some(parse_pt("min", v)?),
             "max" => out.max = Some(parse_pt("max", v)?),
             "section" => {
-                out.section_target = Some(
-                    super::range_kv::parse_section_kv("font", v).map_err(ExecResult::err)?,
-                );
+                out.section_target =
+                    Some(super::range_kv::parse_section_kv("font", v).map_err(ExecResult::err)?);
             }
             "range" => {
-                out.range_target = Some(super::range_kv::parse_range_kv(v).map_err(|msg| {
-                    ExecResult::err(format!("font: range='{}' — {}", v, msg))
-                })?);
+                out.range_target = Some(
+                    super::range_kv::parse_range_kv(v)
+                        .map_err(|msg| ExecResult::err(format!("font: range='{}' — {}", v, msg)))?,
+                );
             }
             other => return Err(ExecResult::err(format!("unknown key '{}'", other))),
         }
@@ -275,10 +275,7 @@ fn parse_font_args(args: &Args) -> Result<FontArgs, ExecResult> {
 /// out over each node (size only; min/max are NotApplicable
 /// for nodes). The edge-adjacent variants each write to their
 /// own channel.
-fn apply_font_args(
-    doc: &mut crate::application::document::MindMapDocument,
-    a: &FontArgs,
-) -> ExecResult {
+fn apply_font_args(doc: &mut crate::application::document::MindMapDocument, a: &FontArgs) -> ExecResult {
     match doc.selection.clone() {
         // `section=N` (E5 verb syntax) routes to that specific
         // section's runs; absent, the write applies to every
@@ -295,9 +292,8 @@ fn apply_font_args(
             section_font_outcome(doc, &s.node_id, idx, a.size, a.min, a.max, a.range_target)
         }
         SelectionState::Multi(ids) => fanout_size_outcome(
-            ids.iter().filter_map(|id| {
-                a.size.map(|pt| doc.set_node_font_size(id, pt))
-            }),
+            ids.iter()
+                .filter_map(|id| a.size.map(|pt| doc.set_node_font_size(id, pt))),
             a.min,
             a.max,
             "node",
@@ -326,13 +322,7 @@ fn apply_font_args(
             super::applied_or_no_change("font", "portal label", changed)
         }
         SelectionState::PortalText(s) => {
-            let changed = doc.set_portal_text_font(
-                &s.edge_ref(),
-                &s.endpoint_node_id,
-                a.size,
-                a.min,
-                a.max,
-            );
+            let changed = doc.set_portal_text_font(&s.edge_ref(), &s.endpoint_node_id, a.size, a.min, a.max);
             super::applied_or_no_change("font", "portal text", changed)
         }
         SelectionState::SectionRange { sel, range } => {
@@ -364,8 +354,8 @@ fn fanout_size_outcome(
     kind: &str,
 ) -> ExecResult {
     let changed = applied_iter.filter(|b| *b).count();
-    let applicable_msg = (min.is_some() || max.is_some())
-        .then(|| format!("min/max: {}s have no screen-space clamps", kind));
+    let applicable_msg =
+        (min.is_some() || max.is_some()).then(|| format!("min/max: {}s have no screen-space clamps", kind));
     if changed == 0 && applicable_msg.is_none() {
         return ExecResult::ok_msg("font: no change");
     }
@@ -424,7 +414,10 @@ fn section_font_outcome(
                          range {}..{} produced no change \
                          (range may extend past the section's \
                          grapheme count or section was deleted)",
-                        section_idx, id, rs, re
+                        section_idx,
+                        id,
+                        rs,
+                        re
                     );
                 }
                 ok
@@ -484,7 +477,6 @@ fn node_font_outcome(
         ExecResult::ok_msg("font: no change")
     }
 }
-
 
 /// `font set <family>` — pin the font family on the current
 /// selection through the `AcceptsFontFamily` trait. Validates the
@@ -566,9 +558,7 @@ fn execute_font_set(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             SelectionState::SectionRange { sel, .. } => sel.node_id,
             _ => return ExecResult::err("font: section=N requires a node or section selection"),
         };
-        let applied = eff
-            .document
-            .set_section_font_family(&node_id, idx, Some(&family));
+        let applied = eff.document.set_section_font_family(&node_id, idx, Some(&family));
         return if applied {
             ExecResult::ok_msg(format!("font set: {} on section {}", family, idx))
         } else {

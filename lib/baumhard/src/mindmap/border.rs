@@ -486,10 +486,7 @@ pub fn border_run_specs(
     use crate::font::metric_cache::glyph_ink;
 
     let font_size = border_style.font_size_pt;
-    let face = border_style
-        .font_name
-        .as_deref()
-        .and_then(app_font_by_family);
+    let face = border_style.font_name.as_deref().and_then(app_font_by_family);
 
     // single-glyph buffer at the exact node corner pixel; the
     // fill rails span the gap BETWEEN corners. Pre-fix the
@@ -563,16 +560,8 @@ pub fn border_run_specs(
     let left_v_height = left_row_count as f32 * left_line_h;
     let right_v_height = right_row_count as f32 * right_line_h;
 
-    let left_v_width = side_pattern_max_advance(
-        &border_style.side_patterns.left,
-        face,
-        font_size,
-    ) + 1.0;
-    let right_v_width = side_pattern_max_advance(
-        &border_style.side_patterns.right,
-        face,
-        font_size,
-    ) + 1.0;
+    let left_v_width = side_pattern_max_advance(&border_style.side_patterns.left, face, font_size) + 1.0;
+    let right_v_width = side_pattern_max_advance(&border_style.side_patterns.right, face, font_size) + 1.0;
 
     // Corner buffer y-position: we want the corner's ink-top
     // to align with the node's top edge. cosmic-text places
@@ -585,8 +574,7 @@ pub fn border_run_specs(
     // `font_size` (which matches cosmic-text's default
     // line-height treatment).
     let top_corner_y = node_pos.1 - tl_ink.ink_top - font_size * 0.8;
-    let bottom_corner_y =
-        node_pos.1 + node_size.1 - bl_ink.ink_height - bl_ink.ink_top - font_size * 0.8;
+    let bottom_corner_y = node_pos.1 + node_size.1 - bl_ink.ink_height - bl_ink.ink_top - font_size * 0.8;
 
     // Cluster counts for palette-offset sweep (top → right
     // → bottom → left clockwise).
@@ -664,10 +652,7 @@ pub fn border_run_specs(
         text: border_style.corners.top_right.clone(),
         font_size_pt: font_size,
         line_height_pt: font_size,
-        position: (
-            node_pos.0 + node_size.0 - tr_ink.advance,
-            top_corner_y,
-        ),
+        position: (node_pos.0 + node_size.0 - tr_ink.advance, top_corner_y),
         bounds: (tr_ink.advance.max(1.0), font_size * 1.5),
         palette_offset: 1 + top_clusters,
         cluster_count: count_clusters(&border_style.corners.top_right),
@@ -689,10 +674,7 @@ pub fn border_run_specs(
         text: border_style.corners.bottom_right.clone(),
         font_size_pt: font_size,
         line_height_pt: font_size,
-        position: (
-            node_pos.0 + node_size.0 - br_ink.advance,
-            bottom_corner_y,
-        ),
+        position: (node_pos.0 + node_size.0 - br_ink.advance, bottom_corner_y),
         bounds: (br_ink.advance.max(1.0), font_size * 1.5),
         palette_offset: 1 + top_clusters + 1 + right_clusters + 1 + bottom_clusters,
         cluster_count: count_clusters(&border_style.corners.bottom_right),
@@ -704,9 +686,7 @@ pub fn border_run_specs(
 /// the vertical-rail line-height computation: we measure the
 /// first grapheme's ink-height and use it as the per-row
 /// y-stride so consecutive rows touch.
-fn side_pattern_first_grapheme(
-    pattern: &SidePattern,
-) -> String {
+fn side_pattern_first_grapheme(pattern: &SidePattern) -> String {
     use crate::mindmap::border_pattern::SidePattern;
     match pattern {
         SidePattern::AtomicRepeat { cluster } => cluster.first().cloned().unwrap_or_default(),
@@ -778,18 +758,9 @@ fn fit_pattern_to_width(
             (text, cluster_count, emitted_w)
         }
         SidePattern::PrefixFillSuffix { prefix, fill, suffix } => {
-            let prefix_widths: Vec<f32> = prefix
-                .iter()
-                .map(|g| glyph_advance(face, font_size, g))
-                .collect();
-            let suffix_widths: Vec<f32> = suffix
-                .iter()
-                .map(|g| glyph_advance(face, font_size, g))
-                .collect();
-            let fill_widths: Vec<f32> = fill
-                .iter()
-                .map(|g| glyph_advance(face, font_size, g))
-                .collect();
+            let prefix_widths: Vec<f32> = prefix.iter().map(|g| glyph_advance(face, font_size, g)).collect();
+            let suffix_widths: Vec<f32> = suffix.iter().map(|g| glyph_advance(face, font_size, g)).collect();
+            let fill_widths: Vec<f32> = fill.iter().map(|g| glyph_advance(face, font_size, g)).collect();
             let prefix_w: f32 = prefix_widths.iter().sum();
             let suffix_w: f32 = suffix_widths.iter().sum();
             let fill_cluster_w: f32 = fill_widths.iter().sum();
@@ -1508,4 +1479,3 @@ fn build_vertical_text(pattern: &SidePattern, rows: usize) -> String {
 pub(crate) fn count_clusters(s: &str) -> usize {
     s.graphemes(true).count()
 }
-

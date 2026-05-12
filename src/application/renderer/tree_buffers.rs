@@ -73,11 +73,7 @@ impl Renderer {
     /// caller is expected to fall back to a full
     /// `rebuild_buffers_from_tree` if it cannot guarantee the
     /// arena id is fresh.
-    pub fn reshape_buffer_for(
-        &mut self,
-        arena_id: indextree::NodeId,
-        tree: &Tree<GfxElement, GfxMutator>,
-    ) {
+    pub fn reshape_buffer_for(&mut self, arena_id: indextree::NodeId, tree: &Tree<GfxElement, GfxMutator>) {
         let Some(element) = tree.arena.get(arena_id).map(|n| n.get()) else {
             return;
         };
@@ -89,7 +85,8 @@ impl Renderer {
         // so other elements' rects survive the filter.
         let key = unique_id.to_string();
         self.mindmap_buffers.remove(&key);
-        self.node_background_rects.retain(|rect| rect.unique_id != unique_id);
+        self.node_background_rects
+            .retain(|rect| rect.unique_id != unique_id);
 
         let mut font_system = fonts::acquire_font_system_write("reshape_buffer_for");
         shape_one_element_into_buffers(

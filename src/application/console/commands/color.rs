@@ -163,8 +163,7 @@ fn picker_target_for(verb: &str, selection: &SelectionState) -> PickerTargetOutc
                     range: None,
                 }),
                 Some(NodeColorAxis::Bg) => PickerTargetOutcome::NotApplicable(
-                    "color bg: not applicable to a section (section-level chrome doesn't exist)"
-                        .to_string(),
+                    "color bg: not applicable to a section (section-level chrome doesn't exist)".to_string(),
                 ),
                 Some(NodeColorAxis::Border) => PickerTargetOutcome::NotApplicable(
                     "color border: not applicable to a section (section-level chrome doesn't exist)"
@@ -176,7 +175,10 @@ fn picker_target_for(verb: &str, selection: &SelectionState) -> PickerTargetOutc
         // SectionRange: route the picker to the targeted section
         // AND plumb the sub-range so the commit fires through
         // `set_section_text_color_range`.
-        SelectionState::SectionRange { sel: SectionSel { node_id, section_idx }, range } => match axis {
+        SelectionState::SectionRange {
+            sel: SectionSel { node_id, section_idx },
+            range,
+        } => match axis {
             Some(NodeColorAxis::Text) | None => PickerTargetOutcome::Open(ColorTarget::Section {
                 node_id: node_id.clone(),
                 section_idx: *section_idx,
@@ -374,9 +376,7 @@ fn apply_section_colours(
                 };
                 let applied = match range {
                     Some((rs, re)) => {
-                        let ok = doc.set_section_text_color_range(
-                            &node_id, section_idx, rs, re, resolved,
-                        );
+                        let ok = doc.set_section_text_color_range(&node_id, section_idx, rs, re, resolved);
                         if !ok {
                             // Mirror the picker path's stale-range
                             // diagnostic: the pre-flight `rs >= total`
@@ -392,7 +392,10 @@ fn apply_section_colours(
                                  range {}..{} produced no change \
                                  (range may extend past the section's \
                                  grapheme count or section was deleted)",
-                                section_idx, node_id, rs, re
+                                section_idx,
+                                node_id,
+                                rs,
+                                re
                             );
                         }
                         ok
@@ -830,7 +833,10 @@ mod tests {
         use crate::application::document::SectionSel;
         let (mut doc, id) = doc_with_two_sections();
         doc.selection = SelectionState::SectionRange {
-            sel: SectionSel { node_id: id.clone(), section_idx: 1 },
+            sel: SectionSel {
+                node_id: id.clone(),
+                section_idx: 1,
+            },
             range: (3, 7),
         };
         let (cmd, toks) = match parse("color text") {

@@ -103,13 +103,7 @@ fn test_section_frames_track_section_aabb() {
 #[test]
 fn test_section_frames_focused_section_marks_only_matching_idx() {
     let map = synthetic_map(vec![three_section_node()], vec![]);
-    let frames = build_section_frames(
-        &map,
-        &HashMap::new(),
-        Some("active"),
-        Some(("active", 1)),
-        None,
-    );
+    let frames = build_section_frames(&map, &HashMap::new(), Some("active"), Some(("active", 1)), None);
     assert_eq!(frames.len(), 3);
     assert!(!frames[0].focused);
     assert!(frames[1].focused, "section 1 must be marked focused");
@@ -122,13 +116,7 @@ fn test_section_frames_focused_section_marks_only_matching_idx() {
 #[test]
 fn test_section_frames_focused_section_owner_mismatch_marks_none() {
     let map = synthetic_map(vec![three_section_node()], vec![]);
-    let frames = build_section_frames(
-        &map,
-        &HashMap::new(),
-        Some("active"),
-        Some(("other", 0)),
-        None,
-    );
+    let frames = build_section_frames(&map, &HashMap::new(), Some("active"), Some(("other", 0)), None);
     assert!(frames.iter().all(|f: &SectionFrameElement| !f.focused));
 }
 
@@ -142,7 +130,10 @@ fn test_section_frames_skip_zero_size_section() {
         {
             let mut s = MindSection::new_default("bad".into(), vec![]);
             s.offset = Position { x: 0.0, y: 100.0 };
-            s.size = Some(Size { width: 200.0, height: 0.0 });
+            s.size = Some(Size {
+                width: 200.0,
+                height: 0.0,
+            });
             s
         },
     ];
@@ -195,9 +186,18 @@ fn test_section_frames_per_section_override_wins_over_canvas_default() {
         color_palette_field: None,
     });
     let frames = build_section_frames(&map, &HashMap::new(), Some("active"), None, None);
-    assert_eq!(frames[0].border_style.color, "#00ff00", "section 0 uses canvas default");
-    assert_eq!(frames[1].border_style.color, "#ff8800", "section 1 uses per-section override");
-    assert_eq!(frames[2].border_style.color, "#00ff00", "section 2 uses canvas default");
+    assert_eq!(
+        frames[0].border_style.color, "#00ff00",
+        "section 0 uses canvas default"
+    );
+    assert_eq!(
+        frames[1].border_style.color, "#ff8800",
+        "section 1 uses per-section override"
+    );
+    assert_eq!(
+        frames[2].border_style.color, "#00ff00",
+        "section 2 uses canvas default"
+    );
 }
 
 #[test]
@@ -246,16 +246,19 @@ fn test_section_frames_focused_uses_focused_canvas_default() {
         color_palette: None,
         color_palette_field: None,
     });
-    let frames = build_section_frames(
-        &map,
-        &HashMap::new(),
-        Some("active"),
-        Some(("active", 1)),
-        None,
+    let frames = build_section_frames(&map, &HashMap::new(), Some("active"), Some(("active", 1)), None);
+    assert_eq!(
+        frames[0].border_style.color, "#aaaaaa",
+        "section 0 unfocused → unfocused default"
     );
-    assert_eq!(frames[0].border_style.color, "#aaaaaa", "section 0 unfocused → unfocused default");
-    assert_eq!(frames[1].border_style.color, "#ffffff", "section 1 focused → focused default");
-    assert_eq!(frames[2].border_style.color, "#aaaaaa", "section 2 unfocused → unfocused default");
+    assert_eq!(
+        frames[1].border_style.color, "#ffffff",
+        "section 1 focused → focused default"
+    );
+    assert_eq!(
+        frames[2].border_style.color, "#aaaaaa",
+        "section 2 unfocused → unfocused default"
+    );
 }
 
 /// `focused = true` with only the unfocused canvas default set
@@ -278,13 +281,7 @@ fn test_section_frames_focused_falls_back_to_unfocused_canvas_default() {
         color_palette_field: None,
     });
     // No focused canvas default — focused should fall through.
-    let frames = build_section_frames(
-        &map,
-        &HashMap::new(),
-        Some("active"),
-        Some(("active", 1)),
-        None,
-    );
+    let frames = build_section_frames(&map, &HashMap::new(), Some("active"), Some(("active", 1)), None);
     assert_eq!(
         frames[1].border_style.color, "#abcdef",
         "focused section with no focused-canvas-default uses the unfocused default"
@@ -312,13 +309,7 @@ fn test_section_frames_unfocused_does_not_bleed_focused_canvas_default() {
     });
     // No unfocused canvas default. Section 1 is focused → focused
     // canvas default; sections 0/2 unfocused → floor (cyan).
-    let frames = build_section_frames(
-        &map,
-        &HashMap::new(),
-        Some("active"),
-        Some(("active", 1)),
-        None,
-    );
+    let frames = build_section_frames(&map, &HashMap::new(), Some("active"), Some(("active", 1)), None);
     assert_eq!(frames[0].border_style.color, SELECTION_HIGHLIGHT_HEX);
     assert_eq!(frames[1].border_style.color, "#ff00ff");
     assert_eq!(frames[2].border_style.color, SELECTION_HIGHLIGHT_HEX);
@@ -386,7 +377,10 @@ fn test_section_frames_no_palette_yields_empty_cycle() {
     let map = synthetic_map(vec![three_section_node()], vec![]);
     let frames = build_section_frames(&map, &HashMap::new(), Some("active"), None, None);
     for f in &frames {
-        assert!(f.palette_cycle.is_empty(), "single-color frame has no palette cycle");
+        assert!(
+            f.palette_cycle.is_empty(),
+            "single-color frame has no palette cycle"
+        );
     }
 }
 
@@ -417,13 +411,7 @@ fn test_border_preview_section_target_renders_through_scene_builder() {
         edits,
         force_show_frame: true,
     };
-    let frames = build_section_frames(
-        &map,
-        &HashMap::new(),
-        Some("active"),
-        None,
-        Some(preview),
-    );
+    let frames = build_section_frames(&map, &HashMap::new(), Some("active"), None, Some(preview));
     // Section 1 should have the heavy preset's top corner glyph
     // (`┏` U+250F); sections 0 and 2 should retain the floor.
     assert_eq!(
@@ -570,13 +558,7 @@ fn test_border_preview_inactive_target_matches_baseline() {
         Some(("active", 1)),
         Some(preview),
     );
-    let baseline = build_section_frames(
-        &map,
-        &HashMap::new(),
-        Some("active"),
-        Some(("active", 1)),
-        None,
-    );
+    let baseline = build_section_frames(&map, &HashMap::new(), Some("active"), Some(("active", 1)), None);
     assert_eq!(with_preview.len(), baseline.len());
     for (a, b) in with_preview.iter().zip(baseline.iter()) {
         assert_eq!(

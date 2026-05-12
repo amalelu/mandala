@@ -28,4 +28,3 @@ pub fn do_monospace_advance_scales_linearly() {
         33.3 * MONOSPACE_ADVANCE_RATIO,
     ));
 }
-

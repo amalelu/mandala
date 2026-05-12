@@ -23,8 +23,7 @@ use super::run_native_init;
 use super::text_edit::TextEditState;
 use super::{
     drain_frame, event_cursor_moved, event_keyboard, event_mouse_click, Application, DragState,
-    InteractionMode,
-    LastClick, Options,
+    InteractionMode, LastClick, Options,
 };
 use crate::application::common::RenderDecree;
 use crate::application::console::ConsoleState;
@@ -154,18 +153,13 @@ impl ApplicationHandler for NativeApp {
             // events arrived in the meantime. Otherwise the grace
             // has already elapsed (or the FPS is already idle), so
             // we either commit the flip now or do nothing.
-            let fps_on = init.renderer.fps_display_mode()
-                != crate::application::common::FpsDisplayMode::Off;
+            let fps_on = init.renderer.fps_display_mode() != crate::application::common::FpsDisplayMode::Off;
             let fps_defer_deadline = if !still_continuing && fps_on {
                 init.renderer.fps_idle_defer_deadline(FPS_IDLE_GRACE)
             } else {
                 None
             };
-            if !still_continuing
-                && fps_on
-                && fps_defer_deadline.is_none()
-                && init.renderer.has_live_fps()
-            {
+            if !still_continuing && fps_on && fps_defer_deadline.is_none() && init.renderer.has_live_fps() {
                 init.renderer.set_fps_idle();
                 init.window.request_redraw();
             }
@@ -500,8 +494,8 @@ impl InitState {
                 // Any active drag (Pending → Throttled etc.) or an
                 // open picker requires a fresh frame so the drag
                 // preview / hover marker tracks the cursor.
-                redraw_after = !matches!(self.drag_state, DragState::None)
-                    || self.color_picker_state.is_open();
+                redraw_after =
+                    !matches!(self.drag_state, DragState::None) || self.color_picker_state.is_open();
             }
             //// TOUCH ////
             Event::WindowEvent {
@@ -742,10 +736,7 @@ impl InitState {
             DragState::Throttled(ref d) if d.as_dyn().needs_continuation()
         );
         let picker_pending = self.picker_hover.has_pending();
-        let animations = self
-            .document
-            .as_ref()
-            .is_some_and(|d| d.has_active_animations());
+        let animations = self.document.as_ref().is_some_and(|d| d.has_active_animations());
         let geometry_dirty = self.renderer.connection_geometry_dirty();
 
         drag_pending || picker_pending || animations || geometry_dirty

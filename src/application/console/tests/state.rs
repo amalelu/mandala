@@ -11,7 +11,12 @@ fn test_console_state_open_seeds_history_and_resets_cursor() {
     assert!(open.is_open());
     assert!(!ConsoleState::Closed.is_open());
     match open {
-        ConsoleState::Open { history: h, input, cursor, .. } => {
+        ConsoleState::Open {
+            history: h,
+            input,
+            cursor,
+            ..
+        } => {
             assert_eq!(h, history);
             assert_eq!(input, "");
             assert_eq!(cursor, 0);

@@ -80,11 +80,10 @@ pub(super) fn build_node_elements(
     // most rebuilds run with `border_preview = None` and we want
     // the steady-state branch to be a single `is_none()` check
     // per node. Match each preview target shape once here.
-    let preview_node_ids: Option<&[String]> =
-        border_preview.and_then(|p| match p.target {
-            super::BorderPreviewTargetRef::Nodes(ids) => Some(ids),
-            _ => None,
-        });
+    let preview_node_ids: Option<&[String]> = border_preview.and_then(|p| match p.target {
+        super::BorderPreviewTargetRef::Nodes(ids) => Some(ids),
+        _ => None,
+    });
     let preview_canvas_default: Option<super::BorderConfigEditsView<'_>> =
         border_preview.and_then(|p| match p.target {
             super::BorderPreviewTargetRef::CanvasDefault => Some(p.edits),
@@ -177,8 +176,7 @@ pub(super) fn build_node_elements(
         // `node_slot_owned_for_preview` is only allocated when a
         // preview folds into this node's slot. Holds the cloned-
         // and-mutated slot for the resolver to borrow from.
-        let node_slot_owned_for_preview: Option<Option<GlyphBorderConfig>> = if preview_targets_this_node
-        {
+        let node_slot_owned_for_preview: Option<Option<GlyphBorderConfig>> = if preview_targets_this_node {
             let view = border_preview
                 .map(|p| p.edits)
                 .expect("preview_targets_this_node implies preview is Some");
@@ -194,7 +192,11 @@ pub(super) fn build_node_elements(
         };
         let visible = node.style.show_frame || (preview_targets_this_node && preview_force_show_frame);
         let resolved_border = if visible {
-            Some(resolve_border_style(node_slot_ref, canvas_default_ref, frame_color))
+            Some(resolve_border_style(
+                node_slot_ref,
+                canvas_default_ref,
+                frame_color,
+            ))
         } else {
             None
         };
@@ -234,11 +236,7 @@ pub(super) fn build_node_elements(
                 continue;
             }
             if let Some(sz) = section.size.as_ref() {
-                if !sz.width.is_finite()
-                    || !sz.height.is_finite()
-                    || sz.width <= 0.0
-                    || sz.height <= 0.0
-                {
+                if !sz.width.is_finite() || !sz.height.is_finite() || sz.width <= 0.0 || sz.height <= 0.0 {
                     continue;
                 }
             }
@@ -255,10 +253,7 @@ pub(super) fn build_node_elements(
                         if let Some(hit) = dim_cache.get(resolved) {
                             hit.clone()
                         } else {
-                            let dimmed = hex_with_alpha_scaled(
-                                resolved,
-                                INACTIVE_NODE_ALPHA_MULTIPLIER,
-                            );
+                            let dimmed = hex_with_alpha_scaled(resolved, INACTIVE_NODE_ALPHA_MULTIPLIER);
                             dim_cache.insert(resolved.to_string(), dimmed.clone());
                             dimmed
                         }
@@ -289,10 +284,7 @@ pub(super) fn build_node_elements(
                 border_style.color = if let Some(hit) = dim_cache.get(&border_style.color) {
                     hit.clone()
                 } else {
-                    let dimmed = hex_with_alpha_scaled(
-                        &border_style.color,
-                        INACTIVE_NODE_ALPHA_MULTIPLIER,
-                    );
+                    let dimmed = hex_with_alpha_scaled(&border_style.color, INACTIVE_NODE_ALPHA_MULTIPLIER);
                     dim_cache.insert(border_style.color.clone(), dimmed.clone());
                     dimmed
                 };

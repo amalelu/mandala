@@ -60,10 +60,7 @@ pub fn check(map: &MindMap) -> Vec<Violation> {
 /// AABB / hit-test comparison in the document — without
 /// panicking. Catching it here surfaces a corrupt save before the
 /// renderer turns the node invisible-but-not-crashed.
-fn check_node_size_finite(
-    node: &baumhard::mindmap::model::MindNode,
-    out: &mut Vec<Violation>,
-) {
+fn check_node_size_finite(node: &baumhard::mindmap::model::MindNode, out: &mut Vec<Violation>) {
     if !node.size.width.is_finite() || !node.size.height.is_finite() {
         out.push(Violation::node(
             CATEGORY,
@@ -94,10 +91,7 @@ fn check_node_size_finite(
 /// — a `"sections": [{},{},…10M…]` JSON payload would OOM at
 /// load. Mirrors the `add_section`'s runtime cap so the model
 /// invariant is checked at every entry point.
-fn check_section_count_cap(
-    node: &baumhard::mindmap::model::MindNode,
-    out: &mut Vec<Violation>,
-) {
+fn check_section_count_cap(node: &baumhard::mindmap::model::MindNode, out: &mut Vec<Violation>) {
     const MAX_SECTIONS_PER_NODE: usize = 1024;
     if node.sections.len() > MAX_SECTIONS_PER_NODE {
         out.push(Violation::node(
@@ -121,10 +115,7 @@ fn check_section_count_cap(
 /// Closes the docstring promise on `MindNode.sections` that
 /// `verify` flags channel collisions; pre-fix the docstring
 /// promised this but no code did the check.
-fn check_section_channel_collisions(
-    node: &baumhard::mindmap::model::MindNode,
-    out: &mut Vec<Violation>,
-) {
+fn check_section_channel_collisions(node: &baumhard::mindmap::model::MindNode, out: &mut Vec<Violation>) {
     use std::collections::HashMap;
     let mut by_channel: HashMap<usize, Vec<usize>> = HashMap::new();
     for (idx, section) in node.sections.iter().enumerate() {
@@ -278,8 +269,10 @@ fn check_within_node_aabb(
     size: &baumhard::mindmap::model::Size,
     out: &mut Vec<Violation>,
 ) {
-    if !section.offset.x.is_finite() || !section.offset.y.is_finite()
-        || !size.width.is_finite() || !size.height.is_finite()
+    if !section.offset.x.is_finite()
+        || !section.offset.y.is_finite()
+        || !size.width.is_finite()
+        || !size.height.is_finite()
     {
         return;
     }
@@ -340,7 +333,10 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 5.0, y: 5.0 },
-            Some(Size { width: 50.0, height: 20.0 }),
+            Some(Size {
+                width: 50.0,
+                height: 20.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         assert!(check(&map).is_empty());
@@ -352,7 +348,10 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 0.0, y: 0.0 },
-            Some(Size { width: 100.0, height: 40.0 }),
+            Some(Size {
+                width: 100.0,
+                height: 40.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         assert!(check(&map).is_empty());
@@ -365,7 +364,9 @@ mod tests {
         n.sections[0] = section(Position { x: -1.0, y: 0.0 }, None);
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("offset.x is negative")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("offset.x is negative")));
     }
 
     #[test]
@@ -375,7 +376,9 @@ mod tests {
         n.sections[0] = section(Position { x: 0.0, y: -2.0 }, None);
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("offset.y is negative")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("offset.y is negative")));
     }
 
     #[test]
@@ -385,7 +388,9 @@ mod tests {
         n.sections[0] = section(Position { x: f64::NAN, y: 0.0 }, None);
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("non-finite")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("non-finite")));
     }
 
     #[test]
@@ -394,11 +399,16 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 0.0, y: 0.0 },
-            Some(Size { width: 0.0, height: 10.0 }),
+            Some(Size {
+                width: 0.0,
+                height: 10.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("size.width is not positive")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("size.width is not positive")));
     }
 
     #[test]
@@ -407,11 +417,16 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 0.0, y: 0.0 },
-            Some(Size { width: 10.0, height: -5.0 }),
+            Some(Size {
+                width: 10.0,
+                height: -5.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("size.height is not positive")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("size.height is not positive")));
     }
 
     #[test]
@@ -420,11 +435,16 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 0.0, y: 0.0 },
-            Some(Size { width: f64::NAN, height: 10.0 }),
+            Some(Size {
+                width: f64::NAN,
+                height: 10.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("non-finite")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("non-finite")));
     }
 
     #[test]
@@ -433,11 +453,16 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 50.0, y: 0.0 },
-            Some(Size { width: 60.0, height: 10.0 }),
+            Some(Size {
+                width: 60.0,
+                height: 10.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("past node right edge")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("past node right edge")));
     }
 
     #[test]
@@ -446,11 +471,16 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 0.0, y: 30.0 },
-            Some(Size { width: 10.0, height: 20.0 }),
+            Some(Size {
+                width: 10.0,
+                height: 20.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("past node bottom edge")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("past node bottom edge")));
     }
 
     #[test]
@@ -463,8 +493,15 @@ mod tests {
         ];
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        let off = v.iter().find(|x| x.message.contains("offset.x is negative")).expect("missed violation");
-        assert!(off.message.contains("section[1]"), "expected section index 1 in message: {}", off.message);
+        let off = v
+            .iter()
+            .find(|x| x.message.contains("offset.x is negative"))
+            .expect("missed violation");
+        assert!(
+            off.message.contains("section[1]"),
+            "expected section index 1 in message: {}",
+            off.message
+        );
     }
 
     /// `None`-sized sections (fill-parent) are bounds-checked
@@ -480,7 +517,10 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(Position { x: 0.0, y: 0.0 }, None);
         map.nodes.insert("0".into(), n);
-        assert!(check(&map).is_empty(), "fill-parent at (0,0) is the canonical shape");
+        assert!(
+            check(&map).is_empty(),
+            "fill-parent at (0,0) is the canonical shape"
+        );
     }
 
     #[test]
@@ -493,7 +533,8 @@ mod tests {
         map.nodes.insert("0".into(), n);
         let v = check(&map);
         assert!(
-            v.iter().any(|x| x.message.contains("extends past node right edge")),
+            v.iter()
+                .any(|x| x.message.contains("extends past node right edge")),
             "fill-parent at non-zero offset must flag right-edge overflow, got {:?}",
             v
         );
@@ -538,7 +579,8 @@ mod tests {
         map.nodes.insert("0".into(), n);
         let v = check(&map);
         assert!(
-            v.iter().any(|x| x.category == CATEGORY && x.message.contains("channel 2 shared by sections")),
+            v.iter()
+                .any(|x| x.category == CATEGORY && x.message.contains("channel 2 shared by sections")),
             "expected channel-collision violation, got {:?}",
             v
         );
@@ -569,11 +611,16 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 0.0, y: 0.0 },
-            Some(Size { width: 1e30, height: 30.0 }),
+            Some(Size {
+                width: 1e30,
+                height: 30.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         let v = check(&map);
-        assert!(v.iter().any(|x| x.category == CATEGORY && x.message.contains("over 100× the node's width")));
+        assert!(v
+            .iter()
+            .any(|x| x.category == CATEGORY && x.message.contains("over 100× the node's width")));
     }
 
     #[test]
@@ -585,7 +632,10 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(
             Position { x: 0.0, y: 0.0 },
-            Some(Size { width: 100.0, height: 40.0 }),
+            Some(Size {
+                width: 100.0,
+                height: 40.0,
+            }),
         );
         map.nodes.insert("0".into(), n);
         assert!(check(&map).is_empty());

@@ -128,7 +128,10 @@ fn standalone_selection_hint(selection: &crate::application::document::Selection
         SelectionState::Section(s) => format!("section {} of {}", s.section_idx, s.node_id),
         SelectionState::MultiSection(secs) => format!("{} sections", secs.len()),
         SelectionState::SectionRange { sel, range } => {
-            format!("section {} of {} range {}..{}", sel.section_idx, sel.node_id, range.0, range.1)
+            format!(
+                "section {} of {} range {}..{}",
+                sel.section_idx, sel.node_id, range.0, range.1
+            )
         }
         SelectionState::Edge(_) => "edge".to_string(),
         SelectionState::EdgeLabel(_) => "edge label".to_string(),

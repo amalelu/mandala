@@ -668,4 +668,3 @@ fn test_orphan_selection_on_root_is_noop() {
     // undo.entries may be non-empty but the restoration is a no-op.
     let _ = undo;
 }
-

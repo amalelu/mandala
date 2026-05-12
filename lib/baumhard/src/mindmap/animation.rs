@@ -261,10 +261,7 @@ mod tests {
             for step in 1..=100 {
                 let t = step as f32 / 100.0;
                 let v = easing.evaluate(t);
-                assert!(
-                    v >= prev - 1e-6,
-                    "{easing:?} dipped at t={t}: prev={prev}, v={v}"
-                );
+                assert!(v >= prev - 1e-6, "{easing:?} dipped at t={t}: prev={prev}, v={v}");
                 prev = v;
             }
         }

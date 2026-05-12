@@ -77,14 +77,10 @@ pub fn insert_run(runs: &mut Vec<TextRun>, run: TextRun) -> usize {
     debug_assert_invariants(runs);
     debug_assert!(run.start < run.end, "insert_run: empty run");
     debug_assert!(
-        runs.iter()
-            .all(|r| r.end <= run.start || r.start >= run.end),
+        runs.iter().all(|r| r.end <= run.start || r.start >= run.end),
         "insert_run: overlap with existing run"
     );
-    let pos = runs
-        .iter()
-        .position(|r| r.start >= run.end)
-        .unwrap_or(runs.len());
+    let pos = runs.iter().position(|r| r.start >= run.end).unwrap_or(runs.len());
     runs.insert(pos, run);
     pos
 }
@@ -533,11 +529,7 @@ mod tests {
 
     #[test]
     fn test_merge_adjacent_equal_chains_three_runs() {
-        let mut runs = vec![
-            run(0, 5, "red"),
-            run(5, 10, "red"),
-            run(10, 15, "red"),
-        ];
+        let mut runs = vec![run(0, 5, "red"), run(5, 10, "red"), run(10, 15, "red")];
         merge_adjacent_equal(&mut runs);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].start, 0);
@@ -548,11 +540,7 @@ mod tests {
     fn test_merge_adjacent_equal_partial_chain() {
         // First two runs match, third differs — only the first
         // pair coalesces.
-        let mut runs = vec![
-            run(0, 5, "red"),
-            run(5, 10, "red"),
-            run(10, 15, "blue"),
-        ];
+        let mut runs = vec![run(0, 5, "red"), run(5, 10, "red"), run(10, 15, "blue")];
         merge_adjacent_equal(&mut runs);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].start, 0);
@@ -755,17 +743,20 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "zero-length")]
     fn test_invariants_panic_on_zero_length_run() {
-        let runs = vec![run(0, 5, "red"), TextRun {
-            start: 5,
-            end: 5,
-            bold: false,
-            italic: false,
-            underline: false,
-            font: "Sans".into(),
-            size_pt: 12,
-            color: "blue".into(),
-            hyperlink: None,
-        }];
+        let runs = vec![
+            run(0, 5, "red"),
+            TextRun {
+                start: 5,
+                end: 5,
+                bold: false,
+                italic: false,
+                underline: false,
+                font: "Sans".into(),
+                size_pt: 12,
+                color: "blue".into(),
+                hyperlink: None,
+            },
+        ];
         let _ = find_run_containing(&runs, 0);
     }
 
@@ -775,8 +766,14 @@ mod tests {
         let template = run(0, 0, "red");
         splice_range(&mut runs, 3, 8, 0, &template);
         assert_eq!(runs.len(), 2);
-        assert_eq!((runs[0].start, runs[0].end, runs[0].color.as_str()), (0, 3, "red"));
-        assert_eq!((runs[1].start, runs[1].end, runs[1].color.as_str()), (3, 7, "green"));
+        assert_eq!(
+            (runs[0].start, runs[0].end, runs[0].color.as_str()),
+            (0, 3, "red")
+        );
+        assert_eq!(
+            (runs[1].start, runs[1].end, runs[1].color.as_str()),
+            (3, 7, "green")
+        );
     }
 
     #[test]
@@ -785,9 +782,18 @@ mod tests {
         let template = run(0, 0, "yellow");
         splice_range(&mut runs, 3, 8, 7, &template);
         assert_eq!(runs.len(), 3);
-        assert_eq!((runs[0].start, runs[0].end, runs[0].color.as_str()), (0, 3, "red"));
-        assert_eq!((runs[1].start, runs[1].end, runs[1].color.as_str()), (3, 10, "yellow"));
-        assert_eq!((runs[2].start, runs[2].end, runs[2].color.as_str()), (10, 14, "green"));
+        assert_eq!(
+            (runs[0].start, runs[0].end, runs[0].color.as_str()),
+            (0, 3, "red")
+        );
+        assert_eq!(
+            (runs[1].start, runs[1].end, runs[1].color.as_str()),
+            (3, 10, "yellow")
+        );
+        assert_eq!(
+            (runs[2].start, runs[2].end, runs[2].color.as_str()),
+            (10, 14, "green")
+        );
     }
 
     #[test]
@@ -807,8 +813,14 @@ mod tests {
         let template = run(0, 0, "red");
         splice_range(&mut runs, 3, 7, 0, &template);
         assert_eq!(runs.len(), 2);
-        assert_eq!((runs[0].start, runs[0].end, runs[0].color.as_str()), (0, 3, "red"));
-        assert_eq!((runs[1].start, runs[1].end, runs[1].color.as_str()), (3, 6, "blue"));
+        assert_eq!(
+            (runs[0].start, runs[0].end, runs[0].color.as_str()),
+            (0, 3, "red")
+        );
+        assert_eq!(
+            (runs[1].start, runs[1].end, runs[1].color.as_str()),
+            (3, 6, "blue")
+        );
     }
 
     #[test]
@@ -818,7 +830,10 @@ mod tests {
         splice_range(&mut runs, 5, 5, 4, &template);
         assert_eq!(runs.len(), 3);
         assert_eq!((runs[0].start, runs[0].end), (0, 3));
-        assert_eq!((runs[1].start, runs[1].end, runs[1].color.as_str()), (5, 9, "yellow"));
+        assert_eq!(
+            (runs[1].start, runs[1].end, runs[1].color.as_str()),
+            (5, 9, "yellow")
+        );
         assert_eq!((runs[2].start, runs[2].end), (12, 16));
     }
 }

@@ -586,7 +586,11 @@ fn criterion_benchmark(c: &mut Criterion) {
 /// `baumhard::mindmap::test_helpers::synthetic_node_full` is
 /// `pub(crate)` so external benches can't reach it. Mirrors the
 /// shape that helper produces (no border, simple style).
-fn bench_node(id: &str, x: f64, sections: Vec<baumhard::mindmap::model::MindSection>) -> baumhard::mindmap::model::MindNode {
+fn bench_node(
+    id: &str,
+    x: f64,
+    sections: Vec<baumhard::mindmap::model::MindSection>,
+) -> baumhard::mindmap::model::MindNode {
     use baumhard::mindmap::model::{MindNode, NodeLayout, NodeStyle, Position, Size};
     MindNode {
         id: id.to_string(),
@@ -732,12 +736,7 @@ fn resize_mode_rebuild_benchmark(c: &mut Criterion) {
     });
 
     let mut node_cache = SceneConnectionCache::new();
-    do_scene_rebuild_with_handle_overrides(
-        &bench_map,
-        &mut node_cache,
-        Some(any_node_id.as_str()),
-        None,
-    );
+    do_scene_rebuild_with_handle_overrides(&bench_map, &mut node_cache, Some(any_node_id.as_str()), None);
     c.bench_function("scene_rebuild_resize_mode_node_target", |b| {
         b.iter(|| {
             do_scene_rebuild_with_handle_overrides(
@@ -876,13 +875,7 @@ fn section_frame_emission_benchmark(c: &mut Criterion) {
     let offsets: HashMap<String, (f32, f32)> = HashMap::new();
     c.bench_function("section_frame_emission_50x5_with_node_edit_active", |b| {
         b.iter(|| {
-            let _ = build_section_frames(
-                &bench_map,
-                &offsets,
-                Some(any_node_id.as_str()),
-                None,
-                None,
-            );
+            let _ = build_section_frames(&bench_map, &offsets, Some(any_node_id.as_str()), None, None);
         })
     });
 }

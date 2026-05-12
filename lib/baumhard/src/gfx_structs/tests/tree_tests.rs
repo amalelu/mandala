@@ -365,7 +365,11 @@ pub fn model_block_commands() {
                     GlyphModelField::GlyphLine(num, line) => {
                         let mut my_reference = reference_model.clone();
                         apply_operation.apply(
-                            my_reference.glyph_model_mut().unwrap().glyph_matrix.ensure_line(num),
+                            my_reference
+                                .glyph_model_mut()
+                                .unwrap()
+                                .glyph_matrix
+                                .ensure_line(num),
                             line,
                         );
                         assert_eq!(my_reference, my_model);

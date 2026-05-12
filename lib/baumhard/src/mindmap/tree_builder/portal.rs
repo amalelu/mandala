@@ -42,11 +42,11 @@ use crate::mindmap::scene_builder::portal::{
     layout_portal_label, layout_portal_text, resolve_portal_endpoint_style,
     resolve_portal_endpoint_text_style, SelectedPortalLabel,
 };
-use crate::util::geometry::aabb_center;
 use crate::mindmap::scene_builder::PortalTextEditOverride;
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color;
+use crate::util::geometry::aabb_center;
 
 /// Identifier for the currently selected edge, used to route the
 /// cyan highlight color to both markers of a selected portal-mode

@@ -68,7 +68,14 @@ pub(in crate::application::app) fn rebuild_after_selection_change(
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
     if selection_change_touches_tree(prev_selection, &doc.selection) {
-        rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+        rebuild_all(
+            doc,
+            interaction_mode,
+            mindmap_tree,
+            app_scene,
+            renderer,
+            scene_cache,
+        );
     } else {
         rebuild_scene_only(doc, interaction_mode, app_scene, renderer, scene_cache);
     }
@@ -237,7 +244,11 @@ mod tests {
         let line = super::mode_status_line(&mode, &doc).expect("text expected");
         assert!(line.starts_with("editing: "), "got {:?}", line);
         assert!(line.contains(&id), "got {:?}", line);
-        assert!(!line.contains("section ["), "single-section must skip the [N of M] suffix; got {:?}", line);
+        assert!(
+            !line.contains("section ["),
+            "single-section must skip the [N of M] suffix; got {:?}",
+            line
+        );
     }
 
     /// NodeEdit on a multi-section node renders `editing: <id> — section [N of M]`
@@ -279,7 +290,10 @@ mod tests {
         use crate::application::document::tests_common::pinned_two_section_node;
         let (doc, id) = pinned_two_section_node();
         let mode = InteractionMode::Resize {
-            target: ResizeTarget::Section { node_id: id.clone(), section_idx: 1 },
+            target: ResizeTarget::Section {
+                node_id: id.clone(),
+                section_idx: 1,
+            },
         };
         let line = super::mode_status_line(&mode, &doc).expect("text expected");
         assert!(line.contains(&format!("{}[1]", id)), "got {:?}", line);
@@ -333,7 +347,11 @@ mod tests {
         };
         let line = super::mode_status_line(&mode, &doc).expect("text expected");
         assert!(line.contains("1 source "), "got {:?}", line);
-        assert!(!line.contains("1 sources"), "singular form must not pluralize: {:?}", line);
+        assert!(
+            !line.contains("1 sources"),
+            "singular form must not pluralize: {:?}",
+            line
+        );
     }
 
     /// Reparent mode with two+ sources renders the plural form.
@@ -444,10 +462,7 @@ pub(in crate::application::app) fn mode_status_line(
                     format!("{}[{}]", node_id, section_idx)
                 }
             };
-            Some(format!(
-                "resize: {} \u{2014} drag a corner or edge",
-                target_label
-            ))
+            Some(format!("resize: {} \u{2014} drag a corner or edge", target_label))
         }
         InteractionMode::Reparent { sources } => {
             let count = sources.len();
@@ -458,10 +473,7 @@ pub(in crate::application::app) fn mode_status_line(
             ))
         }
         InteractionMode::Connect { source } => {
-            Some(format!(
-                "connect: {} \u{2014} click a target node",
-                source
-            ))
+            Some(format!("connect: {} \u{2014} click a target node", source))
         }
     }
 }
@@ -655,10 +667,11 @@ pub(in crate::application::app) fn update_portal_tree(
     // previewed edge is portal-mode. `ColorPickerPreview` is a
     // struct (one shape, one preview) — no Portal variant needed,
     // the edge `key` is enough to fan out.
-    let preview: Option<PortalColorPreviewRef> = doc.color_picker_preview.as_ref().map(|p| PortalColorPreviewRef {
-        edge_key: &p.key,
-        color: p.color.as_str(),
-    });
+    let preview: Option<PortalColorPreviewRef> =
+        doc.color_picker_preview.as_ref().map(|p| PortalColorPreviewRef {
+            edge_key: &p.key,
+            color: p.color.as_str(),
+        });
 
     // Portal text-edit preview mirrors the existing
     // `label_edit_preview`: when the inline portal-text editor is
@@ -905,9 +918,7 @@ pub(in crate::application::app) fn update_section_frame_tree(
     app_scene: &mut crate::application::scene_host::AppScene,
 ) {
     use crate::application::scene_host::{CanvasDispatch, CanvasRole};
-    use baumhard::mindmap::tree_builder::{
-        build_section_frame_tree, section_frame_identity_sequence,
-    };
+    use baumhard::mindmap::tree_builder::{build_section_frame_tree, section_frame_identity_sequence};
 
     let signature = section_frame_identity_sequence(&scene.section_frames);
     match app_scene.canvas_dispatch(CanvasRole::SectionFrames, signature) {

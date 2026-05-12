@@ -32,7 +32,14 @@ pub(in crate::application::app) fn cancel_color_picker(
     *state = ColorPickerState::Closed;
     doc.color_picker_preview = None;
     renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
-    rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+    rebuild_all(
+        doc,
+        interaction_mode,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+    );
 }
 
 /// Close the standalone color picker without committing. Called by
@@ -51,7 +58,15 @@ pub(in crate::application::app) fn close_color_picker_standalone(
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
-    cancel_color_picker(state, doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+    cancel_color_picker(
+        state,
+        doc,
+        interaction_mode,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+    );
 }
 
 /// Commit the picker's currently-previewed HSV value via the regular
@@ -158,13 +173,8 @@ pub(in crate::application::app) fn commit_color_picker(
                 // Single-section / Section commit fans through
                 // `section_commit_targets` as before.
                 if let Some((rs, re)) = range {
-                    let applied = doc.set_section_text_color_range(
-                        &node_id,
-                        section_idx,
-                        rs,
-                        re,
-                        to_write.clone(),
-                    );
+                    let applied =
+                        doc.set_section_text_color_range(&node_id, section_idx, rs, re, to_write.clone());
                     if !applied {
                         // Stale handle: section may have shrunk
                         // below `range_end`, or the node /
@@ -177,7 +187,10 @@ pub(in crate::application::app) fn commit_color_picker(
                              range {}..{} produced no change \
                              (section may have shrunk below the range \
                              or been deleted since picker open)",
-                            section_idx, node_id, rs, re
+                            section_idx,
+                            node_id,
+                            rs,
+                            re
                         );
                     }
                 } else {
@@ -196,7 +209,14 @@ pub(in crate::application::app) fn commit_color_picker(
     // glyph, color, font). Clear so the rebuild re-samples against
     // the committed model.
     scene_cache.clear();
-    rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+    rebuild_all(
+        doc,
+        interaction_mode,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+    );
 }
 
 /// Apply the current picker HSV to the document's transient color
@@ -349,7 +369,14 @@ pub(in crate::application::app) fn commit_color_picker_to_selection(
         // Rebuild the whole scene so the newly-colored items repaint
         // next frame. The picker itself stays open — no state change
         // needed on `state`.
-        rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+        rebuild_all(
+            doc,
+            interaction_mode,
+            mindmap_tree,
+            app_scene,
+            renderer,
+            scene_cache,
+        );
     }
 }
 
@@ -519,10 +546,7 @@ mod tests {
     fn test_node_commit_targets_fans_out_for_multi_selection() {
         let sel = SelectionState::Multi(vec!["a".into(), "b".into(), "c".into()]);
         let targets = node_commit_targets(&sel, "a");
-        assert_eq!(
-            targets,
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
-        );
+        assert_eq!(targets, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
     }
 
     /// `Single(id)` selection writes to the bound handle (which
@@ -550,16 +574,10 @@ mod tests {
     /// across every entry — pins the existing fan-out path.
     #[test]
     fn test_section_commit_targets_fans_out_for_multi_section() {
-        let sel = SelectionState::MultiSection(vec![
-            SectionSel::new("a", 0),
-            SectionSel::new("b", 1),
-        ]);
+        let sel = SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 1)]);
         let targets = section_commit_targets(&sel, "a", 0);
         // Bound handle (a, 0) is already in the set — no dup.
-        assert_eq!(
-            targets,
-            vec![SectionSel::new("a", 0), SectionSel::new("b", 1)]
-        );
+        assert_eq!(targets, vec![SectionSel::new("a", 0), SectionSel::new("b", 1)]);
     }
 
     /// **Handle-union fix.** When the bound handle's section is
@@ -568,10 +586,7 @@ mod tests {
     /// bound section never silently drops out of the commit.
     #[test]
     fn test_section_commit_targets_unions_handle_when_diverged() {
-        let sel = SelectionState::MultiSection(vec![
-            SectionSel::new("a", 0),
-            SectionSel::new("b", 1),
-        ]);
+        let sel = SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 1)]);
         let targets = section_commit_targets(&sel, "c", 5);
         assert_eq!(
             targets,

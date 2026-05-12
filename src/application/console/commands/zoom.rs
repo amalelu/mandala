@@ -248,9 +248,7 @@ pub(crate) fn apply_zoom_to_selection(
         // Zoom-bounds are node-level; section selection routes
         // through to the owning node.
         SelectionState::Section(s) => doc.set_node_zoom_visibility(&s.node_id, min, max),
-        SelectionState::SectionRange { sel, .. } => {
-            doc.set_node_zoom_visibility(&sel.node_id, min, max)
-        }
+        SelectionState::SectionRange { sel, .. } => doc.set_node_zoom_visibility(&sel.node_id, min, max),
         SelectionState::Multi(ids) => {
             let mut changed = false;
             for id in &ids {

@@ -290,9 +290,15 @@ mod predicate_divergence_tests {
     fn predicates_agree_on_single_section_sectionrange_multisection() {
         let cases = [
             SelectionState::Single("a".into()),
-            SelectionState::Section(SectionSel { node_id: "a".into(), section_idx: 0 }),
+            SelectionState::Section(SectionSel {
+                node_id: "a".into(),
+                section_idx: 0,
+            }),
             SelectionState::SectionRange {
-                sel: SectionSel { node_id: "a".into(), section_idx: 0 },
+                sel: SectionSel {
+                    node_id: "a".into(),
+                    section_idx: 0,
+                },
                 range: (0, 0),
             },
             SelectionState::MultiSection(vec![SectionSel {

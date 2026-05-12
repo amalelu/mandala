@@ -134,8 +134,8 @@ mod tests {
         assert!(command_by_name("nope").is_none());
 
         for name in [
-            "help", "anchor", "body", "border", "cap", "color", "edge", "font", "fps", "spacing",
-            "label", "mutation", "save", "open", "new", "zoom",
+            "help", "anchor", "body", "border", "cap", "color", "edge", "font", "fps", "spacing", "label",
+            "mutation", "save", "open", "new", "zoom",
         ] {
             assert!(
                 command_by_name(name).is_some(),

@@ -27,8 +27,7 @@ pub(in crate::application::app) fn fire_onclick_triggers(
     platform: PlatformContext,
     now_ms: u64,
 ) {
-    let triggered =
-        doc.find_triggered_mutations_at(hit_node_id, hit_section, &Trigger::OnClick, &platform);
+    let triggered = doc.find_triggered_mutations_at(hit_node_id, hit_section, &Trigger::OnClick, &platform);
     for cm in triggered {
         if cm.timing.as_ref().is_some_and(|t| t.duration_ms > 0) {
             doc.start_animation_at(&cm, hit_node_id, hit_section, now_ms);

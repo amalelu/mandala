@@ -61,22 +61,46 @@ pub fn do_inclusive_band_on_every_authored_shape() {
     let cases: [(&str, ZoomVisibility, &[(f32, bool)]); 4] = [
         (
             "min-only",
-            ZoomVisibility { min: Some(1.5), max: None },
-            &[(1.0, false), (1.4999, false), (1.5, true), (1.5001, true), (5.0, true)],
+            ZoomVisibility {
+                min: Some(1.5),
+                max: None,
+            },
+            &[
+                (1.0, false),
+                (1.4999, false),
+                (1.5, true),
+                (1.5001, true),
+                (5.0, true),
+            ],
         ),
         (
             "max-only",
-            ZoomVisibility { min: None, max: Some(0.5) },
-            &[(0.05, true), (0.4999, true), (0.5, true), (0.5001, false), (1.0, false)],
+            ZoomVisibility {
+                min: None,
+                max: Some(0.5),
+            },
+            &[
+                (0.05, true),
+                (0.4999, true),
+                (0.5, true),
+                (0.5001, false),
+                (1.0, false),
+            ],
         ),
         (
             "closed",
-            ZoomVisibility { min: Some(0.5), max: Some(2.0) },
+            ZoomVisibility {
+                min: Some(0.5),
+                max: Some(2.0),
+            },
             &[(0.25, false), (0.5, true), (1.0, true), (2.0, true), (2.5, false)],
         ),
         (
             "single-point",
-            ZoomVisibility { min: Some(1.0), max: Some(1.0) },
+            ZoomVisibility {
+                min: Some(1.0),
+                max: Some(1.0),
+            },
             &[(0.9999, false), (1.0, true), (1.0001, false)],
         ),
     ];

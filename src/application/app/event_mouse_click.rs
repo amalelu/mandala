@@ -320,22 +320,20 @@ pub(super) fn handle_mouse_input(
                 };
                 // Node resize handle press capture — only fires when
                 // the active mode is `Resize { Node(_) }`.
-                let hit_node_resize_handle = match (
-                    ctx.document.as_ref(),
-                    ctx.interaction_mode.resize_handle_node(),
-                ) {
-                    (Some(doc), Some(node_id)) => {
-                        let tol = HANDLE_HIT_TOLERANCE_PX * ctx.renderer.canvas_per_pixel();
-                        crate::application::document::hit_test_node_resize_handle(
-                            &doc.mindmap,
-                            canvas_pos,
-                            node_id,
-                            tol,
-                        )
-                        .map(|side| (node_id.to_string(), side))
-                    }
-                    _ => None,
-                };
+                let hit_node_resize_handle =
+                    match (ctx.document.as_ref(), ctx.interaction_mode.resize_handle_node()) {
+                        (Some(doc), Some(node_id)) => {
+                            let tol = HANDLE_HIT_TOLERANCE_PX * ctx.renderer.canvas_per_pixel();
+                            crate::application::document::hit_test_node_resize_handle(
+                                &doc.mindmap,
+                                canvas_pos,
+                                node_id,
+                                tol,
+                            )
+                            .map(|side| (node_id.to_string(), side))
+                        }
+                        _ => None,
+                    };
                 // Portal-label drag capture. Takes precedence
                 // over `hit_node` at threshold-cross time so
                 // pressing a marker and dragging slides the label
@@ -553,11 +551,7 @@ pub(super) fn handle_mouse_input(
                         // from inside NodeEdit left the user in
                         // an orphan "NodeEdit + EdgeLabel selection"
                         // state.
-                        maybe_exit_node_edit_on_outside_click(
-                            ctx,
-                            cursor_pos_val,
-                            hit_node.as_deref(),
-                        );
+                        maybe_exit_node_edit_on_outside_click(ctx, cursor_pos_val, hit_node.as_deref());
                         let entered_label_select = if let Some(er) = edge_label_target {
                             if let Some(doc) = ctx.document.as_mut() {
                                 let prev = doc.selection.clone();
@@ -806,7 +800,13 @@ pub(super) fn handle_mouse_input(
                             // because node trees are untouched by a
                             // label move; the release commit is
                             // the same story.
-                            rebuild_scene_only(doc, ctx.interaction_mode, ctx.app_scene, ctx.renderer, ctx.scene_cache);
+                            rebuild_scene_only(
+                                doc,
+                                ctx.interaction_mode,
+                                ctx.app_scene,
+                                ctx.renderer,
+                                ctx.scene_cache,
+                            );
                         }
                     }
                     DragState::SelectingRect {
@@ -872,11 +872,7 @@ pub(super) fn handle_mouse_input(
 ///    [`finalize_section_resize_release`], the same helpers the
 ///    left-button release path uses. Single-source commit shape
 ///    regardless of which button started the gesture.
-fn handle_right_button(
-    state: ElementState,
-    cursor_pos_val: (f64, f64),
-    ctx: &mut InputHandlerContext<'_>,
-) {
+fn handle_right_button(state: ElementState, cursor_pos_val: (f64, f64), ctx: &mut InputHandlerContext<'_>) {
     if state == ElementState::Pressed {
         // Mode + modal guards: don't arm a fast-resize gesture
         // when the user's intent is unambiguously elsewhere.
@@ -911,10 +907,7 @@ fn handle_right_button(
             log::debug!("right-button press ignored (modal text editor open)");
             return;
         }
-        if matches!(
-            *ctx.interaction_mode,
-            super::InteractionMode::Resize { .. }
-        ) {
+        if matches!(*ctx.interaction_mode, super::InteractionMode::Resize { .. }) {
             log::debug!("right-button press ignored (Resize mode active; use the visible handles)");
             return;
         }
@@ -947,9 +940,7 @@ fn handle_right_button(
         // here — fast-resize is a meaningful gesture; clobbering an
         // in-flight resize with a stray right-press would be visible.
         if !matches!(*ctx.drag_state, DragState::None) {
-            log::debug!(
-                "right-button press ignored (drag already in flight); state stays put"
-            );
+            log::debug!("right-button press ignored (drag already in flight); state stays put");
             return;
         }
         *ctx.drag_state = DragState::PendingRight {
@@ -1066,11 +1057,7 @@ fn finalize_node_resize_release(
             );
         }
         Err(msg) => {
-            log::info!(
-                "{} release rejected: {} (snapping back)",
-                gesture_label,
-                msg
-            );
+            log::info!("{} release rejected: {} (snapping back)", gesture_label, msg);
         }
     }
     ctx.scene_cache.clear();
@@ -1121,11 +1108,7 @@ fn finalize_section_resize_release(
             );
         }
         Err(msg) => {
-            log::info!(
-                "{} release rejected: {} (snapping back)",
-                gesture_label,
-                msg
-            );
+            log::info!("{} release rejected: {} (snapping back)", gesture_label, msg);
         }
     }
     ctx.scene_cache.clear();
@@ -1165,7 +1148,9 @@ fn maybe_exit_node_edit_on_outside_click(
     // count as inside). `ensure_subtree_aabbs` is needed because
     // post-mutation AABB caches go dirty; same shape as the
     // text-editor's click-outside-commit gate.
-    let release_canvas = ctx.renderer.screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
+    let release_canvas = ctx
+        .renderer
+        .screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
     if let Some(tree) = ctx.mindmap_tree.as_mut() {
         tree.tree.ensure_subtree_aabbs();
     }

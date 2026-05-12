@@ -71,9 +71,9 @@ mod event_keyboard;
 mod event_mouse_click;
 #[cfg(not(target_arch = "wasm32"))]
 mod freeze_watchdog;
-mod interaction_mode;
 #[cfg(not(target_arch = "wasm32"))]
 mod input_context;
+mod interaction_mode;
 // Cross-platform context-bundles for the unified `dispatch_action`
 // funnel. Track C from `WASM_CONVERGENCE.md` (final convergence step).
 mod input_context_core;
@@ -360,7 +360,6 @@ fn click_hit_from_priority(
         ClickHit::Empty
     }
 }
-
 
 // Re-export the mode enum, the shared selection→target resolver,
 // and the resolver's typed error so the console layer can carry

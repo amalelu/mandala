@@ -108,7 +108,6 @@ fn test_double_click_just_under_boundary_fires() {
 // target. We verify the guard predicate here; the actual event
 // loop wiring is manually verified via `cargo run`.
 
-
 // -----------------------------------------------------------------
 // Drag-helper + release-flush invariants
 //
@@ -376,13 +375,7 @@ mod click_hit_priority_tests {
     /// double-click compare and the editor open).
     #[test]
     fn click_hit_priority_node_carries_section_idx() {
-        let hit = click_hit_from_priority(
-            &Some("node-x".to_string()),
-            Some(2),
-            &None,
-            &None,
-            &None,
-        );
+        let hit = click_hit_from_priority(&Some("node-x".to_string()), Some(2), &None, &None, &None);
         assert_eq!(hit, ClickHit::Node("node-x".to_string(), Some(2)));
     }
 
@@ -404,13 +397,7 @@ mod click_hit_priority_tests {
 
     #[test]
     fn click_hit_priority_portal_icon_wins_over_edge_label() {
-        let hit = click_hit_from_priority(
-            &None,
-            None,
-            &None,
-            &Some((ek(), "n2".to_string())),
-            &Some(ek()),
-        );
+        let hit = click_hit_from_priority(&None, None, &None, &Some((ek(), "n2".to_string())), &Some(ek()));
         assert!(matches!(hit, ClickHit::PortalMarker { .. }));
     }
 

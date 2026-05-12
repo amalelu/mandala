@@ -499,7 +499,8 @@ pub fn measure_glyph_ink_bounds(
     // glyphs shape against the intended face instead of cosmic-text's
     // default fallback. The family name string must outlive `attrs`,
     // so we hold it in a local binding.
-    let family_name: Option<String> = font.and_then(|app_font| face_family_name_for_pin(font_system, app_font));
+    let family_name: Option<String> =
+        font.and_then(|app_font| face_family_name_for_pin(font_system, app_font));
     let attrs = match family_name.as_deref() {
         Some(name) => Attrs::new().family(Family::Name(name)),
         None => Attrs::new(),
@@ -623,7 +624,8 @@ pub fn measure_text_block_unbounded(
     // cosmic-text's default monospace and the box undersizes by
     // 30–60%. The family-name string must outlive `attrs`, so
     // we hold it in a local binding.
-    let family_name: Option<String> = font.and_then(|app_font| face_family_name_for_pin(font_system, app_font));
+    let family_name: Option<String> =
+        font.and_then(|app_font| face_family_name_for_pin(font_system, app_font));
     let attrs = match family_name.as_deref() {
         Some(name) => Attrs::new().family(Family::Name(name)),
         None => Attrs::new(),

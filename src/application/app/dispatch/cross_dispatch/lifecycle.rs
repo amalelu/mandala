@@ -121,11 +121,7 @@ pub(in crate::application::app) fn resolve_enter_node_edit_plan(
     let Some(node_id) = selection.primary_node_id().map(str::to_string) else {
         return EnterNodeEditPlan::NoTarget;
     };
-    let section_count = mindmap
-        .nodes
-        .get(&node_id)
-        .map(|n| n.sections.len())
-        .unwrap_or(0);
+    let section_count = mindmap.nodes.get(&node_id).map(|n| n.sections.len()).unwrap_or(0);
     if section_count <= 1 {
         EnterNodeEditPlan::SingleSectionShortCircuit { node_id }
     } else {
@@ -165,7 +161,9 @@ pub(in crate::application::app) fn apply_enter_node_edit(
             false
         }
         EnterNodeEditPlan::SingleSectionShortCircuit { node_id } => {
-            *rc.interaction_mode = InteractionMode::NodeEdit { node_id: node_id.clone() };
+            *rc.interaction_mode = InteractionMode::NodeEdit {
+                node_id: node_id.clone(),
+            };
             // Short-circuit path: this call ALSO flipped mode to
             // NodeEdit, so on close the editor must revert mode to
             // Default — a single-section node has nothing else to
@@ -204,7 +202,10 @@ pub(in crate::application::app) enum EnterSectionEditPlan {
     /// Mode was NodeEdit but the selection's owner mismatched the
     /// active NodeEdit target (e.g. user clicked a sibling node).
     /// Caller logs a warning naming both ids and bails.
-    OwnerMismatch { active_node: String, owner: Option<String> },
+    OwnerMismatch {
+        active_node: String,
+        owner: Option<String>,
+    },
     /// Open the section editor on `active_node`. The caller takes
     /// the renderer-driving side from here.
     OpenEditor { active_node: String },
@@ -224,10 +225,7 @@ pub(in crate::application::app) fn resolve_enter_section_edit_plan(
     };
     let owner = selection.primary_node_id().map(str::to_string);
     if owner.as_deref() != Some(&active_node) {
-        return EnterSectionEditPlan::OwnerMismatch {
-            active_node,
-            owner,
-        };
+        return EnterSectionEditPlan::OwnerMismatch { active_node, owner };
     }
     EnterSectionEditPlan::OpenEditor { active_node }
 }
@@ -256,7 +254,8 @@ pub(in crate::application::app) fn apply_enter_section_edit(
         EnterSectionEditPlan::OwnerMismatch { active_node, owner } => {
             log::warn!(
                 "EnterSectionEdit: selection owner ≠ active NodeEdit node ({:?} vs {})",
-                owner, active_node
+                owner,
+                active_node
             );
             false
         }
@@ -284,9 +283,7 @@ pub(in crate::application::app) fn apply_enter_section_edit(
 /// Resolution logic is shared with the `mode resize` console verb
 /// via [`interaction_mode::resolve_resize_target`].
 pub(in crate::application::app) fn apply_enter_resize_mode(rc: &mut RebuildContext<'_>) {
-    use interaction_mode::{
-        resolve_resize_target, InteractionMode, ResizeTargetError,
-    };
+    use interaction_mode::{resolve_resize_target, InteractionMode, ResizeTargetError};
 
     match resolve_resize_target(&rc.document.selection, &rc.document.mindmap) {
         Ok(target) => {
@@ -305,7 +302,8 @@ pub(in crate::application::app) fn apply_enter_resize_mode(rc: &mut RebuildConte
         Err(ResizeTargetError::SectionFillParent { node_id, section_idx }) => {
             log::warn!(
                 "EnterResizeMode: section {}[{}] is fill-parent (no Some size); cannot resize",
-                node_id, section_idx,
+                node_id,
+                section_idx,
             );
         }
         Err(ResizeTargetError::EdgeOrPortal) => {
@@ -365,7 +363,11 @@ pub(in crate::application::app) fn prepare_copy_or_cut(
     let mut first_section_payload: Option<crate::application::document::SectionPayload> = None;
     for tid in &targets {
         let mut view = view_for(doc, tid);
-        let content = if is_cut { view.clipboard_cut() } else { view.clipboard_copy() };
+        let content = if is_cut {
+            view.clipboard_cut()
+        } else {
+            view.clipboard_copy()
+        };
         match content {
             ClipboardContent::Text(text) => {
                 text_payloads.push(text);
@@ -395,7 +397,10 @@ pub(in crate::application::app) fn prepare_copy_or_cut(
         } else {
             None
         };
-        return Some(ComputedCopy { joined_text, structured });
+        return Some(ComputedCopy {
+            joined_text,
+            structured,
+        });
     }
     None
 }
@@ -497,17 +502,15 @@ fn split_paste_for_targets(text: &str, target_count: usize) -> Option<Vec<&str>>
 mod tests {
     use super::{
         apply_copy_or_cut, prepare_copy_or_cut, resolve_enter_node_edit_plan,
-        resolve_enter_section_edit_plan, split_paste_for_targets, EnterNodeEditPlan,
-        EnterSectionEditPlan, MULTI_TARGET_SEPARATOR,
+        resolve_enter_section_edit_plan, split_paste_for_targets, EnterNodeEditPlan, EnterSectionEditPlan,
+        MULTI_TARGET_SEPARATOR,
     };
     use crate::application::app::interaction_mode::InteractionMode;
     use crate::application::clipboard::{
         clear_section_clipboard, read_section_clipboard, write_section_clipboard,
     };
     use crate::application::document::tests_common::{load_test_doc, pinned_two_section_node};
-    use crate::application::document::{
-        EdgeRef, SectionPayload, SectionSel, SelectionState,
-    };
+    use crate::application::document::{EdgeRef, SectionPayload, SectionSel, SelectionState};
 
     // ── EnterNodeEdit plan resolution ────────────────────────────
 
@@ -767,10 +770,7 @@ mod tests {
         // payload variant exists), so the only correctness gate
         // is the up-front clear.
         let (mut doc, id) = pinned_two_section_node();
-        doc.selection = SelectionState::MultiSection(vec![
-            SectionSel::new(&id, 0),
-            SectionSel::new(&id, 1),
-        ]);
+        doc.selection = SelectionState::MultiSection(vec![SectionSel::new(&id, 0), SectionSel::new(&id, 1)]);
         let _ = prepare_copy_or_cut(false, &mut doc);
 
         assert!(
@@ -823,10 +823,7 @@ mod tests {
         clear_section_clipboard();
         let (mut doc, id) = pinned_two_section_node();
         let s0_text = doc.mindmap.nodes.get(&id).unwrap().sections[0].text.clone();
-        doc.selection = SelectionState::MultiSection(vec![
-            SectionSel::new(&id, 0),
-            SectionSel::new(&id, 1),
-        ]);
+        doc.selection = SelectionState::MultiSection(vec![SectionSel::new(&id, 0), SectionSel::new(&id, 1)]);
         let c = prepare_copy_or_cut(false, &mut doc).expect("multi-section copy populates");
         assert!(
             c.structured.is_none(),
@@ -855,9 +852,7 @@ mod tests {
     /// `prepare_copy_or_cut` tests above.
     #[test]
     fn test_multi_section_copy_paste_round_trip() {
-        use crate::application::console::traits::{
-            selection_targets, view_for, HandlesPaste, Outcome,
-        };
+        use crate::application::console::traits::{selection_targets, view_for, HandlesPaste, Outcome};
 
         clear_section_clipboard();
         let (mut doc, id) = pinned_two_section_node();
@@ -867,10 +862,7 @@ mod tests {
         // leave "wiped" in place and fail the assertions below.
         doc.mindmap.nodes.get_mut(&id).unwrap().sections[0].text = "wiped".into();
         doc.mindmap.nodes.get_mut(&id).unwrap().sections[1].text = "wiped".into();
-        doc.selection = SelectionState::MultiSection(vec![
-            SectionSel::new(&id, 0),
-            SectionSel::new(&id, 1),
-        ]);
+        doc.selection = SelectionState::MultiSection(vec![SectionSel::new(&id, 0), SectionSel::new(&id, 1)]);
 
         // Synthesize the joined clipboard string that
         // `apply_copy_or_cut` would have produced from sections
@@ -880,8 +872,8 @@ mod tests {
 
         let targets = selection_targets(&doc.selection);
         assert_eq!(targets.len(), 2);
-        let fragments = super::split_paste_for_targets(&text, targets.len())
-            .expect("count matches → zip applies");
+        let fragments =
+            super::split_paste_for_targets(&text, targets.len()).expect("count matches → zip applies");
         for (i, tid) in targets.iter().enumerate() {
             let mut view = view_for(&mut doc, tid);
             assert_eq!(

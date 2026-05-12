@@ -71,11 +71,7 @@ fn split_usage_forms(usage: &str) -> Vec<&str> {
         match bytes[i] {
             b'<' => depth += 1,
             b'>' => depth = (depth - 1).max(0),
-            b' ' if depth == 0
-                && i + 2 < bytes.len()
-                && bytes[i + 1] == b'|'
-                && bytes[i + 2] == b' ' =>
-            {
+            b' ' if depth == 0 && i + 2 < bytes.len() && bytes[i + 1] == b'|' && bytes[i + 2] == b' ' => {
                 forms.push(&usage[start..i]);
                 start = i + 3;
                 i += 3;
@@ -302,14 +298,8 @@ mod tests {
             crate::application::console::ExecResult::Lines(ls) => ls,
             other => panic!("expected Lines, got {:?}", other),
         };
-        let usage_count = lines
-            .iter()
-            .filter(|l| l.text.starts_with("usage:"))
-            .count();
-        let cont_count = lines
-            .iter()
-            .filter(|l| l.text.starts_with("       "))
-            .count();
+        let usage_count = lines.iter().filter(|l| l.text.starts_with("usage:")).count();
+        let cont_count = lines.iter().filter(|l| l.text.starts_with("       ")).count();
         assert_eq!(usage_count, 1);
         assert_eq!(
             cont_count, 0,

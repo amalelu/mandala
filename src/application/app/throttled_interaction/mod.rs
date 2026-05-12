@@ -340,7 +340,9 @@ mod tests {
 
         let mut moving_node = MovingNodeInteraction::new(vec!["n".into()], false);
         moving_node.pending_delta = Vec2::new(1.0, 0.0);
-        assert!(ThrottledDrag::MovingNode(moving_node).as_dyn().needs_continuation());
+        assert!(ThrottledDrag::MovingNode(moving_node)
+            .as_dyn()
+            .needs_continuation());
 
         let mut edge_handle = EdgeHandleInteraction::new(
             EdgeRef::new("a", "b", "parent_child"),
@@ -349,7 +351,9 @@ mod tests {
             Vec2::ZERO,
         );
         edge_handle.pending_delta = Vec2::new(0.0, 2.0);
-        assert!(ThrottledDrag::EdgeHandle(edge_handle).as_dyn().needs_continuation());
+        assert!(ThrottledDrag::EdgeHandle(edge_handle)
+            .as_dyn()
+            .needs_continuation());
 
         let mut portal_label = PortalLabelInteraction::new(
             EdgeRef::new("a", "b", "parent_child"),
@@ -357,9 +361,12 @@ mod tests {
             fixture_edge(),
         );
         portal_label.pending_cursor = Some(Vec2::new(10.0, 20.0));
-        assert!(ThrottledDrag::PortalLabel(portal_label).as_dyn().needs_continuation());
+        assert!(ThrottledDrag::PortalLabel(portal_label)
+            .as_dyn()
+            .needs_continuation());
 
-        let mut edge_label = EdgeLabelInteraction::new(EdgeRef::new("a", "b", "parent_child"), fixture_edge());
+        let mut edge_label =
+            EdgeLabelInteraction::new(EdgeRef::new("a", "b", "parent_child"), fixture_edge());
         edge_label.pending_cursor = Some(Vec2::new(5.0, 5.0));
         assert!(ThrottledDrag::EdgeLabel(edge_label).as_dyn().needs_continuation());
     }

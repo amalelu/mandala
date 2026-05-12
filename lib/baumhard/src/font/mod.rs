@@ -26,6 +26,10 @@ pub mod fonts;
 /// Routes through [`color::cosmic_color_from_rgba`] for the actual
 /// quantisation.
 pub mod hex;
+/// Per-`(face, size, grapheme)` measured glyph advances + ink
+/// heights, cached. Replaces `metrics::monospace_advance` at every
+/// border-rail callsite.
+pub mod metric_cache;
 /// Font-metric approximations (`monospace_advance` + the underlying
 /// `MONOSPACE_ADVANCE_RATIO`) usable without a live `FontSystem`.
 /// Deprecated in favour of [`metric_cache::glyph_advance`] for any
@@ -33,10 +37,6 @@ pub mod hex;
 /// measured advance from cosmic-text and the ratio's static
 /// calibration drift goes away.
 pub mod metrics;
-/// Per-`(face, size, grapheme)` measured glyph advances + ink
-/// heights, cached. Replaces `metrics::monospace_advance` at every
-/// border-rail callsite.
-pub mod metric_cache;
 /// Test bodies exposed via `pub mod tests` so `benches/test_bench.rs`
 /// can reuse the `do_*()` functions as micro-benchmarks (§B8).
 pub mod tests;
@@ -48,12 +48,12 @@ pub mod tests;
 // directly. The crate boundary stays here; a future swap to a
 // different shaper / layout engine is one edit per site below.
 
-/// Cosmic-text `Attrs` — span-level styling threaded into
-/// `Buffer::set_rich_text` and `Buffer::set_text`.
-pub use cosmic_text::Attrs;
 /// Cosmic-text `Align` — text alignment passed to the rich-text /
 /// set-text API.
 pub use cosmic_text::Align;
+/// Cosmic-text `Attrs` — span-level styling threaded into
+/// `Buffer::set_rich_text` and `Buffer::set_text`.
+pub use cosmic_text::Attrs;
 /// Cosmic-text `Buffer` — the shaped glyph cache the renderer hands
 /// to glyphon. Constructors are wrapped in [`buffer::create`] so the
 /// `Metrics::new(...)` boilerplate doesn't repeat at every callsite.

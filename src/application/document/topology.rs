@@ -187,9 +187,7 @@ impl MindMapDocument {
             // MultiSection delete targets the deduplicated set
             // of owning nodes — routes through the shared
             // `dedup_owning_node_ids` helper.
-            SelectionState::MultiSection(_) => {
-                Some(DelKind::Nodes(self.selection.dedup_owning_node_ids()))
-            }
+            SelectionState::MultiSection(_) => Some(DelKind::Nodes(self.selection.dedup_owning_node_ids())),
             SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
             // Delete on any edge-sub-part selection (label, icon,
             // text) targets the owning edge — the sub-parts are

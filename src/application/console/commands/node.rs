@@ -11,7 +11,9 @@
 //! state the ambient `grow_*` passes can't (shrink to text floor).
 
 use super::Command;
-use crate::application::console::completion::{prefix_filter, Completion, CompletionContext, CompletionState};
+use crate::application::console::completion::{
+    prefix_filter, Completion, CompletionContext, CompletionState,
+};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
@@ -24,7 +26,16 @@ pub const COMMAND: Command = Command {
     aliases: &[],
     summary: "Resize the selected node, fit it to its content, or enter node-edit mode",
     usage: "node resize <w> <h> | node fit | node edit",
-    tags: &["node", "resize", "size", "fit", "shrink", "content", "edit", "node-edit"],
+    tags: &[
+        "node",
+        "resize",
+        "size",
+        "fit",
+        "shrink",
+        "content",
+        "edit",
+        "node-edit",
+    ],
     applicable: always,
     complete: complete_node,
     execute: execute_node,
@@ -60,13 +71,15 @@ fn execute_edit(eff: &mut ConsoleEffects) -> ExecResult {
         SelectionState::Section(s) => s.node_id.clone(),
         SelectionState::SectionRange { sel, .. } => sel.node_id.clone(),
         SelectionState::MultiSection(secs) if !secs.is_empty() => secs[0].node_id.clone(),
-        _ => return ExecResult::err(
-            "node edit: select a node first (Single / Section / MultiSection)"
-        ),
+        _ => return ExecResult::err("node edit: select a node first (Single / Section / MultiSection)"),
     };
-    eff.side_effect = Some(crate::application::console::ConsoleSideEffect::SetInteractionMode(
-        crate::application::app::InteractionMode::NodeEdit { node_id: node_id.clone() },
-    ));
+    eff.side_effect = Some(
+        crate::application::console::ConsoleSideEffect::SetInteractionMode(
+            crate::application::app::InteractionMode::NodeEdit {
+                node_id: node_id.clone(),
+            },
+        ),
+    );
     eff.close_console = true;
     ExecResult::ok_msg(format!("entering node-edit mode on '{}'", node_id))
 }
@@ -108,10 +121,7 @@ fn execute_resize(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         Some(v) => v,
         None => return ExecResult::err("node resize: <h> must be a number"),
     };
-    let new_size = baumhard::mindmap::model::Size {
-        width: w,
-        height: h,
-    };
+    let new_size = baumhard::mindmap::model::Size { width: w, height: h };
     match eff.document.set_node_size(&node_id, new_size) {
         Ok(true) => ExecResult::ok_msg(format!("node '{}' resized to {}×{}", node_id, w, h)),
         Ok(false) => ExecResult::ok_msg("node resize: no change".to_string()),
@@ -157,10 +167,7 @@ mod tests {
         doc.selection = SelectionState::Single(id);
         // Absolute ceiling at 1_000_000 — values past it trip
         // the typo guard. Independent of the prior-size baseline.
-        assert_exec_err_contains(
-            run("node resize 2000000 50", &mut doc),
-            "exceeds the",
-        );
+        assert_exec_err_contains(run("node resize 2000000 50", &mut doc), "exceeds the");
     }
 
     #[test]

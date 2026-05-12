@@ -21,9 +21,7 @@
 
 use crate::application::console::parser::Args;
 use crate::application::console::{ConsoleEffects, ExecResult};
-use crate::application::document::{
-    BorderConfigEdits, BorderEditOutcome, BorderPreviewTarget, OptionEdit,
-};
+use crate::application::document::{BorderConfigEdits, BorderEditOutcome, BorderPreviewTarget, OptionEdit};
 
 use super::execute::{custom_preset_hint, edits_has_glyph_field, stage_kv};
 
@@ -39,9 +37,8 @@ pub(crate) fn execute_border_preview(args: &Args, eff: &mut ConsoleEffects) -> E
         eff,
         "border preview",
         /* subverb_pos */ 1,
-        /* target_for_verb */ |sel| {
-            super::nodes_in_selection(sel, "border preview").map(BorderPreviewTarget::Nodes)
-        },
+        /* target_for_verb */
+        |sel| super::nodes_in_selection(sel, "border preview").map(BorderPreviewTarget::Nodes),
     )
 }
 
@@ -65,9 +62,7 @@ pub(crate) fn dispatch_border_preview<F>(
     target_for_verb: F,
 ) -> ExecResult
 where
-    F: FnOnce(
-        &crate::application::document::SelectionState,
-    ) -> Result<BorderPreviewTarget, ExecResult>,
+    F: FnOnce(&crate::application::document::SelectionState) -> Result<BorderPreviewTarget, ExecResult>,
 {
     // Subverb dispatch: `commit` / `cancel` are case-insensitive
     // terminators; everything else is the kv-form path.
@@ -146,10 +141,7 @@ pub(crate) fn stage_kv_for_preview(args: &Args, verb_label: &str) -> Result<Bord
 /// `border preview commit` — flush the preview through the
 /// matching committing setter and surface the merged outcome.
 /// Returns "no preview" when no preview is active.
-pub(crate) fn commit_border_preview_verb(
-    eff: &mut ConsoleEffects,
-    verb_label: &'static str,
-) -> ExecResult {
+pub(crate) fn commit_border_preview_verb(eff: &mut ConsoleEffects, verb_label: &'static str) -> ExecResult {
     let Some(outcome) = eff.document.commit_border_preview() else {
         return ExecResult::ok_msg(format!("{}: no active preview", verb_label));
     };
@@ -175,10 +167,7 @@ pub(crate) fn commit_border_preview_verb(
 /// anything. Returns a quiet "no preview" line when no preview
 /// was active (cancelling drift-cleared previews falls into the
 /// same branch).
-pub(crate) fn cancel_border_preview_verb(
-    eff: &mut ConsoleEffects,
-    verb_label: &'static str,
-) -> ExecResult {
+pub(crate) fn cancel_border_preview_verb(eff: &mut ConsoleEffects, verb_label: &'static str) -> ExecResult {
     let cleared = eff.document.cancel_border_preview();
     if cleared {
         ExecResult::ok_msg(format!("{} cancelled", verb_label))
@@ -192,10 +181,7 @@ pub(crate) fn cancel_border_preview_verb(
 /// message; bare `preset=custom` (no glyph fields) gets the same
 /// hint the committing path emits.
 fn finish_preview(outcome: BorderEditOutcome, verb_label: &'static str, bare_custom: bool) -> ExecResult {
-    let mut lines: Vec<String> = vec![format!(
-        "{} active (commit / cancel to terminate)",
-        verb_label
-    )];
+    let mut lines: Vec<String> = vec![format!("{} active (commit / cancel to terminate)", verb_label)];
     if outcome.preset_auto_promoted {
         if let Some(name) = outcome.requested_preset.as_deref() {
             lines.push(format!(
@@ -241,7 +227,14 @@ mod tests {
         }
         assert!(doc.border_preview.is_some(), "preview slot populated");
         assert_eq!(
-            doc.mindmap.nodes.get(&nid).unwrap().style.border.as_ref().map(|c| c.preset.clone()),
+            doc.mindmap
+                .nodes
+                .get(&nid)
+                .unwrap()
+                .style
+                .border
+                .as_ref()
+                .map(|c| c.preset.clone()),
             before.style.border.as_ref().map(|c| c.preset.clone()),
             "model border slot is unchanged after preview-set"
         );
@@ -298,7 +291,14 @@ mod tests {
         assert_exec_ok_strict(run("border preview cancel", &mut doc));
         assert!(doc.border_preview.is_none(), "cancel clears the slot");
         assert_eq!(
-            doc.mindmap.nodes.get(&nid).unwrap().style.border.as_ref().map(|c| c.preset.clone()),
+            doc.mindmap
+                .nodes
+                .get(&nid)
+                .unwrap()
+                .style
+                .border
+                .as_ref()
+                .map(|c| c.preset.clone()),
             before_preset,
             "model unchanged after preview-then-cancel"
         );

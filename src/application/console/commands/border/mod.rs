@@ -67,8 +67,8 @@ pub const KEYS: &[&str] = &[
 /// (`preset` / `color` / `padding` / `palette` / `font` /
 /// `side` / `corner`) and `toggle`.
 pub const VERBS: &[&str] = &[
-    "on", "off", "toggle", "show", "reset", "preview",
-    "preset", "color", "padding", "palette", "font", "side", "corner",
+    "on", "off", "toggle", "show", "reset", "preview", "preset", "color", "padding", "palette", "font",
+    "side", "corner",
 ];
 
 /// Subverbs surfaced under `border preview` — the

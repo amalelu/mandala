@@ -317,7 +317,6 @@ impl Tree<GfxElement, GfxMutator> {
         best.map(|(id, _)| id)
     }
 
-
     /// Conservative AABB covering every `GlyphArea` descendant of
     /// [`Self::root`]. Returns `(top_left, bottom_right)` or `None`
     /// if the tree has no visible areas.

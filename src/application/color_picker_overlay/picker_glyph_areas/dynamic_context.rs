@@ -10,16 +10,16 @@ use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use baumhard::core::primitives::ColorFontRegions;
-use baumhard::font::fonts::AppFont;
 use baumhard::font::color::{cosmic_color_from_rgba, cosmic_color_to_rgba};
+use baumhard::font::fonts::AppFont;
 use baumhard::gfx_structs::area::GlyphAreaField;
 use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
 use baumhard::util::grapheme_chad::count_grapheme_clusters;
 
 use crate::application::color_picker::{
     arm_bottom_font, hue_slot_to_degrees, sat_cell_to_value, sat_value_to_cell, val_cell_to_value,
-    val_value_to_cell, ColorPickerLayout, ColorPickerOverlayGeometry, PickerHit,
-    CROSSHAIR_CENTER_CELL, HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT,
+    val_value_to_cell, ColorPickerLayout, ColorPickerOverlayGeometry, PickerHit, CROSSHAIR_CENTER_CELL,
+    HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT,
 };
 use crate::application::color_picker_overlay::color::{
     highlight_hovered_cell_color, highlight_selected_cell_color,

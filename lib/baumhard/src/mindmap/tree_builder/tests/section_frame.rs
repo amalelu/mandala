@@ -169,11 +169,23 @@ fn test_section_frame_tree_custom_preset_renders_author_glyphs() {
     );
     // TL corner spec (index 4, channel 5) = author's '+'.
     let tl_id = parent.children(&tree.arena).nth(4).expect("TL corner");
-    let tl_area = tree.arena.get(tl_id).unwrap().get().glyph_area().expect("GlyphArea");
+    let tl_area = tree
+        .arena
+        .get(tl_id)
+        .unwrap()
+        .get()
+        .glyph_area()
+        .expect("GlyphArea");
     assert_eq!(tl_area.text, "+", "TL corner text");
     // TR corner spec (index 5, channel 6) = author's '*'.
     let tr_id = parent.children(&tree.arena).nth(5).expect("TR corner");
-    let tr_area = tree.arena.get(tr_id).unwrap().get().glyph_area().expect("GlyphArea");
+    let tr_area = tree
+        .arena
+        .get(tr_id)
+        .unwrap()
+        .get()
+        .glyph_area()
+        .expect("GlyphArea");
     assert_eq!(tr_area.text, "*", "TR corner text");
     // The fill between corners uses the author's 'A' glyph.
     assert!(

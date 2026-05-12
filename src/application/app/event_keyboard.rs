@@ -201,12 +201,11 @@ pub(super) fn handle_keyboard_input(
     // unmatched keys reach the global Action set normally.
     // `action_for_context` itself does the fallthrough; we just
     // pick the right starting context.
-    let starting_context =
-        if matches!(ctx.interaction_mode, super::InteractionMode::NodeEdit { .. }) {
-            crate::application::keybinds::InputContext::NodeEdit
-        } else {
-            crate::application::keybinds::InputContext::Document
-        };
+    let starting_context = if matches!(ctx.interaction_mode, super::InteractionMode::NodeEdit { .. }) {
+        crate::application::keybinds::InputContext::NodeEdit
+    } else {
+        crate::application::keybinds::InputContext::Document
+    };
     let action = key_name.as_deref().and_then(|k| {
         ctx.keybinds.action_for_context(
             starting_context,
@@ -283,11 +282,7 @@ pub(super) fn handle_keyboard_input(
 /// Caller already checked `action.is_none()` so rebinding any
 /// printable to a Document action keeps that binding alive
 /// even when an edge label is selected.
-fn try_type_to_edit(
-    logical_key: &Key,
-    key_name: &Option<String>,
-    ctx: &mut InputHandlerContext<'_>,
-) -> bool {
+fn try_type_to_edit(logical_key: &Key, key_name: &Option<String>, ctx: &mut InputHandlerContext<'_>) -> bool {
     if ctx.modifiers.control_key() || ctx.modifiers.alt_key() {
         return false;
     }

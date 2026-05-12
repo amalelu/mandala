@@ -214,11 +214,7 @@ pub fn current_color_at(doc: &MindMapDocument, handle: &PickerHandle) -> Option<
                 SectionColorAxis::Text => match range {
                     Some((rs, re)) => {
                         let in_range =
-                            baumhard::mindmap::model::text_run_ops::slice(
-                                &section.text_runs,
-                                *rs,
-                                *re,
-                            );
+                            baumhard::mindmap::model::text_run_ops::slice(&section.text_runs, *rs, *re);
                         // Coverage check: the in-range slice must
                         // span the entire `[rs, re)` with no gaps
                         // for "unanimous" to be meaningful — a
@@ -230,19 +226,13 @@ pub fn current_color_at(doc: &MindMapDocument, handle: &PickerHandle) -> Option<
                         // check, a single in-range run would
                         // pass the trivial `iter().all` and
                         // seed the picker with the wrong colour.
-                        let fully_covered = in_range
-                            .first()
-                            .is_some_and(|first| first.start == *rs)
+                        let fully_covered = in_range.first().is_some_and(|first| first.start == *rs)
                             && in_range.last().is_some_and(|last| last.end == *re)
-                            && in_range
-                                .windows(2)
-                                .all(|w| w[0].end == w[1].start);
+                            && in_range.windows(2).all(|w| w[0].end == w[1].start);
                         let unanimous = fully_covered
                             && in_range
                                 .first()
-                                .is_some_and(|first| {
-                                    in_range.iter().all(|r| r.color == first.color)
-                                });
+                                .is_some_and(|first| in_range.iter().all(|r| r.color == first.color));
                         if unanimous {
                             in_range
                                 .first()

@@ -123,13 +123,7 @@ impl ThrottledInteraction for SectionResizeInteraction {
                     (new_size.width as f32).max(MIN_DRAG_SIZE_PX),
                     (new_size.height as f32).max(MIN_DRAG_SIZE_PX),
                 );
-                apply_section_resize_to_tree(
-                    tree,
-                    &self.node_id,
-                    self.section_idx,
-                    canvas_pos,
-                    canvas_size,
-                );
+                apply_section_resize_to_tree(tree, &self.node_id, self.section_idx, canvas_pos, canvas_size);
                 renderer.rebuild_buffers_from_tree(&tree.tree);
                 let elements = build_section_resize_handles(
                     &self.node_id,

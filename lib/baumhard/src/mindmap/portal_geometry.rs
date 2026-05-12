@@ -414,8 +414,8 @@ mod tests {
     #[test]
     fn outward_normal_at_side_midpoints_is_cardinal() {
         assert_eq!(border_outward_normal(0.5), Vec2::new(0.0, -1.0)); // top → up
-        assert_eq!(border_outward_normal(1.5), Vec2::new(1.0, 0.0));  // right → right
-        assert_eq!(border_outward_normal(2.5), Vec2::new(0.0, 1.0));  // bottom → down
+        assert_eq!(border_outward_normal(1.5), Vec2::new(1.0, 0.0)); // right → right
+        assert_eq!(border_outward_normal(2.5), Vec2::new(0.0, 1.0)); // bottom → down
         assert_eq!(border_outward_normal(3.5), Vec2::new(-1.0, 0.0)); // left → left
     }
 }

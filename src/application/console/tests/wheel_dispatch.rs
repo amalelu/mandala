@@ -104,7 +104,8 @@ fn wheel_color_section_writes_through_text_color() {
         "LiberationSans",
         14,
     );
-    let tid = TargetId::Section { range: None,
+    let tid = TargetId::Section {
+        range: None,
         node_id: nid.clone(),
         section_idx: 1,
     };

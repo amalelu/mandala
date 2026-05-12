@@ -356,7 +356,8 @@ fn border_tree_left_column_rows_use_floor_not_ceil() {
     assert!(
         cluster_count >= 1,
         "left column should render ≥ 1 row, got {}: '{}'",
-        cluster_count, text
+        cluster_count,
+        text
     );
 }
 
@@ -453,9 +454,16 @@ fn border_tree_honors_custom_side_pattern() {
     // no corners. So it should contain '#' / '*' but neither '<'
     // nor '>'.
     let top_text = &tree.arena.get(runs[0]).unwrap().get().glyph_area().unwrap().text;
-    assert!(top_text.contains('*'), "top fill should contain '*': '{}'", top_text);
-    assert!(!top_text.contains('<') && !top_text.contains('>'),
-        "top fill should NOT contain corner chars: '{}'", top_text);
+    assert!(
+        top_text.contains('*'),
+        "top fill should contain '*': '{}'",
+        top_text
+    );
+    assert!(
+        !top_text.contains('<') && !top_text.contains('>'),
+        "top fill should NOT contain corner chars: '{}'",
+        top_text
+    );
     // TL corner spec is runs[4] (channel 5).
     let tl_text = &tree.arena.get(runs[4]).unwrap().get().glyph_area().unwrap().text;
     assert_eq!(tl_text, "<", "TL corner text");

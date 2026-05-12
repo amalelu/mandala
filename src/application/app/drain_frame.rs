@@ -139,7 +139,14 @@ pub(super) fn drain_animation_tick(
             // cache's `pre_clip_positions` go stale under both
             // paths. Clear before re-sampling.
             scene_cache.clear();
-            rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+            rebuild_all(
+                doc,
+                interaction_mode,
+                mindmap_tree,
+                app_scene,
+                renderer,
+                scene_cache,
+            );
         }
     }
 }

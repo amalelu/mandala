@@ -11,8 +11,8 @@
 //! `baumhard::font::hex::hex_to_cosmic_color` (§B5: cosmic-text
 //! usage stays inside `font/`).
 
-use baumhard::font::{buffer, Attrs, FontSystem, SHAPING_ADVANCED};
 use baumhard::font::metrics::monospace_advance;
+use baumhard::font::{buffer, Attrs, FontSystem, SHAPING_ADVANCED};
 use baumhard::gfx_structs::zoom_visibility::ZoomVisibility;
 
 use super::MindMapTextBuffer;
@@ -20,11 +20,7 @@ use super::MindMapTextBuffer;
 /// Widest shaped advance across `glyphs` at `font_size`, via
 /// cosmic-text. Falls back to `monospace_advance(font_size)` if
 /// every glyph shapes to zero (tofu + missing fallback).
-pub fn measure_max_glyph_advance(
-    font_system: &mut FontSystem,
-    glyphs: &[&str],
-    font_size: f32,
-) -> f32 {
+pub fn measure_max_glyph_advance(font_system: &mut FontSystem, glyphs: &[&str], font_size: f32) -> f32 {
     let mut buf = buffer::create_square(font_system, font_size);
     let attrs = Attrs::new();
     let mut max_w: f32 = 0.0;

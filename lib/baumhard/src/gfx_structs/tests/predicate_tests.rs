@@ -454,24 +454,15 @@ fn test_predicate_flag_equals_negated_matches_clear_flag() {
 /// variant.
 pub fn do_predicate_flag_equals_negated_matches_clear_flag() {
     let pred = Predicate {
-        fields: vec![(
-            GfxElementField::Flag(Flag::SectionRoot),
-            Comparator::Equals(true),
-        )],
+        fields: vec![(GfxElementField::Flag(Flag::SectionRoot), Comparator::Equals(true))],
         always_match: false,
     };
     let area = GlyphArea::new(16.0, 1.2, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
     let mut flagged = GfxElement::new_area_non_indexed_with_id(area.clone(), 0, 1);
     flagged.set_flag(Flag::SectionRoot);
-    assert!(
-        !pred.test(&flagged),
-        "negated equals on a set flag must reject"
-    );
+    assert!(!pred.test(&flagged), "negated equals on a set flag must reject");
     let unflagged = GfxElement::new_area_non_indexed_with_id(area, 0, 2);
-    assert!(
-        pred.test(&unflagged),
-        "negated equals on a clear flag must match"
-    );
+    assert!(pred.test(&unflagged), "negated equals on a clear flag must match");
 }
 
 #[test]
@@ -492,8 +483,5 @@ pub fn do_predicate_flag_with_greater_than_degrades_to_false() {
     let area = GlyphArea::new(16.0, 1.2, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
     let mut elem = GfxElement::new_area_non_indexed_with_id(area, 0, 1);
     elem.set_flag(Flag::SectionRoot);
-    assert!(
-        !pred.test(&elem),
-        "GreaterThan on a Flag must degrade to false"
-    );
+    assert!(!pred.test(&elem), "GreaterThan on a Flag must degrade to false");
 }

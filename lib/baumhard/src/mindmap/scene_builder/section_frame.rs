@@ -130,11 +130,10 @@ pub fn build_section_frames(
     // rebuilds run with `border_preview = None` and we want the
     // steady-state per-section iteration to be one `is_none()`
     // check per branch.
-    let preview_section_targets: Option<&[(String, usize)]> =
-        border_preview.and_then(|p| match p.target {
-            super::BorderPreviewTargetRef::Sections(ts) => Some(ts),
-            _ => None,
-        });
+    let preview_section_targets: Option<&[(String, usize)]> = border_preview.and_then(|p| match p.target {
+        super::BorderPreviewTargetRef::Sections(ts) => Some(ts),
+        _ => None,
+    });
     let preview_canvas_unfocused: Option<super::BorderConfigEditsView<'_>> =
         border_preview.and_then(|p| match p.target {
             super::BorderPreviewTargetRef::CanvasSectionFrame => Some(p.edits),

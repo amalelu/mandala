@@ -485,8 +485,7 @@ mod tests {
         cache.invalidate_edge(&evicted);
 
         // Hub side: only the kept edge survives in the bucket.
-        let hub_bucket: std::collections::HashSet<&EdgeKey> =
-            cache.edges_touching("hub").iter().collect();
+        let hub_bucket: std::collections::HashSet<&EdgeKey> = cache.edges_touching("hub").iter().collect();
         assert_eq!(hub_bucket.len(), 1);
         assert!(hub_bucket.contains(&kept));
         // Other endpoint's bucket is now empty.

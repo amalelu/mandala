@@ -249,10 +249,7 @@ fn test_selection_state_from_sections_many_is_multisection_preserving_order() {
 
 #[test]
 fn test_multisection_is_selected_matches_any_section_node() {
-    let sel = SelectionState::MultiSection(vec![
-        SectionSel::new("a", 0),
-        SectionSel::new("b", 2),
-    ]);
+    let sel = SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 2)]);
     assert!(sel.is_selected("a"));
     assert!(sel.is_selected("b"));
     assert!(!sel.is_selected("c"));
@@ -275,10 +272,7 @@ fn test_multisection_selected_section_returns_none() {
     // `selected_section()` is the single-target accessor — it
     // returns None for MultiSection so verbs that need a single
     // section target route through `selected_sections()` instead.
-    let sel = SelectionState::MultiSection(vec![
-        SectionSel::new("a", 0),
-        SectionSel::new("a", 1),
-    ]);
+    let sel = SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("a", 1)]);
     assert!(sel.selected_section().is_none());
 }
 
@@ -358,7 +352,10 @@ fn test_from_sections_all_duplicates_collapses_to_section() {
 fn test_dedup_owning_node_ids_across_variants() {
     // Multi with duplicates — first-seen wins.
     let multi = SelectionState::Multi(vec!["a".into(), "a".into(), "b".into()]);
-    assert_eq!(multi.dedup_owning_node_ids(), vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(
+        multi.dedup_owning_node_ids(),
+        vec!["a".to_string(), "b".to_string()]
+    );
 
     // MultiSection with two sections of one node + one of
     // another — dedup'd to two unique node ids.
@@ -427,7 +424,9 @@ fn test_other_variants_selected_range_is_none() {
     assert!(SelectionState::Section(SectionSel::new("a", 0))
         .selected_range()
         .is_none());
-    assert!(SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 0)])
-        .selected_range()
-        .is_none());
+    assert!(
+        SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 0)])
+            .selected_range()
+            .is_none()
+    );
 }

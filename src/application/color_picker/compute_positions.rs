@@ -58,7 +58,13 @@ pub(super) fn compute_positions(
     /// `after_arm` covers `CROSSHAIR_CENTER_CELL+1..N`. The
     /// crosshair-centre cell is the preview slot — drawn elsewhere
     /// — so its offset is `(0, 0)`.
-    fn apply_ink(base: (f32, f32), before_arm: &[(f32, f32)], after_arm: &[(f32, f32)], i: usize, fs: f32) -> (f32, f32) {
+    fn apply_ink(
+        base: (f32, f32),
+        before_arm: &[(f32, f32)],
+        after_arm: &[(f32, f32)],
+        i: usize,
+        fs: f32,
+    ) -> (f32, f32) {
         let ink_ratio = if i < CROSSHAIR_CENTER_CELL {
             before_arm[i]
         } else if i > CROSSHAIR_CENTER_CELL {

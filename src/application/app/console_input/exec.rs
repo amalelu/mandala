@@ -8,10 +8,10 @@ use crate::application::color_picker::ColorPickerState;
 use crate::application::console::commands::Command;
 use crate::application::console::parser::{parse, Args, ParseResult};
 use crate::application::console::{ConsoleEffects, ConsoleSideEffect, ConsoleState, ExecResult};
-use baumhard::mindmap::scene_cache::SceneConnectionCache;
-use baumhard::mindmap::tree_builder::MindMapTree;
 use crate::application::document::MindMapDocument;
 use crate::application::renderer::Renderer;
+use baumhard::mindmap::scene_cache::SceneConnectionCache;
+use baumhard::mindmap::tree_builder::MindMapTree;
 
 use super::super::color_picker_flow::{
     close_color_picker_standalone, open_color_picker_contextual, open_color_picker_standalone,
@@ -95,7 +95,14 @@ pub(in crate::application::app) fn execute_console_line(
 
     // Any successful command may have mutated the doc; rebuild.
     scene_cache.clear();
-    rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+    rebuild_all(
+        doc,
+        interaction_mode,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+    );
 
     let opened_modal = handle_post_rebuild_side_effect(
         post_rebuild,
@@ -225,10 +232,25 @@ fn handle_post_rebuild_side_effect(
             open_portal_text_edit(&er, &endpoint, doc, portal_text_edit_state, app_scene, renderer);
         }
         ConsoleSideEffect::OpenColorPicker(target) => {
-            open_color_picker_contextual(target, doc, color_picker_state, interaction_mode, app_scene, renderer, scene_cache);
+            open_color_picker_contextual(
+                target,
+                doc,
+                color_picker_state,
+                interaction_mode,
+                app_scene,
+                renderer,
+                scene_cache,
+            );
         }
         ConsoleSideEffect::OpenColorPickerStandalone => {
-            open_color_picker_standalone(doc, color_picker_state, interaction_mode, app_scene, renderer, scene_cache);
+            open_color_picker_standalone(
+                doc,
+                color_picker_state,
+                interaction_mode,
+                app_scene,
+                renderer,
+                scene_cache,
+            );
         }
         ConsoleSideEffect::CloseColorPicker => {
             close_color_picker_standalone(

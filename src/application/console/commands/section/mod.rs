@@ -100,22 +100,14 @@ fn complete_section(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Comple
                 ));
                 out
             }
-            Some("move") => kv_key_completions_with_hints(
-                &["dx", "dy", "x", "y", "section"],
-                state.partial,
-                kv_hint,
-            ),
-            Some("text") => kv_key_completions_with_hints(
-                &["text", "runs", "section"],
-                state.partial,
-                kv_hint,
-            ),
-            Some("add") => {
-                kv_key_completions_with_hints(&["at", "text"], state.partial, kv_hint)
+            Some("move") => {
+                kv_key_completions_with_hints(&["dx", "dy", "x", "y", "section"], state.partial, kv_hint)
             }
-            Some("split") => {
-                kv_key_completions_with_hints(&["at", "section"], state.partial, kv_hint)
+            Some("text") => {
+                kv_key_completions_with_hints(&["text", "runs", "section"], state.partial, kv_hint)
             }
+            Some("add") => kv_key_completions_with_hints(&["at", "text"], state.partial, kv_hint),
+            Some("split") => kv_key_completions_with_hints(&["at", "section"], state.partial, kv_hint),
             Some("delete") | Some("show") | Some("edit") => {
                 kv_key_completions_with_hints(&["section"], state.partial, kv_hint)
             }
@@ -173,10 +165,7 @@ fn verb_hint(v: &str) -> &'static str {
 /// Surfaces `0..node.sections.len()` for the selection's
 /// primary node, with each row's hint showing a short text
 /// preview so the user can tell which section is which.
-fn section_idx_value_completions(
-    ctx: &ConsoleContext,
-    partial: &str,
-) -> Vec<Completion> {
+fn section_idx_value_completions(ctx: &ConsoleContext, partial: &str) -> Vec<Completion> {
     use unicode_segmentation::UnicodeSegmentation;
     let Some(primary_id) = ctx.document.selection.primary_node_id() else {
         return Vec::new();
@@ -447,11 +436,7 @@ fn execute_show(args: &Args, doc: &MindMapDocument, node_id: &str, idx: usize) -
     let bold = section.text_runs.iter().filter(|r| r.bold).count();
     let italic = section.text_runs.iter().filter(|r| r.italic).count();
     let underline = section.text_runs.iter().filter(|r| r.underline).count();
-    let hyperlink = section
-        .text_runs
-        .iter()
-        .filter(|r| r.hyperlink.is_some())
-        .count();
+    let hyperlink = section.text_runs.iter().filter(|r| r.hyperlink.is_some()).count();
 
     // Text preview: cap at ~40 graphemes so a long section
     // doesn't overflow the readout. Stay grapheme-aware so we
@@ -573,9 +558,11 @@ fn execute_text(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usiz
         Some(t) => t,
         None => match args.positional(1) {
             Some(t) => t.to_string(),
-            None => return ExecResult::err(
-                "usage: section text \"<text>\" [section=<idx>] [runs=preserve|clear]",
-            ),
+            None => {
+                return ExecResult::err(
+                    "usage: section text \"<text>\" [section=<idx>] [runs=preserve|clear]",
+                )
+            }
         },
     };
 
@@ -619,12 +606,7 @@ fn execute_text(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usiz
 /// editor on the resolved target.Routes through
 /// `ConsoleSideEffect::OpenSectionEdit`; closes the console
 /// (modal handoff to the editor).
-fn execute_edit(
-    args: &Args,
-    eff: &mut ConsoleEffects,
-    node_id: &str,
-    idx: usize,
-) -> ExecResult {
+fn execute_edit(args: &Args, eff: &mut ConsoleEffects, node_id: &str, idx: usize) -> ExecResult {
     if let Err(msg) = reject_unknown_kvs(args, "edit", &["section"]) {
         return ExecResult::err(msg);
     }
@@ -656,10 +638,7 @@ fn execute_add(args: &Args, doc: &mut MindMapDocument, node_id: &str) -> ExecRes
         Some(v) => match v.parse::<usize>() {
             Ok(n) => Some(n),
             Err(_) => {
-                return ExecResult::err(format!(
-                    "section add: at='{}' is not a non-negative integer",
-                    v
-                ));
+                return ExecResult::err(format!("section add: at='{}' is not a non-negative integer", v));
             }
         },
         None => None,
@@ -687,10 +666,7 @@ fn execute_delete(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: us
         return ExecResult::err(msg);
     }
     match doc.delete_section(node_id, idx) {
-        Ok(_removed) => ExecResult::ok_msg(format!(
-            "section[{}] deleted from node '{}'",
-            idx, node_id
-        )),
+        Ok(_removed) => ExecResult::ok_msg(format!("section[{}] deleted from node '{}'", idx, node_id)),
         Err(msg) => ExecResult::err(msg),
     }
 }
@@ -761,10 +737,7 @@ fn execute_split(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usi
 /// `section/frame.rs::apply_edits`. On success, an N-section
 /// fan-out produces N `EditNodeStyle` undo entries (same as
 /// the per-pair setter — undo unwinds one section at a time).
-fn execute_move_fan_out_multisection(
-    args: &Args,
-    doc: &mut MindMapDocument,
-) -> ExecResult {
+fn execute_move_fan_out_multisection(args: &Args, doc: &mut MindMapDocument) -> ExecResult {
     let parsed = match parse_move_kvs(args) {
         Ok(p) => p,
         Err(msg) => return ExecResult::err(msg),
@@ -779,10 +752,9 @@ fn execute_move_fan_out_multisection(
     };
 
     let pairs: Vec<(String, usize)> = match &doc.selection {
-        SelectionState::MultiSection(sels) => sels
-            .iter()
-            .map(|s| (s.node_id.clone(), s.section_idx))
-            .collect(),
+        SelectionState::MultiSection(sels) => {
+            sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect()
+        }
         _ => return ExecResult::err("section move: not a MultiSection selection"),
     };
 
@@ -791,12 +763,7 @@ fn execute_move_fan_out_multisection(
     // can't land.
     let mut targets: Vec<(String, usize, f64, f64)> = Vec::with_capacity(pairs.len());
     for (node_id, idx) in &pairs {
-        let Some(section) = doc
-            .mindmap
-            .nodes
-            .get(node_id)
-            .and_then(|n| n.sections.get(*idx))
-        else {
+        let Some(section) = doc.mindmap.nodes.get(node_id).and_then(|n| n.sections.get(*idx)) else {
             // Stale (node, idx) — the setter would silently
             // Ok(false). Skip without recording a target.
             continue;
@@ -828,7 +795,9 @@ fn execute_move_fan_out_multisection(
                 log::warn!(
                     "section move fan-out: setter rejected post-validation on {}[{}]: {} \
                      (validate_section_offset_change → set_section_offset drift)",
-                    node_id, idx, msg
+                    node_id,
+                    idx,
+                    msg
                 );
             }
         }
@@ -856,10 +825,7 @@ fn execute_move(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usiz
             {
                 Some(p) => p,
                 None => {
-                    return ExecResult::err(format!(
-                        "section[{}] not found on node '{}'",
-                        idx, node_id
-                    ));
+                    return ExecResult::err(format!("section[{}] not found on node '{}'", idx, node_id));
                 }
             };
             (current_x + dx, current_y + dy)
@@ -912,15 +878,11 @@ fn parse_move_kvs(args: &Args) -> Result<MoveTarget, String> {
     let any_delta = dx.is_some() || dy.is_some();
     let any_abs = x.is_some() || y.is_some();
     if any_delta && any_abs {
-        return Err(
-            "section move: cannot mix delta form (dx/dy) and absolute form (x/y) — pick one"
-                .into(),
-        );
+        return Err("section move: cannot mix delta form (dx/dy) and absolute form (x/y) — pick one".into());
     }
     if !any_delta && !any_abs {
         return Err(
-            "usage: section move dx=<f64> dy=<f64> | section move x=<f64> y=<f64> [section=<idx>]"
-                .into(),
+            "usage: section move dx=<f64> dy=<f64> | section move x=<f64> y=<f64> [section=<idx>]".into(),
         );
     }
     if any_delta {
@@ -950,12 +912,7 @@ fn execute_resize(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: us
     // `fill` arrives as the first positional. Match case-
     // insensitively so users typing "FILL" or "Fill" don't
     // surprise themselves with a "not a number" parse error.
-    if args
-        .positional(1)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-        == Some("fill")
-    {
+    if args.positional(1).map(str::to_ascii_lowercase).as_deref() == Some("fill") {
         return match doc.set_section_size(node_id, idx, None) {
             Ok(true) => ExecResult::ok_msg(format!("section[{}] size cleared (fill parent)", idx)),
             Ok(false) => ExecResult::ok_msg("section: no change"),
@@ -1003,10 +960,7 @@ fn parse_resize_kvs(args: &Args) -> Result<(f64, f64), String> {
         *target = Some(parsed);
     }
     let (Some(w), Some(h)) = (w, h) else {
-        return Err(
-            "usage: section resize w=<f64> h=<f64> | section resize fill [section=<idx>]"
-                .into(),
-        );
+        return Err("usage: section resize w=<f64> h=<f64> | section resize fill [section=<idx>]".into());
     };
     Ok((w, h))
 }
@@ -1049,10 +1003,7 @@ mod tests {
         // multi-section so the rejection branch runs.
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::Single(id);
-        assert_exec_err_contains(
-            run("section move dx=3 dy=4", &mut doc),
-            "has 2 sections",
-        );
+        assert_exec_err_contains(run("section move dx=3 dy=4", &mut doc), "has 2 sections");
     }
 
     ///rule 3: `Single(id)` on a single-section node
@@ -1152,7 +1103,10 @@ mod tests {
     fn section_move_out_of_range_section_kv_errors() {
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::Single(id);
-        assert_exec_err_contains(run("section move dx=1 dy=1 section=99", &mut doc), "not found on node");
+        assert_exec_err_contains(
+            run("section move dx=1 dy=1 section=99", &mut doc),
+            "not found on node",
+        );
     }
 
     #[test]
@@ -1281,7 +1235,8 @@ mod tests {
                     assert!(
                         s.contains(kind),
                         "expected grouped subverb listing to include '{}'; got: {}",
-                        kind, s
+                        kind,
+                        s
                     );
                 }
             }
@@ -1315,10 +1270,7 @@ mod tests {
             node_id: id,
             section_idx: 1,
         });
-        assert_exec_err_contains(
-            run("section move dx=1 x=2", &mut doc),
-            "cannot mix delta form",
-        );
+        assert_exec_err_contains(run("section move dx=1 x=2", &mut doc), "cannot mix delta form");
     }
 
     /// Empty kvs on `section move` yields the usage line, not
@@ -1344,10 +1296,7 @@ mod tests {
             node_id: id,
             section_idx: 1,
         });
-        assert_exec_err_contains(
-            run("section move foo=1", &mut doc),
-            "unknown key 'foo'",
-        );
+        assert_exec_err_contains(run("section move foo=1", &mut doc), "unknown key 'foo'");
     }
 
     /// `section resize fill` (renamed from the prior `none`
@@ -1393,7 +1342,11 @@ mod tests {
         };
         assert!(blob.contains(&format!("section[1] of node \"{}\"", id)));
         assert!(blob.contains("text:"));
-        assert!(blob.contains("hello world"), "preview must echo the text: {}", blob);
+        assert!(
+            blob.contains("hello world"),
+            "preview must echo the text: {}",
+            blob
+        );
         assert!(blob.contains("offset:"));
         assert!(blob.contains("size:"));
         assert!(blob.contains("channel:"));
@@ -1413,8 +1366,15 @@ mod tests {
             ExecResult::Lines(ls) => ls.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"),
             other => panic!("expected ExecResult::Lines, got {:?}", other),
         };
-        assert!(blob.contains("…"), "truncated preview must include ellipsis: {}", blob);
-        assert!(!blob.contains("ABCDEFGHIJ"), "tail past 40 graphemes shouldn't appear");
+        assert!(
+            blob.contains("…"),
+            "truncated preview must include ellipsis: {}",
+            blob
+        );
+        assert!(
+            !blob.contains("ABCDEFGHIJ"),
+            "tail past 40 graphemes shouldn't appear"
+        );
     }
 
     #[test]
@@ -1487,10 +1447,7 @@ mod tests {
             section_idx: 1,
         });
         assert_exec_ok(run("section text positional text=\"kv-wins\"", &mut doc));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections[1].text,
-            "kv-wins"
-        );
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections[1].text, "kv-wins");
     }
 
     #[test]
@@ -1500,14 +1457,8 @@ mod tests {
             node_id: id.clone(),
             section_idx: 1,
         });
-        assert_exec_ok(run(
-            "section text \"plain text\" runs=clear",
-            &mut doc,
-        ));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections[1].text,
-            "plain text"
-        );
+        assert_exec_ok(run("section text \"plain text\" runs=clear", &mut doc));
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections[1].text, "plain text");
     }
 
     /// Pin the divergence between `runs=preserve` and
@@ -1549,8 +1500,7 @@ mod tests {
 
         let (mut doc_preserve, id_p) = pinned_two_section_node();
         doc_preserve.set_section_text(&id_p, 1, "abcdef".to_string());
-        doc_preserve.mindmap.nodes.get_mut(&id_p).unwrap().sections[1].text_runs =
-            seed_runs.clone();
+        doc_preserve.mindmap.nodes.get_mut(&id_p).unwrap().sections[1].text_runs = seed_runs.clone();
         doc_preserve.selection = SelectionState::Section(SectionSel {
             node_id: id_p.clone(),
             section_idx: 1,
@@ -1634,10 +1584,7 @@ mod tests {
             node_id: id,
             section_idx: 1,
         });
-        assert_exec_err_contains(
-            run("section text \"x\" runs=invalid", &mut doc),
-            "not recognised",
-        );
+        assert_exec_err_contains(run("section text \"x\" runs=invalid", &mut doc), "not recognised");
     }
 
     #[test]
@@ -1673,10 +1620,7 @@ mod tests {
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::Single(id.clone());
         assert_exec_ok(run("section add at=0 text=\"prepended\"", &mut doc));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections[0].text,
-            "prepended"
-        );
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections[0].text, "prepended");
     }
 
     #[test]
@@ -1700,10 +1644,7 @@ mod tests {
             section_idx: 1,
         });
         assert_exec_ok(run("section delete", &mut doc));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections.len(),
-            len_before - 1
-        );
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections.len(), len_before - 1);
     }
 
     #[test]
@@ -1712,10 +1653,7 @@ mod tests {
         let len_before = doc.mindmap.nodes.get(&id).unwrap().sections.len();
         doc.selection = SelectionState::Single(id.clone());
         assert_exec_ok(run("section delete section=0", &mut doc));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections.len(),
-            len_before - 1
-        );
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections.len(), len_before - 1);
     }
 
     #[test]
@@ -1825,10 +1763,7 @@ mod tests {
             node_id: id,
             section_idx: 1,
         });
-        assert_exec_err_contains(
-            run("section delete sectoin=0", &mut doc),
-            "unknown key 'sectoin'",
-        );
+        assert_exec_err_contains(run("section delete sectoin=0", &mut doc), "unknown key 'sectoin'");
     }
 
     /// `section <TAB>` produces verb rows with hints — pre-fix
@@ -1894,8 +1829,16 @@ mod tests {
         };
         let out = complete_section(&state, &ctx);
         let labels: Vec<&str> = out.iter().map(|c| c.text.as_str()).collect();
-        assert!(labels.iter().any(|l| l == &"0"), "idx 0 in completion: {:?}", labels);
-        assert!(labels.iter().any(|l| l == &"1"), "idx 1 in completion: {:?}", labels);
+        assert!(
+            labels.iter().any(|l| l == &"0"),
+            "idx 0 in completion: {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l == &"1"),
+            "idx 1 in completion: {:?}",
+            labels
+        );
         // Hints surface the section text preview.
         let row0 = out.iter().find(|c| c.text == "0").unwrap();
         assert!(
@@ -1996,10 +1939,7 @@ mod tests {
                 section_idx: 1,
             },
         ]);
-        assert_exec_err_contains(
-            run("section move x=3 y=7", &mut doc),
-            "single-target only",
-        );
+        assert_exec_err_contains(run("section move x=3 y=7", &mut doc), "single-target only");
     }
 
     /// Other subverbs on MultiSection still reject (resize /
@@ -2018,10 +1958,7 @@ mod tests {
                 section_idx: 1,
             },
         ]);
-        assert_exec_err_contains(
-            run("section resize w=80 h=40", &mut doc),
-            "single-target only",
-        );
+        assert_exec_err_contains(run("section resize w=80 h=40", &mut doc), "single-target only");
     }
 
     // ─── §4.5: section edit subverb ────────────────────────────
@@ -2065,10 +2002,7 @@ mod tests {
     fn section_edit_rejects_out_of_range_section_kv() {
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::Single(id);
-        assert_exec_err_contains(
-            run("section edit section=99", &mut doc),
-            "not found on node",
-        );
+        assert_exec_err_contains(run("section edit section=99", &mut doc), "not found on node");
     }
 
     /// Sharpened pin per Test Quality #5/6: when the verb's
@@ -2093,9 +2027,6 @@ mod tests {
             "rejection must NOT emit a side-effect: {:?}",
             effects.side_effect
         );
-        assert!(
-            !effects.close_console,
-            "rejection must NOT close the console"
-        );
+        assert!(!effects.close_console, "rejection must NOT close the console");
     }
 }

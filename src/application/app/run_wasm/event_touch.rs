@@ -48,8 +48,7 @@ impl super::WasmApp {
         // `self.dispatch_action` can re-borrow `self.input`.
         let mut input_borrow = self.input.borrow_mut();
         let mut renderer_borrow = self.renderer.borrow_mut();
-        let (Some(input), Some(renderer)) = (input_borrow.as_mut(), renderer_borrow.as_mut())
-        else {
+        let (Some(input), Some(renderer)) = (input_borrow.as_mut(), renderer_borrow.as_mut()) else {
             return false;
         };
         let from_ingest = input.touch_recognizer.ingest(phase, touch.id, pos, now);
@@ -87,7 +86,9 @@ impl super::WasmApp {
                          lands cross-platform (SECTIONS_BORDERS_RESIZE_PLAN.md \
                          Open follow-ups). Rebind {} to a Compatible action \
                          (e.g. ZoomIn / SelectAll / a custom macro) to opt out.",
-                        name, a, name
+                        name,
+                        a,
+                        name
                     );
                 }
                 return true;

@@ -100,33 +100,162 @@ fn test_default_config_resolves_every_documented_binding() {
         (None, "enter", false, false, false, Action::EditSelection),
         (None, "backspace", false, false, false, Action::EditSelectionClean),
         (None, "undo", false, false, false, Action::Undo), // bare alias
-
         // Console.
-        (Some(InputContext::Console), "escape", false, false, false, Action::ConsoleClose),
-        (Some(InputContext::Console), "enter", false, false, false, Action::ConsoleSubmit),
-        (Some(InputContext::Console), "tab", false, false, false, Action::ConsoleTabComplete),
-        (Some(InputContext::Console), "c", true, false, false, Action::ConsoleClearLine),
-        (Some(InputContext::Console), "a", true, false, false, Action::ConsoleJumpStart),
-        (Some(InputContext::Console), "e", true, false, false, Action::ConsoleJumpEnd),
-        (Some(InputContext::Console), "u", true, false, false, Action::ConsoleKillToStart),
-        (Some(InputContext::Console), "w", true, false, false, Action::ConsoleKillWord),
-        (Some(InputContext::Console), "backspace", false, false, false, Action::ConsoleDeleteBack),
-        (Some(InputContext::Console), "space", false, false, false, Action::ConsoleInsertSpace),
-
+        (
+            Some(InputContext::Console),
+            "escape",
+            false,
+            false,
+            false,
+            Action::ConsoleClose,
+        ),
+        (
+            Some(InputContext::Console),
+            "enter",
+            false,
+            false,
+            false,
+            Action::ConsoleSubmit,
+        ),
+        (
+            Some(InputContext::Console),
+            "tab",
+            false,
+            false,
+            false,
+            Action::ConsoleTabComplete,
+        ),
+        (
+            Some(InputContext::Console),
+            "c",
+            true,
+            false,
+            false,
+            Action::ConsoleClearLine,
+        ),
+        (
+            Some(InputContext::Console),
+            "a",
+            true,
+            false,
+            false,
+            Action::ConsoleJumpStart,
+        ),
+        (
+            Some(InputContext::Console),
+            "e",
+            true,
+            false,
+            false,
+            Action::ConsoleJumpEnd,
+        ),
+        (
+            Some(InputContext::Console),
+            "u",
+            true,
+            false,
+            false,
+            Action::ConsoleKillToStart,
+        ),
+        (
+            Some(InputContext::Console),
+            "w",
+            true,
+            false,
+            false,
+            Action::ConsoleKillWord,
+        ),
+        (
+            Some(InputContext::Console),
+            "backspace",
+            false,
+            false,
+            false,
+            Action::ConsoleDeleteBack,
+        ),
+        (
+            Some(InputContext::Console),
+            "space",
+            false,
+            false,
+            false,
+            Action::ConsoleInsertSpace,
+        ),
         // ColorPicker.
-        (Some(InputContext::ColorPicker), "escape", false, false, false, Action::PickerCancel),
-        (Some(InputContext::ColorPicker), "enter", false, false, false, Action::PickerCommit),
-        (Some(InputContext::ColorPicker), "h", false, false, false, Action::PickerNudgeHueDown),
-        (Some(InputContext::ColorPicker), "h", false, true, false, Action::PickerNudgeHueUp),
-        (Some(InputContext::ColorPicker), "s", false, false, false, Action::PickerNudgeSatDown),
-        (Some(InputContext::ColorPicker), "v", false, false, false, Action::PickerNudgeValDown),
-
+        (
+            Some(InputContext::ColorPicker),
+            "escape",
+            false,
+            false,
+            false,
+            Action::PickerCancel,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "enter",
+            false,
+            false,
+            false,
+            Action::PickerCommit,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "h",
+            false,
+            false,
+            false,
+            Action::PickerNudgeHueDown,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "h",
+            false,
+            true,
+            false,
+            Action::PickerNudgeHueUp,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "s",
+            false,
+            false,
+            false,
+            Action::PickerNudgeSatDown,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "v",
+            false,
+            false,
+            false,
+            Action::PickerNudgeValDown,
+        ),
         // LabelEdit.
-        (Some(InputContext::LabelEdit), "escape", false, false, false, Action::LabelEditCancel),
-        (Some(InputContext::LabelEdit), "enter", false, false, false, Action::LabelEditCommit),
-
+        (
+            Some(InputContext::LabelEdit),
+            "escape",
+            false,
+            false,
+            false,
+            Action::LabelEditCancel,
+        ),
+        (
+            Some(InputContext::LabelEdit),
+            "enter",
+            false,
+            false,
+            false,
+            Action::LabelEditCommit,
+        ),
         // TextEdit.
-        (Some(InputContext::TextEdit), "escape", false, false, false, Action::TextEditCancel),
+        (
+            Some(InputContext::TextEdit),
+            "escape",
+            false,
+            false,
+            false,
+            Action::TextEditCancel,
+        ),
     ];
 
     for &(ctx, key, ctrl, shift, alt, ref expected) in cases {
@@ -377,10 +506,7 @@ fn test_wasm_compatibility_section_aabb_actions_are_compatible() {
 #[test]
 fn test_wasm_compatibility_border_no_payload_actions_are_compatible() {
     use crate::application::keybinds::WasmCompatibility::Compatible;
-    for a in [
-        Action::CycleBorderPreset,
-        Action::ToggleBorderVisible,
-    ] {
+    for a in [Action::CycleBorderPreset, Action::ToggleBorderVisible] {
         assert_eq!(a.wasm_compatibility(), Compatible, "{:?} should be Compatible", a);
     }
 }

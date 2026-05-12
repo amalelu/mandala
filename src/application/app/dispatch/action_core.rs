@@ -189,13 +189,8 @@ pub(in crate::application::app) fn dispatch_compatible(
                         // Other selection states (Multi, edge,
                         // portal) stay untouched — the user steered
                         // away from the active node deliberately.
-                        if doc
-                            .selection
-                            .primary_node_id()
-                            .map_or(false, |id| id == node_id)
-                        {
-                            doc.selection =
-                                crate::application::document::SelectionState::Single(node_id);
+                        if doc.selection.primary_node_id().map_or(false, |id| id == node_id) {
+                            doc.selection = crate::application::document::SelectionState::Single(node_id);
                         }
                     }
                     let mut rc = super::cross_dispatch::RebuildContext {
@@ -451,14 +446,17 @@ pub(in crate::application::app) fn dispatch_compatible(
             };
             with_doc_rebuild(core, |rc| {
                 super::cross_dispatch::apply_set_section_size(
-                    Some(baumhard::mindmap::model::Size { width: w_v, height: h_v }),
+                    Some(baumhard::mindmap::model::Size {
+                        width: w_v,
+                        height: h_v,
+                    }),
                     rc,
                 )
             });
         }
-        Action::SetSectionSizeFillParent => with_doc_rebuild(core, |rc| {
-            super::cross_dispatch::apply_set_section_size(None, rc)
-        }),
+        Action::SetSectionSizeFillParent => {
+            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_set_section_size(None, rc))
+        }
         Action::SetSectionOffsetAbs { x, y } => {
             let (Some(x_v), Some(y_v)) = (x.parse::<f64>().ok(), y.parse::<f64>().ok()) else {
                 log::warn!("SetSectionOffsetAbs: invalid x='{}' or y='{}'", x, y);
@@ -491,9 +489,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                 super::cross_dispatch::apply_add_section(at_opt, text_owned, rc)
             });
         }
-        Action::DeleteSection => with_doc_rebuild(core, |rc| {
-            super::cross_dispatch::apply_delete_section(rc)
-        }),
+        Action::DeleteSection => with_doc_rebuild(core, |rc| super::cross_dispatch::apply_delete_section(rc)),
         Action::SplitSection { at_grapheme } => {
             let Some(at_opt) = parse_action_optional_usize(at_grapheme) else {
                 log::warn!(
@@ -502,9 +498,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                 );
                 return DispatchOutcome::Handled;
             };
-            with_doc_rebuild(core, |rc| {
-                super::cross_dispatch::apply_split_section(at_opt, rc)
-            });
+            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_split_section(at_opt, rc));
         }
         // ── Clipboard ─────────────────────────────────────────
         // Compatible because `clipboard::{read,write}_clipboard`

@@ -195,11 +195,7 @@ impl Predicate {
 /// `region_id` isn't present on the element). The outer loop in
 /// [`Predicate::test`] continues to the next field on `None` and
 /// returns `false` if every field falls through.
-fn evaluate_field(
-    element: &GfxElement,
-    field: &GfxElementField,
-    comparator: &Comparator,
-) -> Option<bool> {
+fn evaluate_field(element: &GfxElement, field: &GfxElementField, comparator: &Comparator) -> Option<bool> {
     match field {
         GlyphArea(section) => evaluate_glyph_area_field(element, section, comparator),
         Channel(channel) => Some(match comparator {
@@ -217,7 +213,11 @@ fn evaluate_field(
             };
             // Region missing on this element — fall through to next field.
             let target = area.regions.get(*region).copied()?;
-            Some(evaluate_region_match(&target, color_font_region_field, comparator))
+            Some(evaluate_region_match(
+                &target,
+                color_font_region_field,
+                comparator,
+            ))
         }
         Id(id) => Some(match comparator {
             Equals(negation) => (*id == element.unique_id()) != *negation,

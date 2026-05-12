@@ -23,9 +23,9 @@ use crate::util::color::resolve_var;
 use super::connection::build_connection_elements;
 use super::label::build_label_elements;
 use super::node_pass::build_node_elements;
+use super::node_resize_handle::{build_node_resize_handles, NodeResizeHandleElement};
 use super::portal::build_portal_elements;
 use super::portal::SelectedPortalLabel;
-use super::node_resize_handle::{build_node_resize_handles, NodeResizeHandleElement};
 use super::section_resize_handle::{build_section_resize_handles, SectionResizeHandleElement};
 use super::{BorderPreview, EdgeColorPreview, PortalColorPreview, RenderScene};
 

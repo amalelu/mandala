@@ -2,7 +2,9 @@
 
 //! Once-per-process device / surface setup.
 
-use wgpu::{Adapter, Device, Instance, Queue, Surface, SurfaceCapabilities, SurfaceConfiguration, TextureFormat};
+use wgpu::{
+    Adapter, Device, Instance, Queue, Surface, SurfaceCapabilities, SurfaceConfiguration, TextureFormat,
+};
 use winit::dpi::PhysicalSize;
 
 use super::Renderer;

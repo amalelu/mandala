@@ -29,16 +29,15 @@ pub(in crate::application::app) fn apply_set_border_field(
 /// selections converge to the same target.
 pub(in crate::application::app) fn apply_cycle_border_preset(rc: &mut RebuildContext<'_>) {
     apply_with_rebuild(rc, |doc| {
-        let ids = match crate::application::console::commands::border::nodes_in_selection(
-            &doc.selection,
-            "border",
-        ) {
-            Ok(ids) => ids,
-            Err(_) => {
-                log::warn!("CycleBorderPreset: no border-applicable selection");
-                return false;
-            }
-        };
+        let ids =
+            match crate::application::console::commands::border::nodes_in_selection(&doc.selection, "border")
+            {
+                Ok(ids) => ids,
+                Err(_) => {
+                    log::warn!("CycleBorderPreset: no border-applicable selection");
+                    return false;
+                }
+            };
         let current = ids
             .first()
             .and_then(|id| doc.mindmap.nodes.get(id))
@@ -52,9 +51,7 @@ pub(in crate::application::app) fn apply_cycle_border_preset(rc: &mut RebuildCon
                 .map(|c| c.preset.as_str()))
             .unwrap_or("light");
         let target = baumhard::mindmap::border::next_border_preset(current);
-        crate::application::console::commands::border::apply_border_field_to_selection(
-            doc, "preset", target,
-        )
+        crate::application::console::commands::border::apply_border_field_to_selection(doc, "preset", target)
     });
 }
 
@@ -62,16 +59,15 @@ pub(in crate::application::app) fn apply_cycle_border_preset(rc: &mut RebuildCon
 /// selected node. Each node toggled independently.
 pub(in crate::application::app) fn apply_toggle_border_visible(rc: &mut RebuildContext<'_>) {
     apply_with_rebuild(rc, |doc| {
-        let ids = match crate::application::console::commands::border::nodes_in_selection(
-            &doc.selection,
-            "border",
-        ) {
-            Ok(ids) => ids,
-            Err(_) => {
-                log::warn!("ToggleBorderVisible: no border-applicable selection");
-                return false;
-            }
-        };
+        let ids =
+            match crate::application::console::commands::border::nodes_in_selection(&doc.selection, "border")
+            {
+                Ok(ids) => ids,
+                Err(_) => {
+                    log::warn!("ToggleBorderVisible: no border-applicable selection");
+                    return false;
+                }
+            };
         let mut any = false;
         for id in &ids {
             let cur = doc
@@ -137,10 +133,9 @@ pub(in crate::application::app) fn apply_set_border_preview(
                         let (lo, hi) = (range.0.min(range.1), range.0.max(range.1));
                         (lo..=hi).map(|i| (sel.node_id.clone(), i)).collect()
                     }
-                    crate::application::document::SelectionState::MultiSection(sels) => sels
-                        .iter()
-                        .map(|s| (s.node_id.clone(), s.section_idx))
-                        .collect(),
+                    crate::application::document::SelectionState::MultiSection(sels) => {
+                        sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect()
+                    }
                     _ => return false,
                 };
                 BorderPreviewTarget::Sections(pairs)
@@ -246,9 +241,7 @@ pub(in crate::application::app) fn apply_set_spacing(input: &str, rc: &mut Rebui
 /// `Section` / `SectionRange` resolve via `selected_section()`.
 /// `MultiSection` of length 1 collapses to its single entry
 /// (no ambiguity).
-fn target_section(
-    sel: &crate::application::document::SelectionState,
-) -> Option<(String, usize)> {
+fn target_section(sel: &crate::application::document::SelectionState) -> Option<(String, usize)> {
     use crate::application::document::SelectionState;
     if let Some(s) = sel.selected_section() {
         return Some((s.node_id.clone(), s.section_idx));
@@ -296,7 +289,11 @@ pub(in crate::application::app) fn apply_set_section_offset_delta(
     {
         Some(p) => p,
         None => {
-            log::warn!("SetSectionOffsetDelta: section[{}] not found on node '{}'", idx, node_id);
+            log::warn!(
+                "SetSectionOffsetDelta: section[{}] not found on node '{}'",
+                idx,
+                node_id
+            );
             return;
         }
     };
@@ -326,13 +323,11 @@ pub(in crate::application::app) fn apply_set_section_size(
         log::warn!("SetSectionSize: section[{}] not found on node '{}'", idx, node_id);
         return;
     }
-    apply_with_rebuild(rc, |doc| {
-        match doc.set_section_size(&node_id, idx, size) {
-            Ok(changed) => changed,
-            Err(msg) => {
-                log::warn!("SetSectionSize: {}", msg);
-                false
-            }
+    apply_with_rebuild(rc, |doc| match doc.set_section_size(&node_id, idx, size) {
+        Ok(changed) => changed,
+        Err(msg) => {
+            log::warn!("SetSectionSize: {}", msg);
+            false
         }
     });
 }
@@ -340,11 +335,7 @@ pub(in crate::application::app) fn apply_set_section_size(
 /// Pin the selected section's `offset` to `(x, y)` (absolute,
 /// not delta). Mirror of `section move x=<x> y=<y>` for the
 /// macro path.`Action::SetSectionOffsetAbs`.
-pub(in crate::application::app) fn apply_set_section_offset_abs(
-    x: f64,
-    y: f64,
-    rc: &mut RebuildContext<'_>,
-) {
+pub(in crate::application::app) fn apply_set_section_offset_abs(x: f64, y: f64, rc: &mut RebuildContext<'_>) {
     let Some((node_id, idx)) = target_section(&rc.document.selection) else {
         log::warn!("SetSectionOffsetAbs: no section selected");
         return;
@@ -359,17 +350,16 @@ pub(in crate::application::app) fn apply_set_section_offset_abs(
     if !exists {
         log::warn!(
             "SetSectionOffsetAbs: section[{}] not found on node '{}'",
-            idx, node_id
+            idx,
+            node_id
         );
         return;
     }
-    apply_with_rebuild(rc, |doc| {
-        match doc.set_section_offset(&node_id, idx, x, y) {
-            Ok(changed) => changed,
-            Err(msg) => {
-                log::warn!("SetSectionOffsetAbs: {}", msg);
-                false
-            }
+    apply_with_rebuild(rc, |doc| match doc.set_section_offset(&node_id, idx, x, y) {
+        Ok(changed) => changed,
+        Err(msg) => {
+            log::warn!("SetSectionOffsetAbs: {}", msg);
+            false
         }
     });
 }
@@ -419,12 +409,7 @@ pub(in crate::application::app) fn apply_add_section(
     rc: &mut RebuildContext<'_>,
 ) {
     use baumhard::mindmap::model::MindSection;
-    let Some(node_id) = rc
-        .document
-        .selection
-        .primary_node_id()
-        .map(str::to_string)
-    else {
+    let Some(node_id) = rc.document.selection.primary_node_id().map(str::to_string) else {
         log::warn!("AddSection: no node selected (Multi/None selection or no primary)");
         return;
     };
@@ -478,13 +463,11 @@ pub(in crate::application::app) fn apply_split_section(
         log::warn!("SplitSection: section[{}] not found on node '{}'", idx, node_id);
         return;
     }
-    apply_with_rebuild(rc, |doc| {
-        match doc.split_section(&node_id, idx, at_grapheme) {
-            Ok(_) => true,
-            Err(msg) => {
-                log::warn!("SplitSection: {}", msg);
-                false
-            }
+    apply_with_rebuild(rc, |doc| match doc.split_section(&node_id, idx, at_grapheme) {
+        Ok(_) => true,
+        Err(msg) => {
+            log::warn!("SplitSection: {}", msg);
+            false
         }
     });
 }
@@ -514,8 +497,14 @@ mod tests {
     #[test]
     fn target_section_rejects_multisection_of_many() {
         let sel = SelectionState::MultiSection(vec![
-            SectionSel { node_id: "n".into(), section_idx: 0 },
-            SectionSel { node_id: "n".into(), section_idx: 1 },
+            SectionSel {
+                node_id: "n".into(),
+                section_idx: 0,
+            },
+            SectionSel {
+                node_id: "n".into(),
+                section_idx: 1,
+            },
         ]);
         assert_eq!(target_section(&sel), None);
     }

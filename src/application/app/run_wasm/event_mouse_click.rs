@@ -64,9 +64,7 @@ impl super::WasmApp {
     pub(super) fn handle_right_button(&mut self, state: ElementState) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static WARNED: AtomicBool = AtomicBool::new(false);
-        if state == ElementState::Released
-            && !WARNED.swap(true, Ordering::Relaxed)
-        {
+        if state == ElementState::Released && !WARNED.swap(true, Ordering::Relaxed) {
             log::warn!(
                 "right-button gesture on WASM is currently a no-op \
                  (Action::FastResizeStart is NativeOnly until §6.6 \
@@ -143,12 +141,10 @@ impl super::WasmApp {
                     // on section 0 regardless of which section the
                     // user pointed at).
                     input.document.selection = match section_idx {
-                        Some(idx) => SelectionState::Section(
-                            crate::application::document::SectionSel {
-                                node_id: nid.clone(),
-                                section_idx: *idx,
-                            },
-                        ),
+                        Some(idx) => SelectionState::Section(crate::application::document::SectionSel {
+                            node_id: nid.clone(),
+                            section_idx: *idx,
+                        }),
                         None => SelectionState::Single(nid.clone()),
                     };
                     rebuild_all(

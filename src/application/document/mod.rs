@@ -662,18 +662,12 @@ impl MindMapDocument {
 /// `style.show_frame = true` through the normal setter when the
 /// user wants the visibility flip persisted (today via
 /// `border on`).
-fn build_border_preview_scene_view<'a>(
-    bp: &'a BorderPreview,
-) -> scene_builder::BorderPreview<'a> {
+fn build_border_preview_scene_view<'a>(bp: &'a BorderPreview) -> scene_builder::BorderPreview<'a> {
     let target = match &bp.target {
         BorderPreviewTarget::Nodes(ids) => scene_builder::BorderPreviewTargetRef::Nodes(ids.as_slice()),
-        BorderPreviewTarget::Sections(ts) => {
-            scene_builder::BorderPreviewTargetRef::Sections(ts.as_slice())
-        }
+        BorderPreviewTarget::Sections(ts) => scene_builder::BorderPreviewTargetRef::Sections(ts.as_slice()),
         BorderPreviewTarget::CanvasDefault => scene_builder::BorderPreviewTargetRef::CanvasDefault,
-        BorderPreviewTarget::CanvasSectionFrame => {
-            scene_builder::BorderPreviewTargetRef::CanvasSectionFrame
-        }
+        BorderPreviewTarget::CanvasSectionFrame => scene_builder::BorderPreviewTargetRef::CanvasSectionFrame,
         BorderPreviewTarget::CanvasSectionFrameFocused => {
             scene_builder::BorderPreviewTargetRef::CanvasSectionFrameFocused
         }

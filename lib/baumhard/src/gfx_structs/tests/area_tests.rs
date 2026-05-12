@@ -32,7 +32,6 @@ fn sample_outline() -> OutlineStyle {
     }
 }
 
-
 /// Round-trip: a `DeltaGlyphArea` carrying `Some(outline)` under
 /// `Assign` writes the halo onto a previously-bare area; a follow-up
 /// delta carrying `None` clears it. Pins the on/off semantics that
