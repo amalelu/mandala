@@ -79,7 +79,6 @@ use rustc_hash::FxHashMap;
 
 use wgpu::{
     Color, Device, Instance, MultisampleState, Queue, RenderPipeline, Surface, SurfaceConfiguration,
-    TextureFormat,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -597,28 +596,32 @@ impl Renderer {
     pub(crate) async fn new(instance: Instance, surface: Surface<'static>, window: Arc<Window>) -> Renderer {
         let adapter = Self::get_adapter(&instance, &surface).await;
         let (device, queue) = Self::get_device(&adapter).await;
-        let swapchain_format = TextureFormat::Bgra8UnormSrgb;
         let surface_capabilities = surface.get_capabilities(&adapter);
-        let texture_format = surface_capabilities.formats[0];
+        let surface_format = surface_capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(surface_capabilities.formats[0]);
         let size = window.inner_size();
         let config = Self::create_surface_config(
-            texture_format.clone(),
+            surface_format,
             &surface_capabilities,
             PhysicalSize::new(size.width, size.height),
         );
         let glyphon_cache = Cache::new(&device);
 
-        let mut atlas = TextAtlas::new(&device, &queue, &glyphon_cache, swapchain_format);
+        let mut atlas = TextAtlas::new(&device, &queue, &glyphon_cache, surface_format);
         let text_renderer = TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let console_text_renderer = TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let viewport = Viewport::new(&device, &glyphon_cache);
         let camera = Camera2D::new(size.width, size.height);
 
         // Rect pipeline: colored quads for node backgrounds and the
-        // palette backdrop. Uses the swapchain (not capability[0])
-        // format so the pipeline matches the LoadOp target, and
-        // enables standard alpha blending so semi-transparent fills
-        // compose cleanly with whatever's beneath them.
+        // palette backdrop. Uses the same surface format as the
+        // render-pass attachment so the pipeline matches, and enables
+        // standard alpha blending so semi-transparent fills compose
+        // cleanly with whatever's beneath them.
         let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rect_shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(RECT_SHADER_WGSL)),
@@ -675,7 +678,7 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: swapchain_format,
+                    format: surface_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
