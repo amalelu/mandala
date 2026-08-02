@@ -23,7 +23,7 @@ impl HitBox {
         HitBox { rectangles: vec![] }
     }
 
-    /// Append a single `BoundingRectangle` to the bag. O(1) amortised.
+    /// Append a single `BoundingRectangle` to the bag. O(1) amortized.
     pub fn add(&mut self, rectangle: BoundingRectangle) {
         self.rectangles.push(rectangle)
     }

@@ -13,16 +13,13 @@ use crate::core::primitives::Applicable;
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{GfxMutator, GlyphTreeEventInstance};
 use crate::gfx_structs::tree_walker::walk_tree_from;
-use crate::gfx_structs::util::regions::{RegionElementKeyPair, RegionIndexer, RegionParams};
-use crate::util::arena_utils;
-use crossbeam_channel::Sender;
+use crate::gfx_structs::util::regions::{RegionIndexer, RegionParams};
 use glam::Vec2;
 use indextree::{Arena, Children, Descendants, Node, NodeId};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 /// Every node in a `Tree<T, M>` — and every mutator in a
 /// `MutatorTree<M>` — answers this query. The tree-walker aligns
@@ -33,11 +30,13 @@ pub trait BranchChannel {
     fn channel(&self) -> usize;
 }
 
-/// Thread-safe closure that receives a mutable `GfxElement` plus a
-/// delivered event. `Arc<Mutex<_>>` because elements are cloned and
-/// moved between arenas; the wrapper keeps a single callback
-/// reachable from every clone without duplicating state.
-pub type EventSubscriber = Arc<Mutex<dyn FnMut(&mut GfxElement, GlyphTreeEventInstance) + Send + Sync>>;
+/// Single-threaded closure that receives a mutable `GfxElement` plus a
+/// delivered event. `Rc<RefCell<_>>` because the Mandala event loop is
+/// single-threaded (CODE_CONVENTIONS.md §3) and elements are cloned
+/// between arenas; the wrapper keeps one callback reachable from every
+/// clone without duplicating state. `try_borrow_mut` turns re-entrant
+/// delivery into a logged skip rather than a deadlock.
+pub type EventSubscriber = Rc<RefCell<dyn FnMut(&mut GfxElement, GlyphTreeEventInstance)>>;
 
 /// A tree node that can receive event deliveries. Implemented by
 /// `GfxElement`, which in turn fans events out to its registered
@@ -99,21 +98,16 @@ impl Applicable<Tree<GfxElement, GfxMutator>> for MutatorTree<GfxMutator> {
         // Any mutator may touch GlyphArea position or bounds; the
         // safe default is to drop the bbox memos and let the next
         // query recompute. Cheap (one Cell write each).
-        target.aabb_cache.set(None);
-        target.subtree_aabbs_dirty.set(true);
-        walk_tree_from(target, &self, target.root, self.root)
+        target.invalidate_caches();
+        walk_tree_from(target, &self, target.root, self.root);
+        target.invalidate_caches();
     }
 }
 
-// `position`, `pending_mutations`, `region_params`, `region_index` are
-// written-only today: they're forward-compat seams for the named
-// trajectory (Baumhard script API, plugin mutations, BVH region
-// indexing) per CODE_CONVENTIONS.md §6.
 /// Arena-backed tree of elements `T` mutable by an applicable `M`.
-/// Owns the spatial caches (AABB memo, per-node subtree AABBs,
-/// optional region index) that accelerate hit-testing and the
-/// BVH descent. A `Scene` may host many trees layered on top of
-/// each other.
+/// Owns the spatial caches (AABB memo, per-node subtree AABBs) that
+/// accelerate hit-testing and the BVH descent. A `Scene` may host
+/// many trees layered on top of each other.
 #[derive(Clone, Debug)]
 pub struct Tree<T: Clone, M: Applicable<T>> {
     /// Backing arena of element nodes.
@@ -125,15 +119,12 @@ pub struct Tree<T: Clone, M: Applicable<T>> {
     /// [`Scene`](crate::gfx_structs::scene::Scene). Higher = drawn on
     /// top.
     pub layer: usize,
-    /// All child positions are relative to this
+    /// Optional per-tree region index. Populated by the indexed
+    /// constructors, but the walker does not currently maintain it;
+    /// spatial queries use the per-tree BVH descent instead. Reserved
+    /// seam for the named trajectory (see CONVENTIONS.md §B6).
     #[allow(dead_code)]
-    position: Vec2,
-    /// Children can put mutations here as a response to some event
-    #[allow(dead_code)]
-    pending_mutations: Vec<Arc<MutatorTree<M>>>,
-    /// We want this to be Rc eventually
-    #[allow(dead_code)]
-    region_params: Option<Arc<RegionParams>>,
+    region_params: Option<Rc<RegionParams>>,
     #[allow(dead_code)]
     region_index: Option<Rc<RegionIndexer>>,
     /// Memoised result of [`Tree::descendants_aabb`].
@@ -152,31 +143,10 @@ pub struct Tree<T: Clone, M: Applicable<T>> {
 }
 
 impl Tree<GfxElement, GfxMutator> {
-    // Crate-internal alt-constructor preserved as a seam for future
-    // tree-construction call sites (per CODE_CONVENTIONS.md §6).
-    #[allow(dead_code)]
-    pub(crate) fn new_with(element: GfxElement, region_params: Arc<RegionParams>) -> Self {
-        let mut arena = Arena::default();
-        let root = arena.new_node(element);
-        Tree {
-            arena,
-            phantom: Default::default(),
-            root,
-            layer: 0,
-            position: Default::default(),
-            pending_mutations: vec![],
-            region_params: Some(region_params),
-            region_index: Some(Rc::new(RegionIndexer::default())),
-            aabb_cache: Cell::new(None),
-            subtree_aabbs_dirty: Cell::new(true),
-        }
-    }
-
-    /// Indexed tree with a `GfxElement::void()` root. `_scene_index_sender`
-    /// is accepted for API compatibility with the forward-compat
-    /// region-indexing trajectory (§6); it is not currently wired.
-    /// O(1); one arena allocation for the root.
-    pub fn new(region_params: Arc<RegionParams>, _scene_index_sender: Sender<RegionElementKeyPair>) -> Self {
+    /// Indexed tree with a `GfxElement::void()` root. The region index
+    /// is allocated but not maintained by the walker today
+    /// (CONVENTIONS.md §B6). O(1); one arena allocation for the root.
+    pub fn new(region_params: Rc<RegionParams>) -> Self {
         let mut arena = Arena::default();
         let root = arena.new_node(GfxElement::void());
         Tree {
@@ -184,8 +154,6 @@ impl Tree<GfxElement, GfxMutator> {
             phantom: Default::default(),
             root,
             layer: 0,
-            position: Default::default(),
-            pending_mutations: vec![],
             region_params: Some(region_params),
             region_index: Some(Rc::new(RegionIndexer::default())),
             aabb_cache: Cell::new(None),
@@ -205,8 +173,6 @@ impl Tree<GfxElement, GfxMutator> {
             phantom: Default::default(),
             root,
             layer: 0,
-            position: Default::default(),
-            pending_mutations: vec![],
             region_params: None,
             region_index: None,
             aabb_cache: Cell::new(None),
@@ -224,8 +190,6 @@ impl Tree<GfxElement, GfxMutator> {
             phantom: Default::default(),
             root,
             layer: 0,
-            position: Default::default(),
-            pending_mutations: vec![],
             region_params: None,
             region_index: None,
             aabb_cache: Cell::new(None),
@@ -254,17 +218,6 @@ impl Tree<GfxElement, GfxMutator> {
     /// [`NodeId::children`].
     pub fn children(&self) -> Children<'_, GfxElement> {
         self.root.children(&self.arena)
-    }
-
-    /// Clone `target`'s subtree (without its root) into this tree
-    /// under [`Self::root`]. O(n) in the imported node count; each
-    /// node's arena entry is cloned.
-    pub fn import(&mut self, target: &Self) {
-        self.import_arena(&target.arena, target.root);
-    }
-
-    fn import_arena(&mut self, target: &Arena<GfxElement>, target_root: NodeId) {
-        arena_utils::clone_subtree(target, target_root, &mut self.arena, self.root);
     }
 
     /// Find the smallest-AABB `GlyphArea` descendant whose rectangle
@@ -316,7 +269,6 @@ impl Tree<GfxElement, GfxMutator> {
         crate::gfx_structs::tree_walker::bvh_find(&self.arena, self.root, point, slack, true, &mut best);
         best.map(|(id, _)| id)
     }
-
 
     /// Conservative AABB covering every `GlyphArea` descendant of
     /// [`Self::root`]. Returns `(top_left, bottom_right)` or `None`

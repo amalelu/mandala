@@ -48,15 +48,39 @@ pub fn convert_u8_to_f32(color: &[u8; 4]) -> [f32; 4] {
 /// itself a `var(--other)` reference, it is returned verbatim and not
 /// dereferenced further. That's a deliberate v1 simplification.
 pub fn resolve_var<'a>(raw: &'a str, vars: &'a HashMap<String, String>) -> &'a str {
-    let trimmed = raw.trim();
-    if !trimmed.starts_with("var(") || !trimmed.ends_with(')') {
-        return raw;
-    }
-    let inner = trimmed["var(".len()..trimmed.len() - 1].trim();
-    match vars.get(inner) {
+    match parse_var_name(raw).and_then(|name| vars.get(name)) {
         Some(value) => value.as_str(),
         None => raw,
     }
+}
+
+/// Parse a CSS-style theme variable reference and return the model
+/// key, including its leading `--` (for example `var(--bg)` returns
+/// `--bg`). Whitespace inside the `var(...)` wrapper is tolerated to
+/// match [`resolve_var`]; malformed references return `None`.
+pub fn parse_var_name(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with("var(") || !trimmed.ends_with(')') {
+        return None;
+    }
+    let inner = trimmed["var(".len()..trimmed.len() - 1].trim();
+    if inner.len() <= 2 || !inner.starts_with("--") || inner.contains(|c: char| c == '(' || c == ')') {
+        return None;
+    }
+    Some(inner)
+}
+
+/// Return whether `raw` is a well-formed `var(--name)` color
+/// reference under Baumhard's canonical parser.
+pub fn is_var_ref(raw: &str) -> bool {
+    parse_var_name(raw).is_some()
+}
+
+/// Return whether `raw` is one of the hex color literal forms accepted
+/// by [`hex_to_rgba`]: 3, 4, 6, or 8 hex chars with an optional
+/// leading `#`.
+pub fn is_valid_hex_color(raw: &str) -> bool {
+    hex_to_rgba(raw).is_some()
 }
 
 /// Parse a hex color string into an `[f32; 4]` RGBA quad, returning

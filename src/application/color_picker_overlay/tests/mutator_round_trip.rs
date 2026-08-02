@@ -3,7 +3,7 @@
 //! Layout-mutator output shape + round-trip equivalence between
 //! a freshly-built tree and an in-place mutator apply.
 
-use baumhard::core::primitives::Applicable;
+use baumhard::core::primitives::{Applicable, Discriminated};
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::mutator::{GfxMutator, Mutation, MutatorType};
 use baumhard::gfx_structs::tree::BranchChannel;
@@ -44,7 +44,7 @@ fn picker_mutator_output_matches_spec_shape() {
 
     for child in &children {
         assert!(
-            matches!(child.get_type(), MutatorType::Single),
+            matches!(child.variant(), MutatorType::Single),
             "every picker cell is a Single"
         );
         let GfxMutator::Single { mutation, .. } = child else { unreachable!() };

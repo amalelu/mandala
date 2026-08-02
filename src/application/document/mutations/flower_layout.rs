@@ -225,7 +225,7 @@ mod tests {
         // the declarative branch and skip our handler).
         doc.mutation_sources.insert(
             "flower-layout".to_string(),
-            crate::application::document::mutations_loader::MutationSource::App,
+            crate::application::source_tier::SourceTier::App,
         );
         doc.apply_custom_mutation(&cm, &target_id, None);
 

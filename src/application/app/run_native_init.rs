@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! First-run initialisation for the native event loop. Called once
+//! First-run initialization for the native event loop. Called once
 //! from `super::run_native::NativeApp::resumed`.
 
 #![cfg(not(target_arch = "wasm32"))]
@@ -14,13 +14,9 @@ use winit::window::Window;
 use crate::application::platform::input::Modifiers as ModifiersState;
 
 use super::console_input::load_console_history;
-use super::label_edit::{LabelEditState, PortalTextEditState};
 use super::run_native::InitState;
-use super::scene_rebuild::{
-    flush_canvas_scene_buffers, rebuild_all, update_border_tree_static, update_connection_label_tree,
-    update_connection_tree, update_edge_handle_tree, update_node_resize_handle_tree, update_portal_tree,
-    update_section_resize_handle_tree, warm_handle_tree_arenas,
-};
+use super::scene_rebuild::{rebuild_all, warm_scene_at_load};
+use super::single_line_edit::SingleLineEditor;
 use super::text_edit::TextEditState;
 use super::{DragState, InteractionMode, Options};
 use crate::application::common::RenderDecree;
@@ -29,7 +25,7 @@ use crate::application::document::MindMapDocument;
 use crate::application::keybinds::ResolvedKeybinds;
 use crate::application::renderer::Renderer;
 
-/// Build the fully-initialised [`InitState`] around a freshly-created
+/// Build the fully-initialized [`InitState`] around a freshly-created
 /// `Window`. Mindmap load is best-effort (on failure the document
 /// stays `None` and the canvas renders empty).
 pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
@@ -46,7 +42,7 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
     let mut mindmap_tree: Option<MindMapTree> = None;
     // Keyed incremental rebuild: document-side cache of per-edge
     // pre-clip sample geometry. Populated at load by
-    // `build_scene_with_cache` so first interactions don't pay the
+    // the cache-aware connection pass so first interactions don't pay the
     // full Bezier-sample cost; cleared by `rebuild_all` so any
     // structural change forces a fresh scene build.
     let mut scene_cache = baumhard::mindmap::scene_cache::SceneConnectionCache::new();
@@ -79,72 +75,11 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
             renderer.rebuild_buffers_from_tree(&tree.tree);
             renderer.fit_camera_to_tree(&tree.tree);
 
-            // Connections + borders: flat pipeline from RenderScene.
-            // `fit_camera_to_tree` above settled the zoom, so pass
-            // it through — the scene builder sizes connection
-            // glyphs against the actual final zoom rather than the
-            // default-init value.
-            //
-            // Use `build_scene_with_cache` (not `build_scene`) so
-            // `scene_cache` is hot before the first interaction; the
-            // first drag/zoom no longer pays the full per-edge
-            // Bezier-sample cost.
-            // Init runs before any interaction — mode is `Default` and
-            // no resize handles emit. Pre-warm path uses the explicit
-            // `none()` overrides so the warm scene matches the first
-            // post-init frame's shape.
-            let scene = doc.build_scene_with_cache(
-                &std::collections::HashMap::new(),
-                &mut scene_cache,
-                renderer.camera_zoom(),
-                crate::application::document::InteractionModeOverrides::none(),
-            );
-            update_connection_tree(&scene, &mut app_scene);
-            update_border_tree_static(&doc, &mut app_scene);
-            update_portal_tree(
-                &doc,
-                &std::collections::HashMap::new(),
-                &mut app_scene,
-                &mut renderer,
-            );
-            update_connection_label_tree(&scene, &mut app_scene, &mut renderer);
-            // Register the three handle-tree canvas roles with their
-            // fresh-load (empty-slice) signatures. The first real
-            // selection still takes `CanvasDispatch::FullRebuild`
-            // (its 8-handle signature differs from the empty one),
-            // but every subsequent transition back to "nothing
-            // selected" hits `InPlaceMutator` instead of
-            // FullRebuild because the empty signature is already
-            // stamped. The role registration also lets §B2 dispatch
-            // find the role at all — without these calls the first
-            // interaction would force a register-and-rebuild, the
-            // second a rebuild, and only steady-state drags would
-            // be cheap.
-            update_edge_handle_tree(&scene, &mut app_scene);
-            update_section_resize_handle_tree(&scene, &mut app_scene);
-            update_node_resize_handle_tree(&scene, &mut app_scene);
-            // Synthetic-handle allocator warm: feed the handle-tree
-            // dispatch path 8-element slices once so its arena
-            // allocates from cold pools at load instead of on the
-            // user's first selection. Doesn't help signature
-            // matching (the user-state signature still differs),
-            // but the cosmic-text BufferLine pools and arena
-            // bumpers used inside `build_handle_tree` are warm
-            // when the first real selection lands, cutting the
-            // FullRebuild cost.
-            warm_handle_tree_arenas(&mut app_scene);
-            // Restamp the load-time empty signature so the
-            // canvas state at load-end is the empty-handles state
-            // rather than the synthetic 8-handle one. The later
-            // `rebuild_all` would do this again via
-            // `rebuild_scene_only`, but we re-stamp here too so
-            // correctness doesn't depend on `rebuild_all` running
-            // — if a future change makes it conditional or moves
-            // it, the canvas state stays well-defined.
-            update_edge_handle_tree(&scene, &mut app_scene);
-            update_section_resize_handle_tree(&scene, &mut app_scene);
-            update_node_resize_handle_tree(&scene, &mut app_scene);
-            flush_canvas_scene_buffers(&mut app_scene, &mut renderer);
+            // Every canvas role projected once at load plus the
+            // handle-tree allocator warm — `warm_scene_at_load`, the
+            // body the browser's init runs too. `fit_camera_to_tree`
+            // above settled the zoom, which that helper reads.
+            warm_scene_at_load(&doc, &mut app_scene, &mut renderer, &mut scene_cache);
 
             mindmap_tree = Some(tree);
             document = Some(doc);
@@ -194,40 +129,12 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
     // to on every Enter; written back on close.
     let console_history: Vec<String> = load_console_history();
 
-    // Build the macro registry across all four tiers, in ascending
-    // precedence order: App < User at startup; Map < Inline are
-    // refreshed via `rebuild_document_macros` whenever a document
-    // loads. Higher-tier ids shadow lower-tier ones; clearing a
-    // higher tier reveals what's underneath. See
-    // `format/macros.md` for the threat model and the SOURCE-OF-
-    // TRUTH list of places that must move together when the order
-    // changes.
-    let mut macros = crate::application::macros::MacroRegistry::new();
-    let mut app_count = 0usize;
-    for m in crate::application::macros::loader::load_app_macros() {
-        macros.insert(m, crate::application::macros::MacroSource::App);
-        app_count += 1;
-    }
-    let mut user_count = 0usize;
-    for m in crate::application::macros::loader::load_user_macros() {
-        macros.insert(m, crate::application::macros::MacroSource::User);
-        user_count += 1;
-    }
-    if app_count > 0 || user_count > 0 {
-        log::info!(
-            "loaded {} macro(s): {} app-tier, {} user-tier",
-            macros.len(),
-            app_count,
-            user_count
-        );
-    }
-    // Document-derived macro tiers (Map + Inline). The
-    // `rebuild_document_macros` helper is the single entry point
-    // shared with the document-replace path in `execute_console_line`
-    // so the Map-then-Inline ordering can't drift between sites.
-    if let Some(d) = document.as_ref() {
-        crate::application::macros::loader::rebuild_document_macros(&mut macros, d);
-    }
+    // App + User tiers from the platform loaders, then the
+    // document-derived Map and Inline tiers. Body is
+    // `macros::loader::build_macro_registry`, which the browser's
+    // init calls too — including the `log::info!` shape, so
+    // cross-target log triage stays uniform.
+    let macros = crate::application::macros::loader::build_macro_registry(document.as_ref());
 
     InitState {
         window,
@@ -241,8 +148,7 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
         interaction_mode: InteractionMode::Default,
         console_state: ConsoleState::Closed,
         console_history,
-        label_edit_state: LabelEditState::Closed,
-        portal_text_edit_state: PortalTextEditState::Closed,
+        single_line_edit_state: SingleLineEditor::Closed,
         text_edit_state: TextEditState::Closed,
         color_picker_state: crate::application::color_picker::ColorPickerState::Closed,
         last_click: None,
@@ -255,7 +161,7 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
         // Last cursor icon written via Window::set_cursor — used by
         // the cursor_moved handler to skip redundant per-frame
         // set_cursor calls on platforms (Windows, Wayland) where
-        // winit doesn't dedup. Initialised to Default to match the
+        // winit doesn't dedup. Initialized to Default to match the
         // as-launched cursor.
         cursor_icon_last: winit::window::CursorIcon::Default,
         // Picker hover gate: cursor-moves into the picker update
@@ -268,9 +174,8 @@ pub(super) fn build(options: &Options, window: Arc<Window>) -> InitState {
         keybinds,
         macros,
         anim_pause_start_ms: None,
-        // Touch gesture recogniser. State machine starts Idle;
+        // Touch gesture recognizer. State machine starts Idle;
         // first `WindowEvent::Touch` lands a finger.
         touch_recognizer: super::touch_gesture::TouchGestureRecognizer::new(),
     }
 }
-

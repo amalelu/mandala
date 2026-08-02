@@ -21,7 +21,7 @@
 //! size, color, palette, field, padding, top, bottom, left,
 //! right, tl, tr, bl, br). Auto-promotion of preset to "custom"
 //! on side / corner edits matches the per-node / per-section
-//! behaviour.
+//! behavior.
 //!
 //! Undo: each successful canvas edit pushes a single
 //! `UndoAction::CanvasSnapshot` so undo restores every canvas
@@ -31,7 +31,10 @@
 use baumhard::mindmap::border::resolve_border_style;
 use baumhard::mindmap::model::GlyphBorderConfig;
 
-use super::border::{custom_preset_hint, edits_has_glyph_field, stage_kv, KEYS as BORDER_KEYS};
+use super::border::{
+    custom_preset_hint, edits_has_glyph_field, positional_subverb_to_edits, prepend_line, stage_kv,
+    BorderSurface, KEYS as BORDER_KEYS,
+};
 use super::Command;
 use crate::application::console::completion::{
     kv_key_completions_with_hints, prefix_filter, Completion, CompletionContext, CompletionState,
@@ -134,8 +137,9 @@ fn complete_canvas(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Complet
         }
         // Same for `canvas section-frame <verb>` (one positional later
         // when the `focused` modifier is absent).
-        CompletionContext::Token { index: 2 } if subject == Some("section-frame")
-            && state.tokens.get(2).map(String::as_str) != Some("focused") =>
+        CompletionContext::Token { index: 2 }
+            if subject == Some("section-frame")
+                && state.tokens.get(2).map(String::as_str) != Some("focused") =>
         {
             let verb = state.tokens.get(2).map(|s| s.to_ascii_lowercase());
             canvas_value_completions(verb.as_deref(), state.partial, ctx)
@@ -148,8 +152,9 @@ fn complete_canvas(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Complet
         }
         // `canvas section-frame focused <verb> <value>` — value position
         // for the per-field verbs after the `focused` modifier.
-        CompletionContext::Token { index: 3 } if subject == Some("section-frame")
-            && state.tokens.get(2).map(String::as_str) == Some("focused") =>
+        CompletionContext::Token { index: 3 }
+            if subject == Some("section-frame")
+                && state.tokens.get(2).map(String::as_str) == Some("focused") =>
         {
             let verb = state.tokens.get(3).map(|s| s.to_ascii_lowercase());
             canvas_value_completions(verb.as_deref(), state.partial, ctx)
@@ -175,11 +180,7 @@ fn complete_canvas(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Complet
 /// Routes through the same per-node `border::kv_value_completions`
 /// vocabulary so canvas users see the same preset / palette / font
 /// rows the per-node verb surfaces.
-fn canvas_value_completions(
-    verb: Option<&str>,
-    partial: &str,
-    ctx: &ConsoleContext,
-) -> Vec<Completion> {
+fn canvas_value_completions(verb: Option<&str>, partial: &str, ctx: &ConsoleContext) -> Vec<Completion> {
     match verb {
         Some("preset") | Some("color") | Some("palette") | Some("font") => {
             super::border::kv_value_completions(verb.unwrap(), partial, ctx)
@@ -228,20 +229,16 @@ fn execute_border_subject(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     if let Some(verb) = args.positional(1) {
         match verb.to_ascii_lowercase().as_str() {
             "show" => return execute_show_border(eff),
-            "reset" => return apply_border_edits(eff, clear_edits()),
+            "reset" => return apply_canvas_edits(eff, BorderSurface::CanvasDefault, clear_edits()),
             "preview" => return execute_canvas_border_preview(args, eff),
             other if !other.contains('=') => {
-                match positional_subverb_to_edits(other, args, 1, CanvasSlot::Border, eff) {
-                    Ok(Some(edits)) => return apply_border_edits(eff, edits),
-                    Ok(None) => {
-                        return ExecResult::err(format!(
-                            "canvas border: unknown subverb '{}'; use 'show', 'reset', 'preview', \
-                             'preset', 'color', 'padding', 'palette', 'font', 'side', 'corner', or kv form",
-                            other
-                        ));
-                    }
-                    Err(e) => return e,
-                }
+                return apply_positional(
+                    other,
+                    args,
+                    /* verb_pos */ 1,
+                    BorderSurface::CanvasDefault,
+                    eff,
+                );
             }
             _ => {}
         }
@@ -258,212 +255,44 @@ fn execute_border_subject(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     if !saw_any {
         return ExecResult::err("usage: canvas border show|reset|<key>=<value> …");
     }
-    apply_border_edits(eff, edits)
+    apply_canvas_edits(eff, BorderSurface::CanvasDefault, edits)
 }
 
-/// Which canvas slot the helpers write to. `verb_pos` (param
-/// on `positional_subverb_to_edits`) lets the same dispatcher
-/// service `canvas border` (subverb at index 1) and
-/// `canvas section-frame [focused]` (subverb at index 2 or 3).
-#[derive(Clone, Copy)]
-enum CanvasSlot {
-    Border,
-    SectionFrame,
-    SectionFrameFocused,
-}
-
-impl CanvasSlot {
-    fn label(self) -> &'static str {
-        match self {
-            CanvasSlot::Border => "canvas border",
-            CanvasSlot::SectionFrame => "canvas section-frame",
-            CanvasSlot::SectionFrameFocused => "canvas section-frame focused",
-        }
-    }
-
-    /// Resolve the slot's currently-stored preset, falling back
-    /// to "light" when the slot is unset (the model default).
-    /// Reset paths use this so a user who set the slot's preset
-    /// to "heavy" gets heavy's default glyph back, not light's.
-    fn current_preset(self, doc: &crate::application::document::MindMapDocument) -> String {
-        let slot = match self {
-            CanvasSlot::Border => doc.mindmap.canvas.default_border.as_ref(),
-            CanvasSlot::SectionFrame => doc.mindmap.canvas.default_section_frame_border.as_ref(),
-            CanvasSlot::SectionFrameFocused => doc
-                .mindmap
-                .canvas
-                .default_focused_section_frame_border
-                .as_ref(),
-        };
-        slot.map(|c| c.preset.clone())
-            .unwrap_or_else(|| "light".to_string())
-    }
-}
-
-fn positional_subverb_to_edits(
+/// Positional-subverb entry point for both canvas subjects. The
+/// grammar itself is parsed by the surface-agnostic
+/// [`super::border::positional_subverb_to_edits`] — the same
+/// parser the per-node `border …` verb uses, so a canvas slot and
+/// a node can no longer drift on preset cycling, `reset` glyph
+/// resolution, or the non-custom-preset gate.
+fn apply_positional(
     verb: &str,
     args: &Args,
     verb_pos: usize,
-    slot: CanvasSlot,
-    eff: &ConsoleEffects,
-) -> Result<Option<BorderConfigEdits>, ExecResult> {
-    use baumhard::mindmap::border::preset_glyph_set;
-    use crate::application::document::BorderSide;
-    let value = args.positional(verb_pos + 1);
-    let mut edits = BorderConfigEdits::default();
-    match verb.to_ascii_lowercase().as_str() {
-        "preset" | "color" | "padding" | "palette" | "font" => {
-            let v = value.ok_or_else(|| {
-                ExecResult::err(format!("{}: {} missing value", slot.label(), verb))
-            })?;
-            // `canvas border preset cycle` advances to the next
-            // preset, wrapping. Mirrors the per-node `border preset
-            // cycle` (acknowledged the gap).
-            let resolved = if verb.eq_ignore_ascii_case("preset") && v.eq_ignore_ascii_case("cycle") {
-                baumhard::mindmap::border::next_border_preset(&slot.current_preset(eff.document)).to_string()
-            } else {
-                v.to_string()
-            };
-            stage_kv(&mut edits, &verb.to_ascii_lowercase(), &resolved).map_err(ExecResult::err)?;
-            // Optional kvs (palette field=, font size=) compose.
-            if verb.eq_ignore_ascii_case("palette") {
-                if let Some((_, fv)) = args.kvs().find(|(k, _)| *k == "field") {
-                    stage_kv(&mut edits, "field", fv).map_err(ExecResult::err)?;
-                }
-            }
-            if verb.eq_ignore_ascii_case("font") {
-                if let Some((_, sv)) = args.kvs().find(|(k, _)| *k == "size") {
-                    stage_kv(&mut edits, "size", sv).map_err(ExecResult::err)?;
-                }
-            }
-        }
-        "side" => {
-            let which = value.ok_or_else(|| {
-                ExecResult::err("canvas border side: missing <top|bottom|left|right|all>")
-            })?;
-            let pattern = args.positional(verb_pos + 2).ok_or_else(|| {
-                ExecResult::err(format!(
-                    "canvas border side {}: missing pattern (or 'reset')",
-                    which
-                ))
-            })?;
-            let sides: Vec<BorderSide> = match which.to_ascii_lowercase().as_str() {
-                "top" => vec![BorderSide::Top],
-                "bottom" => vec![BorderSide::Bottom],
-                "left" => vec![BorderSide::Left],
-                "right" => vec![BorderSide::Right],
-                "all" => vec![BorderSide::Top, BorderSide::Bottom, BorderSide::Left, BorderSide::Right],
-                _ => return Err(ExecResult::err(format!(
-                    "canvas border side: '{}' unknown; pick top | bottom | left | right | all",
-                    which
-                ))),
-            };
-            let reset = pattern.eq_ignore_ascii_case("reset");
-            //parity with the per-node `border side`
-            // path: setting a side glyph on a non-custom preset
-            // errors with the explicit "preset custom first"
-            // hint, instead of silently auto-promoting the slot.
-            // The reset arm skips the gate (restoring the
-            // current preset's own default doesn't require
-            // custom).
-            if !reset {
-                let preset = slot.current_preset(eff.document);
-                if !preset.eq_ignore_ascii_case("custom") {
-                    return Err(ExecResult::err(format!(
-                        "{} side {}: cannot set side glyph against preset '{}'. \
-                         run `{} preset custom` first, then set the side.",
-                        slot.label(),
-                        which,
-                        preset,
-                        slot.label()
-                    )));
-                }
-            }
-            // Reset writes the slot's current preset's default
-            // glyph for the named side(s).
-            let glyph_set = if reset {
-                Some(preset_glyph_set(&slot.current_preset(eff.document)))
-            } else {
-                None
-            };
-            for side in sides {
-                if let Some(ref gs) = glyph_set {
-                    let ch = match side {
-                        BorderSide::Top => gs.top,
-                        BorderSide::Bottom => gs.bottom,
-                        BorderSide::Left => gs.left,
-                        BorderSide::Right => gs.right,
-                    };
-                    edits.with_side_pattern(side, &ch.to_string()).map_err(ExecResult::err)?;
-                } else {
-                    edits.with_side_pattern(side, pattern).map_err(ExecResult::err)?;
-                }
-            }
-        }
-        "corner" => {
-            let which = value.ok_or_else(|| {
-                ExecResult::err("canvas border corner: missing <tl|tr|bl|br|all>")
-            })?;
-            let glyph = args.positional(verb_pos + 2).ok_or_else(|| {
-                ExecResult::err(format!(
-                    "canvas border corner {}: missing glyph (or 'reset')",
-                    which
-                ))
-            })?;
-            let corners: Vec<&str> = match which.to_ascii_lowercase().as_str() {
-                "tl" => vec!["tl"],
-                "tr" => vec!["tr"],
-                "bl" => vec!["bl"],
-                "br" => vec!["br"],
-                "all" => vec!["tl", "tr", "bl", "br"],
-                _ => return Err(ExecResult::err(format!(
-                    "canvas border corner: '{}' unknown; pick tl | tr | bl | br | all",
-                    which
-                ))),
-            };
-            let reset = glyph.eq_ignore_ascii_case("reset");
-            if !reset {
-                let preset = slot.current_preset(eff.document);
-                if !preset.eq_ignore_ascii_case("custom") {
-                    return Err(ExecResult::err(format!(
-                        "{} corner {}: cannot set corner glyph against preset '{}'. \
-                         run `{} preset custom` first, then set the corner.",
-                        slot.label(),
-                        which,
-                        preset,
-                        slot.label()
-                    )));
-                }
-            }
-            // Sample the slot's current preset once outside the
-            // loop.
-            let reset_glyph_set = reset.then(|| preset_glyph_set(&slot.current_preset(eff.document)));
-            for corner in corners {
-                if let Some(ref gs) = reset_glyph_set {
-                    let ch = match corner {
-                        "tl" => gs.top_left,
-                        "tr" => gs.top_right,
-                        "bl" => gs.bottom_left,
-                        "br" => gs.bottom_right,
-                        // Defensive: parse_corner_selector
-                        // currently only emits the four corners,
-                        // butinteractive
-                        // paths must not panic on a future
-                        // selector extension.
-                        _ => return Err(ExecResult::err(format!(
-                            "internal: unrecognised corner '{}'",
-                            corner
-                        ))),
-                    };
-                    stage_kv(&mut edits, corner, &ch.to_string()).map_err(ExecResult::err)?;
-                } else {
-                    stage_kv(&mut edits, corner, glyph).map_err(ExecResult::err)?;
-                }
-            }
-        }
-        _ => return Ok(None),
+    surface: BorderSurface,
+    eff: &mut ConsoleEffects,
+) -> ExecResult {
+    let staged = match positional_subverb_to_edits(verb, args, verb_pos, surface, eff.document) {
+        Ok(Some(staged)) => staged,
+        Ok(None) => return ExecResult::err(unknown_canvas_subverb_message(surface, verb)),
+        Err(msg) => return ExecResult::err(msg),
+    };
+    let outcome = apply_canvas_edits(eff, surface, staged.edits);
+    match staged.cycled_to {
+        Some(target) => prepend_line(
+            outcome,
+            format!("{} preset \u{2192} '{}' (cycle)", surface.label(), target),
+        ),
+        None => outcome,
     }
-    Ok(Some(edits))
+}
+
+fn unknown_canvas_subverb_message(surface: BorderSurface, verb: &str) -> String {
+    format!(
+        "{}: unknown subverb '{}'; use 'show', 'reset', 'preview', \
+         'preset', 'color', 'padding', 'palette', 'font', 'side', 'corner', or kv form",
+        surface.label(),
+        verb
+    )
 }
 
 fn execute_section_frame_subject(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
@@ -475,30 +304,19 @@ fn execute_section_frame_subject(args: &Args, eff: &mut ConsoleEffects) -> ExecR
         .map(|t| t.eq_ignore_ascii_case("focused"))
         .unwrap_or(false);
     let verb_pos = if focused { 2 } else { 1 };
+    let surface = if focused {
+        BorderSurface::CanvasSectionFrameFocused
+    } else {
+        BorderSurface::CanvasSectionFrame
+    };
 
     if let Some(verb) = args.positional(verb_pos) {
         match verb.to_ascii_lowercase().as_str() {
             "show" => return execute_show_section_frame(eff, focused),
-            "reset" => return apply_section_frame_edits(eff, focused, clear_edits()),
+            "reset" => return apply_canvas_edits(eff, surface, clear_edits()),
             "preview" => return execute_canvas_section_frame_preview(args, eff, focused),
             other if !other.contains('=') => {
-                let slot = if focused {
-                    CanvasSlot::SectionFrameFocused
-                } else {
-                    CanvasSlot::SectionFrame
-                };
-                match positional_subverb_to_edits(other, args, verb_pos, slot, eff) {
-                    Ok(Some(edits)) => return apply_section_frame_edits(eff, focused, edits),
-                    Ok(None) => {
-                        return ExecResult::err(format!(
-                            "canvas section-frame{}: unknown subverb '{}'; use 'show', 'reset', 'preview', \
-                             'preset', 'color', 'padding', 'palette', 'font', 'side', 'corner', or kv form",
-                            if focused { " focused" } else { "" },
-                            other
-                        ));
-                    }
-                    Err(e) => return e,
-                }
+                return apply_positional(other, args, verb_pos, surface, eff);
             }
             _ => {}
         }
@@ -515,7 +333,7 @@ fn execute_section_frame_subject(args: &Args, eff: &mut ConsoleEffects) -> ExecR
     if !saw_any {
         return ExecResult::err("usage: canvas section-frame [focused] show|reset|<key>=<value> …");
     }
-    apply_section_frame_edits(eff, focused, edits)
+    apply_canvas_edits(eff, surface, edits)
 }
 
 fn clear_edits() -> BorderConfigEdits {
@@ -547,11 +365,7 @@ fn execute_canvas_border_preview(args: &Args, eff: &mut ConsoleEffects) -> ExecR
 /// section-frame slots
 /// (`default_section_frame_border` or `default_focused_section_frame_border`
 /// per the `focused` arg).
-fn execute_canvas_section_frame_preview(
-    args: &Args,
-    eff: &mut ConsoleEffects,
-    focused: bool,
-) -> ExecResult {
+fn execute_canvas_section_frame_preview(args: &Args, eff: &mut ConsoleEffects, focused: bool) -> ExecResult {
     use crate::application::document::BorderPreviewTarget;
     let label: &'static str = if focused {
         "canvas section-frame focused preview"
@@ -570,19 +384,12 @@ fn execute_canvas_section_frame_preview(
     super::border::dispatch_border_preview(args, eff, label, subverb_pos, move |_sel| Ok(target.clone()))
 }
 
-fn apply_border_edits(eff: &mut ConsoleEffects, edits: BorderConfigEdits) -> ExecResult {
-    let bare_custom = matches!(
-        edits.preset,
-        OptionEdit::Set(ref s) if s.eq_ignore_ascii_case("custom")
-    ) && !edits_has_glyph_field(&edits);
-
-    let outcome: BorderEditOutcome = eff.document.set_canvas_default_border(edits);
-    finish(outcome, "canvas border", bare_custom)
-}
-
-fn apply_section_frame_edits(
+/// Write a staged edit bundle to the canvas slot `surface` names
+/// and render the outcome. One function for all three slots — the
+/// only difference is which document setter runs.
+fn apply_canvas_edits(
     eff: &mut ConsoleEffects,
-    focused: bool,
+    surface: BorderSurface,
     edits: BorderConfigEdits,
 ) -> ExecResult {
     let bare_custom = matches!(
@@ -590,15 +397,24 @@ fn apply_section_frame_edits(
         OptionEdit::Set(ref s) if s.eq_ignore_ascii_case("custom")
     ) && !edits_has_glyph_field(&edits);
 
-    let outcome: BorderEditOutcome = eff
-        .document
-        .set_canvas_default_section_frame_border_config(focused, edits);
-    let label = if focused {
-        "canvas section-frame focused"
-    } else {
-        "canvas section-frame"
+    let outcome: BorderEditOutcome = match surface {
+        BorderSurface::CanvasDefault => eff.document.set_canvas_default_border(edits),
+        BorderSurface::CanvasSectionFrame => eff
+            .document
+            .set_canvas_default_section_frame_border_config(false, edits),
+        BorderSurface::CanvasSectionFrameFocused => eff
+            .document
+            .set_canvas_default_section_frame_border_config(true, edits),
+        // The per-node surface is the `border …` verb's business;
+        // routing it here would silently write the map-wide slot.
+        // Defensive per CODE_CONVENTIONS §9 — interactive paths
+        // degrade rather than panic.
+        BorderSurface::Selection => {
+            log::error!("canvas: per-node BorderSurface reached the canvas writer");
+            return ExecResult::err("internal: canvas edit routed to the per-node surface");
+        }
     };
-    finish(outcome, label, bare_custom)
+    finish(outcome, surface.label(), bare_custom)
 }
 
 fn finish(outcome: BorderEditOutcome, label: &str, bare_custom: bool) -> ExecResult {
@@ -687,7 +503,10 @@ fn execute_show_section_frame(eff: &mut ConsoleEffects, focused: bool) -> ExecRe
             cfg,
         )
     } else {
-        vec![format!("{}: (no map-wide default — falls back to {})", label, source)]
+        vec![format!(
+            "{}: (no map-wide default — falls back to {})",
+            label, source
+        )]
     };
     ExecResult::lines(lines)
 }
@@ -832,29 +651,18 @@ mod tests {
     #[test]
     fn canvas_section_frame_top_pattern_auto_promotes_preset_to_custom() {
         let mut doc = load_test_doc();
-        let result = run(
-            "canvas section-frame preset=heavy top=\"###(*)###\"",
-            &mut doc,
-        );
+        let result = run("canvas section-frame preset=heavy top=\"###(*)###\"", &mut doc);
         match result {
             ExecResult::Ok(_) | ExecResult::Lines(_) => {}
             other => panic!("expected success, got {:?}", other),
         }
-        let cfg = doc
-            .mindmap
-            .canvas
-            .default_section_frame_border
-            .as_ref()
-            .unwrap();
+        let cfg = doc.mindmap.canvas.default_section_frame_border.as_ref().unwrap();
         assert_eq!(cfg.preset, "custom");
         let glyphs = cfg.glyphs.as_ref().expect("glyphs populated by side edit");
         assert_eq!(glyphs.top, "###(*)###");
         // The focused variant must NOT be touched.
         assert!(
-            doc.mindmap
-                .canvas
-                .default_focused_section_frame_border
-                .is_none(),
+            doc.mindmap.canvas.default_focused_section_frame_border.is_none(),
             "focused canvas default must be untouched"
         );
     }
@@ -924,11 +732,7 @@ mod tests {
         assert_exec_ok(run("canvas Border preset=heavy", &mut doc));
         assert!(doc.mindmap.canvas.default_border.is_some());
         assert_exec_ok(run("canvas Section-Frame Focused preset=light", &mut doc));
-        assert!(doc
-            .mindmap
-            .canvas
-            .default_focused_section_frame_border
-            .is_some());
+        assert!(doc.mindmap.canvas.default_focused_section_frame_border.is_some());
     }
 
     /// `canvas border reset` against an already-empty default is
@@ -948,10 +752,7 @@ mod tests {
             undo_depth,
             "no-op canvas border reset must not push undo entries"
         );
-        assert!(
-            !doc.dirty,
-            "no-op canvas border reset must not flip `dirty`"
-        );
+        assert!(!doc.dirty, "no-op canvas border reset must not flip `dirty`");
     }
 
     #[test]
@@ -1099,7 +900,11 @@ mod positional_tests {
         let mut doc = load_test_doc();
         assert_exec_ok(run("canvas border preset heavy", &mut doc));
         assert_eq!(
-            doc.mindmap.canvas.default_border.as_ref().map(|c| c.preset.as_str()),
+            doc.mindmap
+                .canvas
+                .default_border
+                .as_ref()
+                .map(|c| c.preset.as_str()),
             Some("heavy")
         );
     }
@@ -1109,7 +914,11 @@ mod positional_tests {
         let mut doc = load_test_doc();
         assert_exec_ok(run("canvas border color #112233", &mut doc));
         assert_eq!(
-            doc.mindmap.canvas.default_border.as_ref().and_then(|c| c.color.as_deref()),
+            doc.mindmap
+                .canvas
+                .default_border
+                .as_ref()
+                .and_then(|c| c.color.as_deref()),
             Some("#112233")
         );
     }
@@ -1139,7 +948,11 @@ mod positional_tests {
         let mut doc = load_test_doc();
         assert_exec_ok(run("canvas section-frame preset double", &mut doc));
         assert_eq!(
-            doc.mindmap.canvas.default_section_frame_border.as_ref().map(|c| c.preset.as_str()),
+            doc.mindmap
+                .canvas
+                .default_section_frame_border
+                .as_ref()
+                .map(|c| c.preset.as_str()),
             Some("double")
         );
     }
@@ -1149,7 +962,11 @@ mod positional_tests {
         let mut doc = load_test_doc();
         assert_exec_ok(run("canvas section-frame focused color #abcdef", &mut doc));
         assert_eq!(
-            doc.mindmap.canvas.default_focused_section_frame_border.as_ref().and_then(|c| c.color.as_deref()),
+            doc.mindmap
+                .canvas
+                .default_focused_section_frame_border
+                .as_ref()
+                .and_then(|c| c.color.as_deref()),
             Some("#abcdef")
         );
     }
@@ -1192,10 +1009,7 @@ mod blocker_pins {
             .and_then(|c| c.glyphs.as_ref())
             .map(|g| g.top.clone())
             .expect("custom + side write must populate glyphs");
-        assert_eq!(
-            top, "━",
-            "reset must use heavy's default top glyph, not light's"
-        );
+        assert_eq!(top, "━", "reset must use heavy's default top glyph, not light's");
     }
 
     #[test]
@@ -1244,10 +1058,7 @@ mod blocker_pins {
             .and_then(|c| c.glyphs.as_ref())
             .map(|g| g.top_left.clone())
             .expect("custom + corner write must populate glyphs");
-        assert_eq!(
-            tl, "╔",
-            "reset must use double's tl glyph, not light's ┌"
-        );
+        assert_eq!(tl, "╔", "reset must use double's tl glyph, not light's ┌");
     }
 }
 
@@ -1265,7 +1076,11 @@ mod cycle_pin {
         assert_exec_ok(run("canvas border preset light", &mut doc));
         assert_exec_ok(run("canvas border preset cycle", &mut doc));
         assert_eq!(
-            doc.mindmap.canvas.default_border.as_ref().map(|c| c.preset.as_str()),
+            doc.mindmap
+                .canvas
+                .default_border
+                .as_ref()
+                .map(|c| c.preset.as_str()),
             Some("heavy")
         );
     }
@@ -1278,7 +1093,11 @@ mod cycle_pin {
         assert_exec_ok(run("canvas section-frame preset custom", &mut doc));
         assert_exec_ok(run("canvas section-frame preset cycle", &mut doc));
         assert_eq!(
-            doc.mindmap.canvas.default_section_frame_border.as_ref().map(|c| c.preset.as_str()),
+            doc.mindmap
+                .canvas
+                .default_section_frame_border
+                .as_ref()
+                .map(|c| c.preset.as_str()),
             Some("light")
         );
     }
@@ -1293,11 +1112,7 @@ mod completion_pins {
         crate::application::document::tests_common::load_test_doc()
     }
 
-    fn at_token<'a>(
-        index: usize,
-        partial: &'a str,
-        tokens: &'a [String],
-    ) -> CompletionState<'a> {
+    fn at_token<'a>(index: usize, partial: &'a str, tokens: &'a [String]) -> CompletionState<'a> {
         CompletionState {
             tokens,
             cursor_token: index,
@@ -1315,7 +1130,9 @@ mod completion_pins {
         let tokens = vec!["canvas".to_string(), "border".to_string()];
         let s = at_token(1, "", &tokens);
         let labels: Vec<String> = complete_canvas(&s, &ctx).into_iter().map(|c| c.display).collect();
-        for v in &["show", "reset", "preview", "preset", "color", "padding", "palette", "font", "side", "corner"] {
+        for v in &[
+            "show", "reset", "preview", "preset", "color", "padding", "palette", "font", "side", "corner",
+        ] {
             assert!(
                 labels.iter().any(|l| l == v),
                 "canvas border completion missing '{}': {:?}",
@@ -1373,5 +1190,91 @@ mod completion_pins {
         let labels: Vec<String> = complete_canvas(&s, &ctx).into_iter().map(|c| c.display).collect();
         assert!(labels.iter().any(|l| l == "heavy"));
         assert!(labels.iter().any(|l| l == "cycle"));
+    }
+}
+
+#[cfg(test)]
+mod shared_positional_pins {
+    //! P1-28: `canvas …` no longer carries its own copy of the
+    //! positional border grammar — it shares
+    //! `border::positional_subverb_to_edits` with the per-node
+    //! `border …` verb. These pin the behaviors the canvas copy
+    //! used to lack, so a regression shows up as a failing test
+    //! rather than as a silently re-diverged second parser.
+
+    use crate::application::console::tests::fixtures::{
+        assert_exec_err_contains, assert_exec_ok, join_lines, run,
+    };
+    use crate::application::console::ExecResult;
+    use crate::application::document::tests_common::load_test_doc;
+
+    /// `canvas border preset cycle` now names the preset it landed
+    /// on, exactly as `border preset cycle` does.
+    #[test]
+    fn canvas_cycle_reports_the_resolved_preset_like_the_node_verb() {
+        let mut doc = load_test_doc();
+        assert_exec_ok(run("canvas border preset light", &mut doc));
+        let blob = match run("canvas border preset cycle", &mut doc) {
+            ExecResult::Lines(rows) => join_lines(&rows),
+            other => panic!("expected Lines with the cycle header, got {:?}", other),
+        };
+        assert!(
+            blob.contains("→ 'heavy'") && blob.contains("(cycle)"),
+            "canvas cycle must name the resolved preset: {}",
+            blob
+        );
+    }
+
+    /// Extra positionals after a single-value subverb are rejected
+    /// on the canvas surfaces too — the canvas copy used to drop
+    /// them silently.
+    #[test]
+    fn canvas_positional_rejects_extra_positional() {
+        let mut doc = load_test_doc();
+        assert_exec_err_contains(
+            run("canvas border padding 12 50", &mut doc),
+            "unexpected extra positional",
+        );
+        assert_exec_err_contains(
+            run("canvas section-frame focused preset heavy bogus", &mut doc),
+            "unexpected extra positional",
+        );
+    }
+
+    /// A missing value emits the same `usage:` line shape the
+    /// per-node verb emits, labeled for the surface the user typed.
+    #[test]
+    fn canvas_positional_missing_value_emits_usage_for_its_surface() {
+        let mut doc = load_test_doc();
+        assert_exec_err_contains(
+            run("canvas border padding", &mut doc),
+            "usage: canvas border padding",
+        );
+        assert_exec_err_contains(
+            run("canvas section-frame focused color", &mut doc),
+            "usage: canvas section-frame focused color",
+        );
+    }
+
+    /// `cycle` is offered as a preset value on the canvas
+    /// surfaces, so the unknown-preset error must advertise it —
+    /// the canvas copy routed straight to the kv parser, whose
+    /// error omitted `| cycle`.
+    #[test]
+    fn canvas_unknown_preset_error_advertises_cycle() {
+        let mut doc = load_test_doc();
+        assert_exec_err_contains(run("canvas border preset frobnicate", &mut doc), "| cycle");
+    }
+
+    /// The glyph gate names the surface being edited in both the
+    /// diagnosis and the suggested fix.
+    #[test]
+    fn canvas_section_frame_corner_gate_names_its_own_surface() {
+        let mut doc = load_test_doc();
+        assert_exec_ok(run("canvas section-frame preset double", &mut doc));
+        assert_exec_err_contains(
+            run("canvas section-frame corner tl +", &mut doc),
+            "run `canvas section-frame preset custom` first",
+        );
     }
 }

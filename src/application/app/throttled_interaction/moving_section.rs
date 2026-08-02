@@ -4,14 +4,15 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use baumhard::mindmap::scene_builder::build_section_resize_handles;
+use baumhard::mindmap::tree_builder::build_section_resize_handles;
 use glam::Vec2;
 
 use crate::application::document::apply_section_drag_delta_and_collect_patches;
-use crate::application::frame_throttle::MutationFrequencyThrottle;
 
 use super::super::scene_rebuild::{flush_canvas_scene_buffers, update_section_resize_handle_tree_from_slice};
-use super::{DrainContext, ThrottledInteraction};
+use super::pending::ThrottledPending;
+use super::release::{ReleaseCommit, ReleaseRefresh};
+use super::{DrainContext, ThrottledDragInteraction, ThrottledInteraction};
 
 /// Per-frame drains mutate the section's tree subtree only; the
 /// model is unchanged until release-commit, where
@@ -26,14 +27,10 @@ pub(in crate::application::app) struct MovingSectionInteraction {
     /// `total_delta` to this and writes the result via
     /// `set_section_offset`.
     pub start_offset: (f64, f64),
-    /// Accumulated total delta across the entire drag. Used at
-    /// release to compute the new offset from `start_offset`.
-    pub total_delta: Vec2,
-    /// Delta accumulated since the last successful drain. Folded
-    /// into the tree and reset to `Vec2::ZERO` in `drain`.
-    pub pending_delta: Vec2,
-    /// Per-interaction adaptive throttle.
-    pub throttle: MutationFrequencyThrottle,
+    /// Delta-accumulate pending state plus this gesture's adaptive
+    /// throttle. The running total is what release folds into
+    /// `start_offset`.
+    pub pending: ThrottledPending,
 }
 
 impl MovingSectionInteraction {
@@ -46,20 +43,18 @@ impl MovingSectionInteraction {
             node_id,
             section_idx,
             start_offset,
-            total_delta: Vec2::ZERO,
-            pending_delta: Vec2::ZERO,
-            throttle: MutationFrequencyThrottle::with_default_budget(),
+            pending: ThrottledPending::accumulating_deltas(),
         }
     }
 }
 
 impl ThrottledInteraction for MovingSectionInteraction {
-    fn has_pending(&self) -> bool {
-        self.pending_delta != Vec2::ZERO
+    fn pending(&self) -> &ThrottledPending {
+        &self.pending
     }
 
-    fn throttle(&mut self) -> &mut MutationFrequencyThrottle {
-        &mut self.throttle
+    fn pending_mut(&mut self) -> &mut ThrottledPending {
+        &mut self.pending
     }
 
     fn drain(&mut self, ctx: DrainContext<'_>) {
@@ -71,14 +66,16 @@ impl ThrottledInteraction for MovingSectionInteraction {
             ..
         } = ctx;
 
+        let pending_delta = self.pending.take_delta();
+        let total_delta = self.pending.total_delta();
         if let Some(tree) = mindmap_tree.as_mut() {
             let mut patches = Vec::new();
             apply_section_drag_delta_and_collect_patches(
                 tree,
                 &self.node_id,
                 self.section_idx,
-                self.pending_delta.x,
-                self.pending_delta.y,
+                pending_delta.x,
+                pending_delta.y,
                 &mut patches,
             );
             renderer.patch_drag_positions(&patches);
@@ -93,8 +90,8 @@ impl ThrottledInteraction for MovingSectionInteraction {
                 if let Some(node) = doc.mindmap.nodes.get(&self.node_id) {
                     if let Some(section) = node.sections.get(self.section_idx) {
                         let canvas_pos = Vec2::new(
-                            node.position.x as f32 + section.offset.x as f32 + self.total_delta.x,
-                            node.position.y as f32 + section.offset.y as f32 + self.total_delta.y,
+                            node.position.x as f32 + section.offset.x as f32 + total_delta.x,
+                            node.position.y as f32 + section.offset.y as f32 + total_delta.y,
                         );
                         let canvas_size = section
                             .size
@@ -131,8 +128,41 @@ impl ThrottledInteraction for MovingSectionInteraction {
             // there `offsets` is a real, in-flight map.
             flush_canvas_scene_buffers(app_scene, renderer);
         }
+    }
+}
 
-        self.pending_delta = Vec2::ZERO;
+impl ThrottledDragInteraction for MovingSectionInteraction {
+    /// Release-commit body, renderer-free. See [`super::release`].
+    ///
+    /// A single setter call; AABB overflow rejection logs and falls
+    /// through to [`ReleaseRefresh::All`], which rebuilds the tree
+    /// from the unchanged model and snaps the section back.
+    fn commit_on_release_core(&mut self, c: ReleaseCommit<'_>) -> ReleaseRefresh {
+        let Some(doc) = c.document.as_mut() else {
+            return ReleaseRefresh::None;
+        };
+        let total_delta = self.pending.total_delta();
+        let new_x = self.start_offset.0 + total_delta.x as f64;
+        let new_y = self.start_offset.1 + total_delta.y as f64;
+        match doc.set_section_offset(&self.node_id, self.section_idx, new_x, new_y) {
+            Ok(true) => {}
+            Ok(false) => {
+                log::debug!(
+                    "section drag committed no-op offset on '{}' section[{}]",
+                    self.node_id,
+                    self.section_idx
+                );
+            }
+            Err(msg) => {
+                log::info!("section drag release rejected: {} (snapping back)", msg);
+            }
+        }
+        // Unconditional clear so the rebuild resamples from the
+        // authoritative model — the per-frame drain mutated the
+        // tree (and therefore stale scene-cache samples) regardless
+        // of which arm above ran.
+        c.scene_cache.clear();
+        ReleaseRefresh::All
     }
 }
 
@@ -140,58 +170,45 @@ impl ThrottledInteraction for MovingSectionInteraction {
 mod tests {
     use super::*;
     use crate::application::app::throttled_interaction::test_utils::{
-        drive_throttle_over_budget, trait_default_tests_for_throttled_interaction,
+        drive_throttle_over_budget, moved, trait_default_tests_for_throttled_interaction,
     };
 
     #[test]
-    fn test_new_initialises_fields_with_zero_deltas() {
+    fn test_new_initializes_fields_with_zero_deltas() {
         let i = MovingSectionInteraction::new("0".to_string(), 1, (10.0, 10.0));
         assert_eq!(i.node_id, "0");
         assert_eq!(i.section_idx, 1);
         assert_eq!(i.start_offset, (10.0, 10.0));
-        assert_eq!(i.pending_delta, Vec2::ZERO);
-        assert_eq!(i.total_delta, Vec2::ZERO);
-        assert_eq!(i.throttle.current_n(), 1);
+        assert_eq!(i.pending.pending_delta(), Vec2::ZERO);
+        assert_eq!(i.pending.total_delta(), Vec2::ZERO);
+        assert_eq!(i.pending.throttle.current_n(), 1);
     }
 
+    /// Delta-accumulate discipline — see the `MovingNode`
+    /// counterpart for why the wiring is worth its own test.
     #[test]
-    fn test_has_pending_false_for_zero_delta() {
-        let i = MovingSectionInteraction::new("n".into(), 0, (0.0, 0.0));
+    fn test_pending_uses_the_delta_accumulate_discipline() {
+        let mut i = MovingSectionInteraction::new("n".into(), 0, (0.0, 0.0));
         assert!(!i.has_pending());
-    }
-
-    #[test]
-    fn test_has_pending_true_for_nonzero_delta() {
-        let mut i = MovingSectionInteraction::new("n".into(), 0, (0.0, 0.0));
-        i.pending_delta = Vec2::new(3.0, -2.0);
+        i.accumulate(moved(3.0, -2.0));
         assert!(i.has_pending());
-    }
-
-    #[test]
-    fn test_has_pending_true_for_tiny_nonzero_delta() {
-        // Strict `!= ZERO` — a sub-pixel accumulator from one
-        // high-frequency cursor tick must still count as pending,
-        // because the sum across skipped frames is the contract
-        // `drive()` relies on.
-        let mut i = MovingSectionInteraction::new("n".into(), 0, (0.0, 0.0));
-        i.pending_delta = Vec2::new(1e-6, 0.0);
-        assert!(i.has_pending());
+        assert_eq!(i.pending.total_delta(), Vec2::new(3.0, -2.0));
+        assert_eq!(i.pending.peek_cursor(), None);
     }
 
     #[test]
     fn test_reset_resets_only_throttle() {
         let mut i = MovingSectionInteraction::new("n".into(), 1, (5.0, 7.0));
-        i.pending_delta = Vec2::new(11.0, 13.0);
-        i.total_delta = Vec2::new(17.0, 19.0);
-        drive_throttle_over_budget(&mut i.throttle);
-        assert!(i.throttle.current_n() > 1);
+        i.accumulate(moved(11.0, 13.0));
+        drive_throttle_over_budget(&mut i.pending.throttle);
+        assert!(i.pending.throttle.current_n() > 1);
 
         i.reset();
 
-        assert_eq!(i.throttle.current_n(), 1);
+        assert_eq!(i.pending.throttle.current_n(), 1);
         // Pending / total / identity survive — reset is throttle-only.
-        assert_eq!(i.pending_delta, Vec2::new(11.0, 13.0));
-        assert_eq!(i.total_delta, Vec2::new(17.0, 19.0));
+        assert_eq!(i.pending.pending_delta(), Vec2::new(11.0, 13.0));
+        assert_eq!(i.pending.total_delta(), Vec2::new(11.0, 13.0));
         assert_eq!(i.node_id, "n");
         assert_eq!(i.section_idx, 1);
         assert_eq!(i.start_offset, (5.0, 7.0));
@@ -201,13 +218,13 @@ mod tests {
     fn test_throttle_accessor_reaches_owned_instance() {
         let mut i = MovingSectionInteraction::new("n".into(), 0, (0.0, 0.0));
         drive_throttle_over_budget(i.throttle());
-        assert!(i.throttle.current_n() > 1);
+        assert!(i.pending.throttle.current_n() > 1);
     }
 
     trait_default_tests_for_throttled_interaction! {
         build = || MovingSectionInteraction::new("n".into(), 0, (0.0, 0.0)),
         set_pending = |i: &mut MovingSectionInteraction| {
-            i.pending_delta = Vec2::new(1.0, 0.0);
+            i.accumulate(moved(1.0, 0.0));
         },
     }
 }

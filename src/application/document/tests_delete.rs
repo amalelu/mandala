@@ -10,7 +10,7 @@ use super::*;
 use baumhard::mindmap::model::MindEdge;
 use glam::Vec2;
 
-use super::defaults::default_cross_link_edge;
+use super::defaults::{default_cross_link_edge, default_orphan_node, default_parent_child_edge};
 
 /// on (or very near) the edge path.
 #[test]
@@ -402,13 +402,267 @@ fn test_delete_root_node_works() {
     }
 }
 
+// ---------------------------------------------------------------
+// Regression: delete+undo must never corrupt the map (issue #1 /
+// P0-01). The deleted node's children are re-rooted with fresh Dewey
+// ids; the original bug scanned the already-shrunk map and handed a
+// child the just-deleted node's own id, which undo then overwrote —
+// destroying the child and leaving a dangling parent_id. The helpers
+// below drive delete+undo and assert byte-equal restoration; the
+// tests only differ in the fixture shape.
+// ---------------------------------------------------------------
+
+/// Build a doc with the given `roots` (all childless except
+/// `subtree_root`), where `subtree_root` owns a two-level subtree
+/// `{subtree_root}.0 → {subtree_root}.0.0`. Edges: parent_child down
+/// the subtree plus a cross_link from the first root into the deepest
+/// descendant, so edge restoration is exercised across a cascaded
+/// rename, not just the direct parent_child edges.
+fn build_roots_with_deep_subtree(roots: &[&str], subtree_root: &str) -> MindMapDocument {
+    assert!(
+        roots.contains(&subtree_root),
+        "subtree_root {subtree_root} must be one of the roots"
+    );
+    let mut doc = MindMapDocument::with_orphan(roots[0], Vec2::ZERO);
+    for &rid in &roots[1..] {
+        doc.mindmap
+            .nodes
+            .insert(rid.to_string(), default_orphan_node(rid, Vec2::ZERO));
+    }
+    let child = format!("{subtree_root}.0");
+    let grandchild = format!("{subtree_root}.0.0");
+    for (cid, parent) in [
+        (child.as_str(), subtree_root),
+        (grandchild.as_str(), child.as_str()),
+    ] {
+        let mut node = default_orphan_node(cid, Vec2::ZERO);
+        node.parent_id = Some(parent.to_string());
+        doc.mindmap.nodes.insert(cid.to_string(), node);
+    }
+    doc.mindmap.edges = vec![
+        default_parent_child_edge(subtree_root, &child),
+        default_parent_child_edge(&child, &grandchild),
+        default_cross_link_edge(roots[0], &grandchild),
+    ];
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    doc
+}
+
+/// id → `Debug`-formatted node payload, order-independent. `MindNode`
+/// has no interior `HashMap`, so its `Debug` string is a
+/// deterministic, field-complete fingerprint — the practical stand-in
+/// for the `PartialEq` the model deliberately doesn't derive. Used to
+/// assert the post-undo node set is byte-equal to the pre-delete one.
+fn node_debug_snapshot(doc: &MindMapDocument) -> std::collections::BTreeMap<String, String> {
+    doc.mindmap
+        .nodes
+        .iter()
+        .map(|(id, node)| (id.clone(), format!("{:?}", node)))
+        .collect()
+}
+
+/// Every `parent_id` in the map must reference a node that exists.
+/// The corruption left a child keyed `"3.0"` pointing at a `"3"` that
+/// no longer existed; this catches that class of dangling reference.
+fn assert_no_dangling_parents(doc: &MindMapDocument) {
+    for node in doc.mindmap.nodes.values() {
+        if let Some(pid) = node.parent_id.as_deref() {
+            assert!(
+                doc.mindmap.nodes.contains_key(pid),
+                "node {} has dangling parent_id {}",
+                node.id,
+                pid
+            );
+        }
+    }
+}
+
+/// Delete `victim`, push the undo, undo it, and assert the whole model
+/// round-trips byte-for-byte: node payloads + parent_ids (order-
+/// independent snapshot) and edges (order *and* payload). Also asserts
+/// the node is gone mid-way and that neither state dangles. Returns the
+/// `orphaned_children` mapping so callers can additionally assert
+/// properties of the fresh-root assignment. Single source of truth for
+/// the delete+undo contract so the scenario tests can't silently
+/// diverge from it.
+fn assert_delete_undo_roundtrip(doc: &mut MindMapDocument, victim: &str) -> Vec<(String, String)> {
+    let before_nodes = node_debug_snapshot(doc);
+    let before_edges = doc.mindmap.edges.clone();
+
+    let undo = doc.delete_node(victim).expect("delete should succeed");
+    let orphaned = match &undo {
+        UndoAction::DeleteNode {
+            orphaned_children, ..
+        } => orphaned_children.clone(),
+        _ => panic!("expected DeleteNode undo action"),
+    };
+    assert!(
+        !doc.mindmap.nodes.contains_key(victim),
+        "{victim} should be gone after delete"
+    );
+    assert_no_dangling_parents(doc);
+
+    doc.undo_stack.push(undo);
+    doc.dirty = true;
+    assert!(doc.undo(), "undo of delete({victim}) should succeed");
+
+    assert_eq!(
+        node_debug_snapshot(doc),
+        before_nodes,
+        "delete+undo of {victim}: node set + payloads must be byte-equal"
+    );
+    assert_eq!(
+        doc.mindmap.edges, before_edges,
+        "delete+undo of {victim}: edges must be restored exactly (order + payload)"
+    );
+    assert_no_dangling_parents(doc);
+    orphaned
+}
+
 #[test]
-fn test_scene_builder_highlights_selected_edge() {
+fn test_delete_max_root_does_not_reuse_deleted_id() {
+    // Highest root "3" (roots "0".."3") owns a subtree; re-rooting its
+    // child must not be handed the just-deleted "3" (forward-delete
+    // invariant, no undo).
+    let mut doc = build_roots_with_deep_subtree(&["0", "1", "2", "3"], "3");
+    let undo = doc.delete_node("3").expect("delete should succeed");
+
+    if let UndoAction::DeleteNode {
+        ref orphaned_children,
+        ..
+    } = undo
+    {
+        assert_eq!(orphaned_children.len(), 1, "root \"3\" has exactly one child");
+        let (old_id, new_root_id) = &orphaned_children[0];
+        assert_eq!(old_id, "3.0");
+        assert_ne!(
+            new_root_id, "3",
+            "orphaned child must not reuse the just-deleted root id"
+        );
+    } else {
+        panic!("expected DeleteNode undo action");
+    }
+    assert!(!doc.mindmap.nodes.contains_key("3"), "\"3\" was deleted");
+    assert_no_dangling_parents(&doc);
+}
+
+#[test]
+fn test_delete_max_root_with_subtree_undo_restores_exact_model() {
+    let mut doc = build_roots_with_deep_subtree(&["0", "1", "2", "3"], "3");
+    assert_delete_undo_roundtrip(&mut doc, "3");
+
+    // Structural spot-checks so a failure localizes fast.
+    assert!(doc.mindmap.nodes.get("3").unwrap().parent_id.is_none());
+    assert_eq!(
+        doc.mindmap.nodes.get("3.0").unwrap().parent_id.as_deref(),
+        Some("3")
+    );
+    assert_eq!(
+        doc.mindmap.nodes.get("3.0.0").unwrap().parent_id.as_deref(),
+        Some("3.0")
+    );
+}
+
+#[test]
+fn test_delete_sole_root_with_subtree_undo_restores_exact_model() {
+    // A single root "0" with a two-level subtree is the other face of
+    // the same bug: removing the only root before minting leaves zero
+    // root-level ids, so a naive mint hands the first orphan "0" — the
+    // deleted id — and undo overwrites it.
+    let mut doc = build_roots_with_deep_subtree(&["0"], "0");
+    assert_delete_undo_roundtrip(&mut doc, "0");
+}
+
+// ---------------------------------------------------------------
+// Regression: id and tree structure can diverge — `apply_reparent`
+// / `apply_orphan_selection` re-point `parent_id` without re-keying
+// the node — so a node's Dewey id need not match its position in the
+// tree. Deleting such a node must not panic or corrupt. Both fixtures
+// below build states reachable via orphan+reparent and both crash /
+// corrupt on the naive "keep the deleted node in the map while
+// cascading" approach.
+// ---------------------------------------------------------------
+
+/// A structural child whose Dewey id is a *prefix* of its parent's id
+/// (child `"1"`, parent `"1.0"`). Reachable by orphaning `"1.0"` to a
+/// root, then reparenting `"1"` under it. Deleting `"1.0"` must not
+/// let the child's cascade sweep the still-keyed parent up by prefix
+/// and strand the removal (a panic on the prior commit). Round-trips
+/// byte-equal on undo.
+#[test]
+fn test_delete_node_child_id_is_dewey_prefix_of_parent() {
+    let mut doc = MindMapDocument::with_orphan("1.0", Vec2::ZERO);
+    // "1" is a structural child of "1.0" (id diverges from structure).
+    let mut child = default_orphan_node("1", Vec2::ZERO);
+    child.parent_id = Some("1.0".to_string());
+    doc.mindmap.nodes.insert("1".to_string(), child);
+    // ...and "1" has its own child "1.2" (here id and structure agree).
+    let mut grandchild = default_orphan_node("1.2", Vec2::ZERO);
+    grandchild.parent_id = Some("1".to_string());
+    doc.mindmap.nodes.insert("1.2".to_string(), grandchild);
+    doc.mindmap.edges = vec![
+        default_parent_child_edge("1.0", "1"),
+        default_parent_child_edge("1", "1.2"),
+    ];
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    // Must not panic (the pre-fix code hit `remove(node_id).expect(..)`).
+    assert_delete_undo_roundtrip(&mut doc, "1.0");
+}
+
+/// A subtree whose deepest descendant would reclaim the deleted node's
+/// own id if re-rooted naively: delete `"2.0"` (child `"2.0.0"`,
+/// grandchild `"2.0.0.0"`) while roots `"0"`/`"1"` exist. Minting the
+/// re-rooted id from the shrunk root set yields `"2"`, so the grandchild
+/// `"2.0.0.0"` cascades to `"2.0"` — colliding with the node still being
+/// deleted. The fix mints above every leading segment, avoiding it.
+#[test]
+fn test_delete_node_grandchild_would_reclaim_deleted_id() {
+    let mut doc = MindMapDocument::with_orphan("0", Vec2::ZERO);
+    doc.mindmap
+        .nodes
+        .insert("1".to_string(), default_orphan_node("1", Vec2::ZERO));
+    // "2.0" is a root (its former root "2" was deleted); it owns a
+    // two-level subtree.
+    doc.mindmap
+        .nodes
+        .insert("2.0".to_string(), default_orphan_node("2.0", Vec2::ZERO));
+    for (cid, parent) in [("2.0.0", "2.0"), ("2.0.0.0", "2.0.0")] {
+        let mut node = default_orphan_node(cid, Vec2::ZERO);
+        node.parent_id = Some(parent.to_string());
+        doc.mindmap.nodes.insert(cid.to_string(), node);
+    }
+    doc.mindmap.edges = vec![
+        default_parent_child_edge("2.0", "2.0.0"),
+        default_parent_child_edge("2.0.0", "2.0.0.0"),
+        default_cross_link_edge("0", "2.0.0.0"),
+    ];
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    let orphaned = assert_delete_undo_roundtrip(&mut doc, "2.0");
+
+    // The re-rooted child must not have reclaimed the deleted id "2.0"
+    // (nor a Dewey prefix of it — else a descendant would).
+    for (_old, new_root) in &orphaned {
+        assert_ne!(new_root, "2.0", "orphan must not reclaim the deleted id");
+        assert!(
+            !"2.0".starts_with(&format!("{}.", new_root)),
+            "orphan root {} must not be a Dewey prefix of the deleted id",
+            new_root
+        );
+    }
+}
+
+#[test]
+fn test_connection_pass_highlights_selected_edge() {
     let mut doc = load_test_doc();
     let (edge_ref, _) = pick_test_edge(&doc);
 
     // Without selection: the edge renders with its model color
-    let scene_normal = doc.build_scene_with_selection(1.0, InteractionModeOverrides::none());
+    let scene_normal = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
     let normal_colors: Vec<String> = scene_normal
         .connection_elements
         .iter()
@@ -417,7 +671,7 @@ fn test_scene_builder_highlights_selected_edge() {
 
     // With edge selected: its element color should be the cyan highlight
     doc.selection = SelectionState::Edge(edge_ref);
-    let scene_selected = doc.build_scene_with_selection(1.0, InteractionModeOverrides::none());
+    let scene_selected = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
     let highlighted_count = scene_selected
         .connection_elements
         .iter()
@@ -668,4 +922,3 @@ fn test_orphan_selection_on_root_is_noop() {
     // undo.entries may be non-empty but the restoration is a no-op.
     let _ = undo;
 }
-

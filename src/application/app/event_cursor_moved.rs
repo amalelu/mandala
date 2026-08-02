@@ -18,12 +18,12 @@ use super::color_picker_flow::handle_color_picker_mouse_move;
 use super::input_context::InputHandlerContext;
 use super::scene_rebuild::{rebuild_after_selection_change, rebuild_all};
 use super::throttled_interaction::{
-    EdgeHandleInteraction, EdgeLabelInteraction, MovingNodeInteraction, MovingSectionInteraction,
+    DragInput, EdgeHandleInteraction, EdgeLabelInteraction, MovingNodeInteraction, MovingSectionInteraction,
     NodeResizeInteraction, PortalLabelInteraction, SectionResizeInteraction, ThrottledDrag,
 };
 use super::DragState;
 use crate::application::common::RenderDecree;
-use crate::application::document::{apply_tree_highlights, hit_test, SelectionState};
+use crate::application::document::{hit_test, SelectionState};
 
 pub(super) fn handle_cursor_moved(
     position: PhysicalPosition<f64>,
@@ -99,12 +99,13 @@ pub(super) fn handle_cursor_moved(
     // gate matters on those targets. `cursor_icon_last` lives on
     // `InitState` — see its doc-comment for the rationale.
     let desired = match ctx.drag_state {
-        DragState::Throttled(ThrottledDrag::NodeResize(i)) => {
-            Some(cursor_icon_for_resize_side(i.side))
-        }
-        DragState::Throttled(ThrottledDrag::SectionResize(i)) => {
-            Some(cursor_icon_for_resize_side(i.side))
-        }
+        DragState::Throttled(drag) => match &**drag {
+            ThrottledDrag::NodeResize(i) => Some(cursor_icon_for_resize_side(i.side)),
+            ThrottledDrag::SectionResize(i) => Some(cursor_icon_for_resize_side(i.side)),
+            // Every other throttled gesture keeps whatever cursor
+            // the gesture started with.
+            _ => None,
+        },
         DragState::None => {
             let over_button = match (ctx.document.as_ref(), ctx.mindmap_tree.as_mut()) {
                 (Some(doc), Some(tree)) => {
@@ -141,62 +142,27 @@ pub(super) fn handle_cursor_moved(
             ctx.renderer
                 .process_decree(RenderDecree::CameraPan(dx as f32, dy as f32));
         }
-        DragState::Throttled(ThrottledDrag::MovingNode(i)) => {
-            // Per-frame mutation + rebuild happens in AboutToWait
-            // behind `ThrottledInteraction::drive`'s adaptive gate.
-            let delta = canvas_delta(ctx.renderer, prev_pos, cursor_pos_val);
-            i.total_delta += delta;
-            i.pending_delta += delta;
+        DragState::Throttled(drag) => {
+            // One sample, both forms; the gesture's own pending
+            // discipline decides which half survives — the five
+            // delta drags sum, the two label drags keep the last
+            // cursor and discard the rest. Per-frame mutation and
+            // rebuild happen in AboutToWait behind
+            // `ThrottledInteraction::drive`'s adaptive gate.
+            let input = drag_input(ctx.renderer, prev_pos, cursor_pos_val);
+            drag.as_dyn_mut().accumulate(input);
         }
-        DragState::Throttled(ThrottledDrag::MovingSection(i)) => {
-            let delta = canvas_delta(ctx.renderer, prev_pos, cursor_pos_val);
-            i.total_delta += delta;
-            i.pending_delta += delta;
-        }
-        DragState::Throttled(ThrottledDrag::EdgeHandle(i)) => {
-            let delta = canvas_delta(ctx.renderer, prev_pos, cursor_pos_val);
-            i.total_delta += delta;
-            i.pending_delta += delta;
-        }
-        DragState::Throttled(ThrottledDrag::SectionResize(i)) => {
-            let delta = canvas_delta(ctx.renderer, prev_pos, cursor_pos_val);
-            i.total_delta += delta;
-            i.pending_delta += delta;
-        }
-        DragState::Throttled(ThrottledDrag::NodeResize(i)) => {
-            let delta = canvas_delta(ctx.renderer, prev_pos, cursor_pos_val);
-            i.total_delta += delta;
-            i.pending_delta += delta;
-        }
-        DragState::Throttled(ThrottledDrag::EdgeLabel(i)) => {
-            // Overwrite discipline: store the latest cursor —
-            // `EdgeLabelInteraction::drain` projects it onto the
-            // edge path at consume time, so intermediate cursors
-            // carry no information the projection needs.
-            let cursor_canvas = ctx
-                .renderer
-                .screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
-            i.pending_cursor = Some(cursor_canvas);
-        }
-        DragState::Throttled(ThrottledDrag::PortalLabel(i)) => {
-            // Overwrite discipline, same as `EdgeLabel` —
-            // `PortalLabelInteraction::drain` snaps to the node
-            // border at consume time.
-            let cursor_canvas = ctx
-                .renderer
-                .screen_to_canvas(cursor_pos_val.0 as f32, cursor_pos_val.1 as f32);
-            i.pending_cursor = Some(cursor_canvas);
-        }
-        DragState::Pending {
-            start_pos,
-            hit_node,
-            hit_section_idx,
-            hit_edge_handle,
-            hit_portal_label,
-            hit_edge_label,
-            hit_section_resize_handle,
-            hit_node_resize_handle,
-        } => {
+        DragState::Pending(press) => {
+            let super::PendingPress {
+                start_pos,
+                hit_node,
+                hit_section_idx,
+                hit_edge_handle,
+                hit_portal_label,
+                hit_edge_label,
+                hit_section_resize_handle,
+                hit_node_resize_handle,
+            } = &mut **press;
             let dist_x = cursor_pos_val.0 - start_pos.0;
             let dist_y = cursor_pos_val.1 - start_pos.1;
             if dist_x * dist_x + dist_y * dist_y > super::DRAG_THRESHOLD_SQ_PX {
@@ -246,7 +212,7 @@ pub(super) fn handle_cursor_moved(
                                 crate::application::document::EdgeLabelSel::new(edge_ref.clone()),
                             );
                             ctx.scene_cache.clear();
-                            *ctx.drag_state = DragState::Throttled(ThrottledDrag::EdgeLabel(
+                            *ctx.drag_state = DragState::throttled(ThrottledDrag::EdgeLabel(
                                 EdgeLabelInteraction::new(edge_ref, original),
                             ));
                             // `rebuild_after_selection_change` picks
@@ -290,7 +256,7 @@ pub(super) fn handle_cursor_moved(
                                     endpoint_node_id: endpoint.clone(),
                                 });
                             ctx.scene_cache.clear();
-                            *ctx.drag_state = DragState::Throttled(ThrottledDrag::PortalLabel(
+                            *ctx.drag_state = DragState::throttled(ThrottledDrag::PortalLabel(
                                 PortalLabelInteraction::new(edge_ref, endpoint, original),
                             ));
                             rebuild_all(
@@ -324,7 +290,7 @@ pub(super) fn handle_cursor_moved(
                                 .map(|(_, p)| p)
                                 .unwrap_or(canvas_pos);
                             ctx.scene_cache.clear();
-                            *ctx.drag_state = DragState::Throttled(ThrottledDrag::EdgeHandle(
+                            *ctx.drag_state = DragState::throttled(ThrottledDrag::EdgeHandle(
                                 EdgeHandleInteraction::new(edge_ref, handle_kind, original, start_handle_pos),
                             ));
                             return;
@@ -366,12 +332,13 @@ pub(super) fn handle_cursor_moved(
                                     doc.selection = new_sel;
                                     rebuild_selection_highlight(
                                         doc,
+                                        ctx.interaction_mode,
                                         ctx.mindmap_tree,
                                         ctx.renderer,
                                     );
                                 }
                                 ctx.scene_cache.clear();
-                                *ctx.drag_state = DragState::Throttled(ThrottledDrag::NodeResize(
+                                *ctx.drag_state = DragState::throttled(ThrottledDrag::NodeResize(
                                     NodeResizeInteraction::new(
                                         node_id,
                                         side,
@@ -414,22 +381,21 @@ pub(super) fn handle_cursor_moved(
                                     // `Section(node, idx)` so the
                                     // mid-drag picker hint matches
                                     // the in-flight gesture.
-                                    if let Some(new_sel) =
-                                        selection_after_section_drag_press(
-                                            &doc.selection,
-                                            &node_id,
-                                            section_idx,
-                                        )
-                                    {
+                                    if let Some(new_sel) = selection_after_section_drag_press(
+                                        &doc.selection,
+                                        &node_id,
+                                        section_idx,
+                                    ) {
                                         doc.selection = new_sel;
                                         rebuild_selection_highlight(
                                             doc,
+                                            ctx.interaction_mode,
                                             ctx.mindmap_tree,
                                             ctx.renderer,
                                         );
                                     }
                                     ctx.scene_cache.clear();
-                                    *ctx.drag_state = DragState::Throttled(ThrottledDrag::SectionResize(
+                                    *ctx.drag_state = DragState::throttled(ThrottledDrag::SectionResize(
                                         SectionResizeInteraction::new(
                                             node_id,
                                             section_idx,
@@ -474,17 +440,20 @@ pub(super) fn handle_cursor_moved(
                         ctx.modifiers.shift_key(),
                     ) {
                         if let Some(doc) = ctx.document.as_mut() {
-                            if let Some(new_sel) = selection_after_section_drag_press(
-                                &doc.selection,
-                                &node_id,
-                                section_idx,
-                            ) {
+                            if let Some(new_sel) =
+                                selection_after_section_drag_press(&doc.selection, &node_id, section_idx)
+                            {
                                 doc.selection = new_sel;
-                                rebuild_selection_highlight(doc, ctx.mindmap_tree, ctx.renderer);
+                                rebuild_selection_highlight(
+                                    doc,
+                                    ctx.interaction_mode,
+                                    ctx.mindmap_tree,
+                                    ctx.renderer,
+                                );
                             }
                         }
                         ctx.scene_cache.clear();
-                        *ctx.drag_state = DragState::Throttled(ThrottledDrag::MovingSection(
+                        *ctx.drag_state = DragState::throttled(ThrottledDrag::MovingSection(
                             MovingSectionInteraction::new(node_id, section_idx, (ox, oy)),
                         ));
                         return;
@@ -501,11 +470,14 @@ pub(super) fn handle_cursor_moved(
                     // (release rebuild lands the same coherent
                     // shape).
                     if let Some(doc) = ctx.document.as_mut() {
-                        if let Some(new_sel) =
-                            selection_after_node_drag_press(&doc.selection, &node_id)
-                        {
+                        if let Some(new_sel) = selection_after_node_drag_press(&doc.selection, &node_id) {
                             doc.selection = new_sel;
-                            rebuild_selection_highlight(doc, ctx.mindmap_tree, ctx.renderer);
+                            rebuild_selection_highlight(
+                                doc,
+                                ctx.interaction_mode,
+                                ctx.mindmap_tree,
+                                ctx.renderer,
+                            );
                         }
                     }
                     // Shift+drag: move all selected nodes together.
@@ -528,8 +500,17 @@ pub(super) fn handle_cursor_moved(
                     // the keyed-edge rebuild picks up the moving
                     // node's edges from scratch.
                     ctx.scene_cache.clear();
-                    *ctx.drag_state = DragState::Throttled(ThrottledDrag::MovingNode(
-                        MovingNodeInteraction::new(node_ids, ctx.modifiers.alt_key()),
+                    let individual = ctx.modifiers.alt_key();
+                    let mut descendant_ids = std::collections::HashSet::new();
+                    if !individual {
+                        if let Some(doc) = ctx.document.as_ref() {
+                            for nid in &node_ids {
+                                descendant_ids.extend(doc.mindmap.all_descendants(nid));
+                            }
+                        }
+                    }
+                    *ctx.drag_state = DragState::throttled(ThrottledDrag::MovingNode(
+                        MovingNodeInteraction::new(node_ids, individual, descendant_ids),
                     ));
                 } else if ctx.modifiers.shift_key() {
                     // Shift+drag on empty space: rubber-band selection
@@ -544,27 +525,71 @@ pub(super) fn handle_cursor_moved(
                         current_canvas,
                     };
                 } else {
-                    // LeftDrag-on-empty pan. Honour the user's
-                    // PanCanvas binding: if they unbound LeftDrag from
-                    // PanCanvas (or rebound it elsewhere), the pan
-                    // doesn't fire. Default `KeybindConfig::default()`
-                    // ships with `pan_canvas: ["LeftDrag", "MiddleClick"]`
-                    // so out-of-the-box behaviour is unchanged.
+                    // LeftDrag-on-empty. Honor the user's binding:
+                    // whatever Action is bound to `LeftDrag`
+                    // (default `PanCanvas`) goes through the §3
+                    // funnel, so rebinding the gesture rebinds the
+                    // behavior and a macro-visible Action isn't
+                    // shadowed by a second copy of its body here.
+                    // Same shape as the `RightDrag` threshold-cross
+                    // arm below and the `MiddleClick` press arm in
+                    // `event_mouse_click.rs`. If the user unbound
+                    // `LeftDrag`, nothing fires.
                     // `action_for_gesture` falls back to unmodified
                     // when no exact-modifier binding exists, so
                     // Ctrl+LeftDrag-on-empty pans like a bare
-                    // LeftDrag-on-empty did pre-branch. Only
-                    // `PanCanvas` is dispatched via this shortcut;
-                    // future Actions bound to `LeftDrag` won't fire
-                    // here without explicit handling.
-                    let leftdrag_pans = ctx.keybinds.action_for_gesture(
+                    // LeftDrag-on-empty did pre-branch.
+                    let action = ctx.keybinds.action_for_gesture(
                         crate::application::keybinds::MouseGesture::LeftDrag.key_name(),
                         ctx.modifiers.control_key(),
                         ctx.modifiers.shift_key(),
                         ctx.modifiers.alt_key(),
-                    ) == Some(crate::application::keybinds::Action::PanCanvas);
-                    if leftdrag_pans {
-                        *ctx.drag_state = DragState::Panning;
+                    );
+                    if let Some(a) = action {
+                        // Copy the press position out of
+                        // `DragState::Pending` before dispatch:
+                        // `start_pos` borrows `*ctx.drag_state`, and
+                        // the arm bodies take `ctx` mutably (and may
+                        // replace the drag state outright).
+                        let press_pos = *start_pos;
+                        let canvas_pos = ctx
+                            .renderer
+                            .screen_to_canvas(press_pos.0 as f32, press_pos.1 as f32);
+                        // This branch is the empty-canvas leg of the
+                        // Pending fan-out (no node / handle / label
+                        // hit), so the hit is `Empty` by
+                        // construction. Carrying it lets
+                        // hit-consuming Actions bound to `LeftDrag`
+                        // work here the same way they do off
+                        // `RightDrag`.
+                        let dispatch_hit = super::dispatch::DispatchHit {
+                            click_hit: super::ClickHit::Empty,
+                            canvas_pos,
+                        };
+                        super::dispatch::dispatch_action(a, ctx, Some(&dispatch_hit));
+                        // If the arm didn't take ownership of the
+                        // gesture the state is still `Pending`, and
+                        // every following cursor move would re-cross
+                        // the threshold and re-fire the same Action.
+                        // Clear it so a rebound one-shot Action fires
+                        // exactly once per press — the same guard the
+                        // `RightDrag` threshold-cross arm below
+                        // applies to `PendingRight`. Skipped entirely
+                        // when nothing is bound, so an unbound
+                        // `LeftDrag` still leaves `Pending` intact for
+                        // the release handler's click path.
+                        if matches!(*ctx.drag_state, DragState::Pending { .. }) {
+                            *ctx.drag_state = DragState::None;
+                        }
+                    }
+                    // Per-frame continuous-gesture state stays inline
+                    // (CODE_CONVENTIONS §3): the funnel owns the
+                    // discrete entry (`Action::PanCanvas` →
+                    // `DragState::Panning`) and this emits the
+                    // threshold-crossing frame's delta so the pan
+                    // doesn't visibly lag one cursor-move behind the
+                    // gesture.
+                    if emits_first_pan_delta(ctx.drag_state) {
                         let dx = cursor_pos_val.0 - prev_pos.0;
                         let dy = cursor_pos_val.1 - prev_pos.1;
                         ctx.renderer
@@ -637,19 +662,41 @@ pub(super) fn handle_cursor_moved(
     }
 }
 
-/// Compute the canvas-space delta between two screen positions.
-/// Used by every accumulating drag arm; the camera transform
-/// (zoom + pan) lives in the renderer, so a screen → canvas
-/// conversion at both ends is the only honest way to derive a
-/// delta that survives an interleaved camera pan.
-fn canvas_delta(
+/// Project one screen-space cursor move into the canvas-space
+/// [`DragInput`] every throttled drag consumes.
+///
+/// Both ends go through `screen_to_canvas` because the camera
+/// transform (zoom + pan) lives in the renderer, and converting at
+/// both ends is the only honest way to derive a delta that survives
+/// an interleaved camera pan. The absolute half is the same
+/// projection the delta's right-hand term already needed, so the
+/// two forms cost one conversion pair between them.
+fn drag_input(
     renderer: &crate::application::renderer::Renderer,
     prev: (f64, f64),
     curr: (f64, f64),
-) -> glam::Vec2 {
-    let prev_canvas = renderer.screen_to_canvas(prev.0 as f32, prev.1 as f32);
-    let curr_canvas = renderer.screen_to_canvas(curr.0 as f32, curr.1 as f32);
-    curr_canvas - prev_canvas
+) -> DragInput {
+    DragInput::between(
+        renderer.screen_to_canvas(prev.0 as f32, prev.1 as f32),
+        renderer.screen_to_canvas(curr.0 as f32, curr.1 as f32),
+    )
+}
+
+/// Whether the `LeftDrag`-on-empty threshold-crossing frame should
+/// also emit its camera-pan delta, read *after* the bound Action
+/// has been dispatched.
+///
+/// True exactly when the dispatch left us in `DragState::Panning`
+/// — i.e. the Action bound to `LeftDrag` was `PanCanvas` (or a
+/// future Action that also enters pan mode). Before the funnel fix
+/// this arm hardcoded `action == Some(PanCanvas)` and set
+/// `DragState::Panning` inline, so an Action rebound onto
+/// `LeftDrag` fired nothing at all. Now the funnel decides and this
+/// predicate reads the decision back, which also means an Action
+/// that starts some *other* gesture doesn't get a free camera
+/// nudge on its first frame.
+fn emits_first_pan_delta(drag_state: &DragState) -> bool {
+    matches!(drag_state, DragState::Panning)
 }
 
 /// Map a `ResizeHandleSide` to the matching winit `CursorIcon`
@@ -658,10 +705,8 @@ fn canvas_delta(
 /// vertical / horizontal resize cursors. Used by both
 /// handle-driven Resize-mode drags and right-button fast-resize
 /// gestures (`SECTIONS_BORDERS_RESIZE_PLAN.md` §6.5).
-fn cursor_icon_for_resize_side(
-    side: baumhard::mindmap::scene_builder::ResizeHandleSide,
-) -> CursorIcon {
-    use baumhard::mindmap::scene_builder::ResizeHandleSide as S;
+fn cursor_icon_for_resize_side(side: baumhard::mindmap::tree_builder::ResizeHandleSide) -> CursorIcon {
+    use baumhard::mindmap::tree_builder::ResizeHandleSide as S;
     match side {
         // Diagonal corners — NW/SE share \ axis, NE/SW share / axis.
         S::NW | S::SE => CursorIcon::NwseResize,
@@ -685,7 +730,7 @@ fn cursor_icon_for_resize_side(
 /// 2. **Multi-section node** — `hit_test_target`'s single-section
 ///    fold means single-section nodes never produce a section hit
 ///    in the first place, but the redundant check here is a
-///    cheap defence against a future drift.
+///    cheap defense against a future drift.
 /// 3. **`InteractionMode::NodeEdit { matching_id }`** — outside
 ///    NodeEdit, drags on a section's area move the whole node
 ///    (consistent with click-on-section folding to `Single` per
@@ -772,17 +817,24 @@ pub(super) fn selection_after_node_drag_press(
 /// + renderer buffers refreshed to reflect the new highlight.
 fn rebuild_selection_highlight(
     doc: &mut crate::application::document::MindMapDocument,
+    interaction_mode: &super::InteractionMode,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut crate::application::renderer::Renderer,
 ) {
     if let Some(tree) = mindmap_tree.as_mut() {
-        let mut new_tree = doc.build_tree();
-        // Routes through the canonical
-        // `selection_highlight_entries` helper — Section /
-        // MultiSection narrow the highlight to the selected
-        // sections, whole-node selections paint every section.
-        let highlights = super::scene_rebuild::selection_highlight_entries(&doc.selection);
-        apply_tree_highlights(&mut new_tree, highlights);
+        // Every overlay, in the one correct order — see
+        // `build_overlaid_tree`. Highlights route through the
+        // canonical `selection_highlight_entries` helper: Section /
+        // MultiSection narrow to the selected sections, whole-node
+        // selections paint every section. `interaction_mode` is
+        // threaded in for the `NodeEdit` dim; without it a section
+        // drag mid-edit snapped every other node's text back to
+        // full opacity while its border stayed dimmed.
+        let new_tree = super::scene_rebuild::build_overlaid_tree(
+            doc,
+            interaction_mode,
+            super::scene_rebuild::selection_highlight_entries(&doc.selection),
+        );
         renderer.rebuild_buffers_from_tree(&new_tree.tree);
         *tree = new_tree;
     }
@@ -791,14 +843,53 @@ fn rebuild_selection_highlight(
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_icon_for_resize_side, resolve_section_drag_target,
-        selection_after_node_drag_press, selection_after_section_drag_press,
+        cursor_icon_for_resize_side, emits_first_pan_delta, resolve_section_drag_target,
+        selection_after_node_drag_press, selection_after_section_drag_press, DragState,
     };
-    use baumhard::mindmap::scene_builder::ResizeHandleSide;
     use crate::application::app::InteractionMode;
     use crate::application::document::tests_common::{load_test_doc, pinned_two_section_node};
     use crate::application::document::{SectionSel, SelectionState};
     use crate::application::platform::window::CursorIcon;
+    use baumhard::mindmap::tree_builder::ResizeHandleSide;
+
+    /// The `LeftDrag`-on-empty arm dispatches whatever Action the
+    /// user bound, then emits the threshold frame's pan delta only
+    /// if that dispatch entered pan mode. `Panning` is the sole
+    /// state that qualifies — a rebound Action that promotes the
+    /// press to a rect-select or a throttled drag must not also
+    /// move the camera.
+    #[test]
+    fn test_emits_first_pan_delta_only_in_panning_state() {
+        assert!(emits_first_pan_delta(&DragState::Panning));
+        assert!(!emits_first_pan_delta(&DragState::None));
+        assert!(!emits_first_pan_delta(&DragState::SelectingRect {
+            start_canvas: glam::Vec2::ZERO,
+            current_canvas: glam::Vec2::ZERO,
+        }));
+    }
+
+    /// Regression pin for the funnel gap: the arm resolves the
+    /// `LeftDrag` binding with **no filter**, so rebinding the
+    /// gesture to a non-`PanCanvas` Action yields that Action.
+    /// The pre-fix arm compared the lookup against
+    /// `Some(Action::PanCanvas)` and dropped everything else on
+    /// the floor — this asserts the comparison is gone and the
+    /// gesture name / modifier plumbing the arm uses actually
+    /// reaches the rebound entry.
+    #[test]
+    fn test_leftdrag_gesture_lookup_honors_a_non_pan_rebinding() {
+        use crate::application::keybinds::{Action, KeybindConfig, MouseGesture};
+        let mut cfg = KeybindConfig::default();
+        cfg.pan_canvas.retain(|b| b != "LeftDrag");
+        cfg.zoom_fit.push("LeftDrag".into());
+        let resolved = cfg.resolve();
+        assert_eq!(
+            resolved.action_for_gesture(MouseGesture::LeftDrag.key_name(), false, false, false),
+            Some(Action::ZoomFit),
+            "a rebound LeftDrag must resolve to the user's Action, \
+             not be filtered down to PanCanvas"
+        );
+    }
 
     /// Pure 8→4 mapping: every `ResizeHandleSide` lands on the
     /// matching winit `CursorIcon` for direction-appropriate
@@ -810,21 +901,47 @@ mod tests {
     fn cursor_icon_for_resize_side_pin_per_side() {
         // Diagonals share an axis: NW/SE = `\` = NwseResize.
         //                          NE/SW = `/` = NeswResize.
-        assert_eq!(cursor_icon_for_resize_side(ResizeHandleSide::NW), CursorIcon::NwseResize);
-        assert_eq!(cursor_icon_for_resize_side(ResizeHandleSide::SE), CursorIcon::NwseResize);
-        assert_eq!(cursor_icon_for_resize_side(ResizeHandleSide::NE), CursorIcon::NeswResize);
-        assert_eq!(cursor_icon_for_resize_side(ResizeHandleSide::SW), CursorIcon::NeswResize);
+        assert_eq!(
+            cursor_icon_for_resize_side(ResizeHandleSide::NW),
+            CursorIcon::NwseResize
+        );
+        assert_eq!(
+            cursor_icon_for_resize_side(ResizeHandleSide::SE),
+            CursorIcon::NwseResize
+        );
+        assert_eq!(
+            cursor_icon_for_resize_side(ResizeHandleSide::NE),
+            CursorIcon::NeswResize
+        );
+        assert_eq!(
+            cursor_icon_for_resize_side(ResizeHandleSide::SW),
+            CursorIcon::NeswResize
+        );
         // Edge midpoints.
-        assert_eq!(cursor_icon_for_resize_side(ResizeHandleSide::N), CursorIcon::NsResize);
-        assert_eq!(cursor_icon_for_resize_side(ResizeHandleSide::S), CursorIcon::NsResize);
-        assert_eq!(cursor_icon_for_resize_side(ResizeHandleSide::E), CursorIcon::EwResize);
-        assert_eq!(cursor_icon_for_resize_side(ResizeHandleSide::W), CursorIcon::EwResize);
+        assert_eq!(
+            cursor_icon_for_resize_side(ResizeHandleSide::N),
+            CursorIcon::NsResize
+        );
+        assert_eq!(
+            cursor_icon_for_resize_side(ResizeHandleSide::S),
+            CursorIcon::NsResize
+        );
+        assert_eq!(
+            cursor_icon_for_resize_side(ResizeHandleSide::E),
+            CursorIcon::EwResize
+        );
+        assert_eq!(
+            cursor_icon_for_resize_side(ResizeHandleSide::W),
+            CursorIcon::EwResize
+        );
     }
 
     /// Helper: NodeEdit mode targeting `node_id` — the mode that
-    /// licences section-drag promotion.
+    /// licenses section-drag promotion.
     fn node_edit_for(node_id: &str) -> InteractionMode {
-        InteractionMode::NodeEdit { node_id: node_id.to_string() }
+        InteractionMode::NodeEdit {
+            node_id: node_id.to_string(),
+        }
     }
 
     /// Multi-section node + non-shift + valid section_idx + NodeEdit
@@ -835,7 +952,10 @@ mod tests {
         let (doc, id) = pinned_two_section_node();
         let mode = node_edit_for(&id);
         let result = resolve_section_drag_target(Some(&doc), &mode, &id, Some(1), false);
-        assert!(result.is_some(), "multi-section + non-shift + NodeEdit must promote");
+        assert!(
+            result.is_some(),
+            "multi-section + non-shift + NodeEdit must promote"
+        );
         let (idx, _, _) = result.unwrap();
         assert_eq!(idx, 1);
     }
@@ -857,13 +977,7 @@ mod tests {
     #[test]
     fn test_resolve_section_drag_target_default_mode_returns_none() {
         let (doc, id) = pinned_two_section_node();
-        let result = resolve_section_drag_target(
-            Some(&doc),
-            &InteractionMode::Default,
-            &id,
-            Some(1),
-            false,
-        );
+        let result = resolve_section_drag_target(Some(&doc), &InteractionMode::Default, &id, Some(1), false);
         assert!(result.is_none(), "Default mode must NOT promote section drag");
     }
 
@@ -918,9 +1032,7 @@ mod tests {
     /// `None` document or `None` hit_section_idx → fall-through.
     #[test]
     fn test_resolve_section_drag_target_no_doc_or_idx_returns_none() {
-        assert!(
-            resolve_section_drag_target(None, &node_edit_for("0"), "0", Some(0), false).is_none()
-        );
+        assert!(resolve_section_drag_target(None, &node_edit_for("0"), "0", Some(0), false).is_none());
         let (doc, id) = pinned_two_section_node();
         let mode = node_edit_for(&id);
         assert!(resolve_section_drag_target(Some(&doc), &mode, &id, None, false).is_none());
@@ -1017,10 +1129,7 @@ mod tests {
     /// section-drag arm's demote.
     #[test]
     fn test_node_drag_press_demotes_multisection_to_single() {
-        let prev = SelectionState::MultiSection(vec![
-            SectionSel::new("a", 0),
-            SectionSel::new("b", 0),
-        ]);
+        let prev = SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 0)]);
         let new = selection_after_node_drag_press(&prev, "a").expect("rewrite");
         assert!(matches!(new, SelectionState::Single(id) if id == "a"));
     }

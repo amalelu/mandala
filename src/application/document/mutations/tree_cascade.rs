@@ -7,10 +7,11 @@
 //! so each level sees its parent's final position before placing
 //! itself.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use log::debug;
 
+use baumhard::mindmap::model::ChildIndex;
 use baumhard::util::geometry::is_non_negative_finite_f64 as is_safe_coord;
 
 use super::MindMapDocument;
@@ -29,10 +30,17 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
     // is `2 * nodes.len()`: a cycle-free BFS visits each node at
     // most once and enqueues each child at most once, so exceeding
     // twice the node count is definitive proof of a cycle.
+    let index = ChildIndex::build(&doc.mindmap);
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(target_id.to_string());
     let iteration_budget = doc.mindmap.nodes.len().saturating_mul(2).max(2);
     let mut iterations = 0usize;
+    // Planned positions are collected while the `ChildIndex` borrows
+    // the map, then applied after the borrow is dropped. This keeps
+    // the walk O(N) instead of the O(N²) `children_of` loop it
+    // replaced without fighting the borrow checker for in-place
+    // mutation.
+    let mut planned: HashMap<String, (f64, f64)> = HashMap::new();
 
     while let Some(current) = queue.pop_front() {
         iterations += 1;
@@ -44,22 +52,37 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
             iteration_budget,
             target_id
         );
-        let children: Vec<String> = doc
-            .mindmap
-            .children_of(&current)
-            .iter()
-            .map(|n| n.id.clone())
-            .collect();
+        let children: Vec<&baumhard::mindmap::model::MindNode> = index.children_of(&current).to_vec();
         if children.is_empty() {
             continue;
         }
-        let Some(parent) = doc.mindmap.nodes.get(&current).cloned() else {
-            continue;
+        // Parent position: use the planned position when this node was
+        // placed as a child, otherwise fall back to its current model
+        // position (the anchor, or a node whose own parent had bad
+        // geometry and could not place it).
+        let fallback_size = baumhard::mindmap::model::Size {
+            width: 0.0,
+            height: 0.0,
         };
-        if !is_safe_coord(parent.size.width)
-            || !is_safe_coord(parent.size.height)
-            || !parent.position.x.is_finite()
-            || !parent.position.y.is_finite()
+        let (parent_pos, parent_size) = match planned.get(&current) {
+            Some(&(x, y)) => {
+                let size = doc
+                    .mindmap
+                    .nodes
+                    .get(&current)
+                    .map(|n| n.size)
+                    .unwrap_or(fallback_size);
+                ((x, y), size)
+            }
+            None => match doc.mindmap.nodes.get(&current).cloned() {
+                Some(n) => ((n.position.x, n.position.y), n.size),
+                None => continue,
+            },
+        };
+        if !is_safe_coord(parent_size.width)
+            || !is_safe_coord(parent_size.height)
+            || !parent_pos.0.is_finite()
+            || !parent_pos.1.is_finite()
         {
             debug!(
                 "tree-cascade: parent '{}' has non-finite size/position; skipping row",
@@ -67,8 +90,8 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
             );
             // Still enqueue children so deeper levels get placed
             // relative to their own parents if those are well-formed.
-            for child_id in &children {
-                queue.push_back(child_id.clone());
+            for child in &children {
+                queue.push_back(child.id.clone());
             }
             continue;
         }
@@ -79,29 +102,35 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
         // own sub-rows.
         let sizes: Vec<(f64, f64)> = children
             .iter()
-            .filter_map(|id| doc.mindmap.nodes.get(id))
+            .filter_map(|n| doc.mindmap.nodes.get(&n.id))
             .map(|n| (n.size.width, n.size.height))
             .collect();
         let total_width: f64 =
             sizes.iter().map(|(w, _)| *w).sum::<f64>() + SIBLING_GAP * (children.len() as f64 - 1.0).max(0.0);
-        let parent_cx = parent.position.x + parent.size.width / 2.0;
-        let row_y = parent.position.y + parent.size.height + ROW_GAP;
+        let parent_cx = parent_pos.0 + parent_size.width / 2.0;
+        let row_y = parent_pos.1 + parent_size.height + ROW_GAP;
 
         let mut cursor_x = parent_cx - total_width / 2.0;
-        for (child_id, (cw, _ch)) in children.iter().zip(sizes.iter()) {
+        for (child, (cw, _ch)) in children.iter().zip(sizes.iter()) {
             if is_safe_coord(*cw) {
-                if let Some(child) = doc.mindmap.nodes.get_mut(child_id) {
-                    child.position.x = cursor_x;
-                    child.position.y = row_y;
-                }
+                planned.insert(child.id.clone(), (cursor_x, row_y));
             } else {
                 debug!(
                     "tree-cascade: child '{}' has non-finite width; leaving in place",
-                    child_id
+                    child.id
                 );
             }
             cursor_x += cw.max(0.0) + SIBLING_GAP;
-            queue.push_back(child_id.clone());
+            queue.push_back(child.id.clone());
+        }
+    }
+
+    // Apply the planned positions now that the ChildIndex borrow is
+    // dropped, allowing the mutable model update.
+    for (id, (x, y)) in planned {
+        if let Some(node) = doc.mindmap.nodes.get_mut(&id) {
+            node.position.x = x;
+            node.position.y = y;
         }
     }
 }
@@ -239,7 +268,7 @@ mod tests {
         crate::application::document::mutations::register_builtin_handlers(&mut doc);
         doc.mutation_sources.insert(
             "tree-cascade".to_string(),
-            crate::application::document::mutations_loader::MutationSource::App,
+            crate::application::source_tier::SourceTier::App,
         );
         doc.apply_custom_mutation(&cm, &target_id, None);
 

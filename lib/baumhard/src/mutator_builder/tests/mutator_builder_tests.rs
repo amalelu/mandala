@@ -231,6 +231,8 @@ fn repeat_runtime_count_consults_context() {
 // Test-only — same rationale as the `#[cfg(test)]`-gated imports
 // at the top of this file (§T2.2 `pub mod tests;` exposure).
 #[cfg(test)]
+use crate::core::primitives::Discriminated;
+#[cfg(test)]
 use crate::gfx_structs::mutator::{GfxMutator, Instruction, Mutation, MutatorType};
 #[cfg(test)]
 use crate::gfx_structs::predicate::Predicate;
@@ -349,11 +351,11 @@ fn instruction_with_children_mirrors_scope_topology() {
     };
     let mt = build(&node, &ScopeCtx);
     let root = mt.arena.get(mt.root).unwrap().get();
-    assert!(matches!(root.get_type(), MutatorType::Instruction));
+    assert!(matches!(root.variant(), MutatorType::Instruction));
     let child_ids: Vec<_> = mt.root.children(&mt.arena).collect();
     assert_eq!(child_ids.len(), 1);
     let child = mt.arena.get(child_ids[0]).unwrap().get();
-    assert!(matches!(child.get_type(), MutatorType::Macro));
+    assert!(matches!(child.variant(), MutatorType::Macro));
 }
 
 /// `InstructionSpec::RepeatWhileAlwaysTrue` materializes to a real

@@ -4,18 +4,25 @@
 //! funnel. Track C from `WASM_CONVERGENCE.md` (final WASM convergence
 //! step after Tracks A + B):
 //!
-//! - [`InputContextCore`] holds the 11 fields **both** native's
+//! - [`InputContextCore`] holds the 12 fields **both** native's
 //!   `InputHandlerContext` (`input_context.rs`) and WASM's
 //!   `WasmInputState` (`run_wasm/`) carry — document, mindmap_tree,
 //!   app_scene, renderer, scene_cache, text_edit_state, last_click,
-//!   cursor_pos, modifiers, keybinds, macros. This is the parameter
-//!   `dispatch_action` takes post-Track-C; both targets' keyboard
-//!   handlers can construct one and call the same dispatcher.
-//! - [`NativeContextExt`] holds the 10 native-only fields (drag_state,
-//!   interaction_mode, console_state, console_history, label_edit_state,
-//!   portal_text_edit_state, color_picker_state, hovered_node,
-//!   cursor_is_hand, picker_hover) — modal / console / picker state
-//!   that doesn't exist in the browser. Cfg-gated to native.
+//!   cursor_pos, modifiers, keybinds, macros, interaction_mode. This
+//!   is the parameter `dispatch_action` takes post-Track-C; both
+//!   targets' keyboard handlers can construct one and call the same
+//!   dispatcher.
+//! - `NativeContextExt` holds the 9 native-only fields (drag_state,
+//!   console_state, console_history, single_line_edit_state,
+//!   color_picker_state, hovered_node, cursor_is_hand,
+//!   cursor_icon_last, picker_hover) — modal / console / picker state
+//!   that doesn't exist in the browser. Cfg-gated to native, which is
+//!   also why it is named here rather than linked: an intra-doc link
+//!   to it does not resolve when the docs are built for
+//!   `wasm32-unknown-unknown`. `interaction_mode` is **not** in this
+//!   set — it moved to the core when the resize-handle gate and the
+//!   `close_text_edit` rebuild path started reading it on both
+//!   targets.
 //!
 //! Native dispatchers pass `Some(&mut ext)`; WASM passes `None`.
 //! Per-arm bodies pattern-match on the `Option` for the ~14 arms that
@@ -112,10 +119,10 @@ pub(in crate::application::app) struct InputContextCore<'a> {
 /// `Action::wasm_compatibility` already classifies these arms
 /// `NativeOnly`.
 ///
-/// **Field set is the 10 fields not on `WasmInputState`** plus
-/// `drag_state` (which WASM substitutes for via `pending_click` on
-/// `WasmInputState`, kept outside the unified context — `pending_click`
-/// isn't a 1:1 mirror).
+/// **Field set is the 9 fields not on `WasmInputState`.** One of
+/// them is `drag_state`, which WASM substitutes for via
+/// `pending_click` on `WasmInputState`, kept outside the unified
+/// context — `pending_click` isn't a 1:1 mirror.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) struct NativeContextExt<'a> {
     /// Current pointer / drag state machine.
@@ -124,10 +131,9 @@ pub(in crate::application::app) struct NativeContextExt<'a> {
     pub console_state: &'a mut crate::application::console::ConsoleState,
     /// Console command-history ring.
     pub console_history: &'a mut Vec<String>,
-    /// Inline edge-label editor state.
-    pub label_edit_state: &'a mut super::label_edit::LabelEditState,
-    /// Inline portal-text editor state.
-    pub portal_text_edit_state: &'a mut super::label_edit::PortalTextEditState,
+    /// Inline single-line editor state (edge label / portal
+    /// caption).
+    pub single_line_edit_state: &'a mut super::single_line_edit::SingleLineEditor,
     /// Glyph-wheel color-picker state.
     pub color_picker_state: &'a mut crate::application::color_picker::ColorPickerState,
     /// The node the cursor is currently over, if any.

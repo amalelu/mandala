@@ -136,6 +136,7 @@ impl Comparator {
 /// carry one or two fields so the cost is effectively O(1). No
 /// allocation on the test path.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Predicate {
     /// The field/comparator pairs to evaluate against a candidate element.
     /// Evaluation stops at the first pair whose field matches the element's
@@ -195,18 +196,14 @@ impl Predicate {
 /// `region_id` isn't present on the element). The outer loop in
 /// [`Predicate::test`] continues to the next field on `None` and
 /// returns `false` if every field falls through.
-fn evaluate_field(
-    element: &GfxElement,
-    field: &GfxElementField,
-    comparator: &Comparator,
-) -> Option<bool> {
+fn evaluate_field(element: &GfxElement, field: &GfxElementField, comparator: &Comparator) -> Option<bool> {
     match field {
         GlyphArea(section) => evaluate_glyph_area_field(element, section, comparator),
         Channel(channel) => Some(match comparator {
-            Equals(negation) => (*channel == element.channel()) != *negation,
-            GreaterThan(negation) => (*channel > element.channel()) != *negation,
-            LessThan(negation) => (*channel < element.channel()) != *negation,
-            _ => false,
+            Equals(negation) => (element.channel() == *channel) != *negation,
+            GreaterThan(negation) => (element.channel() > *channel) != *negation,
+            LessThan(negation) => (element.channel() < *channel) != *negation,
+            Exists(negation) => !negation,
         }),
         Region(region, color_font_region_field) => {
             // Region predicates only make sense on elements that
@@ -217,7 +214,11 @@ fn evaluate_field(
             };
             // Region missing on this element — fall through to next field.
             let target = area.regions.get(*region).copied()?;
-            Some(evaluate_region_match(&target, color_font_region_field, comparator))
+            Some(evaluate_region_match(
+                &target,
+                color_font_region_field,
+                comparator,
+            ))
         }
         Id(id) => Some(match comparator {
             Equals(negation) => (*id == element.unique_id()) != *negation,
@@ -245,7 +246,10 @@ fn evaluate_field(
                 // `Exists` flips on the negation flag, mirroring
                 // the GlyphAreaField / GlyphModelField shape.
                 Equals(negation) => is_set != *negation,
-                Exists(negation) => is_set != *negation,
+                // `Exists` tests field presence, not value. A flag is
+                // always a present field on the element; the negation
+                // flag alone decides the result, matching Channel/Id.
+                Exists(negation) => !negation,
                 // Ordering on a presence bit is not meaningful —
                 // degrade to non-match rather than panic (§9).
                 _ => {
@@ -437,8 +441,8 @@ fn evaluate_glyph_model_match(
                 .get(*line_num)
                 .map(|our_line| (our_line.length() > line.length()) != *negation)
                 .unwrap_or(false),
-            GlyphLines(lines) => (lines.len() > target_model.glyph_matrix.matrix.len()) != *negation,
-            Layer(layer) => (*layer > target_model.layer) != *negation,
+            GlyphLines(lines) => (target_model.glyph_matrix.matrix.len() > lines.len()) != *negation,
+            Layer(layer) => (target_model.layer > *layer) != *negation,
             GlyphModelField::Position(vec) => {
                 (target_model.position.to_vec2().distance(Vec2::new(0.0, 0.0))
                     > vec.to_vec2().distance(Vec2::new(0.0, 0.0)))
@@ -460,8 +464,8 @@ fn evaluate_glyph_model_match(
                 .get(*line_num)
                 .map(|our_line| (our_line.length() < line.length()) != *negation)
                 .unwrap_or(false),
-            GlyphLines(lines) => (lines.len() < target_model.glyph_matrix.matrix.len()) != *negation,
-            Layer(layer) => *layer < target_model.layer,
+            GlyphLines(lines) => (target_model.glyph_matrix.matrix.len() < lines.len()) != *negation,
+            Layer(layer) => (target_model.layer < *layer) != *negation,
             GlyphModelField::Position(vec) => {
                 (target_model.position.to_vec2().distance(Vec2::new(0.0, 0.0))
                     < vec.to_vec2().distance(Vec2::new(0.0, 0.0)))

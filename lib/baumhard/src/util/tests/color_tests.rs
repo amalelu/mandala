@@ -176,3 +176,41 @@ pub fn do_hex_to_rgba_rejects_non_hex_char() {
     assert!(hex_to_rgba("#deadbeef!").is_none()); // length-mismatch wins
     assert!(hex_to_rgba("#ff00 0a").is_none()); // embedded space
 }
+
+#[test]
+fn test_is_valid_hex_color_matches_hex_parser() {
+    use crate::util::color_conversion::is_valid_hex_color;
+
+    for valid in ["#abc", "abc", "#abcd", "abcd", "#aabbcc", "aabbcc", "#aabbccdd"] {
+        assert!(is_valid_hex_color(valid), "{valid:?} should be accepted");
+    }
+    for invalid in ["", "#", "#ab", "#abcde", "#abcdefghi", "#zzzzzz", "var(--accent)"] {
+        assert!(!is_valid_hex_color(invalid), "{invalid:?} should be rejected");
+    }
+}
+
+#[test]
+fn test_parse_var_name_tolerates_inner_whitespace() {
+    use crate::util::color_conversion::{is_var_ref, parse_var_name};
+
+    assert_eq!(parse_var_name("var(--accent)"), Some("--accent"));
+    assert_eq!(parse_var_name(" var( --bg ) "), Some("--bg"));
+    assert!(is_var_ref("var( --fg )"));
+}
+
+#[test]
+fn test_parse_var_name_rejects_malformed_refs() {
+    use crate::util::color_conversion::{is_var_ref, parse_var_name};
+
+    for invalid in [
+        "var(--)",
+        "var(accent)",
+        "var(--accent)extra",
+        "var(--foo(bar))",
+        "var(--accent",
+        "#abcdef",
+    ] {
+        assert_eq!(parse_var_name(invalid), None, "{invalid:?} should be rejected");
+        assert!(!is_var_ref(invalid), "{invalid:?} should not be a var ref");
+    }
+}

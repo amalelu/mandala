@@ -15,12 +15,20 @@ use std::ops::{AddAssign, Index, IndexMut, MulAssign, SubAssign};
 /// controls how `*Assign` operators treat leading whitespace in the
 /// rhs during matrix composition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlyphLine {
-    /// Ordered list of coloured/fonted text runs that together form
+    /// Ordered list of colored/fonted text runs that together form
     /// the line.
     pub line: Vec<GlyphComponent>,
-    /// When `true`, leading whitespace components in the rhs of an
-    /// `*Assign` op are skipped instead of overwriting the lhs.
+    /// When `true`, leading whitespace in the rhs of an `*Assign` op
+    /// is transparent instead of opaque: the all-whitespace runs in
+    /// front are skipped, and the first run carrying content paints at
+    /// its own grapheme offset (indent counted, indent not written).
+    /// An rhs that is *entirely* whitespace therefore paints nothing.
+    ///
+    /// The flag rides on the wire — `GlyphLine` is a
+    /// `ModelDelta`/`GlyphMatrix` payload, so a hand-authored
+    /// `.mindmap.json` mutation can set it (see `format/mutations.md`).
     pub ignore_initial_space: bool,
 }
 
@@ -57,16 +65,24 @@ impl AddAssign for GlyphLine {
     }
 }
 
-// `AddAssign` and `Noop` are arithmetic-op seams matching the
-// `MulAssign`/`SubAssign` set; preserved per CODE_CONVENTIONS.md §6.
+/// How [`GlyphLine::perform_op`] combines the *color* of a leading
+/// rhs run with the lhs run it lands on. Every arm here is
+/// constructed by one of the three `*Assign` impls above; there is no
+/// fourth. An `AddAssign` arm existed once and was unreachable —
+/// `AddAssign for GlyphLine` deliberately assigns rather than adds —
+/// as did a `Noop` arm, which `ApplyOperation::apply_ref`
+/// short-circuits before it can ever reach a line. Both were deleted
+/// per CODE_CONVENTIONS.md §5 (no dead code) and §10 (delete rather
+/// than deprecate); neither is `pub`, so nothing outside the crate
+/// could name them.
 pub(crate) enum GlyphLineOp {
+    /// The rhs color replaces the lhs color outright. Used by both
+    /// `Assign`-style composition and `AddAssign for GlyphLine`.
     Assign,
-    #[allow(dead_code)]
-    AddAssign,
+    /// The two colors multiply per channel.
     MulAssign,
+    /// The rhs color is subtracted per channel from the lhs color.
     SubAssign,
-    #[allow(dead_code)]
-    Noop,
 }
 
 impl GlyphLine {
@@ -88,8 +104,7 @@ impl GlyphLine {
         // `splice` takes a range where to splice in the iterator of elements.
         // Since we're inserting at a specific index, the range starts and ends at `index`.
         // The second argument is the source Vec's into_iter(), which takes ownership of its items.
-        self.line
-            .splice(effective_index..effective_index, source.into_iter());
+        self.line.splice(effective_index..effective_index, source);
     }
 
     /// Line containing one component. O(1).
@@ -109,65 +124,97 @@ impl GlyphLine {
         }
     }
 
-    /// This is mainly for the *Assign impl's
+    /// Composition workhorse behind the three `*Assign` impls: paint
+    /// every run of `rhs` onto `self` at **the grapheme offset that
+    /// run occupies inside `rhs`**, with `operation` deciding how the
+    /// two colors combine.
+    ///
+    /// That offset — the rhs's own column, not the lhs's run ordinal
+    /// — is the whole contract. `self` and `rhs` never have to agree
+    /// on where their run boundaries fall, and after the first paint
+    /// they generally do not: `overriding_insert` splits and merges
+    /// `self`'s runs as it goes. Indexing `self` by an `rhs` ordinal
+    /// therefore drifts a little further with each run painted, which
+    /// scrambled the order of any surplus runs and mislaid them by
+    /// however much the partitions had diverged.
+    ///
+    /// When `rhs.ignore_initial_space` is set, `rhs`'s leading
+    /// whitespace is transparent rather than opaque: the all-space
+    /// runs in front are skipped entirely, and the first run carrying
+    /// content is painted at its own offset with its indent counted
+    /// in but not written, so the rhs shows through onto the lhs
+    /// instead of blanking it. Runs after that one paint at their own
+    /// offsets in the same way.
+    ///
+    /// Every offset here is a grapheme-cluster count:
+    /// [`GlyphComponent::index_of_first_non_space_grapheme`],
+    /// [`Self::index_of_component`], [`GlyphComponent::length`], and
+    /// [`split_off_graphemes`] all speak that one unit. The path used
+    /// to mix three — a `char` ordinal, fed to a byte-indexed
+    /// `String::split_off` (a panic on any multi-byte leading space
+    /// such as U+3000), then reused as a cluster offset (CONVENTIONS
+    /// §B3).
+    ///
+    /// Nothing here can panic on a shape mismatch: every `self`
+    /// access is guarded, and painting past the end of `self` is
+    /// `overriding_insert`'s whitespace-padding case rather than an
+    /// out-of-bounds insert.
+    ///
+    /// Costs: O(rhs runs), each doing one `overriding_insert` — an
+    /// O(line length) grapheme walk plus a splice — over a running
+    /// offset that costs one grapheme walk per run. Clones the text
+    /// of each painted run once.
     pub(crate) fn perform_op(&mut self, rhs: &Self, operation: GlyphLineOp) {
         let mut begin_comp: usize = 0;
         if rhs.ignore_initial_space {
-            // We want to find the index where we should begin to copy
-            for (i, comp) in rhs.line.iter().enumerate() {
-                if comp.contains_non_space() {
-                    begin_comp = i + 1; // We'll handle this one
-                    let comp_index = comp
-                        .index_of_first_non_space_char()
-                        .expect("We already confirmed that this should exist!");
-                    let rhs_comp = rhs.get(i).unwrap();
-                    let to_insert = rhs_comp.text.clone().split_off(comp_index);
-                    let index_of_comp = rhs.index_of_component(i);
-                    let font = rhs_comp.font;
-                    let color;
-
-                    match operation {
-                        GlyphLineOp::AddAssign => {
-                            if i < self.line.len() {
-                                color = self.line[i].color + rhs_comp.color;
-                            } else {
-                                color = rhs_comp.color;
-                            }
-                        }
-                        GlyphLineOp::Assign => {
-                            color = rhs_comp.color;
-                        }
-                        GlyphLineOp::SubAssign => {
-                            color = self.line[i].color - rhs_comp.color;
-                        }
-                        GlyphLineOp::MulAssign => {
-                            color = self.line[i].color * rhs_comp.color;
-                        }
-                        GlyphLineOp::Noop => {
-                            continue;
-                        }
-                    }
-                    self.overriding_insert(
-                        index_of_comp + comp_index,
-                        &GlyphComponent::text(to_insert.as_str(), font, color),
-                    );
-                    break;
-                } else {
+            // An rhs that is nothing but indent paints nothing at all:
+            // the flag's contract is that leading whitespace is
+            // transparent, and every run of an all-whitespace rhs is
+            // leading whitespace. The loop below raises this back to
+            // `i + 1` as soon as it finds a run with content.
+            begin_comp = rhs.line.len();
+            for (i, rhs_comp) in rhs.line.iter().enumerate() {
+                // All-whitespace runs in front of the content paint
+                // nothing at all.
+                let Some(split_at) = rhs_comp.index_of_first_non_space_grapheme() else {
                     continue;
-                }
+                };
+                begin_comp = i + 1;
+
+                let mut content = rhs_comp.text.clone();
+                let to_insert = split_off_graphemes(&mut content, split_at);
+
+                let lhs_color = self.line.get(i).map(|comp| comp.color);
+                let color = match operation {
+                    GlyphLineOp::Assign => rhs_comp.color,
+                    GlyphLineOp::SubAssign => lhs_color.map_or(rhs_comp.color, |lhs| lhs - rhs_comp.color),
+                    GlyphLineOp::MulAssign => lhs_color.map_or(rhs_comp.color, |lhs| lhs * rhs_comp.color),
+                };
+
+                self.overriding_insert(
+                    rhs.index_of_component(i) + split_at,
+                    &GlyphComponent::text(to_insert.as_str(), rhs_comp.font, color),
+                );
+                break;
             }
         }
-        for i in begin_comp..rhs.line.len() {
-            if self.line.get(i).is_some() {
-                let index_of_comp = self.index_of_component(i);
-                self.overriding_insert(index_of_comp, &rhs.get(i).unwrap().clone());
-            } else {
-                self.line.insert(i, rhs.line[i].clone());
-            }
+        // Where run `begin_comp` starts inside `rhs`. Skipped leading
+        // whitespace still occupies columns, so it counts toward the
+        // offset even though it painted nothing.
+        let mut rhs_offset: usize = rhs.line.iter().take(begin_comp).map(GlyphComponent::length).sum();
+        for run in rhs.line.iter().skip(begin_comp) {
+            // `overriding_insert` clones the component itself, so
+            // cloning here too was a second copy of the run (§B7). It
+            // also pads with whitespace when `rhs_offset` is past the
+            // end of `self`, which is why a shorter lhs needs no
+            // special case — and cannot panic the way the old
+            // `Vec::insert(i, …)` did.
+            self.overriding_insert(rhs_offset, run);
+            rhs_offset += run.length();
         }
     }
 
-    /// Append a component to the end. O(1) amortised.
+    /// Append a component to the end. O(1) amortized.
     pub fn push(&mut self, glyph: GlyphComponent) {
         self.line.push(glyph);
     }
@@ -237,10 +284,24 @@ impl GlyphLine {
     ) -> bool {
         let comp_len = comp.length();
         if e_idx_head == begin {
-            // This whole comp can be spared
+            // This whole comp can be spared: the insert starts exactly
+            // on the boundary after it, so it goes into the next slot.
+            //
+            // `should_overwrite` is `true` because whether that next
+            // slot is *consumed* by the insert is not knowable from
+            // here — it depends on the item's length against a
+            // component this call has not seen. So defer to the drain
+            // window: the caller only honors the flag when
+            // `idx_comp_drain_end > idx_insert`, which is precisely
+            // "the run in the insertion slot was fully overridden".
+            // Hard-coding `false` made the result depend on how the
+            // line happened to be cut into runs — the same insert over
+            // the same text overwrote a character when the line was one
+            // run, and grew the line by one when a run boundary fell at
+            // the insertion point.
             *idx_comp_drain_begin = comp_index + 2; // next will be used
             *idx_insert = comp_index + 1; // insert into next
-            *should_overwrite = false;
+            *should_overwrite = true;
             return true;
         } else if e_begin_comp == begin && (end - begin) >= comp_len {
             // This whole comp will be replaced, so we can hijack
@@ -282,7 +343,18 @@ impl GlyphLine {
             // This whole comp will be overridden
             *idx_comp_drain_end = comp_index + 1;
             return true;
-        } else if e_begin_comp == end {
+        } else if e_begin_comp >= end {
+            // This comp starts at or after the end of the insert, so
+            // none of it is overridden and none of it is trimmed —
+            // the drain stops before it.
+            //
+            // The `>` half of this used to fall through to the
+            // `discard_front` branch below and underflow
+            // `end - e_begin_comp`. It is reachable whenever the
+            // insert is shorter than the run it starts on and another
+            // run follows — `overriding_insert(0, one_cluster)` on any
+            // multi-run line, which `GlyphModelCommand::RudeInsert`
+            // hands straight to a `.mindmap.json` author.
             *idx_comp_drain_end = comp_index;
             return true;
         } else if e_idx_head > end {
@@ -345,12 +417,10 @@ impl GlyphLine {
 
         if self.length() <= begin {
             let spaces_we_need_to_add = begin - self.length();
-            if self.line.len() > 0 {
+            if !self.line.is_empty() {
                 self.last_comp_mut().unwrap().space_back(spaces_we_need_to_add);
-            } else {
-                if spaces_we_need_to_add > 0 {
-                    self.push(GlyphComponent::space(spaces_we_need_to_add));
-                }
+            } else if spaces_we_need_to_add > 0 {
+                self.push(GlyphComponent::space(spaces_we_need_to_add));
             }
             self.push(item.clone());
             return;

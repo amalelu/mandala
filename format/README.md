@@ -32,6 +32,14 @@ Each of these documents one decision, with the reasoning:
 - [`macros.md`](./macros.md) — `Macro` carrier, four-source loader,
   privilege gates, and the threat model for non-User tiers
 
+## Wire protocol
+
+- [`ipc.md`](./ipc.md) — the `--ipc` local-socket control protocol
+  (framing, envelope, trust model, command families). Not part of
+  the on-disk map format; it lives here beside `macros.md` because
+  it is a privilege-bearing surface under the same source-of-truth
+  discipline.
+
 ## Tools
 
 - [`migration.md`](./migration.md) — converting legacy miMind-derived files

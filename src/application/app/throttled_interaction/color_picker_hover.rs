@@ -20,28 +20,41 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use crate::application::frame_throttle::MutationFrequencyThrottle;
-
 use super::super::color_picker_flow::rebuild_color_picker_overlay;
 use super::super::scene_rebuild::rebuild_scene_only;
+use super::pending::ThrottledPending;
 use super::{DrainContext, ThrottledInteraction};
 
 /// Hover-update state for the color picker. Two independently-set
 /// dirty flags drive the drain's split-rebuild decision — see the
 /// module docs.
 pub(in crate::application::app) struct ColorPickerHoverInteraction {
-    pub dirty: bool,
-    pub canvas_dirty: bool,
-    pub throttle: MutationFrequencyThrottle,
+    /// Dirty-flag pending state plus this interaction's adaptive
+    /// throttle. Written through [`Self::mark_dirty`] /
+    /// [`Self::mark_canvas_dirty`] rather than as bare fields, so
+    /// the "canvas dirty implies overlay dirty" pairing cannot be
+    /// half-set from a caller.
+    pub pending: ThrottledPending,
 }
 
 impl ColorPickerHoverInteraction {
     pub(in crate::application::app) fn new() -> Self {
         Self {
-            dirty: false,
-            canvas_dirty: false,
-            throttle: MutationFrequencyThrottle::with_default_budget(),
+            pending: ThrottledPending::dirty_flags(),
         }
+    }
+
+    /// Something the picker *overlay* draws has changed — gesture
+    /// repositioning, HSV cursor move, hovered-cell change. The next
+    /// drain rebuilds the overlay and nothing else.
+    pub(in crate::application::app) fn mark_dirty(&mut self) {
+        self.pending.mark_dirty();
+    }
+
+    /// The document's `color_picker_preview` changed, so the canvas
+    /// walk is owed too. Only `apply_picker_preview` gets here.
+    pub(in crate::application::app) fn mark_canvas_dirty(&mut self) {
+        self.pending.mark_canvas_dirty();
     }
 
     /// True iff the document's `color_picker_preview` changed since
@@ -52,8 +65,16 @@ impl ColorPickerHoverInteraction {
     ///
     /// Pulled out as a method so the drain's branching predicate is
     /// unit-testable without standing up a full `DrainContext`.
-    fn canvas_needs_rebuild(&self) -> bool {
-        self.canvas_dirty
+    pub(in crate::application::app) fn canvas_needs_rebuild(&self) -> bool {
+        self.pending.canvas_is_dirty()
+    }
+
+    /// Drop both flags without doing the drain's work. The
+    /// picker-closed path in `drain_inputs` uses it to unstick a
+    /// throttle-deferred hover drain that has nothing left to
+    /// repaint.
+    pub(in crate::application::app) fn clear_pending(&mut self) {
+        self.pending.clear_flags();
     }
 }
 
@@ -64,12 +85,12 @@ impl Default for ColorPickerHoverInteraction {
 }
 
 impl ThrottledInteraction for ColorPickerHoverInteraction {
-    fn has_pending(&self) -> bool {
-        self.dirty
+    fn pending(&self) -> &ThrottledPending {
+        &self.pending
     }
 
-    fn throttle(&mut self) -> &mut MutationFrequencyThrottle {
-        &mut self.throttle
+    fn pending_mut(&mut self) -> &mut ThrottledPending {
+        &mut self.pending
     }
 
     fn drain(&mut self, ctx: DrainContext<'_>) {
@@ -87,8 +108,7 @@ impl ThrottledInteraction for ColorPickerHoverInteraction {
         // drain, drop both dirty flags without doing the rebuild —
         // there's nothing on-screen to update.
         if !color_picker_state.is_open() {
-            self.dirty = false;
-            self.canvas_dirty = false;
+            self.pending.clear_flags();
             return;
         }
 
@@ -107,8 +127,7 @@ impl ThrottledInteraction for ColorPickerHoverInteraction {
             }
             rebuild_color_picker_overlay(color_picker_state, doc, app_scene, renderer);
         }
-        self.dirty = false;
-        self.canvas_dirty = false;
+        self.pending.clear_flags();
     }
 }
 
@@ -122,9 +141,9 @@ mod tests {
     #[test]
     fn test_default_is_not_dirty() {
         let i = ColorPickerHoverInteraction::default();
-        assert!(!i.dirty);
-        assert!(!i.canvas_dirty);
-        assert_eq!(i.throttle.current_n(), 1);
+        assert!(!i.has_pending());
+        assert!(!i.canvas_needs_rebuild());
+        assert_eq!(i.pending.throttle.current_n(), 1);
     }
 
     #[test]
@@ -133,18 +152,18 @@ mod tests {
         // so call sites that reach for either land in the same state.
         let a = ColorPickerHoverInteraction::new();
         let b = ColorPickerHoverInteraction::default();
-        assert_eq!(a.dirty, b.dirty);
-        assert_eq!(a.canvas_dirty, b.canvas_dirty);
-        assert_eq!(a.throttle.current_n(), b.throttle.current_n());
+        assert_eq!(a.has_pending(), b.has_pending());
+        assert_eq!(a.canvas_needs_rebuild(), b.canvas_needs_rebuild());
+        assert_eq!(a.pending.throttle.current_n(), b.pending.throttle.current_n());
     }
 
     #[test]
     fn test_has_pending_matches_dirty_flag() {
         let mut i = ColorPickerHoverInteraction::new();
         assert!(!i.has_pending());
-        i.dirty = true;
+        i.mark_dirty();
         assert!(i.has_pending());
-        i.dirty = false;
+        i.clear_pending();
         assert!(!i.has_pending());
     }
 
@@ -153,20 +172,20 @@ mod tests {
         // Reset is throttle-only; the dirty flag is cleared inside
         // `drain` (or when the picker closes), not here.
         let mut i = ColorPickerHoverInteraction::new();
-        i.dirty = true;
-        drive_throttle_over_budget(&mut i.throttle);
-        assert!(i.throttle.current_n() > 1);
+        i.mark_dirty();
+        drive_throttle_over_budget(&mut i.pending.throttle);
+        assert!(i.pending.throttle.current_n() > 1);
 
         i.reset();
 
-        assert_eq!(i.throttle.current_n(), 1);
-        assert!(i.dirty);
+        assert_eq!(i.pending.throttle.current_n(), 1);
+        assert!(i.has_pending());
     }
 
     trait_default_tests_for_throttled_interaction! {
         build = ColorPickerHoverInteraction::new,
         set_pending = |i: &mut ColorPickerHoverInteraction| {
-            i.dirty = true;
+            i.mark_dirty();
         },
     }
 
@@ -182,12 +201,12 @@ mod tests {
 
     #[test]
     fn test_canvas_needs_rebuild_when_canvas_dirty_set() {
-        // `apply_picker_preview` sets `canvas_dirty = true` — e.g.
+        // `apply_picker_preview` marks the canvas dirty — e.g.
         // keyboard nudge keys pressed mid-drag still change the
         // document's color_picker_preview and must not be dropped
         // by the gesture-only gate.
         let mut i = ColorPickerHoverInteraction::new();
-        i.canvas_dirty = true;
+        i.mark_canvas_dirty();
         assert!(i.canvas_needs_rebuild());
     }
 
@@ -198,7 +217,19 @@ mod tests {
         // without `canvas_dirty` — regression guard for the original
         // performance fix.
         let mut i = ColorPickerHoverInteraction::new();
-        i.dirty = true;
+        i.mark_dirty();
         assert!(!i.canvas_needs_rebuild());
+    }
+
+    /// The canvas-dirty mark implies the overlay-dirty mark: every
+    /// path that changes the document's preview also changes what
+    /// the overlay draws, and a canvas-only mark would leave the
+    /// drain gated off entirely (`has_pending` reads `dirty`).
+    #[test]
+    fn test_marking_the_canvas_dirty_also_flags_the_drain() {
+        let mut i = ColorPickerHoverInteraction::new();
+        i.mark_canvas_dirty();
+        assert!(i.has_pending());
+        assert!(i.canvas_needs_rebuild());
     }
 }

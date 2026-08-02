@@ -3,9 +3,9 @@
 //! GPU-side presentation: every wgpu device, every cosmic-text
 //! rasterization, every text/rect/border buffer Mandala paints
 //! lives under [`Renderer`]. `Renderer` reads two intermediate
-//! representations the document layer hands it
-//! (`Tree<GfxElement, GfxMutator>` for canvas content,
-//! `Scene` for connection / portal / label overlays); it never
+//! representation the document layer hands it
+//! (`Tree<GfxElement, GfxMutator>`, one per canvas role — nodes,
+//! borders, connections, labels, portals, handles); it never
 //! reaches into the document directly, and the document never
 //! holds GPU resources (CODE_CONVENTIONS §3 "Model / view
 //! separation").
@@ -20,15 +20,16 @@
 //! - [`tree_buffers`] / [`tree_walker`] — `GfxElement` tree
 //!   → text-buffer + rect-buffer projection. The tree walker
 //!   is where the bulk of canvas-content shaping happens.
-//! - [`scene_buffers`] — connection paths, edge handles,
-//!   portal markers, edge labels. Scene-graph projection.
+//! - [`selection_overlay`] — the rubber-band selection
+//!   rectangle, the one canvas visual with no model behind it.
 //! - [`borders`] — node-frame buffers (the box-drawing
 //!   glyph runs around each node).
 //! - [`console_pass`] / [`console_geometry`] — the console
 //!   overlay's glyph-tree pass + pure-function layout math.
 //! - [`color_picker`] — the glyph-wheel picker overlay.
-//! - [`hit`] — screen-space → canvas-space hit math
-//!   (`screen_to_canvas`, `canvas_to_screen`, AABB resolution).
+//! - [`camera`] — camera framing and the screen-space ↔
+//!   canvas-space mapping (`screen_to_canvas`,
+//!   `canvas_per_pixel`, `fit_camera_to_tree`).
 //! - [`decree`] — the `RenderDecree` queue the event loop
 //!   feeds the renderer (resize, zoom, camera-pan, etc.).
 //! - [`overlay_dispatch`] — overlay-vs-canvas slot routing
@@ -36,15 +37,15 @@
 //!   tree handles.
 
 mod borders;
+mod camera;
 mod color_picker;
 mod console_geometry;
 mod console_pass;
 mod decree;
-mod hit;
 mod overlay_dispatch;
 mod pipeline;
 mod render;
-mod scene_buffers;
+mod selection_overlay;
 mod tree_buffers;
 mod tree_walker;
 
@@ -79,7 +80,6 @@ use rustc_hash::FxHashMap;
 
 use wgpu::{
     Color, Device, Instance, MultisampleState, Queue, RenderPipeline, Surface, SurfaceConfiguration,
-    TextureFormat,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -89,7 +89,6 @@ use baumhard::font::fonts;
 #[cfg(test)]
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::camera::Camera2D;
-use baumhard::mindmap::scene_cache::EdgeKey;
 use glam::Vec2;
 
 /// Inline WGSL shader for the colored-rectangle pipeline. Draws a
@@ -279,6 +278,14 @@ pub struct Renderer {
     /// (otherwise re-preparing the single text renderer would
     /// race with the pass's already-recorded draw commands).
     console_text_renderer: TextRenderer,
+    /// Whether the current glyphon-`prepare` fault episode has already
+    /// been reported. Set when either `prepare()` fails, cleared on
+    /// the next fully successful prepare, so a *persistent* fault —
+    /// `PrepareError::AtlasFull` is permanent once the atlas hits
+    /// `max_texture_dimension_2d` — logs one line instead of one per
+    /// frame. A failed prepare skips `present()` too, so the frame
+    /// takes no vsync backpressure and the loop can spin at CPU rate.
+    prepare_fault_logged: bool,
     redraw_mode: RedrawMode,
     run: bool,
     should_render: bool,
@@ -353,45 +360,6 @@ pub struct Renderer {
     /// wins via `insert`); the vec preserves emission order so
     /// halos stay behind the main glyph at render time.
     mindmap_buffers: FxHashMap<String, Vec<MindMapTextBuffer>>,
-    /// Per-node border glyph buffers, keyed by `node_id`. Each entry is
-    /// a `Vec` of 4 buffers (top/bottom/left/right) emitted by
-    /// `rebuild_border_buffers`.
-    border_buffers: FxHashMap<String, Vec<MindMapTextBuffer>>,
-    /// Edge grab-handle buffers for the connection reshape surface.
-    /// Populated only when an edge is selected; rebuilt fresh every
-    /// time the scene is rebuilt with a selected edge. Bounded cost
-    /// (≤ 5 glyph buffers per selected edge) so no keyed cache is
-    /// warranted.
-    edge_handle_buffers: Vec<MindMapTextBuffer>,
-    /// Per-edge label buffers, keyed by `EdgeKey`. Each entry is the
-    /// shaped cosmic-text buffer for that edge's label (if any).
-    /// Labels are ≤ 1 per edge and rebuilt every scene build — no
-    /// incremental-reuse cache is warranted.
-    connection_label_buffers: FxHashMap<EdgeKey, MindMapTextBuffer>,
-    /// AABB hitbox for each rendered label, keyed by `EdgeKey`.
-    /// Populated alongside `connection_label_buffers`; consulted by
-    /// `hit_test_edge_label` when the app dispatches inline
-    /// click-to-edit. Stored as `(min, max)` canvas-space corners so
-    /// the hit test is a pair of comparisons per edge.
-    connection_label_hitboxes: FxHashMap<EdgeKey, (Vec2, Vec2)>,
-    /// AABB hitbox for each rendered portal marker, keyed by
-    /// `(edge_key, endpoint_node_id)`. Portal glyph buffers
-    /// themselves flow through `canvas_scene_buffers` via the
-    /// tree pipeline (see `tree_builder::portal`); this map
-    /// carries only the hit-test rectangles the event loop
-    /// needs. Consulted by `hit_test_portal` when
-    /// `handle_click` resolves a click on a portal glyph to an
-    /// `EdgeKey` + the endpoint the marker sits above (the
-    /// double-click jump target is the *other* endpoint).
-    /// Split between the icon's AABB and the text's AABB so the
-    /// event loop can route clicks on text to
-    /// `SelectionState::PortalText` and clicks on the icon to
-    /// `SelectionState::PortalLabel`. Text entries are absent
-    /// when the endpoint has no visible text (see
-    /// `tree_builder::portal` for the load-bearing phantom-hot-
-    /// zone invariant).
-    portal_icon_hitboxes: FxHashMap<(EdgeKey, String), (Vec2, Vec2)>,
-    portal_text_hitboxes: FxHashMap<(EdgeKey, String), (Vec2, Vec2)>,
     /// Command palette / console overlay buffers. Rendered above
     /// everything else in screen coordinates. Populated only when
     /// the console is open; cleared otherwise.
@@ -508,7 +476,7 @@ pub(super) struct NodeBackgroundRect {
     /// reshape paths ([`Renderer::reshape_buffer_for`]) drop the
     /// stale rect for a single element before re-collecting it
     /// — otherwise repeated keystrokes leak duplicate rects per
-    /// edit. Always populated by the tree walker; tests synthesise
+    /// edit. Always populated by the tree walker; tests synthesize
     /// rects with any sentinel value (matching by `unique_id`
     /// during reshape is the only consumer today).
     pub unique_id: usize,
@@ -597,28 +565,32 @@ impl Renderer {
     pub(crate) async fn new(instance: Instance, surface: Surface<'static>, window: Arc<Window>) -> Renderer {
         let adapter = Self::get_adapter(&instance, &surface).await;
         let (device, queue) = Self::get_device(&adapter).await;
-        let swapchain_format = TextureFormat::Bgra8UnormSrgb;
         let surface_capabilities = surface.get_capabilities(&adapter);
-        let texture_format = surface_capabilities.formats[0];
+        let surface_format = surface_capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(surface_capabilities.formats[0]);
         let size = window.inner_size();
         let config = Self::create_surface_config(
-            texture_format.clone(),
+            surface_format,
             &surface_capabilities,
             PhysicalSize::new(size.width, size.height),
         );
         let glyphon_cache = Cache::new(&device);
 
-        let mut atlas = TextAtlas::new(&device, &queue, &glyphon_cache, swapchain_format);
+        let mut atlas = TextAtlas::new(&device, &queue, &glyphon_cache, surface_format);
         let text_renderer = TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let console_text_renderer = TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let viewport = Viewport::new(&device, &glyphon_cache);
         let camera = Camera2D::new(size.width, size.height);
 
         // Rect pipeline: colored quads for node backgrounds and the
-        // palette backdrop. Uses the swapchain (not capability[0])
-        // format so the pipeline matches the LoadOp target, and
-        // enables standard alpha blending so semi-transparent fills
-        // compose cleanly with whatever's beneath them.
+        // palette backdrop. Uses the same surface format as the
+        // render-pass attachment so the pipeline matches, and enables
+        // standard alpha blending so semi-transparent fills compose
+        // cleanly with whatever's beneath them.
         let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rect_shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(RECT_SHADER_WGSL)),
@@ -675,7 +647,7 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: swapchain_format,
+                    format: surface_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -713,6 +685,7 @@ impl Renderer {
             last_render_time: Duration::from_millis(16),
             text_renderer,
             console_text_renderer,
+            prepare_fault_logged: false,
             should_render: false,
             fps: None,
             redraw_mode: RedrawMode::NoLimit,
@@ -731,12 +704,6 @@ impl Renderer {
             viewport,
             camera,
             mindmap_buffers: Default::default(),
-            border_buffers: FxHashMap::default(),
-            edge_handle_buffers: Vec::new(),
-            connection_label_buffers: FxHashMap::default(),
-            connection_label_hitboxes: FxHashMap::default(),
-            portal_icon_hitboxes: FxHashMap::default(),
-            portal_text_hitboxes: FxHashMap::default(),
             console_overlay_buffers: Vec::new(),
             color_picker_backdrop: None,
             overlay_buffers: Vec::new(),
@@ -761,9 +728,9 @@ impl Renderer {
         }
     }
 
-    /// Current camera zoom level, used by the event loop when it needs
-    /// to pass the active zoom into `Document::build_scene*` (the scene
-    /// builder consumes it via
+    /// Current camera zoom level, used by the event loop when it
+    /// needs to pass the active zoom into `CanvasFrame::new` (the
+    /// connection, label, and portal passes consume it via
     /// `GlyphConnectionConfig::effective_font_size_pt`).
     pub fn camera_zoom(&self) -> f32 {
         self.camera.zoom
@@ -991,7 +958,7 @@ impl Renderer {
             .unwrap_or(0);
         self.last_frame_instant = Some(now);
 
-        // Honour a pending idle paint queued by `set_fps_idle`: this
+        // Honor a pending idle paint queued by `set_fps_idle`: this
         // transition render must show "-" even if the rolling avg
         // would compute a value from prior active samples. Clear
         // the rolling window so the next active session starts

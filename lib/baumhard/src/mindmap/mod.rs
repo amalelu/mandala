@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Mindmap data model, loader/saver, and the builders that project a
-//! `MindMap` into the Baumhard render tree and flat scene. Borders,
-//! connections, portal labels, and edge handles all descend from the
-//! types declared under `model` and materialise through
-//! `tree_builder` / `scene_builder`.
+//! Mindmap data model, loader/saver, and the builders that project
+//! a `MindMap` into the Baumhard render tree. Borders, connections,
+//! portal labels, section frames, and every kind of handle descend
+//! from the types declared under `model` and materialize through
+//! `tree_builder`.
 
 /// Timing envelope, easing, and lerp helpers for animated
 /// `CustomMutation`s.
@@ -29,11 +29,9 @@ pub mod model;
 /// Portal-label geometry: point ↔ `border_t` on a node's rectangular
 /// border, plus the directional default orientation.
 pub mod portal_geometry;
-/// `MindMap` → `RenderScene` flat builder for connections, borders,
-/// portals, edge-handles, and connection labels.
-pub mod scene_builder;
-/// Per-edge cache of connection glyph geometry — keeps the scene
-/// builder from re-sampling every visible edge every drag frame.
+/// Per-edge cache of connection glyph geometry — keeps the
+/// connection pass from re-sampling every visible edge every drag
+/// frame.
 pub mod scene_cache;
 /// `MindMap` → `Tree<GfxElement, GfxMutator>` builder with
 /// per-canvas-role sub-builders.

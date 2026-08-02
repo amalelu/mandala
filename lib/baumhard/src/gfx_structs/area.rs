@@ -3,7 +3,7 @@
 //! `GlyphArea` — the text-region element variant of a `GfxElement`.
 //! Owns the text content, font scale, position, bounding size,
 //! halo outline, and the `ColorFontRegions` set that carries per-
-//! range colour / font overrides. Mutations land here through
+//! range color / font overrides. Mutations land here through
 //! `apply_operation` (`DeltaGlyphArea`) or the higher-level
 //! `GlyphAreaCommand`; the field and mutator vocabularies live in
 //! the sibling `area_fields` and `area_mutators` modules and are
@@ -19,16 +19,18 @@ use crate::gfx_structs::shape::NodeShape;
 use crate::gfx_structs::util::hitbox::HitBox;
 use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::util::color::FloatRgba;
+use crate::util::geometry::clockwise_rotation_around_pivot;
 use crate::util::grapheme_chad;
 use crate::util::ordered_vec2::OrderedVec2;
 use derivative::Derivative;
 use glam::f32::Vec2;
+use log::warn;
 
 /// Asymmetric per-edge expansion in pixels. Used by
 /// [`GlyphArea::background_padding`] to extend the fill rect
 /// outward by an independent amount on each side. Default is
 /// `0.0` everywhere — the fill coincides with the text rect, the
-/// historical behaviour. All fields stored as
+/// historical behavior. All fields stored as
 /// [`ordered_float::OrderedFloat`] so the type is hashable and
 /// `PartialEq`-able with float-bit equality, mirroring
 /// [`OrderedVec2`].
@@ -119,7 +121,7 @@ pub struct GlyphArea {
     /// Width / height the renderer is free to shape into. Zero disables
     /// rendering entirely.
     pub render_bounds: OrderedVec2,
-    /// Per-character colour / font runs layered over the base text.
+    /// Per-character color / font runs layered over the base text.
     pub regions: ColorFontRegions,
     /// Solid background fill drawn behind the text glyphs by the
     /// renderer. `None` means no fill — the element draws as text
@@ -136,9 +138,9 @@ pub struct GlyphArea {
     /// text shaping uses the unmodified `position` / `render_bounds`,
     /// so this field doesn't affect layout. Default `EdgePadding::ZERO`
     /// — the background coincides with the text bounds, the historical
-    /// behaviour. Used by mindmap nodes to extend the fill behind
+    /// behavior. Used by mindmap nodes to extend the fill behind
     /// border glyphs that sit outside the text rect so the border
-    /// draws against the node's background colour rather than the
+    /// draws against the node's background color rather than the
     /// canvas underneath. Per-edge rather than symmetric because
     /// node borders are inherently asymmetric — the top run sits
     /// `font_size - corner_overlap` above the rect and the bottom
@@ -148,7 +150,7 @@ pub struct GlyphArea {
     /// When `true`, the renderer shapes this area's text with
     /// `cosmic_text::Align::Center` so cross-script glyphs whose
     /// per-glyph advance varies (e.g. the picker's Devanagari /
-    /// Hebrew / Tibetan hue-ring cells) sit centred in their
+    /// Hebrew / Tibetan hue-ring cells) sit centered in their
     /// box. Default `false` — text starts at the box's left edge,
     /// matching ordinary mindmap node text.
     #[serde(default)]
@@ -163,7 +165,7 @@ pub struct GlyphArea {
     #[serde(default)]
     pub outline: Option<OutlineStyle>,
     /// Background / hit-test shape of the area. Default
-    /// [`NodeShape::Rectangle`] matches the historical behaviour
+    /// [`NodeShape::Rectangle`] matches the historical behavior
     /// where every node fills its bounding box. Shared between the
     /// renderer's rect SDF pipeline (drawn fill) and the BVH
     /// descent (point-in-shape hit test), so changing this field
@@ -313,7 +315,11 @@ impl GlyphArea {
                         self.regions.remove(delta_region);
                     }
                 }
-                _ => {}
+                ApplyOperation::Delete => self.regions = ColorFontRegions::default(),
+                ApplyOperation::Multiply => {
+                    warn!("Multiply is not defined for ColorFontRegions; ignoring")
+                }
+                ApplyOperation::Noop => {}
             }
         }
 
@@ -324,7 +330,11 @@ impl GlyphArea {
                     self.text.push_str(text);
                 }
                 ApplyOperation::Add => self.text += text,
-                _ => {}
+                ApplyOperation::Delete => self.text.clear(),
+                ApplyOperation::Subtract | ApplyOperation::Multiply => {
+                    warn!("{:?} is not defined for text; ignoring", operation)
+                }
+                ApplyOperation::Noop => {}
             }
         }
 
@@ -405,7 +415,7 @@ impl GlyphArea {
         self.render_bounds = OrderedVec2::new_f32(bounds.0, bounds.1);
     }
 
-    /// Remove the colour/font region at `range`, if any. O(n) in
+    /// Remove the color/font region at `range`, if any. O(n) in
     /// the existing region count.
     pub fn delete_color_font_region(&mut self, range: &Range) {
         self.regions.remove_range(*range);
@@ -414,10 +424,17 @@ impl GlyphArea {
     /// Move an existing region's span from `current_range` to
     /// `new_range`. O(n) in region count.
     ///
-    /// # Panics
-    /// Panics if no region exists at `current_range`.
+    /// If no region exists at `current_range`, the call is a no-op
+    /// after logging a warning — interactive mutation paths must not
+    /// abort the editor over a stale range (CODE_CONVENTIONS.md §9).
     pub fn change_region_range(&mut self, current_range: &Range, new_range: &Range) {
-        let mut current = *self.regions.get(*current_range).expect("No region found");
+        let Some(mut current) = self.regions.get(*current_range).copied() else {
+            warn!(
+                "change_region_range skipped: no region at {}..{}",
+                current_range.start, current_range.end
+            );
+            return;
+        };
         current.range = *new_range;
         self.regions.remove_range(*current_range);
         self.regions.submit_region(current);
@@ -468,12 +485,25 @@ impl GlyphArea {
         self.position = OrderedVec2::new_f32(to_set.0, to_set.1);
     }
 
-    /// Rotate this area's position around `pivot` by `angle` radians.
-    /// Note this uses `Vec2::from_angle(angle).rotate(...)` so the
-    /// angle parameter is radians, not degrees. O(1).
-    pub fn rotate(&mut self, pivot: Vec2, angle: f32) {
-        self.position =
-            OrderedVec2::from_vec2(Vec2::from_angle(angle).rotate(self.position.to_vec2() - pivot));
+    /// Rotate this area's position clockwise around `pivot` by
+    /// `degrees`.
+    ///
+    /// Shares [`clockwise_rotation_around_pivot`] with its two
+    /// siblings — [`GfxElement::rotate`](crate::gfx_structs::element::GfxElement::rotate)
+    /// and [`GlyphModel::rotate`](crate::gfx_structs::model::GlyphModel::rotate)
+    /// — so all three agree on the unit (degrees, not radians) and the
+    /// direction (clockwise in screen space, where `+y` points down).
+    /// The rotation is about `pivot`, so rotating about the area's own
+    /// position is the identity.
+    ///
+    /// Costs: O(1) — one `Mat3` construction and one point transform.
+    /// No allocation.
+    pub fn rotate(&mut self, pivot: Vec2, degrees: f32) {
+        self.position = OrderedVec2::from_vec2(clockwise_rotation_around_pivot(
+            self.position.to_vec2(),
+            pivot,
+            degrees,
+        ));
     }
 }
 

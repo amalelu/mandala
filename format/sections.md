@@ -168,10 +168,11 @@ feedback).
 
 The shared
 [`MindSection::effective_size`](../lib/baumhard/src/mindmap/model/node.rs)
-helper is the single source of truth — both the document-side
-setters and `verify::sections::check_within_node_aabb` route
-through it, so the two cannot drift on what "fill-parent"
-means.
+helper feeds the shared
+[`model::validate`](../lib/baumhard/src/mindmap/model/validate.rs)
+rules. Both the document-side setters and `maptool verify` route
+through that validator, so the two cannot drift on what
+"fill-parent" means or on the rejection messages.
 
 **Drag-to-move gesture.** Click and drag on a section of a
 multi-section node — past the drag-threshold the press promotes
@@ -445,4 +446,3 @@ verify): a zero-section map is rejected at parse time with a
 - [`CONCEPTS.md` §3 "Sections"](../CONCEPTS.md) — conceptual
   treatment of the section selection model and per-section
   mutator reach.
-

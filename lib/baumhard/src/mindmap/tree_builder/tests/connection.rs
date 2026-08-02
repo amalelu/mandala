@@ -6,8 +6,8 @@ use super::super::*;
 
 #[test]
 fn connection_tree_emits_one_void_per_edge_with_glyph_children() {
-    use crate::mindmap::scene_builder::ConnectionElement;
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::ConnectionElement;
 
     let elem = ConnectionElement {
         edge_key: EdgeKey::new("a", "b", "child"),
@@ -33,8 +33,8 @@ fn connection_tree_emits_one_void_per_edge_with_glyph_children() {
 
 #[test]
 fn connection_tree_skips_caps_when_absent() {
-    use crate::mindmap::scene_builder::ConnectionElement;
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::ConnectionElement;
 
     let elem = ConnectionElement {
         edge_key: EdgeKey::new("a", "b", "child"),
@@ -53,8 +53,8 @@ fn connection_tree_skips_caps_when_absent() {
 }
 #[test]
 fn connection_identity_sequence_changes_with_structural_shifts() {
-    use crate::mindmap::scene_builder::ConnectionElement;
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::ConnectionElement;
 
     let mk = |body_count: usize,
               cap_start: Option<(String, (f32, f32))>,
@@ -108,8 +108,8 @@ fn connection_identity_sequence_changes_with_structural_shifts() {
 fn connection_mutator_round_trip_matches_full_rebuild() {
     use crate::core::primitives::Applicable;
     use crate::gfx_structs::zoom_visibility::ZoomVisibility;
-    use crate::mindmap::scene_builder::ConnectionElement;
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::ConnectionElement;
 
     // Non-default zoom window on `elem_b` so the round-trip
     // test actually catches a regression in the mutator's
@@ -179,8 +179,8 @@ fn connection_mutator_round_trip_matches_full_rebuild() {
 fn connection_label_mutator_round_trip_handles_text_edit() {
     use crate::core::primitives::Applicable;
     use crate::gfx_structs::zoom_visibility::ZoomVisibility;
-    use crate::mindmap::scene_builder::ConnectionLabelElement;
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::ConnectionLabelElement;
 
     // Non-default zoom window on `elem_b` so the parity loop
     // below catches a regression in the label mutator's
@@ -240,8 +240,8 @@ fn connection_label_mutator_round_trip_handles_text_edit() {
 /// builder against a revert to `.chars().count()`.
 #[test]
 fn connection_region_sized_by_grapheme_cluster_count_not_codepoints() {
-    use crate::mindmap::scene_builder::ConnectionElement;
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::ConnectionElement;
 
     let elem = ConnectionElement {
         edge_key: EdgeKey::new("a", "b", "child"),
@@ -274,8 +274,8 @@ fn connection_region_sized_by_grapheme_cluster_count_not_codepoints() {
 /// cap test above for the connection-label surface.
 #[test]
 fn connection_label_region_sized_by_grapheme_cluster_count_not_codepoints() {
-    use crate::mindmap::scene_builder::ConnectionLabelElement;
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::ConnectionLabelElement;
 
     let elem = ConnectionLabelElement {
         edge_key: EdgeKey::new("a", "b", "cross_link"),

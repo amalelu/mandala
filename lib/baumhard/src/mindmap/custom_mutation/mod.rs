@@ -152,7 +152,7 @@ impl CustomMutation {
 /// safe to expose. **Any new variant that performs file I/O, network
 /// access, arbitrary content load, or cross-process side effects MUST
 /// be gated at the `dispatch_macro` site** (parallel to the
-/// `MacroSource::allows_console_line` gate) to prevent a hostile
+/// `SourceTier::allows_console_line` gate) to prevent a hostile
 /// shared mindmap from invoking it. Marked `#[non_exhaustive]` so
 /// adding such a variant outside this crate is impossible — review
 /// the privilege model when extending.
@@ -185,7 +185,16 @@ pub enum MutationBehavior {
 /// The mutation payload [`CustomMutation::mutator`] performs the
 /// actual tree edits; this enum just tells the app layer which set
 /// of MindNodes are in the reach.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+///
+/// `EnumIter` is load-bearing, not decoration. Adding a variant here
+/// must fail the suite rather than leave a hand-kept list one row
+/// short: the `covers_reach` table pin, the serde round-trip, the
+/// differential harness's scope list, and the `target_scope` value
+/// list published in `format/schema.md` are all driven off
+/// `TargetScope::iter()`, so none of them can silently omit a new
+/// variant (CLAUDE.md §5 — make the drift impossible, don't fix it
+/// once).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, strum_macros::EnumIter)]
 pub enum TargetScope {
     /// Apply to the triggering node itself.
     SelfOnly,
@@ -195,9 +204,25 @@ pub enum TargetScope {
     Descendants,
     /// Apply to the triggering node AND all descendants.
     SelfAndDescendants,
-    /// Apply to the parent of the triggering node.
+    /// Apply to the parent of the triggering node. Resolves to the
+    /// empty set on a root node, which has no parent — the mutation
+    /// then snapshots nothing, mutates nothing, and pushes no undo
+    /// entry.
     Parent,
-    /// Apply to all siblings of the triggering node.
+    /// Apply to all siblings of the triggering node — every *other*
+    /// child of its parent. The triggering node itself is excluded;
+    /// pair with `SelfAndDescendants` on the parent if you want it
+    /// included.
+    ///
+    /// **A root node has no siblings.** "Sibling" here means "shares
+    /// my parent", and a root has no parent to share, so the other
+    /// roots of a multi-root map are deliberately *not* treated as
+    /// siblings — there is no `parent_id` the application layer could
+    /// key the sibling list on, and "every other root" is a different
+    /// relation that would silently fan a node-local mutation across
+    /// unrelated trees. A `Siblings` mutation triggered on a root is
+    /// therefore a well-defined no-op: the target set is empty,
+    /// nothing is snapshotted, and no undo entry is pushed.
     Siblings,
     /// Apply to every section of the triggering node — bypasses
     /// the container fan-out so text / font / region mutations
@@ -227,6 +252,7 @@ pub enum Trigger {
 
 /// Associates a Trigger with a CustomMutation, optionally filtered by platform.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TriggerBinding {
     /// Which trigger fires this binding.
     pub trigger: Trigger,
@@ -275,41 +301,208 @@ pub fn apply_mutations_to_element(
 /// and-apply-per-target semantics while the richer `mutator_builder`
 /// walker path is phased in for size-aware mutations in a separate
 /// session.
+///
+/// # Extraction is all-or-nothing, and it keys on payload equality
+///
+/// The extracted list is applied **once per scope-collected target**.
+/// For that single list to mean what the AST says, two things have to
+/// hold of every node beneath the root:
+///
+/// 1. **It must be evaluatable by the flat path.** A single
+///    unevaluatable node anywhere in the AST declines the whole
+///    mutator, so the apply site warns and skips instead of applying
+///    a partial reading of it. Accepting
+///    `Macro{[L1], children: [Instruction{RepeatWhile(matches-nothing)}
+///    {Macro[L2]}]}` on the strength of its root alone would land
+///    `L1` everywhere and `L2` nowhere — the same "applied result
+///    differs from the authored AST" defect the `always_match` guard
+///    below exists to prevent, just one level down and without the
+///    warning.
+/// 2. **Every payload it carries must equal the one returned.**
+///    Extractability alone is not enough, and this is the sharper of
+///    the two rules: `Macro{[L1], children: [Macro{[L2]}]}` is
+///    *entirely* extractable and still cannot be collapsed, because
+///    one flat list cannot be both `L1` and `L2`. Returning `L1` there
+///    would blanket every target with `L1` and land `L2` nowhere —
+///    exactly the failure rule 1 exists to prevent, reached by a
+///    different road. So a differing payload declines too.
+///
+///    The rule is deliberately conservative rather than permissive:
+///    concatenating the descendant payloads instead would turn
+///    [`scope::self_and_descendants`] — whose root and nested `Macro`
+///    carry two clones of the *same* list — into a double-apply.
+///    Agreement is what makes that helper's duplicate payload a
+///    no-op rather than a special case.
+///
+///    "Agree" is
+///    [`Mutation::writes_the_same`](crate::gfx_structs::mutator::Mutation::writes_the_same),
+///    not `==`. Derived `PartialEq` over `f32` is not reflexive, so
+///    under `==` a `NaN` in that helper's duplicated payload would
+///    make it disagree with **itself** and decline, while the same
+///    payload under [`scope::self_only`] — which has nothing to
+///    compare — applied. Two helpers differing only in scope must
+///    not differ in whether the mutation runs.
+///
+/// [`MutationSrc`](crate::mutator_builder::MutationSrc) payloads on an
+/// `Instruction` wrapper are unevaluatable by rule 1 for the same
+/// reason: `MutationSrc::Runtime` is resolved by a
+/// [`SectionContext`](crate::mutator_builder::SectionContext) the flat
+/// path never consults, and `MutationSrc::AreaDelta` is a per-cell
+/// template. Both scope helpers that build wrappers set
+/// `mutation: MutationSrc::None`, so requiring it costs nothing.
+///
+/// A [`MutatorNode::Void`] on **channel 0** carries no mutation, so
+/// it is transparent: it passes its children's payload through, and
+/// an empty one can lose nothing — declining on it would kill a
+/// mutator to save a payload that does not exist.
+///
+/// Channel 0 is the condition, not a formality. A `Void`'s channel is
+/// branch routing: [`build`](crate::mutator_builder::build) emits
+/// `GfxMutator::new_void(channel)` and the walker aligns that node's
+/// children only against the target child on the matching channel, so
+/// `Void{channel: 7}` is a routing gate rather than pure grouping.
+/// The flat path is channel-blind by construction — it produces one
+/// list applied to whole elements, with nothing to route on — and
+/// `Macro` has always inherited that limitation (load-bearing for the
+/// `SectionsOnly` fan-out, where a channel-0 `Macro` is deliberately
+/// applied to section-areas on channels 1..n). What is *not* on offer
+/// is widening the accepted set on the strength of a rationale that
+/// does not hold: a `Void` used off channel 0 says something the flat
+/// list cannot say, so it keeps the `7f3a87c` behavior and declines.
+/// Every scope helper builds on channel 0, so nothing this
+/// transparency was introduced for is affected.
+///
+/// `Single` declines in every form, including
+/// `Single { mutation: MutationSrc::None }` — which is as payload-free
+/// as an empty `Void` and could safely be admitted. It is not,
+/// because `Single`'s reason to exist is its `ChannelSrc`: unlike
+/// `Void` it is a *leaf* whose channel selects the target it writes,
+/// so admitting the payload-free case would be widening into the one
+/// node kind whose whole meaning is the routing the flat path drops,
+/// to gain a node that does nothing. Conservative on purpose.
+///
+/// Costs: O(AST size). Clones each payload-bearing node's literal
+/// list once — including the clones it compares and discards — so a
+/// declined mutator still allocates. The comparison itself allocates
+/// only when two payloads are not `==` (see
+/// [`Mutation::writes_the_same`](crate::gfx_structs::mutator::Mutation::writes_the_same)).
+/// Called on every apply (three times: once by the unsupported-field
+/// warning and once per tree), plus once per animation start; none of
+/// those is a frame path.
 pub fn flat_mutations(mutator: &MutatorNode) -> Option<Vec<crate::gfx_structs::mutator::Mutation>> {
-    use crate::mutator_builder::{InstructionSpec, MutationListSrc, MutatorNode as N};
-    use crate::gfx_structs::predicate::Comparator;
-    match mutator {
+    // The outer `Option` is the decline verdict; the inner one
+    // distinguishes "carries this payload" from "payload-free
+    // structure". A root that reaches the end payload-free (a bare
+    // `Void`, a childless wrapper) has no list to apply and declines,
+    // which is what makes the apply site warn rather than silently
+    // run an empty mutation.
+    extract(mutator)?
+}
+
+/// One node's contribution to the flat list.
+///
+/// - `None` — decline: this node (or something under it) is not
+///   evaluatable by the flat path, or two payloads below it disagree.
+/// - `Some(None)` — evaluatable, but payload-free structure.
+/// - `Some(Some(list))` — evaluatable, and the subtree agrees on
+///   `list`.
+///
+/// Cost: see [`flat_mutations`].
+fn extract(node: &MutatorNode) -> Option<Option<Vec<crate::gfx_structs::mutator::Mutation>>> {
+    use crate::mutator_builder::{InstructionSpec, MutationListSrc, MutationSrc, MutatorNode as N};
+    let (mut payload, children) = match node {
+        // Pure structural grouping — no payload of its own. Channel
+        // 0 only: off channel 0 a `Void` is a routing gate the flat
+        // path cannot honor, so it falls through and declines.
+        N::Void { channel: 0, children } => (None, children.as_slice()),
+        // The literal list is this node's payload; the children below
+        // must agree with it.
         N::Macro {
             mutations: MutationListSrc::Literal(list),
+            children,
             ..
-        } => Some(list.clone()),
-        // `Instruction(RepeatWhile(always_true))` wrappers
-        // (built by `scope::descendants` and the inner branch of
-        // `scope::self_and_descendants`) carry a child Macro
-        // with the actual mutations. The flat-apply path drives
-        // the iteration via `collect_affected_node_ids` so the
-        // wrapper's repeat-while semantics are redundant — we
-        // can extract the Macro's literal list directly. Only
-        // honour `always_true` predicates: a predicate-filtered
-        // wrapper would need walker-based evaluation, which the
-        // flat-apply path can't provide; falling through to
-        // `None` makes that case warn at the apply site.
+        } => (Some(list.clone()), children.as_slice()),
+        // `Instruction(RepeatWhile(always_true))` wrappers (built by
+        // `scope::descendants` and the inner branch of
+        // `scope::self_and_descendants`) carry a child Macro with the
+        // actual mutations. The flat-apply path drives the iteration
+        // via `collect_affected_node_ids`, so the wrapper's
+        // repeat-while semantics are redundant and its children's
+        // literal list can be extracted directly.
+        //
+        // `mutation: MutationSrc::None` is required: a wrapper
+        // carrying its own per-step `Runtime` or `AreaDelta` payload
+        // is a payload the flat path provably cannot evaluate, and
+        // unwrapping past it would drop it in silence.
         N::Instruction {
             instruction: InstructionSpec::RepeatWhileAlwaysTrue,
+            mutation: MutationSrc::None,
             children,
             ..
-        } => children.iter().find_map(flat_mutations),
+        } => (None, children.as_slice()),
+        // `always_match` is the *only* admissible predicate test,
+        // because it is the only thing [`Predicate::test`]
+        // short-circuits on. Everything else — including an empty
+        // field list — is a predicate that filters. In particular a
+        // bare `Predicate::new()` (`fields: []`,
+        // `always_match: false`) matches **nothing**, the footgun
+        // documented on [`CustomMutation::predicate`]; unwrapping it
+        // here would land the Macro's payload on every node the scope
+        // collected, which is the exact inverse of what the AST
+        // authorizes.
         N::Instruction {
             instruction: InstructionSpec::RepeatWhile(p),
+            mutation: MutationSrc::None,
             children,
             ..
-        } if p.always_match
-            || p.fields.iter().all(|(_, c)| matches!(c, Comparator::Equals(_))) && p.fields.is_empty() =>
-        {
-            children.iter().find_map(flat_mutations)
+        } if p.always_match => (None, children.as_slice()),
+        // Everything else declines: `MapChildren` and the other
+        // walking instructions have no flat equivalent, a
+        // `MutationListSrc::Runtime` Macro needs a section context,
+        // `Single` is a leaf whose `ChannelSrc` selects the target it
+        // writes and the flat path has nowhere to put that, a `Void`
+        // off channel 0 is a routing gate for the same reason, and
+        // `Repeat` expands at build time.
+        _ => return None,
+    };
+    for child in children {
+        match (&payload, extract(child)?) {
+            // Payload-free child: nothing to reconcile.
+            (_, None) => {}
+            // First payload found in this subtree.
+            (None, Some(list)) => payload = Some(list),
+            // A second payload must say the same thing, or the flat
+            // list cannot represent both — decline (rule 2 above).
+            (Some(have), Some(list)) if !lists_agree(have, &list) => return None,
+            (Some(_), Some(_)) => {}
         }
-        _ => None,
     }
+    Some(payload)
+}
+
+/// Whether two payload lists would write the same thing, element by
+/// element.
+///
+/// Element-wise
+/// [`Mutation::writes_the_same`](crate::gfx_structs::mutator::Mutation::writes_the_same)
+/// rather than `==` on the slices, because the derived `PartialEq`
+/// over `f32` is not reflexive and this predicate decides whether a
+/// mutator runs at all — see that method for why a `NaN` otherwise
+/// makes [`scope::self_and_descendants`] decline a payload
+/// [`scope::self_only`] applies.
+///
+/// Element-wise rather than whole-list so each element gets the
+/// full union: `[NaN, 0.0]` agrees with `[NaN, -0.0]`, where a
+/// list-level comparison would find neither disjunct true of the
+/// pair as a whole.
+///
+/// Cost: O(n) comparisons, no allocation unless an element
+/// disagrees under `==`.
+fn lists_agree(
+    a: &[crate::gfx_structs::mutator::Mutation],
+    b: &[crate::gfx_structs::mutator::Mutation],
+) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.writes_the_same(y))
 }
 
 /// Which node sets, relative to the anchor, the mutator AST could
@@ -318,7 +511,11 @@ pub fn flat_mutations(mutator: &MutatorNode) -> Option<Vec<crate::gfx_structs::m
 /// authoring mistakes where the undo-snapshot scope is narrower
 /// than the mutator's actual reach (which silently loses edits on
 /// undo). Ordered from narrowest to widest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// `EnumIter` for the same reason as [`TargetScope`]: the
+/// `covers_reach` table is pinned over both axes, so a new reach can
+/// no more slip past the tests than a new scope can.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, strum_macros::EnumIter)]
 pub enum MutatorReach {
     /// Only the anchor node. Every non-empty mutator reaches this.
     SelfOnly,
@@ -385,16 +582,82 @@ impl TargetScope {
     /// `true` iff this scope's undo-snapshot window covers every
     /// node `reach` could touch. Used to flag mismatched scope +
     /// mutator pairs at apply time.
+    ///
+    /// # The anchoring model this encodes
+    ///
+    /// The application layer resolves a scope to a **target set**
+    /// (`collect_affected_node_ids` in
+    /// `src/application/document/custom/mod.rs`) and then anchors the
+    /// mutator **at each target in turn** — see the [`scope`] module
+    /// header: "the application layer is responsible for iterating
+    /// the right set of targets ... and anchoring the mutator at each
+    /// of them", which is what the flat-apply path does for every
+    /// scope and what the announced walker path will do too. The undo
+    /// snapshot is exactly that same target set.
+    ///
+    /// So the pairing has complete **undo coverage** iff the target
+    /// set is **closed** under the mutator's reach: for every target
+    /// `t`, everything a `reach`-wide mutator anchored at `t` can
+    /// write is itself a target. Note this is a property of the
+    /// *target set*, not of the triggering node — the trigger is only
+    /// in the set for the three scopes that name it.
+    ///
+    /// **Closure is about undo coverage and nothing else.** It is not
+    /// a claim that the payload lands once per node. Per-target
+    /// anchoring runs the mutator once for every target that reaches
+    /// a given node, so `SelfAndDescendants` paired with a
+    /// `Descendants` reach anchors at each node of the subtree and
+    /// writes a node at depth `k` below the anchor `k + 1` times.
+    /// `covers_reach` still returns `true`, correctly — the snapshot
+    /// covers every one of those writes — but a non-idempotent
+    /// payload (a relative nudge, say) compounds. Today's flat-apply
+    /// path collapses the AST to one list and applies it once per
+    /// target, so nothing compounds yet; the walker path is where
+    /// this needs an answer.
+    ///
+    /// Applying that test to each scope, with `n` the triggering node:
+    ///
+    /// | scope | target set | closed under `Children` reach? |
+    /// |---|---|---|
+    /// | `SelfOnly` | `{n}` | no — `n`'s children are not targets |
+    /// | `Parent` | `{parent(n)}` | no — `n` itself is not a target |
+    /// | `Children` | `children(n)` | no — the **grandchildren** are not targets |
+    /// | `Siblings` | `siblings(n)` | no — a sibling's children are not targets |
+    /// | `SectionsOnly` | `{n}` | conservatively no — see below |
+    /// | `Descendants` | `descendants(n)` | yes — a descendant's children are descendants |
+    /// | `SelfAndDescendants` | `{n} ∪ descendants(n)` | yes — same closure |
+    ///
+    /// Only the two descendant scopes are closed under anything wider
+    /// than the anchor itself, so every other scope requires
+    /// `MutatorReach::SelfOnly`. The `Children` and `Siblings` rows
+    /// are the ones that used to read `reach <= Children`: that
+    /// encoded an anchor-at-the-trigger model the application layer
+    /// never implemented, and approved pairings whose snapshot was a
+    /// level shallower than the write set (issue #19-B).
+    ///
+    /// **`SectionsOnly` is deliberately stricter than it has to be.**
+    /// Its targets are the anchor's section-areas, and a section's
+    /// arena subtree holds only that section's own `GlyphModel` — all
+    /// of it inside the anchor's `MindNode`, hence inside the
+    /// one-node snapshot. A wider reach would in fact be covered.
+    /// The gate still demands `SelfOnly` because the asymmetry is
+    /// not symmetric in cost: over-strict yields a spurious `warn!`,
+    /// over-permissive yields silently unrecoverable undo.
+    ///
+    /// This gate is advisory — the apply path logs a `warn!` on a
+    /// `false` verdict and still applies the mutation. It does not
+    /// widen or narrow the snapshot, which is governed solely by
+    /// `collect_affected_node_ids`.
+    ///
+    /// Costs: O(1) — a match over two payload-free enums, no
+    /// allocation, no tree access.
     pub fn covers_reach(&self, reach: MutatorReach) -> bool {
         match self {
-            // Sections of the triggering node are children of the
-            // container in the arena; a `MutatorReach::SelfOnly`
-            // mutator is the right pairing — sections-only
-            // mutations don't recurse into child mind-nodes.
-            TargetScope::SelfOnly | TargetScope::Parent | TargetScope::SectionsOnly => {
-                reach == MutatorReach::SelfOnly
-            }
-            TargetScope::Children | TargetScope::Siblings => reach <= MutatorReach::Children,
+            TargetScope::SelfOnly
+            | TargetScope::Parent
+            | TargetScope::SectionsOnly
+            | TargetScope::Children
+            | TargetScope::Siblings => reach == MutatorReach::SelfOnly,
             TargetScope::Descendants | TargetScope::SelfAndDescendants => true,
         }
     }
@@ -415,5 +678,8 @@ impl TargetScope {
 //
 // The reverse direction is the bug shape `covers_reach` does
 // catch: a `MutatorReach::Children` mutator paired with
-// `target_scope: SelfOnly` would recurse into descendants the
-// snapshot didn't capture, dropping their state on undo.
+// `target_scope: SelfOnly` writes the anchor's children, which
+// the one-node snapshot didn't capture, dropping their state on
+// undo. The same argument one level down is why `Children` and
+// `Siblings` also demand `SelfOnly` reach — see the closure table
+// on `covers_reach`.

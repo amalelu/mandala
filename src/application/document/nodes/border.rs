@@ -15,20 +15,20 @@
 //! `commit_border_preview`, `cancel_border_preview`) — the
 //! live-preview surface for the four border verbs (per-node,
 //! per-section, two canvas defaults). Same discipline as
-//! `color_picker_preview`: never serialised, never push undo,
+//! `color_picker_preview`: never serialized, never push undo,
 //! never flip `dirty`. Cancel / commit clears the slot
 //! atomically; drift detection is lazy
 //! (`border_preview_covers_live_selection`); implicit cancel
 //! happens at the first line of each committing setter so a
 //! non-preview edit always wins. The scene-build plumbing
-//! lives in `assemble_scene_overrides`.
+//! lives in `frame_overrides`.
 
 use baumhard::mindmap::border::PaletteField;
 use baumhard::mindmap::border_pattern::SidePattern;
 use baumhard::mindmap::model::GlyphBorderConfig;
 
 use super::option_edit::{apply_option_edit, apply_string_set, apply_value_set, OptionEdit};
-use super::{grow_one_node_to_fit_border, MindMapDocument, UndoAction};
+use super::{MindMapDocument, NodeEditTail, UndoAction};
 
 /// Bundle of optional edits applied atomically by
 /// [`MindMapDocument::set_node_border_config`]. Every field
@@ -113,7 +113,7 @@ impl BorderSide {
 /// preset auto-promotion side effect so the console verb can
 /// tell the user when their `preset=heavy top=…` request landed
 /// as `preset=custom` (because setting any side or corner glyph
-/// requires the custom preset for the data model to honour the
+/// requires the custom preset for the data model to honor the
 /// override at render time).
 #[derive(Clone, Debug, Default)]
 pub struct BorderEditOutcome {
@@ -134,7 +134,7 @@ pub struct BorderEditOutcome {
 
 /// Active live-preview substitution captured on
 /// [`MindMapDocument::border_preview`]. The scene builder reads
-/// this through a borrowed view (`scene_builder::BorderPreview<'a>`)
+/// this through a borrowed view (`tree_builder::BorderPreview<'a>`)
 /// and substitutes the previewed `edits` for the resolved border
 /// at the matching target. The model is never mutated; commit
 /// dispatches to the matching committing setter and clears the
@@ -194,6 +194,16 @@ impl MindMapDocument {
     /// `Nodes(_)` / `CanvasDefault` previews cancel here; per-section
     /// and canvas-section-frame previews live in orthogonal
     /// surfaces and survive a node-visibility flip.
+    ///
+    /// Runs [`NodeEditTail::Border`] on commit, exactly as
+    /// [`Self::set_node_border_config`] does: switching a frame
+    /// on is the moment the node first needs room for its frame
+    /// glyphs, and `grow_one_node_to_fit_border` no-ops on the
+    /// off direction (it returns early when `show_frame` is
+    /// false). Pre-fix `border on` alone skipped the grow while
+    /// `border on preset=…` ran it — the same edit sized the node
+    /// differently depending on whether an unrelated kv rode
+    /// along.
     pub fn set_node_border_visible(&mut self, node_id: &str, on: bool) -> bool {
         if matches!(
             self.border_preview.as_ref().map(|p| &p.target),
@@ -201,13 +211,14 @@ impl MindMapDocument {
         ) {
             self.cancel_border_preview();
         }
-        super::set_node_style_field(self, node_id, |s| {
-            if s.show_frame == on {
-                return false;
+        self.mutate_node_with_style_undo(node_id, NodeEditTail::Border, |node| {
+            if node.style.show_frame == on {
+                return None;
             }
-            s.show_frame = on;
-            true
+            node.style.show_frame = on;
+            Some(())
         })
+        .is_some()
     }
 
     /// Apply a bundle of border edits to one node atomically.
@@ -222,7 +233,8 @@ impl MindMapDocument {
     /// trusted to have been validated upstream
     /// (via [`BorderConfigEdits::with_side_pattern`]).
     ///
-    /// After mutation, runs [`grow_one_node_to_fit_border`] so
+    /// After mutation, runs
+    /// [`crate::application::document::grow_one_node_to_fit_border`] so
     /// the node grows to fit the new static parts; the same
     /// `EditNodeStyle` undo envelope captures both the style
     /// change and the size change.
@@ -249,62 +261,49 @@ impl MindMapDocument {
         ) {
             self.cancel_border_preview();
         }
-        let canvas_default = self.mindmap.canvas.default_border.clone();
-        let node = match self.mindmap.nodes.get_mut(node_id) {
-            Some(n) => n,
-            None => return BorderEditOutcome::default(),
-        };
-        let before_style = node.style.clone();
-        let before_sections = node.sections.clone();
-        let before_position = node.position;
-        let before_size = node.size;
-        let before_selection = self.selection.clone();
-        let preset_before = before_style.border.as_ref().map(|c| c.preset.clone());
-
         let mut outcome = BorderEditOutcome::default();
-        let any_change = if edits.clear {
-            if node.style.border.is_none() && edits.visible.is_none() {
-                false
-            } else {
-                node.style.border = None;
-                if let Some(v) = edits.visible {
-                    node.style.show_frame = v;
+        // The border grow (`NodeEditTail::Border`) is monotonic
+        // by design (mirrors `grow_node_sizes_to_fit_text`), so
+        // undoing a border edit restores the style override but
+        // leaves the node at its grown size — same posture as
+        // text edits that grew the box. The user can shrink
+        // manually if desired.
+        let changed = self
+            .mutate_node_with_style_undo(node_id, NodeEditTail::Border, |node| {
+                let preset_before = node.style.border.as_ref().map(|c| c.preset.clone());
+                let any_change = if edits.clear {
+                    if node.style.border.is_none() && edits.visible.is_none() {
+                        false
+                    } else {
+                        node.style.border = None;
+                        if let Some(v) = edits.visible {
+                            node.style.show_frame = v;
+                        }
+                        true
+                    }
+                } else {
+                    apply_border_edits(node, &edits, &mut outcome)
+                };
+                if !any_change {
+                    return None;
                 }
-                true
-            }
-        } else {
-            apply_border_edits(node, &edits, &mut outcome)
-        };
-
-        if !any_change {
-            return outcome;
-        }
-
-        // Detect a preset auto-promotion to "custom" so the
-        // verb's success message can tell the user their
-        // explicit `preset=…` choice was overridden by a side
-        // / corner edit. The user-asked-for preset (if any) is
-        // captured up-front in `outcome.requested_preset` by
-        // `apply_border_edits`; here we compare against what
-        // landed in the model.
-        detect_preset_auto_promote(node.style.border.as_ref(), preset_before.as_deref(), &mut outcome);
-
-        // The size grow is monotonic by design (mirrors
-        // `grow_node_sizes_to_fit_text`), so undoing a border edit
-        // restores the style override but leaves the node at its
-        // grown size — same posture as text edits that grew the
-        // box. The user can shrink manually if desired.
-        grow_one_node_to_fit_border(node, canvas_default.as_ref());
-        self.undo_stack.push(UndoAction::EditNodeStyle {
-            node_id: node_id.to_string(),
-            before_style,
-            before_sections,
-            before_position,
-            before_size,
-            before_selection,
-        });
-        self.dirty = true;
-        outcome.changed = true;
+                // Detect a preset auto-promotion to "custom" so
+                // the verb's success message can tell the user
+                // their explicit `preset=…` choice was overridden
+                // by a side / corner edit. The user-asked-for
+                // preset (if any) is captured up-front in
+                // `outcome.requested_preset` by
+                // `apply_border_edits`; here we compare against
+                // what landed in the model.
+                detect_preset_auto_promote(
+                    node.style.border.as_ref(),
+                    preset_before.as_deref(),
+                    &mut outcome,
+                );
+                Some(())
+            })
+            .is_some();
+        outcome.changed = changed;
         outcome
     }
 
@@ -344,52 +343,36 @@ impl MindMapDocument {
         ) {
             self.cancel_border_preview();
         }
-        // Validate node + section exist before we touch anything.
-        let node = match self.mindmap.nodes.get(node_id) {
-            Some(n) => n,
-            None => return BorderEditOutcome::default(),
-        };
-        let Some(section) = node.sections.get(section_idx) else {
-            return BorderEditOutcome::default();
-        };
-        let preset_before = section.frame_border.as_ref().map(|c| c.preset.clone());
-
+        // Apply the staged edits to the section's frame_border
+        // slot inside the shared envelope. The closure returns
+        // its change verdict so the envelope decides whether to
+        // push the undo entry + flip `dirty` — no post-hoc
+        // `undo_stack.pop()` and no leaked `dirty=true` on no-ops.
+        // `NodeEditTail::None`: a section frame renders inside the
+        // node's AABB and never grows it.
         let mut outcome = BorderEditOutcome::default();
-        if edits.clear {
-            if section.frame_border.is_none() {
-                return outcome;
+        let changed = self.mutate_section_with_style_undo(node_id, section_idx, NodeEditTail::None, |s| {
+            let preset_before = s.frame_border.as_ref().map(|c| c.preset.clone());
+            let any_change = if edits.clear {
+                if s.frame_border.is_none() {
+                    false
+                } else {
+                    s.frame_border = None;
+                    true
+                }
+            } else {
+                apply_glyph_border_edits_to_slot(&mut s.frame_border, &edits, &mut outcome)
+            };
+            if !any_change {
+                return false;
             }
-            self.mutate_section_with_style_undo(node_id, section_idx, |s| {
-                s.frame_border = None;
-                true
-            });
-            outcome.changed = true;
-            return outcome;
-        }
-
-        // Apply the staged edits to the section's frame_border slot
-        // through the helper. The closure returns its change verdict
-        // so the helper itself decides whether to push the undo
-        // entry + flip `dirty` — no post-hoc `undo_stack.pop()` and
-        // no leaked `dirty=true` on no-ops.
-        let changed = self.mutate_section_with_style_undo(node_id, section_idx, |s| {
-            apply_glyph_border_edits_to_slot(&mut s.frame_border, &edits, &mut outcome)
+            // Detect preset auto-promotion (light / heavy /
+            // etc. → custom) identically to the node-level
+            // setter.
+            detect_preset_auto_promote(s.frame_border.as_ref(), preset_before.as_deref(), &mut outcome);
+            true
         });
-        if !changed {
-            return outcome;
-        }
-
-        // Detect preset auto-promotion (light / heavy / etc. → custom)
-        // identically to the node-level setter.
-        let landed = self
-            .mindmap
-            .nodes
-            .get(node_id)
-            .and_then(|n| n.sections.get(section_idx))
-            .and_then(|s| s.frame_border.as_ref());
-        detect_preset_auto_promote(landed, preset_before.as_deref(), &mut outcome);
-
-        outcome.changed = true;
+        outcome.changed = changed;
         outcome
     }
 

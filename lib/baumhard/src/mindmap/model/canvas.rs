@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Canvas — the per-map rendering context: background colour, default
+//! Canvas — the per-map rendering context: background color, default
 //! border / connection styles applied when no per-node or per-edge
 //! override exists, and the live theme-variable map that `var(--name)`
-//! colour references resolve against.
+//! color references resolve against.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,6 +16,7 @@ use super::{GlyphBorderConfig, GlyphConnectionConfig};
 /// [`super::MindMap`]. Plain data; no runtime cost beyond the
 /// `HashMap` / `String` allocations serde performs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Canvas {
     pub background_color: String,
     /// Default border style applied to all nodes unless overridden per-node.

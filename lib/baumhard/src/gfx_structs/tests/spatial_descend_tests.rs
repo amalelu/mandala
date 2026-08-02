@@ -12,11 +12,14 @@
 
 use glam::Vec2;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use crate::core::primitives::{Applicable, ApplyOperation};
 use crate::font::fonts;
-use crate::gfx_structs::area::GlyphArea;
+use crate::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaField};
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{
     GfxMutator, GlyphTreeEvent, GlyphTreeEventInstance, Instruction, MouseEventData, Mutation,
@@ -52,7 +55,7 @@ pub fn do_spatial_descend_delivers_event_to_leaf() {
     let mut tree = build_test_tree();
     let received = Arc::new(AtomicBool::new(false));
     let rc = received.clone();
-    let sub: EventSubscriber = Arc::new(Mutex::new(
+    let sub: EventSubscriber = Rc::new(RefCell::new(
         move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
             rc.store(true, Ordering::SeqCst);
         },
@@ -82,7 +85,7 @@ pub fn do_spatial_descend_miss_is_noop() {
     let mut tree = build_test_tree();
     let received = Arc::new(AtomicBool::new(false));
     let rc = received.clone();
-    let sub: EventSubscriber = Arc::new(Mutex::new(
+    let sub: EventSubscriber = Rc::new(RefCell::new(
         move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
             rc.store(true, Ordering::SeqCst);
         },
@@ -114,13 +117,13 @@ pub fn do_spatial_descend_finds_innermost_node() {
     let child_received = Arc::new(AtomicBool::new(false));
 
     let lr = left_received.clone();
-    let left_sub: EventSubscriber = Arc::new(Mutex::new(
+    let left_sub: EventSubscriber = Rc::new(RefCell::new(
         move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
             lr.store(true, Ordering::SeqCst);
         },
     ));
     let cr = child_received.clone();
-    let child_sub: EventSubscriber = Arc::new(Mutex::new(
+    let child_sub: EventSubscriber = Rc::new(RefCell::new(
         move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
             cr.store(true, Ordering::SeqCst);
         },
@@ -160,7 +163,7 @@ pub fn do_spatial_descend_deep_chain_delivers_to_leaf() {
     let mut tree = build_deep_chain();
     let received = Arc::new(AtomicBool::new(false));
     let rc = received.clone();
-    let sub: EventSubscriber = Arc::new(Mutex::new(
+    let sub: EventSubscriber = Rc::new(RefCell::new(
         move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
             rc.store(true, Ordering::SeqCst);
         },
@@ -196,14 +199,14 @@ fn test_spatial_descend_wide_tree_hits_correct_child() {
 
 pub fn do_spatial_descend_wide_tree_hits_correct_child() {
     let mut tree = build_wide_tree();
-    let hit_ids: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let hit_ids: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
 
     let children: Vec<_> = tree.root.children(&tree.arena).collect();
     for (i, &cid) in children.iter().enumerate() {
         let ids = hit_ids.clone();
-        let sub: EventSubscriber = Arc::new(Mutex::new(
+        let sub: EventSubscriber = Rc::new(RefCell::new(
             move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
-                ids.lock().unwrap().push(i);
+                ids.borrow_mut().push(i);
             },
         ));
         tree.arena
@@ -217,7 +220,7 @@ pub fn do_spatial_descend_wide_tree_hits_correct_child() {
     let mtree = spatial_descend_mutator(760.0, 10.0);
     let root = tree.root;
     walk_tree_from(&mut tree, &mtree, root, mtree.root);
-    assert_eq!(*hit_ids.lock().unwrap(), vec![15]);
+    assert_eq!(*hit_ids.borrow(), vec![15]);
 }
 
 // ── Mutation::None payload ────────────────────────────────────────
@@ -231,7 +234,7 @@ pub fn do_spatial_descend_no_mutation_is_noop() {
     let mut tree = build_test_tree();
     let received = Arc::new(AtomicBool::new(false));
     let rc = received.clone();
-    let sub: EventSubscriber = Arc::new(Mutex::new(
+    let sub: EventSubscriber = Rc::new(RefCell::new(
         move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
             rc.store(true, Ordering::SeqCst);
         },
@@ -273,7 +276,7 @@ pub fn do_spatial_descend_ignores_channel_mismatch() {
 
     let received = Arc::new(AtomicBool::new(false));
     let rc = received.clone();
-    let sub: EventSubscriber = Arc::new(Mutex::new(
+    let sub: EventSubscriber = Rc::new(RefCell::new(
         move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
             rc.store(true, Ordering::SeqCst);
         },
@@ -292,6 +295,117 @@ pub fn do_spatial_descend_ignores_channel_mismatch() {
     let mtree = spatial_descend_mutator(25.0, 25.0);
     let root = tree.root;
     walk_tree_from(&mut tree, &mtree, root, mtree.root);
+    assert!(received.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_apply_to_redirties_subtree_aabbs_after_spatial_descend() {
+    do_apply_to_redirties_subtree_aabbs_after_spatial_descend();
+}
+
+/// `SpatialDescend` may compute subtree AABBs mid-walk. A later
+/// sibling mutation in the same `apply_to` must leave the tree dirty
+/// again so post-apply hit-tests see the moved geometry.
+pub fn do_apply_to_redirties_subtree_aabbs_after_spatial_descend() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let probe_id = tree.arena.new_node(GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str("probe", 14.0, 14.0, Vec2::new(0.0, 0.0), Vec2::new(50.0, 50.0)),
+        0,
+        1,
+    ));
+    let moved_id = tree.arena.new_node(GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str("moved", 14.0, 14.0, Vec2::new(100.0, 0.0), Vec2::new(50.0, 50.0)),
+        1,
+        2,
+    ));
+    tree.root.append(probe_id, &mut tree.arena);
+    tree.root.append(moved_id, &mut tree.arena);
+
+    let mut mutator = MutatorTree::new();
+    let spatial_id = mutator.arena.new_node(GfxMutator::Instruction {
+        instruction: Instruction::SpatialDescend(OrderedVec2::new_f32(10.0, 10.0)),
+        channel: 0,
+        mutation: Mutation::None,
+    });
+    let move_id = mutator.arena.new_node(GfxMutator::new(
+        Mutation::area_delta(DeltaGlyphArea::new(vec![
+            GlyphAreaField::Operation(ApplyOperation::Add),
+            GlyphAreaField::position(300.0, 0.0),
+        ])),
+        1,
+    ));
+    mutator.root.append(spatial_id, &mut mutator.arena);
+    mutator.root.append(move_id, &mut mutator.arena);
+
+    mutator.apply_to(&mut tree);
+
+    assert_eq!(tree.descendant_at(Vec2::new(410.0, 10.0)), Some(moved_id));
+    assert!(tree.descendant_at(Vec2::new(110.0, 10.0)).is_none());
+}
+
+#[test]
+fn test_walker_redirties_subtree_aabbs_between_spatial_descends() {
+    do_walker_redirties_subtree_aabbs_between_spatial_descends();
+}
+
+/// A walker-applied move between two spatial descents must dirty
+/// subtree AABBs immediately; the outer post-`apply_to` invalidation
+/// is too late for the second descent.
+pub fn do_walker_redirties_subtree_aabbs_between_spatial_descends() {
+    fonts::init();
+    let mut tree = Tree::new_non_indexed();
+    let probe_id = tree.arena.new_node(GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str("probe", 14.0, 14.0, Vec2::new(0.0, 0.0), Vec2::new(50.0, 50.0)),
+        0,
+        1,
+    ));
+    let moved_id = tree.arena.new_node(GfxElement::new_area_non_indexed_with_id(
+        GlyphArea::new_with_str("moved", 14.0, 14.0, Vec2::new(100.0, 0.0), Vec2::new(50.0, 50.0)),
+        1,
+        2,
+    ));
+    tree.root.append(probe_id, &mut tree.arena);
+    tree.root.append(moved_id, &mut tree.arena);
+
+    let received = Arc::new(AtomicBool::new(false));
+    let rc = received.clone();
+    let sub: EventSubscriber = Rc::new(RefCell::new(
+        move |_: &mut GfxElement, _: GlyphTreeEventInstance| {
+            rc.store(true, Ordering::SeqCst);
+        },
+    ));
+    tree.arena
+        .get_mut(moved_id)
+        .unwrap()
+        .get_mut()
+        .subscribers_mut()
+        .push(sub);
+
+    let first_spatial = MutatorTree::new_with(GfxMutator::Instruction {
+        instruction: Instruction::SpatialDescend(OrderedVec2::new_f32(10.0, 10.0)),
+        channel: 0,
+        mutation: Mutation::None,
+    });
+    let root = tree.root;
+    walk_tree_from(&mut tree, &first_spatial, root, first_spatial.root);
+
+    let mut move_mutator = MutatorTree::new();
+    let move_id = move_mutator.arena.new_node(GfxMutator::new(
+        Mutation::area_delta(DeltaGlyphArea::new(vec![
+            GlyphAreaField::Operation(ApplyOperation::Add),
+            GlyphAreaField::position(300.0, 0.0),
+        ])),
+        1,
+    ));
+    move_mutator.root.append(move_id, &mut move_mutator.arena);
+    let root = tree.root;
+    walk_tree_from(&mut tree, &move_mutator, root, move_mutator.root);
+
+    let second_spatial = spatial_descend_mutator(410.0, 10.0);
+    let root = tree.root;
+    walk_tree_from(&mut tree, &second_spatial, root, second_spatial.root);
+
     assert!(received.load(Ordering::SeqCst));
 }
 

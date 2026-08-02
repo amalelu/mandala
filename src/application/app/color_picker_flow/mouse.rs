@@ -89,7 +89,7 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
                     .clamp(geom.resize_scale_min, geom.resize_scale_max);
             }
         }
-        picker_hover.dirty = true;
+        picker_hover.mark_dirty();
         return true;
     }
 
@@ -175,7 +175,7 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
     // — which is fine: the readout was already showing the
     // current value.
     if state_changed {
-        picker_hover.dirty = true;
+        picker_hover.mark_dirty();
         // Preview the updated HSV onto the (possibly contextual)
         // target so the map reflects the hover color live. No-op
         // in Standalone mode — no bound target — but the ࿕ glyph

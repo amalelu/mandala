@@ -2,6 +2,10 @@
 /release
 /.idea
 /dist
+# `build.sh` renames `dist/` aside to `dist.prev/` while rebuilding it
+# and removes it on success; it only survives a build interrupted
+# hard enough to skip the EXIT trap (SIGKILL).
+/dist.prev
 /target/llvm-cov
 lcov.info
 .rustc_info.json

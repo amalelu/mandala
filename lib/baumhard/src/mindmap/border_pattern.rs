@@ -23,7 +23,7 @@
 //!
 //! ## Escapes
 //!
-//! Three escape sequences are recognised everywhere in the input:
+//! Three escape sequences are recognized everywhere in the input:
 //!
 //! - `\(` → literal `(`
 //! - `\)` → literal `)`
@@ -35,21 +35,23 @@
 //! ## Grapheme awareness
 //!
 //! After parsing, each section's string is split into grapheme
-//! clusters via `unicode-segmentation` (`graphemes(true)`) — the
-//! same API every other Mandala text path uses. Cluster counts,
+//! clusters via `grapheme_chad::split_graphemes_owned` — the same
+//! `unicode-segmentation` walk every other Mandala text path uses,
+//! reached through the one module allowed to name it
+//! (CONVENTIONS §B3). Cluster counts,
 //! not codepoint counts, drive fitter math; combining-mark glyphs
 //! and ZWJ emoji each occupy one cell.
 //!
 //! ## Why a separate module
 //!
 //! Three pipelines (scene builder, tree builder, renderer) all
-//! need to render border sides; centralising the parse + render
+//! need to render border sides; centralizing the parse + render
 //! here lets the call sites stay small refactors and keeps the
 //! grammar in one place. Pure data — no cosmic-text, no wgpu —
 //! so it compiles for `wasm32` by construction and is easy to
 //! unit-test.
 
-use unicode_segmentation::UnicodeSegmentation;
+use crate::util::grapheme_chad::split_graphemes_owned;
 
 /// A parsed side pattern. The two variants reflect the two
 /// well-formed inputs the grammar accepts; everything else
@@ -95,8 +97,9 @@ pub enum SidePattern {
 pub struct RenderedSide {
     /// Concatenated grapheme clusters, ready for layout.
     pub text: String,
-    /// Cluster count of `text`. Equals `text.graphemes(true).count()`
-    /// by construction; carried inline so callers don't need to
+    /// Cluster count of `text`. Equals
+    /// `grapheme_chad::count_grapheme_clusters(text)` by
+    /// construction; carried inline so callers don't need to
     /// re-walk the string.
     pub cluster_count: usize,
 }
@@ -114,7 +117,7 @@ impl SidePattern {
         // delimiters and the escape state. Two output buffers
         // (`outside`, `inside`) plus a flag for "have we seen a
         // fill region yet". Errors out on a second `(`, an
-        // unmatched `)`, or an unrecognised escape.
+        // unmatched `)`, or an unrecognized escape.
         let mut outside = String::new();
         let mut inside = String::new();
         let mut have_seen_fill = false;
@@ -133,7 +136,7 @@ impl SidePattern {
                         ')' => ')',
                         '\\' => '\\',
                         other => {
-                            return Err(format!("unrecognised escape '\\{}' (use \\(, \\), \\\\)", other));
+                            return Err(format!("unrecognized escape '\\{}' (use \\(, \\), \\\\)", other));
                         }
                     };
                     if in_fill {
@@ -180,7 +183,7 @@ impl SidePattern {
             // No fill region — the entire input is one atomic
             // cluster sequence to repeat.
             return Ok(SidePattern::AtomicRepeat {
-                cluster: clusters(&outside),
+                cluster: split_graphemes_owned(&outside),
             });
         }
 
@@ -194,9 +197,9 @@ impl SidePattern {
         }
 
         Ok(SidePattern::PrefixFillSuffix {
-            prefix: clusters(&prefix_str),
-            fill: clusters(&inside),
-            suffix: clusters(&suffix_str),
+            prefix: split_graphemes_owned(&prefix_str),
+            fill: split_graphemes_owned(&inside),
+            suffix: split_graphemes_owned(&suffix_str),
         })
     }
 
@@ -214,7 +217,7 @@ impl SidePattern {
     /// O(`cluster_width`) cluster pushes plus one `String`
     /// allocation sized to the rendered byte length. Both hot
     /// border-rebuild paths (the renderer's
-    /// `rebuild_border_buffers` and the tree builder's
+    /// the section-frame tree and the border tree's
     /// `build_border_mutator_tree_from_nodes`) call this once per
     /// side per visible node per frame, so the per-glyph push has
     /// to stay branchless — no parser work happens here.
@@ -312,14 +315,6 @@ impl SidePattern {
     }
 }
 
-/// Split a string into grapheme clusters, owning each as a
-/// `String`. Wrapper around `UnicodeSegmentation::graphemes(true)`
-/// — kept private so callers route through `SidePattern` and the
-/// cluster-vector layout is an internal contract.
-fn clusters(s: &str) -> Vec<String> {
-    s.graphemes(true).map(|g| g.to_string()).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,9 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_unrecognised_escape_errors() {
-        let err = SidePattern::parse(r"\X").expect_err("unrecognised escape errors");
-        assert!(err.contains("unrecognised escape"));
+    fn parse_unrecognized_escape_errors() {
+        let err = SidePattern::parse(r"\X").expect_err("unrecognized escape errors");
+        assert!(err.contains("unrecognized escape"));
         assert!(err.contains(r"\\"));
     }
 
@@ -496,7 +491,7 @@ mod tests {
         // Width 4 against statics totalling 6 — the fitter
         // truncates to whole clusters of (prefix-prefix-prefix +
         // suffix-suffix). Auto-resize is supposed to make this
-        // unreachable; this asserts the defensive behaviour.
+        // unreachable; this asserts the defensive behavior.
         let p = SidePattern::parse("###(*)###").expect("parses");
         let r = p.render(4);
         // 3 prefix + 1 suffix at the right.

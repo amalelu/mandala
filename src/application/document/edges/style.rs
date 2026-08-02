@@ -5,12 +5,12 @@
 use baumhard::mindmap::model::{
     portal_endpoint_state_mut, EdgeLabelConfig, GlyphConnectionConfig, PortalEndpointState,
 };
-use baumhard::util::geometry::{almost_equal, is_positive_finite};
+use baumhard::util::geometry::almost_equal;
 
 use super::super::types::EdgeRef;
-use super::super::undo_action::UndoAction;
 use super::super::MindMapDocument;
 use super::closure_helpers::{ensure_glyph_connection_inline, ensure_label_config_inline};
+use super::font_triple::{resolve_font_triple, FontTriple};
 
 impl MindMapDocument {
     /// Set the body glyph string for a connection. Empty strings are
@@ -112,9 +112,7 @@ impl MindMapDocument {
     /// touches one site.
     pub fn resolve_edge_color(&self, edge_ref: &EdgeRef) -> Option<String> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
-        let cfg = baumhard::mindmap::model::GlyphConnectionConfig::resolved_for(edge, &self.mindmap.canvas);
-        let raw = cfg.color.as_deref().unwrap_or(edge.color.as_str());
-        Some(baumhard::util::color::resolve_var(raw, &self.mindmap.canvas.theme_variables).to_string())
+        Some(self.resolve_var_owned(edge.body_color(&self.mindmap.canvas)))
     }
 
     /// Read the resolved edge-label color for copy-to-clipboard.
@@ -124,20 +122,8 @@ impl MindMapDocument {
     /// back to whatever the body cascade produces so the label
     /// visually matches the edge unless explicitly detached.
     pub fn resolve_edge_label_color(&self, edge_ref: &EdgeRef) -> Option<String> {
-        let label_override = self
-            .mindmap
-            .edges
-            .iter()
-            .find(|e| edge_ref.matches(e))?
-            .label_config
-            .as_ref()
-            .and_then(|c| c.color.clone());
-        if let Some(hex) = label_override {
-            return Some(
-                baumhard::util::color::resolve_var(&hex, &self.mindmap.canvas.theme_variables).to_string(),
-            );
-        }
-        self.resolve_edge_color(edge_ref)
+        let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
+        Some(self.resolve_var_owned(edge.label_color(&self.mindmap.canvas)))
     }
 
     /// Read the resolved portal-text color for copy-to-clipboard.
@@ -149,14 +135,15 @@ impl MindMapDocument {
     pub fn resolve_portal_text_color(&self, edge_ref: &EdgeRef, endpoint_node_id: &str) -> Option<String> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
         let state = baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
-        // Text's own override wins; fall back to the icon's
-        // already-resolved cascade via `resolve_portal_label_color`.
-        if let Some(hex) = state.and_then(|s| s.text_color.as_deref()) {
-            return Some(
-                baumhard::util::color::resolve_var(hex, &self.mindmap.canvas.theme_variables).to_string(),
-            );
-        }
-        self.resolve_portal_label_color(edge_ref, endpoint_node_id)
+        Some(self.resolve_var_owned(edge.portal_endpoint_text_color(&self.mindmap.canvas, state)))
+    }
+
+    /// Expand `var(--name)` references in `raw` against the
+    /// canvas theme map and own the result. The three
+    /// `resolve_*_color` readers above all end in this same step;
+    /// the cascade itself lives on [`baumhard::mindmap::model::MindEdge`].
+    fn resolve_var_owned(&self, raw: &str) -> String {
+        baumhard::util::color::resolve_var(raw, &self.mindmap.canvas.theme_variables).to_string()
     }
 
     /// Set the color override on a connection's glyph_connection config.
@@ -263,56 +250,31 @@ impl MindMapDocument {
         min: Option<f32>,
         max: Option<f32>,
     ) -> bool {
-        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
-            Some(i) => i,
-            None => return false,
-        };
-        let before = self.mindmap.edges[idx].clone();
-        let cfg = Self::ensure_glyph_connection(&mut self.mindmap.edges[idx], &self.mindmap.canvas);
-        // Resolve the (min, max) pair that will land on the struct
-        // if this call succeeds. Reject inverted pairs before any
-        // mutation — Self::clamp panics on `min > max`, and a
-        // later renderer frame hits the same panic via
-        // `effective_font_size_pt`.
-        let final_min = min
-            .filter(|v| is_positive_finite(*v))
-            .unwrap_or(cfg.min_font_size_pt);
-        let final_max = max
-            .filter(|v| is_positive_finite(*v))
-            .unwrap_or(cfg.max_font_size_pt);
-        if final_min > final_max {
-            self.mindmap.edges[idx] = before;
-            return false;
-        }
-        use baumhard::util::geometry::pretty_inequal;
-        let mut changed = false;
-        if let Some(m) = min.filter(|v| is_positive_finite(*v)) {
-            if pretty_inequal(cfg.min_font_size_pt, m) {
-                cfg.min_font_size_pt = m;
-                changed = true;
+        self.mutate_edge(edge_ref, |edge, canvas| {
+            let cfg = ensure_glyph_connection_inline(edge, canvas);
+            // The body channel is the bottom of the cascade, so
+            // its three values are always concrete — it inherits
+            // its own current clamps as the fallback.
+            let current = FontTriple {
+                size: Some(cfg.font_size_pt),
+                min: Some(cfg.min_font_size_pt),
+                max: Some(cfg.max_font_size_pt),
+            };
+            let fallback = (cfg.min_font_size_pt, cfg.max_font_size_pt);
+            let Some(resolved) = resolve_font_triple(current, fallback, size, min, max) else {
+                return false;
+            };
+            if !resolved.differs_from(&current) {
+                return false;
             }
-        }
-        if let Some(m) = max.filter(|v| is_positive_finite(*v)) {
-            if pretty_inequal(cfg.max_font_size_pt, m) {
-                cfg.max_font_size_pt = m;
-                changed = true;
-            }
-        }
-        if let Some(s) = size.filter(|v| is_positive_finite(*v)) {
-            // Bounds resolved above, known-ordered, safe for clamp.
-            let clamped = s.clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
-            if pretty_inequal(cfg.font_size_pt, clamped) {
-                cfg.font_size_pt = clamped;
-                changed = true;
-            }
-        }
-        if !changed {
-            self.mindmap.edges[idx] = before;
-            return false;
-        }
-        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
-        self.dirty = true;
-        true
+            // Every field is `Some` here: `resolve_font_triple`
+            // only ever carries a `None` through from `current`,
+            // and `current` has none.
+            cfg.font_size_pt = resolved.size.unwrap_or(cfg.font_size_pt);
+            cfg.min_font_size_pt = resolved.min.unwrap_or(cfg.min_font_size_pt);
+            cfg.max_font_size_pt = resolved.max.unwrap_or(cfg.max_font_size_pt);
+            true
+        })
     }
 
     /// Set the edge body's `glyph_connection.font` family override.
@@ -329,27 +291,20 @@ impl MindMapDocument {
     /// render time, falling back to monospace with a warning if
     /// the family is unknown.
     pub fn set_edge_font_family(&mut self, edge_ref: &EdgeRef, family: Option<&str>) -> bool {
-        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
-            Some(i) => i,
-            None => return false,
-        };
-        // Peek the effective family before forking so a no-op
-        // clear (`None` on an edge that already has no override)
-        // doesn't mint an undo entry.
-        let current = self.mindmap.edges[idx]
-            .glyph_connection
-            .as_ref()
-            .and_then(|c| c.font.as_deref());
-        let target = family.filter(|s| !s.is_empty());
-        if current == target {
-            return false;
-        }
-        let before = self.mindmap.edges[idx].clone();
-        let cfg = Self::ensure_glyph_connection(&mut self.mindmap.edges[idx], &self.mindmap.canvas);
-        cfg.font = target.map(|s| s.to_string());
-        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
-        self.dirty = true;
-        true
+        let target = family.filter(|s| !s.is_empty()).map(|s| s.to_string());
+        self.mutate_edge(edge_ref, |edge, canvas| {
+            // Peek the authored family *before* forking so a
+            // no-op clear (`None` on an edge that has no override
+            // yet) doesn't mint an undo entry. `mutate_edge`
+            // would roll the fork back either way; short-
+            // circuiting here also skips the clone.
+            let current = edge.glyph_connection.as_ref().and_then(|c| c.font.clone());
+            if current == target {
+                return false;
+            }
+            ensure_glyph_connection_inline(edge, canvas).font = target;
+            true
+        })
     }
 
     /// Sibling of [`Self::set_edge_font`] targeting the edge
@@ -374,90 +329,38 @@ impl MindMapDocument {
         min: Option<f32>,
         max: Option<f32>,
     ) -> bool {
-        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
-            Some(i) => i,
-            None => return false,
-        };
-        // Compute the resolved body clamps once for fallback
-        // when the label config doesn't carry its own.
-        let body_min;
-        let body_max;
-        {
-            let edge = &self.mindmap.edges[idx];
-            let cfg = GlyphConnectionConfig::resolved_for(edge, &self.mindmap.canvas);
-            body_min = cfg.min_font_size_pt;
-            body_max = cfg.max_font_size_pt;
-        }
-        // Resolve the (min, max) pair that will land after this
-        // call. Either side falls back to the existing label
-        // override or the body's clamp when the call leaves it
-        // untouched. Inverted pairs bail before any mutation —
-        // `f32::clamp` panics on `min > max`, and the renderer's
-        // `effective_font_size_pt` would hit the same panic.
-        let existing_label_min = self.mindmap.edges[idx]
-            .label_config
-            .as_ref()
-            .and_then(|c| c.min_font_size_pt);
-        let existing_label_max = self.mindmap.edges[idx]
-            .label_config
-            .as_ref()
-            .and_then(|c| c.max_font_size_pt);
-        let final_min = min
-            .filter(|v| is_positive_finite(*v))
-            .or(existing_label_min)
-            .unwrap_or(body_min);
-        let final_max = max
-            .filter(|v| is_positive_finite(*v))
-            .or(existing_label_max)
-            .unwrap_or(body_max);
-        if final_min > final_max {
-            return false;
-        }
-        let before = self.mindmap.edges[idx].clone();
-        let label_cfg = Self::ensure_label_config(&mut self.mindmap.edges[idx]);
-        let mut changed = false;
-        if let Some(m) = min.filter(|v| is_positive_finite(*v)) {
-            if label_cfg.min_font_size_pt != Some(m) {
-                label_cfg.min_font_size_pt = Some(m);
-                changed = true;
+        self.mutate_edge(edge_ref, |edge, canvas| {
+            // The label channel inherits the body's clamps when
+            // it authors none of its own — same cascade
+            // `EdgeLabelConfig::effective_font_size_pt` reads at
+            // render time.
+            let body = GlyphConnectionConfig::resolved_for(edge, canvas);
+            let fallback = (body.min_font_size_pt, body.max_font_size_pt);
+            let label_cfg = edge.label_config.as_ref();
+            let current = FontTriple {
+                size: label_cfg.and_then(|c| c.font_size_pt),
+                min: label_cfg.and_then(|c| c.min_font_size_pt),
+                max: label_cfg.and_then(|c| c.max_font_size_pt),
+            };
+            let Some(resolved) = resolve_font_triple(current, fallback, size, min, max) else {
+                return false;
+            };
+            if !resolved.differs_from(&current) {
+                return false;
             }
-        }
-        if let Some(m) = max.filter(|v| is_positive_finite(*v)) {
-            if label_cfg.max_font_size_pt != Some(m) {
-                label_cfg.max_font_size_pt = Some(m);
-                changed = true;
-            }
-        }
-        if let Some(s) = size.filter(|v| is_positive_finite(*v)) {
-            let effective_min = label_cfg.min_font_size_pt.unwrap_or(body_min);
-            let effective_max = label_cfg.max_font_size_pt.unwrap_or(body_max);
-            // `effective_{min,max}` are guaranteed ordered by the
-            // `final_min > final_max` guard above — `effective_*`
-            // resolve through the same `user-override → label
-            // override → body clamp` cascade.
-            let clamped = s.clamp(effective_min, effective_max);
-            if label_cfg.font_size_pt != Some(clamped) {
-                label_cfg.font_size_pt = Some(clamped);
-                changed = true;
-            }
-        }
-        // Rollback-on-noop + rollback-if-label-config-empty so
-        // an unchanged triple doesn't leave an empty
-        // `EdgeLabelConfig` behind.
-        if !changed {
-            self.mindmap.edges[idx] = before;
-            return false;
-        }
-        if self.mindmap.edges[idx]
-            .label_config
-            .as_ref()
-            .map_or(false, |c| c == &EdgeLabelConfig::default())
-        {
-            self.mindmap.edges[idx].label_config = None;
-        }
-        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
-        self.dirty = true;
-        true
+            // No all-default scrub here, unlike the pre-fold
+            // version: a `true` verdict means at least one of the
+            // three resolved values is `Some`, so the config
+            // cannot come out empty — and the no-change path
+            // above returns `false`, which makes `mutate_edge`
+            // roll the fork back wholesale. The scrub was
+            // guarding a state that can no longer be reached.
+            let cfg = ensure_label_config_inline(edge);
+            cfg.font_size_pt = resolved.size;
+            cfg.min_font_size_pt = resolved.min;
+            cfg.max_font_size_pt = resolved.max;
+            true
+        })
     }
 
     /// Sibling of [`Self::set_edge_font`] targeting a portal
@@ -476,112 +379,38 @@ impl MindMapDocument {
         min: Option<f32>,
         max: Option<f32>,
     ) -> bool {
-        let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
-            Some(i) => i,
-            None => return false,
-        };
-        let body_min;
-        let body_max;
-        {
-            let edge = &self.mindmap.edges[idx];
-            let cfg = GlyphConnectionConfig::resolved_for(edge, &self.mindmap.canvas);
-            body_min = cfg.min_font_size_pt;
-            body_max = cfg.max_font_size_pt;
-        }
-        // Check that the endpoint id resolves to a portal slot
-        // before we clone the edge — cloning unnecessarily for a
-        // bogus endpoint id would be wasteful.
-        {
-            let edge = &self.mindmap.edges[idx];
-            if !(endpoint_node_id == edge.from_id || endpoint_node_id == edge.to_id) {
+        self.mutate_edge(edge_ref, |edge, canvas| {
+            // Same body-clamp fallback as the label channel; the
+            // portal text resolver reads the identical cascade.
+            let body = GlyphConnectionConfig::resolved_for(edge, canvas);
+            let fallback = (body.min_font_size_pt, body.max_font_size_pt);
+            let Some(slot) = portal_endpoint_state_mut(edge, endpoint_node_id) else {
+                return false;
+            };
+            let state = slot.as_ref();
+            let current = FontTriple {
+                size: state.and_then(|s| s.text_font_size_pt),
+                min: state.and_then(|s| s.text_min_font_size_pt),
+                max: state.and_then(|s| s.text_max_font_size_pt),
+            };
+            let Some(resolved) = resolve_font_triple(current, fallback, size, min, max) else {
+                return false;
+            };
+            if !resolved.differs_from(&current) {
                 return false;
             }
-        }
-        // Resolve the (min, max) pair that will land after this
-        // call, using the same user-override → endpoint-override
-        // → body-clamp cascade as `effective_font_size_pt` on the
-        // render side. Reject inverted bounds before any mutation
-        // to keep `clamp` panic-safe here and downstream.
-        let (existing_text_min, existing_text_max) = {
-            let edge = &self.mindmap.edges[idx];
-            let state = baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
-            (
-                state.and_then(|s| s.text_min_font_size_pt),
-                state.and_then(|s| s.text_max_font_size_pt),
-            )
-        };
-        let final_min = min
-            .filter(|v| is_positive_finite(*v))
-            .or(existing_text_min)
-            .unwrap_or(body_min);
-        let final_max = max
-            .filter(|v| is_positive_finite(*v))
-            .or(existing_text_max)
-            .unwrap_or(body_max);
-        if final_min > final_max {
-            return false;
-        }
-        let before = self.mindmap.edges[idx].clone();
-        let slot = match portal_endpoint_state_mut(&mut self.mindmap.edges[idx], endpoint_node_id) {
-            Some(s) => s,
-            None => return false,
-        };
-        // Track whether this call forked a fresh `PortalEndpointState`
-        // so the default-scrub below only touches the slot this
-        // call actually installed (a pre-existing default state on
-        // the *other* endpoint must survive untouched).
-        let forked_default = slot.is_none();
-        let state = slot.get_or_insert_with(PortalEndpointState::default);
-        let mut changed = false;
-        if let Some(m) = min.filter(|v| is_positive_finite(*v)) {
-            if state.text_min_font_size_pt != Some(m) {
-                state.text_min_font_size_pt = Some(m);
-                changed = true;
-            }
-        }
-        if let Some(m) = max.filter(|v| is_positive_finite(*v)) {
-            if state.text_max_font_size_pt != Some(m) {
-                state.text_max_font_size_pt = Some(m);
-                changed = true;
-            }
-        }
-        if let Some(s) = size.filter(|v| is_positive_finite(*v)) {
-            let effective_min = state.text_min_font_size_pt.unwrap_or(body_min);
-            let effective_max = state.text_max_font_size_pt.unwrap_or(body_max);
-            // Guaranteed ordered by the `final_min > final_max`
-            // guard above.
-            let clamped = s.clamp(effective_min, effective_max);
-            if state.text_font_size_pt != Some(clamped) {
-                state.text_font_size_pt = Some(clamped);
-                changed = true;
-            }
-        }
-        if !changed {
-            self.mindmap.edges[idx] = before;
-            return false;
-        }
-        // If this call forked a fresh default state and still
-        // wrote nothing interesting (all writes would be
-        // redundant), roll the slot back to `None` — matches the
-        // label-config scrub discipline. Only the slot this call
-        // wrote is touched; the *other* endpoint's state (even if
-        // it happens to hold a pre-existing default) is left
-        // alone, because the scrub is conditional on
-        // `forked_default`.
-        if forked_default {
-            let edge = &mut self.mindmap.edges[idx];
-            let post_state = baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
-            if post_state.map_or(false, |s| s == &PortalEndpointState::default()) {
-                if endpoint_node_id == edge.from_id {
-                    edge.portal_from = None;
-                } else if endpoint_node_id == edge.to_id {
-                    edge.portal_to = None;
-                }
-            }
-        }
-        self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
-        self.dirty = true;
-        true
+            // Same reasoning as `set_edge_label_font`: a `true`
+            // verdict guarantees a non-default state, and the
+            // `false` paths above never reach the fork because
+            // `mutate_edge` restores the whole edge. The
+            // hand-rolled `forked_default` scrub the pre-fold
+            // version carried is unreachable now.
+            let state = slot.get_or_insert_with(PortalEndpointState::default);
+            state.text_font_size_pt = resolved.size;
+            state.text_min_font_size_pt = resolved.min;
+            state.text_max_font_size_pt = resolved.max;
+            true
+        })
     }
 
     /// Set the connection's glyph `spacing` (canvas units between

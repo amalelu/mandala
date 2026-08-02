@@ -8,24 +8,18 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::collections::HashMap;
-
 use glam::Vec2;
 
 use super::now_ms;
-use super::scene_rebuild::{
-    flush_canvas_scene_buffers, rebuild_all, update_connection_label_tree, update_connection_tree,
-    update_edge_handle_tree, update_portal_tree,
-};
-use crate::application::document::{
-    apply_tree_highlights, rect_select, MindMapDocument, SelectionState, HIGHLIGHT_COLOR,
-};
+use super::scene_rebuild::{overlay_tree, rebuild_all, rebuild_camera_geometry};
+use crate::application::document::{rect_select, MindMapDocument, SelectionState, HIGHLIGHT_COLOR};
 use crate::application::renderer::Renderer;
 
 pub(super) fn drain_selecting_rect(
     start_canvas: Vec2,
     current_canvas: Vec2,
     document: &Option<MindMapDocument>,
+    interaction_mode: &super::InteractionMode,
     mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
     renderer: &mut Renderer,
 ) {
@@ -35,16 +29,26 @@ pub(super) fn drain_selecting_rect(
     let max = Vec2::new(sc.x.max(cc.x), sc.y.max(cc.y));
     renderer.rebuild_selection_rect_overlay(min, max);
 
-    // Preview: rebuild tree with intersecting nodes highlighted
+    // Preview: rebuild tree with intersecting nodes highlighted.
     if let Some(doc) = document.as_ref() {
+        // Build **once**. The rect hit-test needs a tree, and the
+        // overlays only rewrite region colors — they never move
+        // geometry — so hit-testing before overlaying gives the same
+        // answer as after, and a second `build_mindmap_tree` per
+        // rubber-band frame would be pure waste (§B7: it is a
+        // benchmarked primitive).
         let mut new_tree = doc.build_tree();
         let hits = rect_select(sc, cc, &new_tree);
         let preview_selection = SelectionState::from_ids(hits);
-        // Rect-select preview always whole-node; `from_ids` never
+        // Rect-select preview is always whole-node; `from_ids` never
         // produces a `Section` selection so the section narrowing
-        // would be `None` here.
-        apply_tree_highlights(
+        // would be `None` here. Routed through `overlay_tree` so the
+        // `NodeEdit` dim and any active toggle survive a rubber-band
+        // drag instead of flickering off for its duration.
+        overlay_tree(
             &mut new_tree,
+            doc,
+            interaction_mode,
             preview_selection
                 .selected_ids()
                 .into_iter()
@@ -84,40 +88,25 @@ pub(super) fn drain_camera_geometry_rebuild(
     let geometry_dirty = renderer.take_connection_geometry_dirty();
     if geometry_dirty && !is_moving_node {
         if let Some(doc) = document.as_ref() {
-            // `ensure_zoom` inside `build_scene_with_cache` would
-            // also catch this, but clearing explicitly here keeps
-            // the ordering readable next to the rebuild.
-            scene_cache.clear();
-            let scene = doc.build_scene_with_cache(
-                &HashMap::new(),
-                scene_cache,
-                renderer.camera_zoom(),
-                interaction_mode.resize_handle_overrides(),
-            );
-            update_connection_tree(&scene, app_scene);
-            update_connection_label_tree(&scene, app_scene, renderer);
-            update_portal_tree(doc, &HashMap::new(), app_scene, renderer);
-            // Edge handles (if an edge is selected) must
-            // also follow camera changes — scroll-wheel
-            // zoom with a selected edge used to leave
-            // the handles pinned to stale screen
-            // positions until the next full rebuild.
-            update_edge_handle_tree(&scene, app_scene);
-            flush_canvas_scene_buffers(app_scene, renderer);
+            // Body is `scene_rebuild::rebuild_camera_geometry` —
+            // WASM's wheel handler runs the same one, under the same
+            // dirty flag, because the browser has no per-frame drain
+            // to hang it off.
+            rebuild_camera_geometry(doc, interaction_mode, app_scene, renderer, scene_cache);
         }
     }
 }
 
 /// Tick any active animations. Each tick lerps the from / to
 /// snapshots into the model and (on completion) routes the final
-/// state through `apply_custom_mutation` so the standard model-sync
-/// + undo-push runs once. Drives `rebuild_all` only when something
-/// actually advanced. The event loop's `ControlFlow::Wait` /
-/// `ControlFlow::Poll` choice is decided in `NativeApp::about_to_wait`
-/// from `InitState::needs_continuation`, which factors in
-/// `has_active_animations` — so when no animations are active and
-/// no other source needs continuation, the loop parks until the
-/// next OS event.
+/// state through `apply_custom_mutation` so the standard
+/// model-sync + undo-push runs once. Drives `rebuild_all` only
+/// when something actually advanced. The event loop's
+/// `ControlFlow::Wait` / `ControlFlow::Poll` choice is decided in
+/// `NativeApp::about_to_wait` from `InitState::needs_continuation`,
+/// which factors in `has_active_animations` — so when no animations
+/// are active and no other source needs continuation, the loop
+/// parks until the next OS event.
 pub(super) fn drain_animation_tick(
     document: &mut Option<MindMapDocument>,
     interaction_mode: &super::InteractionMode,

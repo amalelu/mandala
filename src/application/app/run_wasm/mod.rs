@@ -43,11 +43,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::platform::web::EventLoopExtWebSys;
 use winit::window::WindowId;
 
-use super::scene_rebuild::{
-    flush_canvas_scene_buffers, rebuild_all, update_border_tree_static, update_connection_label_tree,
-    update_connection_tree, update_edge_handle_tree, update_node_resize_handle_tree, update_portal_tree,
-    update_section_resize_handle_tree, warm_handle_tree_arenas,
-};
+use super::scene_rebuild::{rebuild_all, warm_scene_at_load};
 use super::text_edit::TextEditState;
 use super::{Application, LastClick};
 use crate::application::common::RenderDecree;
@@ -125,7 +121,7 @@ pub(super) struct WasmInputState {
     /// `SECTIONS_BORDERS_RESIZE_PLAN.md` — the enum is target-agnostic
     /// even though some mode transitions still depend on native-only
     /// dispatch arms (Reparent / Connect). WASM construction
-    /// initialises to `Default`; later batches add mode-aware click
+    /// initializes to `Default`; later batches add mode-aware click
     /// routing here.
     pub interaction_mode: super::InteractionMode,
     /// Mirror of native's `app_scene` so the canvas-scene tree
@@ -134,7 +130,7 @@ pub(super) struct WasmInputState {
     /// `rebuild_all` / `rebuild_scene_only` call below.
     pub app_scene: crate::application::scene_host::AppScene,
     /// Mirror of native's `scene_cache` so the cache-aware
-    /// `build_scene_with_cache` entry point skips `sample_path`
+    /// cache-aware connection pass skips `sample_path`
     /// work for unchanged edges. Threaded into every rebuild
     /// helper the same way native does.
     pub scene_cache: baumhard::mindmap::scene_cache::SceneConnectionCache,
@@ -144,7 +140,7 @@ pub(super) struct WasmInputState {
     /// document is loaded. Consulted by the keyboard handler's
     /// Action → Macro → CustomMutation fall-through.
     pub macros: crate::application::macros::MacroRegistry,
-    /// Touch gesture recogniser. Cross-platform peer of native's
+    /// Touch gesture recognizer. Cross-platform peer of native's
     /// `InitState.touch_recognizer`. WASM mobile is the *primary*
     /// surface this targets (mobile-browser tap-and-hold is
     /// unreachable through `MouseInput`/`CursorMoved` events
@@ -183,9 +179,10 @@ impl WasmInputState {
     }
 }
 
-/// WASM impl of `MacroDispatchTarget`. Wraps `&mut WasmInputState`
-/// + `&mut Renderer` and forwards each operation to the same
-/// helpers the keyboard handler uses. Privilege gating happens in
+/// WASM impl of `MacroDispatchTarget`. Wraps
+/// `&mut WasmInputState` + `&mut Renderer` and forwards each
+/// operation to the same helpers the keyboard handler uses.
+/// Privilege gating happens in
 /// `dispatch_macro_core::dispatch_macro` (single-source contract).
 struct WasmMacroDispatchTarget<'a> {
     input: &'a mut WasmInputState,
@@ -212,11 +209,24 @@ impl<'a> super::dispatch::macro_core::MacroDispatchTarget for WasmMacroDispatchT
         // for `ExitMode`/`EditSelection*` so the macro loop's
         // `any_ran` flag bumps correctly — see
         // `lift_mixed_branch_for_wasm_macro`'s rustdoc.
+        //
+        // A macro step carries no `DispatchHit`: it is a keystroke-
+        // level instruction with no pointer event behind it. Both
+        // `None`s below are that one fact — no hit means the
+        // `DoubleClickActivate` arm returns before reaching the apply
+        // half, so there is no `DoubleClickResidual` either, and the
+        // lift is told so rather than left to infer it.
+        let hit = None;
+        let double_click_residual = None;
         let outcome = {
             let mut core = self.input.input_context_core(self.renderer, self.keybinds);
-            super::dispatch::action_core::dispatch_compatible(&action, &mut core)
+            super::dispatch::action_core::dispatch_compatible(&action, &mut core, hit)
         };
-        super::dispatch::action_core::lift_mixed_branch_for_wasm_macro(&action, outcome)
+        super::dispatch::action_core::lift_mixed_branch_for_wasm_macro(
+            &action,
+            double_click_residual,
+            outcome,
+        )
     }
 
     fn apply_custom_mutation(&mut self, id: &str, node_id: &str) -> bool {
@@ -294,8 +304,10 @@ impl<'a> super::dispatch::macro_core::MacroDispatchTarget for WasmMacroDispatchT
 }
 
 /// winit 0.30 [`ApplicationHandler`] for the WASM target. Mirrors
-/// the native [`super::run_native`]'s `NativeApp` shape so each
-/// target's event-loop entry point reads the same way.
+/// the native `super::run_native`'s `NativeApp` shape so each
+/// target's event-loop entry point reads the same way. Plain
+/// code-span: that module is native-gated, so an intra-doc link to
+/// it cannot resolve in this target's doc build.
 ///
 /// Initial DOM setup (canvas attach, `tabindex` focus, keydown
 /// preventDefault listener, async renderer construction, document
@@ -686,48 +698,12 @@ pub(super) fn run(mut app: Application) {
                     renderer.rebuild_buffers_from_tree(&mindmap_tree.tree);
                     renderer.fit_camera_to_tree(&mindmap_tree.tree);
 
-                    // Use `build_scene_with_cache` so the per-edge
-                    // Bezier-sample cache is populated at load and
-                    // first interactions don't pay the full cost.
-                    // WASM init runs in Default mode — no handles emit.
-                    let scene = doc.build_scene_with_cache(
-                        &std::collections::HashMap::new(),
-                        &mut init_scene_cache,
-                        renderer.camera_zoom(),
-                        crate::application::document::InteractionModeOverrides::none(),
-                    );
-                    update_connection_tree(&scene, &mut init_app_scene);
-                    update_border_tree_static(&doc, &mut init_app_scene);
-                    update_portal_tree(
-                        &doc,
-                        &std::collections::HashMap::new(),
-                        &mut init_app_scene,
-                        &mut renderer,
-                    );
-                    update_connection_label_tree(&scene, &mut init_app_scene, &mut renderer);
-                    // Register the three handle-tree canvas roles
-                    // with fresh-load (empty-slice) signatures.
-                    // First real selection still takes FullRebuild
-                    // (8-handle signature differs from empty), but
-                    // every subsequent return to "nothing selected"
-                    // hits InPlaceMutator. Mirrors the native init.
-                    update_edge_handle_tree(&scene, &mut init_app_scene);
-                    update_section_resize_handle_tree(&scene, &mut init_app_scene);
-                    update_node_resize_handle_tree(&scene, &mut init_app_scene);
-                    // Synthetic-handle allocator warm; mirrors
-                    // native init. See `warm_handle_tree_arenas`
-                    // doc for what this does and what it doesn't.
-                    warm_handle_tree_arenas(&mut init_app_scene);
-                    // Restamp the empty-handle signatures so the
-                    // load-end canvas state matches what's on
-                    // screen. The later `rebuild_all` re-stamps
-                    // these via `rebuild_scene_only`, but we do it
-                    // here too so correctness doesn't depend on
-                    // `rebuild_all` running.
-                    update_edge_handle_tree(&scene, &mut init_app_scene);
-                    update_section_resize_handle_tree(&scene, &mut init_app_scene);
-                    update_node_resize_handle_tree(&scene, &mut init_app_scene);
-                    flush_canvas_scene_buffers(&mut init_app_scene, &mut renderer);
+                    // Every canvas role projected once at load plus
+                    // the handle-tree allocator warm —
+                    // `warm_scene_at_load`, the body native's init
+                    // runs too. `fit_camera_to_tree` above settled
+                    // the zoom, which that helper reads.
+                    warm_scene_at_load(&doc, &mut init_app_scene, &mut renderer, &mut init_scene_cache);
                     tree_opt = Some(mindmap_tree);
                     doc_opt = Some(doc);
                 }
@@ -775,35 +751,13 @@ pub(super) fn run(mut app: Application) {
         *renderer_for_init.borrow_mut() = Some(renderer);
 
         if let Some(doc) = doc_opt {
-            // Build the macro registry — App + User tiers from the
-            // bundled JSON / `?macros=` / localStorage; Map + Inline
-            // tiers from the just-loaded document. Mirrors
-            // `run_native_init.rs:117-142` precedence and logging
-            // shape so cross-target log triage stays uniform.
-            let mut macros = crate::application::macros::MacroRegistry::new();
-            let mut app_count = 0usize;
-            for m in crate::application::macros::loader::load_app_macros() {
-                macros.insert(m, crate::application::macros::MacroSource::App);
-                app_count += 1;
-            }
-            let mut user_count = 0usize;
-            for m in crate::application::macros::loader::load_user_macros() {
-                macros.insert(m, crate::application::macros::MacroSource::User);
-                user_count += 1;
-            }
-            if app_count > 0 || user_count > 0 {
-                log::info!(
-                    "loaded {} macro(s): {} app-tier, {} user-tier",
-                    macros.len(),
-                    app_count,
-                    user_count,
-                );
-            }
-            // Document-derived tiers — Map first, then Inline. The
-            // shared `rebuild_document_macros` helper enforces the
-            // ordering so it can't drift between the native and WASM
-            // load sites.
-            crate::application::macros::loader::rebuild_document_macros(&mut macros, &doc);
+            // App + User tiers from the bundled JSON / `?macros=` /
+            // localStorage, then the document-derived Map and Inline
+            // tiers. Body is `macros::loader::build_macro_registry`,
+            // which native's init calls too — including the
+            // `log::info!` shape, so cross-target log triage stays
+            // uniform.
+            let macros = crate::application::macros::loader::build_macro_registry(Some(&doc));
 
             *input_for_init.borrow_mut() = Some(WasmInputState {
                 document: doc,

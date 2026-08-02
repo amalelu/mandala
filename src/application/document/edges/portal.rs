@@ -205,26 +205,24 @@ impl MindMapDocument {
         state.text.clone()
     }
 
-    /// Read the resolved portal label color for one endpoint.
-    /// Walks the cascade — per-endpoint override >
-    /// `glyph_connection.color` > `edge.color` — and returns the
-    /// resolved string (with `var(--name)` references already
-    /// expanded through the theme variable map). Used by clipboard
-    /// copy: the user expects `copy` on a portal label to produce
-    /// a real hex they can paste elsewhere, even when no override
-    /// is set.
+    /// Read the resolved portal label (icon) color for one
+    /// endpoint. Walks
+    /// [`baumhard::mindmap::model::MindEdge::portal_endpoint_color`]
+    /// — per-endpoint override > the edge body cascade — and
+    /// expands any `var(--name)` reference through the theme
+    /// variable map. Used by clipboard copy: the user expects
+    /// `copy` on a portal label to produce a real hex they can
+    /// paste elsewhere, even when no override is set.
+    ///
+    /// Reads the model cascade directly rather than calling the
+    /// scene builder's `resolve_portal_endpoint_style`: that
+    /// resolver also does glyph substitution and zoom-clamped
+    /// font sizing, none of which a color read needs, and its
+    /// color tier is now the same model helper.
     pub fn resolve_portal_label_color(&self, edge_ref: &EdgeRef, endpoint_node_id: &str) -> Option<String> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
         let endpoint_state = baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
-        // Camera zoom is irrelevant for color resolution — pass
-        // 1.0 so the font-size clamp path doesn't branch oddly.
-        let style = baumhard::mindmap::scene_builder::portal::resolve_portal_endpoint_style(
-            edge,
-            endpoint_state,
-            &self.mindmap.canvas,
-            None,
-            1.0,
-        );
-        Some(style.color)
+        let raw = edge.portal_endpoint_color(&self.mindmap.canvas, endpoint_state);
+        Some(baumhard::util::color::resolve_var(raw, &self.mindmap.canvas.theme_variables).to_string())
     }
 }

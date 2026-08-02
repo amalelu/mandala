@@ -48,7 +48,7 @@ fn test_resize_mode_lifecycle_default_to_resize_to_default() {
     let mut mode = InteractionMode::Default;
 
     // 1. Default mode — no handles.
-    let scene = doc.build_scene_with_selection(1.0, mode.resize_handle_overrides());
+    let scene = crate::application::document::tests_common::project_roles(&doc, 1.0, mode.resize_handle_overrides());
     assert!(
         scene.node_resize_handles.is_empty(),
         "Default mode + Single selection must emit no handles before mode resize"
@@ -67,7 +67,7 @@ fn test_resize_mode_lifecycle_default_to_resize_to_default() {
     mode = new_mode;
 
     // 3. After the flip — 8 handles emit.
-    let scene = doc.build_scene_with_selection(1.0, mode.resize_handle_overrides());
+    let scene = crate::application::document::tests_common::project_roles(&doc, 1.0, mode.resize_handle_overrides());
     assert_eq!(
         scene.node_resize_handles.len(),
         8,
@@ -84,7 +84,7 @@ fn test_resize_mode_lifecycle_default_to_resize_to_default() {
     mode = new_mode;
 
     // 5. Back to Default — handles disappear.
-    let scene = doc.build_scene_with_selection(1.0, mode.resize_handle_overrides());
+    let scene = crate::application::document::tests_common::project_roles(&doc, 1.0, mode.resize_handle_overrides());
     assert!(
         scene.node_resize_handles.is_empty(),
         "Returning to Default must clear node handles"

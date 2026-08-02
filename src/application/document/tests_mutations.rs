@@ -358,40 +358,16 @@ fn test_collect_affected_node_ids_parent_of_root_is_empty() {
     assert!(ids.is_empty(), "Root node has no parent; should return empty");
 }
 
-#[test]
-fn test_collect_affected_node_ids_siblings() {
-    let doc = load_test_doc();
-    // Find a child node and verify its siblings list excludes itself
-    let child_id = doc
-        .mindmap
-        .nodes
-        .values()
-        .find(|n| n.parent_id.is_some())
-        .map(|n| n.id.clone())
-        .expect("testament map has child nodes");
-    let parent_id = doc
-        .mindmap
-        .nodes
-        .get(&child_id)
-        .unwrap()
-        .parent_id
-        .clone()
-        .unwrap();
-    let all_children = doc.mindmap.children_of(&parent_id);
-
-    let ids = doc.collect_affected_node_ids(&child_id, &TS::Siblings);
-    // Siblings = parent's children minus self
-    assert_eq!(ids.len(), all_children.len() - 1);
-    assert!(!ids.contains(&child_id), "Siblings should not include self");
-}
-
-#[test]
-fn test_collect_affected_node_ids_siblings_of_root_is_empty() {
-    let doc = load_test_doc();
-    // Root has no parent, so no siblings
-    let ids = doc.collect_affected_node_ids("0", &TS::Siblings);
-    assert!(ids.is_empty());
-}
+// The two `Siblings` cases that used to sit here — "siblings exclude
+// self" and "a root has no siblings" — now live in
+// `custom::covers_reach_differential_tests` as
+// `test_siblings_excludes_the_trigger_node` and
+// `test_siblings_of_a_root_node_is_the_empty_set`. Those versions sweep
+// *every* qualifying node and *every* root of the testament map
+// rather than the first child found and the hard-coded id `"0"`, so
+// they strictly subsume these; keeping both would be the §10
+// duplicate shape (one property, two homes, only one of them
+// maintained).
 
 /// `SectionsOnly` returns the triggering node id only — section-
 /// level fan-out happens inside `apply_to_tree`, but the undo
@@ -488,7 +464,7 @@ fn test_apply_custom_mutation_sections_only_targets_section_areas() {
 /// `sync_node_from_tree` writes per-section text + runs back to
 /// the model after a custom mutation that touches regions.
 /// Pre-fix only `position` was synced, so a custom mutation that
-/// recoloured a section's runs would land on the live tree but
+/// recolored a section's runs would land on the live tree but
 /// be reverted on the next `rebuild_all`. The merge-with-prior
 /// reverse converter preserves bold / italic / underline /
 /// size_pt / hyperlink across the round trip. Pins the
@@ -542,7 +518,7 @@ fn test_sync_node_from_tree_writes_back_section_run_color() {
     let section0_run = &doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs[0];
     assert_eq!(
         section0_run.color, "#ff0000",
-        "section 0 colour must round-trip through rgba_to_hex"
+        "section 0 color must round-trip through rgba_to_hex"
     );
     assert!(
         section0_run.bold,
@@ -666,7 +642,7 @@ fn test_sync_node_from_tree_section_1_untouched_when_section_0_mutated() {
 /// the gate *does* run the round-trip — but `region_to_text_run`
 /// inherits from prior on the var-bearing case via the empty
 /// `region.color`. Pin the contract: a position-only mutation
-/// (`NudgeRight`) on a `var(--name)`-coloured section preserves
+/// (`NudgeRight`) on a `var(--name)`-colored section preserves
 /// the variable verbatim.
 #[test]
 fn test_sync_node_from_tree_var_color_preserved_when_regions_untouched() {
@@ -848,7 +824,7 @@ fn test_apply_custom_mutation_move_to_does_not_collapse_section_offsets() {
         s1.offset = Position { x: 50.0, y: 30.0 };
         node.sections.push(s1);
     }
-    let pre_offset = doc.mindmap.nodes.get(&nid).unwrap().sections[1].offset.clone();
+    let pre_offset = doc.mindmap.nodes.get(&nid).unwrap().sections[1].offset;
     let cm = CustomMutation {
         id: "move-to".into(),
         name: "MoveTo".into(),
@@ -865,7 +841,7 @@ fn test_apply_custom_mutation_move_to_does_not_collapse_section_offsets() {
     };
     let mut tree = doc.build_tree();
     doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
-    let post_offset = doc.mindmap.nodes.get(&nid).unwrap().sections[1].offset.clone();
+    let post_offset = doc.mindmap.nodes.get(&nid).unwrap().sections[1].offset;
     assert!(
         (post_offset.x - pre_offset.x).abs() < 1e-3 && (post_offset.y - pre_offset.y).abs() < 1e-3,
         "section.offset must survive a MoveTo on the parent (was {:?}, now {:?})",
@@ -1167,6 +1143,219 @@ fn test_apply_custom_mutation_persistent_sets_dirty() {
     assert_eq!(doc.undo_stack.len(), 1, "Should push undo action");
 }
 
+/// A `RepeatWhile` wrapper whose predicate is `Predicate::new()`
+/// matches **nothing**. Its Macro payload must not reach the tree:
+/// the flat-apply path has no predicate evaluator, so extracting
+/// the literal list would land the mutations on every node the
+/// scope collected — the exact opposite of what the AST authorizes.
+///
+/// Red on `eddd53a`: `flat_mutations`'s guard parsed as
+/// `always_match || (all_equals && fields.is_empty())`, which
+/// collapses to `always_match || fields.is_empty()`, so this shape
+/// was extracted and the nudge landed on the whole
+/// `SelfAndDescendants` set.
+#[test]
+fn test_apply_custom_mutation_match_nothing_repeat_while_does_not_apply() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::gfx_structs::predicate::Predicate;
+    use baumhard::mutator_builder::{InstructionSpec, MutationListSrc, MutationSrc, MutatorNode};
+
+    let mut doc = load_test_doc();
+    let mut cm = make_test_mutation("match-nothing", TS::SelfAndDescendants);
+    cm.mutator = Some(MutatorNode::Instruction {
+        channel: 0,
+        instruction: InstructionSpec::RepeatWhile(Predicate::new()),
+        mutation: MutationSrc::None,
+        children: vec![MutatorNode::Macro {
+            channel: 0,
+            mutations: MutationListSrc::Literal(vec![Mutation::area_command(GlyphAreaCommand::NudgeRight(
+                10.0,
+            ))]),
+            children: vec![],
+        }],
+    });
+    doc.mindmap.custom_mutations.push(cm.clone());
+    doc.build_mutation_registry();
+    let mut tree = doc.build_tree();
+
+    let before: Vec<(String, f64)> = doc
+        .mindmap
+        .nodes
+        .iter()
+        .map(|(id, n)| (id.clone(), n.position.x))
+        .collect();
+    doc.apply_custom_mutation(&cm, "0", Some(&mut tree));
+
+    for (id, x) in &before {
+        assert_eq!(
+            doc.mindmap.nodes.get(id).unwrap().position.x,
+            *x,
+            "node '{}' must be untouched by a match-nothing RepeatWhile",
+            id
+        );
+    }
+    assert!(
+        doc.undo_stack.is_empty(),
+        "a skipped apply must not push an undo entry"
+    );
+    assert!(!doc.dirty, "a skipped apply must not mark the document dirty");
+}
+
+/// The same mutation with an always-true predicate *does* apply —
+/// the control row proving the test above pins the predicate, not
+/// the `Instruction`-rooted shape.
+#[test]
+fn test_apply_custom_mutation_always_true_repeat_while_still_applies() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::scope;
+
+    let mut doc = load_test_doc();
+    let mut cm = make_test_mutation("always-true", TS::SelfAndDescendants);
+    cm.mutator = Some(scope::descendants(vec![Mutation::area_command(
+        GlyphAreaCommand::NudgeRight(10.0),
+    )]));
+    doc.mindmap.custom_mutations.push(cm.clone());
+    doc.build_mutation_registry();
+    let mut tree = doc.build_tree();
+
+    let before = doc.mindmap.nodes.get("0").unwrap().position.x;
+    doc.apply_custom_mutation(&cm, "0", Some(&mut tree));
+    assert!(
+        (doc.mindmap.nodes.get("0").unwrap().position.x - before - 10.0).abs() < 1e-3,
+        "an always-true RepeatWhile stays flat-extractable and applies"
+    );
+    assert_eq!(doc.undo_stack.len(), 1);
+}
+
+/// The **nested** all-or-nothing rule, through the caller rather than
+/// through `flat_mutations` alone.
+///
+/// `test_apply_custom_mutation_match_nothing_repeat_while_does_not_apply`
+/// above exercises the *root* case; this is the shape the rule was
+/// extended for — a `Macro` root whose own literal list is perfectly
+/// extractable, over a child the flat path cannot evaluate. Before
+/// the rule, the root's payload was returned and blanketed the whole
+/// `SelfAndDescendants` set while the nested payload landed nowhere.
+///
+/// Pins all four halves of "declined": the model is untouched, no
+/// undo entry is pushed, the document stays clean, and the tree the
+/// caller handed in is not written either (the flat path is the only
+/// path, so a decline means nothing moved anywhere).
+#[test]
+fn test_apply_custom_mutation_unevaluatable_nested_child_applies_nothing() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::gfx_structs::predicate::Predicate;
+    use baumhard::mutator_builder::{InstructionSpec, MutationListSrc, MutationSrc, MutatorNode};
+
+    let nudge = |n: f32| Mutation::area_command(GlyphAreaCommand::NudgeRight(n));
+
+    let mut doc = load_test_doc();
+    let mut cm = make_test_mutation("nested-decline", TS::SelfAndDescendants);
+    cm.mutator = Some(MutatorNode::Macro {
+        channel: 0,
+        // Extractable on its own — this is the payload that used to
+        // escape and blanket every target.
+        mutations: MutationListSrc::Literal(vec![nudge(10.0)]),
+        children: vec![MutatorNode::Instruction {
+            channel: 0,
+            // `Predicate::new()` matches nothing; the flat path has no
+            // predicate evaluator, so this branch is unevaluatable.
+            instruction: InstructionSpec::RepeatWhile(Predicate::new()),
+            mutation: MutationSrc::None,
+            children: vec![MutatorNode::Macro {
+                channel: 0,
+                mutations: MutationListSrc::Literal(vec![nudge(99.0)]),
+                children: vec![],
+            }],
+        }],
+    });
+    doc.mindmap.custom_mutations.push(cm.clone());
+    doc.build_mutation_registry();
+    let mut tree = doc.build_tree();
+
+    let before: Vec<(String, f64)> = doc
+        .mindmap
+        .nodes
+        .iter()
+        .map(|(id, n)| (id.clone(), n.position.x))
+        .collect();
+    let tree_before = tree
+        .arena_id_for("0")
+        .and_then(|id| tree.tree.arena.get(id))
+        .and_then(|n| n.get().glyph_area())
+        .map(|a| a.position.x.0)
+        .expect("node '0' is in the tree");
+
+    doc.apply_custom_mutation(&cm, "0", Some(&mut tree));
+
+    for (id, x) in &before {
+        assert_eq!(
+            doc.mindmap.nodes.get(id).unwrap().position.x,
+            *x,
+            "node '{}' must be untouched: the root's payload has no business \
+             applying when a nested branch was declined",
+            id
+        );
+    }
+    let tree_after = tree
+        .arena_id_for("0")
+        .and_then(|id| tree.tree.arena.get(id))
+        .and_then(|n| n.get().glyph_area())
+        .map(|a| a.position.x.0)
+        .expect("node '0' is in the tree");
+    assert_eq!(
+        tree_after, tree_before,
+        "a declined mutator must not write the display tree either"
+    );
+    assert!(
+        doc.undo_stack.is_empty(),
+        "a declined apply must not push an undo entry"
+    );
+    assert!(!doc.dirty, "a declined apply must not mark the document dirty");
+}
+
+/// The same decline, one level up: two nested payloads that are each
+/// individually extractable but **disagree**. No unevaluatable node
+/// anywhere — the shape is refused purely because one flat list
+/// cannot be both `nudge(10)` and `nudge(99)`.
+#[test]
+fn test_apply_custom_mutation_disagreeing_nested_payload_applies_nothing() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mutator_builder::{MutationListSrc, MutatorNode};
+
+    let nudge = |n: f32| Mutation::area_command(GlyphAreaCommand::NudgeRight(n));
+
+    let mut doc = load_test_doc();
+    let mut cm = make_test_mutation("nested-disagree", TS::SelfAndDescendants);
+    cm.mutator = Some(MutatorNode::Macro {
+        channel: 0,
+        mutations: MutationListSrc::Literal(vec![nudge(10.0)]),
+        children: vec![MutatorNode::Macro {
+            channel: 0,
+            mutations: MutationListSrc::Literal(vec![nudge(99.0)]),
+            children: vec![],
+        }],
+    });
+    doc.mindmap.custom_mutations.push(cm.clone());
+    doc.build_mutation_registry();
+    let mut tree = doc.build_tree();
+
+    let before = doc.mindmap.nodes.get("0").unwrap().position.x;
+    doc.apply_custom_mutation(&cm, "0", Some(&mut tree));
+
+    assert_eq!(
+        doc.mindmap.nodes.get("0").unwrap().position.x,
+        before,
+        "nudge(10) must not land while nudge(99) lands nowhere"
+    );
+    assert!(doc.undo_stack.is_empty(), "a declined apply pushes no undo entry");
+    assert!(!doc.dirty);
+}
+
 #[test]
 fn test_apply_custom_mutation_toggle_does_not_set_dirty() {
     let mut doc = load_test_doc();
@@ -1239,6 +1428,37 @@ fn make_animated_mutation(id: &str, duration_ms: u32) -> CM {
         .build()
 }
 
+/// Build an animated **absolute-position** mutation: a
+/// `MoveTo(tx, ty)` (which `mutation_targets_absolute_position`
+/// classifies as absolute) wrapped in linear timing. The relative
+/// `make_animated_mutation` above covers the delta case; this
+/// covers the Assign case the P0-03 completion fix must not
+/// regress.
+fn make_animated_moveto_mutation(id: &str, duration_ms: u32, tx: f32, ty: f32) -> CM {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::scope;
+    CM {
+        id: id.into(),
+        name: id.into(),
+        description: String::new(),
+        contexts: vec![],
+        mutator: Some(scope::self_only(vec![Mutation::area_command(
+            GlyphAreaCommand::MoveTo(tx, ty),
+        )])),
+        target_scope: TS::SelfOnly,
+        behavior: MB::Persistent,
+        predicate: None,
+        document_actions: vec![],
+        timing: Some(AnimationTiming {
+            duration_ms,
+            delay_ms: 0,
+            easing: Easing::Linear,
+            then: None,
+        }),
+    }
+}
+
 #[test]
 fn test_start_animation_creates_instance() {
     let mut doc = load_test_doc();
@@ -1271,6 +1491,111 @@ fn test_start_animation_derives_to_snapshot_via_nudge() {
     assert!(
         (anim.from_node.position.x - orig_x).abs() < 0.001,
         "from_node.x should match original",
+    );
+}
+
+/// The third `flat_mutations` call site (`animations.rs`), which no
+/// test reached before.
+///
+/// `start_animation_inner` derives the `to` snapshot by replaying the
+/// extracted flat list against a scratch node, and reaches for
+/// `.unwrap_or_default()` when the mutator declines. So a declined
+/// mutator does not warn and does not skip here — it silently becomes
+/// a **zero-delta tween**: an instance is created, it occupies the
+/// dedup slot for its full duration, it ticks, and it lands the node
+/// exactly where it started.
+///
+/// That is the intended shape (the doc above the call says the
+/// scratch "stays at `from`" for shapes it cannot preview), but it is
+/// the one call site where a decline is invisible at runtime, so it
+/// gets pinned rather than assumed. The mutator here is the nested
+/// disagreement from
+/// `test_apply_custom_mutation_disagreeing_nested_payload_applies_nothing`
+/// — every node extractable, two payloads that disagree.
+#[test]
+fn test_start_animation_with_a_declined_mutator_tweens_zero_delta() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mutator_builder::{MutationListSrc, MutatorNode};
+
+    let nudge = |n: f32| Mutation::area_command(GlyphAreaCommand::NudgeRight(n));
+
+    let mut doc = load_test_doc();
+    let mut cm = make_animated_mutation("anim-declined", 500);
+    cm.mutator = Some(MutatorNode::Macro {
+        channel: 0,
+        mutations: MutationListSrc::Literal(vec![nudge(100.0)]),
+        children: vec![MutatorNode::Macro {
+            channel: 0,
+            mutations: MutationListSrc::Literal(vec![nudge(999.0)]),
+            children: vec![],
+        }],
+    });
+    let node_id = first_testament_node_id(&doc);
+    let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+    doc.start_animation(&cm, &node_id, 0);
+
+    assert_eq!(
+        doc.active_animations.len(),
+        1,
+        "a declined mutator still creates an instance — `unwrap_or_default` \
+         does not abort the animation"
+    );
+    let anim = &doc.active_animations[0];
+    assert!(
+        (anim.from_node.position.x - orig_x).abs() < 0.001,
+        "from_node is the live node"
+    );
+    assert!(
+        (anim.to_node.position.x - orig_x).abs() < 0.001,
+        "to_node must equal from_node: neither nudge(100) nor nudge(999) may \
+         land when the AST was declined. Got to.x = {}, from.x = {}",
+        anim.to_node.position.x,
+        orig_x
+    );
+
+    // And it really is inert end to end: run it to completion and the
+    // model is where it started.
+    doc.tick_animations(1_000, None);
+    assert!(
+        (doc.mindmap.nodes.get(&node_id).unwrap().position.x - orig_x).abs() < 0.001,
+        "a zero-delta tween must leave the model untouched at completion"
+    );
+}
+
+/// Control row for the test above: the *same* mutator with the nested
+/// payload made to agree extracts normally and tweens by the real
+/// delta. Without this, "to == from" could pass for a reason having
+/// nothing to do with the decline.
+#[test]
+fn test_start_animation_with_an_agreeing_nested_payload_tweens_the_delta() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mutator_builder::{MutationListSrc, MutatorNode};
+
+    let nudge = |n: f32| Mutation::area_command(GlyphAreaCommand::NudgeRight(n));
+
+    let mut doc = load_test_doc();
+    let mut cm = make_animated_mutation("anim-agreeing", 500);
+    cm.mutator = Some(MutatorNode::Macro {
+        channel: 0,
+        mutations: MutationListSrc::Literal(vec![nudge(100.0)]),
+        children: vec![MutatorNode::Macro {
+            channel: 0,
+            mutations: MutationListSrc::Literal(vec![nudge(100.0)]),
+            children: vec![],
+        }],
+    });
+    let node_id = first_testament_node_id(&doc);
+    let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+    doc.start_animation(&cm, &node_id, 0);
+    let anim = &doc.active_animations[0];
+    assert!(
+        (anim.to_node.position.x - (orig_x + 100.0)).abs() < 0.001,
+        "agreeing nested payloads extract to one list applied once; got {}",
+        anim.to_node.position.x
     );
 }
 
@@ -1454,5 +1779,894 @@ fn test_fast_forward_animations_snaps_to_end() {
     assert!(
         (final_x - expected).abs() < 0.001,
         "fast-forward should snap to to_node position",
+    );
+}
+
+/// **P0-03 regression — relative mutation, live tree.** Completion
+/// with a live `Some(tree)` after ≥2 advancing ticks must land the
+/// node at exactly `from + delta`, not `from + delta·(1 + t_prev)`.
+/// Every prior animation test drove `tree = None`, so the
+/// production completion path (which routes the final state through
+/// `apply_custom_mutation`) had zero coverage — and pre-fix it
+/// re-applied the full nudge on top of the already-lerped model,
+/// approaching double the delta, while snapshotting the mid-lerp
+/// position for undo. Fails on current main; passes with the
+/// reset-then-apply fix.
+#[test]
+fn test_tick_completion_live_tree_relative_no_double_apply() {
+    let mut doc = load_test_doc();
+    let node_id = first_testament_node_id(&doc);
+    let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+
+    // NudgeRight(100) over 1000 ms, linear.
+    let cm = make_animated_mutation("anim-live-rel", 1000);
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    let mut tree = doc.build_tree();
+    doc.start_animation(&cm, &node_id, 0);
+
+    // Two advancing ticks drift the MODEL toward `to`; rebuild the
+    // interactive tree from the lerped model between frames, exactly
+    // as the event loop's `drain_animation_tick` → `rebuild_all`
+    // does — so the completing tick sees a mid-lerp tree too.
+    assert!(doc.tick_animations(300, Some(&mut tree)));
+    tree = doc.build_tree();
+    assert!(doc.tick_animations(700, Some(&mut tree)));
+    tree = doc.build_tree();
+    assert!(doc.has_active_animations());
+
+    // Completing tick with the live (mid-lerp) tree.
+    assert!(doc.tick_animations(1200, Some(&mut tree)));
+    assert!(!doc.has_active_animations());
+
+    // Model lands at exactly from + delta — instant-mode parity, not
+    // the ~from+170 a double-apply would produce.
+    let final_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+    assert!(
+        (final_x - (orig_x + 100.0)).abs() < 0.01,
+        "animated relative mutation must land at from+delta ({}); got {final_x} \
+         (double-apply would give ~{})",
+        orig_x + 100.0,
+        orig_x + 170.0,
+    );
+
+    // The interactive tree the mutation committed to reflects the
+    // same single application — not the mid-lerp + delta the pre-fix
+    // display side carried until the next rebuild.
+    let arena_id = tree.arena_id_for(&node_id).expect("node in tree");
+    let tree_x = tree
+        .tree
+        .arena
+        .get(arena_id)
+        .unwrap()
+        .get()
+        .glyph_area()
+        .unwrap()
+        .position
+        .x
+        .0 as f64;
+    assert!(
+        (tree_x - (orig_x + 100.0)).abs() < 0.01,
+        "interactive tree must also reflect from+delta once; got {tree_x}, expected {}",
+        orig_x + 100.0,
+    );
+
+    // Ctrl-Z restores exactly the pre-animation position (the undo
+    // snapshot captured `from`, not the mid-lerp model).
+    assert!(doc.undo());
+    let after_undo = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+    assert!(
+        (after_undo - orig_x).abs() < 1e-6,
+        "undo after an animated mutation must restore the exact pre-animation position; \
+         got {after_undo}, expected {orig_x}",
+    );
+}
+
+/// **P0-03 parity guard — absolute mutation, live tree.** The
+/// companion to the relative regression test. An animated absolute
+/// `MoveTo` must commit the exact target (an overwrite, not a delta)
+/// and be undoable back to `from`. Absolute commands are inert under
+/// the tween (`apply_position_mutations_to_node` leaves `to == from`
+/// for them), so — unlike the relative test — this one also passes on
+/// pre-fix code; it exists to prove the reset-then-apply fix doesn't
+/// regress the Assign path. It asserts the tween really is inert (the
+/// model stays at `from` mid-flight) so the final landing provably
+/// comes from the completion apply, not the lerp.
+#[test]
+fn test_tick_completion_live_tree_absolute_lands_and_undo_restores() {
+    let mut doc = load_test_doc();
+    let node_id = first_testament_node_id(&doc);
+    let orig = doc.mindmap.nodes.get(&node_id).unwrap().position;
+
+    let target = (orig.x + 250.0, orig.y - 120.0);
+    let cm = make_animated_moveto_mutation("anim-live-abs", 1000, target.0 as f32, target.1 as f32);
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    let mut tree = doc.build_tree();
+    doc.start_animation(&cm, &node_id, 0);
+
+    // Two advancing ticks, then the completing tick — all live-tree.
+    assert!(doc.tick_animations(300, Some(&mut tree)));
+    // MoveTo is inert under the tween: `to == from`, so mid-flight the
+    // model must still sit at `from` (a real drift toward the target
+    // would be +75 on x by t=0.3). The tolerance clears the f32
+    // round-trip noise of the lerp (~3e-6 at these magnitudes) while
+    // staying far below any real movement.
+    let mid = doc.mindmap.nodes.get(&node_id).unwrap().position;
+    assert!(
+        (mid.x - orig.x).abs() < 1e-3 && (mid.y - orig.y).abs() < 1e-3,
+        "absolute MoveTo must not drift the model mid-tween; got ({}, {}), expected ({}, {})",
+        mid.x,
+        mid.y,
+        orig.x,
+        orig.y,
+    );
+    tree = doc.build_tree();
+    assert!(doc.tick_animations(700, Some(&mut tree)));
+    tree = doc.build_tree();
+    assert!(doc.tick_animations(1200, Some(&mut tree)));
+    assert!(!doc.has_active_animations());
+
+    // Absolute mutation commits the exact target position.
+    let final_pos = doc.mindmap.nodes.get(&node_id).unwrap().position;
+    assert!(
+        (final_pos.x - target.0).abs() < 0.05 && (final_pos.y - target.1).abs() < 0.05,
+        "animated absolute mutation must land at the MoveTo target ({}, {}); got ({}, {})",
+        target.0,
+        target.1,
+        final_pos.x,
+        final_pos.y,
+    );
+
+    // Ctrl-Z restores the exact pre-animation position.
+    assert!(doc.undo());
+    let after = doc.mindmap.nodes.get(&node_id).unwrap().position;
+    assert!(
+        (after.x - orig.x).abs() < 1e-6 && (after.y - orig.y).abs() < 1e-6,
+        "undo of an animated absolute mutation must restore the pre-animation position; \
+         got ({}, {}), expected ({}, {})",
+        after.x,
+        after.y,
+        orig.x,
+        orig.y,
+    );
+}
+
+/// **P0-03 — a node deleted mid-animation must not be resurrected.**
+/// Nothing purges `active_animations` when a node is deleted, so a
+/// queued instance reaches completion after its target is gone. The
+/// completion must skip it cleanly, exactly as the pre-fix path did
+/// (via `apply_custom_mutation`'s empty snapshots). Regression guard
+/// against a whole-node `insert(from_node)` at completion, which would
+/// re-insert the deleted node at `from+delta` with a ghost undo entry.
+#[test]
+fn test_tick_completion_deleted_node_not_resurrected() {
+    let mut doc = load_test_doc();
+    let node_id = first_testament_node_id(&doc);
+    let cm = make_animated_mutation("anim-del", 1000);
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    let mut tree = doc.build_tree();
+    doc.start_animation(&cm, &node_id, 0);
+    assert!(doc.tick_animations(500, Some(&mut tree)));
+
+    // Delete the node mid-flight (model removal mirrors the
+    // `mindmap.nodes` side of `delete_node`); the animation stays
+    // queued because the delete doesn't touch `active_animations`.
+    doc.mindmap.nodes.remove(&node_id);
+    assert!(doc.has_active_animations());
+
+    // Completing tick. The completion checks the MODEL for the target's
+    // existence (not the tree), so the stale `tree` is never read — but
+    // it must still not resurrect the node.
+    doc.tick_animations(1200, Some(&mut tree));
+    assert!(!doc.has_active_animations(), "the instance still drains");
+    assert!(
+        !doc.mindmap.nodes.contains_key(&node_id),
+        "a node deleted mid-animation must stay deleted at completion"
+    );
+    assert!(
+        doc.undo_stack.is_empty(),
+        "no undo entry should be pushed for a completion on a deleted node"
+    );
+}
+
+/// **P0-03 — no-tree completion of a displacing mutation is
+/// undoable.** Production always passes a tree, but tests and any
+/// future headless caller hit the no-tree fallback. A relative nudge
+/// completing without a tree must land at `from+delta` and push
+/// exactly one undo entry that restores `from`. Pre-fix this path
+/// pushed none ("caller's responsibility", which no caller took —
+/// defect 3).
+#[test]
+fn test_tick_completion_no_tree_relative_is_undoable() {
+    let mut doc = load_test_doc();
+    let node_id = first_testament_node_id(&doc);
+    let orig_x = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+    let cm = make_animated_mutation("anim-notree-rel", 1000);
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    doc.start_animation(&cm, &node_id, 0);
+    doc.tick_animations(1200, None);
+    assert!(!doc.has_active_animations());
+
+    let after = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+    assert!(
+        (after - (orig_x + 100.0)).abs() < 1e-3,
+        "no-tree nudge completion lands at from+delta; got {after}, expected {}",
+        orig_x + 100.0,
+    );
+    assert_eq!(
+        doc.undo_stack.len(),
+        1,
+        "a displacing no-tree completion pushes exactly one undo entry"
+    );
+
+    assert!(doc.undo());
+    let restored = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
+    assert!(
+        (restored - orig_x).abs() < 1e-6,
+        "undo restores the pre-animation position; got {restored}, expected {orig_x}"
+    );
+}
+
+/// **P0-03 — no-tree completion of a no-op mutation pushes no undo
+/// entry.** An animated absolute `MoveTo` leaves `to == from` in the
+/// model snapshot (`apply_position_mutations_to_node` is a no-op for
+/// absolute commands), and the no-tree path can't run the declarative
+/// MoveTo, so the commit is a no-op that must NOT leave a dead undo
+/// entry or a spurious `dirty` — mirroring the tree path's `changed`
+/// gate (P0-02).
+#[test]
+fn test_tick_completion_no_tree_noop_pushes_no_undo() {
+    let mut doc = load_test_doc();
+    let node_id = first_testament_node_id(&doc);
+    let orig = doc.mindmap.nodes.get(&node_id).unwrap().position;
+    let cm = make_animated_moveto_mutation(
+        "anim-notree-abs",
+        1000,
+        (orig.x + 250.0) as f32,
+        (orig.y - 120.0) as f32,
+    );
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    doc.start_animation(&cm, &node_id, 0);
+    doc.tick_animations(1200, None);
+    assert!(!doc.has_active_animations());
+
+    let after = doc.mindmap.nodes.get(&node_id).unwrap().position;
+    assert!(
+        (after.x - orig.x).abs() < 1e-9 && (after.y - orig.y).abs() < 1e-9,
+        "no-tree absolute completion is inert (to == from); got ({}, {})",
+        after.x,
+        after.y,
+    );
+    assert!(
+        doc.undo_stack.is_empty(),
+        "a no-op no-tree completion must push no undo entry"
+    );
+    assert!(
+        !doc.dirty,
+        "a no-op no-tree completion must not flag the document dirty"
+    );
+}
+
+// ----- Font-size sync-back (P0-02) -----
+
+/// Build a `GrowFont`/`ShrinkFont`-style area-command mutation.
+fn make_font_scale_mutation(id: &str, cmd: baumhard::gfx_structs::area::GlyphAreaCommand, scope: TS) -> CM {
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::scope as sc;
+    CM {
+        id: id.into(),
+        name: id.into(),
+        description: String::new(),
+        contexts: vec![],
+        mutator: Some(sc::self_only(vec![Mutation::area_command(cmd)])),
+        target_scope: scope,
+        behavior: MB::Persistent,
+        predicate: None,
+        document_actions: vec![],
+        timing: None,
+    }
+}
+
+/// Largest `size_pt` across section `idx`'s runs — mirrors the
+/// forward path's `scale = max(run.size_pt)` collapse.
+fn section_max_size_pt(doc: &MindMapDocument, node_id: &str, idx: usize) -> u32 {
+    doc.mindmap.nodes.get(node_id).unwrap().sections[idx]
+        .text_runs
+        .iter()
+        .map(|r| r.size_pt)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Tree-side font scale of section `idx`'s area.
+fn section_tree_scale(tree: &baumhard::mindmap::tree_builder::MindMapTree, node_id: &str, idx: usize) -> f32 {
+    let sid = tree.section_arena_id(node_id, idx).unwrap();
+    tree.tree
+        .arena
+        .get(sid)
+        .unwrap()
+        .get()
+        .glyph_area()
+        .unwrap()
+        .scale
+        .0
+}
+
+/// Acceptance criterion (a): `grow-font` visibly grows the text,
+/// the growth is written back to the model, it survives a
+/// rebuild-from-model, and exactly one undo entry reverses it.
+/// Pre-fix the scale change never reached the model, so the
+/// mutation was a silent no-op that still polluted the undo stack.
+#[test]
+fn test_grow_font_persists_survives_rebuild_and_undo_reverses() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+
+    let size_before = section_max_size_pt(&doc, &nid, 0);
+    assert!(size_before > 0, "fixture node must have a run with a size");
+    let undo_len_before = doc.undo_stack.len();
+
+    let cm = make_font_scale_mutation("grow-font-test", GlyphAreaCommand::GrowFont(2.0), TS::SelfOnly);
+    let mut tree = doc.build_tree();
+    // Tree-side scale starts at the model's largest run size.
+    assert!((section_tree_scale(&tree, &nid, 0) - size_before as f32).abs() < 1e-3);
+
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    // (1) Model changed: the run size grew by exactly 2pt.
+    assert_eq!(
+        section_max_size_pt(&doc, &nid, 0),
+        size_before + 2,
+        "grow-font must write the +2pt back to the model run"
+    );
+    // (2) Exactly one undo entry, and dirty is set.
+    assert_eq!(
+        doc.undo_stack.len(),
+        undo_len_before + 1,
+        "grow-font must push exactly one undo entry"
+    );
+    assert!(doc.dirty);
+
+    // (3) Survives rebuild_all's model→tree rebuild.
+    let tree2 = doc.build_tree();
+    assert!(
+        (section_tree_scale(&tree2, &nid, 0) - (size_before + 2) as f32).abs() < 1e-3,
+        "grown font size must survive the rebuild-from-model"
+    );
+
+    // (4) Ctrl-Z reverses it.
+    assert!(doc.undo(), "undo must report success");
+    assert_eq!(
+        section_max_size_pt(&doc, &nid, 0),
+        size_before,
+        "undo must restore the original font size"
+    );
+}
+
+/// The §5 hard part: a multi-run section grown by a fixed delta
+/// keeps its *relative* run sizes instead of collapsing every run
+/// to the max. `sync_section_font_size` distributes the scale
+/// delta, so a `[14pt, 40pt]` section grown 3pt becomes
+/// `[17pt, 43pt]`, preserving the 26pt spread — an overwrite-all
+/// approach would flatten both to 43pt and permanently destroy the
+/// authored sizing.
+#[test]
+fn test_grow_font_preserves_relative_run_sizes() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::mindmap::model::TextRun;
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.sections[0].text = "hello world".into();
+        node.sections[0].text_runs = vec![
+            TextRun {
+                start: 0,
+                end: 5,
+                bold: false,
+                italic: false,
+                underline: false,
+                font: "LiberationSans".into(),
+                size_pt: 14,
+                color: "#ffffff".into(),
+                hyperlink: None,
+            },
+            TextRun {
+                start: 5,
+                end: 11,
+                bold: false,
+                italic: false,
+                underline: false,
+                font: "LiberationSans".into(),
+                size_pt: 40,
+                color: "#ffffff".into(),
+                hyperlink: None,
+            },
+        ];
+    }
+    let cm = make_font_scale_mutation("grow-font-multi", GlyphAreaCommand::GrowFont(3.0), TS::SelfOnly);
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    let runs = &doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs;
+    assert_eq!(runs[0].size_pt, 17, "small run grows by the same +3 delta");
+    assert_eq!(runs[1].size_pt, 43, "large run grows by the same +3 delta");
+}
+
+/// `shrink-font` past the floor clamps `size_pt` to
+/// [`MIN_TEXT_RUN_SIZE_PT`] (1) instead of saturating a negative
+/// tree scale to an invisible 0pt on the `u32` cast.
+#[test]
+fn test_shrink_font_clamps_to_minimum() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::mindmap::model::TextRun;
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.sections[0].text = "small".into();
+        node.sections[0].text_runs = vec![TextRun {
+            start: 0,
+            end: 5,
+            bold: false,
+            italic: false,
+            underline: false,
+            font: "LiberationSans".into(),
+            size_pt: 8,
+            color: "#ffffff".into(),
+            hyperlink: None,
+        }];
+    }
+    // Shrink by 20pt from an 8pt run — tree scale goes negative.
+    let cm = make_font_scale_mutation(
+        "shrink-font-test",
+        GlyphAreaCommand::ShrinkFont(20.0),
+        TS::SelfOnly,
+    );
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    assert_eq!(
+        doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs[0].size_pt,
+        1,
+        "shrink past the floor clamps to 1pt, never 0"
+    );
+}
+
+/// A `grow-font` mutation on a **runless** section synthesizes a
+/// single run to carry the new size — the change would otherwise
+/// have nowhere to live and evaporate on the next rebuild. The
+/// synthesized run spans the whole text and inherits the node's
+/// default text color so rendering is unchanged except for size.
+#[test]
+fn test_grow_font_on_runless_section_synthesizes_run() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::mindmap::model::MindSection;
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.style.text_color = "#abcdef".into();
+        // A section with text but no runs (size defaults to 14pt).
+        node.sections
+            .push(MindSection::new_default("runless".into(), Vec::new()));
+    }
+    let runless_idx = doc.mindmap.nodes.get(&nid).unwrap().sections.len() - 1;
+    let cm = make_font_scale_mutation("grow-runless", GlyphAreaCommand::GrowFont(2.0), TS::SelfOnly);
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    let section = &doc.mindmap.nodes.get(&nid).unwrap().sections[runless_idx];
+    assert_eq!(
+        section.text_runs.len(),
+        1,
+        "a run must be synthesized to hold the size"
+    );
+    let run = &section.text_runs[0];
+    assert_eq!(run.size_pt, 16, "synthesized run carries the grown size (14 + 2)");
+    assert_eq!(run.start, 0);
+    assert_eq!(
+        run.end,
+        baumhard::util::grapheme_chad::count_grapheme_clusters("runless")
+    );
+    assert_eq!(
+        run.color, "#abcdef",
+        "synthesized run inherits the node's default text color"
+    );
+}
+
+/// Acceptance criterion (b): a Toggle mutation's visual survives a
+/// rebuild-from-model while active, then reverts once toggled off.
+/// Pre-fix nothing re-applied `active_toggles` after a rebuild, so
+/// the toggle-on's tree edit died at the end of the same dispatch
+/// and "second trigger reverses" had no effect left to reverse.
+#[test]
+fn test_toggle_mutation_survives_rebuild_and_reverts_off() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::{scope, CustomMutation};
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+
+    let cm = CustomMutation {
+        id: "toggle-nudge".into(),
+        name: "Toggle nudge".into(),
+        description: String::new(),
+        contexts: vec![],
+        mutator: Some(scope::self_only(vec![Mutation::area_command(
+            GlyphAreaCommand::NudgeRight(25.0),
+        )])),
+        target_scope: TS::SelfOnly,
+        behavior: MB::Toggle,
+        predicate: None,
+        document_actions: vec![],
+        timing: None,
+    };
+    // Register so the toggle re-application can find the mutation.
+    doc.mutation_registry.insert("toggle-nudge".into(), cm.clone());
+
+    // Simulate the render path (`rebuild_all`): build the pure,
+    // overlay-free tree, then stamp active-toggle visuals onto it
+    // exactly as the renderer sees them. `build_tree` itself stays
+    // overlay-free so the Persistent sync path never reads a toggle.
+    let container_x = |doc: &MindMapDocument| -> f32 {
+        let mut tree = doc.build_tree();
+        doc.reapply_active_toggles(&mut tree);
+        let aid = tree.arena_id_for(&nid).unwrap();
+        tree.tree
+            .arena
+            .get(aid)
+            .unwrap()
+            .get()
+            .glyph_area()
+            .unwrap()
+            .position
+            .x
+            .0
+    };
+    let base_x = container_x(&doc);
+
+    // Toggle ON (the passed tree is discarded; the assertion below
+    // exercises a *fresh* rebuild-from-model).
+    {
+        let mut tree = doc.build_tree();
+        doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+    }
+    assert!(doc
+        .active_toggles
+        .contains(&(nid.clone(), "toggle-nudge".to_string())));
+    assert!(
+        (container_x(&doc) - base_x - 25.0).abs() < 1e-3,
+        "an active toggle must survive the rebuild-from-model"
+    );
+    // Toggle is visual-only: the model must be untouched.
+    assert!(
+        !doc.dirty,
+        "a Toggle mutation must not mark the model dirty via apply_to_tree"
+    );
+
+    // Toggle OFF → the visual reverts on the next rebuild.
+    {
+        let mut tree = doc.build_tree();
+        doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+    }
+    assert!(!doc
+        .active_toggles
+        .contains(&(nid.clone(), "toggle-nudge".to_string())));
+    assert!(
+        (container_x(&doc) - base_x).abs() < 1e-3,
+        "toggling off must revert the visual on the next rebuild"
+    );
+}
+
+/// Acceptance criterion (c): a mutation that resolves to no model
+/// change must not push an undo entry. Pre-fix every apply pushed
+/// undo unconditionally, so the next Ctrl-Z silently ate a real step.
+#[test]
+fn test_no_op_mutation_pushes_no_undo_entry() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    // Runless sections keep the round-trip a strict identity: no
+    // runs means no font-name canonicalization drift, so the only
+    // thing that can flip `changed` is the mutation itself.
+    for section in doc.mindmap.nodes.get_mut(&nid).unwrap().sections.iter_mut() {
+        section.text_runs.clear();
+    }
+    doc.dirty = false;
+    let undo_len_before = doc.undo_stack.len();
+
+    // Zero-magnitude nudge: applies cleanly but changes nothing.
+    let cm = TestNudgeMutation::new("zero-nudge", TS::SelfOnly)
+        .magnitude(0.0)
+        .build();
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    assert_eq!(
+        doc.undo_stack.len(),
+        undo_len_before,
+        "a no-op mutation must not push an undo entry"
+    );
+    assert!(!doc.dirty, "a no-op mutation must not set the dirty flag");
+}
+
+/// The predicate-filtered-everything no-op path: an empty-fields,
+/// `always_match = false` predicate matches nothing, so no element
+/// is mutated and the model is unchanged — no dead undo entry.
+#[test]
+fn test_predicate_filtered_all_apply_pushes_no_undo() {
+    use baumhard::gfx_structs::predicate::Predicate;
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    // See the note in `test_no_op_mutation_pushes_no_undo_entry`:
+    // clear runs so the pristine round-trip is a strict identity.
+    for section in doc.mindmap.nodes.get_mut(&nid).unwrap().sections.iter_mut() {
+        section.text_runs.clear();
+    }
+    doc.dirty = false;
+    let undo_len_before = doc.undo_stack.len();
+
+    let mut cm = TestNudgeMutation::new("filtered-noop", TS::SelfOnly)
+        .magnitude(25.0)
+        .build();
+    cm.predicate = Some(Predicate {
+        fields: vec![],
+        always_match: false,
+    });
+
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    assert_eq!(
+        doc.undo_stack.len(),
+        undo_len_before,
+        "a predicate that filters every candidate must not push an undo entry"
+    );
+    assert!(!doc.dirty);
+}
+
+// ----- Review follow-ups: overlay-leak + delta-baseline + ordering -----
+
+/// A Persistent mutation applied against an interactive tree that
+/// carries a selection-highlight overlay must persist only its own
+/// effect — never the cyan highlight. Regression for the P1 review
+/// finding: `sync_node_from_tree` now reads a fresh, overlay-free
+/// `build_tree`, not the caller's decorated render tree.
+#[test]
+fn test_persistent_apply_does_not_leak_highlight_overlay_into_model() {
+    use crate::application::document::{apply_tree_highlights, HIGHLIGHT_COLOR};
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    let orig_color = doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs[0]
+        .color
+        .clone();
+    let orig_x = doc.mindmap.nodes.get(&nid).unwrap().position.x;
+
+    // Simulate `rebuild_all`'s stored render tree: a pure projection
+    // plus the selection-highlight overlay stamped on the node.
+    let mut interactive = doc.build_tree();
+    apply_tree_highlights(&mut interactive, vec![(nid.as_str(), None, HIGHLIGHT_COLOR)]);
+
+    // Apply a Persistent nudge against the OVERLAID interactive tree.
+    let cm = TestNudgeMutation::new("nudge-over-highlight", TS::SelfOnly)
+        .magnitude(5.0)
+        .build();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut interactive));
+
+    // The mutation's own effect persists...
+    let after_x = doc.mindmap.nodes.get(&nid).unwrap().position.x;
+    assert!(
+        (after_x - orig_x - 5.0).abs() < 1e-3,
+        "the nudge itself must persist to the model"
+    );
+    // ...but the highlight overlay must NOT be written back.
+    let after_color = doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs[0]
+        .color
+        .clone();
+    assert_eq!(
+        after_color, orig_color,
+        "selection-highlight overlay must not leak into the persisted model"
+    );
+}
+
+/// A Persistent mutation applied while a visual toggle is active on
+/// the same node must persist only the Persistent mutation's effect
+/// — the toggle's tree-only nudge must not become a saved model
+/// move. Regression for the P1 review finding.
+#[test]
+fn test_persistent_apply_does_not_leak_active_toggle_into_model() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::{scope, CustomMutation};
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    let orig_x = doc.mindmap.nodes.get(&nid).unwrap().position.x;
+
+    // A visual toggle that nudges the node right by 100px.
+    let toggle = CustomMutation {
+        id: "vis-toggle".into(),
+        name: "vis".into(),
+        description: String::new(),
+        contexts: vec![],
+        mutator: Some(scope::self_only(vec![Mutation::area_command(
+            GlyphAreaCommand::NudgeRight(100.0),
+        )])),
+        target_scope: TS::SelfOnly,
+        behavior: MB::Toggle,
+        predicate: None,
+        document_actions: vec![],
+        timing: None,
+    };
+    doc.mutation_registry.insert("vis-toggle".into(), toggle.clone());
+    {
+        let mut t = doc.build_tree();
+        doc.apply_custom_mutation(&toggle, &nid, Some(&mut t));
+    }
+
+    // Interactive render tree WITH the toggle overlay (as rebuild_all
+    // would produce), then a Persistent +5 nudge on the same node.
+    let mut interactive = doc.build_tree();
+    doc.reapply_active_toggles(&mut interactive);
+    let persistent = TestNudgeMutation::new("persist-nudge", TS::SelfOnly)
+        .magnitude(5.0)
+        .build();
+    doc.apply_custom_mutation(&persistent, &nid, Some(&mut interactive));
+
+    let after_x = doc.mindmap.nodes.get(&nid).unwrap().position.x;
+    assert!(
+        (after_x - orig_x - 5.0).abs() < 1e-3,
+        "only the Persistent +5 may persist; the toggle's +100 must not leak (got orig+{})",
+        after_x - orig_x
+    );
+}
+
+/// A text/region mutation that drops the section's largest run must
+/// NOT inflate the surviving runs to the stale tree scale. Regression
+/// for the P2 review finding: the font-size delta uses the section's
+/// scale captured *before* the round-trip rewrites `text_runs`.
+#[test]
+fn test_font_size_delta_ignores_run_dropped_by_round_trip() {
+    use baumhard::core::primitives::Range;
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::{scope, CustomMutation};
+    use baumhard::mindmap::model::TextRun;
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.sections[0].text = "abcdef".into();
+        node.sections[0].text_runs = vec![
+            TextRun {
+                start: 0,
+                end: 3,
+                bold: false,
+                italic: false,
+                underline: false,
+                font: "LiberationSans".into(),
+                size_pt: 14,
+                color: "#ffffff".into(),
+                hyperlink: None,
+            },
+            TextRun {
+                start: 3,
+                end: 6,
+                bold: false,
+                italic: false,
+                underline: false,
+                font: "LiberationSans".into(),
+                size_pt: 40,
+                color: "#ff0000".into(),
+                hyperlink: None,
+            },
+        ];
+    }
+    // Delete the region carrying the largest (40pt) run. The tree's
+    // `scale` stays 40 (deleting a color region doesn't touch it),
+    // and the round-trip rebuilds the model with only the 14pt run.
+    let cm = CustomMutation {
+        id: "drop-large".into(),
+        name: "drop".into(),
+        description: String::new(),
+        contexts: vec![],
+        mutator: Some(scope::self_only(vec![Mutation::area_command(
+            GlyphAreaCommand::DeleteColorFontRegion(Range::new(3, 6)),
+        )])),
+        target_scope: TS::SelfOnly,
+        behavior: MB::Persistent,
+        predicate: None,
+        document_actions: vec![],
+        timing: None,
+    };
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    let runs = &doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs;
+    assert!(
+        runs.iter().all(|r| r.size_pt == 14),
+        "surviving run(s) must keep their authored 14pt, not inflate to the stale 40pt scale; got {:?}",
+        runs.iter().map(|r| r.size_pt).collect::<Vec<_>>()
+    );
+}
+
+/// Toggles replay in activation order after a rebuild. Two
+/// non-commutative `MoveTo` toggles on the same node must leave the
+/// node at the *second* toggle's target (last-writer-wins in
+/// activation order) — `active_toggles` is an ordered list, so the
+/// post-rebuild visual is deterministic. Regression for the P2
+/// ordering finding.
+#[test]
+fn test_active_toggles_replay_in_activation_order() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::{scope, CustomMutation};
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+
+    let move_toggle = |id: &str, x: f32| CustomMutation {
+        id: id.into(),
+        name: id.into(),
+        description: String::new(),
+        contexts: vec![],
+        mutator: Some(scope::self_only(vec![Mutation::area_command(
+            GlyphAreaCommand::MoveTo(x, 0.0),
+        )])),
+        target_scope: TS::SelfOnly,
+        behavior: MB::Toggle,
+        predicate: None,
+        document_actions: vec![],
+        timing: None,
+    };
+    let first = move_toggle("move-a", 111.0);
+    let second = move_toggle("move-b", 222.0);
+    doc.mutation_registry.insert("move-a".into(), first.clone());
+    doc.mutation_registry.insert("move-b".into(), second.clone());
+
+    // Activate in order: A then B.
+    {
+        let mut t = doc.build_tree();
+        doc.apply_custom_mutation(&first, &nid, Some(&mut t));
+    }
+    {
+        let mut t = doc.build_tree();
+        doc.apply_custom_mutation(&second, &nid, Some(&mut t));
+    }
+    assert_eq!(
+        doc.active_toggles,
+        vec![
+            (nid.clone(), "move-a".to_string()),
+            (nid.clone(), "move-b".to_string())
+        ],
+        "active_toggles must record activation order"
+    );
+
+    // Render-path rebuild: the last-activated toggle (B → x=222) wins.
+    let mut tree = doc.build_tree();
+    doc.reapply_active_toggles(&mut tree);
+    let aid = tree.arena_id_for(&nid).unwrap();
+    let x = tree
+        .tree
+        .arena
+        .get(aid)
+        .unwrap()
+        .get()
+        .glyph_area()
+        .unwrap()
+        .position
+        .x
+        .0;
+    assert!(
+        (x - 222.0).abs() < 1e-3,
+        "ordered replay must apply move-a then move-b, leaving x at 222 (got {x})"
     );
 }

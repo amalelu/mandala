@@ -19,7 +19,7 @@
 
 use super::super::*;
 use super::fixtures::*;
-use crate::core::primitives::{Flag, Flaggable};
+use crate::core::primitives::{Discriminated, Flag, Flaggable};
 use crate::gfx_structs::element::GfxElementType;
 use crate::mindmap::model::{MindSection, Position, Size};
 
@@ -64,7 +64,7 @@ fn test_section_model_is_glyph_model_child_of_section_area() {
         .expect("section-area has a model child");
     let model_element = result.tree.arena.get(model_id).unwrap().get();
     assert_eq!(
-        model_element.get_type(),
+        model_element.variant(),
         GfxElementType::GlyphModel,
         "section-model is a GlyphModel"
     );
@@ -263,12 +263,12 @@ fn test_default_section_channel_falls_through_to_index() {
 }
 
 /// Explicit `channel: Some(0)` on a non-zero-index section is
-/// honoured — the `Option<usize>` shape disambiguates "author
+/// honored — the `Option<usize>` shape disambiguates "author
 /// chose 0 deliberately" from "default fall-through to index".
 /// Pre-`Option`, the bare `usize` saw `0` from both shapes and
 /// silently overrode the explicit choice for idx > 0.
 #[test]
-fn test_explicit_channel_zero_honoured_for_non_zero_index() {
+fn test_explicit_channel_zero_honored_for_non_zero_index() {
     let mut node = synthetic_node("n", None, 0.0, 0.0);
     let mut s1 = MindSection::new_default("explicit".into(), vec![]);
     s1.channel = Some(0);
@@ -282,7 +282,7 @@ fn test_explicit_channel_zero_honoured_for_non_zero_index() {
     assert_eq!(
         element.channel(),
         0,
-        "explicit Some(0) on idx 1 must be honoured (not silently substituted)"
+        "explicit Some(0) on idx 1 must be honored (not silently substituted)"
     );
 }
 
@@ -306,28 +306,27 @@ fn test_section_count_for_reports_authored_count() {
     assert_eq!(result.section_count_for("does-not-exist"), 0);
 }
 
-/// Section text content emits as a `TextElement` with a stable
-/// `section_idx` matching its position in `MindNode.sections`.
-/// Pins the multi-section path through the scene builder that
-/// today's single-section fixtures don't reach.
+/// A multi-section node projects one section `GlyphArea` per
+/// section, each keyed by its position in `MindNode.sections`.
+/// Pins the multi-section path that today's single-section
+/// fixtures don't reach. Empty-text sections still get an area —
+/// they own the rectangle the next keystroke lands in.
 #[test]
-fn test_multi_section_emits_distinct_text_elements() {
-    use crate::mindmap::scene_builder::build_scene;
+fn test_multi_section_emits_distinct_section_areas() {
     let mut node = synthetic_node("n", None, 0.0, 0.0);
     node.sections = vec![
         MindSection::new_default("first".into(), vec![]),
         MindSection::new_default("second".into(), vec![]),
-        MindSection::new_default("".into(), vec![]), // empty → no element
+        MindSection::new_default("".into(), vec![]),
     ];
     let map = synthetic_map(vec![node], vec![]);
-    let scene = build_scene(&map, 1.0);
-    assert_eq!(scene.text_elements.len(), 2);
-    let by_idx: std::collections::HashMap<usize, &str> = scene
-        .text_elements
-        .iter()
-        .map(|e| (e.section_idx, e.text.as_str()))
+    let tree = build_mindmap_tree(&map);
+    let by_idx: std::collections::HashMap<usize, String> = tree
+        .section_ids()
+        .map(|((_, idx), arena_id)| (idx, glyph_area_of(&tree.tree, arena_id).text.clone()))
         .collect();
-    assert_eq!(by_idx.get(&0), Some(&"first"));
-    assert_eq!(by_idx.get(&1), Some(&"second"));
-    assert!(!by_idx.contains_key(&2), "empty section emits nothing");
+    assert_eq!(by_idx.len(), 3);
+    assert_eq!(by_idx.get(&0).map(String::as_str), Some("first"));
+    assert_eq!(by_idx.get(&1).map(String::as_str), Some("second"));
+    assert_eq!(by_idx.get(&2).map(String::as_str), Some(""));
 }

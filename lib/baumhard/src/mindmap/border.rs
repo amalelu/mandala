@@ -8,12 +8,17 @@
 //! handles, and drag previews all attach to these geometry hints.
 
 use serde::{Deserialize, Serialize};
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::core::primitives::{ColorFontRegion, ColorFontRegions, Range};
+// `FontSystem` is re-exported by `crate::font` (§B5: code outside
+// `font/` does not name `cosmic_text` directly). Threaded through
+// `border_run_specs_with` so guard-holding callers measure without a
+// nested `FONT_SYSTEM` acquire.
+use crate::font::FontSystem;
 use crate::mindmap::border_pattern::SidePattern;
 use crate::mindmap::model::{Canvas, ColorGroup, CustomBorderGlyphs, GlyphBorderConfig, MindSection};
 use crate::util::color::FloatRgba;
+use crate::util::grapheme_chad::{count_grapheme_clusters, join_graphemes};
 
 /// Fraction of `font_size` by which a border's top/bottom runs
 /// are pulled inward so their glyph visible extents overlap with
@@ -58,14 +63,25 @@ pub struct BorderGlyphSet {
 
 /// Single source of truth for the four canonical Unicode
 /// box-drawing presets. Each row is `(name, [top, bottom, left,
-/// right, tl, tr, bl, br])`. Adding a fifth preset is a one-row
-/// extension here, plus an entry in [`BORDER_PRESETS`] (which the
-/// console's `border preset=` completion surfaces).
-const PRESET_TABLE: &[(&str, [char; 8])] = &[
-    ("light", ['─', '─', '│', '│', '┌', '┐', '└', '┘']),
-    ("heavy", ['━', '━', '┃', '┃', '┏', '┓', '┗', '┛']),
-    ("double", ['═', '═', '║', '║', '╔', '╗', '╚', '╝']),
-    ("rounded", ['─', '─', '│', '│', '╭', '╮', '╰', '╯']),
+/// right, tl, tr, bl, br], hint)`, where `hint` is the one-line
+/// human description [`border_preset_hint`] serves to the console's
+/// completion popup. Adding a fifth preset is a one-row extension
+/// here — [`BORDER_PRESETS`] and the hint lookup both derive from
+/// this table, and the tuple's third slot means a new preset cannot
+/// land without a description.
+const PRESET_TABLE: &[(&str, [char; 8], &str)] = &[
+    (
+        "light",
+        ['─', '─', '│', '│', '┌', '┐', '└', '┘'],
+        "thin lines (default)",
+    ),
+    ("heavy", ['━', '━', '┃', '┃', '┏', '┓', '┗', '┛'], "bold lines"),
+    ("double", ['═', '═', '║', '║', '╔', '╗', '╚', '╝'], "double lines"),
+    (
+        "rounded",
+        ['─', '─', '│', '│', '╭', '╮', '╰', '╯'],
+        "thin lines with rounded corners",
+    ),
 ];
 
 impl BorderGlyphSet {
@@ -284,7 +300,7 @@ impl PaletteField {
         }
     }
 
-    /// Static list of recognised values (used by the console
+    /// Static list of recognized values (used by the console
     /// command's completion).
     pub const ALL: &'static [&'static str] = &["frame", "background", "text", "title"];
 }
@@ -353,29 +369,6 @@ impl BorderStyle {
         }
     }
 
-    /// Concatenated full top-edge text for `cluster_width` cluster
-    /// columns: `top_left + top_pattern + top_right`. Cluster math
-    /// trims the side fill so the corners fit.
-    pub fn top_text(&self, cluster_width: usize) -> String {
-        build_horizontal_text(
-            &self.corners.top_left,
-            &self.corners.top_right,
-            &self.side_patterns.top,
-            cluster_width,
-        )
-    }
-
-    /// Concatenated full bottom-edge text for `cluster_width`
-    /// cluster columns.
-    pub fn bottom_text(&self, cluster_width: usize) -> String {
-        build_horizontal_text(
-            &self.corners.bottom_left,
-            &self.corners.bottom_right,
-            &self.side_patterns.bottom,
-            cluster_width,
-        )
-    }
-
     /// Vertical column for the left side at `rows` rows. Each
     /// rendered cluster occupies one line; clusters are separated
     /// by `'\n'` and the last cluster has no trailing newline,
@@ -393,18 +386,18 @@ impl BorderStyle {
     /// the auto-resize pass so they speak in the same units.
     pub fn corner_clusters(&self) -> CornerClusterCounts {
         CornerClusterCounts {
-            top_left: count_clusters(&self.corners.top_left),
-            top_right: count_clusters(&self.corners.top_right),
-            bottom_left: count_clusters(&self.corners.bottom_left),
-            bottom_right: count_clusters(&self.corners.bottom_right),
+            top_left: count_grapheme_clusters(&self.corners.top_left),
+            top_right: count_grapheme_clusters(&self.corners.top_right),
+            bottom_left: count_grapheme_clusters(&self.corners.bottom_left),
+            bottom_right: count_grapheme_clusters(&self.corners.bottom_right),
         }
     }
 }
 
-/// Per-side run geometry the three border-emit pipelines (the
+/// Per-side run geometry the three border-emit paths (the
 /// in-place mutator path, the initial-build tree path, and the
-/// flat-pipeline `rebuild_border_buffers` in the renderer) each
-/// previously open-coded with byte-identical math.
+/// section-frame tree path) each previously open-coded with
+/// byte-identical math.
 ///
 /// One spec describes one side (top / bottom / left / right):
 /// where the run sits in canvas space, how big its text bounds
@@ -449,7 +442,7 @@ pub struct BorderRunSpec {
     /// Glyph-index offset into the per-cycle palette so a palette-cycling
     /// border sweeps continuously around the rectangle in
     /// top → right → bottom → left order. Zero when the upstream
-    /// palette is empty (single-colour border).
+    /// palette is empty (single-color border).
     pub palette_offset: usize,
     /// Pre-computed `count_grapheme_clusters(text)`. Carried on
     /// the spec so consumers handing it to [`build_border_regions`]
@@ -460,8 +453,14 @@ pub struct BorderRunSpec {
 /// Compute the four-side run geometry for one node's border.
 /// Single source of truth for the per-side `(text, position,
 /// bounds, palette_offset)` arithmetic that the in-place mutator
-/// path, the initial-build tree path, and the flat-pipeline
-/// `rebuild_border_buffers` previously reproduced independently.
+/// path, the initial-build tree path, and the section-frame tree
+/// path previously reproduced independently.
+///
+/// This is the **lock-acquiring wrapper** for callers that do NOT
+/// already hold the `FONT_SYSTEM` write guard (the tree-builder
+/// paths, unit tests). A caller inside a write-guard scope must use
+/// [`border_run_specs_with`] instead, or the nested same-thread
+/// acquire deadlocks (issue P0-06).
 ///
 /// Channels:
 /// - `1` = top, `2` = bottom, `3` = left, `4` = right.
@@ -474,22 +473,52 @@ pub struct BorderRunSpec {
 /// per visible glyph, so the indices line up with the per-cluster
 /// regions [`build_border_regions`] emits.
 ///
-/// Cost: 4 `String` allocations (one per side text), 4
-/// `count_grapheme_clusters` walks. No font-system access, no
-/// shaping. Pure: same inputs → same array.
+/// Cost: acquires the `FONT_SYSTEM` **write** guard once per call —
+/// unconditionally, even when every glyph is a cache hit (unlike the
+/// metric-cache wrappers, which check the cache before locking).
+/// Shapes each corner + fill grapheme once through the metric cache
+/// (hot re-renders hit the cache; only cold keys touch cosmic-text),
+/// 4 `String` allocations, 4 `count_grapheme_clusters` walks. Same
+/// inputs → same array.
 pub fn border_run_specs(
     border_style: &BorderStyle,
     node_pos: (f32, f32),
     node_size: (f32, f32),
 ) -> Vec<BorderRunSpec> {
+    // Warm the font lazy-statics BEFORE taking the guard. Resolving a
+    // face under the guard lazily builds `FAMILY_INDEX` /
+    // `COMPILED_FONT_ID_MAP`, and that build acquires `FONT_SYSTEM`
+    // via `load_fonts` — a same-thread re-entry that would time out.
+    // Production warms this at `fonts::init()`, so this is a no-op
+    // there; it only matters for unlocked callers that skip `init()`
+    // (the tree-builder path, unit tests). See `fonts::ensure_warm`.
+    crate::font::fonts::ensure_warm();
+    let mut font_system = crate::font::fonts::acquire_font_system_write("border_run_specs");
+    border_run_specs_with(&mut font_system, border_style, node_pos, node_size)
+}
+
+/// [`border_run_specs`] for callers that already hold the
+/// `FONT_SYSTEM` write guard. Threads the guard into every
+/// metric-cache measurement so a cold corner / fill grapheme
+/// shapes through the held guard instead
+/// of blocking on a second acquire of the same lock — the composable
+/// design §B5 and the `measure_glyph_ink_bounds` primitive share.
+///
+/// Assumes `fonts::init()` has run (the standard §B5 invariant): the
+/// face-resolution and pin lookups here read the already-built
+/// `FAMILY_INDEX` / `COMPILED_FONT_ID_MAP` without triggering
+/// `load_fonts`, so nothing under this guard re-acquires it.
+pub fn border_run_specs_with(
+    font_system: &mut FontSystem,
+    border_style: &BorderStyle,
+    node_pos: (f32, f32),
+    node_size: (f32, f32),
+) -> Vec<BorderRunSpec> {
     use crate::font::fonts::app_font_by_family;
-    use crate::font::metric_cache::glyph_ink;
+    use crate::font::metric_cache::glyph_ink_with;
 
     let font_size = border_style.font_size_pt;
-    let face = border_style
-        .font_name
-        .as_deref()
-        .and_then(app_font_by_family);
+    let face = border_style.font_name.as_deref().and_then(app_font_by_family);
 
     // single-glyph buffer at the exact node corner pixel; the
     // fill rails span the gap BETWEEN corners. Pre-fix the
@@ -498,10 +527,10 @@ pub fn border_run_specs(
     // never landing on the node's actual corner pixel.
     // Per-corner positioning makes corner placement
     // structurally exact.
-    let tl_ink = glyph_ink(face, font_size, &border_style.corners.top_left);
-    let tr_ink = glyph_ink(face, font_size, &border_style.corners.top_right);
-    let bl_ink = glyph_ink(face, font_size, &border_style.corners.bottom_left);
-    let br_ink = glyph_ink(face, font_size, &border_style.corners.bottom_right);
+    let tl_ink = glyph_ink_with(font_system, face, font_size, &border_style.corners.top_left);
+    let tr_ink = glyph_ink_with(font_system, face, font_size, &border_style.corners.top_right);
+    let bl_ink = glyph_ink_with(font_system, face, font_size, &border_style.corners.bottom_left);
+    let br_ink = glyph_ink_with(font_system, face, font_size, &border_style.corners.bottom_right);
 
     // Top fill rail spans the horizontal gap between TL and TR
     // corners. Its position.x is `node.x + tl_w`; its bounds.0
@@ -512,9 +541,15 @@ pub fn border_run_specs(
     let top_fill_avail = (node_size.0 - tl_ink.advance - tr_ink.advance).max(0.0);
     let bottom_fill_avail = (node_size.0 - bl_ink.advance - br_ink.advance).max(0.0);
 
-    let (top_fill_text, top_fill_clusters, _top_fill_w) =
-        fit_pattern_to_width(&border_style.side_patterns.top, top_fill_avail, face, font_size);
+    let (top_fill_text, top_fill_clusters, _top_fill_w) = fit_pattern_to_width(
+        font_system,
+        &border_style.side_patterns.top,
+        top_fill_avail,
+        face,
+        font_size,
+    );
     let (bottom_fill_text, bottom_fill_clusters, _bottom_fill_w) = fit_pattern_to_width(
+        font_system,
         &border_style.side_patterns.bottom,
         bottom_fill_avail,
         face,
@@ -530,12 +565,12 @@ pub fn border_run_specs(
     let left_first_glyph = side_pattern_first_grapheme(&border_style.side_patterns.left);
     let right_first_glyph = side_pattern_first_grapheme(&border_style.side_patterns.right);
     let left_line_h = if !left_first_glyph.is_empty() {
-        glyph_ink(face, font_size, &left_first_glyph).ink_height
+        glyph_ink_with(font_system, face, font_size, &left_first_glyph).ink_height
     } else {
         font_size
     };
     let right_line_h = if !right_first_glyph.is_empty() {
-        glyph_ink(face, font_size, &right_first_glyph).ink_height
+        glyph_ink_with(font_system, face, font_size, &right_first_glyph).ink_height
     } else {
         font_size
     };
@@ -563,16 +598,10 @@ pub fn border_run_specs(
     let left_v_height = left_row_count as f32 * left_line_h;
     let right_v_height = right_row_count as f32 * right_line_h;
 
-    let left_v_width = side_pattern_max_advance(
-        &border_style.side_patterns.left,
-        face,
-        font_size,
-    ) + 1.0;
-    let right_v_width = side_pattern_max_advance(
-        &border_style.side_patterns.right,
-        face,
-        font_size,
-    ) + 1.0;
+    let left_v_width =
+        side_pattern_max_advance(font_system, &border_style.side_patterns.left, face, font_size) + 1.0;
+    let right_v_width =
+        side_pattern_max_advance(font_system, &border_style.side_patterns.right, face, font_size) + 1.0;
 
     // Corner buffer y-position: we want the corner's ink-top
     // to align with the node's top edge. cosmic-text places
@@ -585,15 +614,14 @@ pub fn border_run_specs(
     // `font_size` (which matches cosmic-text's default
     // line-height treatment).
     let top_corner_y = node_pos.1 - tl_ink.ink_top - font_size * 0.8;
-    let bottom_corner_y =
-        node_pos.1 + node_size.1 - bl_ink.ink_height - bl_ink.ink_top - font_size * 0.8;
+    let bottom_corner_y = node_pos.1 + node_size.1 - bl_ink.ink_height - bl_ink.ink_top - font_size * 0.8;
 
     // Cluster counts for palette-offset sweep (top → right
     // → bottom → left clockwise).
     let top_clusters = top_fill_clusters;
     let bottom_clusters = bottom_fill_clusters;
-    let left_clusters = count_clusters(&left_text);
-    let right_clusters = count_clusters(&right_text);
+    let left_clusters = count_grapheme_clusters(&left_text);
+    let right_clusters = count_grapheme_clusters(&right_text);
 
     // Side rail y-position: start just below the top corner's
     // ink-bottom (which is `node.y + top_corner_h`).
@@ -601,7 +629,7 @@ pub fn border_run_specs(
 
     let mut specs: Vec<BorderRunSpec> = Vec::with_capacity(8);
     // Channel 1: top fill rail.
-    let top_fill_clusters_n = count_clusters(&top_fill_text);
+    let top_fill_clusters_n = count_grapheme_clusters(&top_fill_text);
     specs.push(BorderRunSpec {
         channel: 1,
         text: top_fill_text,
@@ -613,7 +641,7 @@ pub fn border_run_specs(
         cluster_count: top_fill_clusters_n,
     });
     // Channel 2: bottom fill rail.
-    let bottom_fill_clusters_n = count_clusters(&bottom_fill_text);
+    let bottom_fill_clusters_n = count_grapheme_clusters(&bottom_fill_text);
     specs.push(BorderRunSpec {
         channel: 2,
         text: bottom_fill_text,
@@ -656,7 +684,7 @@ pub fn border_run_specs(
         position: (node_pos.0, top_corner_y),
         bounds: (tl_ink.advance.max(1.0), font_size * 1.5),
         palette_offset: 0,
-        cluster_count: count_clusters(&border_style.corners.top_left),
+        cluster_count: count_grapheme_clusters(&border_style.corners.top_left),
     });
     // Channel 6: TR corner.
     specs.push(BorderRunSpec {
@@ -664,13 +692,10 @@ pub fn border_run_specs(
         text: border_style.corners.top_right.clone(),
         font_size_pt: font_size,
         line_height_pt: font_size,
-        position: (
-            node_pos.0 + node_size.0 - tr_ink.advance,
-            top_corner_y,
-        ),
+        position: (node_pos.0 + node_size.0 - tr_ink.advance, top_corner_y),
         bounds: (tr_ink.advance.max(1.0), font_size * 1.5),
         palette_offset: 1 + top_clusters,
-        cluster_count: count_clusters(&border_style.corners.top_right),
+        cluster_count: count_grapheme_clusters(&border_style.corners.top_right),
     });
     // Channel 7: BL corner.
     specs.push(BorderRunSpec {
@@ -681,7 +706,7 @@ pub fn border_run_specs(
         position: (node_pos.0, bottom_corner_y),
         bounds: (bl_ink.advance.max(1.0), font_size * 1.5),
         palette_offset: 1 + top_clusters + 1 + right_clusters,
-        cluster_count: count_clusters(&border_style.corners.bottom_left),
+        cluster_count: count_grapheme_clusters(&border_style.corners.bottom_left),
     });
     // Channel 8: BR corner.
     specs.push(BorderRunSpec {
@@ -689,13 +714,10 @@ pub fn border_run_specs(
         text: border_style.corners.bottom_right.clone(),
         font_size_pt: font_size,
         line_height_pt: font_size,
-        position: (
-            node_pos.0 + node_size.0 - br_ink.advance,
-            bottom_corner_y,
-        ),
+        position: (node_pos.0 + node_size.0 - br_ink.advance, bottom_corner_y),
         bounds: (br_ink.advance.max(1.0), font_size * 1.5),
         palette_offset: 1 + top_clusters + 1 + right_clusters + 1 + bottom_clusters,
-        cluster_count: count_clusters(&border_style.corners.bottom_right),
+        cluster_count: count_grapheme_clusters(&border_style.corners.bottom_right),
     });
     specs
 }
@@ -704,9 +726,7 @@ pub fn border_run_specs(
 /// the vertical-rail line-height computation: we measure the
 /// first grapheme's ink-height and use it as the per-row
 /// y-stride so consecutive rows touch.
-fn side_pattern_first_grapheme(
-    pattern: &SidePattern,
-) -> String {
+fn side_pattern_first_grapheme(pattern: &SidePattern) -> String {
     use crate::mindmap::border_pattern::SidePattern;
     match pattern {
         SidePattern::AtomicRepeat { cluster } => cluster.first().cloned().unwrap_or_default(),
@@ -729,12 +749,13 @@ fn side_pattern_first_grapheme(
 /// that fit. The leftover sub-cluster pixels stay blank, so the
 /// rail terminates flush with the right corner.
 fn fit_pattern_to_width(
+    font_system: &mut FontSystem,
     pattern: &SidePattern,
     available_pt: f32,
     face: Option<crate::font::fonts::AppFont>,
     font_size: f32,
 ) -> (String, usize, f32) {
-    use crate::font::metric_cache::glyph_advance;
+    use crate::font::metric_cache::glyph_advance_with;
     use crate::mindmap::border_pattern::SidePattern;
     match pattern {
         SidePattern::AtomicRepeat { cluster } => {
@@ -748,7 +769,7 @@ fn fit_pattern_to_width(
             // of the smallest grapheme in the cluster.
             let g_widths: Vec<f32> = cluster
                 .iter()
-                .map(|g| glyph_advance(face, font_size, g))
+                .map(|g| glyph_advance_with(font_system, face, font_size, g))
                 .collect();
             let cluster_w: f32 = g_widths.iter().sum();
             if cluster_w <= 0.0 {
@@ -780,15 +801,15 @@ fn fit_pattern_to_width(
         SidePattern::PrefixFillSuffix { prefix, fill, suffix } => {
             let prefix_widths: Vec<f32> = prefix
                 .iter()
-                .map(|g| glyph_advance(face, font_size, g))
+                .map(|g| glyph_advance_with(font_system, face, font_size, g))
                 .collect();
             let suffix_widths: Vec<f32> = suffix
                 .iter()
-                .map(|g| glyph_advance(face, font_size, g))
+                .map(|g| glyph_advance_with(font_system, face, font_size, g))
                 .collect();
             let fill_widths: Vec<f32> = fill
                 .iter()
-                .map(|g| glyph_advance(face, font_size, g))
+                .map(|g| glyph_advance_with(font_system, face, font_size, g))
                 .collect();
             let prefix_w: f32 = prefix_widths.iter().sum();
             let suffix_w: f32 = suffix_widths.iter().sum();
@@ -855,11 +876,12 @@ fn fit_pattern_to_width(
 /// (`bounds.0`) so cosmic-text doesn't wrap. Slack handling
 /// happens in the caller.
 fn side_pattern_max_advance(
+    font_system: &mut FontSystem,
     pattern: &SidePattern,
     face: Option<crate::font::fonts::AppFont>,
     font_size: f32,
 ) -> f32 {
-    use crate::font::metric_cache::glyph_advance;
+    use crate::font::metric_cache::glyph_advance_with;
     use crate::mindmap::border_pattern::SidePattern;
     let graphemes: &[String] = match pattern {
         SidePattern::AtomicRepeat { cluster } => cluster.as_slice(),
@@ -867,7 +889,7 @@ fn side_pattern_max_advance(
     };
     graphemes
         .iter()
-        .map(|g| glyph_advance(face, font_size, g))
+        .map(|g| glyph_advance_with(font_system, face, font_size, g))
         .fold(0.0_f32, |acc: f32, w: f32| acc.max(w))
 }
 
@@ -941,10 +963,10 @@ fn parse_legacy_glyph(c: char) -> SidePattern {
 
 /// Resolve a node's effective `BorderStyle` from its optional
 /// `GlyphBorderConfig`, the canvas-level default, and the resolved
-/// frame colour. Single source of truth — every border-build path
-/// (scene_builder, tree_builder, renderer) goes through this so
-/// preset / font / size / color / pattern resolution can't drift
-/// between pipelines.
+/// frame color. Single source of truth — every border-build path
+/// (the border pass, the section-frame pass, the clip-AABB pass)
+/// goes through this so preset / font / size / color / pattern
+/// resolution can't drift between them.
 ///
 /// Cascade for each field, most-specific wins:
 /// 1. Per-node `GlyphBorderConfig` (the `cfg` arg).
@@ -1007,6 +1029,38 @@ pub fn resolve_border_style(
         color,
         visible: true,
     }
+}
+
+/// The `font_size_pt` half of [`resolve_border_style`]'s cascade,
+/// on its own.
+///
+/// A caller that only needs the border's *extent* — the clip-AABB
+/// pass behind
+/// [`crate::mindmap::tree_builder::node_clip_aabbs`], which grows a
+/// node's clip box by the rendered frame's thickness — would
+/// otherwise pay for a whole [`BorderStyle`]: four corner
+/// `String`s, four `SidePattern`s each carrying a `Vec`, the color
+/// `String`, and the optional font / palette clones, all discarded
+/// after reading one `f32`.
+///
+/// **Parity contract:** this must stay byte-identical to what
+/// [`resolve_border_style`] writes into
+/// [`BorderStyle::font_size_pt`] — same `cfg.or(canvas_default)`
+/// chosen-slot rule, same `14.0` floor. It deliberately takes no
+/// `frame_color`: that argument feeds only `BorderStyle::color`,
+/// and the size cascade is independent of both it and the preset.
+/// `resolve_border_font_size_pt_matches_resolve_border_style` pins
+/// the equivalence across presets, per-node overrides,
+/// canvas-default fall-through, and the unset floor.
+///
+/// # Costs
+///
+/// Two `Option` derefs and a copy. No allocation, no parsing.
+pub fn resolve_border_font_size_pt(
+    cfg: Option<&GlyphBorderConfig>,
+    canvas_default: Option<&GlyphBorderConfig>,
+) -> f32 {
+    cfg.or(canvas_default).map(|c| c.font_size_pt).unwrap_or(14.0)
 }
 
 /// Resolve a section-frame's [`BorderStyle`] against the same
@@ -1123,16 +1177,19 @@ const SECTION_FRAME_FLOOR_FONT_SIZE_PT: f32 = 10.0;
 /// is `const &[…; 4]` (non-empty by construction).
 pub fn preset_glyph_set(preset: &str) -> BorderGlyphSet {
     let name = preset.to_ascii_lowercase();
-    let row = PRESET_TABLE.iter().find(|(n, _)| *n == name).unwrap_or_else(|| {
-        // "custom" is in `BORDER_PRESETS` but absent from the
-        // glyph table — it signals "user-supplied glyphs
-        // override these defaults," with the per-side fallback
-        // to `light`. Anything else gets a warn-log.
-        if name != CUSTOM_PRESET_NAME {
-            log::warn!("border preset '{}' unknown; using 'light'", preset);
-        }
-        &PRESET_TABLE[0]
-    });
+    let row = PRESET_TABLE
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .unwrap_or_else(|| {
+            // "custom" is in `BORDER_PRESETS` but absent from the
+            // glyph table — it signals "user-supplied glyphs
+            // override these defaults," with the per-side fallback
+            // to `light`. Anything else gets a warn-log.
+            if name != CUSTOM_PRESET_NAME {
+                log::warn!("border preset '{}' unknown; using 'light'", preset);
+            }
+            &PRESET_TABLE[0]
+        });
     BorderGlyphSet::from_glyphs(row.1)
 }
 
@@ -1142,6 +1199,37 @@ pub fn preset_glyph_set(preset: &str) -> BorderGlyphSet {
 /// `"custom"` checks reach for this to keep the meaning single-
 /// sourced.
 pub const CUSTOM_PRESET_NAME: &str = "custom";
+
+/// Description of [`CUSTOM_PRESET_NAME`] for
+/// [`border_preset_hint`]. Lives beside the sentinel rather than in
+/// `PRESET_TABLE` for the same reason the sentinel does: `custom`
+/// has no glyph row.
+const CUSTOM_PRESET_HINT: &str = "user-supplied per-side / per-corner glyphs";
+
+/// One-line human description of a preset name, for a UI that
+/// offers presets to pick from — the console's `border preset=`
+/// completion is the consumer today.
+///
+/// Matching is case-insensitive, mirroring [`preset_glyph_set`].
+/// Returns `None` for a name that is not in [`BORDER_PRESETS`];
+/// every name that *is* in `BORDER_PRESETS` returns `Some`, because
+/// both this lookup and that list derive from the same
+/// `PRESET_TABLE` (plus the `custom` sentinel). That is what keeps a
+/// newly added preset from silently completing with a blank
+/// description.
+///
+/// O(n) over the four-row table, no allocation beyond the
+/// lowercased needle.
+pub fn border_preset_hint(preset: &str) -> Option<&'static str> {
+    let name = preset.to_ascii_lowercase();
+    if name == CUSTOM_PRESET_NAME {
+        return Some(CUSTOM_PRESET_HINT);
+    }
+    PRESET_TABLE
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, _, hint)| *hint)
+}
 
 /// Every preset name accepted by the schema's
 /// `GlyphBorderConfig.preset` field — the four typed glyph rows
@@ -1241,39 +1329,32 @@ pub fn default_custom_glyphs() -> CustomBorderGlyphs {
     }
 }
 
-/// Resolve `border_style.color_palette` (a name) to a list of
-/// per-cycle-position RGBA colours, reading the configured
-/// `palette_field` channel out of each `ColorGroup`. Returns an
-/// empty `Vec` when the name is unset or the named palette is not
-/// in the map (logs a warning in the latter case per
-/// `CODE_CONVENTIONS.md` §9). Pre-resolution lets the renderer and
-/// tree builder consume the colour list without re-walking the
-/// Apply a [`crate::mindmap::scene_builder::BorderConfigEditsView`]
+/// Apply a [`crate::mindmap::tree_builder::BorderConfigEditsView`]
 /// to a slot for live-preview rendering. Mirrors the application-
 /// crate's `apply_glyph_border_edits_to_slot` shape but consumes
-/// borrowed strings rather than `OptionEdit<T>` so the scene
-/// builder can fold the staged preview edits into a clone of the
-/// committed slot without round-tripping back through the
-/// application layer.
+/// borrowed strings rather than `OptionEdit<T>` so the border and
+/// section-frame passes can fold the staged preview edits into a
+/// clone of the committed slot without round-tripping back through
+/// the application layer.
 ///
 /// **Parity contract:** this function must produce the same
 /// post-state as `apply_glyph_border_edits_to_slot` for any
 /// committing edit. Both paths derive from the same field rules:
 /// per-field set-or-keep, side / corner edits force preset to
-/// `"custom"`, the `glyphs` slot materialises on first edit. A
+/// `"custom"`, the `glyphs` slot materializes on first edit. A
 /// parity regression here means the preview lies about what
 /// commit will produce — Risk #1 in the plan.
 ///
 /// `view.clear == true` empties the slot and short-circuits.
-/// Otherwise the helper materialises a fresh `GlyphBorderConfig`
+/// Otherwise the helper materializes a fresh `GlyphBorderConfig`
 /// on first edit (mirroring the committing path's
 /// `default_glyph_border_config`) and folds each per-field
 /// override.
 pub fn apply_view_to_slot(
     slot: &mut Option<GlyphBorderConfig>,
-    view: &crate::mindmap::scene_builder::BorderConfigEditsView<'_>,
+    view: &crate::mindmap::tree_builder::BorderConfigEditsView<'_>,
 ) {
-    use crate::mindmap::scene_builder::EditView;
+    use crate::mindmap::tree_builder::EditView;
     // Top-level slot clear — empties the entire slot, falls back
     // to the canvas default / hardcoded floor on resolve.
     if view.clear {
@@ -1360,11 +1441,11 @@ pub fn apply_view_to_slot(
 
 /// Default `GlyphBorderConfig` shape — light preset, 14pt, no
 /// font, 4px padding, no palette. Used by the application-side
-/// committing setters as the "first edit materialises this" base
+/// committing setters as the "first edit materializes this" base
 /// (`set_node_border_config` etc.) and by the scene-side preview
 /// apply path so the two share one constant. Mirrors the
 /// loader-time defaults in
-/// [`crate::mindmap::model::node`]; centralised here so callers
+/// [`crate::mindmap::model::node`]; centralized here so callers
 /// don't reach into the model module's private `default_*`
 /// factories.
 pub fn default_glyph_border_config() -> GlyphBorderConfig {
@@ -1380,6 +1461,17 @@ pub fn default_glyph_border_config() -> GlyphBorderConfig {
     }
 }
 
+/// Resolve `border_style.color_palette` (a name) to a list of
+/// per-cycle-position RGBA colors, reading the configured
+/// `palette_field` channel out of each `ColorGroup`. Returns an
+/// empty `Vec` when the name is unset or the named palette is not
+/// in the map (logs a warning in the latter case per
+/// `CODE_CONVENTIONS.md` §9). Pre-resolution lets the renderer and
+/// tree builder consume the color list without re-walking the
+/// palette map and re-parsing its hex strings — [`build_border_regions`]
+/// indexes the returned slice once per glyph cluster, so the walk
+/// happens once per border rather than once per glyph.
+///
 /// Cost: O(groups.len()) hex parses on names that resolve, O(1) on
 /// the unset / missing fallback paths.
 pub fn resolve_palette_cycle(
@@ -1392,7 +1484,7 @@ pub fn resolve_palette_cycle(
     };
     let Some(palette) = palettes.get(name) else {
         log::warn!(
-            "border color_palette '{}' not found in map; falling back to single colour",
+            "border color_palette '{}' not found in map; falling back to single color",
             name
         );
         return Vec::new();
@@ -1409,13 +1501,13 @@ pub fn resolve_palette_cycle(
 
 /// Build a [`ColorFontRegions`] that paints `cluster_count` glyph
 /// clusters. When `palette_cycle` is non-empty, each cluster
-/// picks its colour from `palette_cycle[(offset + i) % len]`. When
+/// picks its color from `palette_cycle[(offset + i) % len]`. When
 /// it's empty, a single uniform region is emitted using
 /// `fallback_rgba`.
 ///
 /// `glyph_index_offset` lets callers chain side runs into one
 /// continuous cycle around the rectangle (top → right → bottom →
-/// left), so a colour sweep wraps cleanly across corners.
+/// left), so a color sweep wraps cleanly across corners.
 ///
 /// # Newlines in vertical sides
 ///
@@ -1426,7 +1518,7 @@ pub fn resolve_palette_cycle(
 /// positions `[offset, offset+2, offset+4, …]` rather than
 /// `[offset, offset+1, offset+2, …]`. This matches the tree
 /// builder's per-side region emission, which means the flat-scene
-/// renderer and the Baumhard-tree renderer paint identical colour
+/// renderer and the Baumhard-tree renderer paint identical color
 /// sequences. Callers that want a denser cycle on a column can
 /// shorten the palette to compensate.
 ///
@@ -1463,27 +1555,6 @@ pub fn build_border_regions(
     regions
 }
 
-/// Concatenate corner + side fill + corner into one horizontal
-/// border row. `cluster_width` is the row's total cluster width
-/// (corners included); the side pattern fills the gap between
-/// the corners.
-fn build_horizontal_text(
-    corner_left: &str,
-    corner_right: &str,
-    pattern: &SidePattern,
-    cluster_width: usize,
-) -> String {
-    let cl = count_clusters(corner_left);
-    let cr = count_clusters(corner_right);
-    let between = cluster_width.saturating_sub(cl + cr);
-    let rendered = pattern.render(between);
-    let mut s = String::with_capacity(corner_left.len() + rendered.text.len() + corner_right.len());
-    s.push_str(corner_left);
-    s.push_str(&rendered.text);
-    s.push_str(corner_right);
-    s
-}
-
 /// Render a side pattern as a vertical column of `rows` rows.
 /// Each cluster sits on its own line; lines are separated by
 /// `'\n'` with no trailing newline, matching the existing
@@ -1493,19 +1564,5 @@ fn build_vertical_text(pattern: &SidePattern, rows: usize) -> String {
         return String::new();
     }
     let rendered = pattern.render(rows);
-    let mut s = String::with_capacity(rendered.text.len() + rows);
-    let mut first = true;
-    for g in rendered.text.graphemes(true) {
-        if !first {
-            s.push('\n');
-        }
-        s.push_str(g);
-        first = false;
-    }
-    s
+    join_graphemes(&rendered.text, "\n")
 }
-
-pub(crate) fn count_clusters(s: &str) -> usize {
-    s.graphemes(true).count()
-}
-

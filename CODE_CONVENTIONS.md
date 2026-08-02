@@ -96,19 +96,64 @@ decision, not a drive-by edit.
 - **Single-threaded event loop.** `Application` owns `Renderer` directly.
   No channels, no worker threads, no `tokio`, no `std::thread::spawn` in
   interactive paths.
+
+  **Sanctioned boundary threads.** Two narrow exceptions exist, both
+  shaped so that app state (`InitState`, `MindMapDocument`,
+  `Renderer`) still has exactly one thread:
+  - The native `FreezeWatchdog`
+    (`src/application/app/freeze_watchdog.rs`) — reads a liveness
+    atomic, never touches app state.
+  - The IPC boundary threads (design: `work_plans/LLM_IPC.md` §D2,
+    protocol: `format/ipc.md`; lands with IPC-02). When `--ipc` is
+    active: a persistent acceptor thread (always `accept()`ing, so a
+    second client is rejected immediately with a non-blocking write),
+    plus a per-controller reader thread (blocking read → parse →
+    enqueue → wake the loop via a winit `EventLoopProxy` user event)
+    and a per-controller outbound thread (dequeue → serialize →
+    blocking write) that are spawned and torn down together per
+    connection. Each connection carries a monotonic generation stamp
+    on its requests/replies/events/pending-waits, and the reader's
+    disconnect sends a user event so the main thread cancels that
+    generation's waits and subscriptions — nothing crosses to a
+    successor controller. All see only protocol value types; every
+    IPC command executes on the main thread in the `user_event` arm
+    with the same access as any input handler, and a command that
+    changes pixels requests a redraw just as the winit input handlers
+    do. The `std::sync::mpsc` queues at this boundary carry protocol
+    values only — they are not a license for channels between app
+    components — and blocking IPC I/O on the main thread stays
+    forbidden: a stalled client must never trip
+    the `FreezeWatchdog`; the bounded outbound queue tears the
+    connection down instead.
 - **Model / view separation.** `MindMapDocument` owns the data model;
   `Renderer` owns GPU resources. The renderer reads intermediate
-  representations (`Tree<GfxElement, GfxMutator>`, `RenderScene`). The
-  renderer never reaches into the document; the document never holds
-  GPU handles.
-- **Render through the Baumhard tree.** All visuals — nodes,
-  connections, borders, portals — converge on
-  `Tree<GfxElement, GfxMutator>` and are shaped by
-  `src/application/renderer/tree_walker.rs`. Some element types
-  still travel through a flat scene intermediary
-  (`scene_builder/`) before reaching the walker, but that's a
-  consolidation seam, not a permanent second pipeline. New
-  visuals belong in the Baumhard tree.
+  representation (`Tree<GfxElement, GfxMutator>`, one per canvas
+  role). The renderer never reaches into the document; the document
+  never holds GPU handles.
+- **Render document content through the Baumhard tree.** Every
+  visual that comes from the model — nodes, connections, borders,
+  portals, labels, section frames, handles — converges on
+  `Tree<GfxElement, GfxMutator>` and is shaped by
+  `src/application/renderer/tree_walker.rs`. There is exactly one
+  pipeline for them: a data pass plus a tree projection under
+  `lib/baumhard/src/mindmap/tree_builder/`, driven by `CanvasFrame`
+  in `src/application/app/scene_rebuild.rs`. Model-derived content
+  reaching the GPU any other way is a second pipeline; do not add
+  one.
+
+  **Transient chrome is the carve-out**, and the list is small and
+  closed: the rubber-band selection rectangle
+  (`renderer/selection_overlay.rs`), the console overlay
+  (`renderer/console_pass.rs`), the glyph-wheel color picker
+  (`renderer/color_picker.rs`), and the FPS / mode-status overlays.
+  The discriminator is *what the visual is a projection of*, not
+  whether it ever reads the model: each of these belongs to an
+  interaction rather than to document content, so it has no model
+  element to be the projection *of* — even where it quotes one (the
+  mode-status line reports the active `MindNode`'s id and section
+  count, but the overlay is a property of the mode, not of the
+  node). A new visual qualifies only on that test; if it is a
+  rendering of document content, it belongs in the tree.
 - **Mutation-first interaction.** Where a user action can be expressed
   as a `MutatorTree<GfxMutator>`, express it that way. Every user-facing
   mutation gets a matching `UndoAction` variant and an `undo()` branch.
@@ -155,23 +200,23 @@ decision, not a drive-by edit.
   mutates document state or changes view state — must go through the
   funnel.
 
-  **Macro-tier privilege gates are mandatory before non-user tiers
-  ship.** Macros loaded from `~/.config/mandala/macros.json` share
+  **Macro-tier privilege gates are mandatory.** Macros loaded from
+  `~/.config/mandala/macros.json` share
   trust posture with `keybinds.json` — the user owns the file. The
-  dispatcher gates two things on `MacroSource`:
+  dispatcher gates two things on `SourceTier`:
   - `MacroStep::ConsoleLine` runs an arbitrary console verb, so it's
-    User-tier-only via `MacroSource::allows_console_line`.
+    User-tier-only via `SourceTier::allows_console_line`.
   - Destructive / I/O / clipboard `Action` variants
     (`SaveDocument`, `DeleteSelection`, `Cut`, `Paste`, `Copy`,
     `OrphanSelection`, `CreateOrphanNode`, `CreateOrphanNodeAndEdit`,
     `NewDocument`) are User-tier-only via
-    `MacroSource::allows_action`.
+    `SourceTier::allows_action`.
   Privilege rejections **fail-closed** — the rest of the macro
   aborts so a `[DeleteSelection, ConsoleLine(rejected),
   SaveDocument]` pattern can't sneak its outer steps past the gate.
-  Today only the User tier loads, so the gates are dormant; they
-  MUST hold before app-bundle / map-inline / node-inline tiers
-  ship.
+  All four tiers load today, so the gates are fully active; they
+  MUST hold as new dispatch surfaces are added (IPC included —
+  `format/ipc.md` §"Trust model").
 
   `DocumentAction` (carried by `MacroStep::CustomMutation`) is
   `#[non_exhaustive]`. Today every variant is a pure in-memory
@@ -179,7 +224,7 @@ decision, not a drive-by edit.
   performs file I/O, network access, arbitrary content load, or
   cross-process side effects MUST add a parallel gate at the
   `dispatch_macro` site** (look up the existing `allows_*` pattern
-  on `MacroSource` and extend it).
+  on `SourceTier` and extend it).
 
   Source-tier assignment is loader-pinned. Each loader call site
   hardcodes the tier; nothing in the on-disk format can affect it.
@@ -209,9 +254,11 @@ first-class deployments. The lowest-spec target sets the budget.
   a feature genuinely belongs native-only, the `cfg` guard sits at the
   module boundary and an entry appears in `CLAUDE.md`'s "Dual-target
   status" section naming the reason. "I'll add WASM later" is not a
-  contract this repo recognizes. `./test.sh`'s WASM type-check gate,
-  `./build.sh --wasm`, and CI (`.github/workflows/test.yml`) enforce
-  this.
+  contract this repo recognizes. What enforces it: `./test.sh`'s WASM
+  gate, which is `cargo check --target wasm32-unknown-unknown
+  --workspace` and is the check to reach for while iterating;
+  `./build.sh`, which always builds both legs in full; and CI
+  (`.github/workflows/test.yml`), which runs `./test.sh`.
 
 ## §5 Canonical or exemplary
 
@@ -312,6 +359,35 @@ industrial cost/benefit reasoning. This is not license for speculation.
   message.** Startup is everything before the first frame: CLI parse,
   `Renderer::new`, `fonts::init`, the initial `loader::load_from_file`,
   the `?map=` parser on WASM. Bare `unwrap()` outside tests is a bug.
+- **`warn!` and `error!` survive into release; `info!`, `debug!` and
+  `trace!` do not.** Both crates build `log` with
+  `release_max_level_warn`, so the degrade half of "degrade the frame,
+  log, keep running" is real in the binaries users actually run —
+  `./build.sh`, `./run.sh`, and the WASM bundle all ship release. That
+  fixes which macro to reach for: a condition a user or a bug report
+  needs to know about is `warn!`/`error!`; developer instrumentation —
+  walker traces, per-frame counters, anything you would be unhappy to
+  see at 60 Hz — is `debug!`/`trace!`, which cost nothing in release
+  because the call is compiled out entirely. A designed, transient
+  degrade that the next frame retries (a contended `try_write`, a
+  skipped overlay reshape) is instrumentation, not a warning: log it at
+  `debug!` so a persistent condition doesn't flood stderr. The
+  compile-time cap is what makes the boundary identical on both
+  targets (§4); the runtime filters underneath it differ and are set
+  in one place, `util::log::init` — native `env_logger` defaults to
+  `warn` (`RUST_LOG` overrides; `RUST_LOG=` set-but-empty counts as
+  unset), WASM `console_log` sits at `Info`, looser than native but
+  invisible in release because the cap removes `info!` before the
+  filter ever sees it. Every binary the workspace ships calls
+  `util::log::init` — including `maptool`, which exercises the same
+  loader degrade paths.
+- **One log-message prefix idiom: `"<area>: message"`.** The area is the
+  subsystem, not the enclosing function — `"macros: ..."`,
+  `"font::attrs: ..."`, `"keybinds: ..."`, `"console history: ..."`.
+  Function names go stale under refactor and tell a user nothing; the
+  area is what they can name in a bug report. Bare messages with no
+  prefix are not acceptable. Normalize prefixes in files you are
+  already editing rather than in a repository-wide sweep.
 
 ## §10 No backwards-compatibility assumptions until V1
 
@@ -342,9 +418,58 @@ Workspace-level commitment:
 ## §12 Commit hygiene
 
 - **Tests land in the commit that introduces the code they test.**
-- **`./test.sh` is green before committing.** `./test.sh --lint` is advisory; review it. `./test.sh --bench` for performance-conscious
-  Baumhard commits.
+- **`./test.sh` is green before committing.** It also type-checks the
+  benchmark targets and the wasm32 leg, so neither can rot between
+  merges. `./test.sh --lint` is advisory; review it.
 - **`./build.sh` is green for cross-platform changes.** Anything
   outside an explicit `cfg` guard must build for
   `wasm32-unknown-unknown` before commit.
 - **Commit messages explain *why*, not what the diff shows.**
+- **Benchmarks are for maintainers.** `AGENTS.md` forbids automated
+  agents from running `cargo bench`, `./bench.sh` or
+  `./test.sh --bench`, and forbids performance claims made without the
+  main-against-main control row
+  [`lib/baumhard/CONVENTIONS.md §B7`](./lib/baumhard/CONVENTIONS.md)
+  requires. Changing benchmark code is still expected — §B3 wants a
+  bench entry alongside a new primitive — and `./test.sh` proves those
+  targets compile.
+
+## §13 Cargo manifests
+
+Mechanical repo rules about where a line goes in a `Cargo.toml`.
+Unlike §3, obeying these *is* a drive-by edit — it is what you do
+while adding a dependency, not a decision to weigh.
+
+- **One *version string* per dependency, written once.** A crate that two or
+  more workspace members need is declared in the root manifest's
+  `[workspace.dependencies]`, and each member writes
+  `dep.workspace = true` — with `features` beside it when that member
+  needs more, since features are additive on top of the shared entry.
+  A crate only one member uses stays in that member's manifest. The
+  reason this is a rule and not a preference: cargo raises no
+  objection when two members name the same crate at different
+  versions, it simply builds both, and the symptom is two mutually
+  incompatible copies of the same types. `strum` sat at 0.27 and 0.28
+  simultaneously until it was unified by hand.
+  `baumhard::util::manifests` reads the real manifests and checks all
+  three clauses, in every spelling in use here — inline,
+  `[dependencies.<name>]` sub-table, `dep.workspace = true`, wrapped
+  across lines, renamed via `package =`, with or without a trailing
+  comment. The spellings cargo accepts that nobody here writes stop
+  the run instead: a shape it cannot read is refused by name rather
+  than dropping out of the checked set, which is the property that
+  makes the check worth citing. The heading says *version string* on
+  purpose — a declaration that names no version is outside the first
+  two clauses, so `path` and `git` dependencies are exempt and two
+  members pinning one crate to two git revisions would not be
+  reported. Nothing here uses a `git` dependency; the first one to
+  arrive owes that gap a decision.
+- **A dependency that exists to turn a feature on says so.** Cargo
+  unions features across the workspace, so a manifest entry with no
+  call site can still be load-bearing — the root manifest's
+  `getrandom` is the live example. Comment it, or the next
+  dead-dependency sweep deletes it.
+- **Say what a per-target table buys.** A dependency moved under
+  `[target.'cfg(...)'.dependencies]` changes the feature union on the
+  *other* target too. Note the consequence where the move is made; see
+  `env_logger` in `lib/baumhard/Cargo.toml`.

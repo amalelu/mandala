@@ -8,6 +8,7 @@ use super::tests_common::{load_test_doc, load_test_tree, TestNudgeMutation};
 use super::*;
 
 use baumhard::mindmap::animation::{AnimationTiming, Easing};
+use baumhard::mindmap::tree_builder::INACTIVE_NODE_ALPHA_MULTIPLIER;
 use baumhard::mindmap::custom_mutation::{CustomMutation as CM, TargetScope as TS};
 use glam::Vec2;
 
@@ -135,6 +136,116 @@ fn test_apply_tree_highlights_via_walker() {
     assert!((highlighted_color[0] - HIGHLIGHT_COLOR[0]).abs() < 0.01);
     assert!((highlighted_color[1] - HIGHLIGHT_COLOR[1]).abs() < 0.01);
     assert!((highlighted_color[2] - HIGHLIGHT_COLOR[2]).abs() < 0.01);
+}
+
+/// Alpha of the first region on a node's first section area.
+fn first_section_alpha(tree: &MindMapTree, mind_id: &str) -> f32 {
+    let section_id = tree
+        .section_arena_id(mind_id, 0)
+        .unwrap_or_else(|| panic!("{mind_id} must have a section area"));
+    tree.tree
+        .arena
+        .get(section_id)
+        .unwrap()
+        .get()
+        .glyph_area()
+        .unwrap()
+        .regions
+        .all_regions()[0]
+        .color
+        .unwrap()[3]
+}
+
+/// The NodeEdit affordance: with `active = Some(id)`, every *other*
+/// node's text drops to half alpha and the active node keeps full
+/// alpha. Pairs with the border half of the affordance, which the
+/// border pass applies from the same constant.
+#[test]
+fn test_apply_inactive_node_dimming_halves_other_nodes_only() {
+    let mut tree = load_test_tree();
+    let others: Vec<String> = tree
+        .node_ids()
+        .filter(|(id, _)| *id != "0")
+        .map(|(id, _)| id.to_string())
+        .take(3)
+        .collect();
+    assert!(!others.is_empty(), "fixture must have more than one node");
+
+    let active_before = first_section_alpha(&tree, "0");
+    let others_before: Vec<f32> = others.iter().map(|id| first_section_alpha(&tree, id)).collect();
+
+    apply_inactive_node_dimming(&mut tree, Some("0"));
+
+    assert!(
+        (first_section_alpha(&tree, "0") - active_before).abs() < 1e-3,
+        "the active node must keep its alpha"
+    );
+    for (id, before) in others.iter().zip(others_before) {
+        let after = first_section_alpha(&tree, id);
+        assert!(
+            (after - before * INACTIVE_NODE_ALPHA_MULTIPLIER).abs() < 1e-2,
+            "{id}: alpha {after} should be {before} x {INACTIVE_NODE_ALPHA_MULTIPLIER}"
+        );
+    }
+}
+
+/// `None` (Default mode) is the no-op fast path — no node's alpha
+/// moves. A regression here would dim the entire canvas outside
+/// NodeEdit.
+#[test]
+fn test_apply_inactive_node_dimming_none_is_a_no_op() {
+    let mut tree = load_test_tree();
+    let before: Vec<(String, f32)> = tree
+        .node_ids()
+        .map(|(id, _)| id.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|id| {
+            let a = first_section_alpha(&tree, &id);
+            (id, a)
+        })
+        .collect();
+
+    apply_inactive_node_dimming(&mut tree, None);
+
+    for (id, alpha) in before {
+        assert!(
+            (first_section_alpha(&tree, &id) - alpha).abs() < 1e-6,
+            "{id} must be untouched in Default mode"
+        );
+    }
+}
+
+/// Dimming is applied *before* the selection highlight at every
+/// rebuild site, so a node that is both inactive and selected reads
+/// as selected rather than as faded. Locks that ordering.
+#[test]
+fn test_selection_highlight_wins_over_dimming_when_applied_after() {
+    let mut tree = load_test_tree();
+    let other = tree
+        .node_ids()
+        .map(|(id, _)| id.to_string())
+        .find(|id| id != "0")
+        .expect("fixture must have more than one node");
+
+    apply_inactive_node_dimming(&mut tree, Some("0"));
+    apply_tree_highlights(&mut tree, std::iter::once((other.as_str(), None, HIGHLIGHT_COLOR)));
+
+    let section_id = tree.section_arena_id(&other, 0).unwrap();
+    let color = tree
+        .tree
+        .arena
+        .get(section_id)
+        .unwrap()
+        .get()
+        .glyph_area()
+        .unwrap()
+        .regions
+        .all_regions()[0]
+        .color
+        .unwrap();
+    assert!((color[0] - HIGHLIGHT_COLOR[0]).abs() < 0.01);
+    assert!((color[3] - HIGHLIGHT_COLOR[3]).abs() < 0.01, "highlight alpha survives the dim");
 }
 
 #[test]
@@ -1015,7 +1126,7 @@ fn test_rect_select_misses_distant_nodes() {
 //
 // These exercise the end-to-end wiring: flip a node's `shape` on
 // the tree side to `Ellipse`, then assert that hit_test /
-// point_in_node_aabb / rect_select all honour the new geometry.
+// point_in_node_aabb / rect_select all honor the new geometry.
 // The baumhard-level math is covered exhaustively in
 // `lib/baumhard/src/gfx_structs/shape.rs#tests`; these tests
 // guard the plumbing.
@@ -1038,12 +1149,12 @@ fn node_bounds(tree: &baumhard::mindmap::tree_builder::MindMapTree, node_id: &st
 }
 
 #[test]
-fn test_hit_test_ellipse_centre_hits() {
+fn test_hit_test_ellipse_center_hits() {
     let mut tree = load_test_tree();
     set_node_shape_ellipse(&mut tree, "0");
     let (pos, bounds) = node_bounds(&tree, "0");
-    let centre = pos + bounds * 0.5;
-    assert_eq!(hit_test(centre, &mut tree), Some("0".to_string()));
+    let center = pos + bounds * 0.5;
+    assert_eq!(hit_test(center, &mut tree), Some("0".to_string()));
 }
 
 #[test]
@@ -1067,11 +1178,11 @@ fn test_point_in_node_aabb_is_shape_aware() {
     let mut tree = load_test_tree();
     set_node_shape_ellipse(&mut tree, "0");
     let (pos, bounds) = node_bounds(&tree, "0");
-    let centre = pos + bounds * 0.5;
+    let center = pos + bounds * 0.5;
     let near_corner = pos + Vec2::new(0.5, 0.5);
     assert!(
-        point_in_node_aabb(centre, "0", &tree),
-        "Centre must count as inside the ellipse"
+        point_in_node_aabb(center, "0", &tree),
+        "Center must count as inside the ellipse"
     );
     assert!(
         !point_in_node_aabb(near_corner, "0", &tree),
@@ -1096,17 +1207,17 @@ fn test_rect_select_ignores_ellipse_aabb_corner_only() {
 }
 
 #[test]
-fn test_rect_select_still_catches_ellipse_through_centre() {
+fn test_rect_select_still_catches_ellipse_through_center() {
     let mut tree = load_test_tree();
     set_node_shape_ellipse(&mut tree, "0");
     let (pos, bounds) = node_bounds(&tree, "0");
-    // Selection rect crossing the centre of the ellipse must
+    // Selection rect crossing the center of the ellipse must
     // still register a hit.
-    let centre = pos + bounds * 0.5;
-    let hits = rect_select(centre - Vec2::new(5.0, 5.0), centre + Vec2::new(5.0, 5.0), &tree);
+    let center = pos + bounds * 0.5;
+    let hits = rect_select(center - Vec2::new(5.0, 5.0), center + Vec2::new(5.0, 5.0), &tree);
     assert!(
         hits.contains(&"0".to_string()),
-        "Rect-select crossing the ellipse centre must hit"
+        "Rect-select crossing the ellipse center must hit"
     );
 }
 
@@ -1253,7 +1364,7 @@ fn test_hit_test_section_resize_handle_returns_none_for_missing_node_or_section(
 fn test_hit_test_section_resize_handle_lands_on_se_corner() {
     use crate::application::document::hit_test_section_resize_handle;
     use crate::application::document::tests_common::pinned_two_section_node;
-    use baumhard::mindmap::scene_builder::ResizeHandleSide;
+    use baumhard::mindmap::tree_builder::ResizeHandleSide;
     use glam::Vec2;
 
     let (doc, id) = pinned_two_section_node();
@@ -1270,7 +1381,7 @@ fn test_hit_test_section_resize_handle_lands_on_se_corner() {
 fn test_hit_test_section_resize_handle_lands_on_n_edge_midpoint() {
     use crate::application::document::hit_test_section_resize_handle;
     use crate::application::document::tests_common::pinned_two_section_node;
-    use baumhard::mindmap::scene_builder::ResizeHandleSide;
+    use baumhard::mindmap::tree_builder::ResizeHandleSide;
     use glam::Vec2;
 
     let (doc, id) = pinned_two_section_node();
@@ -1340,7 +1451,7 @@ fn test_hit_test_section_resize_handle_misses_outside_tolerance() {
 fn test_hit_test_node_resize_handle_lands_on_se_corner() {
     use crate::application::document::hit_test_node_resize_handle;
     use crate::application::document::tests_common::pinned_two_section_node;
-    use baumhard::mindmap::scene_builder::ResizeHandleSide;
+    use baumhard::mindmap::tree_builder::ResizeHandleSide;
     use glam::Vec2;
 
     let (doc, id) = pinned_two_section_node();

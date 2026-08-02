@@ -21,56 +21,33 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::application::keybinds::Action;
+use crate::application::source_tier::SourceTier;
 
-/// Tier a macro was loaded from. Mirrors `MutationSource` in
-/// `document/mutations_loader/mod.rs`. Variants are in ascending
-/// precedence: `App` < `User` < `Map` < `Inline`. Higher-tier
-/// macros override lower-tier ones with the same id.
+/// **Macro privilege model**, hung off the shared
+/// [`SourceTier`] ladder.
 ///
-/// **Privilege model.** [`MacroStep::ConsoleLine`] runs an
-/// arbitrary console verb — including filesystem-touching ones
-/// (`save <path>`, `open <path>`). To prevent a hostile shared
-/// mindmap from doing arbitrary file I/O, only [`MacroSource::User`]
-/// macros are allowed to contain `ConsoleLine` steps. The
-/// dispatcher rejects `ConsoleLine` from `App`, `Map`, and
-/// `Inline` tiers with a `warn!`. All four tiers load today on
-/// native; the gate is fully active.
+/// The tier a macro was loaded from is also how much the macro is
+/// trusted. [`MacroStep::ConsoleLine`] runs an arbitrary console
+/// verb — including filesystem-touching ones (`save <path>`,
+/// `open <path>`) — so to prevent a hostile shared mindmap from
+/// doing arbitrary file I/O, only [`SourceTier::User`] macros may
+/// contain `ConsoleLine` steps. The dispatcher rejects
+/// `ConsoleLine` from `App`, `Map`, and `Inline` tiers with a
+/// `warn!`. All four tiers load today on native; the gate is fully
+/// active.
 ///
-/// Document-mutating step kinds (`Action`, `CustomMutation`) also
-/// gate via [`MacroSource::allows_action`] — see the denylist
-/// there for which Actions are blocked from non-User tiers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum MacroSource {
-    /// Shipped with the binary via
-    /// `assets/macros/application.json`. Loaded by
-    /// [`crate::application::macros::loader::load_app_macros`] at
-    /// startup.
-    App,
-    /// Loaded from the user's `macros.json`
-    /// (`$XDG_CONFIG_HOME/mandala/macros.json` on native). Same
-    /// trust posture as `keybinds.json` — the user owns the file.
-    User,
-    /// Declared in `MindMap.macros` on the currently-loaded
-    /// document. Reloaded on every `open` / `new` console verb via
-    /// [`crate::application::macros::loader::rebuild_map_macros`].
-    Map,
-    /// Declared on individual nodes via `MindNode.inline_macros`.
-    /// Walked across every node and aggregated into the registry
-    /// by
-    /// [`crate::application::macros::loader::rebuild_inline_macros`].
-    /// Highest precedence — overrides Map / User / App on id
-    /// collision.
-    Inline,
-}
-
-impl MacroSource {
+/// Document-mutating step kinds (`Action`, `CustomMutation`) gate
+/// via [`SourceTier::allows_action`].
+///
+/// These live here rather than in `source_tier` because the policy
+/// is about what a *macro step* may do, not about what a tier is.
+impl SourceTier {
     /// Whether macros from this source may carry
     /// `MacroStep::ConsoleLine` steps. Only `User` macros pass —
     /// app-bundled / map-inline / node-inline macros loaded from
     /// untrusted sources cannot execute arbitrary console verbs.
     pub fn allows_console_line(self) -> bool {
-        matches!(self, MacroSource::User)
+        matches!(self, SourceTier::User)
     }
 
     /// Whether macros from this source may invoke the given Action
@@ -94,7 +71,7 @@ impl MacroSource {
     /// silently bypassed the gate. A real `LabelEditOnSelection`
     /// gap surfaced from that pattern.)
     pub fn allows_action(self, action: &Action) -> bool {
-        if matches!(self, MacroSource::User) {
+        if matches!(self, SourceTier::User) {
             return true;
         }
         !action.is_destructive()
@@ -158,7 +135,7 @@ pub enum MacroTarget {
 
 /// A user-defined macro: id + ordered list of steps. Loaded from
 /// up to four tiers on native (App bundle / User config /
-/// per-Map / per-node Inline); see `MacroSource` for the
+/// per-Map / per-node Inline); see [`SourceTier`] for the
 /// precedence order and `loader.rs` for the parse plumbing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Macro {
@@ -170,33 +147,11 @@ pub struct Macro {
     pub steps: Vec<MacroStep>,
 }
 
-/// Number of `MacroSource` tiers. Lock-stepped with the variant
-/// count of the enum; the registry's per-id slot array is sized
-/// against this constant.
-const TIER_COUNT: usize = 4;
-
-impl MacroSource {
-    /// Index into the per-tier slot array on `MacroRegistry`. Order
-    /// matches the variant declaration so `MacroSource as usize`
-    /// would conceptually agree, but the explicit `match` survives
-    /// future re-ordering and `#[non_exhaustive]` keeps it honest.
-    /// Higher index = higher precedence. Module-private — only the
-    /// registry's slot array consumes it.
-    const fn index(self) -> usize {
-        match self {
-            MacroSource::App => 0,
-            MacroSource::User => 1,
-            MacroSource::Map => 2,
-            MacroSource::Inline => 3,
-        }
-    }
-}
-
 /// In-memory lookup table. Built once at startup from the loader's
 /// merged slices, then refreshed on every document-replace.
 ///
 /// **Shadow-stacked storage.** Each id maps to a per-tier slot
-/// array indexed by [`MacroSource::index`]: `[App, User, Map,
+/// array indexed by `SourceTier::index`: `[App, User, Map,
 /// Inline]`. Lookup walks high-to-low precedence; the first
 /// non-None slot wins. Higher-tier entries SHADOW lower-tier ones
 /// rather than displacing them — `clear_tier(Inline)` removes
@@ -212,7 +167,7 @@ impl MacroSource {
 /// only the cross-tier reveal property is new.
 #[derive(Debug, Clone, Default)]
 pub struct MacroRegistry {
-    macros: HashMap<String, [Option<Macro>; TIER_COUNT]>,
+    macros: HashMap<String, [Option<Macro>; SourceTier::COUNT]>,
 }
 
 impl MacroRegistry {
@@ -225,7 +180,7 @@ impl MacroRegistry {
     /// tier entry, since lower tiers are no longer displaced.
     /// Within-tier last-writer-wins; cross-tier coexistence is
     /// preserved.
-    pub fn insert(&mut self, m: Macro, source: MacroSource) -> Option<Macro> {
+    pub fn insert(&mut self, m: Macro, source: SourceTier) -> Option<Macro> {
         let id = m.id.clone();
         let slots = self
             .macros
@@ -239,7 +194,7 @@ impl MacroRegistry {
     /// non-None entry.
     pub fn get(&self, id: &str) -> Option<&Macro> {
         let slots = self.macros.get(id)?;
-        for i in (0..TIER_COUNT).rev() {
+        for i in (0..SourceTier::COUNT).rev() {
             if let Some(m) = &slots[i] {
                 return Some(m);
             }
@@ -249,19 +204,13 @@ impl MacroRegistry {
 
     /// Look up the highest-tier macro for `id` and the tier that
     /// holds it. The dispatcher uses this pair to consult the
-    /// privilege gate (`MacroSource::allows_console_line`,
+    /// privilege gate (`SourceTier::allows_console_line`,
     /// `allows_action`). Same walk order as `get`.
-    pub fn get_with_source(&self, id: &str) -> Option<(&Macro, MacroSource)> {
+    pub fn get_with_source(&self, id: &str) -> Option<(&Macro, SourceTier)> {
         let slots = self.macros.get(id)?;
-        // Walk tiers high-to-low. The list is hand-written so the
-        // tier→index mapping stays explicit; if a future tier is
-        // added, this list must extend AND `index` above must too.
-        for tier in [
-            MacroSource::Inline,
-            MacroSource::Map,
-            MacroSource::User,
-            MacroSource::App,
-        ] {
+        // Walk tiers high-to-low straight off the shared ladder, so
+        // a future tier extends `SourceTier::ALL` and nothing else.
+        for tier in SourceTier::ALL.into_iter().rev() {
             if let Some(m) = &slots[tier.index()] {
                 return Some((m, tier));
             }
@@ -310,7 +259,7 @@ impl MacroRegistry {
     /// disturbing the App + User tiers loaded at startup, AND the
     /// previously-shadowed User-tier entries re-emerge naturally
     /// in subsequent lookups.
-    pub fn clear_tier(&mut self, source: MacroSource) {
+    pub fn clear_tier(&mut self, source: SourceTier) {
         let idx = source.index();
         self.macros.retain(|_, slots| {
             slots[idx] = None;
@@ -323,7 +272,7 @@ impl MacroRegistry {
     /// override earlier ones). Cross-tier entries at OTHER tiers
     /// survive in their slots — this is the shadow-stacking
     /// property.
-    pub fn extend_with_tier<I: IntoIterator<Item = Macro>>(&mut self, macros: I, source: MacroSource) {
+    pub fn extend_with_tier<I: IntoIterator<Item = Macro>>(&mut self, macros: I, source: SourceTier) {
         for m in macros {
             self.insert(m, source);
         }

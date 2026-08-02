@@ -5,14 +5,18 @@
 //! Each function in this directory implements one or more
 //! `Action::*` variant bodies in a form callable from BOTH the
 //! native dispatcher ([`super::action_core`] +
-//! [`super::native::dispatch_action`]) and the WASM dispatcher
-//! (`super::super::run_wasm` — cfg-gated, hence the plain
-//! code-span). The split between native and WASM exists because
-//! the two dispatchers carry different context types — native has
-//! 21 fields including console / picker / interaction_mode / modifiers;
-//! WASM has 9 fields, a strict subset. Arms whose bodies touch
+//! `super::native::dispatch_action`) and the WASM dispatcher
+//! (`super::super::run_wasm`). Both of those are plain
+//! code-spans: each is cfg-gated to one target, and rustdoc
+//! resolves links against the active target's module tree, so
+//! either link breaks the other target's doc build.
+//!
+//! The split between native and WASM exists because the two
+//! dispatchers carry different context types — native has 21 fields
+//! including console / picker / interaction_mode / modifiers; WASM
+//! has 9 fields, a strict subset. Arms whose bodies touch
 //! only the shared subset live here; native-only arms stay in
-//! [`super::native`].
+//! `super::native`.
 //!
 //! This is the Track-C path documented in
 //! `WASM_CONVERGENCE.md`: incrementally lift arm bodies as they
@@ -37,12 +41,15 @@
 //!   mutation).
 //! - [`camera`]: every zoom-related arm (camera-state zoom
 //!   step / reset / fit-to-tree + per-element zoom-visibility
-//!   window edits), pan nudges, centre-on-selection, and
+//!   window edits), pan nudges, center-on-selection, and
 //!   jump-to-root.
 //! - [`selection`]: selection-changing arms (`SelectAll`,
 //!   `DeselectAll`, `InvertSelection`, `SelectParent`,
 //!   `SelectChild`, `SelectNext/PrevSibling`) + their pure-doc
 //!   inner functions.
+//! - [`mod@pointer`]: the pointer-gesture payload
+//!   ([`DispatchHit`]) and the double-click behavior — a pure
+//!   route resolver plus the apply half that matches on it.
 //!
 //! `mod.rs` itself only carries the shared types
 //! ([`RebuildContext`], [`DispatchOutcome`]), the two
@@ -63,6 +70,7 @@ mod camera;
 mod edges;
 mod fps;
 mod lifecycle;
+mod pointer;
 mod selection;
 mod style;
 
@@ -74,6 +82,7 @@ pub(in crate::application::app) use camera::*;
 pub(in crate::application::app) use edges::*;
 pub(in crate::application::app) use fps::*;
 pub(in crate::application::app) use lifecycle::*;
+pub(in crate::application::app) use pointer::*;
 pub(in crate::application::app) use selection::*;
 pub(in crate::application::app) use style::*;
 
@@ -103,6 +112,25 @@ pub(crate) fn apply_keybind_custom_mutation(
     now_ms: u64,
 ) -> bool {
     if cm.timing.as_ref().is_some_and(|t| t.duration_ms > 0) {
+        // Queues the envelope only. Advancing it is
+        // `drain_frame::drain_animation_tick`, which is native-only —
+        // so on WASM this branch starts an animation that never ticks.
+        // A sanctioned carve-out, registered in CLAUDE.md's
+        // "Dual-target status". This function is the keystroke tier's
+        // entry (`run_wasm/event_keyboard.rs` on the browser side,
+        // `native.rs` / `lifecycle.rs` on the desktop's).
+        //
+        // The **click-trigger** path does not come through here:
+        // `click_triggers::fire_onclick_triggers` carries its own copy
+        // of this animated-vs-instant routing and calls
+        // `start_animation_at` (section-aware) instead. Same stall,
+        // reached by a second body. Named pre-existing duplication,
+        // not unified in this PR because the two copies genuinely
+        // differ in the no-tree case — this one returns `false` and
+        // skips `apply_document_actions`, the trigger loop applies
+        // them anyway — so collapsing them is a behavior decision, not
+        // a refactor. Whoever takes it owns picking which of the two
+        // is right.
         doc.start_animation(cm, node_id, now_ms);
     } else if let Some(tree) = mindmap_tree.as_mut() {
         doc.apply_custom_mutation(cm, node_id, Some(tree));
@@ -204,7 +232,8 @@ impl<'a> RebuildContext<'a> {
 // ── RebuildContext construction macro ───────────────────────────
 
 /// Build a [`RebuildContext`] from a context-like struct (native
-/// [`super::super::input_context::InputHandlerContext`] or WASM
+/// `super::super::input_context::InputHandlerContext` (native-gated,
+/// hence the plain code-span) or WASM
 /// `WasmInputState`) plus an already-unwrapped
 /// `&mut MindMapDocument`. Expands inline so the borrow-checker
 /// accepts the disjoint per-field borrows; a `fn rebuild_ctx(&mut

@@ -20,11 +20,11 @@ use rand::seq::IteratorRandom;
 use rustc_hash::FxHashMap;
 use tinyvec::TinyVec;
 
-use crate::font::fonts::AppFont::*;
 // Serde derives are used by the generated AppFont enum below.
-//@formatter:off
 use serde::{Deserialize, Serialize};
-// Build-time generated: defines `AppFont` and `FONT_DATA`.
+// Build-time generated: defines `AppFont` and `FONT_DATA`. The
+// naming and ordering rules the generator follows live in
+// `crate::font::name_rules`, which `build.rs` shares by `include!`.
 include!(concat!(env!("OUT_DIR"), "/generated_fonts_data.rs"));
 
 fn load_font_sources() -> FxHashMap<AppFont, Source> {
@@ -38,12 +38,17 @@ fn load_font_sources() -> FxHashMap<AppFont, Source> {
 /// Register every compiled-in font with [`FONT_SYSTEM`], returning
 /// the `AppFont → fontdb ID` map callers use to resolve faces.
 ///
-/// Acquires the `FONT_SYSTEM` **write** lock; callers that already
-/// hold any lock on it will deadlock. Costs: one lock acquisition
-/// plus one `load_font_source` call per entry in [`FONT_SOURCES`].
+/// Acquires the `FONT_SYSTEM` **write** guard through
+/// [`acquire_font_system_write`] (§B5: every write acquire routes
+/// through the helper). A caller already holding any `FONT_SYSTEM`
+/// guard on this thread makes the acquire time out and panic with a
+/// site tag instead of hanging — but that never happens in practice
+/// because [`init`] runs `load_fonts` at startup, before any guard
+/// is held. Costs: one lock acquisition plus one `load_font_source`
+/// call per entry in [`FONT_SOURCES`].
 fn load_fonts() -> FxHashMap<AppFont, TinyVec<[ID; 8]>> {
     debug!("Waiting for font-system write lock");
-    let mut font_system = FONT_SYSTEM.write().expect("Failed to retrieve font system lock");
+    let mut font_system = acquire_font_system_write("load_fonts");
     let mut compiled_font_id_map = FxHashMap::default();
     do_for_all_sources(|x, source| {
         let font_id = font_system.db_mut().load_font_source(source.clone());
@@ -81,6 +86,19 @@ lazy_static! {
 /// builder, the lazy path would deadlock. Eager init at startup
 /// makes that impossible.
 pub fn init() {
+    ensure_warm();
+}
+
+/// Force the font lazy-statics a `FONT_SYSTEM` write acquire depends
+/// on to build **now** — `COMPILED_FONT_ID_MAP` (via `load_fonts`,
+/// which itself takes the write guard) and `FAMILY_INDEX` (via
+/// `build_family_index`, which takes the read guard). Library-callable
+/// counterpart to the app-only [`init`]: a caller that is about to
+/// hold the write guard and will reach `face_family_name_for_pin` /
+/// `app_font_by_family` under it calls this **first**, so the lazy
+/// build doesn't re-enter the same-thread lock. Idempotent — a no-op
+/// once warm; both stores are `OnceLock`/`lazy_static`. §B5.
+pub(crate) fn ensure_warm() {
     COMPILED_FONT_ID_MAP.capacity();
     FAMILY_INDEX.get_or_init(build_family_index);
 }
@@ -117,10 +135,10 @@ static FAMILY_INDEX: OnceLock<Vec<(String, AppFont)>> = OnceLock::new();
 fn build_family_index() -> Vec<(String, AppFont)> {
     // Force `COMPILED_FONT_ID_MAP`'s lazy-static init **before** we
     // grab the `FONT_SYSTEM` read lock. `load_fonts()` (the lazy
-    // initialiser) needs `FONT_SYSTEM.write()`, and a same-thread
+    // initializer) needs `FONT_SYSTEM.write()`, and a same-thread
     // read-then-write deadlocks the worker. `init()` documents this
     // ordering at the top of the module and explicitly does both
-    // initialisations in the right order, but tests / call paths
+    // initializations in the right order, but tests / call paths
     // that reach `app_font_by_family` without going through
     // `init()` first (the cosmic-text tree builder, the inline text
     // editor, the console completion popup) would otherwise hit the
@@ -157,7 +175,7 @@ fn build_family_index() -> Vec<(String, AppFont)> {
             None => {
                 // The codebase owns the fontdb today (see `build.rs`
                 // and the comment at the top of this file), so any
-                // face we don't recognise comes from a future
+                // face we don't recognize comes from a future
                 // system-fonts loader or a test that registered
                 // fonts directly. Surface that at `debug` so it's
                 // observable without spamming `warn`.
@@ -199,7 +217,7 @@ pub fn loaded_families_iter() -> impl Iterator<Item = &'static str> {
         .map(|(name, _)| name.as_str())
 }
 
-/// Materialise [`loaded_families_iter`] as `Vec<String>` — kept for
+/// Materialize [`loaded_families_iter`] as `Vec<String>` — kept for
 /// callers that need an owned list (tests, future external API
 /// consumers). Allocates one `Vec<String>` per call.
 pub fn list_loaded_families() -> Vec<String> {
@@ -228,7 +246,7 @@ pub fn app_font_by_family(name: &str) -> Option<AppFont> {
 /// `FAMILY_INDEX`. Returns the *first* family name registered
 /// for the variant (alphabetical-by-name, matching
 /// `loaded_families_iter`'s order); when a single AppFont
-/// surfaces multiple aliases (localised names, postscript names),
+/// surfaces multiple aliases (localized names, postscript names),
 /// only the first is returned.
 ///
 /// Used by the post-mutation reverse converter in
@@ -236,7 +254,7 @@ pub fn app_font_by_family(name: &str) -> Option<AppFont> {
 /// `ColorFontRegion.font: Option<AppFont>` rolls back into the
 /// model's `TextRun.font: String` shape. `None` falls through to
 /// the empty string at that site, matching the pre-section
-/// behaviour for runs without a family pin.
+/// behavior for runs without a family pin.
 ///
 /// Costs: O(n) over `FAMILY_INDEX`, but `n` is the small set of
 /// compiled-in families (~30 today), so the scan is cheaper than
@@ -296,7 +314,11 @@ pub(crate) fn face_family_name_for_pin(
 /// `std::sync::RwLock::write()` would otherwise block on forever.
 /// 5 s is orders of magnitude beyond any legitimate frame budget and
 /// conservative enough to never fire on a healthy system.
-const FONT_SYSTEM_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// `pub(crate)` so the metric cache reuses the *same* budget for its
+/// miss-path acquires rather than duplicating the literal — the
+/// "same value" the two sites want is then compiler-enforced.
+pub(crate) const FONT_SYSTEM_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Poll interval while waiting for the `FONT_SYSTEM` write guard.
 /// Short enough that a lock release is noticed promptly; long enough
@@ -306,12 +328,29 @@ const FONT_SYSTEM_LOCK_POLL: Duration = Duration::from_millis(1);
 /// Acquire the `FONT_SYSTEM` write guard with a bounded timeout,
 /// panicking with `site` in the message on timeout or poison.
 ///
-/// Every `FONT_SYSTEM.write()` call site in the codebase should go
-/// through this helper instead of calling `RwLock::write` directly.
-/// The rationale is in the `FONT_SYSTEM_LOCK_TIMEOUT` doc above:
-/// a timeout here is a re-entrancy bug, and without the helper that
-/// bug would hang the main thread indefinitely. With the helper, it
-/// produces a stack trace pointing at the second acquisition site.
+/// There are exactly **two sanctioned shapes** for taking the
+/// `FONT_SYSTEM` write lock; a raw `FONT_SYSTEM.write()` is neither:
+///
+/// 1. **Blocking-with-timeout via this helper** — the default. Used
+///    by every call site that must measure or shape and can afford
+///    to wait a frame: `load_fonts`, the metric cache's miss path
+///    (`metric_cache::glyph_*`), and the renderer's border /
+///    handle / overlay rebuilds. A timeout here is a re-entrancy
+///    bug (this thread already holds the guard); without the helper
+///    that bug would hang the main thread forever, so instead we
+///    panic with a stack trace pointing at the second acquisition.
+/// 2. **Non-blocking `try_write` + frame-degrade** — the renderer's
+///    interactive paths (`renderer::mod::rebuild_mode_status_overlay_if_needed`,
+///    `rebuild_fps_overlay_if_needed`, `render::prepare_text_for_pass`)
+///    take `FONT_SYSTEM.try_write()` directly and skip the frame on
+///    `WouldBlock` rather than block or panic. This is legitimate:
+///    a contended lock there means another pass is mid-shape, and
+///    dropping one overlay frame is cheaper than stalling render.
+///    These sites retry on the next `process()` cycle.
+///
+/// Guard-holding callers that need to measure a nested value must
+/// thread their `&mut FontSystem` into a `*_with` variant (see
+/// `metric_cache` / `border_run_specs_with`) rather than re-acquire.
 ///
 /// `site` is a short static string naming the call site; it appears
 /// in the panic message so the stack makes the culprit obvious even
@@ -391,7 +430,7 @@ pub fn get_some_font() -> Source {
     return FONT_SOURCES.values().choose(&mut rng).unwrap().clone();
 }
 
-/// Opaque black. The default foreground colour for newly-built
+/// Opaque black. The default foreground color for newly-built
 /// `AttrsList`s.
 /// Ink bounding box of a shaped glyph string, measured at a specific
 /// font size. Sibling of the `measure_max_glyph_advance` scalar
@@ -596,14 +635,14 @@ impl TextBlockSize {
 /// `font` pins the cosmic-text [`Family`] so the measurement uses
 /// the same face the renderer will eventually shape with. Pass
 /// `None` to fall back to cosmic-text's default (typically a
-/// monospace) — historical behaviour, but a fragile floor for
+/// monospace) — historical behavior, but a fragile floor for
 /// nodes whose `TextRun.font` pins a wider display face. The pin
 /// follows the same `COMPILED_FONT_ID_MAP → face.families.first()`
 /// path [`measure_glyph_ink_bounds`] uses, so the two measurement
 /// primitives agree on which face name to pin.
 ///
 /// Costs: one scratch `Buffer`, one shaping pass, O(lines) fold
-/// over `layout_runs`. No rasterisation (no `SwashCache` required).
+/// over `layout_runs`. No rasterization (no `SwashCache` required).
 pub fn measure_text_block_unbounded(
     font_system: &mut cosmic_text::FontSystem,
     text: &str,

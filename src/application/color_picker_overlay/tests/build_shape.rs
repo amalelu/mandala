@@ -4,6 +4,7 @@
 //! centering, and the GlyphArea/GlyphModel pairing the picker tree's
 //! mutator-walker safety relies on.
 
+use baumhard::core::primitives::Discriminated;
 use baumhard::gfx_structs::element::GfxElementType;
 
 use super::fixtures::{picker_glyph_areas_for, picker_sample_geometry};
@@ -89,7 +90,7 @@ fn picker_overlay_tree_emits_flat_glyph_area_children() {
     for area_id in tree.root.children(&tree.arena) {
         let area_elem = tree.arena.get(area_id).expect("area node in arena").get();
         assert!(
-            matches!(area_elem.get_type(), GfxElementType::GlyphArea),
+            matches!(area_elem.variant(), GfxElementType::GlyphArea),
             "every direct child of root must be a GlyphArea"
         );
         assert_eq!(

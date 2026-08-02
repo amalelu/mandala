@@ -4,12 +4,12 @@
 //! inline-on-node — in ascending precedence.
 //!
 //! **Source-of-truth note:** the precedence order (App < User < Map
-//! < Inline) is documented in `format/mutations.md` under "Where
-//! mutations come from." Code mirrors the doc — the [`MutationSource`]
-//! enum variant order and
+//! < Inline) is [`crate::application::source_tier::SourceTier`],
+//! shared with the macro registry and pinned by that module's tests.
+//! `format/mutations.md` documents the same ladder under "Where
+//! mutations come from" for authors;
 //! [`crate::application::document::MindMapDocument::build_mutation_registry_with_app_and_user`]
-//! encode the same ordering. Changes to the set or order update all
-//! three sites in the same commit.
+//! walks it.
 //!
 //! This module owns the outer loader (app + user slices produced in
 //! `load_app_and_user`), the app-bundle parser ([`builtin`]), and the
@@ -32,29 +32,6 @@ pub mod platform_desktop;
 pub mod platform_web;
 
 use baumhard::mindmap::custom_mutation::CustomMutation;
-
-/// Source layer a registered mutation came from. The
-/// `build_mutation_registry_with_app_and_user` method stamps a
-/// `MutationSource` into `MindMapDocument::mutation_sources`
-/// alongside every registry write, so `mutation help <id>` can
-/// report which layer won the id — critical for authors debugging
-/// override precedence.
-///
-/// Variants are in ascending precedence: `App` is the lowest layer
-/// (most easily overridable), `Inline` is the highest (wins last).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum MutationSource {
-    /// Shipped with the binary via `assets/mutations/application.json`.
-    App,
-    /// Loaded from the user's `mutations.json` (XDG path on native,
-    /// `?mutations=` query param or `localStorage` on WASM).
-    User,
-    /// Declared in the currently-loaded map's `custom_mutations` array.
-    Map,
-    /// Declared on a specific node's `inline_mutations` array.
-    Inline,
-}
 
 /// Load the two slices the registry builder expects — application
 /// mutations (bundled with the binary) and user mutations (from the

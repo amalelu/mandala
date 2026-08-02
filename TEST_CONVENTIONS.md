@@ -42,8 +42,8 @@ test harness.
 Representative exemplars:
 - `src/application/document.rs` — fundamentals coverage of
   hit-testing, selection, undo stacks, portal mutations.
-- `lib/baumhard/src/mindmap/scene_builder.rs` — connection and border
-  rendering math.
+- `lib/baumhard/src/mindmap/border.rs` — border run-spec geometry
+  and the resolver cascade.
 - `lib/baumhard/src/mindmap/connection.rs` — anchor points, path
   sampling, Bezier curves.
 
@@ -79,11 +79,33 @@ The `pub mod tests;` pattern is Baumhard-only. The `mandala` crate has
 no benchmark harness, so there is no reason to ever reach for it
 there — every mandala-side test lives inline.
 
+Both manifests now say this rather than only this document: `mandala`
+carries no `criterion` dev-dependency and both crates set
+`autobenches = false`, so baumhard's single declared `[[bench]]`
+target is the workspace's only one. That closes a gap this section
+used to describe inaccurately — each crate had a `benches/_template.rs`
+which cargo auto-discovered and built against the *default* libtest
+harness, where `criterion_main!` is ignored: the binaries ran zero
+benchmarks and said nothing about it. A new benchmark has to be
+declared explicitly with `harness = false` to exist at all.
+
 ## §T3 Naming
 
 - **Test functions:** `test_<topic>_<specific_case>`. Lowercase
   snake_case. Examples: `test_hit_test_direct_hit`,
   `test_portal_label_gap_reuse`.
+
+  **Where the case is a claim, name the claim.** A test whose subject
+  is a property of the repository rather than a code path is allowed
+  to spend the name on the sentence it asserts —
+  `test_no_dependency_version_is_written_in_two_manifests`,
+  `test_the_workspace_keeps_warn_and_error_in_release`. Still
+  `test_`-prefixed, still snake_case; the `<topic>_<case>` shape is
+  what relaxes. The reason to allow it: the whole value of these tests
+  is the sentence in the failure output, and `test_manifests_split`
+  names nothing a reader can act on. This is a narrow license — for a
+  test over ordinary code, `<topic>_<case>` still wins, because the
+  topic is how you find its neighbours.
 
 - **Benchmark-reusable bodies:** `pub fn do_<topic>_<case>()`, with a
   one-line `#[test] fn test_<topic>_<case>()` wrapper that calls it.
@@ -162,9 +184,11 @@ there — every mandala-side test lives inline.
 Any `do_*()` function exported through a `pub mod tests;` tree is part
 of `lib/baumhard/benches/test_bench.rs`'s surface. Renaming or
 removing one is a two-file change — update the benchmark imports in
-the same commit. This is not enforced by the compiler (the benchmark
-file is not built unless you run `cargo bench` or `./test.sh
---bench`), so keep them in sync by convention.
+the same commit. `cargo test` will not tell you: the benchmark file is
+not compiled under `cfg(test)`. `./test.sh`'s `cargo check --workspace
+--benches` step will, and that is the only automated place it is
+caught, since `AGENTS.md` forbids agents from running the benchmarks
+themselves.
 
 ## §T7 When to add a regression test
 
@@ -242,8 +266,13 @@ re-litigate them without a strong reason.
 
 ## §T11 Running the suite
 
-- `./test.sh` — full suite across `baumhard` and `mandala`; prints a
-  test count at the end.
+- `./test.sh` — full suite across every workspace member —
+  `mandala`, `baumhard`, `mandala_derive`, `maptool` — then the
+  bench-target type-check and the wasm32 type-check gate; prints a
+  test count at the end. It runs `cargo test --workspace` rather than
+  a list of `-p` flags, on purpose: the list it used to carry named
+  three of the four members and so never ran `mandala_derive`'s tests
+  at all.
 - `./test.sh --coverage` — runs under `cargo-llvm-cov` (install with
   `cargo install cargo-llvm-cov`). HTML at
   `target/llvm-cov/html/index.html`, LCOV at
@@ -251,10 +280,19 @@ re-litigate them without a strong reason.
 - `./test.sh --lint` — also runs `cargo fmt --check` and
   `cargo clippy --workspace --all-targets`. Both advisory; review
   output but they do not fail the run.
-- `./test.sh --bench` — also runs `cargo bench` after tests pass.
-- `cargo test -p baumhard --lib <pattern>` or
-  `cargo test -p mandala --lib <pattern>` — targeted subset while
-  iterating.
+- `./test.sh --bench` — also *runs* `cargo bench` after tests pass.
+  Maintainers only: `AGENTS.md` forbids automated agents this flag,
+  `./bench.sh`, and `cargo bench` alike, along with any performance
+  claim lacking the main-against-main control row §T6 and
+  [`lib/baumhard/CONVENTIONS.md §B7`](./lib/baumhard/CONVENTIONS.md)
+  require. Proving a bench target still *compiles* needs no flag —
+  `./test.sh` type-checks all of them on every run, which is what
+  keeps §B8's `do_*()` contract enforceable now that its two named
+  mechanisms are off limits.
+- `cargo test -p baumhard --lib <pattern>`,
+  `cargo test -p mandala --lib <pattern>`,
+  `cargo test -p mandala_derive` or `cargo test -p maptool` —
+  targeted subset while iterating.
 - `cargo doc -p baumhard --no-deps` — render the library docs and
   spot-check that every `pub` item has the doc comment
   [`lib/baumhard/CONVENTIONS.md §B9`](./lib/baumhard/CONVENTIONS.md)

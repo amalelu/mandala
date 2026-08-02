@@ -49,7 +49,7 @@ pub(in crate::application::app) fn open_color_picker_contextual(
     // color so the picker opens right where the user already is.
     let hsv = current_hsv_at(doc, &handle);
 
-    // Capture the raw colour string the seed came from. When it's a
+    // Capture the raw color string the seed came from. When it's a
     // `var(--name)` reference (i.e. resolution non-identity), keep
     // it so the commit path can preserve the variable when the user
     // doesn't move the wheel. Plain-hex seeds need no preservation
@@ -188,7 +188,7 @@ pub(in crate::application::app) fn open_picker_inner(
         // The picker renders each cell with `Align::Center` in a
         // bounds box of width `cell_box_w` and height
         // `cell_font_size * 1.5`. For the ink to land on the
-        // crosshair radius (not the em-box centre) we measure each
+        // crosshair radius (not the em-box center) we measure each
         // glyph's actual ink rectangle and store a dimensionless
         // (dx, dy) — `compute_color_picker_layout` subtracts those
         // per-cell. A single per-arm correction can't pull this

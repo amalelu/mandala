@@ -84,8 +84,9 @@ pub(in crate::application::app) fn nav_popup(console_state: &mut ConsoleState, s
 /// No-op if no popup is present.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn accept_console_completion(console_state: &mut ConsoleState) {
-    use baumhard::util::grapheme_chad::{count_grapheme_clusters, find_byte_index_of_grapheme};
-    use unicode_segmentation::UnicodeSegmentation;
+    use baumhard::util::grapheme_chad::{
+        count_grapheme_clusters, find_byte_index_of_grapheme, token_start_ws,
+    };
     let ConsoleState::Open {
         input,
         cursor,
@@ -107,23 +108,22 @@ pub(in crate::application::app) fn accept_console_completion(console_state: &mut
     // Find the start of the token under the cursor: walk back from
     // the cursor position past non-whitespace grapheme clusters,
     // treating `key=value` as one token (so a kv-value completion
-    // replaces only the value portion).
+    // replaces only the value portion). `token_start_ws` is the
+    // shared primitive for that scan — the old inline loop built a
+    // `Vec<&str>` of every cluster before the cursor on each Tab.
     let cursor_byte = find_byte_index_of_grapheme(input, *cursor).unwrap_or(input.len());
-    let before: Vec<&str> = input[..cursor_byte].graphemes(true).collect();
-    let mut start_g = before.len();
-    while start_g > 0 && !before[start_g - 1].chars().all(|c| c.is_whitespace()) {
-        start_g -= 1;
-    }
+    let start_g = token_start_ws(input, *cursor);
+    let start_byte = find_byte_index_of_grapheme(input, start_g).unwrap_or(input.len());
     // If the token contains an `=`, and we're completing a kv-value,
-    // the replacement starts *after* the `=`.
-    let token: String = before[start_g..].concat();
-    let is_kv_value_replace = matches!(token.find('='), Some(pos) if pos > 0);
-    let replace_from = if is_kv_value_replace {
-        let eq_pos = token.find('=').expect("guarded by is_kv_value_replace");
-        let graph_before_eq = token[..eq_pos].graphemes(true).count();
-        start_g + graph_before_eq + 1
-    } else {
-        start_g
+    // the replacement starts *after* the `=`. Borrowed, not
+    // `concat()`ed — the slice lives only long enough to locate the
+    // separator.
+    let (replace_from, is_kv_value_replace) = {
+        let token = &input[start_byte..cursor_byte];
+        match token.find('=') {
+            Some(eq_pos) if eq_pos > 0 => (start_g + count_grapheme_clusters(&token[..eq_pos]) + 1, true),
+            _ => (start_g, false),
+        }
     };
 
     // Delete graphemes from replace_from..cursor, then insert the

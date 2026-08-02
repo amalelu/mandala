@@ -34,10 +34,8 @@ impl ColorValue {
     /// error through the per-kv outcome.
     pub fn parse(s: &str) -> Result<Self, String> {
         let t = s.trim();
-        if let Some(rest) = t.strip_prefix('#') {
-            // Shape-check: 3 / 4 / 6 / 8 hex digits.
-            let valid = matches!(rest.len(), 3 | 4 | 6 | 8) && rest.chars().all(|c| c.is_ascii_hexdigit());
-            if !valid {
+        if t.starts_with('#') {
+            if !baumhard::util::color::is_valid_hex_color(t) {
                 return Err(format!("invalid hex color: '{}'", s));
             }
             return Ok(ColorValue::Hex(t.to_string()));

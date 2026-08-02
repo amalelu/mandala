@@ -6,7 +6,7 @@
 //! channel is stable across rebuilds — the precondition for the
 //! in-place mutator path `build_border_mutator_tree_from_nodes`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::Vec2;
 use indextree::NodeId;
@@ -18,8 +18,11 @@ use crate::gfx_structs::shape::NodeShape;
 use crate::gfx_structs::tree::Tree;
 use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::mindmap::border::{build_border_regions, resolve_border_style};
-use crate::mindmap::model::MindMap;
+use crate::mindmap::model::{GlyphBorderConfig, MindMap};
 use crate::util::color;
+
+use super::node_clip::INACTIVE_NODE_ALPHA_MULTIPLIER;
+use super::overrides::{BorderConfigEditsView, BorderPreview, BorderPreviewTargetRef};
 
 /// Per-node data for the border tree — single source of truth
 /// consumed by both [`build_border_tree`] (initial build) and
@@ -43,7 +46,7 @@ pub struct BorderNodeData {
     /// mutator-update time so the frame disappears atomically
     /// with its node at any zoom level.
     pub zoom_visibility: ZoomVisibility,
-    /// Resolved per-cycle-position colours for palette cycling,
+    /// Resolved per-cycle-position colors for palette cycling,
     /// or empty when `border_style.color_palette` is unset / the
     /// named palette doesn't exist. Pre-resolved upstream so the
     /// mutator path doesn't need to thread `&MindMap` through
@@ -53,17 +56,104 @@ pub struct BorderNodeData {
     pub palette_cycle: Vec<[f32; 4]>,
 }
 
+/// View-side chrome overrides for one border-pass call. Both
+/// fields are frame-local: they never touch the committed model,
+/// and both default to "no override".
+///
+/// Bundled rather than passed as two more positional arguments
+/// because they arrive together — the application layer derives
+/// both from the same per-frame `(document, InteractionMode)`
+/// snapshot — and because a third mode-derived border override
+/// should extend this struct rather than the signature.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BorderChromeOverrides<'a> {
+    /// Staged `border preview …` edits for the `Nodes` /
+    /// `CanvasDefault` targets. Folded into a clone of the
+    /// matching slot before resolution, so the preview renders
+    /// without a model write. The `Sections` /
+    /// `CanvasSectionFrame*` targets belong to
+    /// [`super::build_section_frames`] and are ignored here.
+    pub preview: Option<BorderPreview<'a>>,
+    /// Active `InteractionMode::NodeEdit` target. When `Some`,
+    /// every *other* node's frame renders at
+    /// [`INACTIVE_NODE_ALPHA_MULTIPLIER`] alpha — the "you are
+    /// inside this node" affordance. `None` (Default mode) is the
+    /// no-op fast path.
+    pub node_edit_for: Option<&'a str>,
+}
+
 /// Compute the border layout for the current `(map, offsets)`
 /// state. Sorted lexicographically by `MindNode.id` so per-node
 /// Void parents always land at the same channel — the
 /// prerequisite for the in-place mutator path.
 ///
-/// Skips hidden-by-fold and `show_frame = false` nodes, mirroring
-/// the filter in `scene_builder::build_scene`.
-pub fn border_node_data(map: &MindMap, offsets: &HashMap<String, (f32, f32)>) -> Vec<BorderNodeData> {
+/// Skips hidden-by-fold nodes, non-rectangular nodes, and
+/// `show_frame = false` nodes — unless a `preview` with
+/// `force_show_frame` targets them, so `border preview
+/// preset=heavy` on a frameless node is visible instead of
+/// silently doing nothing.
+///
+/// `hidden_set` is the output of [`MindMap::fold_hidden_set`]. The
+/// caller should build it once per frame and share it across the
+/// border / connection / portal passes instead of recomputing it
+/// here.
+///
+/// # Costs
+///
+/// O(N log N) in the visible node count (the id sort dominates).
+/// One [`resolve_border_style`] + one `resolve_palette_cycle` per
+/// emitted node, and that is **the only resolution of this cascade
+/// anywhere in the frame** — the clip-AABB pass
+/// ([`super::node_clip_aabbs`]) takes the allocation-free
+/// [`crate::mindmap::border::resolve_border_font_size_pt`] shortcut
+/// instead of resolving a `BorderStyle` it would throw away.
+/// `overrides` adds one `GlyphBorderConfig` clone per previewed
+/// slot and, under `node_edit_for`, one hex parse/format per
+/// distinct inactive frame color (memoized by input hex for the
+/// duration of the call).
+pub fn border_node_data(
+    map: &MindMap,
+    offsets: &HashMap<String, (f32, f32)>,
+    overrides: BorderChromeOverrides<'_>,
+    hidden_set: &HashSet<&str>,
+) -> Vec<BorderNodeData> {
     let vars = &map.canvas.theme_variables;
     let mut sorted_ids: Vec<&String> = map.nodes.keys().collect();
     sorted_ids.sort();
+
+    // Hoist the preview-target match out of the per-node loop: the
+    // steady-state rebuild runs with `preview = None` and we want
+    // one `is_none()` check per node, not a re-match of the target
+    // enum. Mirrors the same hoist in `node_clip::node_clip_aabbs`,
+    // which resolves the same cascade for the clip box.
+    let preview_node_ids: Option<&[String]> = overrides.preview.and_then(|p| match p.target {
+        BorderPreviewTargetRef::Nodes(ids) => Some(ids),
+        _ => None,
+    });
+    let preview_canvas_default: Option<BorderConfigEditsView<'_>> =
+        overrides.preview.and_then(|p| match p.target {
+            BorderPreviewTargetRef::CanvasDefault => Some(p.edits),
+            _ => None,
+        });
+    let preview_force_show_frame = overrides.preview.map(|p| p.force_show_frame).unwrap_or(false);
+    // Only materialize the previewed canvas-default slot when a
+    // canvas-default preview is actually active; otherwise keep the
+    // clone-free borrow into the model (§B7).
+    let canvas_default_preview_owned: Option<Option<GlyphBorderConfig>> =
+        preview_canvas_default.map(|view| {
+            let mut slot = map.canvas.default_border.clone();
+            crate::mindmap::border::apply_view_to_slot(&mut slot, &view);
+            slot
+        });
+    let canvas_default_ref: Option<&GlyphBorderConfig> = match &canvas_default_preview_owned {
+        Some(opt) => opt.as_ref(),
+        None => map.canvas.default_border.as_ref(),
+    };
+    // Per-call dimming cache. `hex_with_alpha_scaled` parses →
+    // multiplies → re-formats; on a dense map in NodeEdit mode the
+    // same resolved frame hex recurs once per inactive node.
+    // Bounded by the distinct-frame-color count of one frame.
+    let mut dim_cache: HashMap<String, String> = HashMap::new();
 
     let mut out: Vec<BorderNodeData> = Vec::new();
     let mut parent_channel: usize = 1;
@@ -71,10 +161,13 @@ pub fn border_node_data(map: &MindMap, offsets: &HashMap<String, (f32, f32)>) ->
         let Some(node) = map.nodes.get(node_id) else {
             continue;
         };
-        if map.is_hidden_by_fold(node) {
+        if hidden_set.contains(node.id.as_str()) {
             continue;
         }
-        if !node.style.show_frame {
+        let preview_targets_this_node = preview_node_ids
+            .map(|ids| ids.iter().any(|i| i == &node.id))
+            .unwrap_or(false);
+        if !(node.style.show_frame || (preview_targets_this_node && preview_force_show_frame)) {
             continue;
         }
         // The glyph frame is laid out as four axis-aligned text
@@ -98,18 +191,54 @@ pub fn border_node_data(map: &MindMap, offsets: &HashMap<String, (f32, f32)>) ->
         }
         let (ox, oy) = offsets.get(&node.id).copied().unwrap_or((0.0, 0.0));
         let frame_color_hex = color::resolve_var(&node.style.frame_color, vars);
+        // Border preview: when this node is a `Nodes(ids)` target,
+        // fold the staged edits into a clone of its committed slot
+        // before resolution. A `CanvasDefault` preview instead
+        // substitutes the cascade base (`canvas_default_ref`
+        // above) and leaves per-node slots untouched. Either
+        // flavor leaves the model itself unmodified.
+        let node_slot_owned_for_preview: Option<Option<GlyphBorderConfig>> = if preview_targets_this_node {
+            let view = overrides
+                .preview
+                .map(|p| p.edits)
+                .expect("preview_targets_this_node implies preview is Some");
+            let mut slot = node.style.border.clone();
+            crate::mindmap::border::apply_view_to_slot(&mut slot, &view);
+            Some(slot)
+        } else {
+            None
+        };
+        let node_slot_ref: Option<&GlyphBorderConfig> = match &node_slot_owned_for_preview {
+            Some(opt) => opt.as_ref(),
+            None => node.style.border.as_ref(),
+        };
         // Routes through `resolve_border_style` so per-node
         // GlyphBorderConfig (preset / font / size / color /
         // pattern / palette) drives the rendered output. Without
         // this the data-model fields exist but the renderer
-        // ignores them; with it, all three border-build paths
-        // (this, scene_builder/node_pass, renderer/scene_buffers)
-        // resolve through one shared function.
-        let border_style = resolve_border_style(
-            node.style.border.as_ref(),
-            map.canvas.default_border.as_ref(),
-            frame_color_hex,
-        );
+        // ignores them. This is the *only* resolution of the node
+        // border cascade in a frame: the clip-AABB pass needs just
+        // the extent and takes `resolve_border_font_size_pt`, and
+        // nothing downstream of here resolves it again.
+        let mut border_style = resolve_border_style(node_slot_ref, canvas_default_ref, frame_color_hex);
+        // NodeEdit dimming: every node *other* than the active
+        // target renders its frame at half alpha so the active
+        // node visually pops. `node_edit_for == None` (Default
+        // mode) is the no-op fast path.
+        if overrides
+            .node_edit_for
+            .is_some_and(|active| active != node.id.as_str())
+        {
+            border_style.color = match dim_cache.get(&border_style.color) {
+                Some(hit) => hit.clone(),
+                None => {
+                    let dimmed =
+                        color::hex_with_alpha_scaled(&border_style.color, INACTIVE_NODE_ALPHA_MULTIPLIER);
+                    dim_cache.insert(border_style.color.clone(), dimmed.clone());
+                    dimmed
+                }
+            };
+        }
         let color_rgba = color::hex_to_rgba_safe(&border_style.color, [1.0, 1.0, 1.0, 1.0]);
         let palette_cycle =
             crate::mindmap::border::resolve_palette_cycle(&map.palettes, &border_style, color_rgba);
@@ -142,7 +271,7 @@ pub fn border_node_data(map: &MindMap, offsets: &HashMap<String, (f32, f32)>) ->
 /// `Text::Assign` picks up the new glyphs); adding or removing a
 /// framed node, toggling `show_frame`, or folding an ancestor
 /// drops the equality and forces a full rebuild via the
-/// dispatcher in `update_border_tree_static`.
+/// dispatcher in `CanvasFrame::update_border_tree`.
 pub fn border_identity_sequence(nodes: &[BorderNodeData]) -> Vec<String> {
     nodes.iter().map(|n| n.node_id.clone()).collect()
 }
@@ -174,14 +303,21 @@ pub fn border_identity_sequence(nodes: &[BorderNodeData]) -> Vec<String> {
 ///
 /// O(N log N) where N is the visible framed-node count (the sort
 /// dominates for large maps). Allocates one tree arena plus one
-/// `String` per run. Uses the same `BorderStyle` defaults as
-/// `scene_builder::build_scene` so the two paths can't drift on
-/// style choices.
+/// `String` per run. Builds with [`BorderChromeOverrides::default`]
+/// — the convenience entry point for callers with no preview and
+/// no active `NodeEdit`; the app's per-frame path calls
+/// [`border_node_data`] directly so it can thread both.
 pub fn build_border_tree(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
 ) -> Tree<GfxElement, GfxMutator> {
-    build_border_tree_from_nodes(&border_node_data(map, offsets))
+    let hidden_set = map.fold_hidden_set();
+    build_border_tree_from_nodes(&border_node_data(
+        map,
+        offsets,
+        BorderChromeOverrides::default(),
+        &hidden_set,
+    ))
 }
 
 /// Variant of [`build_border_tree`] that consumes pre-computed
@@ -216,7 +352,13 @@ pub fn build_border_mutator_tree(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
 ) -> crate::gfx_structs::tree::MutatorTree<GfxMutator> {
-    build_border_mutator_tree_from_nodes(&border_node_data(map, offsets))
+    let hidden_set = map.fold_hidden_set();
+    build_border_mutator_tree_from_nodes(&border_node_data(
+        map,
+        offsets,
+        BorderChromeOverrides::default(),
+        &hidden_set,
+    ))
 }
 
 /// Variant of [`build_border_mutator_tree`] that consumes
@@ -249,7 +391,7 @@ pub fn build_border_mutator_tree_from_nodes(
             let mut area = GlyphArea::new_with_str(
                 &spec.text,
                 spec.font_size_pt,
-                spec.font_size_pt,
+                spec.line_height_pt,
                 Vec2::new(spec.position.0, spec.position.1),
                 Vec2::new(spec.bounds.0, spec.bounds.1),
             );
@@ -294,7 +436,7 @@ fn append_border_sub_tree(
     // Stable channels 1..=4 inside each border sub-tree. The
     // per-node Void parent already disambiguates across nodes.
     // Palette offsets sweep top → right → bottom → left around
-    // the rectangle so a colour cycle wraps cleanly. See
+    // the rectangle so a color cycle wraps cleanly. See
     // `BorderRunSpec` for the spec contract.
     for spec in &specs {
         append_border_run(
@@ -304,6 +446,7 @@ fn append_border_sub_tree(
             *unique_id,
             &spec.text,
             spec.font_size_pt,
+            spec.line_height_pt,
             spec.position,
             spec.bounds,
             node.color_rgba,
@@ -327,6 +470,7 @@ pub(super) fn append_border_run(
     unique_id: usize,
     text: &str,
     font_size: f32,
+    line_height: f32,
     position: (f32, f32),
     bounds: (f32, f32),
     color_rgba: [f32; 4],
@@ -338,7 +482,7 @@ pub(super) fn append_border_run(
     let mut area = GlyphArea::new_with_str(
         text,
         font_size,
-        font_size,
+        line_height,
         Vec2::new(position.0, position.1),
         Vec2::new(bounds.0, bounds.1),
     );

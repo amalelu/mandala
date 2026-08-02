@@ -14,45 +14,48 @@ use super::line::GlyphLine;
 use super::matrix::GlyphMatrix;
 
 use crate::core::primitives::{Applicable, ApplyOperation};
+use crate::gfx_structs::delta::{Delta, DeltaField};
 use crate::util::ordered_vec2::OrderedVec2;
 use glam::Vec2;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use strum_macros::{Display, EnumIter};
-
-/// Payload-free discriminant for [`GlyphModelField`]. Used as a
-/// HashMap/HashSet key in [`DeltaGlyphModel`]; cheap to hash and
-/// compare.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Eq, Hash, EnumIter, Display)]
-pub enum GlyphModelFieldType {
-    /// Tag for [`GlyphModelField::GlyphMatrix`].
-    GlyphMatrix,
-    /// Tag for [`GlyphModelField::GlyphLine`].
-    GlyphLine,
-    /// Tag for [`GlyphModelField::GlyphLines`].
-    GlyphLines,
-    /// Reserved for flag deltas; no matching field today
-    /// (§6 seam).
-    Flags,
-    /// Tag for [`GlyphModelField::Layer`].
-    Layer,
-    /// Tag for [`GlyphModelField::Position`].
-    Position,
-    /// Tag for [`GlyphModelField::Operation`] (the control variant).
-    Operation,
-}
+use strum_macros::{Display, EnumDiscriminants, EnumIter};
 
 /// One field of a [`GlyphModel`] plus its new value. The delta
 /// pipeline selects the variant to know which field to touch; the
 /// `Operation` variant is the control knob that picks
 /// `Assign`/`Add`/`Subtract` for the rest of the delta.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Eq)]
+///
+/// The payload-free `GlyphModelFieldType` tag is *derived* from this
+/// enum, so the two can never drift: adding a variant here adds its
+/// tag, and the only other edit a new model mutation needs is its
+/// branch in `GlyphModel::apply_operation` (`CONVENTIONS.md` §B4).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Eq, EnumDiscriminants)]
+#[strum_discriminants(name(GlyphModelFieldType))]
+#[strum_discriminants(derive(Hash, Serialize, Deserialize, EnumIter, Display))]
+#[strum_discriminants(doc = "Payload-free tag for [`GlyphModelField`], derived by strum so it")]
+#[strum_discriminants(doc = "always lists exactly the field variants that exist. Keys the")]
+#[strum_discriminants(doc = "[`DeltaGlyphModel`] map, where using the tag rather than the")]
+#[strum_discriminants(doc = "field avoids hashing the payload (whole glyph matrices) on")]
+#[strum_discriminants(doc = "every lookup.")]
 pub enum GlyphModelField {
-    /// Replace the entire matrix.
+    /// Replace the entire matrix. Operation semantics: `Assign` and
+    /// `Add` both overwrite the matrix (matrix addition is defined as
+    /// per-line overwrite via the `AddAssign` impl); `Subtract`
+    /// and `Multiply` use the matching `*Assign` impls; `Delete`
+    /// clears the matrix to its default empty state.
     GlyphMatrix(GlyphMatrix),
     /// Replace one line at `line_num` with `GlyphLine`.
+    /// `Assign`/`Add` grow missing lines with empty rows as needed.
+    /// `Subtract`/`Multiply`/`Delete` apply only to existing lines and
+    /// no-op for absent rows. Operation semantics otherwise mirror
+    /// `GlyphMatrix`: `Assign`/`Add` overwrite the target line,
+    /// `Subtract`/`Multiply` use the line's `*Assign` impls, `Delete`
+    /// clears the line.
     GlyphLine(usize, GlyphLine),
     /// Replace many lines in one go, identified by `(line_num, line)`.
+    /// Each line is applied independently with the delta's operation;
+    /// growth and destructive no-op semantics per line match
+    /// [`GlyphModelField::GlyphLine`].
     GlyphLines(Vec<(usize, GlyphLine)>),
     /// Replace the draw-order layer.
     Layer(usize),
@@ -67,24 +70,17 @@ impl GlyphModelField {
     pub fn position(x: f32, y: f32) -> Self {
         Self::Position(OrderedVec2::new_f32(x, y))
     }
+}
 
-    /// Discriminant tag for this field. O(1).
-    pub fn variant(&self) -> GlyphModelFieldType {
-        match self {
-            GlyphModelField::GlyphMatrix(_) => GlyphModelFieldType::GlyphMatrix,
-            GlyphModelField::GlyphLine(_, _) => GlyphModelFieldType::GlyphLine,
-            GlyphModelField::Layer(_) => GlyphModelFieldType::Layer,
-            GlyphModelField::Position(_) => GlyphModelFieldType::Position,
-            GlyphModelField::GlyphLines(_) => GlyphModelFieldType::GlyphLines,
-            GlyphModelField::Operation(_) => GlyphModelFieldType::Operation,
-        }
-    }
+impl DeltaField for GlyphModelField {
+    const OPERATION_KEY: GlyphModelFieldType = GlyphModelFieldType::Operation;
 
-    /// Whether `self` and `other` carry the same variant (ignoring
-    /// payload). O(1).
     #[inline]
-    pub fn same_type(&self, other: &GlyphModelField) -> bool {
-        self.variant() == other.variant()
+    fn as_operation(&self) -> Option<ApplyOperation> {
+        match self {
+            GlyphModelField::Operation(operation) => Some(*operation),
+            _ => None,
+        }
     }
 }
 
@@ -95,79 +91,58 @@ impl GlyphModelField {
 /// Field-set delta for a [`GlyphModel`]. One entry per touched field
 /// type; the companion `Operation` entry carries the global
 /// arithmetic mode.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DeltaGlyphModel {
-    /// Keyed by field variant so duplicates collapse.
-    pub fields: FxHashMap<GlyphModelFieldType, GlyphModelField>,
-}
+///
+/// Storage, `new()`, the operation lookup, and the additive merge come
+/// from the shared [`Delta`] container — the model and area deltas are
+/// the same container over different vocabularies. The accessors below
+/// are what *is* model-specific, and they **borrow**: a delta is
+/// applied through a shared reference, and deep-copying a whole
+/// [`GlyphMatrix`] just to read it made `apply_to` pay for a payload
+/// even under `Noop` / `Delete` (`CONVENTIONS.md` §B7 names this a hot
+/// loop).
+pub type DeltaGlyphModel = Delta<GlyphModelField>;
 
 impl DeltaGlyphModel {
-    /// Build a delta from a list of field payloads. Later entries
-    /// of the same variant win. O(n) in `fields.len()`.
-    pub fn new(fields: Vec<GlyphModelField>) -> DeltaGlyphModel {
-        let mut field_map = FxHashMap::default();
-        for field in fields {
-            field_map.insert(field.variant(), field);
-        }
-        DeltaGlyphModel { fields: field_map }
-    }
-
-    /// Clone the matrix payload if present. O(matrix size).
-    pub fn glyph_matrix(&self) -> Option<GlyphMatrix> {
-        if let Some(GlyphModelField::GlyphMatrix(matrix)) = self.fields.get(&GlyphModelFieldType::GlyphMatrix)
-        {
-            Some(matrix.clone())
-        } else {
-            None
+    /// Borrow the matrix payload if present. O(1) — no copy of the
+    /// matrix.
+    pub fn glyph_matrix(&self) -> Option<&GlyphMatrix> {
+        match self.get(GlyphModelFieldType::GlyphMatrix)? {
+            GlyphModelField::GlyphMatrix(matrix) => Some(matrix),
+            _ => None,
         }
     }
 
     /// Layer payload, if any. O(1).
     pub fn layer(&self) -> Option<usize> {
-        if let Some(GlyphModelField::Layer(layer)) = self.fields.get(&GlyphModelFieldType::Layer) {
-            Some(*layer)
-        } else {
-            None
+        match self.get(GlyphModelFieldType::Layer)? {
+            GlyphModelField::Layer(layer) => Some(*layer),
+            _ => None,
         }
     }
 
-    /// Clone the single-line payload if present. O(line length).
-    pub fn glyph_line(&self) -> Option<(usize, GlyphLine)> {
-        if let Some(GlyphModelField::GlyphLine(line_num, glyph_line)) =
-            self.fields.get(&GlyphModelFieldType::GlyphLine)
-        {
-            Some((*line_num, glyph_line.clone()))
-        } else {
-            None
+    /// Borrow the single-line payload if present, with its target
+    /// line number. O(1) — no copy of the line.
+    pub fn glyph_line(&self) -> Option<(usize, &GlyphLine)> {
+        match self.get(GlyphModelFieldType::GlyphLine)? {
+            GlyphModelField::GlyphLine(line_num, glyph_line) => Some((*line_num, glyph_line)),
+            _ => None,
         }
     }
 
-    /// Clone the multi-line payload if present. O(sum of line sizes).
-    pub fn glyph_lines(&self) -> Option<Vec<(usize, GlyphLine)>> {
-        if let Some(GlyphModelField::GlyphLines(lines)) = self.fields.get(&GlyphModelFieldType::GlyphLines) {
-            Some(lines.clone())
-        } else {
-            None
+    /// Borrow the multi-line payload if present. O(1) — no copy of
+    /// the lines.
+    pub fn glyph_lines(&self) -> Option<&[(usize, GlyphLine)]> {
+        match self.get(GlyphModelFieldType::GlyphLines)? {
+            GlyphModelField::GlyphLines(lines) => Some(lines),
+            _ => None,
         }
     }
 
     /// Position payload, if any. O(1).
     pub fn position(&self) -> Option<OrderedVec2> {
-        if let Some(GlyphModelField::Position(vec)) = self.fields.get(&GlyphModelFieldType::Position) {
-            Some(*vec)
-        } else {
-            None
-        }
-    }
-
-    /// Global arithmetic mode (`Assign` / `Add` / `Subtract`), or
-    /// `Noop` when no `Operation` entry is present. O(1).
-    pub fn operation_variant(&self) -> ApplyOperation {
-        if let Some(GlyphModelField::Operation(operation)) = self.fields.get(&GlyphModelFieldType::Operation)
-        {
-            *operation
-        } else {
-            ApplyOperation::Noop
+        match self.get(GlyphModelFieldType::Position)? {
+            GlyphModelField::Position(position) => Some(*position),
+            _ => None,
         }
     }
 }
@@ -182,35 +157,19 @@ impl Applicable<GlyphModel> for DeltaGlyphModel {
 ////// GlyphModelCommand Mutator //////
 //////////////////////////////////////
 
-/// Payload-free discriminant for [`GlyphModelCommand`]. Keyable in
-/// HashMap/HashSet for command-dispatch tables.
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Eq, Hash, EnumIter, Display)]
-pub enum GlyphModelCommandType {
-    /// Tag for `GlyphModelCommand::NudgeLeft`.
-    NudgeLeft,
-    /// Tag for `GlyphModelCommand::NudgeRight`.
-    NudgeRight,
-    /// Tag for `GlyphModelCommand::NudgeDown`.
-    NudgeDown,
-    /// Tag for `GlyphModelCommand::NudgeUp`.
-    NudgeUp,
-    /// Tag for `GlyphModelCommand::MoveTo`.
-    MoveTo,
-    /// Reserved for a future flag-setting command (§6 seam).
-    SetFlag,
-    /// Tag for `GlyphModelCommand::Rotate`.
-    Rotate,
-    /// Tag for `GlyphModelCommand::RudeInsert`.
-    RudeInsert,
-    /// Tag for `GlyphModelCommand::PoliteInsert`.
-    PoliteInsert,
-}
-
 /// Imperative command targeting a [`GlyphModel`]. Unlike
 /// [`DeltaGlyphModel`] (arithmetic), each variant performs one
 /// fixed operation. All variants are O(1) on position; the insert
 /// variants are O(line length).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// The payload-free `GlyphModelCommandType` tag is derived from this
+/// enum, so a new command cannot ship without its tag.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, EnumDiscriminants)]
+#[strum_discriminants(name(GlyphModelCommandType))]
+#[strum_discriminants(derive(Hash, Serialize, Deserialize, EnumIter, Display))]
+#[strum_discriminants(doc = "Payload-free tag for [`GlyphModelCommand`], derived by strum.")]
+#[strum_discriminants(doc = "Keyable in `HashMap`/`HashSet` for command-dispatch tables.")]
+#[serde(deny_unknown_fields)]
 pub enum GlyphModelCommand {
     /// Shift position left by the given pixels.
     NudgeLeft(f32),
@@ -224,7 +183,10 @@ pub enum GlyphModelCommand {
     MoveTo(f32, f32),
     /// Rotate position around `pivot` by `degrees` (clockwise).
     Rotate {
-        /// Pivot in world coordinates.
+        /// Pivot in world coordinates. On the wire this is a
+        /// two-element `[x, y]` array — `glam` serializes `Vec2` as a
+        /// sequence and its deserializer rejects the
+        /// `{"x": …, "y": …}` object form. See `format/mutations.md`.
         pivot: Vec2,
         /// Rotation angle in degrees.
         degrees: f32,
@@ -249,29 +211,6 @@ pub enum GlyphModelCommand {
         /// Grapheme-index inside the line.
         at_idx: usize,
     },
-}
-
-impl GlyphModelCommand {
-    /// Discriminant tag for this command. O(1).
-    pub fn variant(&self) -> GlyphModelCommandType {
-        match self {
-            GlyphModelCommand::NudgeLeft(_) => GlyphModelCommandType::NudgeLeft,
-            GlyphModelCommand::NudgeRight(_) => GlyphModelCommandType::NudgeRight,
-            GlyphModelCommand::NudgeDown(_) => GlyphModelCommandType::NudgeDown,
-            GlyphModelCommand::NudgeUp(_) => GlyphModelCommandType::NudgeUp,
-            GlyphModelCommand::MoveTo(_, _) => GlyphModelCommandType::MoveTo,
-            GlyphModelCommand::Rotate { .. } => GlyphModelCommandType::Rotate,
-            GlyphModelCommand::RudeInsert { .. } => GlyphModelCommandType::RudeInsert,
-            GlyphModelCommand::PoliteInsert { .. } => GlyphModelCommandType::PoliteInsert,
-        }
-    }
-
-    /// Whether `self` and `other` share the same variant (ignoring
-    /// payload). O(1).
-    #[inline]
-    pub fn same_type(&self, other: &Self) -> bool {
-        self.variant() == other.variant()
-    }
 }
 
 impl Applicable<GlyphModel> for GlyphModelCommand {

@@ -265,7 +265,7 @@ the surfaces it didn't fully replace.
   inside NodeEdit).
 
 - **Modal stealers** (`ConsoleState`, `ColorPickerState`,
-  `LabelEditState`, `PortalTextEditState`, `TextEditState`) stay as
+  `SingleLineEditor`, `TextEditState`) stay as
   separate states. They steal *keystrokes*; modes drive *click
   routing and chrome*. The two systems are layered, not merged. This
   matches CODE_CONVENTIONS §3 carve-out for modal steals.
@@ -622,7 +622,7 @@ still saves). This matches `ColorPicker`'s pattern.
 ### 3.7 Macro / privilege gate review
 
 The new Action variants are reviewed against
-`MacroSource::allows_action`:
+`SourceTier::allows_action`:
 
 - `EnterNodeEdit` is `destructive` (opens the editor, which is
   treated as destructive today — it can clear the section's text on
@@ -1072,7 +1072,7 @@ SplitSection { at: String },
 
 The dispatch arms route to the same setters the console verbs do.
 Macro privilege gates: every `destructive` variant is User-tier-only
-(or above) per the existing `MacroSource::allows_action` denylist.
+(or above) per the existing `SourceTier::allows_action` denylist.
 
 ### 4.7 Section visual hover affordance
 

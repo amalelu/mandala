@@ -13,7 +13,10 @@
 //! screen-space point, `Scene::component_at` walks trees in
 //! top-to-bottom draw order, asks each in turn whether it contains
 //! the point, and returns the first `(SceneTreeId, NodeId)` hit.
-//! Each individual tree then resolves the concrete target via
+//! `Scene::component_in` is the scoped sibling: same descent, but
+//! against one named tree, for callers whose own priority ladder
+//! already picked the component. Each individual tree then resolves
+//! the concrete target via
 //! [`Tree::descendant_at`](crate::gfx_structs::tree::Tree::descendant_at)
 //! — so the scene-level index stays cheap (O(trees)) and the
 //! per-tree walk stays linear in the tree's own node count.
@@ -61,6 +64,13 @@ impl SceneEntry {
     /// renderer's per-tree buffer walker.
     pub fn tree(&self) -> &Tree<GfxElement, GfxMutator> {
         &self.tree
+    }
+
+    /// Consume this entry and return the tree it owned. After this
+    /// call the entry no longer exists in the scene; use
+    /// [`Scene::remove`] to obtain an entry before calling this.
+    pub fn into_tree(self) -> Tree<GfxElement, GfxMutator> {
+        self.tree
     }
 
     /// Higher layers draw on top. Equal layers break ties by
@@ -240,7 +250,7 @@ impl Scene {
     ///
     /// # Costs
     ///
-    /// O(trees) outer scan + a memoised AABB check per tree
+    /// O(trees) outer scan + a memoized AABB check per tree
     /// (O(1) when warm, O(descendants) once after each mutator).
     /// On a hit, one additional O(descendants) walk inside the
     /// matched tree via [`Tree::descendant_at`]. Misses cost only
@@ -283,6 +293,41 @@ impl Scene {
             }
         }
         None
+    }
+
+    /// Hit-test a **single** registered tree instead of the whole
+    /// scene. Returns the best-matching descendant [`NodeId`] inside
+    /// `id`'s tree, or `None` when the id is unknown, the entry is
+    /// hidden, or nothing under it contains `point`.
+    ///
+    /// `point` is in the same space [`Self::component_at`] takes; the
+    /// entry's `offset` is subtracted before the descent, so callers
+    /// pass scene coordinates and never the tree-local ones.
+    ///
+    /// Where [`Self::component_at`] answers "what did the user click
+    /// anywhere on screen", this answers "what did the user click
+    /// *within this component*" — the shape a caller wants when the
+    /// surrounding priority ladder already decided which component
+    /// owns the click (e.g. the app resolving a portal-marker click
+    /// before falling through to the connection paths beneath).
+    ///
+    /// # Costs
+    ///
+    /// One memoized AABB reject (O(1) warm, O(descendants) once
+    /// after each mutator) plus, on a hit, one BVH descent via
+    /// [`Tree::descendant_at`]. A miss costs only the bbox check.
+    ///
+    /// # Precondition
+    ///
+    /// Same as [`Self::component_at`]: all pending mutations must be
+    /// applied first, or the BVH caches answer from stale geometry.
+    pub fn component_in(&mut self, id: SceneTreeId, point: Vec2) -> Option<NodeId> {
+        let entry = self.trees.get(id.0)?;
+        if !entry.contains(point) {
+            return None;
+        }
+        let local = point - entry.offset;
+        self.trees.get_mut(id.0)?.tree.descendant_at(local)
     }
 
     fn ensure_layer_order(&mut self) {

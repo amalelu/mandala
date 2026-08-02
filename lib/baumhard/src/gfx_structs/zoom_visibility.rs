@@ -26,6 +26,7 @@ use std::hash::{Hash, Hasher};
 /// assert!(!only_zoomed_in.contains(1.0));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ZoomVisibility {
     /// Lower bound on `camera.zoom`; `None` = unbounded below.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -5,7 +5,7 @@
 //! `Instruction` control-flow directive, and the `GlyphTreeEvent`
 //! side channel that the walker threads through `apply_to`.
 
-use crate::core::primitives::Applicable;
+use crate::core::primitives::{Applicable, Discriminated};
 use crate::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaCommand};
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::model::{DeltaGlyphModel, GlyphModel, GlyphModelCommand};
@@ -16,7 +16,7 @@ use crate::util::ordered_vec2::OrderedVec2;
 use log::debug;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
-use strum_macros::Display;
+use strum_macros::{Display, EnumDiscriminants};
 
 /// A control-flow directive attached to a [`GfxMutator::Instruction`]
 /// node. Instructions govern *how* the tree walker processes the
@@ -41,7 +41,7 @@ pub enum Instruction {
     /// Rotate every predicate-matching descendant around the pivot
     /// element's position by `f32` degrees. **Stub**: the tree walker
     /// currently no-ops this; the slot exists so adding the
-    /// implementation later doesn't break serialised trees.
+    /// implementation later doesn't break serialized trees.
     RotateWhile(f32, Predicate),
     /// Descend the target tree using per-node subtree AABBs to find
     /// the deepest node whose own AABB contains the given point,
@@ -73,23 +73,6 @@ pub enum Instruction {
     MapChildren,
 }
 
-/// Discriminant returned by [`GfxMutator::get_type`] for fast
-/// variant-matching without destructuring the full enum. No heap
-/// cost — `Copy` and comparison is a single-byte test.
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum MutatorType {
-    /// A single field-level mutation.
-    Single,
-    /// A batch of mutations applied to the same target element.
-    Macro,
-    /// A placeholder node that occupies a tree position without
-    /// carrying a mutation — used to align channels.
-    Void,
-    /// A control-flow node whose [`Instruction`] governs child
-    /// traversal.
-    Instruction,
-}
-
 /// A timestamped occurrence of a [`GlyphTreeEvent`] delivered to a
 /// target element's event subscribers via
 /// [`Mutation::Event`]. Unlike field mutations, events do not change
@@ -99,7 +82,8 @@ pub enum MutatorType {
 ///
 /// Cost: one allocation for the boxed closure dispatch per subscriber;
 /// no arena walk.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct GlyphTreeEventInstance {
     /// The kind of event being delivered.
     pub event_type: GlyphTreeEvent,
@@ -130,6 +114,7 @@ impl GlyphTreeEventInstance {
 ///
 /// Cost: 8 bytes, `Copy`.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct MouseEventData {
     /// Canvas-space X coordinate.
     pub x: OrderedFloat<f32>,
@@ -171,24 +156,6 @@ pub enum GlyphTreeEvent {
     NoopEvent(usize),
 }
 
-/// Discriminant returned by [`Mutation::get_type`] for lightweight
-/// variant inspection without destructuring. `Copy` — no heap cost.
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum MutationType {
-    /// Field-level delta targeting a [`GlyphArea`].
-    AreaDelta,
-    /// Imperative command targeting a [`GlyphArea`].
-    AreaCommand,
-    /// Field-level delta targeting a [`GlyphModel`].
-    ModelDelta,
-    /// Imperative command targeting a [`GlyphModel`].
-    ModelCommand,
-    /// An event delivered to subscribers.
-    Event,
-    /// The no-op sentinel.
-    None,
-}
-
 /// A single atomic change that can be applied to a [`GfxElement`].
 ///
 /// Mutations are the leaf payload of the mutator pipeline: a
@@ -197,7 +164,27 @@ pub enum MutationType {
 /// [`Mutation::apply_to`], which routes to the appropriate
 /// element-type method. Boxed variants keep the enum size uniform
 /// (one pointer + discriminant) regardless of inner payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// The payload-free `MutationType` tag is derived from this enum and
+/// reached through
+/// [`crate::core::primitives::Discriminated::variant`].
+///
+/// `PartialEq` is IEEE equality over the whole payload, derived. Not
+/// `Eq`, and **not reflexive**: the numeric payloads are `f32`, so a
+/// mutation carrying a `NaN` is not equal to itself. Use
+/// [`Mutation::writes_the_same`] — not `==` — for "would these two
+/// write the same thing", which is the question
+/// [`flat_mutations`](crate::mindmap::custom_mutation::flat_mutations)
+/// asks before collapsing an AST's nested payloads into one list.
+/// `==` is still the right operator for an ordinary value
+/// comparison; it is only the *agreement* predicate that needs the
+/// reflexive form.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, EnumDiscriminants)]
+#[strum_discriminants(name(MutationType))]
+#[strum_discriminants(derive(Hash, Serialize, Deserialize))]
+#[strum_discriminants(doc = "Payload-free tag for [`Mutation`], derived by strum. Lets a")]
+#[strum_discriminants(doc = "caller inspect which kind of mutation is carried without")]
+#[strum_discriminants(doc = "destructuring it. `Copy` — no heap cost.")]
 pub enum Mutation {
     /// A field-level delta applied to a [`GlyphArea`]. The
     /// [`DeltaGlyphArea`] may add, assign, or subtract from one or
@@ -264,6 +251,56 @@ impl Mutation {
         Mutation::None
     }
 
+    /// Whether these two mutations would write the same thing —
+    /// the **reflexive** payload-agreement predicate, as opposed to
+    /// `==`.
+    ///
+    /// Derived `PartialEq` over `f32` is not an equivalence relation:
+    /// `NaN != NaN`, so a mutation carrying a `NaN` is not `==` to
+    /// itself. That matters because
+    /// [`flat_mutations`](crate::mindmap::custom_mutation::flat_mutations)
+    /// collapses an AST only when every payload beneath the root
+    /// agrees with the one it returns, and
+    /// [`scope::self_and_descendants`](crate::mindmap::custom_mutation::scope::self_and_descendants)
+    /// builds its AST by cloning **one** list into two `Macro` nodes
+    /// — so that comparison is a payload against itself. Under `==`
+    /// a `NaN` there declines the whole mutator while the identical
+    /// payload under
+    /// [`scope::self_only`](crate::mindmap::custom_mutation::scope::self_only)
+    /// applies: two helpers differing only in scope disagreeing on
+    /// whether the mutation runs at all.
+    ///
+    /// Two payloads agree when they are `==` **or** when they are
+    /// structurally identical. The second disjunct is what restores
+    /// reflexivity; the first is what keeps `0.0` agreeing with
+    /// `-0.0`, which "would write the same thing" requires. The
+    /// union is itself an equivalence relation: structural identity
+    /// implies equal values except for `NaN` payload bits, so a
+    /// chain through either disjunct stays consistent.
+    ///
+    /// Structural identity is taken over the derived `Debug`
+    /// rendering, which is the NaN-normalizing view of these types
+    /// that costs no hand-written traversal: `f32`'s `Debug` prints
+    /// every `NaN` as `NaN` while distinguishing `inf`, `-0.0` and
+    /// every finite value (its shortest round-tripping form is
+    /// injective). None of the types reachable from a `Mutation` has
+    /// a hand-written `Debug`, so the rendering is total — nothing is
+    /// elided, and two mutations rendering alike really are alike.
+    ///
+    /// The serialized form is **not** usable for this: `serde_json`
+    /// writes every non-finite float as `null`, so it would make a
+    /// `NaN` payload agree with an `inf` one — and `inf` *is*
+    /// reachable from a `.mindmap.json` (an out-of-range literal), so
+    /// that would be a silently-dropped payload rather than merely an
+    /// over-strict decline.
+    ///
+    /// Costs: O(1) on the common path — `==` answers, and only a
+    /// genuine disagreement or a `NaN` reaches the fallback, which
+    /// renders both operands into `String`s.
+    pub fn writes_the_same(&self, other: &Self) -> bool {
+        self == other || format!("{self:?}") == format!("{other:?}")
+    }
+
     /// Returns `true` when this mutation carries actual work (i.e. is
     /// not `Mutation::None`). O(1).
     pub fn is_some(&self) -> bool {
@@ -277,12 +314,9 @@ impl Mutation {
     /// (logged at debug level). Cost: O(k) in the number of delta
     /// fields, or O(1) for commands and events.
     pub fn apply_to(&self, target: &mut GfxElement) {
-        match self {
-            Event(event) => {
-                target.accept_event(event);
-                return;
-            }
-            _ => {}
+        if let Event(event) = self {
+            target.accept_event(event);
+            return;
         }
         match target {
             GfxElement::GlyphArea { glyph_area, .. } => {
@@ -292,19 +326,6 @@ impl Mutation {
                 self.apply_to_model(glyph_model);
             }
             GfxElement::Void { .. } => {}
-        }
-    }
-
-    /// Return the [`MutationType`] discriminant for this mutation.
-    /// O(1), no allocation.
-    pub fn get_type(&self) -> MutationType {
-        match self {
-            AreaDelta(_) => MutationType::AreaDelta,
-            AreaCommand(_) => MutationType::AreaCommand,
-            ModelDelta(_) => MutationType::ModelDelta,
-            ModelCommand(_) => MutationType::ModelCommand,
-            Event(_) => MutationType::Event,
-            Mutation::None => MutationType::None,
         }
     }
 
@@ -331,9 +352,9 @@ impl Mutation {
             // `apply_to` filters `Event` before reaching here.
             // A direct caller hitting this arm is a regression in
             // the dispatch invariant, not a runtime user error.
-            Event(_) => unreachable!(
-                "Event reached apply_to_area; apply_to() must filter Event before dispatch"
-            ),
+            Event(_) => {
+                unreachable!("Event reached apply_to_area; apply_to() must filter Event before dispatch")
+            }
         }
     }
 
@@ -350,18 +371,15 @@ impl Mutation {
                 debug!("Tried to apply an area mutation to a model, ignoring.");
             }
             Mutation::None => {}
-            Event(_) => unreachable!(
-                "Event reached apply_to_model; apply_to() must filter Event before dispatch"
-            ),
+            Event(_) => {
+                unreachable!("Event reached apply_to_model; apply_to() must filter Event before dispatch")
+            }
         }
     }
 
     /// Returns `true` when this is the `Mutation::None` no-op. O(1).
     pub fn is_none(&self) -> bool {
-        match self {
-            Mutation::None => true,
-            _ => false,
-        }
+        matches!(self, Mutation::None)
     }
 }
 
@@ -378,7 +396,17 @@ impl Mutation {
 ///
 /// Cost of applying: O(1) for `Single`/`Void`, O(k) for `Macro`
 /// where k is the number of inner mutations.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// The payload-free `MutatorType` tag is derived from this enum and
+/// reached through
+/// [`crate::core::primitives::Discriminated::variant`].
+#[derive(Clone, Debug, Serialize, Deserialize, EnumDiscriminants)]
+#[strum_discriminants(name(MutatorType))]
+#[strum_discriminants(derive(Hash, Serialize, Deserialize))]
+#[strum_discriminants(doc = "Payload-free tag for [`GfxMutator`], derived by strum. Lets the")]
+#[strum_discriminants(doc = "walker match a mutator kind without destructuring the full")]
+#[strum_discriminants(doc = "enum. No heap cost — `Copy`, and comparison is a single-byte")]
+#[strum_discriminants(doc = "test.")]
 pub enum GfxMutator {
     /// A single mutation targeting the element at the matching channel.
     Single {
@@ -454,21 +482,10 @@ impl GfxMutator {
         }
     }
 
-    /// Return the [`MutatorType`] discriminant without destructuring.
-    /// O(1), no allocation.
-    pub fn get_type(&self) -> MutatorType {
-        match self {
-            GfxMutator::Single { .. } => MutatorType::Single,
-            GfxMutator::Void { .. } => MutatorType::Void,
-            GfxMutator::Instruction { .. } => MutatorType::Instruction,
-            GfxMutator::Macro { .. } => MutatorType::Macro,
-        }
-    }
-
     /// Test whether this mutator is of the given [`MutatorType`].
     /// O(1), no allocation.
     pub fn is(&self, mutator_type: MutatorType) -> bool {
-        self.get_type() == mutator_type
+        self.variant() == mutator_type
     }
 }
 

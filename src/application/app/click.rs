@@ -8,13 +8,14 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use baumhard::mindmap::custom_mutation::PlatformContext;
+use baumhard::mindmap::tree_builder::PortalPart;
 
 use super::click_triggers::fire_onclick_triggers;
-use super::scene_rebuild::{rebuild_all, rebuild_scene_only};
+use super::scene_rebuild::{build_overlaid_tree, rebuild_all, rebuild_scene_only};
 use super::{now_ms, InteractionMode, EDGE_HIT_TOLERANCE_PX};
 use crate::application::document::{
-    apply_tree_highlights, hit_test_edge, MindMapDocument, SectionSel, SelectionState,
-    REPARENT_SOURCE_COLOR, REPARENT_TARGET_COLOR,
+    hit_test_edge, MindMapDocument, SectionSel, SelectionState, REPARENT_SOURCE_COLOR,
+    REPARENT_TARGET_COLOR,
 };
 use crate::application::renderer::Renderer;
 
@@ -74,22 +75,21 @@ pub(super) fn handle_click(
             // separately by the event loop and pans the camera
             // to the opposite endpoint.
             let canvas_pos = renderer.screen_to_canvas(cursor_pos.0 as f32, cursor_pos.1 as f32);
-            // Portal sub-part precedence: text first, icon next.
-            // Text and icon AABBs don't overlap in practice (text
-            // sits beside the icon along the border normal), so
-            // only one of these hits at a time — the ordering
-            // keeps routing deterministic even if future layout
-            // changes make them adjacent.
-            if let Some((edge_key, endpoint)) = renderer.hit_test_portal_text(canvas_pos) {
-                doc.selection = SelectionState::PortalText(crate::application::document::PortalLabelSel {
-                    edge_key,
-                    endpoint_node_id: endpoint,
-                });
-            } else if let Some((edge_key, endpoint)) = renderer.hit_test_portal(canvas_pos) {
-                doc.selection = SelectionState::PortalLabel(crate::application::document::PortalLabelSel {
-                    edge_key,
-                    endpoint_node_id: endpoint,
-                });
+            // One BVH descent over the portal tree names both the
+            // endpoint and which of its two sibling leaves — icon
+            // or text — the click landed on, so the sub-part
+            // precedence is decided by geometry (smallest area
+            // wins) rather than by the order two side maps happen
+            // to be scanned in.
+            if let Some(hit) = app_scene.portal_at(canvas_pos) {
+                let sel = crate::application::document::PortalLabelSel {
+                    edge_key: hit.edge_key,
+                    endpoint_node_id: hit.endpoint_node_id,
+                };
+                doc.selection = match hit.part {
+                    PortalPart::Text => SelectionState::PortalText(sel),
+                    PortalPart::Icon => SelectionState::PortalLabel(sel),
+                };
             } else {
                 let tolerance = EDGE_HIT_TOLERANCE_PX * renderer.canvas_per_pixel();
                 let edge_hit = hit_test_edge(canvas_pos, &doc.mindmap, tolerance);
@@ -123,8 +123,6 @@ pub(super) fn rebuild_all_with_mode(
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
-    let mut new_tree = doc.build_tree();
-
     // Build a single flat list of (mind_node_id, color) pairs that
     // `apply_tree_highlights` applies via baumhard's mutator/walker.
     // Order matters: later entries override earlier ones via the
@@ -163,13 +161,12 @@ pub(super) fn rebuild_all_with_mode(
             }
         }
         // Default / NodeEdit / Resize don't contribute selection-
-        // tinting highlights — NodeEdit dimming and Resize tinting
-        // run through their own scene-builder seams (`node_pass.rs`
-        // alpha multiplier, scene_builder handle emission) rather
-        // than through `apply_tree_highlights`.
+        // tinting highlights. NodeEdit dimming is a separate overlay
+        // `build_overlaid_tree` stamps; Resize tinting rides on the
+        // handle trees.
         InteractionMode::Default | InteractionMode::NodeEdit { .. } | InteractionMode::Resize { .. } => {}
     }
-    apply_tree_highlights(&mut new_tree, highlights);
+    let new_tree = build_overlaid_tree(doc, interaction_mode, highlights);
     renderer.rebuild_buffers_from_tree(&new_tree.tree);
 
     rebuild_scene_only(doc, interaction_mode, app_scene, renderer, scene_cache);
@@ -188,7 +185,7 @@ pub(super) fn rebuild_all_with_mode(
 /// (or in NodeEdit on a different node) every click on a multi-section
 /// node folds to whole-node `Single` / `Multi`. Single-section nodes
 /// always fold via `hit_test_target`'s short-circuit (they never
-/// produce `hit_section = Some(_)`), so their click behaviour is
+/// produce `hit_section = Some(_)`), so their click behavior is
 /// unchanged from pre-Batch-3.
 ///
 /// Plain click:
@@ -252,7 +249,7 @@ pub(super) fn compute_node_click_selection(
         };
     }
 
-    // Whole-node shift+click: existing behaviour (toggle node in/out of Multi).
+    // Whole-node shift+click: existing behavior (toggle node in/out of Multi).
     match existing {
         SelectionState::None
         | SelectionState::Edge(_)
@@ -455,7 +452,7 @@ mod tests {
         }
     }
 
-    // Plain click — non-section behaviour stays intact.
+    // Plain click — non-section behavior stays intact.
 
     #[test]
     fn test_plain_click_overrides_existing_multi_with_single() {
@@ -469,7 +466,7 @@ mod tests {
         }
     }
 
-    // Shift+click — whole-node toggle behaviour stays intact.
+    // Shift+click — whole-node toggle behavior stays intact.
 
     #[test]
     fn test_shift_click_same_single_node_toggles_off() {

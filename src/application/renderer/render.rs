@@ -49,7 +49,7 @@ impl Renderer {
         let sid = shape_id as f32;
         // UVs match the quad's local frame: TL = (0, 0), TR = (1, 0),
         // BR = (1, 1), BL = (0, 1). The SDF cases in the fragment
-        // shader assume exactly this parameterisation.
+        // shader assume exactly this parameterization.
         let push = |out: &mut Vec<f32>, x: f32, y: f32, u: f32, v: f32| {
             out.extend_from_slice(&[x, y, u, v, r, g, b, a, sid]);
         };
@@ -246,6 +246,13 @@ impl Renderer {
             //    overlays, all drawn on top of the node backgrounds.
             //    Interactive path: log and continue on render failure
             //    so a single bad atlas frame doesn't crash the editor.
+            //    Unreachable as of glyphon 0.11.0 — `TextRenderer::
+            //    render` returns `Ok(())` on every path and neither
+            //    `RenderError` variant is ever constructed — so this
+            //    is forward-compat cover, not a live warn, and it
+            //    carries no frame-rate spam risk today. Kept because
+            //    the signature is fallible and a future glyphon may
+            //    start using it.
             if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
                 log::warn!("text_renderer.render failed: {e}");
             }
@@ -267,6 +274,8 @@ impl Renderer {
             //    filtered action rows. Drawn on top of the palette
             //    backdrop so every glyph sits cleanly on solid fill.
             //    Interactive path: log and continue on render failure.
+            //    Unreachable in glyphon 0.11.0 for the same reason as
+            //    the main pass above; kept as forward-compat cover.
             if let Err(e) = self
                 .console_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
@@ -280,8 +289,9 @@ impl Renderer {
     }
 
     /// Collect every visible text-area from the renderer's buffer
-    /// maps (mindmap nodes, borders, connection labels, edge
-    /// handles, overlays, canvas-scene, console, color picker, FPS
+    /// maps (mindmap nodes, overlays, canvas-scene — which carries
+    /// borders, connections, labels, and handles through the tree
+    /// pipeline — console, color picker, FPS
     /// overlay) and run both `text_renderer.prepare()` and
     /// `console_text_renderer.prepare()` against the atlas. Returns
     /// `false` (and skips the rest of the caller's frame) on
@@ -308,19 +318,18 @@ impl Renderer {
         };
         let default_color = COLOR_WHITE;
 
-        // Collect "main" text areas: the mindmap + borders +
-        // connections + edge handles + overlays + arena buffers.
+        // Collect "main" text areas: the mindmap node buffers +
+        // overlays + canvas-scene arena buffers (borders,
+        // connections, labels, portals, handles all arrive here
+        // through the tree walker).
         // Palette buffers go into a separate list so they render
         // in a second glyphon pass (with the backdrop rect
         // between them, hence the split).
         // Upper-bound capacity so the per-frame `Vec` doesn't grow
         // through several reallocs. Visibility-culling reduces the
-        // realised count below this; allocating once at the ceiling
+        // realized count below this; allocating once at the ceiling
         // is still cheaper than `push` reallocations.
         let main_capacity = self.mindmap_buffers.values().map(|v| v.len()).sum::<usize>()
-            + self.border_buffers.values().map(|v| v.len()).sum::<usize>()
-            + self.connection_label_buffers.len()
-            + self.edge_handle_buffers.len()
             + self.overlay_buffers.len()
             + self.canvas_scene_buffers.len();
         let mut main_text_areas: Vec<TextArea> = Vec::with_capacity(main_capacity);
@@ -328,9 +337,6 @@ impl Renderer {
             self.mindmap_buffers
                 .values()
                 .flat_map(|v| v.iter())
-                .chain(self.border_buffers.values().flat_map(|v| v.iter()))
-                .chain(self.connection_label_buffers.values())
-                .chain(self.edge_handle_buffers.iter())
                 .chain(self.overlay_buffers.iter())
                 .chain(self.canvas_scene_buffers.iter())
                 .filter_map(|tb| {
@@ -383,15 +389,37 @@ impl Renderer {
         );
 
         // Interactive path: a contended font-system lock must skip
-        // the frame, not abort the process.
+        // the frame, not abort the process. `debug!`, not `warn!`,
+        // per CODE_CONVENTIONS §9: this runs once per frame, the
+        // skip is a designed transient that the next frame retries,
+        // and there is nothing a user could act on — a `warn!` here
+        // would flood stderr at frame rate for no diagnostic gain.
+        // `rebuild_mode_status_overlay_if_needed` takes the same
+        // contention path silently for the same reason.
         let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
-            log::warn!("font_system lock contended in prepare_text_for_pass, skipping");
+            log::debug!("renderer: font_system lock contended in prepare_text_for_pass, skipping");
             return false;
         };
 
         // Interactive path: a glyphon prepare failure must degrade the
         // frame, not abort the process. Skip the whole render so we
         // don't run a half-prepared atlas through the GPU.
+        //
+        // Logged once per fault episode, not once per frame. Unlike
+        // the `render()` failures above, `PrepareError::AtlasFull` is
+        // reachable and can be *permanent*: glyphon only reports it
+        // after `TextAtlas::grow()` returns `false`, which it does
+        // unconditionally once the atlas has reached
+        // `max_texture_dimension_2d` — commonly 4096 on WebGL2, a
+        // first-class target under CODE_CONVENTIONS §4. Returning
+        // `false` here makes the caller bail before
+        // `get_current_texture()` / `present()`, so the skipped frame
+        // takes no vsync backpressure either: under
+        // `RedrawMode::NoLimit` with `ControlFlow::Poll` the loop
+        // spins at CPU rate during a drag or animation and an
+        // unguarded `warn!` would write a line per spin. The flag
+        // clears on the next successful prepare, so a transient fault
+        // logs again if it returns.
         if let Err(e) = self.text_renderer.prepare(
             &self.device,
             &self.queue,
@@ -401,7 +429,10 @@ impl Renderer {
             main_text_areas,
             &mut self.swash_cache,
         ) {
-            log::warn!("text_renderer.prepare failed, skipping frame: {e}");
+            if !self.prepare_fault_logged {
+                self.prepare_fault_logged = true;
+                log::warn!("text_renderer.prepare failed, skipping frame: {e}");
+            }
             return false;
         }
         if let Err(e) = self.console_text_renderer.prepare(
@@ -413,10 +444,14 @@ impl Renderer {
             palette_text_areas,
             &mut self.swash_cache,
         ) {
-            log::warn!("console_text_renderer.prepare failed, skipping frame: {e}");
+            if !self.prepare_fault_logged {
+                self.prepare_fault_logged = true;
+                log::warn!("console_text_renderer.prepare failed, skipping frame: {e}");
+            }
             return false;
         }
         drop(font_system);
+        self.prepare_fault_logged = false;
         true
     }
 

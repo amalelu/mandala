@@ -4,6 +4,8 @@
 //! token 0 surfaces verbs + kv keys; `KvValue { key }` matches a
 //! per-key vocabulary (presets, palette names, font families).
 
+use baumhard::mindmap::border::border_preset_hint;
+
 use crate::application::console::completion::{
     prefix_filter, Completion, CompletionContext, CompletionState,
 };
@@ -59,8 +61,12 @@ const SIDE_VALUES: &[&str] = &["top", "bottom", "left", "right", "all"];
 const CORNER_VALUES: &[&str] = &["tl", "tr", "bl", "br", "all"];
 
 /// `border preset <TAB>` and `border preset=<TAB>` value
-/// completion.every entry from `BORDER_PRESETS`
-/// plus `cycle`.
+/// completion: every entry from `BORDER_PRESETS` plus `cycle`.
+///
+/// Hints come from `baumhard::mindmap::border::border_preset_hint`,
+/// which derives from the same `PRESET_TABLE` `BORDER_PRESETS` does
+/// — a preset added to the table arrives here already described,
+/// instead of completing with a blank hint.
 fn preset_value_completions(partial: &str) -> Vec<Completion> {
     let mut out: Vec<Completion> = super::PRESETS
         .iter()
@@ -68,7 +74,7 @@ fn preset_value_completions(partial: &str) -> Vec<Completion> {
         .map(|p| Completion {
             text: p.to_string(),
             display: p.to_string(),
-            hint: Some(preset_hint(p).to_string()),
+            hint: border_preset_hint(p).map(str::to_string),
             font_family: None,
         })
         .collect();
@@ -81,17 +87,6 @@ fn preset_value_completions(partial: &str) -> Vec<Completion> {
         });
     }
     out
-}
-
-fn preset_hint(p: &str) -> &'static str {
-    match p {
-        "light" => "thin lines (default)",
-        "heavy" => "bold lines",
-        "double" => "double lines",
-        "rounded" => "thin lines with rounded corners",
-        "custom" => "user-supplied per-side / per-corner glyphs",
-        _ => "",
-    }
 }
 
 /// `border show <TAB>` surfaces the optional `side=` filter
@@ -510,6 +505,28 @@ mod plan_5_9_tests {
                 p,
                 labels
             );
+        }
+    }
+
+    /// Every preset row the popup renders carries a non-empty
+    /// hint — including `cycle`, which is not a preset but shares
+    /// the row shape. A blank hint column is the symptom the
+    /// baumhard-side table fold exists to prevent, so pin it at
+    /// the surface the user actually sees.
+    #[test]
+    fn preset_completion_rows_all_carry_a_hint() {
+        let doc = fixture_doc();
+        let ctx = ConsoleContext::from_document(&doc);
+        let tokens = vec!["border".to_string(), "preset".to_string()];
+        let s = at_token1("", &tokens);
+        let rows = complete_border(&s, &ctx);
+        assert!(!rows.is_empty(), "preset completion must offer rows");
+        for row in &rows {
+            let hint = row
+                .hint
+                .as_deref()
+                .unwrap_or_else(|| panic!("preset row '{}' has no hint", row.display));
+            assert!(!hint.is_empty(), "preset row '{}' has an empty hint", row.display);
         }
     }
 

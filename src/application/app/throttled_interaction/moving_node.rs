@@ -13,19 +13,15 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::Vec2;
 
-use crate::application::document::apply_drag_delta_and_collect_patches;
-use crate::application::frame_throttle::MutationFrequencyThrottle;
-
-use super::super::scene_rebuild::{
-    flush_canvas_scene_buffers, update_border_tree_with_offsets, update_connection_label_tree,
-    update_connection_tree, update_edge_handle_tree, update_node_resize_handle_tree, update_portal_tree,
-    update_section_frame_tree,
-};
-use super::{DrainContext, ThrottledInteraction};
+use super::super::scene_rebuild::{flush_canvas_scene_buffers, CanvasFrame};
+use super::pending::ThrottledPending;
+use super::release::{ReleaseCommit, ReleaseRefresh};
+use super::{DrainContext, ThrottledDragInteraction, ThrottledInteraction};
+use crate::application::document::{apply_drag_delta, apply_drag_delta_and_collect_patches, UndoAction};
 
 /// Drag-to-move state for one or more nodes. `individual = true`
 /// (Alt-drag) moves only the anchor nodes; false moves each
@@ -34,41 +30,47 @@ pub(in crate::application::app) struct MovingNodeInteraction {
     /// The node IDs being moved. Single node, or every selected
     /// node (shift+drag).
     pub node_ids: Vec<String>,
-    /// Accumulated total delta in canvas coords. Used on release
-    /// to sync the final position back to the model.
-    pub total_delta: Vec2,
-    /// Delta accumulated since the last successful drain. Folded
-    /// into the tree and reset to `Vec2::ZERO` in `drain`.
-    pub pending_delta: Vec2,
     /// Alt-drag: move only the anchor node(s), not their subtrees.
     pub individual: bool,
-    /// Per-interaction adaptive throttle. See
-    /// [`crate::application::frame_throttle`].
-    pub throttle: MutationFrequencyThrottle,
+    /// Delta-accumulate pending state plus this gesture's adaptive
+    /// throttle.
+    pub pending: ThrottledPending,
+    /// Snapshot of every descendant of every anchor node. Captured
+    /// once at drag start because the descendant set cannot change
+    /// mid-drag; reused in every `drain` instead of re-walking the
+    /// model with `all_descendants` per frame.
+    pub descendant_ids: HashSet<String>,
 }
 
 impl MovingNodeInteraction {
     /// Start a fresh move-node drag. The throttle begins at the
-    /// default budget; `pending_delta` and `total_delta` start
-    /// zeroed — the `CursorMoved` handler fills them.
-    pub(in crate::application::app) fn new(node_ids: Vec<String>, individual: bool) -> Self {
+    /// default budget and both accumulators start zeroed — the
+    /// `CursorMoved` handler fills them through `accumulate`.
+    ///
+    /// `descendant_ids` must contain every descendant of every node
+    /// in `node_ids` when `individual` is `false`; it is ignored when
+    /// `individual` is `true`.
+    pub(in crate::application::app) fn new(
+        node_ids: Vec<String>,
+        individual: bool,
+        descendant_ids: HashSet<String>,
+    ) -> Self {
         Self {
             node_ids,
-            total_delta: Vec2::ZERO,
-            pending_delta: Vec2::ZERO,
             individual,
-            throttle: MutationFrequencyThrottle::with_default_budget(),
+            pending: ThrottledPending::accumulating_deltas(),
+            descendant_ids,
         }
     }
 }
 
 impl ThrottledInteraction for MovingNodeInteraction {
-    fn has_pending(&self) -> bool {
-        self.pending_delta != Vec2::ZERO
+    fn pending(&self) -> &ThrottledPending {
+        &self.pending
     }
 
-    fn throttle(&mut self) -> &mut MutationFrequencyThrottle {
-        &mut self.throttle
+    fn pending_mut(&mut self) -> &mut ThrottledPending {
+        &mut self.pending
     }
 
     fn drain(&mut self, ctx: DrainContext<'_>) {
@@ -82,6 +84,7 @@ impl ThrottledInteraction for MovingNodeInteraction {
             ..
         } = ctx;
 
+        let pending_delta = self.pending.take_delta();
         if let Some(tree) = mindmap_tree.as_mut() {
             // Position-only patch: move the dragged nodes in the
             // arena and patch the renderer's existing text buffers
@@ -91,8 +94,8 @@ impl ThrottledInteraction for MovingNodeInteraction {
                 apply_drag_delta_and_collect_patches(
                     tree,
                     nid,
-                    self.pending_delta.x,
-                    self.pending_delta.y,
+                    pending_delta.x,
+                    pending_delta.y,
                     !self.individual,
                     &mut patches,
                 );
@@ -110,49 +113,104 @@ impl ThrottledInteraction for MovingNodeInteraction {
         // their `pos` patched in place.
         if let Some(doc) = document.as_ref() {
             let mut offsets: HashMap<String, (f32, f32)> = HashMap::new();
-            let delta = (self.total_delta.x, self.total_delta.y);
+            let total = self.pending.total_delta();
+            let delta = (total.x, total.y);
             for nid in &self.node_ids {
                 offsets.insert(nid.clone(), delta);
-                if !self.individual {
-                    for desc_id in doc.mindmap.all_descendants(nid) {
-                        offsets.insert(desc_id, delta);
-                    }
+            }
+            if !self.individual {
+                for desc_id in &self.descendant_ids {
+                    offsets.insert(desc_id.clone(), delta);
                 }
             }
 
-            let scene = doc.build_scene_with_cache(
+            let frame = CanvasFrame::new(
+                doc,
                 &offsets,
-                scene_cache,
-                renderer.camera_zoom(),
                 interaction_mode.resize_handle_overrides(),
+                renderer.camera_zoom(),
             );
-
-            update_connection_tree(&scene, app_scene);
-            update_border_tree_with_offsets(doc, &offsets, app_scene);
-            update_connection_label_tree(&scene, app_scene, renderer);
-            update_portal_tree(doc, &offsets, app_scene, renderer);
-            update_edge_handle_tree(&scene, app_scene);
+            frame.update_connection_trees(scene_cache, app_scene);
+            frame.update_border_tree(app_scene);
+            frame.update_connection_label_tree(app_scene);
+            frame.update_portal_tree(app_scene);
             // The 8 resize handles for a Single-selected dragged
-            // node anchor on the node's AABB; the cache-aware scene
-            // build above already populated `scene.node_resize_handles`
-            // with the in-flight offsets, so we just push those
-            // through to the app-scene tree. Without this the
-            // handles freeze at the pre-drag position while the
-            // node visibly slides under them.
-            update_node_resize_handle_tree(&scene, app_scene);
-            // Section frames render only while in NodeEdit mode but
-            // are emitted into the same `RenderScene.section_frames`
-            // that the cache-aware build above populated. Without
-            // this drain call, dragging the active node mid-edit
-            // leaves every section frame stuck at the pre-drag
+            // node anchor on the node's AABB, so they have to be
+            // re-emitted against the in-flight offsets. Without
+            // this the handles freeze at the pre-drag position
+            // while the node visibly slides under them.
+            frame.update_node_resize_handle_tree(app_scene);
+            // Section frames render only while in NodeEdit mode.
+            // Without this drain call, dragging the active node
+            // mid-edit leaves every frame stuck at the pre-drag
             // origin while the node and its borders slide under
-            // them — the no-NodeEdit case is already a no-op
-            // (`scene.section_frames` is empty).
-            update_section_frame_tree(&scene, app_scene);
+            // them — the no-NodeEdit case is already a no-op (the
+            // pass emits nothing).
+            frame.update_section_frame_tree(app_scene);
             flush_canvas_scene_buffers(app_scene, renderer);
         }
+    }
+}
 
-        self.pending_delta = Vec2::ZERO;
+impl ThrottledDragInteraction for MovingNodeInteraction {
+    /// Release-commit body, renderer-free. See
+    /// [`super::release`] for why the canvas work comes back as a
+    /// decree instead of running here.
+    ///
+    /// The pending flush is unconditional on the throttle: on
+    /// release the final position must be committed in full even
+    /// if the throttle was mid-stretch skipping intermediate
+    /// drains.
+    ///
+    /// The pending slot is *taken*, not peeked, like every other
+    /// release core's. `commit_on_release_core` is `&mut self`, so
+    /// a second call is expressible — the lifecycle harness can
+    /// script two `Release` steps — and peeking would flush the
+    /// same delta into the tree twice. This does not make the body
+    /// idempotent (the model write below reads the running total,
+    /// which no release consumes); it removes the one asymmetry
+    /// among the seven cores about whether the pending slot
+    /// survives a release. `take_delta` leaves the running total
+    /// alone by contract.
+    fn commit_on_release_core(&mut self, c: ReleaseCommit<'_>) -> ReleaseRefresh {
+        let pending_delta = self.pending.take_delta();
+        let had_pending = pending_delta != Vec2::ZERO;
+        if had_pending {
+            if let Some(tree) = c.mindmap_tree.as_mut() {
+                for nid in &self.node_ids {
+                    apply_drag_delta(tree, nid, pending_delta.x, pending_delta.y, !self.individual);
+                }
+            }
+        }
+        let Some(doc) = c.document.as_mut() else {
+            return ReleaseRefresh::None;
+        };
+        // Sync to model, push undo.
+        let total_delta = self.pending.total_delta();
+        let dx = total_delta.x as f64;
+        let dy = total_delta.y as f64;
+        let undo_data = doc.apply_move_multiple(&self.node_ids, dx, dy, self.individual);
+        doc.undo_stack.push(UndoAction::MoveNodes {
+            original_positions: undo_data,
+        });
+        doc.dirty = true;
+
+        // Under rapid drag the throttle can skip the last drain or
+        // two, leaving `pending_delta` stranded in the accumulator.
+        // The flush above syncs the tree and `apply_move_multiple`
+        // syncs the model, but the `SceneConnectionCache`'s
+        // `pre_clip_positions` still reflect the second-to-last
+        // drain's `offsets` (short of the committed position by
+        // `pending_delta`). The subsequent rebuild runs with empty
+        // offsets, so the cache's fast path returns those stale
+        // samples and the edges appear glued to the node's
+        // pre-flush position until the next cache-invalidating
+        // event (mutation or zoom). Clearing here forces a resample
+        // from the now-authoritative model.
+        if had_pending {
+            c.scene_cache.clear();
+        }
+        ReleaseRefresh::All
     }
 }
 
@@ -160,75 +218,66 @@ impl ThrottledInteraction for MovingNodeInteraction {
 mod tests {
     use super::*;
     use crate::application::app::throttled_interaction::test_utils::{
-        drive_throttle_over_budget, trait_default_tests_for_throttled_interaction,
+        drive_throttle_over_budget, moved, trait_default_tests_for_throttled_interaction,
     };
 
     #[test]
-    fn test_new_initialises_fields_with_zero_deltas() {
-        let i = MovingNodeInteraction::new(vec!["a".to_string(), "b".to_string()], true);
+    fn test_new_initializes_fields_with_zero_deltas() {
+        let i = MovingNodeInteraction::new(vec!["a".to_string(), "b".to_string()], true, HashSet::new());
         assert_eq!(i.node_ids, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(i.pending_delta, Vec2::ZERO);
-        assert_eq!(i.total_delta, Vec2::ZERO);
+        assert_eq!(i.pending.pending_delta(), Vec2::ZERO);
+        assert_eq!(i.pending.total_delta(), Vec2::ZERO);
         assert!(i.individual);
-        assert_eq!(i.throttle.current_n(), 1);
+        assert_eq!(i.pending.throttle.current_n(), 1);
     }
 
+    /// This gesture is wired to the delta-accumulate discipline, not
+    /// the cursor latch. Picking the wrong constructor would leave
+    /// `has_pending` permanently false under the samples the
+    /// cursor-move dispatcher sends, and the drag would silently
+    /// never drain.
     #[test]
-    fn test_has_pending_false_for_zero_delta() {
-        let i = MovingNodeInteraction::new(vec!["n".into()], false);
+    fn test_pending_uses_the_delta_accumulate_discipline() {
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false, HashSet::new());
         assert!(!i.has_pending());
-    }
-
-    #[test]
-    fn test_has_pending_true_for_nonzero_delta() {
-        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
-        i.pending_delta = Vec2::new(3.0, -2.0);
+        i.accumulate(moved(3.0, -2.0));
         assert!(i.has_pending());
-    }
-
-    #[test]
-    fn test_has_pending_true_for_tiny_nonzero_delta() {
-        // Confirms the strict `!= ZERO` comparison — a sub-pixel
-        // accumulator from one high-frequency cursor tick must still
-        // count as pending, because the sum across skipped frames is
-        // the contract drive() relies on.
-        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
-        i.pending_delta = Vec2::new(1e-6, 0.0);
-        assert!(i.has_pending());
+        assert_eq!(i.pending.total_delta(), Vec2::new(3.0, -2.0));
+        assert_eq!(i.pending.pending_delta(), Vec2::new(3.0, -2.0));
+        assert_eq!(i.pending.peek_cursor(), None);
     }
 
     #[test]
     fn test_throttle_accessor_reaches_owned_instance() {
-        let mut i = MovingNodeInteraction::new(vec!["n".into()], false);
+        let mut i = MovingNodeInteraction::new(vec!["n".into()], false, HashSet::new());
         drive_throttle_over_budget(i.throttle());
         // The accessor must hand out the field, not a transient copy —
         // mutations through it have to survive into the struct.
-        assert!(i.throttle.current_n() > 1);
+        assert!(i.pending.throttle.current_n() > 1);
     }
 
     #[test]
     fn test_reset_resets_only_throttle() {
-        let mut i = MovingNodeInteraction::new(vec!["a".into(), "b".into()], true);
-        i.pending_delta = Vec2::new(5.0, 7.0);
-        i.total_delta = Vec2::new(11.0, 13.0);
-        drive_throttle_over_budget(&mut i.throttle);
-        assert!(i.throttle.current_n() > 1);
+        let mut i = MovingNodeInteraction::new(vec!["a".into(), "b".into()], true, HashSet::new());
+        i.accumulate(moved(5.0, 7.0));
+        drive_throttle_over_budget(&mut i.pending.throttle);
+        assert!(i.pending.throttle.current_n() > 1);
 
         i.reset();
 
-        assert_eq!(i.throttle.current_n(), 1);
+        assert_eq!(i.pending.throttle.current_n(), 1);
         // Pending / total / identity survive — reset is throttle-only
         // per the trait's default impl.
-        assert_eq!(i.pending_delta, Vec2::new(5.0, 7.0));
-        assert_eq!(i.total_delta, Vec2::new(11.0, 13.0));
+        assert_eq!(i.pending.pending_delta(), Vec2::new(5.0, 7.0));
+        assert_eq!(i.pending.total_delta(), Vec2::new(5.0, 7.0));
         assert_eq!(i.node_ids, vec!["a".to_string(), "b".to_string()]);
         assert!(i.individual);
     }
 
     trait_default_tests_for_throttled_interaction! {
-        build = || MovingNodeInteraction::new(vec!["n".into()], false),
+        build = || MovingNodeInteraction::new(vec!["n".into()], false, HashSet::new()),
         set_pending = |i: &mut MovingNodeInteraction| {
-            i.pending_delta = Vec2::new(1.0, 0.0);
+            i.accumulate(moved(1.0, 0.0));
         },
     }
 }

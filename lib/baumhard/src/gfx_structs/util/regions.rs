@@ -348,14 +348,18 @@ impl RegionParams {
     }
 }
 
-/// Pairing of a region bucket number and an element's unique id —
-/// the token a [`crate::gfx_structs::tree::Tree`] sends through its
-/// `scene_index_sender` channel when an element lands in (or moves
-/// between) region buckets. Downstream scene-index consumers use the
-/// pair to keep a `region → elements` map in step with the tree.
+/// Pairing of a region bucket number and an element's unique id.
 ///
-/// Copy + 16 bytes so shipping one through a channel is free — no
-/// heap, no clone.
+/// Reserved token for the future per-tree region-index seam: when the
+/// region indexer is wired into `MutatorTree::apply_to`, a [`Tree`] will
+/// emit these pairs so a scene-level consumer can keep a
+/// `region → elements` map in step with the tree. Not currently sent
+/// anywhere (CONVENTIONS.md §B6).
+///
+/// Copy + 16 bytes so shipping one through a channel will be free —
+/// no heap, no clone.
+///
+/// [`Tree`]: crate::gfx_structs::tree::Tree
 #[derive(Debug, Clone, Copy)]
 pub struct RegionElementKeyPair {
     region_num: usize,

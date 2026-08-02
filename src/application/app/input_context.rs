@@ -20,9 +20,9 @@ use crate::application::macros::MacroRegistry;
 use crate::application::renderer::Renderer;
 use crate::application::scene_host::AppScene;
 
-use super::label_edit::{LabelEditState, PortalTextEditState};
+use super::single_line_edit::SingleLineEditor;
 use super::text_edit::TextEditState;
-use super::throttled_interaction::ColorPickerHoverInteraction;
+use super::throttled_interaction::{ColorPickerHoverInteraction, DrainContext, ReleaseCommit};
 use super::{DragState, InteractionMode, LastClick};
 
 /// Borrowed view of the persistent state every interactive-path
@@ -60,10 +60,9 @@ pub(in crate::application::app) struct InputHandlerContext<'a> {
     pub console_state: &'a mut ConsoleState,
     /// Console command-history ring.
     pub console_history: &'a mut Vec<String>,
-    /// Inline edge-label editor state.
-    pub label_edit_state: &'a mut LabelEditState,
-    /// Inline portal-text editor state.
-    pub portal_text_edit_state: &'a mut PortalTextEditState,
+    /// Inline single-line editor state (edge label / portal
+    /// caption).
+    pub single_line_edit_state: &'a mut SingleLineEditor,
     /// Inline node text editor state.
     pub text_edit_state: &'a mut TextEditState,
     /// Glyph-wheel color-picker state.
@@ -104,6 +103,37 @@ pub(in crate::application::app) struct InputHandlerContext<'a> {
 }
 
 impl<'a> InputHandlerContext<'a> {
+    /// Renderer-free slice for a throttled drag's release commit —
+    /// see
+    /// [`super::throttled_interaction::release`]. The commit body
+    /// mutates the model and the scene cache, then hands back a
+    /// [`super::throttled_interaction::ReleaseRefresh`] the caller
+    /// runs against [`Self::drain_context`].
+    pub(in crate::application::app) fn release_commit(&mut self) -> ReleaseCommit<'_> {
+        ReleaseCommit {
+            document: &mut *self.document,
+            mindmap_tree: &mut *self.mindmap_tree,
+            scene_cache: &mut *self.scene_cache,
+        }
+    }
+
+    /// The per-frame drain bundle, rebuilt from the event-loop
+    /// context. `drain_inputs` builds the same struct from
+    /// `InitState` directly; the release path reaches it from here
+    /// so a drag's release-commit and its per-frame drains share
+    /// one context type.
+    pub(in crate::application::app) fn drain_context(&mut self) -> DrainContext<'_> {
+        DrainContext {
+            document: &mut *self.document,
+            mindmap_tree: &mut *self.mindmap_tree,
+            app_scene: &mut *self.app_scene,
+            renderer: &mut *self.renderer,
+            scene_cache: &mut *self.scene_cache,
+            color_picker_state: &mut *self.color_picker_state,
+            interaction_mode: &*self.interaction_mode,
+        }
+    }
+
     /// Decompose into the cross-platform
     /// [`super::input_context_core::InputContextCore`] +
     /// native-only [`super::input_context_core::NativeContextExt`]
@@ -133,9 +163,8 @@ impl<'a> InputHandlerContext<'a> {
                 text_edit_state: &mut *self.text_edit_state,
                 last_click: &mut *self.last_click,
                 cursor_pos: &mut *self.cursor_pos,
-                modifiers: &*self.modifiers,
+                modifiers: self.modifiers,
                 keybinds: self.keybinds,
-
                 macros: &mut *self.macros,
                 interaction_mode: &mut *self.interaction_mode,
             },
@@ -143,8 +172,7 @@ impl<'a> InputHandlerContext<'a> {
                 drag_state: &mut *self.drag_state,
                 console_state: &mut *self.console_state,
                 console_history: &mut *self.console_history,
-                label_edit_state: &mut *self.label_edit_state,
-                portal_text_edit_state: &mut *self.portal_text_edit_state,
+                single_line_edit_state: &mut *self.single_line_edit_state,
                 color_picker_state: &mut *self.color_picker_state,
                 hovered_node: &mut *self.hovered_node,
                 cursor_is_hand: &mut *self.cursor_is_hand,

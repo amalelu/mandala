@@ -14,6 +14,7 @@ use super::node::ColorGroup;
 /// color set; deeper levels walk the vector. Plain data; no runtime
 /// cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Palette {
     pub groups: Vec<ColorGroup>,
 }

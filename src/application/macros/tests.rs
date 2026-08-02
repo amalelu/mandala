@@ -7,7 +7,7 @@
 //! - The shadow-stack reveal property: clearing a higher tier
 //!   exposes the lower-tier slot underneath instead of leaving
 //!   the id permanently displaced.
-//! - `MacroSource::allows_action` / `allows_console_line` —
+//! - `SourceTier::allows_action` / `allows_console_line` —
 //!   the privilege gate the dispatcher reads before running
 //!   each step. Includes the fail-closed contract: a rejected
 //!   step aborts the rest of the macro.
@@ -28,14 +28,14 @@ fn macro_registry_insert_and_get() {
         steps: vec![MacroStep::Action { action: Action::Undo }],
     };
     assert!(reg.is_empty());
-    reg.insert(m.clone(), MacroSource::User);
+    reg.insert(m.clone(), SourceTier::User);
     assert_eq!(reg.len(), 1);
     assert!(reg.contains("test"));
     let got = reg.get("test").unwrap();
     assert_eq!(got.id, "test");
     assert_eq!(got.steps.len(), 1);
     let (_, src) = reg.get_with_source("test").unwrap();
-    assert_eq!(src, MacroSource::User);
+    assert_eq!(src, SourceTier::User);
 }
 
 #[test]
@@ -55,18 +55,18 @@ fn macro_registry_insert_replaces_by_id() {
             line: "border on".into(),
         }],
     };
-    reg.insert(m1, MacroSource::User);
-    let prev = reg.insert(m2, MacroSource::User);
+    reg.insert(m1, SourceTier::User);
+    let prev = reg.insert(m2, SourceTier::User);
     assert!(prev.is_some());
     assert_eq!(reg.get("x").unwrap().name, "second");
 }
 
 #[test]
 fn macro_source_console_line_gating() {
-    assert!(MacroSource::User.allows_console_line());
-    assert!(!MacroSource::App.allows_console_line());
-    assert!(!MacroSource::Map.allows_console_line());
-    assert!(!MacroSource::Inline.allows_console_line());
+    assert!(SourceTier::User.allows_console_line());
+    assert!(!SourceTier::App.allows_console_line());
+    assert!(!SourceTier::Map.allows_console_line());
+    assert!(!SourceTier::Inline.allows_console_line());
 }
 
 #[test]
@@ -105,13 +105,13 @@ fn macro_source_allows_action_gates_destructive_actions_for_non_user() {
         Action::FastResizeStart,
     ] {
         assert!(
-            MacroSource::User.allows_action(&a),
+            SourceTier::User.allows_action(&a),
             "User tier should allow {:?}",
             a
         );
     }
     // Non-User tiers reject all of the above.
-    for tier in [MacroSource::App, MacroSource::Map, MacroSource::Inline] {
+    for tier in [SourceTier::App, SourceTier::Map, SourceTier::Inline] {
         for a in [
             Action::SaveDocument,
             Action::DeleteSelection,
@@ -127,8 +127,8 @@ fn macro_source_allows_action_gates_destructive_actions_for_non_user() {
             Action::DoubleClickActivate,
             Action::EditSelection,
             Action::EditSelectionClean,
-            // Same dispatch surface (`open_label_edit` /
-            // `open_portal_text_edit`) as `EditSelection` — a
+            // Same dispatch surface (`open_single_line_edit`)
+            // as `EditSelection` — a
             // hostile macro firing this with an edge label /
             // portal selection forces the user into an inline
             // editor over selected content.
@@ -174,7 +174,7 @@ fn macro_source_allows_action_gates_destructive_actions_for_non_user() {
 fn macro_source_allows_action_passes_navigation_for_non_user() {
     // Non-User tiers may still invoke navigation / view-state
     // Actions — they don't touch the filesystem or destroy data.
-    for tier in [MacroSource::App, MacroSource::Map, MacroSource::Inline] {
+    for tier in [SourceTier::App, SourceTier::Map, SourceTier::Inline] {
         for a in [
             Action::ZoomIn,
             Action::ZoomOut,
@@ -204,7 +204,7 @@ fn macro_source_allows_action_passes_navigation_for_non_user() {
 /// policy decision so the load-bearing security claim
 /// ("fail-closed: a rejected privileged step aborts the rest
 /// of the macro") has a runtime regression check.
-fn step_allowed(step: &MacroStep, src: MacroSource) -> bool {
+fn step_allowed(step: &MacroStep, src: SourceTier) -> bool {
     match step {
         MacroStep::Action { action } => src.allows_action(action),
         MacroStep::ConsoleLine { .. } => src.allows_console_line(),
@@ -215,7 +215,7 @@ fn step_allowed(step: &MacroStep, src: MacroSource) -> bool {
     }
 }
 
-fn run_until_rejected<'a>(steps: &'a [MacroStep], src: MacroSource) -> &'a [MacroStep] {
+fn run_until_rejected(steps: &[MacroStep], src: SourceTier) -> &[MacroStep] {
     let mut executed = 0;
     for s in steps {
         if !step_allowed(s, src) {
@@ -241,7 +241,7 @@ fn dispatch_macro_fail_closed_aborts_on_first_reject() {
             action: Action::SaveDocument,
         },
     ];
-    let executed = run_until_rejected(&steps, MacroSource::Map);
+    let executed = run_until_rejected(&steps, SourceTier::Map);
     assert_eq!(executed.len(), 1);
     assert!(matches!(
         &executed[0],
@@ -258,7 +258,7 @@ fn dispatch_macro_fail_closed_first_step_rejected() {
         },
         MacroStep::Action { action: Action::Undo },
     ];
-    let executed = run_until_rejected(&steps, MacroSource::Map);
+    let executed = run_until_rejected(&steps, SourceTier::Map);
     assert!(executed.is_empty());
 }
 
@@ -275,7 +275,7 @@ fn dispatch_macro_user_tier_passes_destructive_steps() {
             action: Action::DeleteSelection,
         },
     ];
-    let executed = run_until_rejected(&steps, MacroSource::User);
+    let executed = run_until_rejected(&steps, SourceTier::User);
     assert_eq!(executed.len(), 3);
 }
 
@@ -287,7 +287,7 @@ fn dispatch_macro_inline_tier_rejects_label_edit_on_selection() {
     let steps = vec![MacroStep::Action {
         action: Action::LabelEditOnSelection,
     }];
-    let executed = run_until_rejected(&steps, MacroSource::Inline);
+    let executed = run_until_rejected(&steps, SourceTier::Inline);
     assert!(executed.is_empty());
 }
 
@@ -374,14 +374,14 @@ fn macro_registry_inline_overrides_user_and_map_by_id() {
     };
     // Order matches run_native_init::build: App → User →
     // Map → Inline.
-    reg.insert(mk("app"), MacroSource::App);
-    reg.insert(mk("user"), MacroSource::User);
-    reg.insert(mk("map"), MacroSource::Map);
+    reg.insert(mk("app"), SourceTier::App);
+    reg.insert(mk("user"), SourceTier::User);
+    reg.insert(mk("map"), SourceTier::Map);
     // Inserting Inline does NOT displace Map; both coexist
     // under the shadow-stack design. `insert` returns the
     // previous slot at the SAME tier (None here — this is
     // the first Inline write).
-    let prev = reg.insert(mk("inline"), MacroSource::Inline);
+    let prev = reg.insert(mk("inline"), SourceTier::Inline);
     assert!(
         prev.is_none(),
         "no prior Inline-tier entry; Map slot should not have been touched"
@@ -389,7 +389,7 @@ fn macro_registry_inline_overrides_user_and_map_by_id() {
     // Lookup walks high-to-low and finds Inline first.
     let (m, src) = reg.get_with_source("shared").unwrap();
     assert_eq!(m.name, "inline");
-    assert_eq!(src, MacroSource::Inline);
+    assert_eq!(src, SourceTier::Inline);
 }
 
 /// Higher-tier macros SHADOW lower-tier ones with the same id —
@@ -413,39 +413,39 @@ fn macro_registry_user_overrides_app_by_id() {
         steps: vec![MacroStep::Action { action: Action::Undo }],
     };
     // Insert order matches run_native_init::build: App first.
-    reg.insert(app_macro, MacroSource::App);
+    reg.insert(app_macro, SourceTier::App);
     // First write to the User tier — no prior User entry to
     // return.
-    let prev = reg.insert(user_macro, MacroSource::User);
+    let prev = reg.insert(user_macro, SourceTier::User);
     assert!(prev.is_none(), "no prior User-tier entry");
     // Lookup walks high-to-low → User wins.
     let (m, src) = reg.get_with_source("shared-id").unwrap();
     assert_eq!(m.name, "User version");
-    assert_eq!(src, MacroSource::User);
+    assert_eq!(src, SourceTier::User);
     // Critical for the privilege gate: the tier upgrade is
-    // honoured (User can run ConsoleLine / privileged Actions
+    // honored (User can run ConsoleLine / privileged Actions
     // even if an App macro had the same id first).
     assert!(src.allows_console_line());
 
     // Reveal property: clearing User exposes the App entry
     // underneath, so a higher-tier load is non-destructive
     // to the lower tier.
-    reg.clear_tier(MacroSource::User);
+    reg.clear_tier(SourceTier::User);
     let (m, src) = reg
         .get_with_source("shared-id")
         .expect("App entry must re-emerge");
     assert_eq!(m.name, "App version");
-    assert_eq!(src, MacroSource::App);
+    assert_eq!(src, SourceTier::App);
     assert!(!src.allows_console_line(), "App tier rejects ConsoleLine");
 }
 
-/// Sentinel for `TIER_COUNT` ↔ `MacroSource` variant-count drift.
-/// If a future contributor adds a fifth `MacroSource` variant
-/// without bumping `TIER_COUNT`, `MacroSource::index()` would
-/// return an out-of-bounds index for the new variant and
-/// every lookup involving it would panic in `dispatch_macro`.
-/// Inserting at every existing tier and asserting the count
-/// catches the omission at test time rather than at runtime.
+/// Sentinel for `SourceTier::COUNT` ↔ variant-count drift. If a
+/// future contributor adds a fifth `SourceTier` variant without
+/// extending `SourceTier::ALL`, `SourceTier::index()` would return
+/// an out-of-bounds index for the new variant and every lookup
+/// involving it would panic in `dispatch_macro`. Inserting at every
+/// tier the ladder declares and asserting the count catches the
+/// omission at test time rather than at runtime.
 #[test]
 fn macro_registry_every_tier_holds_an_entry() {
     let mut reg = MacroRegistry::new();
@@ -455,25 +455,17 @@ fn macro_registry_every_tier_holds_an_entry() {
         description: String::new(),
         steps: vec![],
     };
-    for (i, src) in [
-        MacroSource::App,
-        MacroSource::User,
-        MacroSource::Map,
-        MacroSource::Inline,
-    ]
-    .iter()
-    .enumerate()
-    {
+    for (i, src) in SourceTier::ALL.iter().enumerate() {
         reg.insert(make(&format!("id-{}", i)), *src);
         assert!(
             reg.get_with_source(&format!("id-{}", i)).is_some(),
-            "tier {:?} (TIER_COUNT={}) failed to store an entry — \
-             likely a TIER_COUNT/MacroSource drift",
+            "tier {:?} (SourceTier::COUNT={}) failed to store an entry — \
+             likely a slot-array / SourceTier drift",
             src,
-            TIER_COUNT,
+            SourceTier::COUNT,
         );
     }
-    assert_eq!(reg.len(), 4);
+    assert_eq!(reg.len(), SourceTier::COUNT);
 }
 
 /// `clear_tier` removes only entries with the matching source —
@@ -490,7 +482,7 @@ fn macro_registry_clear_tier_only_drops_matching() {
             description: "".into(),
             steps: vec![],
         },
-        MacroSource::App,
+        SourceTier::App,
     );
     reg.insert(
         Macro {
@@ -499,7 +491,7 @@ fn macro_registry_clear_tier_only_drops_matching() {
             description: "".into(),
             steps: vec![],
         },
-        MacroSource::User,
+        SourceTier::User,
     );
     reg.insert(
         Macro {
@@ -508,17 +500,17 @@ fn macro_registry_clear_tier_only_drops_matching() {
             description: "".into(),
             steps: vec![],
         },
-        MacroSource::Map,
+        SourceTier::Map,
     );
     assert_eq!(reg.len(), 3);
-    reg.clear_tier(MacroSource::Map);
+    reg.clear_tier(SourceTier::Map);
     assert_eq!(reg.len(), 2);
     assert!(reg.contains("app"));
     assert!(reg.contains("user"));
     assert!(!reg.contains("map"));
 }
 
-/// Shadow-stack reveal property — the central new behaviour
+/// Shadow-stack reveal property — the central new behavior
 /// of the per-tier slot design. Clearing a higher tier reveals
 /// the lower-tier entry underneath instead of leaving the id
 /// permanently displaced.
@@ -531,21 +523,21 @@ fn clear_higher_tier_reveals_lower_tier() {
         description: String::new(),
         steps: vec![],
     };
-    reg.insert(mk("user"), MacroSource::User);
-    reg.insert(mk("map"), MacroSource::Map);
+    reg.insert(mk("user"), SourceTier::User);
+    reg.insert(mk("map"), SourceTier::Map);
 
     // Map shadows User on lookup.
     let (m, src) = reg.get_with_source("x").unwrap();
     assert_eq!(m.name, "map");
-    assert_eq!(src, MacroSource::Map);
+    assert_eq!(src, SourceTier::Map);
 
     // Clearing Map reveals User — does not leave "x" gone.
-    reg.clear_tier(MacroSource::Map);
+    reg.clear_tier(SourceTier::Map);
     let (m, src) = reg
         .get_with_source("x")
         .expect("User entry should re-emerge after Map clear");
     assert_eq!(m.name, "user");
-    assert_eq!(src, MacroSource::User);
+    assert_eq!(src, SourceTier::User);
 }
 
 /// `clear_tier(X)` only zeroes the slot for tier `X` on each
@@ -564,31 +556,31 @@ fn clear_tier_removes_only_matching_slot() {
         steps: vec![],
     };
     // Stack two tiers on "x" and one tier each on "y" / "z".
-    reg.insert(mk("x", "x.app"), MacroSource::App);
-    reg.insert(mk("x", "x.user"), MacroSource::User);
-    reg.insert(mk("y", "y.user"), MacroSource::User);
-    reg.insert(mk("z", "z.map"), MacroSource::Map);
+    reg.insert(mk("x", "x.app"), SourceTier::App);
+    reg.insert(mk("x", "x.user"), SourceTier::User);
+    reg.insert(mk("y", "y.user"), SourceTier::User);
+    reg.insert(mk("z", "z.map"), SourceTier::Map);
 
-    reg.clear_tier(MacroSource::User);
+    reg.clear_tier(SourceTier::User);
 
     // "x" still has its App entry — id survives, just at a
     // lower tier.
     let (m, src) = reg.get_with_source("x").unwrap();
     assert_eq!(m.name, "x.app");
-    assert_eq!(src, MacroSource::App);
+    assert_eq!(src, SourceTier::App);
     // "y" had only User → id evicted entirely.
     assert!(!reg.contains("y"));
     // "z" had only Map → unaffected.
     let (m, src) = reg.get_with_source("z").unwrap();
     assert_eq!(m.name, "z.map");
-    assert_eq!(src, MacroSource::Map);
+    assert_eq!(src, SourceTier::Map);
 }
 
 /// Document-replace cycle: a Map-tier macro shadows a
 /// User-tier macro in document A; opening document B (which
 /// has no `mindmap.macros`) clears the Map tier and the
 /// User-tier macro re-emerges. Locks the load-bearing
-/// user-visible behaviour change shadow-stacking enables.
+/// user-visible behavior change shadow-stacking enables.
 #[test]
 fn cross_tier_within_session_round_trip() {
     let mut reg = MacroRegistry::new();
@@ -599,20 +591,20 @@ fn cross_tier_within_session_round_trip() {
         steps: vec![],
     };
     // Startup: User tier loaded.
-    reg.insert(mk("user-macro"), MacroSource::User);
+    reg.insert(mk("user-macro"), SourceTier::User);
     // Open document A: Map tier shadows User.
-    reg.insert(mk("docA-macro"), MacroSource::Map);
+    reg.insert(mk("docA-macro"), SourceTier::Map);
     assert_eq!(reg.get_with_source("save-and-quit").unwrap().0.name, "docA-macro");
 
     // Open document B: replace path runs `clear_tier(Map)`
     // first, then `extend_with_tier(empty, Map)`.
-    reg.clear_tier(MacroSource::Map);
-    reg.extend_with_tier(Vec::<Macro>::new(), MacroSource::Map);
+    reg.clear_tier(SourceTier::Map);
+    reg.extend_with_tier(Vec::<Macro>::new(), SourceTier::Map);
 
     // User entry re-emerges.
     let (m, src) = reg.get_with_source("save-and-quit").expect("User entry restored");
     assert_eq!(m.name, "user-macro");
-    assert_eq!(src, MacroSource::User);
+    assert_eq!(src, SourceTier::User);
 }
 
 /// Within-tier id collisions follow last-writer-wins —
@@ -637,7 +629,7 @@ fn macro_registry_extend_with_tier_within_tier_collision_is_last_writer() {
             steps: vec![],
         },
     ];
-    reg.extend_with_tier(macros, MacroSource::Map);
+    reg.extend_with_tier(macros, SourceTier::Map);
     assert_eq!(reg.len(), 1);
     let (m, _src) = reg.get_with_source("x").unwrap();
     assert_eq!(m.name, "second", "later writer wins within a tier");
@@ -663,12 +655,12 @@ fn macro_registry_extend_with_tier_inserts_at_correct_source() {
             steps: vec![],
         },
     ];
-    reg.extend_with_tier(macros, MacroSource::Map);
+    reg.extend_with_tier(macros, SourceTier::Map);
     assert_eq!(reg.len(), 2);
     let (_, src_a) = reg.get_with_source("a").unwrap();
     let (_, src_b) = reg.get_with_source("b").unwrap();
-    assert_eq!(src_a, MacroSource::Map);
-    assert_eq!(src_b, MacroSource::Map);
+    assert_eq!(src_a, SourceTier::Map);
+    assert_eq!(src_b, SourceTier::Map);
     // Both tagged Map — should reject ConsoleLine and destructive
     // Actions (the privilege gate).
     assert!(!src_a.allows_console_line());
@@ -691,9 +683,9 @@ fn macro_registry_get_with_source_returns_pinned_tier() {
             line: "save /tmp/evil".into(),
         }],
     };
-    reg.insert(map_macro, MacroSource::Map);
+    reg.insert(map_macro, SourceTier::Map);
     let (m, src) = reg.get_with_source("hostile").unwrap();
-    assert_eq!(src, MacroSource::Map);
+    assert_eq!(src, SourceTier::Map);
     // The dispatcher looks at this exact pair to decide gating.
     assert!(!src.allows_console_line());
     assert!(matches!(&m.steps[0], MacroStep::ConsoleLine { .. }));

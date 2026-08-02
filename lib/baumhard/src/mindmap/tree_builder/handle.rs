@@ -24,7 +24,7 @@ use crate::gfx_structs::tree::{MutatorTree, Tree};
 use crate::util::color;
 
 /// Per-instance view a handle element exposes to the generic
-/// tree-builder. Implementors live in `scene_builder/` next to
+/// tree-builder. Implementors live alongside
 /// their element struct.
 pub trait HandleVisual {
     /// Canvas-space center of the handle. The layout fn shifts

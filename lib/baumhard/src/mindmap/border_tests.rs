@@ -12,16 +12,15 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::mindmap::border::{border_run_specs, count_clusters,
-                                 resolve_border_style, BorderGlyphSet, BorderStyle};
-
+    use crate::mindmap::border::{border_run_specs, resolve_border_style, BorderGlyphSet, BorderStyle};
+    use crate::util::grapheme_chad::count_grapheme_clusters;
 
     /// `border_run_specs` produces four runs in the contractually
     /// required channel order (top=1, bottom=2, left=3, right=4)
     /// and assigns palette offsets that sweep continuously
     /// top→right→bottom→left. The invariant the three border
     /// pipelines (initial-build tree, in-place mutator tree,
-    /// flat-pipeline scene_buffers) all rely on.
+    /// section-frame tree) all rely on.
     #[test]
     fn border_run_specs_channels_and_palette_offsets() {
         let style = BorderStyle::default_with_color("#ffffff");
@@ -40,6 +39,32 @@ mod tests {
         assert_eq!(specs[4].palette_offset, 0, "TL corner palette offset");
     }
 
+    /// `border_run_specs` handles a font-PINNED style
+    /// (`font_name = Some(registered family)`) without deadlocking.
+    /// Every other border test uses the default `font_name: None`,
+    /// so this is the only coverage of the `Some(face)` path through
+    /// `border_run_specs_with` — face resolution,
+    /// `face_family_name_for_pin`, and the guard-threaded
+    /// `glyph_ink_with` — and of the wrapper's warm-before-guard
+    /// step (`fonts::ensure_warm`) that keeps that path
+    /// re-entrancy-free (issue P0-06). These tests do not call
+    /// `fonts::init()`, so the wrapper's own warm is what makes the
+    /// guarded face lookup safe.
+    #[test]
+    fn border_run_specs_with_font_pin_does_not_deadlock() {
+        // `loaded_families_iter` yields names that round-trip through
+        // `app_font_by_family` (see fonts_tests), so this pins a real
+        // resolvable face — exercising the guarded pin lookup.
+        let family = crate::font::fonts::loaded_families_iter()
+            .next()
+            .expect("at least one bundled family")
+            .to_string();
+        let mut style = BorderStyle::default_with_color("#ffffff");
+        style.font_name = Some(family);
+        let specs = border_run_specs(&style, (0.0, 0.0), (200.0, 80.0));
+        assert_eq!(specs.len(), 8, "font-pinned border still emits 8 specs");
+    }
+
     /// Each spec's `cluster_count` is consistent with
     /// `count_grapheme_clusters(text)` — the field exists so
     /// consumers handing the spec to `build_border_regions`
@@ -52,7 +77,7 @@ mod tests {
         for spec in &specs {
             assert_eq!(
                 spec.cluster_count,
-                count_clusters(&spec.text),
+                count_grapheme_clusters(&spec.text),
                 "spec channel {} cluster_count mismatch",
                 spec.channel
             );
@@ -93,12 +118,16 @@ mod tests {
         assert!(
             left.position.1 + left.bounds.1 <= 110.0,
             "left rail (y={} + h={}) = {} must fit within node height 110",
-            left.position.1, left.bounds.1, left.position.1 + left.bounds.1
+            left.position.1,
+            left.bounds.1,
+            left.position.1 + left.bounds.1
         );
         assert!(
             right.position.1 + right.bounds.1 <= 110.0,
             "right rail (y={} + h={}) = {} must fit within node height 110",
-            right.position.1, right.bounds.1, right.position.1 + right.bounds.1
+            right.position.1,
+            right.bounds.1,
+            right.position.1 + right.bounds.1
         );
     }
 
@@ -118,7 +147,8 @@ mod tests {
         // TL.position.x = node.x = 0.
         assert!(
             (tl.position.0 - 0.0).abs() < 0.01,
-            "TL position.x = {} expected 0.0", tl.position.0
+            "TL position.x = {} expected 0.0",
+            tl.position.0
         );
         // TR.position.x + TR.bounds.0 should equal node.x + node.width.
         // bounds.0 is at least the corner advance, may include slack.
@@ -127,18 +157,21 @@ mod tests {
         let tr_right_edge = tr.position.0 + tr.bounds.0;
         assert!(
             (tr_right_edge - 360.0).abs() < 5.0,
-            "TR right edge = {} expected ≈ 360.0", tr_right_edge
+            "TR right edge = {} expected ≈ 360.0",
+            tr_right_edge
         );
         // BL.position.x = 0.
         assert!(
             (bl.position.0 - 0.0).abs() < 0.01,
-            "BL position.x = {} expected 0.0", bl.position.0
+            "BL position.x = {} expected 0.0",
+            bl.position.0
         );
         // BR right edge ≈ 360.
         let br_right_edge = br.position.0 + br.bounds.0;
         assert!(
             (br_right_edge - 360.0).abs() < 5.0,
-            "BR right edge = {} expected ≈ 360.0", br_right_edge
+            "BR right edge = {} expected ≈ 360.0",
+            br_right_edge
         );
     }
 
@@ -178,12 +211,16 @@ mod tests {
         assert!(
             top.position.0 + top.bounds.0 <= 360.0,
             "top rail (x={} + w={}) = {} must fit within node width 360",
-            top.position.0, top.bounds.0, top.position.0 + top.bounds.0
+            top.position.0,
+            top.bounds.0,
+            top.position.0 + top.bounds.0
         );
         assert!(
             bottom.position.0 + bottom.bounds.0 <= 360.0,
             "bottom rail (x={} + w={}) = {} must fit within node width 360",
-            bottom.position.0, bottom.bounds.0, bottom.position.0 + bottom.bounds.0
+            bottom.position.0,
+            bottom.bounds.0,
+            bottom.position.0 + bottom.bounds.0
         );
 
         // bounds.0 should be reasonably close to (node_width - 2*corner_w)
@@ -191,7 +228,8 @@ mod tests {
         assert!(
             top.bounds.0 >= 360.0 * 0.7,
             "top rail bounds.0 = {} should use ≥ 70% of node width {} (otherwise the rail leaves a huge gap)",
-            top.bounds.0, 360.0
+            top.bounds.0,
+            360.0
         );
     }
 
@@ -217,11 +255,16 @@ mod tests {
         assert!(
             left.position.1 + left.bounds.1 <= 100.0,
             "left rail (y={} + h={}) must fit within node.height 100",
-            left.position.1, left.bounds.1
+            left.position.1,
+            left.bounds.1
         );
         // At least 1 row of fill rendered (rail isn't empty).
         let left_rows = left.text.matches('\n').count() + 1;
-        assert!(left_rows >= 1, "left rail should render ≥ 1 row, got {}", left_rows);
+        assert!(
+            left_rows >= 1,
+            "left rail should render ≥ 1 row, got {}",
+            left_rows
+        );
     }
 
     /// The light preset's top border at width 5 is corners + 3 fill
@@ -371,5 +414,98 @@ mod tests {
         assert_eq!(style.color, "#abcdef");
         assert_eq!(style.font_size_pt, 14.0);
         assert!(style.visible);
+    }
+
+    /// Every name the schema accepts has a non-empty description.
+    /// The console's `border preset=` completion renders one row per
+    /// entry of `BORDER_PRESETS` and takes its hint from
+    /// `border_preset_hint`; before the hint moved into
+    /// `PRESET_TABLE`, the app-side lookup was a hand-maintained
+    /// `match` with a `_ => ""` arm, so a fifth preset would have
+    /// completed with a blank description and nobody would have
+    /// noticed. This pins the coverage even though the tuple shape
+    /// now makes omitting one a compile error.
+    #[test]
+    fn every_border_preset_has_a_non_empty_hint() {
+        use crate::mindmap::border::{border_preset_hint, BORDER_PRESETS};
+        for preset in BORDER_PRESETS {
+            let hint = border_preset_hint(preset)
+                .unwrap_or_else(|| panic!("preset '{}' has no completion hint", preset));
+            assert!(!hint.is_empty(), "preset '{}' has an empty hint", preset);
+        }
+    }
+
+    /// Hint lookup is case-insensitive, matching `preset_glyph_set`
+    /// — the schema accepts `"Rounded"` as readily as `"rounded"`,
+    /// and a completion row must not lose its description over
+    /// casing.
+    #[test]
+    fn border_preset_hint_is_case_insensitive() {
+        use crate::mindmap::border::border_preset_hint;
+        assert_eq!(border_preset_hint("ROUNDED"), border_preset_hint("rounded"));
+        assert_eq!(border_preset_hint("Custom"), border_preset_hint("custom"));
+    }
+
+    /// An unknown preset has no hint rather than a blank one, so a
+    /// caller can tell "no such preset" from "described as nothing".
+    #[test]
+    fn border_preset_hint_unknown_name_is_none() {
+        use crate::mindmap::border::border_preset_hint;
+        assert!(border_preset_hint("no-such-preset").is_none());
+    }
+
+    /// **Parity guard for the clip-AABB fast path.**
+    /// `resolve_border_font_size_pt` exists so `node_clip_aabbs`
+    /// can skip a whole `BorderStyle` allocation for the one `f32`
+    /// it needs. If the two ever disagree, connection glyphs clip
+    /// against a different frame thickness than the one drawn —
+    /// a silent visual defect with no other test to catch it.
+    ///
+    /// Covers every arm of the cascade: per-node override, canvas
+    /// default fall-through, per-node winning over canvas default,
+    /// the unset floor, and (because the cheap resolver skips both)
+    /// independence from the preset and the frame color.
+    #[test]
+    fn resolve_border_font_size_pt_matches_resolve_border_style() {
+        use crate::mindmap::border::resolve_border_font_size_pt;
+        use crate::mindmap::model::GlyphBorderConfig;
+
+        fn cfg(preset: &str, size: f32) -> GlyphBorderConfig {
+            GlyphBorderConfig {
+                preset: preset.to_string(),
+                font: None,
+                font_size_pt: size,
+                color: None,
+                glyphs: None,
+                padding: 4.0,
+                color_palette: None,
+                color_palette_field: None,
+            }
+        }
+
+        let node = cfg("heavy", 22.0);
+        let canvas = cfg("double", 9.5);
+        let cases: [(Option<&GlyphBorderConfig>, Option<&GlyphBorderConfig>); 4] = [
+            (Some(&node), Some(&canvas)),
+            (Some(&node), None),
+            (None, Some(&canvas)),
+            (None, None),
+        ];
+        // Frame color must not move the answer — the cheap
+        // resolver doesn't take one.
+        for frame_color in ["#ffffff", "#123456", ""] {
+            for (per_node, canvas_default) in cases {
+                let full = resolve_border_style(per_node, canvas_default, frame_color).font_size_pt;
+                let cheap = resolve_border_font_size_pt(per_node, canvas_default);
+                assert!(
+                    (full - cheap).abs() < f32::EPSILON,
+                    "cascade drift for ({:?}, {:?}, {frame_color:?}): full {full} vs cheap {cheap}",
+                    per_node.map(|c| c.font_size_pt),
+                    canvas_default.map(|c| c.font_size_pt),
+                );
+            }
+        }
+        // And the documented floor.
+        assert!((resolve_border_font_size_pt(None, None) - 14.0).abs() < f32::EPSILON);
     }
 }

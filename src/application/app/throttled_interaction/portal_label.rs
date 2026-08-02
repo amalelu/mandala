@@ -13,14 +13,13 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use glam::Vec2;
-
 use crate::application::document::EdgeRef;
-use crate::application::frame_throttle::MutationFrequencyThrottle;
 
 use super::super::portal_label_drag::apply_portal_label_drag;
-use super::super::scene_rebuild::{flush_canvas_scene_buffers, update_portal_tree};
-use super::{DrainContext, ThrottledInteraction};
+use super::super::scene_rebuild::{flush_canvas_scene_buffers, CanvasFrame};
+use super::pending::ThrottledPending;
+use super::release::{ReleaseCommit, ReleaseRefresh};
+use super::{DrainContext, ThrottledDragInteraction, ThrottledInteraction};
 
 /// Drag state for repositioning one portal endpoint along its
 /// node's border.
@@ -33,11 +32,10 @@ pub(in crate::application::app) struct PortalLabelInteraction {
     /// whole-edge `PartialEq` would fold in float-fragile
     /// `control_points`).
     pub original: baumhard::mindmap::model::MindEdge,
-    /// Latest cursor position in canvas space. Overwritten on
-    /// every `CursorMoved`; consumed (`None`) at the end of every
-    /// successful drain.
-    pub pending_cursor: Option<Vec2>,
-    pub throttle: MutationFrequencyThrottle,
+    /// Cursor-latch pending state plus this gesture's adaptive
+    /// throttle: the latest canvas-space cursor, overwritten per
+    /// event and taken once per successful drain.
+    pub pending: ThrottledPending,
 }
 
 impl PortalLabelInteraction {
@@ -50,19 +48,18 @@ impl PortalLabelInteraction {
             edge_ref,
             endpoint_node_id,
             original,
-            pending_cursor: None,
-            throttle: MutationFrequencyThrottle::with_default_budget(),
+            pending: ThrottledPending::latching_cursor(),
         }
     }
 }
 
 impl ThrottledInteraction for PortalLabelInteraction {
-    fn has_pending(&self) -> bool {
-        self.pending_cursor.is_some()
+    fn pending(&self) -> &ThrottledPending {
+        &self.pending
     }
 
-    fn throttle(&mut self) -> &mut MutationFrequencyThrottle {
-        &mut self.throttle
+    fn pending_mut(&mut self) -> &mut ThrottledPending {
+        &mut self.pending
     }
 
     fn drain(&mut self, ctx: DrainContext<'_>) {
@@ -76,17 +73,59 @@ impl ThrottledInteraction for PortalLabelInteraction {
         // has_pending guarded the entry; `take` converts it to a
         // concrete `Vec2` and resets the pending slot to `None`
         // in the same step. No unwrap path needed.
-        let Some(cursor) = self.pending_cursor.take() else {
+        let Some(cursor) = self.pending.take_cursor() else {
             return;
         };
 
         if let Some(doc) = document.as_mut() {
             let changed = apply_portal_label_drag(doc, &self.edge_ref, &self.endpoint_node_id, cursor);
             if changed {
-                update_portal_tree(doc, &std::collections::HashMap::new(), app_scene, renderer);
+                let offsets = std::collections::HashMap::new();
+                CanvasFrame::new(
+                    doc,
+                    &offsets,
+                    // Portal markers ignore resize-handle /
+                    // NodeEdit overrides, so the empty bundle keeps
+                    // this drag off the mode-threading path.
+                    baumhard::mindmap::tree_builder::InteractionModeOverrides::none(),
+                    renderer.camera_zoom(),
+                )
+                .update_portal_tree(app_scene);
                 flush_canvas_scene_buffers(app_scene, renderer);
             }
         }
+    }
+}
+
+impl ThrottledDragInteraction for PortalLabelInteraction {
+    /// Release-commit body, renderer-free. See [`super::release`].
+    ///
+    /// Flushes the final cursor if one is buffered. `None` means
+    /// the last drain already consumed it; `Some` means the
+    /// throttle skipped that cursor and release must commit the
+    /// user's actual drop position rather than wherever the prior
+    /// drain happened to land. Bypasses the throttle — there is no
+    /// "next frame" after release.
+    ///
+    /// The no-op check compares only the two fields this drag
+    /// touches (`portal_from` / `portal_to`) — whole-edge
+    /// `PartialEq` would fold in float-fragile `control_points`.
+    ///
+    /// `original` is cloned rather than moved out so the body can
+    /// take `&mut self` like every other release commit; one clone
+    /// per gesture end.
+    fn commit_on_release_core(&mut self, c: ReleaseCommit<'_>) -> ReleaseRefresh {
+        let pending_cursor = self.pending.take_cursor();
+        if let (Some(doc), Some(cursor)) = (c.document.as_mut(), pending_cursor) {
+            apply_portal_label_drag(doc, &self.edge_ref, &self.endpoint_node_id, cursor);
+        }
+        let Some(doc) = c.document.as_mut() else {
+            return ReleaseRefresh::None;
+        };
+        doc.commit_throttled_edge_drag(&self.edge_ref, self.original.clone(), |c, o| {
+            c.portal_from != o.portal_from || c.portal_to != o.portal_to
+        });
+        ReleaseRefresh::All
     }
 }
 
@@ -94,8 +133,10 @@ impl ThrottledInteraction for PortalLabelInteraction {
 mod tests {
     use super::*;
     use crate::application::app::throttled_interaction::test_utils::{
-        drive_throttle_over_budget, fixture_edge, trait_default_tests_for_throttled_interaction,
+        drive_throttle_over_budget, fixture_edge, moved, sample,
+        trait_default_tests_for_throttled_interaction,
     };
+    use glam::Vec2;
 
     fn fixture_interaction() -> PortalLabelInteraction {
         PortalLabelInteraction::new(
@@ -106,25 +147,31 @@ mod tests {
     }
 
     #[test]
-    fn test_new_initialises_pending_cursor_to_none() {
+    fn test_new_initializes_pending_cursor_to_none() {
         let i = fixture_interaction();
         assert_eq!(i.edge_ref.from_id, "a");
         assert_eq!(i.endpoint_node_id, "a");
-        assert!(i.pending_cursor.is_none());
-        assert_eq!(i.throttle.current_n(), 1);
+        assert!(i.pending.peek_cursor().is_none());
+        assert_eq!(i.pending.throttle.current_n(), 1);
     }
 
+    /// This gesture is wired to the cursor-latch discipline, not
+    /// the delta accumulator: its drain projects an absolute
+    /// position, so a summed delta would be meaningless input.
+    ///
+    /// The sample is the discriminating one — zero delta, non-zero
+    /// absolute position, the shape a stationary pointer produces.
+    /// A delta-wired gesture reports no pending state at all on it,
+    /// so this fails loudly rather than reading back the same
+    /// numbers from the wrong half.
     #[test]
-    fn test_has_pending_false_when_pending_cursor_is_none() {
-        let i = fixture_interaction();
-        assert!(!i.has_pending());
-    }
-
-    #[test]
-    fn test_has_pending_true_when_pending_cursor_is_some() {
+    fn test_pending_uses_the_cursor_latch_discipline() {
         let mut i = fixture_interaction();
-        i.pending_cursor = Some(Vec2::new(4.0, 5.0));
+        assert!(!i.has_pending());
+        i.accumulate(sample(Vec2::ZERO, Vec2::new(4.0, 5.0)));
         assert!(i.has_pending());
+        assert_eq!(i.pending.peek_cursor(), Some(Vec2::new(4.0, 5.0)));
+        assert_eq!(i.pending.total_delta(), Vec2::ZERO);
     }
 
     #[test]
@@ -133,9 +180,9 @@ mod tests {
         // information the border projection needs, so the pending
         // slot must hold the last write, not accumulate or queue.
         let mut i = fixture_interaction();
-        i.pending_cursor = Some(Vec2::new(1.0, 1.0));
-        i.pending_cursor = Some(Vec2::new(9.0, 9.0));
-        assert_eq!(i.pending_cursor, Some(Vec2::new(9.0, 9.0)));
+        i.accumulate(sample(Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0)));
+        i.accumulate(sample(Vec2::new(8.0, 8.0), Vec2::new(9.0, 9.0)));
+        assert_eq!(i.pending.peek_cursor(), Some(Vec2::new(9.0, 9.0)));
     }
 
     #[test]
@@ -144,21 +191,21 @@ mod tests {
         // lingers until drain `take`s it or the whole interaction is
         // dropped at drag release.
         let mut i = fixture_interaction();
-        i.pending_cursor = Some(Vec2::new(2.0, 3.0));
-        drive_throttle_over_budget(&mut i.throttle);
-        assert!(i.throttle.current_n() > 1);
+        i.accumulate(sample(Vec2::new(1.0, 1.0), Vec2::new(2.0, 3.0)));
+        drive_throttle_over_budget(&mut i.pending.throttle);
+        assert!(i.pending.throttle.current_n() > 1);
 
         i.reset();
 
-        assert_eq!(i.throttle.current_n(), 1);
-        assert_eq!(i.pending_cursor, Some(Vec2::new(2.0, 3.0)));
+        assert_eq!(i.pending.throttle.current_n(), 1);
+        assert_eq!(i.pending.peek_cursor(), Some(Vec2::new(2.0, 3.0)));
         assert_eq!(i.endpoint_node_id, "a");
     }
 
     trait_default_tests_for_throttled_interaction! {
         build = fixture_interaction,
         set_pending = |i: &mut PortalLabelInteraction| {
-            i.pending_cursor = Some(Vec2::new(0.0, 0.0));
+            i.accumulate(moved(1.0, 1.0));
         },
     }
 }

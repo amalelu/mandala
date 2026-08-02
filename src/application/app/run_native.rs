@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use baumhard::mindmap::tree_builder::MindMapTree;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Event, KeyEvent, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event::{ElementState, Event, KeyEvent, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
@@ -18,13 +18,12 @@ use winit::window::{CursorIcon, Window, WindowId};
 use super::color_picker_flow::rebuild_color_picker_overlay;
 use super::freeze_watchdog::FreezeWatchdog;
 use super::input_context::InputHandlerContext;
-use super::label_edit::{LabelEditState, PortalTextEditState};
 use super::run_native_init;
+use super::single_line_edit::SingleLineEditor;
 use super::text_edit::TextEditState;
 use super::{
     drain_frame, event_cursor_moved, event_keyboard, event_mouse_click, Application, DragState,
-    InteractionMode,
-    LastClick, Options,
+    InteractionMode, LastClick, Options,
 };
 use crate::application::common::RenderDecree;
 use crate::application::console::ConsoleState;
@@ -69,7 +68,7 @@ pub(super) fn run(app: Application) {
 
 /// winit 0.30 `ApplicationHandler` implementor. Holds options
 /// pre-resume; on the first `resumed()` it creates the window and
-/// builds the fully-initialised [`InitState`]. Subsequent resume
+/// builds the fully-initialized [`InitState`]. Subsequent resume
 /// callbacks (mobile resume-after-suspend) are idempotent thanks
 /// to the `is_some()` guard.
 struct NativeApp {
@@ -154,18 +153,13 @@ impl ApplicationHandler for NativeApp {
             // events arrived in the meantime. Otherwise the grace
             // has already elapsed (or the FPS is already idle), so
             // we either commit the flip now or do nothing.
-            let fps_on = init.renderer.fps_display_mode()
-                != crate::application::common::FpsDisplayMode::Off;
+            let fps_on = init.renderer.fps_display_mode() != crate::application::common::FpsDisplayMode::Off;
             let fps_defer_deadline = if !still_continuing && fps_on {
                 init.renderer.fps_idle_defer_deadline(FPS_IDLE_GRACE)
             } else {
                 None
             };
-            if !still_continuing
-                && fps_on
-                && fps_defer_deadline.is_none()
-                && init.renderer.has_live_fps()
-            {
+            if !still_continuing && fps_on && fps_defer_deadline.is_none() && init.renderer.has_live_fps() {
                 init.renderer.set_fps_idle();
                 init.window.request_redraw();
             }
@@ -211,8 +205,7 @@ pub(super) struct InitState {
     pub(super) interaction_mode: InteractionMode,
     pub(super) console_state: ConsoleState,
     pub(super) console_history: Vec<String>,
-    pub(super) label_edit_state: LabelEditState,
-    pub(super) portal_text_edit_state: PortalTextEditState,
+    pub(super) single_line_edit_state: SingleLineEditor,
     pub(super) text_edit_state: TextEditState,
     pub(super) color_picker_state: crate::application::color_picker::ColorPickerState,
     pub(super) last_click: Option<LastClick>,
@@ -225,7 +218,7 @@ pub(super) struct InitState {
     /// Windows (every call → `LoadCursorW` + `SetCursor` + mutex
     /// lock) or Wayland (calls into pointer manager every time),
     /// so the per-event cursor icon update needs an
-    /// application-side gate. Initialised to `Default` to match
+    /// application-side gate. Initialized to `Default` to match
     /// the as-launched cursor.
     pub(super) cursor_icon_last: CursorIcon,
     /// Throttled, coexistent-with-drag color-picker hover.
@@ -275,8 +268,7 @@ impl InitState {
             interaction_mode: &mut self.interaction_mode,
             console_state: &mut self.console_state,
             console_history: &mut self.console_history,
-            label_edit_state: &mut self.label_edit_state,
-            portal_text_edit_state: &mut self.portal_text_edit_state,
+            single_line_edit_state: &mut self.single_line_edit_state,
             text_edit_state: &mut self.text_edit_state,
             color_picker_state: &mut self.color_picker_state,
             last_click: &mut self.last_click,
@@ -291,7 +283,7 @@ impl InitState {
         }
     }
 
-    /// Translate a winit `Touch` event into a recogniser ingest +
+    /// Translate a winit `Touch` event into a recognizer ingest +
     /// tick + dispatch step. Returns true when the event drove
     /// any state transition or dispatched a gesture (the caller
     /// should request a redraw on true). Modifier state is fixed
@@ -307,37 +299,35 @@ impl InitState {
     /// jitter `Moved` events constantly while a finger is down,
     /// so the gap is theoretical. A future improvement would set
     /// `ControlFlow::WaitUntil(started_at + LONG_PRESS_MS)` from
-    /// the recogniser's `OneFinger` state — deferred to keep
+    /// the recognizer's `OneFinger` state — deferred to keep
     /// Batch 7's diff small.
     pub(super) fn dispatch_touch_event(&mut self, touch: winit::event::Touch) -> bool {
         use super::touch_gesture::Phase;
         use web_time::Instant;
-        use winit::event::TouchPhase;
-        let phase = match touch.phase {
-            TouchPhase::Started => Phase::Started,
-            TouchPhase::Moved => Phase::Moved,
-            TouchPhase::Ended | TouchPhase::Cancelled => Phase::Ended,
-        };
+        // Phase translation, recognizer ingest + tick, and the
+        // gesture-to-Action lookup are `cross_dispatch::pointer`'s
+        // `drive_touch_event`; the browser runs the same body. Only
+        // the dispatch below is native's own — it goes through
+        // `dispatch_action` so `NativeOnly` gesture Actions
+        // (`EnterResizeMode`, `FastResizeStart`) reach their arms.
+        let phase = super::dispatch::touch_phase(touch.phase);
         let pos = (touch.location.x, touch.location.y);
-        let now = Instant::now();
-        let from_ingest = self.touch_recognizer.ingest(phase, touch.id, pos, now);
-        let from_tick = self.touch_recognizer.tick(now);
-        // Either ingest or tick can produce at most one
-        // recognition per call. If both fired the ingest one
-        // wins (it's the more recent transition); the tick's
-        // emission is queued for the next call.
-        let recognised = from_ingest.or(from_tick);
-        if let Some(g) = recognised {
-            self.cursor_pos = g.pos();
-            let mut ctx = self.input_context();
-            let name = g.mouse_gesture().key_name();
-            let action = ctx.keybinds.action_for_gesture(name, false, false, false);
-            if let Some(a) = action {
+        if let Some(d) = super::dispatch::drive_touch_event(
+            &mut self.touch_recognizer,
+            &self.keybinds,
+            phase,
+            touch.id,
+            pos,
+            Instant::now(),
+        ) {
+            self.cursor_pos = d.cursor_pos;
+            if let Some(a) = d.action {
+                let mut ctx = self.input_context();
                 let _ = super::dispatch::dispatch_action(a, &mut ctx, None);
                 return true;
             }
         }
-        // No gesture recognised — but the recogniser may have
+        // No gesture recognized — but the recognizer may have
         // moved its internal state (e.g. Started → OneFinger).
         // The caller still wants a redraw on Started/Moved so
         // any cursor-following overlay (long-press preview,
@@ -419,10 +409,7 @@ impl InitState {
                 event: WindowEvent::MouseWheel { delta, .. },
                 ..
             } => {
-                let scroll_y = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y as f64,
-                    MouseScrollDelta::PixelDelta(pos) => pos.y / 50.0,
-                };
+                let scroll_y = crate::application::app::wheel_lines(delta);
                 // While the console is open, the wheel scrolls the
                 // scrollback rather than zooming the canvas — mouse
                 // events should follow keyboard focus. Fractional
@@ -463,16 +450,12 @@ impl InitState {
                     // both to `ZoomIn` / `ZoomOut`. If the user
                     // explicitly clears the bindings, wheel events are
                     // silently ignored.
-                    let gesture_name = if scroll_y > 0.0 {
-                        crate::application::keybinds::MouseGesture::WheelUp.key_name()
-                    } else {
-                        crate::application::keybinds::MouseGesture::WheelDown.key_name()
-                    };
+                    let gesture_name = crate::application::app::wheel_gesture(scroll_y).key_name();
                     // `action_for_gesture` falls back to the unmodified
                     // binding when no exact-modifier match exists, so
                     // `Ctrl+Wheel` keeps zooming even though only
                     // `WheelUp` / `WheelDown` are bound in defaults —
-                    // pre-branch behaviour was modifier-agnostic and
+                    // pre-branch behavior was modifier-agnostic and
                     // we preserve it here without forcing every user
                     // to enumerate modifier permutations.
                     let action = self.keybinds.action_for_gesture(
@@ -500,8 +483,8 @@ impl InitState {
                 // Any active drag (Pending → Throttled etc.) or an
                 // open picker requires a fresh frame so the drag
                 // preview / hover marker tracks the cursor.
-                redraw_after = !matches!(self.drag_state, DragState::None)
-                    || self.color_picker_state.is_open();
+                redraw_after =
+                    !matches!(self.drag_state, DragState::None) || self.color_picker_state.is_open();
             }
             //// TOUCH ////
             Event::WindowEvent {
@@ -571,7 +554,8 @@ impl InitState {
         // the next drain after any competing rebuild.
         let is_moving_node = matches!(
             self.drag_state,
-            DragState::Throttled(super::throttled_interaction::ThrottledDrag::MovingNode(_)),
+            DragState::Throttled(ref d)
+                if matches!(**d, super::throttled_interaction::ThrottledDrag::MovingNode(_))
         );
 
         // Suppress the animation tick during drags that mutate
@@ -584,12 +568,14 @@ impl InitState {
         // document, not the tree.
         let is_drag_with_tree_mutation = matches!(
             self.drag_state,
-            DragState::Throttled(
-                super::throttled_interaction::ThrottledDrag::MovingNode(_)
-                    | super::throttled_interaction::ThrottledDrag::MovingSection(_)
-                    | super::throttled_interaction::ThrottledDrag::SectionResize(_)
-                    | super::throttled_interaction::ThrottledDrag::NodeResize(_),
-            ),
+            DragState::Throttled(ref d)
+                if matches!(
+                    **d,
+                    super::throttled_interaction::ThrottledDrag::MovingNode(_)
+                        | super::throttled_interaction::ThrottledDrag::MovingSection(_)
+                        | super::throttled_interaction::ThrottledDrag::SectionResize(_)
+                        | super::throttled_interaction::ThrottledDrag::NodeResize(_)
+                )
         );
 
         // Destructure the fields the two throttled-drive call sites
@@ -646,8 +632,7 @@ impl InitState {
             // pins the loop in `ControlFlow::Poll`. Two boolean
             // writes, no GPU work; bypass the throttle and clear
             // immediately.
-            picker_hover.dirty = false;
-            picker_hover.canvas_dirty = false;
+            picker_hover.clear_pending();
         }
 
         if let DragState::SelectingRect {
@@ -659,6 +644,7 @@ impl InitState {
                 *start_canvas,
                 *current_canvas,
                 &self.document,
+                &self.interaction_mode,
                 &mut self.mindmap_tree,
                 &mut self.renderer,
             );
@@ -730,7 +716,7 @@ impl InitState {
     /// are intentionally event-driven only — they update on
     /// `CursorMoved` and don't need self-driven continuation. The
     /// FPS overlay is also intentionally NOT a continuation source:
-    /// a diagnostic should observe behaviour, not change it. When
+    /// a diagnostic should observe behavior, not change it. When
     /// the app idles, the overlay flips to "-" (see
     /// [`crate::application::renderer::Renderer::set_fps_idle`])
     /// rather than forcing the loop to keep rendering.
@@ -742,10 +728,7 @@ impl InitState {
             DragState::Throttled(ref d) if d.as_dyn().needs_continuation()
         );
         let picker_pending = self.picker_hover.has_pending();
-        let animations = self
-            .document
-            .as_ref()
-            .is_some_and(|d| d.has_active_animations());
+        let animations = self.document.as_ref().is_some_and(|d| d.has_active_animations());
         let geometry_dirty = self.renderer.connection_geometry_dirty();
 
         drag_pending || picker_pending || animations || geometry_dirty

@@ -11,7 +11,7 @@ use glam::Vec2;
 use baumhard::mindmap::model::{
     portal_endpoint_state_mut, Canvas, EdgeLabelConfig, GlyphConnectionConfig, MindEdge, PortalEndpointState,
 };
-use baumhard::mindmap::scene_builder;
+use baumhard::mindmap::tree_builder;
 
 use super::super::types::EdgeRef;
 use super::super::undo_action::UndoAction;
@@ -39,7 +39,7 @@ impl MindMapDocument {
         canvas_pos: Vec2,
         edge_ref: &EdgeRef,
         tolerance: f32,
-    ) -> Option<(scene_builder::EdgeHandleKind, Vec2)> {
+    ) -> Option<(tree_builder::EdgeHandleKind, Vec2)> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
         let from_node = self.mindmap.nodes.get(&edge.from_id)?;
         let to_node = self.mindmap.nodes.get(&edge.to_id)?;
@@ -50,16 +50,16 @@ impl MindMapDocument {
 
         let edge_key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
         let handles =
-            scene_builder::build_edge_handles(edge, &edge_key, from_pos, from_size, to_pos, to_size);
+            tree_builder::build_edge_handles(edge, &edge_key, from_pos, from_size, to_pos, to_size);
 
-        let mut best: Option<(scene_builder::EdgeHandleKind, Vec2, f32)> = None;
+        let mut best: Option<(tree_builder::EdgeHandleKind, Vec2, f32)> = None;
         for h in handles {
             let pos = Vec2::new(h.position.0, h.position.1);
             let dist = canvas_pos.distance(pos);
             if dist > tolerance {
                 continue;
             }
-            if best.as_ref().map_or(true, |(_, _, d)| dist < *d) {
+            if best.as_ref().is_none_or(|(_, _, d)| dist < *d) {
                 best = Some((h.kind, pos, dist));
             }
         }
@@ -90,7 +90,7 @@ impl MindMapDocument {
     ///   `edge.from_id` / `edge.to_id` — any other value is a
     ///   no-op (the console layer ensures the id came from a
     ///   portal-label hit-test, so this guard is defensive, not
-    ///   a user-visible behaviour).
+    ///   a user-visible behavior).
     /// - **Line-mode edge, `endpoint = Some(_)`.** Identical to
     ///   the `endpoint = None` line-mode case above — line-mode
     ///   edges have no per-endpoint state to reset, so the
@@ -227,7 +227,7 @@ impl MindMapDocument {
         }
         // Resolve the actual path endpoints so the curve bulges
         // out relative to the rendered straight line, not the
-        // (centre-to-centre) raw vector between nodes.
+        // (center-to-center) raw vector between nodes.
         let edge = &self.mindmap.edges[idx];
         let from_node = match self.mindmap.nodes.get(&edge.from_id) {
             Some(n) => n,

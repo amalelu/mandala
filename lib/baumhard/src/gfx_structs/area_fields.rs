@@ -4,6 +4,7 @@
 //! pipeline uses to describe which field to touch and how.
 
 use crate::core::primitives::{ApplyOperation, ColorFontRegions};
+use crate::gfx_structs::delta::DeltaField;
 use crate::gfx_structs::shape::NodeShape;
 use crate::gfx_structs::zoom_visibility::ZoomVisibility;
 use crate::util::ordered_vec2::OrderedVec2;
@@ -11,6 +12,7 @@ use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::ops::Add;
+use strum_macros::{Display, EnumDiscriminants, EnumIter};
 
 /// Per-glyph halo style. When set on a [`crate::gfx_structs::area::GlyphArea`], the renderer
 /// emits 8 extra shaped buffers behind the area's text — each at the
@@ -33,12 +35,13 @@ use std::ops::Add;
 ///
 /// # Costs
 ///
-/// Each outlined area costs 9 cosmic-text buffer shapings instead of
-/// 1. The stamp count is canonical (chosen inside this crate, not a
-/// caller knob) so every consumer gets the same outline quality
-/// without having to tune it. Hot-path work (§B7) — enable only when
+/// Each outlined area costs 9 cosmic-text buffer shapings instead
+/// of one. The stamp count is canonical (chosen inside this crate,
+/// not a caller knob) so every consumer gets the same outline
+/// quality without having to tune it. Hot-path work (§B7) — enable only when
 /// the background legibility problem actually needs it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutlineStyle {
     /// RGBA halo color, applied to every glyph in every halo copy.
     pub color: [u8; 4],
@@ -97,49 +100,33 @@ impl Hash for OutlineStyle {
     }
 }
 
-/// Discriminant tag for [`GlyphAreaField`] — payload-free so it can
-/// key a `HashMap`/`HashSet` without paying the inner field's
-/// allocation or equality cost.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum GlyphAreaFieldType {
-    /// Tag for [`GlyphAreaField::Text`].
-    Text,
-    /// Tag for [`GlyphAreaField::Scale`].
-    Scale,
-    /// Tag for [`GlyphAreaField::LineHeight`].
-    LineHeight,
-    /// Reserved for flag deltas; no matching `GlyphAreaField` variant
-    /// today — preserved as a seam per `CODE_CONVENTIONS.md` §6.
-    Flags,
-    /// Tag for [`GlyphAreaField::Position`].
-    Position,
-    /// Tag for [`GlyphAreaField::Bounds`].
-    Bounds,
-    /// Tag for [`GlyphAreaField::ColorFontRegions`].
-    ColorFontRegions,
-    /// Tag for [`GlyphAreaField::Outline`].
-    Outline,
-    /// Tag for [`GlyphAreaField::Shape`].
-    Shape,
-    /// Tag for [`GlyphAreaField::ZoomVisibility`].
-    ZoomVisibility,
-    /// Tag for [`GlyphAreaField::Operation`] — the control variant
-    /// that selects `Assign`/`Add`/`Subtract` for the rest of the
-    /// delta.
-    ApplyOperation,
-}
-
 /// A single field delta for a [`crate::gfx_structs::area::GlyphArea`].
 /// Each variant carries the new value (or addend, depending on the
 /// active [`ApplyOperation`]) for one field of the area. Used inside
 /// [`crate::gfx_structs::area::DeltaGlyphArea`] and the mutator
 /// pipeline — the variant you pick determines which field is touched;
 /// all others are left alone.
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+///
+/// The payload-free `GlyphAreaFieldType` tag is *derived* from this
+/// enum, so the two can never drift: adding a variant here adds its
+/// tag, and the only other edit a new area mutation needs is its
+/// branch in
+/// [`GlyphArea::apply_operation`](crate::gfx_structs::area::GlyphArea::apply_operation)
+/// (`CONVENTIONS.md` §B4).
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, EnumDiscriminants)]
+#[strum_discriminants(name(GlyphAreaFieldType))]
+#[strum_discriminants(derive(Hash, Serialize, Deserialize, EnumIter, Display))]
+#[strum_discriminants(doc = "Payload-free tag for [`GlyphAreaField`], derived by strum so it")]
+#[strum_discriminants(doc = "always lists exactly the field variants that exist. Keys the")]
+#[strum_discriminants(doc = "[`DeltaGlyphArea`](crate::gfx_structs::area::DeltaGlyphArea) map,")]
+#[strum_discriminants(doc = "where using the tag rather than the field avoids hashing the")]
+#[strum_discriminants(doc = "payload (text, region sets) on every lookup.")]
 pub enum GlyphAreaField {
     /// Replace or append to the area's text content. Under
     /// `ApplyOperation::Assign` the string replaces the current text;
-    /// under `Add` it is concatenated.
+    /// under `Add` it is concatenated; under `Delete` the text is
+    /// cleared. `Subtract` and `Multiply` are not defined and are
+    /// ignored with a `log::warn!`.
     Text(String),
     /// Font size in points. Under `Add`/`Subtract` the value is added
     /// to / subtracted from the current scale; under `Assign` it
@@ -155,10 +142,11 @@ pub enum GlyphAreaField {
     /// Render bounds (width, height) in pixels. Under `Add` the
     /// components grow; under `Assign` the bounds are replaced.
     Bounds(OrderedVec2),
-    /// Character-range colour / font runs. Under `Add` each run in
+    /// Character-range color / font runs. Under `Add` each run in
     /// the delta is submitted (merged) into the existing set; under
     /// `Assign` the entire set is replaced; under `Subtract` matching
-    /// runs are removed.
+    /// runs are removed; under `Delete` the set is cleared.
+    /// `Multiply` is not defined and is ignored with a `log::warn!`.
     ColorFontRegions(ColorFontRegions),
     /// Replace the area's
     /// [`outline`](crate::gfx_structs::area::GlyphArea#structfield.outline)
@@ -309,27 +297,16 @@ impl GlyphAreaField {
     pub fn position(x: f32, y: f32) -> Self {
         GlyphAreaField::Position(OrderedVec2::new_f32(x, y))
     }
-    /// Discriminant tag for this field. Zero-cost; usable as a
-    /// HashMap/HashSet key.
-    pub const fn variant(&self) -> GlyphAreaFieldType {
-        match self {
-            GlyphAreaField::Text(_) => GlyphAreaFieldType::Text,
-            GlyphAreaField::Scale(_) => GlyphAreaFieldType::Scale,
-            GlyphAreaField::Position(_) => GlyphAreaFieldType::Position,
-            GlyphAreaField::Bounds(_) => GlyphAreaFieldType::Bounds,
-            GlyphAreaField::ColorFontRegions(_) => GlyphAreaFieldType::ColorFontRegions,
-            GlyphAreaField::LineHeight(_) => GlyphAreaFieldType::LineHeight,
-            GlyphAreaField::Outline(_) => GlyphAreaFieldType::Outline,
-            GlyphAreaField::Shape(_) => GlyphAreaFieldType::Shape,
-            GlyphAreaField::ZoomVisibility(_) => GlyphAreaFieldType::ZoomVisibility,
-            GlyphAreaField::Operation(_) => GlyphAreaFieldType::ApplyOperation,
-        }
-    }
+}
 
-    /// Whether `self` and `other` represent the same field variant
-    /// (ignoring payload). O(1).
+impl DeltaField for GlyphAreaField {
+    const OPERATION_KEY: GlyphAreaFieldType = GlyphAreaFieldType::Operation;
+
     #[inline]
-    pub fn same_type(&self, other: &GlyphAreaField) -> bool {
-        self.variant() == other.variant()
+    fn as_operation(&self) -> Option<ApplyOperation> {
+        match self {
+            GlyphAreaField::Operation(operation) => Some(*operation),
+            _ => None,
+        }
     }
 }

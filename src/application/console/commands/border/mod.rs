@@ -28,6 +28,7 @@ use crate::application::console::predicates::node_or_section_selected;
 
 mod complete;
 mod execute;
+mod positional;
 mod preview;
 mod show;
 
@@ -36,8 +37,11 @@ mod tests;
 
 pub use complete::complete_border;
 pub(crate) use complete::{kv_value_completions, preview_subverb_completions};
-pub(crate) use execute::apply_border_field_to_selection;
 pub use execute::execute_border;
+pub(crate) use execute::{
+    apply_border_field_to_selection, cycle_border_preset_on_selection, prepend_line,
+    toggle_border_visible_on_selection,
+};
 // Re-exported for the `section frame preview …` and
 // `canvas border preview …` / `canvas section-frame [focused]
 // preview …` verbs. Each verb's `preview` arm wraps
@@ -55,8 +59,13 @@ pub(crate) use preview::dispatch_border_preview;
 // `edits_has_glyph_field`, `custom_preset_hint`) violated
 // `CODE_CONVENTIONS.md` §5 ("avoid duplicating logic").
 pub(crate) use execute::{custom_preset_hint, edits_has_glyph_field, kv_hint, nodes_in_selection, stage_kv};
+// The positional subverb grammar (`preset` / `color` / `padding` /
+// `palette` / `font` / `side` / `corner`) is surface-agnostic:
+// `canvas border …` and `canvas section-frame [focused] …` speak
+// exactly the same one. `canvas.rs` used to carry a second copy.
+pub(crate) use positional::{positional_subverb_to_edits, BorderSurface};
 
-/// kv keys recognised on the kv-form path.
+/// kv keys recognized on the kv-form path.
 pub const KEYS: &[&str] = &[
     "preset", "font", "size", "color", "palette", "field", "padding", "top", "bottom", "left", "right", "tl",
     "tr", "bl", "br",
@@ -67,8 +76,8 @@ pub const KEYS: &[&str] = &[
 /// (`preset` / `color` / `padding` / `palette` / `font` /
 /// `side` / `corner`) and `toggle`.
 pub const VERBS: &[&str] = &[
-    "on", "off", "toggle", "show", "reset", "preview",
-    "preset", "color", "padding", "palette", "font", "side", "corner",
+    "on", "off", "toggle", "show", "reset", "preview", "preset", "color", "padding", "palette", "font",
+    "side", "corner",
 ];
 
 /// Subverbs surfaced under `border preview` — the

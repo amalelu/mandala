@@ -492,3 +492,151 @@ pub fn repeat_while_without_children_is_noop() {
     // Target is untouched.
     assert_pos(&model, target, 100.0, 100.0);
 }
+
+#[test]
+pub fn test_repeat_while_aligns_non_ascending_target_channels() {
+    repeat_while_aligns_non_ascending_target_channels();
+}
+
+/// Regression for P1-08: `compare_apply_repeat_while` walked siblings in raw
+/// arena order and dropped matches when the target row was not channel-
+/// ascending. Target children on channels `[2,0,1]` and a single ch-0 mutator
+/// must still match the ch-0 child.
+pub fn repeat_while_aligns_non_ascending_target_channels() {
+    fonts::init();
+
+    let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed_with(mk_area(0.0, 0.0, 0, 0));
+    let root = model.root;
+    // Arena order is ch 2, 0, 1 — deliberately not ascending.
+    let t2 = append_area(&mut model, root, 0.0, 0.0, 2, 1);
+    let t0 = append_area(&mut model, root, 10.0, 0.0, 0, 2);
+    let t1 = append_area(&mut model, root, 20.0, 0.0, 1, 3);
+
+    // Predicate that always holds so the repeated mutator applies to every
+    // matching target child.
+    let mut always_true = Predicate::new();
+    always_true.fields.push((
+        GfxElementField::GlyphArea(GlyphAreaField::Position(OrderedVec2::new_f32(-1.0, -1.0))),
+        Comparator::not_equals(),
+    ));
+
+    // Make the instruction the mutator root so the sibling row being tested
+    // is the target root's children, not an intermediate node's children.
+    let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::Instruction {
+        instruction: RepeatWhile(always_true),
+        channel: 0,
+        mutation: Mutation::None,
+    });
+    let repeated = mutator.arena.new_node(GfxMutator::new(
+        Mutation::AreaCommand(Box::new(GlyphAreaCommand::NudgeDown(10.0))),
+        0,
+    ));
+    mutator.root.append(repeated, &mut mutator.arena);
+
+    walk_tree(&mut model, &mutator);
+
+    assert_pos(&model, t0, 10.0, 10.0); // matched ch 0
+    assert_pos(&model, t1, 20.0, 0.0); // no ch-1 mutator
+    assert_pos(&model, t2, 0.0, 0.0); // no ch-2 mutator
+}
+
+#[test]
+pub fn test_repeat_while_merge_advance_does_not_drop_mutator_without_target() {
+    repeat_while_merge_advance_does_not_drop_mutator_without_target();
+}
+
+/// Regression for P1-08: the old advance rule advanced **both** cursors when
+/// `m_chan < t_chan`, so a mutator on channel 2 following a ch-1 mutator never
+/// reached a ch-2 target. Targets `[2,3]` vs mutators `[1,2]` must apply the
+/// ch-2 mutator to the ch-2 target.
+pub fn repeat_while_merge_advance_does_not_drop_mutator_without_target() {
+    fonts::init();
+
+    let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed_with(mk_area(0.0, 0.0, 0, 0));
+    let root = model.root;
+    let t2 = append_area(&mut model, root, 0.0, 0.0, 2, 1);
+    let t3 = append_area(&mut model, root, 10.0, 0.0, 3, 2);
+
+    let mut always_true = Predicate::new();
+    always_true.fields.push((
+        GfxElementField::GlyphArea(GlyphAreaField::Position(OrderedVec2::new_f32(-1.0, -1.0))),
+        Comparator::not_equals(),
+    ));
+
+    let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::Instruction {
+        instruction: RepeatWhile(always_true),
+        channel: 0,
+        mutation: Mutation::None,
+    });
+    let m1 = mutator.arena.new_node(GfxMutator::new(
+        Mutation::AreaCommand(Box::new(GlyphAreaCommand::NudgeDown(10.0))),
+        1,
+    ));
+    let m2 = mutator.arena.new_node(GfxMutator::new(
+        Mutation::AreaCommand(Box::new(GlyphAreaCommand::NudgeDown(10.0))),
+        2,
+    ));
+    mutator.root.append(m1, &mut mutator.arena);
+    mutator.root.append(m2, &mut mutator.arena);
+
+    walk_tree(&mut model, &mutator);
+
+    assert_pos(&model, t2, 0.0, 10.0); // m2 reached the ch-2 target
+    assert_pos(&model, t3, 10.0, 0.0); // no ch-3 mutator
+}
+
+#[test]
+pub fn test_default_terminator_resumes_over_non_ascending_after_mutators() {
+    default_terminator_resumes_over_non_ascending_after_mutators();
+}
+
+/// Regression for P1-08: `DEFAULT_TERMINATOR` scanned after-mutations in arena
+/// order and broke on `next.channel() > t_chan`. When the after-mutations are
+/// [ch 2, ch 0, ch 1] and the failing target is ch 0, the terminator must skip
+/// the higher-channel entries and still find the ch-0 after-mutation.
+pub fn default_terminator_resumes_over_non_ascending_after_mutators() {
+    fonts::init();
+
+    let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed_with(mk_area(0.0, 0.0, 0, 0));
+    let root = model.root;
+    let t0 = append_area(&mut model, root, 100.0, 100.0, 0, 1);
+    let t2 = append_area(&mut model, root, 0.0, 0.0, 2, 2);
+    let t1 = append_area(&mut model, root, 50.0, 50.0, 1, 3);
+
+    // Predicate fails only on t0, triggering the terminator for that node.
+    let mut fail_on_t0 = Predicate::new();
+    fail_on_t0.fields.push((
+        GfxElementField::GlyphArea(GlyphAreaField::Position(OrderedVec2::new_f32(100.0, 100.0))),
+        Comparator::not_equals(),
+    ));
+
+    let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::Instruction {
+        instruction: RepeatWhile(fail_on_t0),
+        channel: 0,
+        mutation: Mutation::None,
+    });
+    let repeated = mutator.arena.new_node(GfxMutator::new_void(0));
+    // After-mutations in non-ascending arena order.
+    let after_ch2 = mutator.arena.new_node(GfxMutator::new(
+        Mutation::AreaCommand(Box::new(GlyphAreaCommand::NudgeDown(10.0))),
+        2,
+    ));
+    let after_ch0 = mutator.arena.new_node(GfxMutator::new(
+        Mutation::AreaCommand(Box::new(GlyphAreaCommand::NudgeDown(10.0))),
+        0,
+    ));
+    let after_ch1 = mutator.arena.new_node(GfxMutator::new(
+        Mutation::AreaCommand(Box::new(GlyphAreaCommand::NudgeDown(10.0))),
+        1,
+    ));
+    mutator.root.append(repeated, &mut mutator.arena);
+    repeated.append(after_ch2, &mut mutator.arena);
+    repeated.append(after_ch0, &mut mutator.arena);
+    repeated.append(after_ch1, &mut mutator.arena);
+
+    walk_tree(&mut model, &mutator);
+
+    assert_pos(&model, t0, 100.0, 110.0); // ch-0 after-mutation found
+    assert_pos(&model, t1, 50.0, 50.0); // no mutator aligned to ch 1
+    assert_pos(&model, t2, 0.0, 0.0); // no mutator aligned to ch 2
+}

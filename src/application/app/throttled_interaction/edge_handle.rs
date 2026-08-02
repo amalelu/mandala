@@ -16,14 +16,12 @@ use std::collections::HashMap;
 use glam::Vec2;
 
 use crate::application::document::EdgeRef;
-use crate::application::frame_throttle::MutationFrequencyThrottle;
 
 use super::super::edge_drag::apply_edge_handle_drag;
-use super::super::scene_rebuild::{
-    flush_canvas_scene_buffers, update_connection_label_tree, update_connection_tree,
-    update_edge_handle_tree, update_portal_tree,
-};
-use super::{DrainContext, ThrottledInteraction};
+use super::super::scene_rebuild::{flush_canvas_scene_buffers, CanvasFrame};
+use super::pending::ThrottledPending;
+use super::release::{ReleaseCommit, ReleaseRefresh};
+use super::{DrainContext, ThrottledDragInteraction, ThrottledInteraction};
 
 /// Drag-to-reshape state for one edge's grab-handle.
 pub(in crate::application::app) struct EdgeHandleInteraction {
@@ -32,7 +30,7 @@ pub(in crate::application::app) struct EdgeHandleInteraction {
     /// initial kind — after the first drain frame inserts a
     /// fresh control point, this mutates in place to
     /// `ControlPoint(0)` so subsequent frames take the CP path.
-    pub handle: baumhard::mindmap::scene_builder::EdgeHandleKind,
+    pub handle: baumhard::mindmap::tree_builder::EdgeHandleKind,
     /// Full snapshot of the edge at drag start, consumed by the
     /// release path for the `UndoAction::EditEdge` entry and the
     /// no-op skip check.
@@ -42,17 +40,16 @@ pub(in crate::application::app) struct EdgeHandleInteraction {
     /// cursor location, which avoids accumulating drift on
     /// non-control-point handles.
     pub start_handle_pos: Vec2,
-    /// Accumulated delta since drag start.
-    pub total_delta: Vec2,
-    /// Delta accumulated since the last successful drain.
-    pub pending_delta: Vec2,
-    pub throttle: MutationFrequencyThrottle,
+    /// Delta-accumulate pending state plus this gesture's adaptive
+    /// throttle. The running total is added to `start_handle_pos`
+    /// to give the handle's absolute position.
+    pub pending: ThrottledPending,
 }
 
 impl EdgeHandleInteraction {
     pub(in crate::application::app) fn new(
         edge_ref: EdgeRef,
-        handle: baumhard::mindmap::scene_builder::EdgeHandleKind,
+        handle: baumhard::mindmap::tree_builder::EdgeHandleKind,
         original: baumhard::mindmap::model::MindEdge,
         start_handle_pos: Vec2,
     ) -> Self {
@@ -61,20 +58,18 @@ impl EdgeHandleInteraction {
             handle,
             original,
             start_handle_pos,
-            total_delta: Vec2::ZERO,
-            pending_delta: Vec2::ZERO,
-            throttle: MutationFrequencyThrottle::with_default_budget(),
+            pending: ThrottledPending::accumulating_deltas(),
         }
     }
 }
 
 impl ThrottledInteraction for EdgeHandleInteraction {
-    fn has_pending(&self) -> bool {
-        self.pending_delta != Vec2::ZERO
+    fn pending(&self) -> &ThrottledPending {
+        &self.pending
     }
 
-    fn throttle(&mut self) -> &mut MutationFrequencyThrottle {
-        &mut self.throttle
+    fn pending_mut(&mut self) -> &mut ThrottledPending {
+        &mut self.pending
     }
 
     fn drain(&mut self, ctx: DrainContext<'_>) {
@@ -87,13 +82,14 @@ impl ThrottledInteraction for EdgeHandleInteraction {
             ..
         } = ctx;
 
+        self.pending.take_delta();
         if let Some(doc) = document.as_mut() {
             let new_handle = apply_edge_handle_drag(
                 doc,
                 &self.edge_ref,
                 self.handle,
                 self.start_handle_pos,
-                self.total_delta,
+                self.pending.total_delta(),
             );
             self.handle = new_handle;
 
@@ -101,20 +97,49 @@ impl ThrottledInteraction for EdgeHandleInteraction {
             scene_cache.invalidate_edge(&edge_key);
 
             let offsets: HashMap<String, (f32, f32)> = HashMap::new();
-            let scene = doc.build_scene_with_cache(
+            let frame = CanvasFrame::new(
+                doc,
                 &offsets,
-                scene_cache,
-                renderer.camera_zoom(),
                 interaction_mode.resize_handle_overrides(),
+                renderer.camera_zoom(),
             );
-            update_connection_tree(&scene, app_scene);
-            update_edge_handle_tree(&scene, app_scene);
-            update_connection_label_tree(&scene, app_scene, renderer);
-            update_portal_tree(doc, &offsets, app_scene, renderer);
+            frame.update_connection_trees(scene_cache, app_scene);
+            frame.update_connection_label_tree(app_scene);
+            frame.update_portal_tree(app_scene);
             flush_canvas_scene_buffers(app_scene, renderer);
         }
+    }
+}
 
-        self.pending_delta = Vec2::ZERO;
+impl ThrottledDragInteraction for EdgeHandleInteraction {
+    /// Release-commit body, renderer-free. See [`super::release`].
+    ///
+    /// The drain loop has been writing each new edge state directly
+    /// into the model. Before release, flush one last write using
+    /// the full `total_delta` (independent of any throttled pending
+    /// drain) so the final committed state matches the cursor
+    /// position exactly. Reaching this path means the drag
+    /// threshold was crossed, so the `EditEdge` undo entry carrying
+    /// the pre-drag snapshot is pushed unconditionally.
+    ///
+    /// `original` is cloned rather than moved out so the body can
+    /// take `&mut self` like every other release commit; one clone
+    /// per gesture end.
+    fn commit_on_release_core(&mut self, c: ReleaseCommit<'_>) -> ReleaseRefresh {
+        let Some(doc) = c.document.as_mut() else {
+            return ReleaseRefresh::None;
+        };
+        apply_edge_handle_drag(
+            doc,
+            &self.edge_ref,
+            self.handle,
+            self.start_handle_pos,
+            self.pending.total_delta(),
+        );
+        // Crossing the drag threshold guarantees a state change, so
+        // commit unconditionally.
+        doc.commit_throttled_edge_drag(&self.edge_ref, self.original.clone(), |_, _| true);
+        ReleaseRefresh::All
     }
 }
 
@@ -122,9 +147,9 @@ impl ThrottledInteraction for EdgeHandleInteraction {
 mod tests {
     use super::*;
     use crate::application::app::throttled_interaction::test_utils::{
-        drive_throttle_over_budget, fixture_edge, trait_default_tests_for_throttled_interaction,
+        drive_throttle_over_budget, fixture_edge, moved, trait_default_tests_for_throttled_interaction,
     };
-    use baumhard::mindmap::scene_builder::EdgeHandleKind;
+    use baumhard::mindmap::tree_builder::EdgeHandleKind;
 
     fn fixture_interaction() -> EdgeHandleInteraction {
         EdgeHandleInteraction::new(
@@ -136,44 +161,42 @@ mod tests {
     }
 
     #[test]
-    fn test_new_initialises_fields_with_zero_deltas() {
+    fn test_new_initializes_fields_with_zero_deltas() {
         let i = fixture_interaction();
         assert_eq!(i.edge_ref.from_id, "a");
         assert_eq!(i.edge_ref.to_id, "b");
         assert_eq!(i.edge_ref.edge_type, "parent_child");
         assert_eq!(i.handle, EdgeHandleKind::AnchorFrom);
         assert_eq!(i.start_handle_pos, Vec2::new(10.0, 20.0));
-        assert_eq!(i.pending_delta, Vec2::ZERO);
-        assert_eq!(i.total_delta, Vec2::ZERO);
-        assert_eq!(i.throttle.current_n(), 1);
+        assert_eq!(i.pending.pending_delta(), Vec2::ZERO);
+        assert_eq!(i.pending.total_delta(), Vec2::ZERO);
+        assert_eq!(i.pending.throttle.current_n(), 1);
     }
 
+    /// Delta-accumulate discipline — see the `MovingNode`
+    /// counterpart for why the wiring is worth its own test.
     #[test]
-    fn test_has_pending_false_for_zero_delta() {
-        let i = fixture_interaction();
-        assert!(!i.has_pending());
-    }
-
-    #[test]
-    fn test_has_pending_true_for_nonzero_delta() {
+    fn test_pending_uses_the_delta_accumulate_discipline() {
         let mut i = fixture_interaction();
-        i.pending_delta = Vec2::new(0.0, 3.0);
+        assert!(!i.has_pending());
+        i.accumulate(moved(0.0, 3.0));
         assert!(i.has_pending());
+        assert_eq!(i.pending.total_delta(), Vec2::new(0.0, 3.0));
+        assert_eq!(i.pending.peek_cursor(), None);
     }
 
     #[test]
     fn test_reset_resets_only_throttle() {
         let mut i = fixture_interaction();
-        i.pending_delta = Vec2::new(1.0, 2.0);
-        i.total_delta = Vec2::new(4.0, 5.0);
-        drive_throttle_over_budget(&mut i.throttle);
-        assert!(i.throttle.current_n() > 1);
+        i.accumulate(moved(1.0, 2.0));
+        drive_throttle_over_budget(&mut i.pending.throttle);
+        assert!(i.pending.throttle.current_n() > 1);
 
         i.reset();
 
-        assert_eq!(i.throttle.current_n(), 1);
-        assert_eq!(i.pending_delta, Vec2::new(1.0, 2.0));
-        assert_eq!(i.total_delta, Vec2::new(4.0, 5.0));
+        assert_eq!(i.pending.throttle.current_n(), 1);
+        assert_eq!(i.pending.pending_delta(), Vec2::new(1.0, 2.0));
+        assert_eq!(i.pending.total_delta(), Vec2::new(1.0, 2.0));
         assert_eq!(i.start_handle_pos, Vec2::new(10.0, 20.0));
         assert_eq!(i.handle, EdgeHandleKind::AnchorFrom);
     }
@@ -181,7 +204,7 @@ mod tests {
     trait_default_tests_for_throttled_interaction! {
         build = fixture_interaction,
         set_pending = |i: &mut EdgeHandleInteraction| {
-            i.pending_delta = Vec2::new(2.0, 0.0);
+            i.accumulate(moved(2.0, 0.0));
         },
     }
 

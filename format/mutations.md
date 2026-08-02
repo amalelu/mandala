@@ -15,11 +15,12 @@ Four sources contribute to a document's active registry, in
 ascending precedence (later writers override earlier ones with the
 same `id`):
 
-<!-- SOURCE-OF-TRUTH: the precedence order below is also encoded in
-     src/application/document/mutations_loader/mod.rs as the
-     MutationSource enum variant order and in the doc comment on
-     build_mutation_registry_with_app_and_user. When the order or
-     set of sources changes, update all three in the same commit. -->
+<!-- SOURCE-OF-TRUTH: the precedence order below is encoded once in
+     code, as the SourceTier enum variant order in
+     src/application/source_tier.rs, and pinned by that module's
+     tests. The macro registry shares the same enum. When the order
+     or set of sources changes, update this list and
+     build_mutation_registry_with_app_and_user in the same commit. -->
 
 1. **Application bundle** — `assets/mutations/application.json`,
    compiled into the binary via `include_str!`. Lowest precedence so
@@ -38,7 +39,7 @@ layer won the registry slot for that id.
 
 Override-safety note: if a user file redeclares the id of a
 bundled mutation that has a registered Rust handler (e.g.
-`flower-layout`, `tree-cascade`), the dispatcher **honours the
+`flower-layout`, `tree-cascade`), the dispatcher **honors the
 user's declarative mutator** rather than silently running the
 bundled handler's algorithm against the user's scope. See
 `MindMapDocument::will_dispatch_to_handler` for the guard.
@@ -83,8 +84,9 @@ Fields the shape above uses:
 - `predicate` — optional `Predicate` filter gate; defaults to none.
   See [predicate](#predicate--top-level-filter-gate) below.
 - `target_scope` — one of `SelfOnly` / `Children` / `Descendants` /
-  `SelfAndDescendants` / `Parent` / `Siblings`. Governs both what
-  nodes the mutations apply to *and* the undo-snapshot window.
+  `SelfAndDescendants` / `Parent` / `Siblings` / `SectionsOnly`.
+  Governs both what nodes the mutations apply to *and* the
+  undo-snapshot window.
 
 When the legacy shape isn't enough — a mutation that needs
 per-child positioning, runtime-computed values, or the
@@ -105,10 +107,114 @@ value. The most common variants for authoring:
   Sibling variants: `NudgeLeft`, `NudgeUp`, `NudgeDown`.
 - `{"AreaCommand": { "SetFontSize": 18.0 }}` — absolute font size.
 - `{"AreaCommand": { "MoveTo": [100.0, 200.0] }}` — absolute x,y.
+- `{"AreaCommand": { "Rotate": { "pivot": [0.0, 0.0], "degrees": 90.0 } }}`
+  — rotate the area's position clockwise around `pivot`. Degrees,
+  not radians; clockwise in screen space, where `+y` points down.
+  Mirrors its model-side twin `{"ModelCommand": { "Rotate": … }}`.
+
+  **`pivot` is a two-element `[x, y]` array, not an
+  `{"x": …, "y": …}` object.** The *variant* is struct-shaped (named
+  members `pivot` and `degrees`), but the `Vec2` inside it is
+  serialized by `glam` as a sequence, and its deserializer accepts
+  nothing else. The object form fails with
+  `invalid type: map, expected a sequence of 2 f32 values`, and
+  because `custom_mutations` is a required-shape field, that error
+  takes the **whole `.mindmap.json` down** — or, in
+  `~/.config/mandala/mutations.json`, makes `load_user` warn and
+  silently drop the entire user mutation file. The same applies to
+  every future `Vec2` payload on either command enum.
+  `do_area_rotate_command_json_wire_shape` **reads the example on the
+  line above out of this file** and parses it, so editing it back to
+  the object form fails the suite rather than shipping a doc that
+  breaks every document that copies it.
 
 The full vocabulary lives in
 `lib/baumhard/src/gfx_structs/area_mutators.rs` under
 `GlyphAreaCommand`. Same enum-variant-as-JSON-tag convention.
+
+> **Added (pre-V1, per `CODE_CONVENTIONS.md` §10).** `Rotate` is
+> new on the area side; the model side already had it. The addition
+> is purely additive — no existing key changed meaning, so no
+> in-repo fixture, bundled asset, or `maptool` path needed
+> migrating. Previously `GlyphArea::rotate` existed in Rust but no
+> command could reach it, which is why its missing translate-back
+> (it rotated the pivot-relative vector and never added the pivot
+> back, teleporting the area toward the origin) went unnoticed.
+
+### Delta mutations and their field-map keys
+
+`{"AreaDelta": …}` and `{"ModelDelta": …}` carry a *set* of field
+payloads rather than one named command. On the wire the payload is
+an object with a single `fields` member, and **the keys of that map
+are field-type tag names** — one per touched field, plus a sibling
+`Operation` entry naming the arithmetic that governs all of them:
+
+```json
+{
+  "AreaDelta": {
+    "fields": {
+      "Position": { "Position": { "x": 100.0, "y": 200.0 } },
+      "Operation": { "Operation": "Assign" }
+    }
+  }
+}
+```
+
+The valid keys are exactly the variants of `GlyphAreaField`
+(`Text`, `Scale`, `LineHeight`, `Position`, `Bounds`,
+`ColorFontRegions`, `Outline`, `Shape`, `ZoomVisibility`,
+`Operation`) and of `GlyphModelField` (`GlyphMatrix`, `GlyphLine`,
+`GlyphLines`, `Layer`, `Position`, `Operation`). Both tag sets are
+*derived* from the field enums, so the key list can never drift from
+the fields that actually exist.
+
+A `GlyphLine` payload (used directly by `GlyphLine`/`GlyphLines`
+and nested inside `GlyphMatrix`) carries a required
+`ignore_initial_space` boolean alongside its `line` array of runs.
+When it is `true` the rhs's leading whitespace is *transparent*:
+the all-whitespace runs in front are skipped, and the first run
+carrying content paints at its own grapheme offset — its indent
+counted into the offset, not written over the target. An rhs that
+is entirely whitespace therefore paints nothing at all.
+
+Every run after that first one paints at **its own** grapheme
+offset within the rhs, in order. Offsets are columns, not run
+ordinals: the rhs's run boundaries need not line up with the
+target's, and after the first paint they generally do not. Two
+rhs payloads that spell the same text with different run
+boundaries produce the same result; only the column each run
+starts at matters. Runs that reach past the end of the target
+extend it, padding any gap with whitespace.
+
+> **Behavior change (pre-V1, per `CODE_CONVENTIONS.md` §10).** All
+> the statements above are new. The path previously mixed byte,
+> `char`, and grapheme offsets, so an indent containing a
+> multi-byte space (U+3000) panicked outright and a multi-char
+> cluster (CRLF) painted one column off; runs after the first were
+> placed by run ordinal against the target rather than by their own
+> column, which reordered and mislaid them; an rhs with more runs
+> than the target also panicked; and an all-whitespace rhs blanked the
+> target instead of showing through. No in-repo fixture or bundled
+> asset set the flag, so there was nothing to migrate — but a
+> hand-authored file that relied on the old blanking behavior needs
+> `ignore_initial_space: false` to keep it.
+
+> **Breaking change (pre-V1, per `CODE_CONVENTIONS.md` §10).** The
+> area-side operation key was previously spelled `ApplyOperation`;
+> it is now `Operation`, matching the field variant it tags and the
+> model-side key of the same meaning. The write-only keys `Flags`
+> (both sides) and the `SetFlag` command tag have been removed —
+> they named no field or command and were never applicable. A
+> hand-authored `.mindmap.json`, `~/.config/mandala/mutations.json`,
+> or `assets/mutations/*.json` still using `ApplyOperation` or
+> `Flags` as a map key will fail to deserialize with
+> `unknown variant`, and because mutations are parsed as part of the
+> enclosing document, **the whole file fails to load** — not just
+> the offending mutation. Rename the key to `Operation`; drop any
+> `Flags` entry. No alias or migration shim is provided (§10:
+> rename rather than alias). No in-repo fixture, bundled asset, or
+> `maptool` path used these keys, so there was nothing to migrate in
+> the same commit.
 
 ### Document-actions-only mutation
 
@@ -187,8 +293,8 @@ writes won't be reverted by `Ctrl+Z` and won't reach the saved model.
 | `Children` | Direct children of the anchor. |
 | `Descendants` | All descendants recursively (not the anchor). |
 | `SelfAndDescendants` | Anchor + all descendants. |
-| `Parent` | The anchor's parent node. |
-| `Siblings` | The anchor's siblings (excluding itself). |
+| `Parent` | The anchor's parent node. Empty on a root — the mutation is a no-op. |
+| `Siblings` | The anchor's siblings (excluding itself). **Empty on a root**: "sibling" means "shares my parent", and a root shares none, so the other roots of a multi-root map are *not* siblings. A `Siblings` mutation on a root snapshots nothing, mutates nothing, and pushes no undo entry. |
 | `SectionsOnly` | Every section of the anchor — bypasses the chrome-only container fan-out so text / font / region mutations land on the section-areas only. The anchor `MindNode` is still the snapshot window (whole-node clone covers per-section state). Use this when a mutation must avoid colliding with a sibling mind-node sharing the section's channel. |
 
 For scope-helper-generated MutatorNodes (via
@@ -196,6 +302,51 @@ For scope-helper-generated MutatorNodes (via
 matches the `target_scope` value — `scope::self_and_descendants(...)`
 pairs with `SelfAndDescendants`, etc. For hand-authored MutatorNodes,
 pick the smallest scope that covers every node the AST will touch.
+
+### Which scopes admit a tree-walking mutator
+
+The application resolves a scope to a target set and then **anchors
+the mutator at each target in turn**. So the pairing has complete
+undo coverage only when the target set is *closed* under whatever
+the mutator walks: everything a mutator anchored at a target can
+reach must itself be a target, or the undo snapshot ends up narrower
+than the write set.
+
+Only `Descendants` and `SelfAndDescendants` are closed — a
+descendant's children are still descendants. Every other scope,
+including `Children` and `Siblings`, requires a mutator that touches
+**only its anchor**: anchoring a `MapChildren`-reach mutator at each
+child reaches the *grandchildren*, and at each sibling reaches that
+sibling's children, neither of which the snapshot captured.
+
+Closure is a statement about **undo coverage, and nothing else**. It
+does not say the mutation applies once per node. Per-target
+anchoring means a mutator with a reach wider than `SelfOnly` runs
+once for *every* target that reaches a given node, so under a
+`SelfAndDescendants` scope a `Descendants`-reach mutator is anchored
+at each node of the subtree and a node at depth *k* below the anchor
+is written *k + 1* times. The snapshot still covers all of it —
+closure holds, `covers_reach` is right to approve — but a
+non-idempotent payload (a relative nudge, say) compounds. Today's
+flat-apply path collapses the AST to one list and applies it once
+per target, so nothing compounds yet; the announced walker path is
+where this becomes real.
+
+`baumhard::mindmap::custom_mutation::mutator_reach` computes the
+widest set an AST can reach and `TargetScope::covers_reach` checks
+the pairing; a mismatch is a `warn!` at apply time, not a rejection —
+the mutation still runs, but its undo coverage is incomplete. The
+`mutation inspect <id>` console verb prints the computed reach.
+
+One caveat on "still runs", because it bites precisely the pairings
+this gate rejects. The pairings that trip it — a `Children` or
+`Siblings` scope against a `MapChildren`-reach mutator, say — are by
+construction *not* flat-extractable, and the flat-apply path is the
+only path wired today. So such a mutation collects its second warning
+from `apply_to_tree` and is **skipped**: the `covers_reach` warning
+is advisory, but the non-flat decline behind it is not. "Still runs"
+is accurate for a flat-extractable AST whose declared scope is merely
+too narrow, and for those only.
 
 ## `predicate` — top-level filter gate
 
@@ -263,6 +414,60 @@ Four top-level variants:
   - `RepeatWhileAlwaysTrue` — apply children to every descendant.
   - `RepeatWhile(<Predicate>)` — apply children to every descendant
     for which the predicate holds, short-circuit once it fails.
+    Note the predicate genuinely filters: a `RepeatWhile` whose
+    predicate is the bare `{ "fields": [] }` shape (no fields,
+    `always_match` absent/false) matches **nothing**. Today's
+    flat-apply path has no predicate evaluator, so it declines any
+    `RepeatWhile` that isn't `always_match` and warns instead of
+    applying — the alternative would be landing the payload on the
+    whole scope set, the inverse of what the AST says.
+    Extraction is **all-or-nothing**: one such `RepeatWhile`
+    *anywhere* in the AST declines the whole mutator, nested just as
+    much as at the root. Honoring a root while dropping a nested
+    branch would be the worse failure of the two — the root's payload
+    would blanket every target, the nested payload would land
+    nowhere, and nothing would warn.
+
+    The same argument decides shapes with **no** unevaluatable node
+    in them. `Macro{[L1], children: [Macro{[L2]}]}` is extractable
+    top to bottom and still declines, because one flat list cannot be
+    both `L1` and `L2` — picking `L1` lands `L2` nowhere, which is the
+    identical failure by a different road. So the rule is: every
+    payload anywhere in the AST must **agree with** the one
+    extracted. `scope::self_and_descendants` satisfies it exactly
+    (its root and nested `Macro` carry two clones of the same list);
+    nesting *differing* payloads is declined, not merged.
+    Concatenating them instead would turn that helper into a
+    double-apply.
+
+    "Agree" is *would write the same thing*, which is deliberately
+    not `==` on the payload: the numeric fields are `f32`, so `==`
+    is not reflexive and a `NaN` would make the duplicated payload
+    of `scope::self_and_descendants` disagree with **itself** and
+    decline, while the same payload under `scope::self_only` — with
+    nothing to compare — applied. Two payloads agree when they are
+    `==` **or** structurally identical, so `NaN` agrees with itself
+    and `0.0` still agrees with `-0.0`. `NaN` does not agree with
+    `inf`.
+
+    Two corollaries of "every payload must agree":
+
+    - An `Instruction` wrapper carrying its own `mutation` — a
+      `Runtime` hole or an `AreaDelta` per-cell template — is
+      declined. Both are payloads the flat path provably cannot
+      evaluate. The scope helpers all set `"mutation": "None"`.
+    - A `Void` **on channel 0** is transparent, since it carries no
+      mutation of its own: an empty one cannot lose anything and does
+      not decline, while one wrapping a disagreeing payload still
+      surfaces the disagreement. Off channel 0 it declines — a
+      `Void`'s channel is branch routing (the walker aligns its
+      children only against the target child on that channel), and
+      the flat path produces one list applied to whole elements with
+      nothing to route on. All the scope helpers build on channel 0.
+      `Single` declines in every form, including
+      `"mutation": "None"`: it is a leaf whose `channel` selects the
+      target it writes, so admitting it would widen the flat path
+      into precisely the routing it cannot honor.
   - `RotateWhile(<f32>, <Predicate>)` — rotation stub (reserved).
   - `SpatialDescend(<OrderedVec2>)` — descend by AABB containment to
     the deepest node that holds the point, deliver the instruction's

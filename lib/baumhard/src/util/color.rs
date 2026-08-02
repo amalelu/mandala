@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Core colour type and arithmetic, plus macros for compile-time
-//! colour literals. The conversion utilities (hex/RGB/HSV, theme
+//! Core color type and arithmetic, plus macros for compile-time
+//! color literals. The conversion utilities (hex/RGB/HSV, theme
 //! variable resolution) live in the companion `super::color_conversion`
 //! module.
 
@@ -71,7 +71,7 @@ macro_rules! hex {
     }};
 }
 
-/// `[R, G, B, A]` in `[0.0, 1.0]` — the canvas-space colour
+/// `[R, G, B, A]` in `[0.0, 1.0]` — the canvas-space color
 /// representation consumed by the renderer. Plain array, zero
 /// allocation, `Copy`.
 pub type FloatRgba = [f32; 4];
@@ -79,10 +79,6 @@ pub type FloatRgba = [f32; 4];
 /// [`Color`] and by hex parsing. Plain array, zero allocation,
 /// `Copy`.
 pub type Rgba = [u8; 4];
-/// Ordered list of float RGBA colours forming a named palette. Heap
-/// allocation proportional to the number of entries; typically
-/// constructed once at program start via `lazy_static`.
-pub type Palette = Vec<FloatRgba>;
 
 /// Index of the alpha channel in an [`Rgba`] / [`FloatRgba`] quad.
 pub const ALPHA_IDX: usize = 3;
@@ -96,12 +92,13 @@ pub const RED_IDX: usize = 0;
 /// saturated).
 pub const VAL_MAX: u8 = 255;
 
-/// Byte-packed RGBA colour, the blessed in-memory colour type in
+/// Byte-packed RGBA color, the blessed in-memory color type in
 /// baumhard. Wraps a `[u8; 4]` and implements the four wrapping
 /// arithmetic traits ([`Add`], [`Sub`], [`Mul`], [`Div`]) plus
 /// [`Index`] / [`IndexMut`] for channel access. `Copy`, zero
 /// allocation, serde-serializable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Color {
     /// Raw `[R, G, B, A]` byte channels. Exposed `pub` so palette
     /// constants can be written as struct literals at compile time.
@@ -127,7 +124,7 @@ impl Color {
 
 /// Component-wise wrapping division of two [`Color`]s. Uses
 /// `u8::wrapping_div` per channel. Wrapping was chosen over
-/// saturating because colour arithmetic in Baumhard is used for
+/// saturating because color arithmetic in Baumhard is used for
 /// procedural palette generation where wrap-around produces
 /// artistically useful cycling; clamping would flatten the cycle.
 impl Div for Color {
@@ -142,7 +139,7 @@ impl Div for Color {
 
 /// Component-wise wrapping multiplication of two [`Color`]s. Uses
 /// `u8::wrapping_mul` — overflow wraps modulo 256. Wrapping was
-/// chosen over saturating because colour arithmetic in Baumhard is
+/// chosen over saturating because color arithmetic in Baumhard is
 /// used for procedural palette generation where wrap-around
 /// produces artistically useful cycling; clamping would flatten the
 /// cycle.
@@ -158,7 +155,7 @@ impl Mul for Color {
 
 /// Component-wise wrapping subtraction of two [`Color`]s. Uses
 /// `u8::wrapping_sub` — underflow wraps modulo 256. Wrapping was
-/// chosen over saturating because colour arithmetic in Baumhard is
+/// chosen over saturating because color arithmetic in Baumhard is
 /// used for procedural palette generation where wrap-around
 /// produces artistically useful cycling; clamping would flatten the
 /// cycle.
@@ -174,7 +171,7 @@ impl Sub for Color {
 
 /// Component-wise wrapping addition of two [`Color`]s. Uses
 /// `u8::wrapping_add` — overflow wraps modulo 256. Wrapping was
-/// chosen over saturating because colour arithmetic in Baumhard is
+/// chosen over saturating because color arithmetic in Baumhard is
 /// used for procedural palette generation where wrap-around
 /// produces artistically useful cycling; clamping would flatten the
 /// cycle.
@@ -380,7 +377,7 @@ mod tests {
     }
 
     /// Composition pin: applying factor 0.5 twice yields factor
-    /// 0.25 — exercises the parse → multiply → re-serialise round
+    /// 0.25 — exercises the parse → multiply → re-serialize round
     /// trip stability under repeated application.
     #[test]
     fn test_hex_with_alpha_scaled_composes() {
@@ -406,7 +403,7 @@ mod tests {
     // Performance & robustness regression guards
     //
     // `resolve_var` and `hex_to_rgba_safe` are called for every text run,
-    // border, connection, and background colour on every scene build.
+    // border, connection, and background color on every scene build.
     // Any panic here crashes the WASM renderer; any regression from O(1)
     // HashMap lookup to linear scan here would be invisible to a smoke
     // test but visible in the frame budget.
@@ -526,7 +523,7 @@ mod tests {
 
     /// An unknown `var(--x)` reference must return the raw string, NOT
     /// silently substitute anything. Explicit guard against a future
-    /// "helpful" fallback-to-black or similar behaviour that would mask
+    /// "helpful" fallback-to-black or similar behavior that would mask
     /// theme typos.
     #[test]
     fn resolve_var_passthrough_on_unknown_is_verbatim() {
@@ -779,7 +776,7 @@ mod tests {
     /// Property-style sweep across the unit interval (4096 sample
     /// points per channel = 64⁴ ≈ 16M combinations is too slow;
     /// step by 0.05 = 21⁴ ≈ 200k combinations runs in well under
-    /// a second). Pins the §6.1 invariant that f32-source colours
+    /// a second). Pins the §6.1 invariant that f32-source colors
     /// (sliders, picker outputs, theme variables) round-trip
     /// cleanly through the 8-bit storage.
     #[test]

@@ -36,7 +36,11 @@
 //! command surface in completion + help.
 
 mod frame;
+pub(crate) mod target;
 
+use self::target::{
+    multi_section_single_target_error, parse_section_target_kv, resolve_section_index, SectionTargetPolicy,
+};
 use super::Command;
 use crate::application::console::completion::{
     kv_key_completions_with_hints, prefix_filter, Completion, CompletionContext, CompletionState,
@@ -44,7 +48,7 @@ use crate::application::console::completion::{
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::node_or_section_selected_single_node;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
-use crate::application::document::{MindMapDocument, SectionSel, SelectionState};
+use crate::application::document::{MindMapDocument, SelectionState};
 
 pub const KEYS: &[&str] = &["section"];
 pub const VERBS: &[&str] = &[
@@ -100,22 +104,14 @@ fn complete_section(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Comple
                 ));
                 out
             }
-            Some("move") => kv_key_completions_with_hints(
-                &["dx", "dy", "x", "y", "section"],
-                state.partial,
-                kv_hint,
-            ),
-            Some("text") => kv_key_completions_with_hints(
-                &["text", "runs", "section"],
-                state.partial,
-                kv_hint,
-            ),
-            Some("add") => {
-                kv_key_completions_with_hints(&["at", "text"], state.partial, kv_hint)
+            Some("move") => {
+                kv_key_completions_with_hints(&["dx", "dy", "x", "y", "section"], state.partial, kv_hint)
             }
-            Some("split") => {
-                kv_key_completions_with_hints(&["at", "section"], state.partial, kv_hint)
+            Some("text") => {
+                kv_key_completions_with_hints(&["text", "runs", "section"], state.partial, kv_hint)
             }
+            Some("add") => kv_key_completions_with_hints(&["at", "text"], state.partial, kv_hint),
+            Some("split") => kv_key_completions_with_hints(&["at", "section"], state.partial, kv_hint),
             Some("delete") | Some("show") | Some("edit") => {
                 kv_key_completions_with_hints(&["section"], state.partial, kv_hint)
             }
@@ -173,11 +169,8 @@ fn verb_hint(v: &str) -> &'static str {
 /// Surfaces `0..node.sections.len()` for the selection's
 /// primary node, with each row's hint showing a short text
 /// preview so the user can tell which section is which.
-fn section_idx_value_completions(
-    ctx: &ConsoleContext,
-    partial: &str,
-) -> Vec<Completion> {
-    use unicode_segmentation::UnicodeSegmentation;
+fn section_idx_value_completions(ctx: &ConsoleContext, partial: &str) -> Vec<Completion> {
+    use baumhard::util::grapheme_chad::take_graphemes;
     let Some(primary_id) = ctx.document.selection.primary_node_id() else {
         return Vec::new();
     };
@@ -192,11 +185,13 @@ fn section_idx_value_completions(
             // Short text preview (≤20 graphemes, grapheme-aware so
             // a multi-codepoint emoji doesn't slice mid-cluster).
             // Empty sections render `(empty)` so the row isn't
-            // a bare bullet.
-            let preview: String = section.text.graphemes(true).take(20).collect();
+            // a bare bullet. One walk, no prefix allocation —
+            // `take_graphemes` returns the borrowed prefix and the
+            // overflow flag together.
+            let (preview, overflow) = take_graphemes(&section.text, 20);
             let hint = if preview.is_empty() {
                 "(empty)".to_string()
-            } else if section.text.graphemes(true).count() > 20 {
+            } else if overflow {
                 format!("\"{}…\"", preview)
             } else {
                 format!("\"{}\"", preview)
@@ -259,7 +254,7 @@ fn execute_section(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     // CRIT-1 (whole-PR review): validate the verb against the known
     // set BEFORE the per-section resolver runs. Pre-fix a `section
     // <typo>` against `Single(node)` (multi-section) ran
-    // `resolve_section_idx` first, which surfaced the
+    // the per-section resolver first, which surfaced the
     // "node 'X' has N sections — pick one" error — making the
     // typo masquerade as a selection problem. Surface the actual
     // typo with a grouped subverb listing (mirrors the `border`
@@ -298,17 +293,22 @@ fn execute_section(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             }
         }
     }
-    let target_idx = match resolve_section_idx(args, &eff.document.selection, eff.document) {
-        Ok(idx) => idx,
+    // Parse `section=K` BEFORE resolving the node. A malformed
+    // `section=abc` is a syntax error the user can see and fix; if
+    // the selection resolver ran first, `MultiSection` would answer
+    // "single-target only; pass section=<idx>" — which is exactly
+    // what the user did, with a typo. Same defect class as the
+    // CRIT-1 note above, in the opposite direction. Order matches
+    // the pre-dedup `resolve_section_idx`, which read the kv on its
+    // first line.
+    let kv_idx = match parse_section_target_kv(args, "section") {
+        Ok(v) => v,
         Err(msg) => return ExecResult::err(msg),
     };
     let node_id = match resolve_node_id(&eff.document.selection) {
         Ok(id) => id,
         Err(msg) => return ExecResult::err(msg),
     };
-    // Verify the index resolves before delegating — explicit
-    // `section=99` should error, not silently return "no change"
-    // (indistinguishable from a successful idempotent set).
     let section_count = eff
         .document
         .mindmap
@@ -316,6 +316,19 @@ fn execute_section(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         .get(&node_id)
         .map(|n| n.sections.len())
         .unwrap_or(0);
+    let target_idx = match resolve_section_index(
+        &eff.document.selection,
+        &node_id,
+        kv_idx,
+        Some(section_count),
+        SectionTargetPolicy::Verb,
+    ) {
+        Ok(idx) => idx,
+        Err(msg) => return ExecResult::err(msg),
+    };
+    // Verify the index resolves before delegating — explicit
+    // `section=99` should error, not silently return "no change"
+    // (indistinguishable from a successful idempotent set).
     if target_idx >= section_count {
         return ExecResult::err(format!("section[{}] not found on node '{}'", target_idx, node_id));
     }
@@ -337,69 +350,14 @@ fn execute_section(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     }
 }
 
-/// Resolve `(node_id, section_idx)` from the current selection +
-/// optional `section=K` kv.§906-920 selection rules:
-///
-/// 1. `section=K` kv → that index, with the selection's
-///    primary node id.
-/// 2. `Section(s)` / `SectionRange { sel, .. }` → `s.section_idx`.
-/// 3. `Single(id)` AND `mindmap.nodes[id].sections.len() == 1`
-///    → `(id, 0)` — single-section nodes don't need an explicit
-///    `section=K` because there's only one option.///    rule 3 (line 914): closes the §5.7 hostile error.
-/// 4. `Single(id)` on a multi-section node → error (the user
-///    needs to pick one).
-/// 5. `MultiSection(_)` → error with the single-target hint.
-fn resolve_section_idx(
-    args: &Args,
-    selection: &SelectionState,
-    doc: &MindMapDocument,
-) -> Result<usize, String> {
-    let kv_idx = parse_section_kv(args)?;
-    match (selection, kv_idx) {
-        (_, Some(idx)) => Ok(idx),
-        (SelectionState::Section(SectionSel { section_idx, .. }), None) => Ok(*section_idx),
-        (SelectionState::SectionRange { sel: SectionSel { section_idx, .. }, .. }, None) => {
-            Ok(*section_idx)
-        }
-        (SelectionState::Single(id), None) => {
-            //rule 3: a single-section node implies idx 0.
-            // Multi-section nodes still require explicit selection.
-            let n_sections = doc.mindmap.nodes.get(id).map(|n| n.sections.len()).unwrap_or(0);
-            if n_sections == 1 {
-                Ok(0)
-            } else {
-                Err(format!(
-                    "section: node '{}' has {} sections — pick one (click) or pass section=<idx>",
-                    id, n_sections
-                ))
-            }
-        }
-        (SelectionState::MultiSection(_), None) => Err(
-            "section: multi-section selection — single-target only; pass section=<idx> or click one section first".into(),
-        ),
-        _ => Err("section: requires a node or section selection".into()),
-    }
-}
-
 fn resolve_node_id(selection: &SelectionState) -> Result<String, String> {
     if let Some(id) = selection.primary_node_id() {
         return Ok(id.to_string());
     }
     if matches!(selection, SelectionState::MultiSection(_)) {
-        return Err(
-            "section: multi-section selection — single-target only; pass section=<idx> or click one section first".into(),
-        );
+        return Err(multi_section_single_target_error("section"));
     }
     Err("section: requires a node or section selection".into())
-}
-
-fn parse_section_kv(args: &Args) -> Result<Option<usize>, String> {
-    for (k, v) in args.kvs() {
-        if k == "section" {
-            return super::range_kv::parse_section_kv("section", v).map(Some);
-        }
-    }
-    Ok(None)
 }
 
 /// Reject any kv whose key isn't in `allowed`. Used by each
@@ -447,32 +405,19 @@ fn execute_show(args: &Args, doc: &MindMapDocument, node_id: &str, idx: usize) -
     let bold = section.text_runs.iter().filter(|r| r.bold).count();
     let italic = section.text_runs.iter().filter(|r| r.italic).count();
     let underline = section.text_runs.iter().filter(|r| r.underline).count();
-    let hyperlink = section
-        .text_runs
-        .iter()
-        .filter(|r| r.hyperlink.is_some())
-        .count();
+    let hyperlink = section.text_runs.iter().filter(|r| r.hyperlink.is_some()).count();
 
     // Text preview: cap at ~40 graphemes so a long section
     // doesn't overflow the readout. Stay grapheme-aware so we
-    // don't slice mid-cluster. Single-pass: take 41 graphemes;
-    // if 41 came back, we're past the cap and need an ellipsis.
-    // Pre-fix this walked the iterator twice (`take(40).collect()`
-    // + `count() > 40`), which is O(n) per call for the second
-    // walk. The completion popup hits this path on every key
-    // press in some flows.
-    use unicode_segmentation::UnicodeSegmentation;
-    let mut preview = String::with_capacity(160);
-    let mut grapheme_count = 0usize;
-    let mut overflow = false;
-    for g in section.text.graphemes(true) {
-        if grapheme_count == 40 {
-            overflow = true;
-            break;
-        }
-        preview.push_str(g);
-        grapheme_count += 1;
-    }
+    // don't slice mid-cluster. `take_graphemes` is the single-pass
+    // primitive for that: it borrows the prefix (no `String` to
+    // build) and reports overflow from the same walk. This file
+    // used to carry two different hand-rolled truncations — the
+    // other one, in `section_idx_value_completions`, walked the
+    // iterator twice, and the completion popup hits that path on
+    // every key press in some flows.
+    use baumhard::util::grapheme_chad::take_graphemes;
+    let (preview, overflow) = take_graphemes(&section.text, 40);
     let text_display = if overflow {
         format!("\"{}…\"", preview)
     } else {
@@ -573,9 +518,11 @@ fn execute_text(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usiz
         Some(t) => t,
         None => match args.positional(1) {
             Some(t) => t.to_string(),
-            None => return ExecResult::err(
-                "usage: section text \"<text>\" [section=<idx>] [runs=preserve|clear]",
-            ),
+            None => {
+                return ExecResult::err(
+                    "usage: section text \"<text>\" [section=<idx>] [runs=preserve|clear]",
+                )
+            }
         },
     };
 
@@ -586,7 +533,7 @@ fn execute_text(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usiz
         Some("preserve") | None => false,
         Some(other) => {
             return ExecResult::err(format!(
-                "section text: runs='{}' not recognised; use 'preserve' or 'clear'",
+                "section text: runs='{}' not recognized; use 'preserve' or 'clear'",
                 other
             ));
         }
@@ -619,12 +566,7 @@ fn execute_text(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usiz
 /// editor on the resolved target.Routes through
 /// `ConsoleSideEffect::OpenSectionEdit`; closes the console
 /// (modal handoff to the editor).
-fn execute_edit(
-    args: &Args,
-    eff: &mut ConsoleEffects,
-    node_id: &str,
-    idx: usize,
-) -> ExecResult {
+fn execute_edit(args: &Args, eff: &mut ConsoleEffects, node_id: &str, idx: usize) -> ExecResult {
     if let Err(msg) = reject_unknown_kvs(args, "edit", &["section"]) {
         return ExecResult::err(msg);
     }
@@ -656,10 +598,7 @@ fn execute_add(args: &Args, doc: &mut MindMapDocument, node_id: &str) -> ExecRes
         Some(v) => match v.parse::<usize>() {
             Ok(n) => Some(n),
             Err(_) => {
-                return ExecResult::err(format!(
-                    "section add: at='{}' is not a non-negative integer",
-                    v
-                ));
+                return ExecResult::err(format!("section add: at='{}' is not a non-negative integer", v));
             }
         },
         None => None,
@@ -687,10 +626,7 @@ fn execute_delete(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: us
         return ExecResult::err(msg);
     }
     match doc.delete_section(node_id, idx) {
-        Ok(_removed) => ExecResult::ok_msg(format!(
-            "section[{}] deleted from node '{}'",
-            idx, node_id
-        )),
+        Ok(_removed) => ExecResult::ok_msg(format!("section[{}] deleted from node '{}'", idx, node_id)),
         Err(msg) => ExecResult::err(msg),
     }
 }
@@ -761,10 +697,7 @@ fn execute_split(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usi
 /// `section/frame.rs::apply_edits`. On success, an N-section
 /// fan-out produces N `EditNodeStyle` undo entries (same as
 /// the per-pair setter — undo unwinds one section at a time).
-fn execute_move_fan_out_multisection(
-    args: &Args,
-    doc: &mut MindMapDocument,
-) -> ExecResult {
+fn execute_move_fan_out_multisection(args: &Args, doc: &mut MindMapDocument) -> ExecResult {
     let parsed = match parse_move_kvs(args) {
         Ok(p) => p,
         Err(msg) => return ExecResult::err(msg),
@@ -779,10 +712,9 @@ fn execute_move_fan_out_multisection(
     };
 
     let pairs: Vec<(String, usize)> = match &doc.selection {
-        SelectionState::MultiSection(sels) => sels
-            .iter()
-            .map(|s| (s.node_id.clone(), s.section_idx))
-            .collect(),
+        SelectionState::MultiSection(sels) => {
+            sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect()
+        }
         _ => return ExecResult::err("section move: not a MultiSection selection"),
     };
 
@@ -791,12 +723,7 @@ fn execute_move_fan_out_multisection(
     // can't land.
     let mut targets: Vec<(String, usize, f64, f64)> = Vec::with_capacity(pairs.len());
     for (node_id, idx) in &pairs {
-        let Some(section) = doc
-            .mindmap
-            .nodes
-            .get(node_id)
-            .and_then(|n| n.sections.get(*idx))
-        else {
+        let Some(section) = doc.mindmap.nodes.get(node_id).and_then(|n| n.sections.get(*idx)) else {
             // Stale (node, idx) — the setter would silently
             // Ok(false). Skip without recording a target.
             continue;
@@ -828,7 +755,9 @@ fn execute_move_fan_out_multisection(
                 log::warn!(
                     "section move fan-out: setter rejected post-validation on {}[{}]: {} \
                      (validate_section_offset_change → set_section_offset drift)",
-                    node_id, idx, msg
+                    node_id,
+                    idx,
+                    msg
                 );
             }
         }
@@ -856,10 +785,7 @@ fn execute_move(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usiz
             {
                 Some(p) => p,
                 None => {
-                    return ExecResult::err(format!(
-                        "section[{}] not found on node '{}'",
-                        idx, node_id
-                    ));
+                    return ExecResult::err(format!("section[{}] not found on node '{}'", idx, node_id));
                 }
             };
             (current_x + dx, current_y + dy)
@@ -912,15 +838,11 @@ fn parse_move_kvs(args: &Args) -> Result<MoveTarget, String> {
     let any_delta = dx.is_some() || dy.is_some();
     let any_abs = x.is_some() || y.is_some();
     if any_delta && any_abs {
-        return Err(
-            "section move: cannot mix delta form (dx/dy) and absolute form (x/y) — pick one"
-                .into(),
-        );
+        return Err("section move: cannot mix delta form (dx/dy) and absolute form (x/y) — pick one".into());
     }
     if !any_delta && !any_abs {
         return Err(
-            "usage: section move dx=<f64> dy=<f64> | section move x=<f64> y=<f64> [section=<idx>]"
-                .into(),
+            "usage: section move dx=<f64> dy=<f64> | section move x=<f64> y=<f64> [section=<idx>]".into(),
         );
     }
     if any_delta {
@@ -950,12 +872,7 @@ fn execute_resize(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: us
     // `fill` arrives as the first positional. Match case-
     // insensitively so users typing "FILL" or "Fill" don't
     // surprise themselves with a "not a number" parse error.
-    if args
-        .positional(1)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-        == Some("fill")
-    {
+    if args.positional(1).map(str::to_ascii_lowercase).as_deref() == Some("fill") {
         return match doc.set_section_size(node_id, idx, None) {
             Ok(true) => ExecResult::ok_msg(format!("section[{}] size cleared (fill parent)", idx)),
             Ok(false) => ExecResult::ok_msg("section: no change"),
@@ -1003,10 +920,7 @@ fn parse_resize_kvs(args: &Args) -> Result<(f64, f64), String> {
         *target = Some(parsed);
     }
     let (Some(w), Some(h)) = (w, h) else {
-        return Err(
-            "usage: section resize w=<f64> h=<f64> | section resize fill [section=<idx>]"
-                .into(),
-        );
+        return Err("usage: section resize w=<f64> h=<f64> | section resize fill [section=<idx>]".into());
     };
     Ok((w, h))
 }
@@ -1017,6 +931,7 @@ mod tests {
     use crate::application::console::tests::fixtures::{assert_exec_err_contains, assert_exec_ok, run};
     use crate::application::console::ExecResult;
     use crate::application::document::tests_common::{load_test_doc, pinned_two_section_node};
+    use crate::application::document::SectionSel;
 
     #[test]
     fn section_move_writes_offset_when_section_selection_supplies_idx() {
@@ -1049,10 +964,7 @@ mod tests {
         // multi-section so the rejection branch runs.
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::Single(id);
-        assert_exec_err_contains(
-            run("section move dx=3 dy=4", &mut doc),
-            "has 2 sections",
-        );
+        assert_exec_err_contains(run("section move dx=3 dy=4", &mut doc), "has 2 sections");
     }
 
     ///rule 3: `Single(id)` on a single-section node
@@ -1152,7 +1064,10 @@ mod tests {
     fn section_move_out_of_range_section_kv_errors() {
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::Single(id);
-        assert_exec_err_contains(run("section move dx=1 dy=1 section=99", &mut doc), "not found on node");
+        assert_exec_err_contains(
+            run("section move dx=1 dy=1 section=99", &mut doc),
+            "not found on node",
+        );
     }
 
     #[test]
@@ -1249,9 +1164,82 @@ mod tests {
         assert_exec_err_contains(run("section frobnicate 1 2", &mut doc), "unknown subverb");
     }
 
+    // ─── kv-parse-before-selection ordering ───────────────────
+    //
+    // `execute_section` reads `section=K` before it resolves the
+    // node. Skipping that order makes a typo'd `section=abc`
+    // masquerade as a selection problem — the resolver would
+    // answer "pass section=<idx>" to a user who did exactly that.
+    // The `target.rs` unit tests exercise the resolver in
+    // isolation, so only a verb-level pin catches the caller
+    // reordering; these are those pins.
+
+    /// A malformed `section=` outranks the `MultiSection`
+    /// single-target rejection on every per-section subverb.
+    #[test]
+    fn section_malformed_section_kv_outranks_multi_section_rejection() {
+        let (mut doc, id) = pinned_two_section_node();
+        doc.selection = SelectionState::MultiSection(vec![
+            SectionSel {
+                node_id: id.clone(),
+                section_idx: 0,
+            },
+            SectionSel {
+                node_id: id,
+                section_idx: 1,
+            },
+        ]);
+        for line in [
+            "section delete section=abc",
+            "section show section=abc",
+            "section split section=abc at=1",
+            "section resize w=10 h=10 section=abc",
+            "section move x=1 y=1 section=abc",
+            "section text \"hi\" section=abc",
+            "section edit section=abc",
+        ] {
+            assert_exec_err_contains(run(line, &mut doc), "is not a non-negative integer");
+        }
+    }
+
+    /// Same precedence for the selections that have no primary
+    /// node at all (`Multi`, `Edge`, `None`) — the parse error is
+    /// the actionable one.
+    #[test]
+    fn section_malformed_section_kv_outranks_no_node_selection() {
+        let mut doc = load_test_doc();
+        let ids: Vec<String> = doc.mindmap.nodes.keys().take(2).cloned().collect();
+        for selection in [SelectionState::Multi(ids), SelectionState::None] {
+            doc.selection = selection;
+            assert_exec_err_contains(
+                run("section delete section=abc", &mut doc),
+                "is not a non-negative integer",
+            );
+        }
+    }
+
+    /// A *well-formed* `section=K` must still lose to the
+    /// `MultiSection` single-target rejection — the hoisted parse
+    /// changes which error wins, not which selections are legal.
+    #[test]
+    fn section_well_formed_section_kv_still_rejects_multi_section() {
+        let (mut doc, id) = pinned_two_section_node();
+        doc.selection = SelectionState::MultiSection(vec![
+            SectionSel {
+                node_id: id.clone(),
+                section_idx: 0,
+            },
+            SectionSel {
+                node_id: id,
+                section_idx: 1,
+            },
+        ]);
+        assert_exec_err_contains(run("section delete section=0", &mut doc), "single-target only");
+    }
+
     /// Whole-PR review CRIT-1: a `section <typo>` against
     /// `Single(node)` (multi-section) used to run
-    /// `resolve_section_idx` first, surfacing the
+    /// the per-section resolver first, surfacing the
     /// "node 'X' has N sections — pick one" error and making the
     /// typo masquerade as a selection problem. After the fix, the
     /// verb-match runs first → the user sees "unknown subverb" +
@@ -1281,7 +1269,8 @@ mod tests {
                     assert!(
                         s.contains(kind),
                         "expected grouped subverb listing to include '{}'; got: {}",
-                        kind, s
+                        kind,
+                        s
                     );
                 }
             }
@@ -1315,10 +1304,7 @@ mod tests {
             node_id: id,
             section_idx: 1,
         });
-        assert_exec_err_contains(
-            run("section move dx=1 x=2", &mut doc),
-            "cannot mix delta form",
-        );
+        assert_exec_err_contains(run("section move dx=1 x=2", &mut doc), "cannot mix delta form");
     }
 
     /// Empty kvs on `section move` yields the usage line, not
@@ -1344,10 +1330,7 @@ mod tests {
             node_id: id,
             section_idx: 1,
         });
-        assert_exec_err_contains(
-            run("section move foo=1", &mut doc),
-            "unknown key 'foo'",
-        );
+        assert_exec_err_contains(run("section move foo=1", &mut doc), "unknown key 'foo'");
     }
 
     /// `section resize fill` (renamed from the prior `none`
@@ -1393,7 +1376,11 @@ mod tests {
         };
         assert!(blob.contains(&format!("section[1] of node \"{}\"", id)));
         assert!(blob.contains("text:"));
-        assert!(blob.contains("hello world"), "preview must echo the text: {}", blob);
+        assert!(
+            blob.contains("hello world"),
+            "preview must echo the text: {}",
+            blob
+        );
         assert!(blob.contains("offset:"));
         assert!(blob.contains("size:"));
         assert!(blob.contains("channel:"));
@@ -1413,8 +1400,15 @@ mod tests {
             ExecResult::Lines(ls) => ls.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"),
             other => panic!("expected ExecResult::Lines, got {:?}", other),
         };
-        assert!(blob.contains("…"), "truncated preview must include ellipsis: {}", blob);
-        assert!(!blob.contains("ABCDEFGHIJ"), "tail past 40 graphemes shouldn't appear");
+        assert!(
+            blob.contains("…"),
+            "truncated preview must include ellipsis: {}",
+            blob
+        );
+        assert!(
+            !blob.contains("ABCDEFGHIJ"),
+            "tail past 40 graphemes shouldn't appear"
+        );
     }
 
     #[test]
@@ -1487,10 +1481,7 @@ mod tests {
             section_idx: 1,
         });
         assert_exec_ok(run("section text positional text=\"kv-wins\"", &mut doc));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections[1].text,
-            "kv-wins"
-        );
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections[1].text, "kv-wins");
     }
 
     #[test]
@@ -1500,14 +1491,8 @@ mod tests {
             node_id: id.clone(),
             section_idx: 1,
         });
-        assert_exec_ok(run(
-            "section text \"plain text\" runs=clear",
-            &mut doc,
-        ));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections[1].text,
-            "plain text"
-        );
+        assert_exec_ok(run("section text \"plain text\" runs=clear", &mut doc));
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections[1].text, "plain text");
     }
 
     /// Pin the divergence between `runs=preserve` and
@@ -1549,8 +1534,7 @@ mod tests {
 
         let (mut doc_preserve, id_p) = pinned_two_section_node();
         doc_preserve.set_section_text(&id_p, 1, "abcdef".to_string());
-        doc_preserve.mindmap.nodes.get_mut(&id_p).unwrap().sections[1].text_runs =
-            seed_runs.clone();
+        doc_preserve.mindmap.nodes.get_mut(&id_p).unwrap().sections[1].text_runs = seed_runs.clone();
         doc_preserve.selection = SelectionState::Section(SectionSel {
             node_id: id_p.clone(),
             section_idx: 1,
@@ -1634,10 +1618,7 @@ mod tests {
             node_id: id,
             section_idx: 1,
         });
-        assert_exec_err_contains(
-            run("section text \"x\" runs=invalid", &mut doc),
-            "not recognised",
-        );
+        assert_exec_err_contains(run("section text \"x\" runs=invalid", &mut doc), "not recognized");
     }
 
     #[test]
@@ -1673,10 +1654,7 @@ mod tests {
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::Single(id.clone());
         assert_exec_ok(run("section add at=0 text=\"prepended\"", &mut doc));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections[0].text,
-            "prepended"
-        );
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections[0].text, "prepended");
     }
 
     #[test]
@@ -1700,10 +1678,7 @@ mod tests {
             section_idx: 1,
         });
         assert_exec_ok(run("section delete", &mut doc));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections.len(),
-            len_before - 1
-        );
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections.len(), len_before - 1);
     }
 
     #[test]
@@ -1712,10 +1687,7 @@ mod tests {
         let len_before = doc.mindmap.nodes.get(&id).unwrap().sections.len();
         doc.selection = SelectionState::Single(id.clone());
         assert_exec_ok(run("section delete section=0", &mut doc));
-        assert_eq!(
-            doc.mindmap.nodes.get(&id).unwrap().sections.len(),
-            len_before - 1
-        );
+        assert_eq!(doc.mindmap.nodes.get(&id).unwrap().sections.len(), len_before - 1);
     }
 
     #[test]
@@ -1766,7 +1738,7 @@ mod tests {
 
     /// Explicit `at=N` still works — pin the happy path post-
     /// requirement-tightening to match the old default
-    /// (empty-suffix) behaviour at the user's explicit choice.
+    /// (empty-suffix) behavior at the user's explicit choice.
     #[test]
     fn section_split_at_end_of_text_creates_empty_suffix() {
         let (mut doc, id) = pinned_two_section_node();
@@ -1825,10 +1797,7 @@ mod tests {
             node_id: id,
             section_idx: 1,
         });
-        assert_exec_err_contains(
-            run("section delete sectoin=0", &mut doc),
-            "unknown key 'sectoin'",
-        );
+        assert_exec_err_contains(run("section delete sectoin=0", &mut doc), "unknown key 'sectoin'");
     }
 
     /// `section <TAB>` produces verb rows with hints — pre-fix
@@ -1894,8 +1863,16 @@ mod tests {
         };
         let out = complete_section(&state, &ctx);
         let labels: Vec<&str> = out.iter().map(|c| c.text.as_str()).collect();
-        assert!(labels.iter().any(|l| l == &"0"), "idx 0 in completion: {:?}", labels);
-        assert!(labels.iter().any(|l| l == &"1"), "idx 1 in completion: {:?}", labels);
+        assert!(
+            labels.iter().any(|l| l == &"0"),
+            "idx 0 in completion: {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l == &"1"),
+            "idx 1 in completion: {:?}",
+            labels
+        );
         // Hints surface the section text preview.
         let row0 = out.iter().find(|c| c.text == "0").unwrap();
         assert!(
@@ -1981,7 +1958,7 @@ mod tests {
     /// `section move x=A y=B` (absolute) against MultiSection
     /// stays single-target — fan-out would collide every
     /// section at the same offset, which is never the intent.
-    /// The verb path falls through to `resolve_section_idx`
+    /// The verb path falls through to the shared resolver
     /// which rejects with the existing single-target message.
     #[test]
     fn section_move_absolute_form_on_multi_section_rejects_single_target() {
@@ -1996,10 +1973,7 @@ mod tests {
                 section_idx: 1,
             },
         ]);
-        assert_exec_err_contains(
-            run("section move x=3 y=7", &mut doc),
-            "single-target only",
-        );
+        assert_exec_err_contains(run("section move x=3 y=7", &mut doc), "single-target only");
     }
 
     /// Other subverbs on MultiSection still reject (resize /
@@ -2018,10 +1992,7 @@ mod tests {
                 section_idx: 1,
             },
         ]);
-        assert_exec_err_contains(
-            run("section resize w=80 h=40", &mut doc),
-            "single-target only",
-        );
+        assert_exec_err_contains(run("section resize w=80 h=40", &mut doc), "single-target only");
     }
 
     // ─── §4.5: section edit subverb ────────────────────────────
@@ -2065,10 +2036,7 @@ mod tests {
     fn section_edit_rejects_out_of_range_section_kv() {
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::Single(id);
-        assert_exec_err_contains(
-            run("section edit section=99", &mut doc),
-            "not found on node",
-        );
+        assert_exec_err_contains(run("section edit section=99", &mut doc), "not found on node");
     }
 
     /// Sharpened pin per Test Quality #5/6: when the verb's
@@ -2093,9 +2061,6 @@ mod tests {
             "rejection must NOT emit a side-effect: {:?}",
             effects.side_effect
         );
-        assert!(
-            !effects.close_console,
-            "rejection must NOT close the console"
-        );
+        assert!(!effects.close_console, "rejection must NOT close the console");
     }
 }

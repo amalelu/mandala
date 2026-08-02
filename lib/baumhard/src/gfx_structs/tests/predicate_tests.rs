@@ -12,11 +12,12 @@
 //! body is benchmarkable from `benches/test_bench.rs`.
 
 use glam::Vec2;
+use lazy_static::lazy_static;
 
 use crate::core::primitives::{ColorFontRegionField, Flag, Flaggable, Range};
 use crate::gfx_structs::area::{GlyphArea, GlyphAreaField};
 use crate::gfx_structs::element::{GfxElement, GfxElementField};
-use crate::gfx_structs::model::{GlyphLine, GlyphMatrix, GlyphModelField};
+use crate::gfx_structs::model::{GlyphLine, GlyphMatrix, GlyphModel, GlyphModelField};
 use crate::gfx_structs::predicate::{Comparator, Predicate};
 
 // ── Comparator::Equals (==) ────────────────────────────────────────
@@ -454,24 +455,15 @@ fn test_predicate_flag_equals_negated_matches_clear_flag() {
 /// variant.
 pub fn do_predicate_flag_equals_negated_matches_clear_flag() {
     let pred = Predicate {
-        fields: vec![(
-            GfxElementField::Flag(Flag::SectionRoot),
-            Comparator::Equals(true),
-        )],
+        fields: vec![(GfxElementField::Flag(Flag::SectionRoot), Comparator::Equals(true))],
         always_match: false,
     };
     let area = GlyphArea::new(16.0, 1.2, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
     let mut flagged = GfxElement::new_area_non_indexed_with_id(area.clone(), 0, 1);
     flagged.set_flag(Flag::SectionRoot);
-    assert!(
-        !pred.test(&flagged),
-        "negated equals on a set flag must reject"
-    );
+    assert!(!pred.test(&flagged), "negated equals on a set flag must reject");
     let unflagged = GfxElement::new_area_non_indexed_with_id(area, 0, 2);
-    assert!(
-        pred.test(&unflagged),
-        "negated equals on a clear flag must match"
-    );
+    assert!(pred.test(&unflagged), "negated equals on a clear flag must match");
 }
 
 #[test]
@@ -492,8 +484,449 @@ pub fn do_predicate_flag_with_greater_than_degrades_to_false() {
     let area = GlyphArea::new(16.0, 1.2, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
     let mut elem = GfxElement::new_area_non_indexed_with_id(area, 0, 1);
     elem.set_flag(Flag::SectionRoot);
-    assert!(
-        !pred.test(&elem),
-        "GreaterThan on a Flag must degrade to false"
-    );
+    assert!(!pred.test(&elem), "GreaterThan on a Flag must degrade to false");
+}
+
+// ── Predicate truth table (field × comparator × negation) ────────────
+
+/// Element factory for the channel truth-table rows: an area whose
+/// walker channel is set to `channel`.
+fn area_element_with_channel(channel: usize) -> GfxElement {
+    let area = GlyphArea::new(16.0, 1.2, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
+    GfxElement::new_area_non_indexed(area, channel)
+}
+
+/// Element factory for the scale truth-table rows: an area whose
+/// font scale is set to `scale`.
+fn area_element_with_scale(scale: f32) -> GfxElement {
+    let area = GlyphArea::new(scale, 1.2, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
+    GfxElement::new_area_non_indexed(area, 0)
+}
+
+/// Element factory for the flag truth-table rows: an area whose
+/// `SectionRoot` flag is set when `set` is `true`.
+fn area_element_with_flag(set: bool) -> GfxElement {
+    let area = GlyphArea::new(16.0, 1.2, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
+    let mut elem = GfxElement::new_area_non_indexed(area, 0);
+    if set {
+        elem.set_flag(Flag::SectionRoot);
+    }
+    elem
+}
+
+/// Element factory for the id truth-table rows.
+fn void_element_with_id(unique_id: usize) -> GfxElement {
+    GfxElement::new_void_with_id(0, unique_id)
+}
+
+/// Element factory for the model-layer / glyph-lines truth-table rows.
+fn model_element_with(layer: usize, line_count: usize) -> GfxElement {
+    let mut model = GlyphModel::new();
+    model.layer = layer;
+    for _ in 0..line_count {
+        model.add_line(GlyphLine::new());
+    }
+    GfxElement::new_model_non_indexed(model, 0, 0)
+}
+
+lazy_static! {
+    /// Regression truth table for predicate comparator semantics.
+    ///
+    /// Every row asserts that `Predicate { fields: [(field, comparator)] }`
+    /// matches the constructed element exactly when `expected` is `true`.
+    /// The table is intentionally exhaustive across the field types that
+    /// had inverted or dropped negation arms (Channel, Id, Layer,
+    /// GlyphLines, Scale) plus flags, and across both directions of each
+    /// inequality. New rows should fail on the buggy implementation and
+    /// pass once the convention is restored.
+    pub static ref PREDICATE_TRUTH_TABLE: Vec<(
+        fn() -> GfxElement,
+        GfxElementField,
+        Comparator,
+        bool,
+    )> = vec![
+        // Channel: element value 5, reference 3 (element > reference).
+        (
+            || area_element_with_channel(5),
+            GfxElementField::Channel(3),
+            Comparator::greater(),
+            true,
+        ),
+        (
+            || area_element_with_channel(5),
+            GfxElementField::Channel(3),
+            Comparator::less_or_equal(),
+            false,
+        ),
+        (
+            || area_element_with_channel(5),
+            GfxElementField::Channel(3),
+            Comparator::less(),
+            false,
+        ),
+        (
+            || area_element_with_channel(5),
+            GfxElementField::Channel(3),
+            Comparator::greater_or_equal(),
+            true,
+        ),
+        // Channel: element value 2, reference 3 (element < reference).
+        (
+            || area_element_with_channel(2),
+            GfxElementField::Channel(3),
+            Comparator::greater(),
+            false,
+        ),
+        (
+            || area_element_with_channel(2),
+            GfxElementField::Channel(3),
+            Comparator::less_or_equal(),
+            true,
+        ),
+        (
+            || area_element_with_channel(2),
+            GfxElementField::Channel(3),
+            Comparator::less(),
+            true,
+        ),
+        (
+            || area_element_with_channel(2),
+            GfxElementField::Channel(3),
+            Comparator::greater_or_equal(),
+            false,
+        ),
+        // Channel Exists: independent of value.
+        (
+            || area_element_with_channel(0),
+            GfxElementField::Channel(0),
+            Comparator::exists(),
+            true,
+        ),
+        (
+            || area_element_with_channel(0),
+            GfxElementField::Channel(0),
+            Comparator::not_exists(),
+            false,
+        ),
+        // Id: element value 5, reference 3 (element > reference).
+        (
+            || void_element_with_id(5),
+            GfxElementField::Id(3),
+            Comparator::greater(),
+            true,
+        ),
+        (
+            || void_element_with_id(5),
+            GfxElementField::Id(3),
+            Comparator::less_or_equal(),
+            false,
+        ),
+        (
+            || void_element_with_id(5),
+            GfxElementField::Id(3),
+            Comparator::less(),
+            false,
+        ),
+        (
+            || void_element_with_id(5),
+            GfxElementField::Id(3),
+            Comparator::greater_or_equal(),
+            true,
+        ),
+        // Id: element value 2, reference 3 (element < reference).
+        (
+            || void_element_with_id(2),
+            GfxElementField::Id(3),
+            Comparator::greater(),
+            false,
+        ),
+        (
+            || void_element_with_id(2),
+            GfxElementField::Id(3),
+            Comparator::less_or_equal(),
+            true,
+        ),
+        (
+            || void_element_with_id(2),
+            GfxElementField::Id(3),
+            Comparator::less(),
+            true,
+        ),
+        (
+            || void_element_with_id(2),
+            GfxElementField::Id(3),
+            Comparator::greater_or_equal(),
+            false,
+        ),
+        // Id Exists: independent of value.
+        (
+            || void_element_with_id(0),
+            GfxElementField::Id(0),
+            Comparator::exists(),
+            true,
+        ),
+        (
+            || void_element_with_id(0),
+            GfxElementField::Id(0),
+            Comparator::not_exists(),
+            false,
+        ),
+        // Layer: element value 5, reference 3 (element > reference).
+        (
+            || model_element_with(5, 0),
+            GfxElementField::GlyphModel(GlyphModelField::Layer(3)),
+            Comparator::greater(),
+            true,
+        ),
+        (
+            || model_element_with(5, 0),
+            GfxElementField::GlyphModel(GlyphModelField::Layer(3)),
+            Comparator::less_or_equal(),
+            false,
+        ),
+        (
+            || model_element_with(5, 0),
+            GfxElementField::GlyphModel(GlyphModelField::Layer(3)),
+            Comparator::less(),
+            false,
+        ),
+        (
+            || model_element_with(5, 0),
+            GfxElementField::GlyphModel(GlyphModelField::Layer(3)),
+            Comparator::greater_or_equal(),
+            true,
+        ),
+        // Layer: element value 2, reference 3 (element < reference).
+        (
+            || model_element_with(2, 0),
+            GfxElementField::GlyphModel(GlyphModelField::Layer(3)),
+            Comparator::greater(),
+            false,
+        ),
+        (
+            || model_element_with(2, 0),
+            GfxElementField::GlyphModel(GlyphModelField::Layer(3)),
+            Comparator::less_or_equal(),
+            true,
+        ),
+        (
+            || model_element_with(2, 0),
+            GfxElementField::GlyphModel(GlyphModelField::Layer(3)),
+            Comparator::less(),
+            true,
+        ),
+        (
+            || model_element_with(2, 0),
+            GfxElementField::GlyphModel(GlyphModelField::Layer(3)),
+            Comparator::greater_or_equal(),
+            false,
+        ),
+        // GlyphLines: element line count 5, reference 3 (element > reference).
+        (
+            || model_element_with(0, 5),
+            GfxElementField::GlyphModel(GlyphModelField::GlyphLines(vec![
+                (0, GlyphLine::new()),
+                (1, GlyphLine::new()),
+                (2, GlyphLine::new()),
+            ])),
+            Comparator::greater(),
+            true,
+        ),
+        (
+            || model_element_with(0, 5),
+            GfxElementField::GlyphModel(GlyphModelField::GlyphLines(vec![
+                (0, GlyphLine::new()),
+                (1, GlyphLine::new()),
+                (2, GlyphLine::new()),
+            ])),
+            Comparator::less_or_equal(),
+            false,
+        ),
+        (
+            || model_element_with(0, 5),
+            GfxElementField::GlyphModel(GlyphModelField::GlyphLines(vec![
+                (0, GlyphLine::new()),
+                (1, GlyphLine::new()),
+                (2, GlyphLine::new()),
+            ])),
+            Comparator::less(),
+            false,
+        ),
+        (
+            || model_element_with(0, 5),
+            GfxElementField::GlyphModel(GlyphModelField::GlyphLines(vec![
+                (0, GlyphLine::new()),
+                (1, GlyphLine::new()),
+                (2, GlyphLine::new()),
+            ])),
+            Comparator::greater_or_equal(),
+            true,
+        ),
+        // GlyphLines: element line count 2, reference 3 (element < reference).
+        (
+            || model_element_with(0, 2),
+            GfxElementField::GlyphModel(GlyphModelField::GlyphLines(vec![
+                (0, GlyphLine::new()),
+                (1, GlyphLine::new()),
+                (2, GlyphLine::new()),
+            ])),
+            Comparator::greater(),
+            false,
+        ),
+        (
+            || model_element_with(0, 2),
+            GfxElementField::GlyphModel(GlyphModelField::GlyphLines(vec![
+                (0, GlyphLine::new()),
+                (1, GlyphLine::new()),
+                (2, GlyphLine::new()),
+            ])),
+            Comparator::less_or_equal(),
+            true,
+        ),
+        (
+            || model_element_with(0, 2),
+            GfxElementField::GlyphModel(GlyphModelField::GlyphLines(vec![
+                (0, GlyphLine::new()),
+                (1, GlyphLine::new()),
+                (2, GlyphLine::new()),
+            ])),
+            Comparator::less(),
+            true,
+        ),
+        (
+            || model_element_with(0, 2),
+            GfxElementField::GlyphModel(GlyphModelField::GlyphLines(vec![
+                (0, GlyphLine::new()),
+                (1, GlyphLine::new()),
+                (2, GlyphLine::new()),
+            ])),
+            Comparator::greater_or_equal(),
+            false,
+        ),
+        // Scale: element value 5.0, reference 3.0 (element > reference).
+        (
+            || area_element_with_scale(5.0),
+            GfxElementField::GlyphArea(GlyphAreaField::scale(3.0)),
+            Comparator::greater(),
+            true,
+        ),
+        (
+            || area_element_with_scale(5.0),
+            GfxElementField::GlyphArea(GlyphAreaField::scale(3.0)),
+            Comparator::less_or_equal(),
+            false,
+        ),
+        (
+            || area_element_with_scale(5.0),
+            GfxElementField::GlyphArea(GlyphAreaField::scale(3.0)),
+            Comparator::less(),
+            false,
+        ),
+        (
+            || area_element_with_scale(5.0),
+            GfxElementField::GlyphArea(GlyphAreaField::scale(3.0)),
+            Comparator::greater_or_equal(),
+            true,
+        ),
+        // Scale: element value 2.0, reference 3.0 (element < reference).
+        (
+            || area_element_with_scale(2.0),
+            GfxElementField::GlyphArea(GlyphAreaField::scale(3.0)),
+            Comparator::greater(),
+            false,
+        ),
+        (
+            || area_element_with_scale(2.0),
+            GfxElementField::GlyphArea(GlyphAreaField::scale(3.0)),
+            Comparator::less_or_equal(),
+            true,
+        ),
+        (
+            || area_element_with_scale(2.0),
+            GfxElementField::GlyphArea(GlyphAreaField::scale(3.0)),
+            Comparator::less(),
+            true,
+        ),
+        (
+            || area_element_with_scale(2.0),
+            GfxElementField::GlyphArea(GlyphAreaField::scale(3.0)),
+            Comparator::greater_or_equal(),
+            false,
+        ),
+        // Flag: set.
+        (
+            || area_element_with_flag(true),
+            GfxElementField::Flag(Flag::SectionRoot),
+            Comparator::equals(),
+            true,
+        ),
+        (
+            || area_element_with_flag(true),
+            GfxElementField::Flag(Flag::SectionRoot),
+            Comparator::not_equals(),
+            false,
+        ),
+        (
+            || area_element_with_flag(true),
+            GfxElementField::Flag(Flag::SectionRoot),
+            Comparator::exists(),
+            true,
+        ),
+        (
+            || area_element_with_flag(true),
+            GfxElementField::Flag(Flag::SectionRoot),
+            Comparator::not_exists(),
+            false,
+        ),
+        // Flag: clear.
+        (
+            || area_element_with_flag(false),
+            GfxElementField::Flag(Flag::SectionRoot),
+            Comparator::equals(),
+            false,
+        ),
+        (
+            || area_element_with_flag(false),
+            GfxElementField::Flag(Flag::SectionRoot),
+            Comparator::not_equals(),
+            true,
+        ),
+        (
+            || area_element_with_flag(false),
+            GfxElementField::Flag(Flag::SectionRoot),
+            Comparator::exists(),
+            true,
+        ),
+        (
+            || area_element_with_flag(false),
+            GfxElementField::Flag(Flag::SectionRoot),
+            Comparator::not_exists(),
+            false,
+        ),
+    ];
+}
+
+#[test]
+fn test_predicate_truth_table() {
+    do_predicate_truth_table();
+}
+
+/// Walk [`PREDICATE_TRUTH_TABLE`] and assert that every documented
+/// convention holds: the element-side value is always the left operand,
+/// the negation flag is always applied, and `Exists` on Channel/Id/Flag
+/// behaves consistently. O(rows) per call.
+pub fn do_predicate_truth_table() {
+    for (make_element, field, comparator, expected) in PREDICATE_TRUTH_TABLE.clone() {
+        let element = make_element();
+        let pred = Predicate {
+            fields: vec![(field.clone(), comparator.clone())],
+            always_match: false,
+        };
+        let result = pred.test(&element);
+        assert_eq!(
+            result, expected,
+            "Predicate truth-table mismatch: field={:?}, comparator={:?}, expected={}",
+            field, comparator, expected,
+        );
+    }
 }

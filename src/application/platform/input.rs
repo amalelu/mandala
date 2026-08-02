@@ -32,9 +32,9 @@ pub use winit::keyboard::NamedKey;
 #[cfg(test)]
 pub use winit::keyboard::SmolStr;
 
-/// Wheel/trackpad scroll-delta payload — only the WASM mouse-wheel
-/// handler routes through this seam; native pattern-matches on
-/// `winit::event::MouseScrollDelta` directly inside its driver
-/// dispatcher.
-#[cfg(target_arch = "wasm32")]
+/// Wheel/trackpad scroll-delta payload. Both targets route through
+/// this seam: the shared `wheel_lines` helper in `app/mod.rs` names
+/// the delta by this alias, and each target's wheel handler passes
+/// its driver's value straight in. Previously WASM-only, when native
+/// still decomposed the delta itself inside its driver dispatcher.
 pub use winit::event::MouseScrollDelta;

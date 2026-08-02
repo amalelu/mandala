@@ -198,6 +198,25 @@ fn insert_text_skips_control_chars() {
 }
 
 #[test]
+fn insert_text_advances_by_grapheme_delta_for_ime_payload() {
+    let mut s = open_with("", 0);
+    assert_eq!(
+        insert_text(&mut s, "\u{1112}\u{1161}\u{11AB}"),
+        EditOutcome::InputChanged
+    );
+    assert_eq!(input_of(&s), "\u{1112}\u{1161}\u{11AB}");
+    assert_eq!(cursor_of(&s), 1);
+}
+
+#[test]
+fn insert_text_combining_mark_merge_does_not_overadvance_cursor() {
+    let mut s = open_with("e", 1);
+    assert_eq!(insert_text(&mut s, "\u{0301}"), EditOutcome::InputChanged);
+    assert_eq!(input_of(&s), "e\u{0301}");
+    assert_eq!(cursor_of(&s), 1);
+}
+
+#[test]
 fn insert_text_only_control_chars_is_unchanged() {
     let mut s = open_with("", 0);
     assert_eq!(insert_text(&mut s, "\t\r\n"), EditOutcome::Unchanged);

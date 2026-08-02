@@ -24,67 +24,31 @@ pub(in crate::application::app) fn apply_set_border_field(
 }
 
 /// `Action::CycleBorderPreset` — advance the selected node(s)'
-/// border preset to the next entry in `BORDER_PRESETS`. Samples
-/// the first selected node's resolved preset; multi-node
-/// selections converge to the same target.
+/// border preset to the next entry in `BORDER_PRESETS`. Thin
+/// wrapper over the `border preset cycle` mutation core, so the
+/// keybind and the verb can never disagree about what "next"
+/// means or about which preset the sample starts from.
 pub(in crate::application::app) fn apply_cycle_border_preset(rc: &mut RebuildContext<'_>) {
-    apply_with_rebuild(rc, |doc| {
-        let ids = match crate::application::console::commands::border::nodes_in_selection(
-            &doc.selection,
-            "border",
-        ) {
-            Ok(ids) => ids,
-            Err(_) => {
-                log::warn!("CycleBorderPreset: no border-applicable selection");
-                return false;
-            }
-        };
-        let current = ids
-            .first()
-            .and_then(|id| doc.mindmap.nodes.get(id))
-            .and_then(|n| n.style.border.as_ref())
-            .map(|c| c.preset.as_str())
-            .or(doc
-                .mindmap
-                .canvas
-                .default_border
-                .as_ref()
-                .map(|c| c.preset.as_str()))
-            .unwrap_or("light");
-        let target = baumhard::mindmap::border::next_border_preset(current);
-        crate::application::console::commands::border::apply_border_field_to_selection(
-            doc, "preset", target,
-        )
-    });
+    apply_with_rebuild(
+        rc,
+        crate::application::console::commands::border::cycle_border_preset_on_selection,
+    );
 }
 
 /// `Action::ToggleBorderVisible` — flip `style.show_frame` per
-/// selected node. Each node toggled independently.
+/// selected node, each toggled independently. Thin wrapper over
+/// the `border toggle` mutation core; the verb formats the same
+/// report as scrollback, this arm only needs "did anything
+/// change".
 pub(in crate::application::app) fn apply_toggle_border_visible(rc: &mut RebuildContext<'_>) {
     apply_with_rebuild(rc, |doc| {
-        let ids = match crate::application::console::commands::border::nodes_in_selection(
-            &doc.selection,
-            "border",
-        ) {
-            Ok(ids) => ids,
+        match crate::application::console::commands::border::toggle_border_visible_on_selection(doc) {
+            Ok(report) => report.toggled > 0,
             Err(_) => {
                 log::warn!("ToggleBorderVisible: no border-applicable selection");
-                return false;
-            }
-        };
-        let mut any = false;
-        for id in &ids {
-            let cur = doc
-                .mindmap
-                .nodes
-                .get(id)
-                .map(|n| n.style.show_frame)
-                .unwrap_or(true);
-            if doc.set_node_border_visible(id, !cur) {
-                any = true;
+                false
             }
         }
-        any
     });
 }
 
@@ -107,7 +71,7 @@ pub(in crate::application::app) fn apply_set_border_preview(
 
         let mut edits = BorderConfigEdits::default();
         if let Err(msg) = stage_kv(&mut edits, field, value) {
-            log::warn!("apply_set_border_preview: stage_kv error: {msg}");
+            log::warn!("border: SetBorderPreview stage_kv error: {msg}");
             return false;
         }
 
@@ -137,10 +101,9 @@ pub(in crate::application::app) fn apply_set_border_preview(
                         let (lo, hi) = (range.0.min(range.1), range.0.max(range.1));
                         (lo..=hi).map(|i| (sel.node_id.clone(), i)).collect()
                     }
-                    crate::application::document::SelectionState::MultiSection(sels) => sels
-                        .iter()
-                        .map(|s| (s.node_id.clone(), s.section_idx))
-                        .collect(),
+                    crate::application::document::SelectionState::MultiSection(sels) => {
+                        sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect()
+                    }
                     _ => return false,
                 };
                 BorderPreviewTarget::Sections(pairs)
@@ -168,7 +131,7 @@ pub(in crate::application::app) fn apply_cancel_border_preview(rc: &mut RebuildC
     apply_with_rebuild(rc, |doc| doc.cancel_border_preview());
 }
 
-/// Set a single colour axis (`bg` / `frame` / `text` / `title`
+/// Set a single color axis (`bg` / `frame` / `text` / `title`
 /// — see [`crate::application::keybinds::ColorAxis`]) to a
 /// hex / palette / `var(--name)` value across the current
 /// selection. Visual change → full rebuild.
@@ -221,55 +184,29 @@ pub(in crate::application::app) fn apply_set_spacing(input: &str, rc: &mut Rebui
     });
 }
 
-/// Resolve the (node_id, section_idx) the section-targeted
-/// Action variants apply to. Diverges from the console verb
-/// path on two axes — both pinned in this doc:
+/// Resolve the `(node_id, section_idx)` the section-targeted
+/// `Action` variants apply to.
 ///
-/// 1. **`Single(id)` is rejected here** even on a 1-section
-///    node, where the console verb path's `resolve_section_idx`
-///    rule 3 auto-resolves to `(id, 0)`. This helper doesn't
-///    have access to `MindMapDocument` to count sections;
-///    callers that want auto-resolve should switch the
-///    selection to `Section { node_id, section_idx: 0 }`
-///    explicitly before firing the Action.
+/// One-line wrapper over the shared cascade in
+/// [`crate::application::console::commands::section::target`]
+/// under its `Action` policy, which pins the two divergences from
+/// the console verb path:
 ///
-/// 2. **`MultiSection(secs)` of length > 1 is rejected** with a
-///    `log::warn!`, mirroring the console verb path's
-///    "single-target only — pass `section=<idx>`" rejection for
-///    every subverb except `move dx/dy`. Pre-fix this silently
+/// 1. **`Single(id)` is rejected here** even on a 1-section node,
+///    where the verb path auto-resolves to `(id, 0)`. That rule
+///    needs a `MindMapDocument` to count sections and this
+///    dispatch surface has none in hand at resolve time; callers
+///    that want the auto-resolve switch the selection to
+///    `Section { node_id, section_idx: 0 }` before firing.
+/// 2. **`MultiSection` naming the node more than once is
+///    rejected**, mirroring the verb path's "single-target only"
+///    posture for every subverb except `move dx/dy` (whose
+///    fan-out lives at the verb layer in
+///    `execute_move_fan_out_multisection`). Pre-fix this silently
 ///    collapsed to the first entry, losing the user's
-///    multi-section selection signal entirely. The verb path's
-///    `move dx/dy` fan-out lives at the verb layer
-///    (`execute_move_fan_out_multisection`); macro authors
-///    that want fan-out should script multiple Action steps.
-///
-/// `Section` / `SectionRange` resolve via `selected_section()`.
-/// `MultiSection` of length 1 collapses to its single entry
-/// (no ambiguity).
-fn target_section(
-    sel: &crate::application::document::SelectionState,
-) -> Option<(String, usize)> {
-    use crate::application::document::SelectionState;
-    if let Some(s) = sel.selected_section() {
-        return Some((s.node_id.clone(), s.section_idx));
-    }
-    if let SelectionState::MultiSection(secs) = sel {
-        match secs.len() {
-            0 => return None,
-            1 => return Some((secs[0].node_id.clone(), secs[0].section_idx)),
-            n => {
-                log::warn!(
-                    "section Action: MultiSection({} entries) rejected; \
-                     macro/keybind path is single-target — script multiple \
-                     Action steps for fan-out, or use the console verb \
-                     `section move dx=… dy=…` (delta form fans out)",
-                    n
-                );
-                return None;
-            }
-        }
-    }
-    None
+///    multi-section signal entirely.
+fn target_section(sel: &crate::application::document::SelectionState) -> Option<(String, usize)> {
+    crate::application::console::commands::section::target::resolve_action_section_target(sel)
 }
 
 /// Nudge the selected section by `(dx, dy)` canvas units.
@@ -296,7 +233,11 @@ pub(in crate::application::app) fn apply_set_section_offset_delta(
     {
         Some(p) => p,
         None => {
-            log::warn!("SetSectionOffsetDelta: section[{}] not found on node '{}'", idx, node_id);
+            log::warn!(
+                "SetSectionOffsetDelta: section[{}] not found on node '{}'",
+                idx,
+                node_id
+            );
             return;
         }
     };
@@ -326,13 +267,11 @@ pub(in crate::application::app) fn apply_set_section_size(
         log::warn!("SetSectionSize: section[{}] not found on node '{}'", idx, node_id);
         return;
     }
-    apply_with_rebuild(rc, |doc| {
-        match doc.set_section_size(&node_id, idx, size) {
-            Ok(changed) => changed,
-            Err(msg) => {
-                log::warn!("SetSectionSize: {}", msg);
-                false
-            }
+    apply_with_rebuild(rc, |doc| match doc.set_section_size(&node_id, idx, size) {
+        Ok(changed) => changed,
+        Err(msg) => {
+            log::warn!("SetSectionSize: {}", msg);
+            false
         }
     });
 }
@@ -340,11 +279,7 @@ pub(in crate::application::app) fn apply_set_section_size(
 /// Pin the selected section's `offset` to `(x, y)` (absolute,
 /// not delta). Mirror of `section move x=<x> y=<y>` for the
 /// macro path.`Action::SetSectionOffsetAbs`.
-pub(in crate::application::app) fn apply_set_section_offset_abs(
-    x: f64,
-    y: f64,
-    rc: &mut RebuildContext<'_>,
-) {
+pub(in crate::application::app) fn apply_set_section_offset_abs(x: f64, y: f64, rc: &mut RebuildContext<'_>) {
     let Some((node_id, idx)) = target_section(&rc.document.selection) else {
         log::warn!("SetSectionOffsetAbs: no section selected");
         return;
@@ -359,17 +294,16 @@ pub(in crate::application::app) fn apply_set_section_offset_abs(
     if !exists {
         log::warn!(
             "SetSectionOffsetAbs: section[{}] not found on node '{}'",
-            idx, node_id
+            idx,
+            node_id
         );
         return;
     }
-    apply_with_rebuild(rc, |doc| {
-        match doc.set_section_offset(&node_id, idx, x, y) {
-            Ok(changed) => changed,
-            Err(msg) => {
-                log::warn!("SetSectionOffsetAbs: {}", msg);
-                false
-            }
+    apply_with_rebuild(rc, |doc| match doc.set_section_offset(&node_id, idx, x, y) {
+        Ok(changed) => changed,
+        Err(msg) => {
+            log::warn!("SetSectionOffsetAbs: {}", msg);
+            false
         }
     });
 }
@@ -419,12 +353,7 @@ pub(in crate::application::app) fn apply_add_section(
     rc: &mut RebuildContext<'_>,
 ) {
     use baumhard::mindmap::model::MindSection;
-    let Some(node_id) = rc
-        .document
-        .selection
-        .primary_node_id()
-        .map(str::to_string)
-    else {
+    let Some(node_id) = rc.document.selection.primary_node_id().map(str::to_string) else {
         log::warn!("AddSection: no node selected (Multi/None selection or no primary)");
         return;
     };
@@ -462,31 +391,62 @@ pub(in crate::application::app) fn apply_delete_section(rc: &mut RebuildContext<
 }
 
 /// Split the resolved section in two at a grapheme boundary.
-/// `at_grapheme = None` defaults to end-of-text (empty suffix).
-/// Mirror of `section split [section=<idx>] [at=<grapheme>]`
-/// for the macro path.`Action::SplitSection`.
-/// Destructive.
+/// Mirror of `section split [section=<idx>] at=<grapheme>` for
+/// the macro path (`Action::SplitSection`). Destructive.
+///
+/// `at_grapheme` is **required**, exactly as `at=` is on the verb
+/// path: the old end-of-text default silently produced an empty
+/// suffix section that the user almost never wanted, and the
+/// console verb was hardened against it. A macro step written as
+/// `SplitSection { at_grapheme: None }` used to do precisely the
+/// thing the verb rejects — the last verb↔Action body divergence.
 pub(in crate::application::app) fn apply_split_section(
     at_grapheme: Option<usize>,
     rc: &mut RebuildContext<'_>,
 ) {
-    let Some((node_id, idx)) = target_section(&rc.document.selection) else {
-        log::warn!("SplitSection: no section selected");
+    let Some((node_id, idx, at)) = resolve_split_section_target(rc.document, at_grapheme) else {
         return;
     };
-    if !section_exists(&rc.document, &node_id, idx) {
-        log::warn!("SplitSection: section[{}] not found on node '{}'", idx, node_id);
-        return;
-    }
-    apply_with_rebuild(rc, |doc| {
-        match doc.split_section(&node_id, idx, at_grapheme) {
-            Ok(_) => true,
-            Err(msg) => {
-                log::warn!("SplitSection: {}", msg);
-                false
-            }
+    apply_with_rebuild(rc, |doc| match doc.split_section(&node_id, idx, Some(at)) {
+        Ok(_) => true,
+        Err(msg) => {
+            log::warn!("SplitSection: {}", msg);
+            false
         }
     });
+}
+
+/// Validate a macro-path `SplitSection` against the live
+/// document, returning `(node_id, section_idx, at_grapheme)` when
+/// the split may proceed. Every rejection logs its reason —
+/// the macro path has no scrollback, so a silent `None` would
+/// leave the user with no signal at all.
+///
+/// Split out from [`apply_split_section`] so the gate is
+/// reachable without a `Renderer` (`TEST_CONVENTIONS.md` §T8 /
+/// §T9: platform-shared logic lives in functions over plain
+/// values).
+fn resolve_split_section_target(
+    doc: &MindMapDocument,
+    at_grapheme: Option<usize>,
+) -> Option<(String, usize, usize)> {
+    let Some(at) = at_grapheme else {
+        log::warn!(
+            "SplitSection: at_grapheme is required — split-at-end-of-text \
+             silently creates an empty suffix section, so the console verb \
+             requires `at=<grapheme>` and the macro / keybind path does too"
+        );
+        return None;
+    };
+    let Some((node_id, idx)) = target_section(&doc.selection) else {
+        log::warn!("SplitSection: no section selected");
+        return None;
+    };
+    if !section_exists(doc, &node_id, idx) {
+        log::warn!("SplitSection: section[{}] not found on node '{}'", idx, node_id);
+        return None;
+    }
+    Some((node_id, idx, at))
 }
 
 #[cfg(test)]
@@ -514,8 +474,14 @@ mod tests {
     #[test]
     fn target_section_rejects_multisection_of_many() {
         let sel = SelectionState::MultiSection(vec![
-            SectionSel { node_id: "n".into(), section_idx: 0 },
-            SectionSel { node_id: "n".into(), section_idx: 1 },
+            SectionSel {
+                node_id: "n".into(),
+                section_idx: 0,
+            },
+            SectionSel {
+                node_id: "n".into(),
+                section_idx: 1,
+            },
         ]);
         assert_eq!(target_section(&sel), None);
     }
@@ -538,5 +504,57 @@ mod tests {
     fn target_section_rejects_single() {
         let sel = SelectionState::Single("n".into());
         assert_eq!(target_section(&sel), None);
+    }
+
+    /// Point the fixture document at section 0 of its first node.
+    fn doc_with_section_selected() -> (MindMapDocument, String) {
+        let mut doc = crate::application::document::tests_common::load_test_doc();
+        let node_id = doc
+            .mindmap
+            .nodes
+            .keys()
+            .next()
+            .expect("testament map has nodes")
+            .clone();
+        doc.selection = SelectionState::Section(SectionSel {
+            node_id: node_id.clone(),
+            section_idx: 0,
+        });
+        (doc, node_id)
+    }
+
+    /// `Action::SplitSection { at_grapheme: None }` is refused.
+    /// The console verb requires `at=` because split-at-end-of-text
+    /// silently creates an empty suffix section; a macro step must
+    /// not be able to do the thing the verb was hardened against.
+    #[test]
+    fn split_section_action_rejects_missing_at_grapheme() {
+        let (doc, _id) = doc_with_section_selected();
+        assert_eq!(
+            resolve_split_section_target(&doc, None),
+            None,
+            "macro-path SplitSection must reject an absent at_grapheme"
+        );
+    }
+
+    /// The same call with an explicit index resolves — the
+    /// rejection is about the missing value, not about the
+    /// selection.
+    #[test]
+    fn split_section_action_accepts_explicit_at_grapheme() {
+        let (doc, id) = doc_with_section_selected();
+        assert_eq!(resolve_split_section_target(&doc, Some(2)), Some((id, 0, 2)));
+    }
+
+    /// An out-of-range section index is refused before the setter
+    /// runs, so a stale macro can't address a deleted section.
+    #[test]
+    fn split_section_action_rejects_missing_section() {
+        let (mut doc, id) = doc_with_section_selected();
+        doc.selection = SelectionState::Section(SectionSel {
+            node_id: id,
+            section_idx: 99,
+        });
+        assert_eq!(resolve_split_section_target(&doc, Some(1)), None);
     }
 }

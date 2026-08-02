@@ -72,13 +72,17 @@ target nodes using predicates. As far as tree-mutation goes, we have now covered
 GfxMutator is the basic mutator node, and can be of different types:
 
 ```Rust
-pub enum MutatorType {
-    Single,
-    Macro,
-    Void,
-    Instruction,
+pub enum GfxMutator {
+    Single { mutation: Mutation, channel: usize },
+    Void { channel: usize },
+    Instruction { instruction: Instruction, channel: usize, mutation: Mutation },
+    Macro { channel: usize, mutations: Vec<Mutation> },
 }
 ```
+The payload-free `MutatorType` tag used for cheap variant checks is
+*derived* from this enum with strum's `EnumDiscriminants`, so it can
+never list a kind the mutator does not have. Reach it with
+`mutator.variant()` (the `Discriminated` trait) or `mutator.is(MutatorType::Macro)`.
 A 'Single' simply means that the mutator contains a single mutation, while a macro is a list of mutations. 
 The rest of the types have been covered above. Mutations can also be different types, as per right now we have
 these types:

@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Mindmap tree builder — projects a `MindMap` into a Baumhard
-//! `Tree<GfxElement, GfxMutator>` and exposes per-canvas-role
-//! builders (borders, portals, connections, connection-labels,
-//! edge-handles) that the app crate's scene rebuilders consume.
+//! Mindmap tree builder — projects a `MindMap` into Baumhard
+//! `Tree<GfxElement, GfxMutator>`s, one per canvas role (nodes,
+//! borders, portals, connections, connection-labels, section
+//! frames, edge / node / section handles), which the app crate's
+//! scene rebuilders register into `AppScene`.
+//!
+//! Every role file follows the same **courier** shape: a data pass
+//! that resolves the model + this frame's
+//! [`overrides`](crate::mindmap::tree_builder::overrides)
+//! into plain per-element data, and a pair of projections that turn that data
+//! into either a fresh tree or an in-place `MutatorTree`. Style is
+//! resolved exactly once, in the data pass; the projections never
+//! re-resolve it.
+//!
 //! `MindMapTree` and `build_mindmap_tree` live here; per-role
 //! builders are re-exported from the sibling files.
 
@@ -19,34 +29,64 @@ use crate::mindmap::model::MindMap;
 mod border;
 mod connection;
 mod connection_label;
+mod edge_handle;
 mod handle;
 mod node;
+mod node_clip;
+mod node_resize_handle;
 mod portal;
+mod portal_style;
 mod section_frame;
+mod section_resize_handle;
+
+pub mod overrides;
 
 #[cfg(test)]
 mod tests;
 
 pub use border::{
     border_identity_sequence, border_node_data, build_border_mutator_tree,
-    build_border_mutator_tree_from_nodes, build_border_tree, build_border_tree_from_nodes, BorderNodeData,
+    build_border_mutator_tree_from_nodes, build_border_tree, build_border_tree_from_nodes,
+    BorderChromeOverrides, BorderNodeData,
 };
 pub use connection::{
-    build_connection_mutator_tree, build_connection_tree, connection_identity_sequence,
-    ConnectionEdgeIdentity,
+    build_connection_elements, build_connection_mutator_tree, build_connection_tree,
+    connection_identity_sequence, point_inside_any_node, ConnectionEdgeIdentity, ConnectionElement,
 };
 pub use connection_label::{
-    build_connection_label_mutator_tree, build_connection_label_tree, connection_label_identity_sequence,
+    build_connection_label_mutator_tree, build_connection_label_tree, build_label_elements,
+    connection_label_identity_sequence, ConnectionLabelElement, ConnectionLabelHitIndex,
     ConnectionLabelMutator, ConnectionLabelTree,
 };
+pub use edge_handle::{build_edge_handles, edge_handle_channel_for, EdgeHandleElement, EdgeHandleKind};
 pub use handle::{build_handle_mutator_tree, build_handle_tree, handle_identity_sequence, HandleVisual};
+pub use node::DEFAULT_SECTION_FONT_SCALE;
+pub use node_clip::{node_clip_aabbs, INACTIVE_NODE_ALPHA_MULTIPLIER};
+pub use node_resize_handle::{
+    build_node_resize_handles, build_selected_node_handles, NodeResizeHandleElement,
+};
+pub use overrides::{
+    BorderConfigEditsView, BorderPreview, BorderPreviewTargetRef, EdgeColorPreview, EditView, FrameOverrides,
+    InteractionModeOverrides, PortalColorPreview, PortalTextEditOverride, SceneSelectionContext,
+};
 pub use portal::{
     build_portal_mutator_tree, build_portal_mutator_tree_from_pairs, build_portal_tree,
-    build_portal_tree_from_pairs, portal_identity_sequence, portal_pair_data, PortalColorPreviewRef,
-    PortalIdentity, PortalMutator, PortalPairData, PortalTree, SelectedEdgeRef,
+    build_portal_tree_from_pairs, portal_identity_sequence, portal_pair_data, EndpointAreas, PortalHit,
+    PortalHitIndex, PortalIdentity, PortalMutator, PortalPairData, PortalPart, PortalTree, SelectedEdgeRef,
 };
-pub use section_frame::{build_section_frame_tree, section_frame_identity_sequence};
+pub use portal_style::{
+    resolve_portal_endpoint_style, resolve_portal_endpoint_text_style, ResolvedPortalStyle,
+    ResolvedPortalTextStyle, SelectedPortalLabel,
+};
+pub use section_frame::{
+    build_section_frame_tree, build_section_frames, section_frame_identity_sequence, SectionFrameElement,
+};
+pub use section_resize_handle::{
+    build_section_resize_handles, build_selected_section_handles, infer_resize_anchor, ResizeHandleSide,
+    SectionResizeHandleElement, SECTION_RESIZE_HANDLE_FONT_SIZE_PT, SECTION_RESIZE_HANDLE_GLYPH,
+};
 
+use crate::mindmap::model::ChildIndex;
 use node::{append_node_sections, build_children_recursive, mindnode_container_area};
 
 /// Result of building a Baumhard tree from a MindMap. The tree
@@ -133,11 +173,9 @@ pub fn build_mindmap_tree(map: &MindMap) -> MindMapTree {
 
     let vars = &map.canvas.theme_variables;
     let canvas_default_border = map.canvas.default_border.as_ref();
-    let roots = map.root_nodes();
-    for root in &roots {
-        if map.is_hidden_by_fold(root) {
-            continue;
-        }
+    let index = ChildIndex::build(map);
+    for root in index.roots() {
+        // Roots have no ancestors, so they are never hidden by fold.
         let area = mindnode_container_area(root, vars, canvas_default_border);
         let element = GfxElement::new_area_non_indexed_with_id(area, root.channel, id_counter);
         id_counter += 1;
@@ -150,7 +188,9 @@ pub fn build_mindmap_tree(map: &MindMap) -> MindMapTree {
 
         build_children_recursive(
             map,
+            &index,
             &root.id,
+            root.folded,
             node_id,
             &mut tree,
             &mut node_map,

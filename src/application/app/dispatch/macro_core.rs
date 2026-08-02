@@ -5,7 +5,7 @@
 //! over a [`MacroDispatchTarget`] trait so native and WASM share
 //! the same body byte-for-byte. Re-implementing the loop on
 //! either target is **forbidden** — the privilege gate
-//! (`MacroSource::allows_action`, `allows_console_line`) is the
+//! (`SourceTier::allows_action`, `allows_console_line`) is the
 //! threat-model defence and must be single-sourced.
 //!
 //! - **Native** impl lives in
@@ -53,7 +53,7 @@ pub(in crate::application::app) trait MacroDispatchTarget {
     fn apply_custom_mutation(&mut self, id: &str, node_id: &str) -> bool;
 
     /// Execute a free-form console line. Reaches the loop ONLY
-    /// after the privilege gate (`MacroSource::allows_console_line`)
+    /// after the privilege gate (`SourceTier::allows_console_line`)
     /// approved the step — non-User tiers fail-closed-abort the
     /// macro before this method is called.
     ///
@@ -98,7 +98,7 @@ pub(in crate::application::app) fn dispatch_macro<T: MacroDispatchTarget>(
     let (mac, source) = match target.registry().get_with_source(macro_id) {
         Some((m, s)) => (m.clone(), s),
         None => {
-            log::warn!("dispatch_macro: unknown macro id '{}'", macro_id);
+            log::warn!("macros: dispatch of unknown macro id '{}'", macro_id);
             return false;
         }
     };
@@ -163,7 +163,7 @@ pub(in crate::application::app) fn dispatch_macro<T: MacroDispatchTarget>(
             MacroStep::ConsoleLine { line } => {
                 // **Privilege gate.** `ConsoleLine` runs an arbitrary
                 // console verb, including filesystem-touching ones.
-                // Only `MacroSource::User` macros may carry it —
+                // Only `SourceTier::User` macros may carry it —
                 // app-bundled, map-inline, and node-inline tiers
                 // come from sources the user didn't necessarily
                 // author, so they cannot do file I/O via macros.
@@ -203,7 +203,8 @@ mod tests {
 
     use super::*;
     use crate::application::keybinds::Action;
-    use crate::application::macros::{Macro, MacroRegistry, MacroSource, MacroStep, MacroTarget};
+    use crate::application::macros::{Macro, MacroRegistry, MacroStep, MacroTarget};
+    use crate::application::source_tier::SourceTier;
 
     /// Mock target: records every method invocation in order.
     /// `Default` selection → `current_selection_node_id` returns
@@ -256,7 +257,7 @@ mod tests {
         }
     }
 
-    fn registry_with(macros: Vec<(Macro, MacroSource)>) -> MacroRegistry {
+    fn registry_with(macros: Vec<(Macro, SourceTier)>) -> MacroRegistry {
         let mut r = MacroRegistry::new();
         for (m, s) in macros {
             r.insert(m, s);
@@ -295,7 +296,7 @@ mod tests {
                 },
             ],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::User)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
         assert!(dispatch_macro("u1", &mut t));
         assert_eq!(
             t.calls,
@@ -305,6 +306,73 @@ mod tests {
                 "console:fps on".to_string(),
             ],
         );
+    }
+
+    /// **Issue #31 acceptance criterion 1, at the macro loop.**
+    /// `MacroStep::Action` must be able to drive every picker
+    /// Action. Pre-fix the eight `Picker*` bodies lived inside the
+    /// picker's key handler and `dispatch_action` had no arms for
+    /// them, so a macro step reached the dispatcher and fell to
+    /// `_ => Unhandled` — a silent no-op. This pins the step loop
+    /// half of the contract: the gate lets them through and each
+    /// one lands on `target.dispatch_action`. The arm that
+    /// receives them is pinned separately by `picker_op_for`'s
+    /// exhaustiveness walk (which is that arm's match guard).
+    #[test]
+    fn user_tier_macro_drives_every_picker_action() {
+        let picker_actions = [
+            Action::PickerCancel,
+            Action::PickerCommit,
+            Action::PickerNudgeHueDown,
+            Action::PickerNudgeHueUp,
+            Action::PickerNudgeSatDown,
+            Action::PickerNudgeSatUp,
+            Action::PickerNudgeValDown,
+            Action::PickerNudgeValUp,
+        ];
+        let steps: Vec<MacroStep> = picker_actions
+            .iter()
+            .map(|a| MacroStep::Action { action: a.clone() })
+            .collect();
+        let m = macro_with_steps("picker", steps);
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
+        assert!(dispatch_macro("picker", &mut t));
+        let expected: Vec<String> = picker_actions.iter().map(|a| format!("action:{:?}", a)).collect();
+        assert_eq!(t.calls, expected, "every picker Action must reach the dispatcher");
+    }
+
+    /// The picker Actions are non-destructive, so the privilege
+    /// gate lets them through from every tier — a map-authored
+    /// macro can drive the wheel. Pinned value-explicitly because
+    /// a future reclassification of `PickerCommit` as destructive
+    /// would silently take this away, and the abort is fail-closed
+    /// (the whole rest of the macro stops).
+    #[test]
+    fn non_user_tiers_may_drive_the_picker() {
+        for tier in [SourceTier::App, SourceTier::Map, SourceTier::Inline] {
+            let m = macro_with_steps(
+                "p",
+                vec![
+                    MacroStep::Action {
+                        action: Action::PickerNudgeHueUp,
+                    },
+                    MacroStep::Action {
+                        action: Action::PickerCommit,
+                    },
+                ],
+            );
+            let mut t = MockTarget::new(registry_with(vec![(m, tier)]));
+            assert!(dispatch_macro("p", &mut t), "{:?} tier", tier);
+            assert_eq!(
+                t.calls,
+                vec![
+                    "action:PickerNudgeHueUp".to_string(),
+                    "action:PickerCommit".to_string(),
+                ],
+                "{:?} tier must reach both picker steps",
+                tier
+            );
+        }
     }
 
     #[test]
@@ -322,7 +390,7 @@ mod tests {
                 },
             ],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::Map)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::Map)]));
         // any_ran is true (Undo executed)
         assert!(dispatch_macro("m1", &mut t));
         // Only Undo recorded — ConsoleLine + SaveDocument both
@@ -344,7 +412,7 @@ mod tests {
                 MacroStep::Action { action: Action::Undo },
             ],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::Map)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::Map)]));
         assert!(dispatch_macro("m2", &mut t));
         // Only the first non-destructive Undo ran.
         assert_eq!(t.calls, vec!["action:Undo".to_string()]);
@@ -362,7 +430,7 @@ mod tests {
                 MacroStep::Action { action: Action::Undo },
             ],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::User)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
         t.current_selection = None;
         // any_ran true because the Undo Action ran
         assert!(dispatch_macro("u3", &mut t));
@@ -384,7 +452,7 @@ mod tests {
                 MacroStep::Action { action: Action::Undo },
             ],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::User)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
         // `known_nodes` is `["n1", "sel"]` — "missing" isn't there.
         assert!(dispatch_macro("u4", &mut t));
         // Same posture: CustomMutation soft-skipped, Undo ran.
@@ -394,7 +462,7 @@ mod tests {
     #[test]
     fn empty_macro_returns_false() {
         let m = macro_with_steps("empty", vec![]);
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::User)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
         assert!(!dispatch_macro("empty", &mut t));
         assert!(t.calls.is_empty());
     }
@@ -404,7 +472,7 @@ mod tests {
         // Action steps that return `Unhandled` (e.g. dispatched in
         // a context where they don't apply) must NOT count as "ran".
         let m = macro_with_steps("u5", vec![MacroStep::Action { action: Action::Undo }]);
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::User)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
         t.action_outcome = DispatchOutcome::Unhandled;
         // The dispatch_action call landed on the mock, but
         // any_ran stays false because Outcome wasn't Handled.
@@ -422,7 +490,7 @@ mod tests {
                 line: "fps on".into(),
             }],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::User)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
         t.console_line_executed = true;
         // any_ran=true because the console line "ran" (mock
         // returned true).
@@ -442,7 +510,7 @@ mod tests {
             "u_console_skip",
             vec![MacroStep::ConsoleLine { line: "save".into() }],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::User)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
         t.console_line_executed = false;
         // The mock recorded the call, but the macro returns false
         // because the only step's "execution" was a soft-skip.
@@ -464,7 +532,7 @@ mod tests {
                 target: MacroTarget::CurrentSelection,
             }],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::User)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::User)]));
         t.custom_mutation_applied = false;
         assert!(!dispatch_macro("u_cm_failed", &mut t));
         // The mock recorded the call (apply was attempted) — only
@@ -483,7 +551,7 @@ mod tests {
                 action: Action::DeleteSelection,
             }],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::Inline)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::Inline)]));
         assert!(!dispatch_macro("i1", &mut t));
         assert!(t.calls.is_empty());
     }
@@ -507,7 +575,7 @@ mod tests {
                 },
             ],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::App)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::App)]));
         assert!(dispatch_macro("a1", &mut t));
         assert_eq!(
             t.calls,
@@ -531,7 +599,7 @@ mod tests {
                 MacroStep::Action { action: Action::Undo },
             ],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::App)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::App)]));
         assert!(dispatch_macro("a2", &mut t));
         assert_eq!(
             t.calls,
@@ -559,7 +627,7 @@ mod tests {
                 },
             ],
         );
-        let mut t = MockTarget::new(registry_with(vec![(m, MacroSource::Inline)]));
+        let mut t = MockTarget::new(registry_with(vec![(m, SourceTier::Inline)]));
         assert!(dispatch_macro("i_console", &mut t));
         assert_eq!(
             t.calls,

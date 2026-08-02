@@ -9,8 +9,16 @@ palette references that don't resolve. These are caught by:
 maptool verify <map.json>
 ```
 
-Exit code 0 if clean. Nonzero with a list of violations if anything is
-off.
+Exit code 0 if clean, or if only warnings are found. Nonzero with a
+list of violations if any error is found. Warnings are still printed so
+a CI recipe that captures stderr can see them.
+
+The split is between *spelling* and *meaning*. Spelling is the
+loader's: every object in the format is closed, so a key no field
+claims fails the load outright rather than being dropped and then
+erased at the next save — see [schema.md](./schema.md#unknown-keys-are-rejected).
+Everything below is about correctly-spelled files that still say
+something incoherent, and that is `verify`'s.
 
 ## What gets checked
 
@@ -36,10 +44,17 @@ depends on which code path runs, a reliability nightmare.
 ### References
 
 - Every edge's `from_id` and `to_id` exist in `nodes`
+- No two edges share the same `(from_id, to_id, edge_type)` tuple
 
 **Why**: dangling references silently disappear at render time — the
 connection just doesn't draw, with no indication that something was
 lost. Applies uniformly to line-mode and portal-mode edges.
+
+Duplicate tuples break edge identity: `EdgeRef` lookups return the
+first match, `SceneConnectionCache` overwrites with the second edge's
+geometry, and the on-disk format no longer round-trips through the
+runtime faithfully. Multiple edges between the same pair with
+different `edge_type` values are allowed.
 
 ### Palettes
 
@@ -53,7 +68,9 @@ any level.
 
 ### Named enums
 
-- `style.shape` is one of the known shape values
+- `style.shape` is one of `"rectangle"`, `"rounded_rectangle"`,
+  `"ellipse"`, `"circle"`, `"diamond"`, `"parallelogram"`, `"hexagon"`
+  (compared case-insensitively)
 - `layout.type` is one of `"map"`, `"tree"`, `"outline"`
 - `layout.direction` is one of `"auto"`, `"up"`, `"down"`, `"left"`,
   `"right"`, `"balanced"`
@@ -74,7 +91,7 @@ catches the typo.
 - Runs do not overlap (which implies ascending `start` order for
   well-formed runs)
 - Each run's `start < end`
-- `end` is within the text's code-point count
+- `end` is within the text's grapheme-cluster count
 
 **Why**: overlapping or out-of-bounds runs produce undefined rendering —
 the first run wins silently, the tail is clipped. Rich text bugs are
@@ -85,13 +102,16 @@ painful to diagnose after the fact.
 For every `MindNode.sections[i]`:
 
 - `offset.{x,y}` finite and non-negative
-- When `size` is set: `size.{width,height}` finite and strictly
-  positive, the section's AABB (`offset + size`) inside the parent
-  node's `size`, and `size.{width,height}` not over 100× the
-  parent's matching dimension (typo guard)
-- The owning `node.size.{width,height}` itself finite and
-  strictly positive (sub-check, since a corrupt node-size
-  cascades into every section's AABB math)
+- The section's effective AABB (`offset + effective_size`) is inside
+  the parent node's `size`. The effective size is the explicit
+  `section.size` when set, otherwise `node.size` (fill-parent).
+- `size.{width,height}` (when set) finite and strictly positive, and
+  not over 100× the parent's matching dimension (typo guard)
+- The owning `node.size.{width,height}` itself finite, strictly
+  positive, and not over `MAX_NODE_AXIS` (`1_000_000.0`) (sub-check,
+  since a corrupt node-size cascades into every section's AABB math)
+- `node.sections.len()` does not exceed `MAX_SECTIONS_PER_NODE`
+  (`1024`)
 - No two sections share the same effective channel under the same
   parent — the effective channel is `section.channel.unwrap_or(section_idx)`.
   Surfaced as a *warning*, not a hard rejection: the broadcast
@@ -109,9 +129,9 @@ edit and a `verify` violation read identically.
 
 ### Zoom bounds
 
-- Whenever both `min_zoom_to_render` and `max_zoom_to_render` are set
-  on a `MindNode`, `MindEdge`, `EdgeLabelConfig`, or
-  `PortalEndpointState`, `min <= max` holds.
+- `min_zoom_to_render` and `max_zoom_to_render` (when set) are finite
+- Whenever both are set on a `MindNode`, `MindEdge`,
+  `EdgeLabelConfig`, or `PortalEndpointState`, `min <= max` holds
 
 **Why**: an inverted pair is a well-defined but always-invisible
 window — the render-time check still terminates cleanly, but an
@@ -150,16 +170,25 @@ done
 
 ## Violation output format
 
+Errors:
+
 ```
 <category> @ <location>: <message>
 ```
 
-Example:
+Warnings are printed the same way but prefixed with `warning:`:
+
+```
+warning: sections @ 0: channel 0 shared by sections [0, 1]; ...
+```
+
+Examples:
 
 ```
 tree @ 1.2: parent_id "9.9" references a node that does not exist
 ids @ 1.2.3: parent_id "1.0" does not match derived parent "1.2"
 references @ edge[0]: from_id "5.5" is not a node
+edges @ edge[3]: duplicate edge (from_id="0", to_id="1", type="cross_link") first seen at edge[0]
 palettes @ 0: palette "sunset" is not defined in map.palettes
 enums @ 0: style.shape "oblong" is not a known shape
 text_runs @ 0: section[0].run[1] overlaps previous run (start 3 < previous end 5)

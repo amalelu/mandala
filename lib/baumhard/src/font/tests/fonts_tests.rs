@@ -424,7 +424,7 @@ pub fn do_app_font_by_family_unknown_returns_none() {
 #[test]
 #[should_panic(expected = "FONT_SYSTEM write lock not available")]
 fn test_acquire_font_system_write_panics_on_timeout() {
-    use crate::font::fonts::{acquire_font_system_write_with_timeout, FONT_SYSTEM};
+    use crate::font::fonts::{acquire_font_system_write, acquire_font_system_write_with_timeout};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -435,9 +435,12 @@ fn test_acquire_font_system_write_panics_on_timeout() {
     // it long enough to let our acquire attempt time out *and* to
     // cover scheduler jitter on a loaded CI runner. We do not join
     // the handle — the test function panics below, and the
-    // detached thread finishes on its own.
+    // detached thread finishes on its own. The holder acquires
+    // through the same helper (not a raw `.write()`) so the codebase
+    // stays grep-clean of raw `FONT_SYSTEM.write()`; the lock is free
+    // at spawn time, so this returns instantly.
     let _holder = thread::spawn(move || {
-        let _guard = FONT_SYSTEM.write().expect("FONT_SYSTEM poisoned");
+        let _guard = acquire_font_system_write("test_timeout_holder");
         acquired_tx.send(()).unwrap();
         // Hold for 5× the acquire timeout so a slow scheduler
         // cannot let `try_write` succeed before the timeout fires.

@@ -12,14 +12,15 @@
 //! body is benchmarkable from `benches/test_bench.rs`.
 
 use glam::Vec2;
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::rc::Rc;
 
-use crate::core::primitives::{Flag, Flaggable};
+use crate::core::primitives::{Discriminated, Flag, Flaggable};
 use crate::font::fonts;
 use crate::gfx_structs::area::GlyphArea;
 use crate::gfx_structs::element::{GfxElement, GfxElementType};
 use crate::gfx_structs::mutator::GlyphTreeEventInstance;
-use crate::gfx_structs::tree::BranchChannel;
+use crate::gfx_structs::tree::{BranchChannel, EventSubscriber};
 
 // ── constructor: GlyphArea variant ─────────────────────────────────
 
@@ -36,7 +37,7 @@ pub fn do_new_area_constructs_glyph_area_variant() {
     let area = GlyphArea::new_with_str("hello", 14.0, 14.0, Vec2::new(0.0, 0.0), Vec2::new(100.0, 20.0));
     let elem = GfxElement::new_area_non_indexed_with_id(area, 7, 42);
 
-    assert_eq!(elem.get_type(), GfxElementType::GlyphArea);
+    assert_eq!(elem.variant(), GfxElementType::GlyphArea);
     assert_eq!(elem.channel(), 7);
     assert_eq!(elem.unique_id(), 42);
 }
@@ -52,7 +53,7 @@ fn test_new_void_constructs_void_variant() {
 pub fn do_new_void_constructs_void_variant() {
     let elem = GfxElement::new_void_with_id(3, 99);
 
-    assert_eq!(elem.get_type(), GfxElementType::Void);
+    assert_eq!(elem.variant(), GfxElementType::Void);
     assert_eq!(elem.channel(), 3);
     assert_eq!(elem.unique_id(), 99);
 }
@@ -139,25 +140,25 @@ pub fn do_event_subscribers_add_and_check() {
     // Starts empty.
     assert!(elem.subscribers_as_ref().is_empty());
 
-    // Add a subscriber (a no-op closure wrapped in Arc<Mutex<...>>).
-    let subscriber: Arc<Mutex<dyn FnMut(&mut GfxElement, GlyphTreeEventInstance) + Send + Sync>> = Arc::new(
-        Mutex::new(|_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {}),
-    );
+    // Add a subscriber (a no-op closure wrapped in Rc<RefCell<...>>).
+    let subscriber: EventSubscriber = Rc::new(RefCell::new(
+        |_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {},
+    ));
     elem.subscribers_mut().push(subscriber.clone());
 
     // List should now contain exactly one entry.
     assert_eq!(elem.subscribers_as_ref().len(), 1);
 
-    // The subscriber we pushed should be the same Arc (pointer equality).
-    assert!(Arc::ptr_eq(&elem.subscribers_as_ref()[0], &subscriber,));
+    // The subscriber we pushed should be the same Rc (pointer equality).
+    assert!(Rc::ptr_eq(&elem.subscribers_as_ref()[0], &subscriber,));
 
     // A second subscriber is distinguishable.
-    let subscriber2: Arc<Mutex<dyn FnMut(&mut GfxElement, GlyphTreeEventInstance) + Send + Sync>> = Arc::new(
-        Mutex::new(|_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {}),
-    );
+    let subscriber2: EventSubscriber = Rc::new(RefCell::new(
+        |_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {},
+    ));
     elem.subscribers_mut().push(subscriber2.clone());
     assert_eq!(elem.subscribers_as_ref().len(), 2);
-    assert!(!Arc::ptr_eq(
+    assert!(!Rc::ptr_eq(
         &elem.subscribers_as_ref()[0],
         &elem.subscribers_as_ref()[1],
     ));
@@ -186,25 +187,22 @@ pub fn do_event_subscribers_observe_dispatched_event() {
     let mut elem = GfxElement::new_void_with_id(0, 0);
 
     // Closure-shared recorder: each invocation pushes the
-    // dispatched event-type tag. Arc<Mutex<Vec>> so the
+    // dispatched event-type tag. Rc<RefCell<Vec>> so the
     // closure can mutate observed state from inside the
-    // subscriber's Mutex<dyn FnMut>.
-    let observed: Arc<Mutex<Vec<GlyphTreeEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    // subscriber's RefCell<dyn FnMut>.
+    let observed: Rc<RefCell<Vec<GlyphTreeEvent>>> = Rc::new(RefCell::new(Vec::new()));
     let observed_for_subscriber = observed.clone();
-    let subscriber: Arc<Mutex<dyn FnMut(&mut GfxElement, GlyphTreeEventInstance) + Send + Sync>> = Arc::new(
-        Mutex::new(move |_elem: &mut GfxElement, evt: GlyphTreeEventInstance| {
-            observed_for_subscriber
-                .lock()
-                .expect("recorder lock not poisoned")
-                .push(evt.event_type);
-        }),
-    );
+    let subscriber: EventSubscriber = Rc::new(RefCell::new(
+        move |_elem: &mut GfxElement, evt: GlyphTreeEventInstance| {
+            observed_for_subscriber.borrow_mut().push(evt.event_type);
+        },
+    ));
     elem.subscribers_mut().push(subscriber);
 
     let event = GlyphTreeEventInstance::new(GlyphTreeEvent::AppEvent, 12345);
     elem.accept_event(&event);
 
-    let recorded = observed.lock().expect("recorder lock not poisoned");
+    let recorded = observed.borrow();
     assert_eq!(recorded.len(), 1, "subscriber should fire exactly once");
     assert_eq!(
         recorded[0],
@@ -215,19 +213,16 @@ pub fn do_event_subscribers_observe_dispatched_event() {
     // Two subscribers, one event → both fire.
     drop(recorded);
     let observed_for_second = observed.clone();
-    let second: Arc<Mutex<dyn FnMut(&mut GfxElement, GlyphTreeEventInstance) + Send + Sync>> = Arc::new(
-        Mutex::new(move |_e: &mut GfxElement, evt: GlyphTreeEventInstance| {
-            observed_for_second
-                .lock()
-                .expect("recorder lock")
-                .push(evt.event_type);
-        }),
-    );
+    let second: EventSubscriber = Rc::new(RefCell::new(
+        move |_e: &mut GfxElement, evt: GlyphTreeEventInstance| {
+            observed_for_second.borrow_mut().push(evt.event_type);
+        },
+    ));
     elem.subscribers_mut().push(second);
     let event2 = GlyphTreeEventInstance::new(GlyphTreeEvent::CloseEvent, 67890);
     elem.accept_event(&event2);
 
-    let recorded = observed.lock().expect("recorder lock");
+    let recorded = observed.borrow();
     assert_eq!(
         recorded.len(),
         3,
@@ -238,4 +233,88 @@ pub fn do_event_subscribers_observe_dispatched_event() {
     assert_eq!(recorded[0], GlyphTreeEvent::AppEvent);
     assert_eq!(recorded[1], GlyphTreeEvent::CloseEvent);
     assert_eq!(recorded[2], GlyphTreeEvent::CloseEvent);
+}
+
+#[test]
+fn test_event_subscriber_can_capture_rc_refcell_state() {
+    do_event_subscriber_can_capture_rc_refcell_state();
+}
+
+/// A plugin-shaped closure can capture `Rc<RefCell<...>>` app state and
+/// subscribe to element events. This is the shape future script/plugin
+/// consumers need: single-threaded (CODE_CONVENTIONS.md §3), no
+/// `Send + Sync` requirement.
+pub fn do_event_subscriber_can_capture_rc_refcell_state() {
+    use crate::gfx_structs::mutator::GlyphTreeEvent;
+    use crate::gfx_structs::tree::TreeEventConsumer;
+
+    let mut elem = GfxElement::new_void_with_id(0, 0);
+
+    // App state captured as Rc<RefCell<T>> — the plugin/script trajectory.
+    let app_state: Rc<RefCell<Vec<GlyphTreeEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let captured = app_state.clone();
+    let subscriber: EventSubscriber = Rc::new(RefCell::new(
+        move |_elem: &mut GfxElement, evt: GlyphTreeEventInstance| {
+            captured.borrow_mut().push(evt.event_type);
+        },
+    ));
+    elem.subscribers_mut().push(subscriber);
+
+    elem.accept_event(&GlyphTreeEventInstance::new(GlyphTreeEvent::AppEvent, 1));
+    elem.accept_event(&GlyphTreeEventInstance::new(
+        GlyphTreeEvent::MouseEvent(crate::gfx_structs::mutator::MouseEventData::new(10.0, 20.0)),
+        2,
+    ));
+
+    let recorded = app_state.borrow();
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[0], GlyphTreeEvent::AppEvent);
+    assert!(matches!(recorded[1], GlyphTreeEvent::MouseEvent(_)));
+}
+
+#[test]
+fn test_event_subscriber_can_mutate_subscriber_list_during_delivery() {
+    do_event_subscriber_can_mutate_subscriber_list_during_delivery();
+}
+
+/// A subscriber that mutates the subscriber list during delivery
+/// (e.g. removes itself) must not panic or dispatch the wrong
+/// subscribers. Regression for the review on #90.
+pub fn do_event_subscriber_can_mutate_subscriber_list_during_delivery() {
+    use crate::gfx_structs::mutator::GlyphTreeEvent;
+    use crate::gfx_structs::tree::TreeEventConsumer;
+
+    let mut elem = GfxElement::new_void_with_id(0, 0);
+
+    let fired = Rc::new(RefCell::new(Vec::new()));
+
+    // First subscriber removes itself and the second subscriber from
+    // the list during delivery.
+    let fired_a = fired.clone();
+    let removable: EventSubscriber = Rc::new(RefCell::new(
+        move |elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {
+            fired_a.borrow_mut().push('a');
+            elem.subscribers_mut().clear();
+        },
+    ));
+
+    let fired_b = fired.clone();
+    let second: EventSubscriber = Rc::new(RefCell::new(
+        move |_elem: &mut GfxElement, _evt: GlyphTreeEventInstance| {
+            fired_b.borrow_mut().push('b');
+        },
+    ));
+
+    elem.subscribers_mut().push(removable);
+    elem.subscribers_mut().push(second);
+
+    elem.accept_event(&GlyphTreeEventInstance::new(GlyphTreeEvent::AppEvent, 1));
+
+    let recorded = fired.borrow();
+    // Snapshotting the Rc handles before delivery means both
+    // subscribers in the snapshot fire, even though the first
+    // subscriber cleared the live list. The important thing is that
+    // we do not panic or index the mutated list.
+    assert_eq!(*recorded, vec!['a', 'b']);
+    assert!(elem.subscribers_as_ref().is_empty());
 }

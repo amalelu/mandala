@@ -16,10 +16,10 @@
 #![cfg(target_arch = "wasm32")]
 
 use crate::application::app::dispatch::{self, DispatchOutcome};
-use crate::application::app::touch_gesture::{Phase, RecognizedGesture};
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::application::app::touch_gesture::Phase;
+use std::sync::atomic::AtomicBool;
 use web_time::Instant;
-use winit::event::{Touch, TouchPhase};
+use winit::event::Touch;
 
 /// One-shot warn-log latch: fires the first time a recognised
 /// touch gesture maps to an Action whose body is `NativeOnly`,
@@ -36,35 +36,33 @@ impl super::WasmApp {
     /// Started/Moved so future cursor-following overlays update;
     /// true for Ended only when a gesture was dispatched).
     pub(super) fn handle_touch_event(&mut self, touch: Touch) -> bool {
-        let phase = match touch.phase {
-            TouchPhase::Started => Phase::Started,
-            TouchPhase::Moved => Phase::Moved,
-            TouchPhase::Ended | TouchPhase::Cancelled => Phase::Ended,
-        };
+        let phase = dispatch::touch_phase(touch.phase);
         let pos = (touch.location.x, touch.location.y);
         let now = Instant::now();
-        // Recogniser ingest + tick happens under the input
-        // borrow; dispatch happens after the borrow drops so
-        // `self.dispatch_action` can re-borrow `self.input`.
         let mut input_borrow = self.input.borrow_mut();
         let mut renderer_borrow = self.renderer.borrow_mut();
-        let (Some(input), Some(renderer)) = (input_borrow.as_mut(), renderer_borrow.as_mut())
-        else {
+        let (Some(input), Some(renderer)) = (input_borrow.as_mut(), renderer_borrow.as_mut()) else {
             return false;
         };
-        let from_ingest = input.touch_recognizer.ingest(phase, touch.id, pos, now);
-        let from_tick = input.touch_recognizer.tick(now);
-        let recognised: Option<RecognizedGesture> = from_ingest.or(from_tick);
-        if let Some(g) = recognised {
+        // Phase translation, recognizer ingest + tick, and the
+        // gesture-to-Action lookup are the shared body native runs
+        // too. What is left below is the browser's own dispatch:
+        // `dispatch_compatible` plus the `NativeOnly` warn-log.
+        if let Some(d) = dispatch::drive_touch_event(
+            &mut input.touch_recognizer,
+            &self.keybinds,
+            phase,
+            touch.id,
+            pos,
+            now,
+        ) {
             // Move the cursor to the gesture's reported pos so the
-            // dispatched Action sees the right cursor. Mirrors
-            // `dispatch_touch_event` on native.
-            input.cursor_pos = g.pos();
-            let name = g.mouse_gesture().key_name();
-            let action = self.keybinds.action_for_gesture(name, false, false, false);
-            if let Some(a) = action {
+            // dispatched Action sees the right cursor.
+            input.cursor_pos = d.cursor_pos;
+            let name = d.gesture_name;
+            if let Some(a) = d.action {
                 let mut core = input.input_context_core(renderer, &self.keybinds);
-                let outcome = dispatch::action_core::dispatch_compatible(&a, &mut core);
+                let outcome = dispatch::action_core::dispatch_compatible(&a, &mut core, None);
                 // Whole-PR review BLK-1: when the bound Action is
                 // `NativeOnly` (e.g. `EnterResizeMode`,
                 // `FastResizeStart` — both default-bound to touch
@@ -72,22 +70,21 @@ impl super::WasmApp {
                 // `dispatch_compatible` returns `Unhandled` and
                 // there's no graceful fallback on WASM. A user who
                 // long-presses on mobile gets *literally nothing* —
-                // no log, no chrome, no model change. Warn-log once
-                // per session so the failure is at least observable
-                // in the dev console; the underlying fix (lifting
-                // those Actions to `Compatible` + porting the
-                // DragState plumbing) is tracked in the plan's
-                // open follow-ups.
-                if matches!(outcome, DispatchOutcome::Unhandled)
-                    && !WARNED_NATIVE_ONLY.swap(true, Ordering::Relaxed)
-                {
-                    log::warn!(
-                        "touch gesture '{}' dispatched a NativeOnly action ({:?}) — \
-                         no-op on WASM until DragState / modal-stealer plumbing \
-                         lands cross-platform (SECTIONS_BORDERS_RESIZE_PLAN.md \
-                         Open follow-ups). Rebind {} to a Compatible action \
-                         (e.g. ZoomIn / SelectAll / a custom macro) to opt out.",
-                        name, a, name
+                // no log, no chrome, no model change.
+                //
+                // The reporting body is shared with the double-click
+                // and wheel sites, which reach the same dead end now
+                // that they consult the keybind table too; only the
+                // latch and the remedy are per-input-class.
+                if matches!(outcome, DispatchOutcome::Unhandled) {
+                    crate::application::app::warn_unhandled_native_only_once(
+                        &WARNED_NATIVE_ONLY,
+                        name,
+                        &a,
+                        "Blocked on DragState / modal-stealer plumbing landing \
+                         cross-platform (SECTIONS_BORDERS_RESIZE_PLAN.md Open \
+                         follow-ups). Rebind the gesture to a Compatible action \
+                         (e.g. zoom_in / select_all / a custom macro) to opt out.",
                     );
                 }
                 return true;

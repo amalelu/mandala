@@ -45,6 +45,9 @@ pub use action::{BorderPreviewTargetKind, ColorAxis, FontSlot, ZoomBound};
 // not "spurious lint."
 #[allow(unused_imports)]
 pub use action::WasmCompatibility;
+// The one mixed-branch set, shared by the dispatcher's WASM-macro
+// lift and the classification test — see `MIXED_BRANCH_ACTIONS`.
+pub(crate) use action::MIXED_BRANCH_ACTIONS;
 // Public surface; the lint can't see in-crate test consumers without --tests.
 #[allow(unused_imports)]
 pub use bind::{key_to_name, normalize_key_name, KeyBind, MouseGesture};

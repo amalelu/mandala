@@ -3,31 +3,81 @@ name = "baumhard"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
+# The `[[bench]]` entry at the bottom of this file is the crate's only
+# benchmark target, and this is what makes "only" true. Cargo's
+# default is to *also* auto-discover every other `.rs` under
+# `benches/` as a bench target compiled against the libtest harness —
+# which ignores `criterion_main!`, so such a file builds, links
+# criterion, runs zero benchmarks and reports success. A `_template.rs`
+# sat there doing exactly that. Turning autodiscovery off means a new
+# bench has to be declared with `harness = false` to exist at all.
+autobenches = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 rand = "0.10.1"
-serde = {version = "1.0.228", features = ["derive"]}
-serde_json = "1.0.149"
-serde-lexpr = "0.1.3"
+serde.workspace = true
+serde_json.workspace = true
 slab = "0.4.12"
 lazy_static = "1.5.0"
-syn = "2.0.117"
-log = { version = "0.4.29", features = ["release_max_level_off"] }
-env_logger = "0.11.10"
-smol_str = "0.3.6"
-indextree = {version = "4.8.1", features = ["serde"]}
-glam = {version = "0.32.1", features = ["serde"]}
+# `release_max_level_warn` is what keeps baumhard's §9 degrade paths
+# (unknown font id, UTF-8 conversion failure, corrupt-region drop)
+# diagnosable from a user report while the chatty walker
+# `debug!`/`trace!` instrumentation still compiles to nothing. It is
+# declared once, in the root `[workspace.dependencies]` table — there
+# is no longer a second manifest for this one to fall out of lockstep
+# with.
+log.workspace = true
+indextree.workspace = true
+glam.workspace = true
 cosmic-text = "0.18.2"
 tinyvec = "1.11.0"
 unicode-segmentation = "1.13.2"
-rustc-hash = "2.1.2"
-strum = "0.28.0"
-strum_macros = "0.28.0"
-enumset = {version = "1.1.10", features = ["serde"]}
+rustc-hash.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 ordered-float = {version = "5.3.0", features = ["serde"]}
-crossbeam-channel = "0.5.15"
 derivative = "2.2.0"
+
+# `env_logger` is load-bearing, not a leftover — and it is the native
+# half of a matched pair with `console_log` below. `util::log::init()`
+# is the workspace's single logger-installation point, and the binaries
+# that front this library call it: the app crate's `main`, `maptool`,
+# and `src/bin/generate_stress_map.rs`, which this crate ships itself.
+# Since `log`'s `release_max_level_warn` above keeps `warn!`/`error!`
+# alive in release builds, a release run with no logger installed would
+# silently drop exactly the diagnostics CODE_CONVENTIONS §9's "log and
+# degrade" posture depends on.
+#
+# Declared per-target rather than feature-gated. A feature both
+# consumers would always enable is a switch with one position; the
+# real axis is the target, because `init()`'s two arms are already
+# `cfg(target_arch)`-split and `env_logger` has nothing to do on
+# wasm32. Placing it here says that in the manifest and stops the
+# browser build compiling it.
+#
+# One consequence worth writing down, because it is invisible in this
+# diff and the error it would eventually produce points somewhere
+# else: `env_logger` was the only crate enabling `log/std` on the
+# wasm32 leg, and cargo unions features per target, so the browser
+# build's `log` is now `release_max_level_warn` alone where it used to
+# be `release_max_level_warn,std`. That is survivable today only
+# because `console_log 1.0.0` installs a `static LOGGER` through
+# `log::set_logger(&LOGGER)` (`console_log-1.0.0/src/lib.rs:215`)
+# rather than `log::set_boxed_logger`, which is the API `log`'s
+# `std`/`alloc` features gate. A wasm arm that reached for
+# `set_boxed_logger`, or a replacement for `console_log` that boxes its
+# logger, needs `log = { workspace = true, features = ["std"] }` here —
+# without it the browser build stops compiling with an error naming
+# `log`, not this line.
+#
+# The asymmetry with `rand` is deliberate and is not an oversight: see
+# the `getrandom` note in the root manifest. `rand` cannot move into a
+# `cfg(not(wasm32))` table the way `env_logger` did, because
+# `generate_stress_map` uses it and the wasm32 gate builds that binary
+# on both legs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11.10"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_log = "1.0.0"
@@ -37,11 +87,24 @@ console_error_panic_hook = "0.1.7"
 walkdir = "2.5.0"
 path-slash = "0.2.1"
 ttf-parser = "0.25.1"
-regex = "1.12.3"
-lazy_static = "1.5.0"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
+# `util::serde_coverage` parses baumhard's own sources so the
+# unknown-key policy is checked against the model that exists rather
+# than a list of the model as it once was. `full` is what adds the
+# item / expression parsers `syn::parse_file` needs; keeping the
+# dependency test-only means a shipped build never links it.
+#
+# `features` on a workspace dependency is additive, so this asks for
+# `full` on top of the default set the root table declares, without
+# editing the shared entry. Under resolver 2 it lands on the
+# *target*-graph `syn` node; the proc-macro-graph node `mandala_derive`
+# compiles against is a separate one, which has `full` on it anyway
+# from `strum_macros` and `wasm-bindgen-backend`. Asking for less there
+# does not mean compiling against less — see
+# `lib/mandala_derive/Cargo.toml`.
+syn = { workspace = true, features = ["full"] }
 
 [[bench]]
 name = "test_bench"

@@ -40,10 +40,14 @@ fn collect_palettes(root: &Value) -> HashMap<String, Value> {
             _ => continue,
         };
 
+        // First-writer-wins on a name collision, as
+        // `format/migration.md` §"Known limitations" documents. One
+        // hash lookup via `entry` rather than the `contains_key` +
+        // `insert` pair this used to do (clippy::map_entry).
         let palette_name = palette_key(schema);
-        if !palettes.contains_key(&palette_name) {
-            palettes.insert(palette_name, json!({ "groups": groups }));
-        }
+        palettes
+            .entry(palette_name)
+            .or_insert_with(|| json!({ "groups": groups }));
     }
 
     palettes

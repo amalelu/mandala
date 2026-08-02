@@ -6,12 +6,12 @@ use super::super::*;
 
 #[test]
 fn edge_handle_channels_preserve_ordering_and_distinctness() {
-    use crate::mindmap::scene_builder::EdgeHandleKind;
-    let from = crate::mindmap::scene_builder::edge_handle_channel_for(EdgeHandleKind::AnchorFrom);
-    let to = crate::mindmap::scene_builder::edge_handle_channel_for(EdgeHandleKind::AnchorTo);
-    let mid = crate::mindmap::scene_builder::edge_handle_channel_for(EdgeHandleKind::Midpoint);
-    let cp0 = crate::mindmap::scene_builder::edge_handle_channel_for(EdgeHandleKind::ControlPoint(0));
-    let cp1 = crate::mindmap::scene_builder::edge_handle_channel_for(EdgeHandleKind::ControlPoint(1));
+    use crate::mindmap::tree_builder::EdgeHandleKind;
+    let from = crate::mindmap::tree_builder::edge_handle_channel_for(EdgeHandleKind::AnchorFrom);
+    let to = crate::mindmap::tree_builder::edge_handle_channel_for(EdgeHandleKind::AnchorTo);
+    let mid = crate::mindmap::tree_builder::edge_handle_channel_for(EdgeHandleKind::Midpoint);
+    let cp0 = crate::mindmap::tree_builder::edge_handle_channel_for(EdgeHandleKind::ControlPoint(0));
+    let cp1 = crate::mindmap::tree_builder::edge_handle_channel_for(EdgeHandleKind::ControlPoint(1));
     assert!(from < to, "AnchorFrom < AnchorTo");
     assert!(to < mid, "AnchorTo < Midpoint");
     assert!(to < cp0, "AnchorTo < ControlPoint(0)");
@@ -32,8 +32,8 @@ fn edge_handle_channels_preserve_ordering_and_distinctness() {
 #[test]
 fn edge_handle_mutator_round_trip_matches_full_rebuild() {
     use crate::core::primitives::Applicable;
-    use crate::mindmap::scene_builder::{EdgeHandleElement, EdgeHandleKind};
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::{EdgeHandleElement, EdgeHandleKind};
 
     let mk = |kind: EdgeHandleKind, x: f32, y: f32| EdgeHandleElement {
         edge_key: EdgeKey::new("a", "b", "child"),
@@ -91,8 +91,8 @@ fn edge_handle_mutator_round_trip_matches_full_rebuild() {
 /// whose channel set has shifted.
 #[test]
 fn edge_handle_identity_sequence_changes_on_midpoint_to_cp() {
-    use crate::mindmap::scene_builder::{EdgeHandleElement, EdgeHandleKind};
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::{EdgeHandleElement, EdgeHandleKind};
 
     let mk = |kind: EdgeHandleKind| EdgeHandleElement {
         edge_key: EdgeKey::new("a", "b", "child"),
@@ -125,8 +125,8 @@ fn edge_handle_identity_sequence_changes_on_midpoint_to_cp() {
 /// against a revert to `.chars().count()`.
 #[test]
 fn edge_handle_region_sized_by_grapheme_cluster_count_not_codepoints() {
-    use crate::mindmap::scene_builder::{EdgeHandleElement, EdgeHandleKind};
     use crate::mindmap::scene_cache::EdgeKey;
+    use crate::mindmap::tree_builder::{EdgeHandleElement, EdgeHandleKind};
 
     let elem = EdgeHandleElement {
         edge_key: EdgeKey::new("a", "b", "child"),

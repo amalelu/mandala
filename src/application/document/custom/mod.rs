@@ -25,9 +25,9 @@ use baumhard::mindmap::custom_mutation::{
 use baumhard::mindmap::model::MindNode;
 use baumhard::mindmap::tree_builder::MindMapTree;
 
-use super::mutations_loader::MutationSource;
 use super::undo_action::UndoAction;
 use super::MindMapDocument;
+use crate::application::source_tier::SourceTier;
 
 /// Warn at apply time when a predicate gate filtered every
 /// candidate out. Catches both authoring mistakes (a bare
@@ -59,18 +59,65 @@ fn mutation_targets_absolute_position(m: &baumhard::gfx_structs::mutator::Mutati
             // `Assign` on the position field sets it absolutely;
             // `Add` / `Sub` are deltas (safe to fan out).
             // `DeltaGlyphArea.fields` carries the touched fields
-            // and a sibling `GlyphAreaFieldType::ApplyOperation`
+            // and a sibling `GlyphAreaFieldType::Operation`
             // entry naming the global op. Inspect both.
             if !delta.fields.contains_key(&GlyphAreaFieldType::Position) {
                 return false;
             }
             matches!(
-                delta.fields.get(&GlyphAreaFieldType::ApplyOperation),
+                delta.fields.get(&GlyphAreaFieldType::Operation),
                 Some(GlyphAreaField::Operation(ApplyOperation::Assign))
             )
         }
         _ => false,
     }
+}
+
+/// The tree-side `GlyphArea` fields a single
+/// [`baumhard::gfx_structs::mutator::Mutation`] touches
+/// that [`MindMapDocument::sync_node_from_tree`] has **no model
+/// home for** — so a mutation writing them lands on the display
+/// tree for one frame and reverts on the next rebuild-from-model.
+///
+/// The sync-back persists position, section offset / size, text,
+/// color / font runs, and font size (`scale`). Everything else a
+/// `GfxMutator` can reach — line-height (derived as `scale * 1.2`,
+/// no independent home), the outline halo, the node shape, and the
+/// zoom-visibility window — has a tree representation but no
+/// reverse converter, so it can't survive a `rebuild_all`. Returns
+/// the human-readable names of any such fields the mutation writes.
+fn unsupported_fields_of_mutation(m: &baumhard::gfx_structs::mutator::Mutation) -> Vec<&'static str> {
+    use baumhard::gfx_structs::area::GlyphAreaCommand as Cmd;
+    use baumhard::gfx_structs::area_fields::GlyphAreaFieldType as FieldType;
+    use baumhard::gfx_structs::mutator::Mutation;
+    let mut out = Vec::new();
+    match m {
+        Mutation::AreaCommand(cmd) => {
+            if matches!(
+                **cmd,
+                Cmd::SetLineHeight(_) | Cmd::GrowLineHeight(_) | Cmd::ShrinkLineHeight(_)
+            ) {
+                out.push("line-height");
+            }
+        }
+        Mutation::AreaDelta(delta) => {
+            // A delta can touch several fields at once; report each
+            // unsupported one so the warning names the full gap.
+            for key in delta.fields.keys() {
+                match key {
+                    FieldType::LineHeight => out.push("line-height"),
+                    FieldType::Outline => out.push("outline"),
+                    FieldType::Shape => out.push("shape"),
+                    FieldType::ZoomVisibility => out.push("zoom-visibility"),
+                    _ => {}
+                }
+            }
+        }
+        // `ModelDelta` / `ModelCommand` / `Event` / `None` don't
+        // reach the section-area sync path at all.
+        _ => {}
+    }
+    out
 }
 
 fn warn_if_predicate_filtered_everything(mutation_id: &str, has_predicate: bool, seen: usize, passed: usize) {
@@ -90,7 +137,7 @@ impl MindMapDocument {
     /// at apply time. Two conditions must hold:
     ///
     /// - A handler is registered for this id.
-    /// - The mutation's source layer is [`MutationSource::App`] — i.e.
+    /// - The mutation's source layer is [`SourceTier::App`] — i.e.
     ///   the definition the user sees actually is the one the handler
     ///   was written for. If the user / map / inline layer overrode
     ///   the id, their declarative shape wins and the bundled handler
@@ -103,7 +150,7 @@ impl MindMapDocument {
     /// declared `mutator` and `target_scope`.
     pub fn will_dispatch_to_handler(&self, mutation_id: &str) -> bool {
         self.mutation_handlers.contains_key(mutation_id)
-            && self.mutation_sources.get(mutation_id) == Some(&MutationSource::App)
+            && self.mutation_sources.get(mutation_id) == Some(&SourceTier::App)
     }
 
     /// Apply a custom mutation to the tree and optionally sync to the model.
@@ -121,7 +168,7 @@ impl MindMapDocument {
         &mut self,
         custom: &CustomMutation,
         node_id: &str,
-        mut tree: Option<&mut MindMapTree>,
+        tree: Option<&mut MindMapTree>,
     ) {
         // For toggle behavior, check if already active and reverse if so.
         if custom.behavior == MutationBehavior::Toggle {
@@ -138,13 +185,21 @@ impl MindMapDocument {
                 // conventional shape; trigger dispatchers that keep
                 // a persistent tree across events must explicitly
                 // call `build_tree()` after a toggle-off.
-                self.active_toggles.remove(&key);
+                self.active_toggles.retain(|k| k != &key);
                 self.dirty = true;
                 return;
             }
-            self.active_toggles.insert(key);
+            // Not yet active (the `contains` above returned false), so
+            // append — preserving activation order for the ordered
+            // re-stamp in `reapply_active_toggles`.
+            self.active_toggles.push(key);
             // Toggle mutations apply to tree only (visual), no model sync.
-            if let Some(tree) = tree.as_deref_mut() {
+            // No `as_deref_mut()` reborrow: this branch `return`s
+            // immediately below, so `tree` is at its last use and can
+            // be moved out of (same reasoning as the `else if let
+            // Some(tree) = tree` on the persistent path).
+            if let Some(tree) = tree {
+                self.warn_about_mutator(custom);
                 self.apply_to_tree(custom, node_id, tree);
             } else {
                 log::warn!(
@@ -185,17 +240,64 @@ impl MindMapDocument {
         // Handler dispatch: only fires when the mutation at this id
         // actually came from the app bundle — a user / map / inline
         // override of the same id keeps the declarative path so the
-        // user's mutator is honoured. See
+        // user's mutator is honored. See
         // [`Self::will_dispatch_to_handler`] for the rationale.
-        if self.will_dispatch_to_handler(&custom.id) {
+        //
+        // `changed` is the load-bearing verdict: only a mutation that
+        // actually moved the model earns an undo entry and the dirty
+        // flag. Pre-fix every apply pushed undo unconditionally, so
+        // a `grow-font` (whose scale change wasn't synced back), a
+        // `flat_mutations`-failed skip, or a predicate that filtered
+        // every candidate all left a dead undo entry that ate a real
+        // Ctrl-Z step.
+        let changed = if self.will_dispatch_to_handler(&custom.id) {
             if let Some(handler) = self.mutation_handlers.get(&custom.id).copied() {
                 handler(self, node_id);
             }
-        } else if let Some(tree) = tree.as_deref_mut() {
+            // Imperative handlers (flower-layout, tree-cascade) mutate
+            // the model directly — they're layout algorithms that
+            // reposition their targets, and there's no cheap post-hoc
+            // model diff to gate on. Treat a dispatched handler as a
+            // real change; the snapshot taken above is its undo home.
+            true
+        } else if let Some(tree) = tree {
+            // Surface a declined AST, or any mutator field the
+            // sync-back can't persist, *before* applying — so a
+            // partially-supported mutation doesn't silently drop half
+            // its effect on the next rebuild (§5 no half-features).
+            // Hoisted here rather than left inside `apply_to_tree`
+            // because the persistent path calls that twice (once for
+            // the caller's interactive tree, once for the pure tree),
+            // which logged every diagnosis twice per apply.
+            self.warn_about_mutator(custom);
+            // Apply to the caller's interactive tree so the change is
+            // immediately visible / hit-testable before the next
+            // rebuild (the render, keybind, and click paths read this
+            // tree's post-apply state).
             self.apply_to_tree(custom, node_id, tree);
+            // But sync from a **fresh, pure** projection, never the
+            // caller's tree. The interactive tree (the stored render
+            // tree the keybind / click dispatchers pass) can carry
+            // render-layer overlays — selection highlights and
+            // active-toggle visuals stamped in `rebuild_all` — that
+            // must NEVER round-trip into the persisted model (a nudge
+            // toggle would become a permanent move; a selection
+            // highlight would repaint the run cyan on disk). Applying
+            // the same mutation to an overlay-free `build_tree` and
+            // syncing from that writes back exactly the mutation's own
+            // effect and nothing else.
+            let mut pure_tree = self.build_tree();
+            self.apply_to_tree(custom, node_id, &mut pure_tree);
+            // Sync every affected node and OR the per-node verdicts.
+            // An explicit loop (not `|=`) keeps `sync_node_from_tree`
+            // — which is `#[must_use]` — running for every node.
+            let mut any_changed = false;
             for id in &affected_ids {
-                self.sync_node_from_tree(id, tree);
+                if self.sync_node_from_tree(id, &pure_tree) {
+                    any_changed = true;
+                }
             }
+            any_changed
         } else {
             log::warn!(
                 "apply_custom_mutation: declarative mutation '{}' called with None tree; \
@@ -203,16 +305,120 @@ impl MindMapDocument {
                  handler-dispatched.",
                 custom.id
             );
-            // Fall through: document_actions still push undo below,
-            // but no tree/model changes occurred.
+            // Nothing applied, nothing to sync — leave the undo stack
+            // and dirty flag untouched.
             return;
-        }
+        };
 
-        if !snapshots.is_empty() {
+        if changed && !snapshots.is_empty() {
             self.undo_stack.push(UndoAction::CustomMutation {
                 node_snapshots: snapshots,
             });
             self.dirty = true;
+        }
+    }
+
+    /// Diagnose everything wrong with `custom`'s mutator that the
+    /// apply is about to paper over, and log one `warn!` per problem.
+    /// Two of them:
+    ///
+    /// - **The AST is declined by the flat-apply path** — a runtime
+    ///   hole, a filtering `RepeatWhile`, a `Single` root, or nested
+    ///   payloads that disagree (see
+    ///   [`flat_mutations`]). Nothing will be applied at all.
+    /// - **The flat list writes a field the sync-back can't
+    ///   persist** (line-height, outline, shape, zoom-visibility).
+    ///   The change flashes for one frame and then reverts, and the
+    ///   author is left chasing a vanishing effect.
+    ///
+    /// Both are silent-failure shapes, which is the worst outcome;
+    /// naming them at apply time turns each into a diagnosable event
+    /// (§5 no half-features).
+    ///
+    /// **This is the one place either is reported.**
+    /// [`Self::apply_to_tree`] deliberately stays quiet on a declined
+    /// AST: the persistent path calls it twice per apply (interactive
+    /// tree, then pure tree), so warning there logged everything
+    /// twice, and [`Self::reapply_active_toggles`] calls it once per
+    /// active toggle on *every* rebuild, which would turn a single
+    /// bad toggle into per-frame log spam. Callers that apply on
+    /// behalf of a user gesture call this first; the re-stamp path
+    /// does not, because its toggle was diagnosed when the user
+    /// turned it on.
+    ///
+    /// Mutator-less (document-action-only) mutations are not a
+    /// problem shape and are skipped.
+    fn warn_about_mutator(&self, custom: &CustomMutation) {
+        let Some(mutator) = custom.mutator.as_ref() else {
+            return;
+        };
+        let Some(mutations) = flat_mutations(mutator) else {
+            log::warn!(
+                "mutation '{}': mutator AST is not flat-extractable — the flat-apply path \
+                 can't evaluate this shape, so the apply is skipped. Causes: a root that \
+                 isn't a `Macro` with a literal list, a `RepeatWhile` predicate that isn't \
+                 `always_match`, a runtime-supplied payload, or two nested payloads that \
+                 disagree. Use `scope::self_only` / `scope::descendants` / \
+                 `scope::self_and_descendants` for now, or wait for the walker-based \
+                 `apply_custom_mutation` path.",
+                custom.id
+            );
+            return;
+        };
+        let mut fields: Vec<&'static str> = Vec::new();
+        for m in &mutations {
+            for name in unsupported_fields_of_mutation(m) {
+                if !fields.contains(&name) {
+                    fields.push(name);
+                }
+            }
+        }
+        if !fields.is_empty() {
+            log::warn!(
+                "mutation '{}': writes field(s) [{}] that have no model home; the change \
+                 applies to the display tree but is NOT persisted and reverts on the next \
+                 rebuild. Persisted fields: position, section offset/size, text, color/font \
+                 runs, font size.",
+                custom.id,
+                fields.join(", "),
+            );
+        }
+    }
+
+    /// Re-stamp every active toggle's tree-side visual onto a
+    /// freshly-built tree. Called by
+    /// [`MindMapDocument::build_tree`](super::MindMapDocument::build_tree)
+    /// after the model→tree projection, because a `rebuild_all`
+    /// throws the prior tree away and rebuilds from the model — and
+    /// Toggle mutations, by design, live only on the tree (they
+    /// never sync to the model, per CONCEPTS §4). Without this
+    /// re-application a toggle-on's visual would die at the end of
+    /// the same dispatch that turned it on: nothing re-applied it,
+    /// so "second trigger reverses" had no first-trigger effect left
+    /// to reverse.
+    ///
+    /// Toggles always take the declarative flat-apply path — the
+    /// Toggle branch of [`Self::apply_custom_mutation`] never
+    /// dispatches to a Rust handler — so re-application is the same
+    /// [`Self::apply_to_tree`] call, keyed by the `(node_id,
+    /// mutation_id)` pairs in `active_toggles`. A pair whose mutation
+    /// left the registry, or whose node left the model, is skipped
+    /// (the lookups return `None` / `apply_to_tree` no-ops on a
+    /// missing arena id).
+    ///
+    /// Iterated in insertion order (`active_toggles` is an ordered
+    /// list, not a hash set) so a rebuild re-stamps non-commutative
+    /// toggles in the same sequence the user activated them — the
+    /// post-rebuild visual matches the pre-rebuild one.
+    pub(in crate::application) fn reapply_active_toggles(&self, tree: &mut MindMapTree) {
+        if self.active_toggles.is_empty() {
+            return;
+        }
+        for (node_id, mutation_id) in &self.active_toggles {
+            let Some(custom) = self.mutation_registry.get(mutation_id) else {
+                continue;
+            };
+            self.apply_to_tree(custom, node_id, tree);
         }
     }
 
@@ -254,7 +460,7 @@ impl MindMapDocument {
                 // Any new variant that performs file I/O, network
                 // access, or arbitrary content load MUST be gated
                 // at the macro-dispatcher site — see
-                // `MacroSource::allows_console_line` and
+                // `SourceTier::allows_console_line` and
                 // `lib/baumhard/src/mindmap/custom_mutation/mod.rs`
                 // doc-comment on `DocumentAction`.
                 _ => {
@@ -294,24 +500,15 @@ impl MindMapDocument {
 
         let Some(mutator) = custom.mutator.as_ref() else { return };
         let Some(mutations) = flat_mutations(mutator) else {
-            // Non-flat mutator AST (e.g. `scope::descendants` —
-            // `Instruction`-rooted, no Macro at the root). The
-            // current flat-apply path can't extract a mutation
-            // list from these shapes; pre-fix this returned
-            // silently and the entire apply was a no-op with no
-            // diagnostic. The richer `mutator_builder` walker
-            // path is the home for these (size-aware /
-            // predicate-filtered descendant iteration); until
-            // it's wired into `apply_custom_mutation`, warn so
-            // authors notice the silent drop instead of chasing
-            // a missing visual change.
-            log::warn!(
-                "mutation '{}': mutator AST is non-flat (root is not `Macro` with literal list); \
-                 the flat-apply path can't evaluate this shape — apply skipped. \
-                 Use `scope::self_only` / `scope::self_and_descendants` for now, \
-                 or wait for the walker-based `apply_custom_mutation` path.",
-                custom.id
-            );
+            // Declined AST — the flat-apply path can't extract a
+            // mutation list from this shape, so nothing is applied.
+            // The warning lives in
+            // [`Self::warn_about_mutator`], which every
+            // user-gesture caller runs exactly once before reaching
+            // here; see that doc for why it is not logged in this
+            // function. The richer `mutator_builder` walker path is
+            // the eventual home for these shapes (size-aware /
+            // predicate-filtered descendant iteration).
             return;
         };
         // Top-level predicate gate (item E3). When `Some`, every
@@ -459,7 +656,7 @@ impl MindMapDocument {
             // borrows the arena immutably; the loop body needs
             // `&mut tree.tree.arena.get_mut(...)` to apply the
             // mutation. Holding the iterator across the mutable
-            // borrow won't compile, so the fix is to materialise the
+            // borrow won't compile, so the fix is to materialize the
             // section ids first and drop the immutable borrow
             // before the mutation pass starts. The vec is `O(sections
             // per node)` — bounded by user authoring (typically 1–4
@@ -551,7 +748,18 @@ impl MindMapDocument {
             .collect()
     }
 
-    /// Collect the IDs of all nodes affected by a mutation with the given scope.
+    /// Collect the IDs of all nodes affected by a mutation with the
+    /// given scope. This list is simultaneously the apply-time target
+    /// set and the undo-snapshot window — the equivalence CONCEPTS §4
+    /// calls the load-bearing detail — so the two can never drift.
+    ///
+    /// Two scopes resolve to the empty set on a root node, by design:
+    /// `Parent` (a root has no parent) and `Siblings` (a root shares
+    /// no parent, so the other roots of a multi-root map are *not*
+    /// siblings — see [`TargetScope::Siblings`]). Both are no-ops
+    /// rather than errors: nothing is snapshotted, `apply_to_tree`
+    /// iterates an empty list, and the `changed` verdict stays
+    /// `false` so no dead undo entry is pushed.
     pub(super) fn collect_affected_node_ids(&self, node_id: &str, scope: &TargetScope) -> Vec<String> {
         match scope {
             // `SectionsOnly` lives on the triggering node — every
@@ -560,16 +768,27 @@ impl MindMapDocument {
             // undo (whole-`MindNode` clone covers section state),
             // so a single entry is correct.
             TargetScope::SelfOnly | TargetScope::SectionsOnly => vec![node_id.to_string()],
+            // Tree-walking scopes build the child index once, inside
+            // the arm that actually needs it. Building it before the
+            // match would make self-only / parent-only mutations O(N).
             TargetScope::Children => self
                 .mindmap
+                .child_index()
                 .children_of(node_id)
                 .iter()
                 .map(|n| n.id.clone())
                 .collect(),
-            TargetScope::Descendants => self.mindmap.all_descendants(node_id),
+            TargetScope::Descendants => self
+                .mindmap
+                .child_index()
+                .all_descendant_ids(node_id, self.mindmap.nodes.len()),
             TargetScope::SelfAndDescendants => {
                 let mut ids = vec![node_id.to_string()];
-                ids.extend(self.mindmap.all_descendants(node_id));
+                ids.extend(
+                    self.mindmap
+                        .child_index()
+                        .all_descendant_ids(node_id, self.mindmap.nodes.len()),
+                );
                 ids
             }
             TargetScope::Parent => self
@@ -579,20 +798,403 @@ impl MindMapDocument {
                 .and_then(|n| n.parent_id.clone())
                 .into_iter()
                 .collect(),
-            TargetScope::Siblings => self
-                .mindmap
-                .nodes
-                .get(node_id)
-                .and_then(|n| n.parent_id.as_deref())
-                .map(|pid| {
-                    self.mindmap
-                        .children_of(pid)
-                        .iter()
-                        .filter(|n| n.id != node_id)
-                        .map(|n| n.id.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            // A root node (`parent_id == None`) short-circuits to
+            // the empty set here — `and_then` yields `None` and
+            // `unwrap_or_default` returns an empty `Vec`. That is the
+            // documented semantic, not an oversight: see
+            // [`TargetScope::Siblings`].
+            TargetScope::Siblings => {
+                let parent_id = self.mindmap.nodes.get(node_id).and_then(|n| n.parent_id.clone());
+                let index = self.mindmap.child_index();
+                parent_id
+                    .map(|pid| {
+                        index
+                            .children_of(&pid)
+                            .iter()
+                            .filter(|n| n.id != node_id)
+                            .map(|n| n.id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
         }
+    }
+}
+
+/// Differential harness for [`TargetScope::covers_reach`].
+///
+/// `covers_reach` is a *static* gate: it answers "is this
+/// scope + reach pairing safe?" from two enum values alone. What it
+/// is really claiming is a structural property of the real tree —
+/// that the scope's target set (which is exactly the undo-snapshot
+/// window, see [`MindMapDocument::collect_affected_node_ids`]) is
+/// **closed** under the mutator's reach, given that the application
+/// anchors the mutator at every target in turn.
+///
+/// This module rebuilds that property from scratch against the
+/// testament map's 252 real nodes — the reference model — and
+/// compares it cell-by-cell with what `covers_reach` returns. Neither
+/// side consults the other: the reference walks `child_index()`, the
+/// gate matches on enums.
+///
+/// Two directions are checked, because either alone is trivially
+/// satisfiable:
+///
+/// - **Soundness** — every approved cell really is closed, for
+///   *every* trigger node in the fixture. A single counterexample
+///   means the gate green-lights a pairing whose undo snapshot is
+///   narrower than what the mutator touches.
+/// - **Tightness** — every rejected cell has a witness node where
+///   closure actually fails. Without this a gate that returns
+///   `false` everywhere would pass the soundness half.
+#[cfg(test)]
+mod covers_reach_differential_tests {
+    use super::*;
+    use crate::application::document::tests_common::load_test_doc;
+    use baumhard::mindmap::custom_mutation::MutatorReach;
+    use baumhard::mindmap::model::ChildIndex;
+    use std::collections::BTreeSet;
+
+    /// Every scope whose target set is a set of *model nodes*.
+    /// `SectionsOnly` is excluded — its anchors are section-areas
+    /// inside one `MindNode`, not model nodes, so the closure
+    /// argument doesn't transfer. It gets
+    /// [`test_sections_only_gate_is_sound_and_deliberately_conservative`]
+    /// instead.
+    ///
+    /// Derived from `TargetScope::iter()` with that one subtraction,
+    /// not hand-listed: an eighth variant has to be either covered
+    /// here or explicitly excluded, and the exclusion is one named
+    /// arm rather than a silent omission. A hand-typed array would
+    /// simply run six cases forever
+    /// ([`test_node_scopes_accounts_for_every_target_scope`] is the pin).
+    fn node_scopes() -> Vec<TargetScope> {
+        use strum::IntoEnumIterator;
+        TargetScope::iter()
+            .filter(|scope| !matches!(scope, TargetScope::SectionsOnly))
+            .collect()
+    }
+
+    fn reaches() -> Vec<MutatorReach> {
+        use strum::IntoEnumIterator;
+        MutatorReach::iter().collect()
+    }
+
+    /// Every `TargetScope` is either exercised by the differential
+    /// run or deliberately routed to the `SectionsOnly` test — no
+    /// variant may fall between the two.
+    #[test]
+    fn test_node_scopes_accounts_for_every_target_scope() {
+        use strum::IntoEnumIterator;
+        for scope in TargetScope::iter() {
+            let covered = node_scopes().contains(&scope) || scope == TargetScope::SectionsOnly;
+            assert!(
+                covered,
+                "TargetScope::{:?} is in neither the differential run nor the \
+                 SectionsOnly carve-out — give it a home before shipping it",
+                scope
+            );
+        }
+    }
+
+    /// Reference model: the model nodes a mutator of `reach`, anchored
+    /// at `anchor`, can write to. `MutatorReach` is cumulative
+    /// (`SelfOnly <= Children <= Descendants`), so each set includes
+    /// the narrower ones — the anchor itself is always in reach
+    /// because every non-empty mutator carries a payload at its root.
+    ///
+    /// Derived from `child_index()` only; deliberately does not call
+    /// `covers_reach` or any of its helpers.
+    ///
+    /// The index is passed in rather than rebuilt: this runs once per
+    /// (trigger, target, reach) triple over a 252-node fixture, and
+    /// `child_index()` is an O(N) scan plus a sort per child list —
+    /// building it inside the loop dominated the whole test binary's
+    /// runtime.
+    fn reference_touch_set(
+        index: &ChildIndex<'_>,
+        budget: usize,
+        anchor: &str,
+        reach: MutatorReach,
+    ) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        out.insert(anchor.to_string());
+        match reach {
+            MutatorReach::SelfOnly => {}
+            MutatorReach::Children => {
+                for child in index.children_of(anchor) {
+                    out.insert(child.id.clone());
+                }
+            }
+            MutatorReach::Descendants => {
+                out.extend(index.all_descendant_ids(anchor, budget));
+            }
+        }
+        out
+    }
+
+    /// Walk every node of the fixture as the trigger and report the
+    /// first node where the scope's target set is *not* closed under
+    /// `reach`, or `None` when the pairing is closed everywhere.
+    ///
+    /// The returned string names the trigger node and one node that
+    /// escaped the snapshot, so a failure message points at a
+    /// reproducible case rather than just "false".
+    fn closure_witness(
+        doc: &MindMapDocument,
+        index: &ChildIndex<'_>,
+        scope: TargetScope,
+        reach: MutatorReach,
+    ) -> Option<String> {
+        let budget = doc.mindmap.nodes.len();
+        let mut node_ids: Vec<&String> = doc.mindmap.nodes.keys().collect();
+        node_ids.sort();
+        for trigger in node_ids {
+            let targets: BTreeSet<String> = doc
+                .collect_affected_node_ids(trigger, &scope)
+                .into_iter()
+                .collect();
+            for anchor in &targets {
+                for touched in reference_touch_set(index, budget, anchor, reach) {
+                    if !targets.contains(&touched) {
+                        return Some(format!(
+                            "trigger '{}' with scope {:?}: anchoring a {:?}-reach mutator at \
+                             target '{}' touches '{}', which is not in the {}-node snapshot",
+                            trigger,
+                            scope,
+                            reach,
+                            anchor,
+                            touched,
+                            targets.len()
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The differential run: every node scope x every reach, gate
+    /// verdict against reference verdict, both directions.
+    #[test]
+    fn test_covers_reach_matches_structural_closure_on_the_testament_map() {
+        let doc = load_test_doc();
+        assert!(
+            doc.mindmap.nodes.len() > 100,
+            "fixture too small to be a meaningful reference model"
+        );
+        // Built once and threaded through: the reference model
+        // consults it 6 x 3 x (targets per trigger) times, and
+        // rebuilding it per call is an O(N) scan each time.
+        let index = doc.mindmap.child_index();
+        let mut mismatches: Vec<String> = Vec::new();
+        for scope in node_scopes() {
+            for reach in reaches() {
+                let witness = closure_witness(&doc, &index, scope.clone(), reach);
+                let reference_says_safe = witness.is_none();
+                let gate_says_safe = scope.covers_reach(reach);
+                if gate_says_safe && !reference_says_safe {
+                    mismatches.push(format!(
+                        "UNSOUND: covers_reach({:?}, {:?}) == true but {}",
+                        scope,
+                        reach,
+                        witness.unwrap_or_default()
+                    ));
+                } else if !gate_says_safe && reference_says_safe {
+                    mismatches.push(format!(
+                        "OVER-STRICT: covers_reach({:?}, {:?}) == false but the target set is \
+                         closed under that reach for every node in the fixture",
+                        scope, reach
+                    ));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "covers_reach disagrees with the structural reference model:\n  {}",
+            mismatches.join("\n  ")
+        );
+    }
+
+    /// `SectionsOnly`'s targets are the anchor's section-areas, which
+    /// live inside the anchor's own `MindNode` — so the one-node
+    /// snapshot covers them whatever the reach does *within* the
+    /// section subtree. The gate still demands `SelfOnly`, which is
+    /// strictly conservative: over-strict costs a spurious `warn!`,
+    /// while over-permissive costs undo coverage. This pins the
+    /// direction of the asymmetry so a later "optimization" can't
+    /// flip it silently.
+    #[test]
+    fn test_sections_only_gate_is_sound_and_deliberately_conservative() {
+        let doc = load_test_doc();
+        let mut node_ids: Vec<&String> = doc.mindmap.nodes.keys().collect();
+        node_ids.sort();
+        for trigger in node_ids {
+            let targets = doc.collect_affected_node_ids(trigger, &TargetScope::SectionsOnly);
+            assert_eq!(
+                targets,
+                vec![trigger.clone()],
+                "SectionsOnly snapshots exactly the anchor node"
+            );
+        }
+        assert!(TargetScope::SectionsOnly.covers_reach(MutatorReach::SelfOnly));
+        assert!(!TargetScope::SectionsOnly.covers_reach(MutatorReach::Children));
+        assert!(!TargetScope::SectionsOnly.covers_reach(MutatorReach::Descendants));
+    }
+
+    /// `Siblings` on a root node resolves to the empty set: "sibling"
+    /// means "shares my parent", and a root shares no parent — the
+    /// other roots of a multi-root map are deliberately *not*
+    /// siblings. The testament map has four roots, so this is a live
+    /// case, not a hypothetical. Pins the documented semantics on
+    /// [`TargetScope::Siblings`].
+    #[test]
+    fn test_siblings_of_a_root_node_is_the_empty_set() {
+        let doc = load_test_doc();
+        let roots: Vec<String> = doc
+            .mindmap
+            .nodes
+            .values()
+            .filter(|n| n.parent_id.is_none())
+            .map(|n| n.id.clone())
+            .collect();
+        assert!(roots.len() > 1, "testament map is expected to have several roots");
+        for root in &roots {
+            assert!(
+                doc.collect_affected_node_ids(root, &TargetScope::Siblings)
+                    .is_empty(),
+                "root '{}' must have no siblings even though {} other roots exist",
+                root,
+                roots.len() - 1
+            );
+        }
+    }
+
+    /// A non-root node's siblings exclude the node itself — the other
+    /// half of the `Siblings` contract, and the reason
+    /// `Siblings` + `MutatorReach::SelfOnly` is closed while
+    /// `Siblings` + `Parent`-style reaches are not.
+    #[test]
+    fn test_siblings_excludes_the_trigger_node() {
+        let doc = load_test_doc();
+        let index = doc.mindmap.child_index();
+        let mut checked = 0usize;
+        let mut node_ids: Vec<&String> = doc.mindmap.nodes.keys().collect();
+        node_ids.sort();
+        for id in node_ids {
+            let Some(parent_id) = doc.mindmap.nodes.get(id).and_then(|n| n.parent_id.clone()) else {
+                continue;
+            };
+            if index.children_of(&parent_id).len() < 2 {
+                continue;
+            }
+            let siblings = doc.collect_affected_node_ids(id, &TargetScope::Siblings);
+            assert!(
+                !siblings.contains(id),
+                "node '{}' must not be its own sibling",
+                id
+            );
+            assert_eq!(siblings.len(), index.children_of(&parent_id).len() - 1);
+            checked += 1;
+        }
+        assert!(checked > 0, "fixture has no node with a sibling");
+    }
+}
+
+#[cfg(test)]
+mod unsupported_field_tests {
+    use super::unsupported_fields_of_mutation;
+    use baumhard::core::primitives::ApplyOperation;
+    use baumhard::gfx_structs::area::{DeltaGlyphArea, GlyphArea, GlyphAreaCommand, GlyphAreaField};
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::gfx_structs::shape::NodeShape;
+
+    /// Font-size commands (`GrowFont` / `ShrinkFont` / `SetFontSize`)
+    /// ARE persisted by the sync-back, so they must NOT be flagged —
+    /// this is the whole point of the P0-02 fix.
+    #[test]
+    fn test_grow_and_shrink_font_are_supported() {
+        for cmd in [
+            GlyphAreaCommand::GrowFont(2.0),
+            GlyphAreaCommand::ShrinkFont(2.0),
+            GlyphAreaCommand::SetFontSize(20.0),
+        ] {
+            let m = Mutation::area_command(cmd);
+            assert!(
+                unsupported_fields_of_mutation(&m).is_empty(),
+                "font-size command {:?} must be treated as supported",
+                cmd
+            );
+        }
+    }
+
+    /// Position / bounds commands persist too (node position, section
+    /// offset/size), so they're not flagged.
+    #[test]
+    fn test_position_and_bounds_commands_are_supported() {
+        for cmd in [
+            GlyphAreaCommand::NudgeRight(5.0),
+            GlyphAreaCommand::MoveTo(1.0, 2.0),
+            GlyphAreaCommand::SetBounds(10.0, 10.0),
+        ] {
+            let m = Mutation::area_command(cmd);
+            assert!(unsupported_fields_of_mutation(&m).is_empty());
+        }
+    }
+
+    /// Line-height commands have no model home (line-height is
+    /// derived as `scale * 1.2` on every rebuild) — they must be
+    /// flagged so the author isn't left chasing a vanishing change.
+    #[test]
+    fn test_line_height_commands_are_flagged() {
+        for cmd in [
+            GlyphAreaCommand::SetLineHeight(1.5),
+            GlyphAreaCommand::GrowLineHeight(0.2),
+            GlyphAreaCommand::ShrinkLineHeight(0.2),
+        ] {
+            let m = Mutation::area_command(cmd);
+            assert_eq!(
+                unsupported_fields_of_mutation(&m),
+                vec!["line-height"],
+                "line-height command {:?} must be flagged unsupported",
+                cmd
+            );
+        }
+    }
+
+    /// A delta touching `shape` / `outline` / `zoom_visibility` — all
+    /// tree-only fields with no reverse converter — is flagged, one
+    /// name per unsupported field it writes.
+    #[test]
+    fn test_shape_outline_zoom_delta_fields_are_flagged() {
+        let area = GlyphArea::new(14.0, 16.8, glam::Vec2::ZERO, glam::Vec2::new(10.0, 10.0));
+        // `full_assign_from` emits Text/position/bounds/scale/
+        // line_height/regions/Outline/ZoomVisibility/Operation — a
+        // superset that exercises the delta-key scan. Add Shape too.
+        let mut delta = DeltaGlyphArea::full_assign_from(&area);
+        delta.fields.insert(
+            baumhard::gfx_structs::area_fields::GlyphAreaFieldType::Shape,
+            GlyphAreaField::Shape(NodeShape::Ellipse),
+        );
+        let m = Mutation::area_delta(delta);
+        let mut flagged = unsupported_fields_of_mutation(&m);
+        flagged.sort_unstable();
+        assert_eq!(
+            flagged,
+            vec!["line-height", "outline", "shape", "zoom-visibility"]
+        );
+    }
+
+    /// A delta that only touches persisted fields (position + scale)
+    /// is NOT flagged.
+    #[test]
+    fn test_supported_only_delta_is_clean() {
+        let delta = DeltaGlyphArea::new(vec![
+            GlyphAreaField::position(1.0, 2.0),
+            GlyphAreaField::scale(20.0),
+            GlyphAreaField::Operation(ApplyOperation::Assign),
+        ]);
+        let m = Mutation::area_delta(delta);
+        assert!(unsupported_fields_of_mutation(&m).is_empty());
     }
 }

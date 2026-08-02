@@ -38,16 +38,21 @@ pub(in crate::application::app) fn apply_edge_label_drag(
     // rebuild the path fresh every frame.
     let path = {
         let edge = &doc.mindmap.edges[idx];
+        // `debug!`, not `warn!`, per CODE_CONVENTIONS §9: returning
+        // `false` skips the move but does not end the drag, so the
+        // throttled interaction calls straight back in on the next
+        // cursor move. At `warn!` a single delete-mid-drag would
+        // repeat one line per mouse-move until mouse-up.
         let Some(from_node) = doc.mindmap.nodes.get(&edge.from_id) else {
-            log::warn!(
-                "apply_edge_label_drag: from-endpoint {} disappeared mid-drag",
+            log::debug!(
+                "edge label drag: from-endpoint {} disappeared mid-drag",
                 edge.from_id
             );
             return false;
         };
         let Some(to_node) = doc.mindmap.nodes.get(&edge.to_id) else {
-            log::warn!(
-                "apply_edge_label_drag: to-endpoint {} disappeared mid-drag",
+            log::debug!(
+                "edge label drag: to-endpoint {} disappeared mid-drag",
                 edge.to_id
             );
             return false;

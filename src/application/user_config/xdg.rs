@@ -29,9 +29,11 @@ pub fn xdg_mandala_path(filename: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::user_config::load_desktop_layered;
+    use baumhard::util::test_temp::TempDir;
     use std::sync::Mutex;
 
-    /// Process-wide mutex serialising tests that mutate
+    /// Process-wide mutex serializing tests that mutate
     /// `std::env::*`. Cargo runs unit tests on multiple threads
     /// by default (one per logical core); env vars are global
     /// per-process, so two `with_env` calls on different threads
@@ -97,6 +99,76 @@ mod tests {
     fn empty_home_with_unset_xdg_returns_none() {
         with_env(None, Some(""), || {
             assert!(xdg_mandala_path("macros.json").is_none());
+        });
+    }
+
+    /// Accepts any payload, uppercased so an assertion can tell
+    /// parsed output from the raw bytes on disk. These tests are about
+    /// which layer wins, so the parser never rejects — `desktop.rs`'s
+    /// own fixture covers the rejecting case.
+    fn parse(src: &str) -> Result<String, String> {
+        Ok(src.trim().to_ascii_uppercase())
+    }
+
+    /// Lay out `<dir>/mandala/<filename>` with `payload` in it — the
+    /// exact shape [`xdg_mandala_path`] resolves to — and return the
+    /// resolved path so the caller can assert on the reported source.
+    fn write_xdg_config(dir: &TempDir, filename: &str, payload: &str) -> PathBuf {
+        let cfg_dir = dir.join("mandala");
+        std::fs::create_dir_all(&cfg_dir).expect("create the mandala config dir");
+        let cfg = cfg_dir.join(filename);
+        std::fs::write(&cfg, payload).expect("write the xdg config file");
+        cfg
+    }
+
+    /// The XDG layer of `load_desktop_layered` wins when there is no
+    /// explicit CLI path, and reports the path it resolved.
+    ///
+    /// This is the pin on the default layer's existence: deleting the
+    /// `layers.push` that builds it leaves every test in `desktop.rs`
+    /// green, because none of them puts a file where the XDG layer
+    /// looks. Without this test a refactor could drop
+    /// `~/.config/mandala/*.json` support for every desktop user in
+    /// silence.
+    ///
+    /// It lives here rather than beside `load_desktop_layered`
+    /// because it mutates `XDG_CONFIG_HOME`, and [`ENV_LOCK`] /
+    /// [`with_env`] already serialize that against this module's own
+    /// tests — a second harness in `desktop.rs` would race this one.
+    #[test]
+    fn test_desktop_xdg_layer_wins_when_there_is_no_explicit_path() {
+        let dir = TempDir::new("xdg-layer-wins");
+        let cfg = write_xdg_config(&dir, "keybinds.json", "from-xdg");
+        with_env(Some(&dir.path().display().to_string()), None, || {
+            let (value, source) = load_desktop_layered("test", "keybinds.json", None, parse)
+                .expect("an existing XDG config must win when no explicit path is given");
+            assert_eq!(value, "FROM-XDG", "the XDG layer's payload must reach the parser");
+            assert_eq!(
+                source,
+                cfg.display().to_string(),
+                "the winning layer must report its resolved XDG path"
+            );
+        });
+    }
+
+    /// An explicit CLI path outranks an existing XDG config — the
+    /// precedence the wrapper's layer order exists to express, and
+    /// untestable without an XDG file actually in place to lose.
+    #[test]
+    fn test_desktop_explicit_path_beats_the_xdg_layer() {
+        let dir = TempDir::new("xdg-layer-outranked");
+        write_xdg_config(&dir, "keybinds.json", "from-xdg");
+        let explicit = dir.join("explicit-keybinds.json");
+        std::fs::write(&explicit, "from-explicit").expect("write the explicit config file");
+        with_env(Some(&dir.path().display().to_string()), None, || {
+            let (value, source) = load_desktop_layered("test", "keybinds.json", Some(&explicit), parse)
+                .expect("the explicit path must win over the XDG config");
+            assert_eq!(value, "FROM-EXPLICIT", "the explicit layer must outrank XDG");
+            assert_eq!(
+                source,
+                explicit.display().to_string(),
+                "the winning layer must report the explicit path"
+            );
         });
     }
 }

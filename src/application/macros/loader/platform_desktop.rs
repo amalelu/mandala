@@ -5,71 +5,36 @@
 //! `~/.config/mandala/macros.json`) and parses through the shared
 //! [`super::parse_user_macros_json`].
 //!
-//! Mirrors `keybinds/platform_desktop.rs` and
-//! `document/mutations_loader/platform_desktop.rs` — same
-//! resilience posture: the app boots with an empty user tier when
-//! the file is absent or malformed, and warns on parse failure so
-//! the user notices.
-//!
-//! Path resolution is delegated to
-//! [`crate::application::user_config::xdg::xdg_mandala_path`] —
-//! shared with the keybinds and mutations loaders.
+//! The read, the size cap, the layer construction, and the fallback
+//! walk all belong to [`crate::application::user_config`]; this
+//! module only names the file and the parser. The keybinds and
+//! mutations desktop loaders name theirs the same way against the
+//! same wrapper, which is also where the shared resilience posture
+//! lives: the app boots with an empty user tier when the file is
+//! absent or malformed, and warns on failure so the user notices.
 
 use super::Macro;
-use crate::application::user_config::{xdg::xdg_mandala_path, MAX_USER_PAYLOAD_BYTES};
+use crate::application::user_config::load_desktop_layered;
 
-/// Load the user-layer macros. Tier: `MacroSource::User`, assigned
+/// Load the user-layer macros. Tier: `SourceTier::User`, assigned
 /// at the call site in `run_native_init::build`.
+///
+/// Macros have no CLI override, so the explicit layer is `None` and
+/// the XDG path is the only candidate — the one place this loader
+/// differs from its keybinds / mutations peers.
 ///
 /// Returns an empty `Vec` when the file is absent, oversized, or
 /// malformed; failures log a warning so users notice but the app
 /// still boots. Files larger than `MAX_USER_PAYLOAD_BYTES` are
-/// rejected before `read_to_string` runs — matching the mutations
-/// desktop loader's posture.
+/// rejected before `read_to_string` runs.
 pub fn load_user_macros() -> Vec<Macro> {
-    let path = match xdg_mandala_path("macros.json") {
-        Some(p) => p,
-        None => {
-            log::debug!("macros: no HOME / XDG_CONFIG_HOME; user macro file disabled");
-            return Vec::new();
-        }
-    };
-    if !path.exists() {
-        return Vec::new();
-    }
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.len() > MAX_USER_PAYLOAD_BYTES as u64 => {
-            log::warn!(
-                "macros: {} exceeds size cap ({} bytes > {} max); refusing to load",
-                path.display(),
-                meta.len(),
-                MAX_USER_PAYLOAD_BYTES,
-            );
-            return Vec::new();
-        }
-        Ok(_) => {}
-        Err(e) => {
-            log::warn!("macros: stat {}: {}", path.display(), e);
-            return Vec::new();
-        }
-    }
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("macros: failed to read {}: {}", path.display(), e);
-            return Vec::new();
-        }
-    };
-    match super::parse_user_macros_json(&text) {
-        Ok(v) => {
+    match load_desktop_layered("macros", "macros.json", None, super::parse_user_macros_json) {
+        Some((v, source)) => {
             if !v.is_empty() {
-                log::info!("macros: loaded {} user macro(s) from {}", v.len(), path.display(),);
+                log::info!("macros: loaded {} user macro(s) from {}", v.len(), source);
             }
             v
         }
-        Err(e) => {
-            log::warn!("macros: {} ({})", e, path.display());
-            Vec::new()
-        }
+        None => Vec::new(),
     }
 }

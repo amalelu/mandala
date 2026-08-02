@@ -3,11 +3,12 @@
 //! `WindowEvent::KeyboardInput` arm (Pressed only). Routes
 //! through the editor-steal pre-filter (`TextEditCommit` /
 //! `TextEditCancel` first, then the modal `handle_text_edit_key`
-//! body), then the document-context Action lookup, then the
-//! Macro fallback. Mirrors the Action -> Macro chain native
-//! exposes via `event_keyboard::handle_keyboard_input`; the WASM
-//! side has no console / color-picker / label / portal edit
-//! modals so the pre-filter ladder is simpler.
+//! body), then the document-context Action lookup, then the Macro
+//! fallback, then the custom-mutation tier. That is the same
+//! Action -> Macro -> CustomMutation chain native runs in
+//! `event_keyboard::handle_keyboard_input`; the WASM side has no
+//! console / color-picker / label / portal edit modals so only the
+//! pre-filter ladder is shorter.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -47,7 +48,7 @@ impl super::WasmApp {
             });
             if let Some(modal_action @ (Action::TextEditCommit | Action::TextEditCancel)) = &action {
                 let mut core = input.input_context_core(renderer, &self.keybinds);
-                let _ = dispatch::action_core::dispatch_compatible(modal_action, &mut core);
+                let _ = dispatch::action_core::dispatch_compatible(modal_action, &mut core, None);
                 self.suppress_keys.set(input.text_edit_state.is_open());
                 return;
             }
@@ -100,7 +101,7 @@ impl super::WasmApp {
             let was_edit_selection = matches!(a, Action::EditSelection | Action::EditSelectionClean);
             let _ = {
                 let mut core = input.input_context_core(renderer, &self.keybinds);
-                dispatch::action_core::dispatch_compatible(&a, &mut core)
+                dispatch::action_core::dispatch_compatible(&a, &mut core, None)
             };
             if was_edit_selection {
                 // Mirror pre-Track-B `set(is_open())`: flip
@@ -114,30 +115,63 @@ impl super::WasmApp {
                 // restored here per the design reviewer's flag.
                 self.suppress_keys.set(input.text_edit_state.is_open());
             }
-        } else {
-            // No built-in Action bound to this combo — fall
-            // through to macro lookup. Mirrors native's
-            // `event_keyboard.rs` chain: Action → Macro →
-            // (CustomMutation tier on native; macros only on
-            // WASM today). Privilege gate runs inside
-            // `dispatch_macro_core::dispatch_macro` so a
-            // hostile Map / Inline tier macro can't slip
-            // destructive Actions or ConsoleLine past.
-            if let Some(macro_id) = key_name.as_deref().and_then(|k| {
-                self.keybinds.macro_for(
-                    k,
-                    input.modifiers.control_key(),
-                    input.modifiers.shift_key(),
-                    input.modifiers.alt_key(),
-                )
-            }) {
-                let macro_id = macro_id.to_string();
+        } else if let Some(k) = key_name.as_deref() {
+            // No built-in Action bound to this combo — fall through
+            // the rest of native's chain: Action → Macro →
+            // CustomMutation (CONCEPTS §5). Privilege gating runs
+            // inside `dispatch::macro_core::dispatch_macro` so a
+            // hostile Map / Inline tier macro can't slip destructive
+            // Actions or ConsoleLine past.
+            let (ctrl, shift, alt) = (
+                input.modifiers.control_key(),
+                input.modifiers.shift_key(),
+                input.modifiers.alt_key(),
+            );
+            let macro_id = self.keybinds.macro_for(k, ctrl, shift, alt).map(str::to_string);
+            // A macro bound to an id that isn't in the registry
+            // (typo'd config, half-loaded macros file) returns false
+            // from `dispatch_macro`; fall through to the
+            // custom-mutation tier so the keystroke still has a
+            // chance to do something, exactly as native does.
+            let macro_handled = if let Some(id) = macro_id {
                 let mut target = WasmMacroDispatchTarget {
                     input,
                     renderer,
                     keybinds: &self.keybinds,
                 };
-                let _ = dispatch::macro_core::dispatch_macro(&macro_id, &mut target);
+                dispatch::macro_core::dispatch_macro(&id, &mut target)
+            } else {
+                false
+            };
+            if !macro_handled {
+                // Third tier. Pre-unification the browser's chain
+                // stopped at Macro, so a `custom_mutation_bindings`
+                // entry worked on the desktop and was silently dead
+                // on the web.
+                //
+                // **Instant mutations only.** An entry carrying
+                // `timing.duration_ms > 0` takes
+                // `apply_keybind_custom_mutation`'s `start_animation`
+                // branch, which only *queues* the envelope. The one
+                // site that advances it is
+                // `drain_frame::drain_animation_tick`, and
+                // `drain_frame.rs` is `#[cfg(not(target_arch =
+                // "wasm32"))]` — the browser has no per-frame drain
+                // loop, so an animated mutation started here never
+                // lerps, never completes, and never reaches the
+                // completion `apply_custom_mutation` / undo push. The
+                // user gets `apply_document_actions`' side effects
+                // without the mutation.
+                //
+                // Registered in CLAUDE.md's "Dual-target status" with
+                // the parity trajectory. Pre-existing on the click
+                // path (`click_triggers.rs` calls
+                // `start_animation_at` the same way); this tier
+                // widens the surface from click triggers to every
+                // bound keystroke, which is why it is stated here
+                // rather than left implicit.
+                let mut core = input.input_context_core(renderer, &self.keybinds);
+                let _ = dispatch::dispatch_custom_mutation_for_key(&mut core, k, ctrl, shift, alt);
             }
         }
     }

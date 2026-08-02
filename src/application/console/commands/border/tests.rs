@@ -93,8 +93,8 @@ fn border_preset_custom_with_glyph_field_skips_hint() {
     };
     let blob = join_lines(&lines);
     // The hint string identifies itself via "preset=custom" plus a
-    // catalogue of side / corner keys joined together. Confirm that
-    // *catalogue text* doesn't appear when at least one glyph
+    // catalog of side / corner keys joined together. Confirm that
+    // *catalog text* doesn't appear when at least one glyph
     // field is set — the preset-was-promoted note can still fire,
     // but the orientation hint shouldn't.
     assert!(
@@ -499,7 +499,14 @@ fn border_preset_positional_writes_through() {
     // auto-promote — single-line success.
     assert_exec_ok_strict(run("border preset heavy", &mut doc));
     assert_eq!(
-        doc.mindmap.nodes.get(&id).unwrap().style.border.as_ref().map(|c| c.preset.as_str()),
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .unwrap()
+            .style
+            .border
+            .as_ref()
+            .map(|c| c.preset.as_str()),
         Some("heavy")
     );
 }
@@ -511,13 +518,17 @@ fn border_preset_cycle_advances_to_next_in_list() {
     let id = first_node_id(&doc);
     doc.selection = SelectionState::Single(id.clone());
     // Pin to the first preset, then cycle and assert second.
-    assert_exec_ok(run(
-        &format!("border preset {}", BORDER_PRESETS[0]),
-        &mut doc,
-    ));
+    assert_exec_ok(run(&format!("border preset {}", BORDER_PRESETS[0]), &mut doc));
     assert_exec_ok(run("border preset cycle", &mut doc));
     assert_eq!(
-        doc.mindmap.nodes.get(&id).unwrap().style.border.as_ref().map(|c| c.preset.as_str()),
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .unwrap()
+            .style
+            .border
+            .as_ref()
+            .map(|c| c.preset.as_str()),
         Some(BORDER_PRESETS[1])
     );
 }
@@ -535,7 +546,14 @@ fn border_preset_cycle_wraps_at_last() {
     ));
     assert_exec_ok(run("border preset cycle", &mut doc));
     assert_eq!(
-        doc.mindmap.nodes.get(&id).unwrap().style.border.as_ref().map(|c| c.preset.as_str()),
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .unwrap()
+            .style
+            .border
+            .as_ref()
+            .map(|c| c.preset.as_str()),
         Some(BORDER_PRESETS[0])
     );
 }
@@ -556,7 +574,14 @@ fn border_color_positional_writes_through() {
     // Strict-Ok: color edit only, no hint paths.
     assert_exec_ok_strict(run("border color #ff8800", &mut doc));
     assert_eq!(
-        doc.mindmap.nodes.get(&id).unwrap().style.border.as_ref().and_then(|c| c.color.as_deref()),
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .unwrap()
+            .style
+            .border
+            .as_ref()
+            .and_then(|c| c.color.as_deref()),
         Some("#ff8800")
     );
 }
@@ -569,7 +594,14 @@ fn border_padding_positional_writes_through() {
     // Strict-Ok: padding edit only, no hint paths.
     assert_exec_ok_strict(run("border padding 12", &mut doc));
     assert_eq!(
-        doc.mindmap.nodes.get(&id).unwrap().style.border.as_ref().map(|c| c.padding),
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .unwrap()
+            .style
+            .border
+            .as_ref()
+            .map(|c| c.padding),
         Some(12.0)
     );
 }
@@ -736,8 +768,11 @@ fn border_side_reset_works_on_non_custom_preset() {
     // reset on heavy is a no-op (heavy already has its own default
     // top), so we just assert it doesn't error.
     let r = run("border side top reset", &mut doc);
-    assert!(matches!(r, ExecResult::Ok(_) | ExecResult::Lines(_)),
-        "reset on non-custom must succeed: {:?}", r);
+    assert!(
+        matches!(r, ExecResult::Ok(_) | ExecResult::Lines(_)),
+        "reset on non-custom must succeed: {:?}",
+        r
+    );
 }
 
 /// / §5.3: `border show side=top` filters to one
@@ -755,10 +790,22 @@ fn border_show_side_filter_prunes_other_sides() {
     };
     let blob = join_lines(&lines);
     assert!(blob.contains("top:"), "top side should appear: {}", blob);
-    assert!(!blob.contains("\nbottom:"), "bottom should be filtered out: {}", blob);
+    assert!(
+        !blob.contains("\nbottom:"),
+        "bottom should be filtered out: {}",
+        blob
+    );
     assert!(!blob.contains("\nleft:"), "left should be filtered out: {}", blob);
-    assert!(!blob.contains("\nright:"), "right should be filtered out: {}", blob);
-    assert!(!blob.contains("corners:"), "corners should be filtered out: {}", blob);
+    assert!(
+        !blob.contains("\nright:"),
+        "right should be filtered out: {}",
+        blob
+    );
+    assert!(
+        !blob.contains("corners:"),
+        "corners should be filtered out: {}",
+        blob
+    );
 }
 
 /// `side=all` is the explicit equivalent of no filter.
@@ -798,9 +845,21 @@ fn border_show_verbose_surfaces_dual_color_surface() {
         other => panic!("expected Lines, got {:?}", other),
     };
     let blob = join_lines(&lines);
-    assert!(blob.contains("color (cascade):"), "cascade header missing: {}", blob);
-    assert!(blob.contains("style.frame_color"), "frame_color row missing: {}", blob);
-    assert!(blob.contains("style.border.color"), "border.color row missing: {}", blob);
+    assert!(
+        blob.contains("color (cascade):"),
+        "cascade header missing: {}",
+        blob
+    );
+    assert!(
+        blob.contains("style.frame_color"),
+        "frame_color row missing: {}",
+        blob
+    );
+    assert!(
+        blob.contains("style.border.color"),
+        "border.color row missing: {}",
+        blob
+    );
     assert!(
         blob.contains("set via `color border=`"),
         "frame_color verb annotation missing: {}",
@@ -820,8 +879,8 @@ fn border_show_verbose_surfaces_dual_color_surface() {
 /// completion / help.
 #[test]
 fn border_verb_applicable_on_multi_selection() {
-    use crate::application::console::ConsoleContext;
     use crate::application::console::predicates::node_or_section_selected;
+    use crate::application::console::ConsoleContext;
     let mut doc = fixture_doc();
     let id1 = first_node_id(&doc);
     let id2 = doc.mindmap.nodes.keys().nth(1).cloned().unwrap();
@@ -848,7 +907,11 @@ fn border_show_works_on_section_selection() {
     match run("border show", &mut doc) {
         ExecResult::Lines(rows) => {
             let blob = join_lines(&rows);
-            assert!(blob.contains("preset:"), "show output missing preset row: {}", blob);
+            assert!(
+                blob.contains("preset:"),
+                "show output missing preset row: {}",
+                blob
+            );
         }
         other => panic!("expected Lines for show on Section, got {:?}", other),
     }
@@ -878,40 +941,28 @@ fn border_show_works_on_section_range_selection() {
 fn border_on_with_extra_kv_errors() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::Single(first_node_id(&doc));
-    assert_exec_err_contains(
-        run("border on preset=heavy", &mut doc),
-        "takes no arguments",
-    );
+    assert_exec_err_contains(run("border on preset=heavy", &mut doc), "takes no arguments");
 }
 
 #[test]
 fn border_off_with_extra_positional_errors() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::Single(first_node_id(&doc));
-    assert_exec_err_contains(
-        run("border off something", &mut doc),
-        "takes no arguments",
-    );
+    assert_exec_err_contains(run("border off something", &mut doc), "takes no arguments");
 }
 
 #[test]
 fn border_toggle_with_extra_kv_errors() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::Single(first_node_id(&doc));
-    assert_exec_err_contains(
-        run("border toggle padding=8", &mut doc),
-        "takes no arguments",
-    );
+    assert_exec_err_contains(run("border toggle padding=8", &mut doc), "takes no arguments");
 }
 
 #[test]
 fn border_reset_with_extras_errors() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::Single(first_node_id(&doc));
-    assert_exec_err_contains(
-        run("border reset preset=heavy", &mut doc),
-        "takes no arguments",
-    );
+    assert_exec_err_contains(run("border reset preset=heavy", &mut doc), "takes no arguments");
 }
 
 // ─── Opus review T5 (API/UX) pins ────────────────────────────────
@@ -1022,9 +1073,21 @@ fn border_show_includes_toggle_and_cycle_hints() {
         other => panic!("expected Lines, got {:?}", other),
     };
     let blob = join_lines(&lines);
-    assert!(blob.contains("(toggle: `border toggle`)"), "missing toggle hint: {}", blob);
-    assert!(blob.contains("(cycle: `border preset cycle`)"), "missing cycle hint: {}", blob);
-    assert!(blob.contains("(override: `border font"), "missing override hint: {}", blob);
+    assert!(
+        blob.contains("(toggle: `border toggle`)"),
+        "missing toggle hint: {}",
+        blob
+    );
+    assert!(
+        blob.contains("(cycle: `border preset cycle`)"),
+        "missing cycle hint: {}",
+        blob
+    );
+    assert!(
+        blob.contains("(override: `border font"),
+        "missing override hint: {}",
+        blob
+    );
 }
 
 /// `border show` against `Multi(>=2)` selection
@@ -1192,7 +1255,14 @@ fn border_preset_positional_against_multi_selection() {
     assert_exec_ok(run("border preset heavy", &mut doc));
     for id in &[id1, id2] {
         assert_eq!(
-            doc.mindmap.nodes.get(id).unwrap().style.border.as_ref().map(|c| c.preset.as_str()),
+            doc.mindmap
+                .nodes
+                .get(id)
+                .unwrap()
+                .style
+                .border
+                .as_ref()
+                .map(|c| c.preset.as_str()),
             Some("heavy"),
             "preset should land on every Multi target"
         );
@@ -1217,7 +1287,14 @@ fn border_preset_cycle_falls_through_to_canvas_default() {
     assert_exec_ok(run("border preset cycle", &mut doc));
     // From canvas-default heavy, cycle → double.
     assert_eq!(
-        doc.mindmap.nodes.get(&id).unwrap().style.border.as_ref().map(|c| c.preset.as_str()),
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .unwrap()
+            .style
+            .border
+            .as_ref()
+            .map(|c| c.preset.as_str()),
         Some("double"),
         "cycle should advance from canvas-default heavy"
     );
@@ -1241,18 +1318,133 @@ fn apply_border_field_to_selection_auto_promotes_preset_to_custom() {
     // Land heavy preset first so the auto-promote is observable.
     let _ = super::apply_border_field_to_selection(&mut doc, "preset", "heavy");
     assert_eq!(
-        doc.mindmap.nodes.get(&id).unwrap().style.border.as_ref().map(|c| c.preset.as_str()),
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .unwrap()
+            .style
+            .border
+            .as_ref()
+            .map(|c| c.preset.as_str()),
         Some("heavy"),
         "fixture: preset should be heavy before the side write"
     );
     // Macro-tier write — bypasses the verb-layer gate. Auto-promotes.
     let changed = super::apply_border_field_to_selection(&mut doc, "top", "###(*)###");
-    assert!(changed, "macro write must succeed (verb-strict gate is verb-layer-only)");
+    assert!(
+        changed,
+        "macro write must succeed (verb-strict gate is verb-layer-only)"
+    );
     assert_eq!(
-        doc.mindmap.nodes.get(&id).unwrap().style.border.as_ref().map(|c| c.preset.as_str()),
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .unwrap()
+            .style
+            .border
+            .as_ref()
+            .map(|c| c.preset.as_str()),
         Some("custom"),
         "macro path should auto-promote preset to 'custom' silently \
          (kv-form back-compat — verb path errors instead, see \
          border_side_on_non_custom_preset_errors_with_hint)"
     );
+}
+
+// ─── P1-28 verb ↔ Action single-core pins ────────────────────────
+//
+// `Action::CycleBorderPreset` and `Action::ToggleBorderVisible`
+// used to re-derive the verb's body in
+// `dispatch/cross_dispatch/style.rs`. Both now call the mutation
+// cores below; these tests pin that the Action lands exactly where
+// the verb does, so a future edit to one can't quietly move the
+// other.
+
+#[test]
+fn cycle_core_and_verb_land_on_the_same_preset() {
+    let mut via_verb = fixture_doc();
+    let id = first_node_id(&via_verb);
+    via_verb.selection = SelectionState::Single(id.clone());
+    assert_exec_ok(run("border preset light", &mut via_verb));
+    assert_exec_ok(run("border preset cycle", &mut via_verb));
+
+    let mut via_action = fixture_doc();
+    via_action.selection = SelectionState::Single(id.clone());
+    assert_exec_ok(run("border preset light", &mut via_action));
+    assert!(super::cycle_border_preset_on_selection(&mut via_action));
+
+    assert_eq!(
+        via_verb
+            .mindmap
+            .nodes
+            .get(&id)
+            .and_then(|n| n.style.border.as_ref())
+            .map(|c| c.preset.as_str()),
+        via_action
+            .mindmap
+            .nodes
+            .get(&id)
+            .and_then(|n| n.style.border.as_ref())
+            .map(|c| c.preset.as_str()),
+    );
+}
+
+/// The cycle core samples the canvas default when the node has no
+/// per-node border — the same cascade `border preset cycle` uses.
+#[test]
+fn cycle_core_samples_the_canvas_default_when_the_node_has_none() {
+    let mut doc = fixture_doc();
+    let id = first_node_id(&doc);
+    doc.selection = SelectionState::Single(id.clone());
+    assert_exec_ok(run("canvas border preset double", &mut doc));
+    assert!(super::cycle_border_preset_on_selection(&mut doc));
+    assert_eq!(
+        doc.mindmap
+            .nodes
+            .get(&id)
+            .and_then(|n| n.style.border.as_ref())
+            .map(|c| c.preset.as_str()),
+        Some("rounded"),
+        "cycle must advance from the canvas default, not from 'light'"
+    );
+}
+
+/// A selection borders can't attach to leaves the model alone.
+#[test]
+fn cycle_core_is_a_no_op_without_a_border_applicable_selection() {
+    let mut doc = fixture_doc();
+    doc.selection = SelectionState::None;
+    assert!(!super::cycle_border_preset_on_selection(&mut doc));
+}
+
+#[test]
+fn toggle_core_and_verb_flip_the_same_nodes() {
+    let mut doc = fixture_doc();
+    let ids: Vec<String> = doc.mindmap.nodes.keys().take(2).cloned().collect();
+    doc.selection = SelectionState::Multi(ids.clone());
+    let before: Vec<bool> = ids
+        .iter()
+        .map(|id| doc.mindmap.nodes.get(id).unwrap().style.show_frame)
+        .collect();
+
+    let report = super::toggle_border_visible_on_selection(&mut doc)
+        .unwrap_or_else(|_| panic!("Multi node selection is border-applicable"));
+    assert_eq!(report.toggled, ids.len());
+    assert_eq!(report.now_on + report.now_off, report.toggled);
+    for (id, was) in ids.iter().zip(&before) {
+        assert_eq!(doc.mindmap.nodes.get(id).unwrap().style.show_frame, !was);
+    }
+
+    // The verb runs the same core, so it flips straight back.
+    assert_exec_ok(run("border toggle", &mut doc));
+    for (id, was) in ids.iter().zip(&before) {
+        assert_eq!(doc.mindmap.nodes.get(id).unwrap().style.show_frame, *was);
+    }
+}
+
+#[test]
+fn toggle_core_rejects_a_non_node_selection() {
+    let mut doc = fixture_doc();
+    doc.selection = SelectionState::None;
+    assert!(super::toggle_border_visible_on_selection(&mut doc).is_err());
 }

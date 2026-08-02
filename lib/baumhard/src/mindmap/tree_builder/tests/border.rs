@@ -208,7 +208,12 @@ fn border_mutator_round_trip_matches_full_rebuild() {
     let mut offsets = HashMap::new();
     offsets.insert("a".to_string(), (12.5, -6.0));
 
-    let nodes_b = border_node_data(&map, &offsets);
+    let nodes_b = border_node_data(
+        &map,
+        &offsets,
+        BorderChromeOverrides::default(),
+        &map.fold_hidden_set(),
+    );
     let mutator = build_border_mutator_tree_from_nodes(&nodes_b);
     mutator.apply_to(&mut tree_a);
 
@@ -291,7 +296,7 @@ fn border_runs_default_to_unbounded_when_node_has_no_window() {
 
 /// Toggling `show_frame = false` on a node shifts the
 /// identity sequence so the dispatcher in
-/// `update_border_tree_with_offsets` falls back to a full
+/// `CanvasFrame::update_border_tree` falls back to a full
 /// rebuild. Without this, applying a mutator against a tree
 /// whose parent set has changed would silently misalign.
 #[test]
@@ -303,11 +308,21 @@ fn border_identity_sequence_changes_on_show_frame_toggle() {
         ],
         vec![],
     );
-    let before = border_identity_sequence(&border_node_data(&map, &HashMap::new()));
+    let before = border_identity_sequence(&border_node_data(
+        &map,
+        &HashMap::new(),
+        BorderChromeOverrides::default(),
+        &map.fold_hidden_set(),
+    ));
     assert_eq!(before, vec!["a".to_string(), "b".to_string()]);
 
     map.nodes.get_mut("b").unwrap().style.show_frame = false;
-    let after = border_identity_sequence(&border_node_data(&map, &HashMap::new()));
+    let after = border_identity_sequence(&border_node_data(
+        &map,
+        &HashMap::new(),
+        BorderChromeOverrides::default(),
+        &map.fold_hidden_set(),
+    ));
     assert_eq!(after, vec!["a".to_string()]);
     assert_ne!(before, after);
 }
@@ -356,7 +371,8 @@ fn border_tree_left_column_rows_use_floor_not_ceil() {
     assert!(
         cluster_count >= 1,
         "left column should render ≥ 1 row, got {}: '{}'",
-        cluster_count, text
+        cluster_count,
+        text
     );
 }
 
@@ -386,6 +402,7 @@ fn append_border_run_region_sized_by_grapheme_cluster_count_not_codepoints() {
         1,
         text,
         12.0,
+        12.0,
         (0.0, 0.0),
         (100.0, 20.0),
         [1.0, 1.0, 1.0, 1.0],
@@ -411,7 +428,7 @@ fn append_border_run_region_sized_by_grapheme_cluster_count_not_codepoints() {
 /// builder's resolved style consumes it through
 /// `BorderStyle::top_text` / `bottom_text` etc. Pre-fix, the
 /// builder ignored `node.style.border` entirely; this test fails
-/// loudly on a regression to that behaviour.
+/// loudly on a regression to that behavior.
 #[test]
 fn border_tree_honors_custom_side_pattern() {
     use crate::mindmap::model::{CustomBorderGlyphs, GlyphBorderConfig};
@@ -453,9 +470,16 @@ fn border_tree_honors_custom_side_pattern() {
     // no corners. So it should contain '#' / '*' but neither '<'
     // nor '>'.
     let top_text = &tree.arena.get(runs[0]).unwrap().get().glyph_area().unwrap().text;
-    assert!(top_text.contains('*'), "top fill should contain '*': '{}'", top_text);
-    assert!(!top_text.contains('<') && !top_text.contains('>'),
-        "top fill should NOT contain corner chars: '{}'", top_text);
+    assert!(
+        top_text.contains('*'),
+        "top fill should contain '*': '{}'",
+        top_text
+    );
+    assert!(
+        !top_text.contains('<') && !top_text.contains('>'),
+        "top fill should NOT contain corner chars: '{}'",
+        top_text
+    );
     // TL corner spec is runs[4] (channel 5).
     let tl_text = &tree.arena.get(runs[4]).unwrap().get().glyph_area().unwrap().text;
     assert_eq!(tl_text, "<", "TL corner text");
@@ -516,7 +540,12 @@ fn border_mutator_picks_up_pattern_change() {
         .unwrap()
         .top = "###(*)###".into();
 
-    let nodes_b = border_node_data(&map, &HashMap::new());
+    let nodes_b = border_node_data(
+        &map,
+        &HashMap::new(),
+        BorderChromeOverrides::default(),
+        &map.fold_hidden_set(),
+    );
     let mutator = build_border_mutator_tree_from_nodes(&nodes_b);
     mutator.apply_to(&mut tree_a);
 
@@ -573,8 +602,105 @@ fn border_mutator_picks_up_pattern_change() {
     );
 }
 
+/// `BorderRunSpec.line_height_pt` for vertical rails must reach
+/// the built tree's `GlyphArea.line_height`. The spec computes it
+/// from the fill glyph's measured ink height (revision-4's
+/// "no-gappy-diamonds" fix); the live tree paths previously
+/// dropped it and always used `font_size_pt`, so filled-glyph
+/// side patterns rendered with inter-row gaps or overflow.
+///
+/// This test is spec-vs-tree (not tree-vs-tree), so it fails on
+/// any branch that discards `line_height_pt`.
+#[test]
+fn border_tree_uses_spec_line_height_for_vertical_rails() {
+    use crate::mindmap::border::border_run_specs;
+
+    let mut map = synthetic_map(vec![synthetic_node("a", None, 0.0, 0.0)], vec![]);
+    let node = map.nodes.get_mut("a").unwrap();
+    // Tall node so the vertical rail has multiple rows; wide node
+    // so the horizontal fitter has room. Filled diamond side glyphs
+    // have an ink height smaller than the font size, which makes
+    // `spec.line_height_pt != spec.font_size_pt` — the condition
+    // the old tree-vs-tree parity test could not catch.
+    node.size.width = 400.0;
+    node.size.height = 200.0;
+    node.style.border = Some(crate::mindmap::model::GlyphBorderConfig {
+        preset: "custom".into(),
+        font: None,
+        font_size_pt: 18.0,
+        color: None,
+        glyphs: Some(crate::mindmap::model::CustomBorderGlyphs {
+            top: "-".into(),
+            bottom: "-".into(),
+            left: "◆".into(),
+            right: "◆".into(),
+            top_left: "+".into(),
+            top_right: "+".into(),
+            bottom_left: "+".into(),
+            bottom_right: "+".into(),
+        }),
+        padding: 4.0,
+        color_palette: None,
+        color_palette_field: None,
+    });
+
+    let nodes = border_node_data(
+        &map,
+        &HashMap::new(),
+        BorderChromeOverrides::default(),
+        &map.fold_hidden_set(),
+    );
+    let node_data = &nodes[0];
+    let specs = border_run_specs(
+        &node_data.border_style,
+        (node_data.pos_x, node_data.pos_y),
+        (node_data.size_x, node_data.size_y),
+    );
+    let left_spec = specs.iter().find(|s| s.channel == 3).unwrap();
+    let right_spec = specs.iter().find(|s| s.channel == 4).unwrap();
+
+    // Build the tree from the same node data the spec came from.
+    let tree = build_border_tree_from_nodes(&nodes);
+    let parent = tree.root.children(&tree.arena).next().unwrap();
+    let runs: Vec<_> = parent.children(&tree.arena).collect();
+    let left_area = tree.arena.get(runs[2]).unwrap().get().glyph_area().unwrap();
+    let right_area = tree.arena.get(runs[3]).unwrap().get().glyph_area().unwrap();
+
+    assert_eq!(
+        left_area.line_height.0, left_spec.line_height_pt,
+        "left rail line_height must equal the spec's measured ink-height line_height_pt"
+    );
+    assert_eq!(
+        right_area.line_height.0, right_spec.line_height_pt,
+        "right rail line_height must equal the spec's measured ink-height line_height_pt"
+    );
+
+    // The spec bounds height is `row_count * line_height` (with a
+    // `max(line_height)` guard for the empty-rail case). With a
+    // tall node we always have rows, so the rendered bounds must
+    // agree exactly.
+    let left_rows = left_area.text.split('\n').filter(|s| !s.is_empty()).count();
+    let right_rows = right_area.text.split('\n').filter(|s| !s.is_empty()).count();
+    assert!(left_rows > 0, "left rail should render at least one row");
+    assert!(right_rows > 0, "right rail should render at least one row");
+    assert!(
+        (left_area.render_bounds.y.0 - left_rows as f32 * left_area.line_height.0).abs() < 0.001,
+        "left rail bounds height ({}) must equal rows ({}) × line_height ({})",
+        left_area.render_bounds.y.0,
+        left_rows,
+        left_area.line_height.0
+    );
+    assert!(
+        (right_area.render_bounds.y.0 - right_rows as f32 * right_area.line_height.0).abs() < 0.001,
+        "right rail bounds height ({}) must equal rows ({}) × line_height ({})",
+        right_area.render_bounds.y.0,
+        right_rows,
+        right_area.line_height.0
+    );
+}
+
 /// `color_palette` resolution: when the cfg names a palette that
-/// exists, the per-cluster regions on each run pick up colours
+/// exists, the per-cluster regions on each run pick up colors
 /// from that palette (one region per cluster). The
 /// `BorderNodeData.palette_cycle` resolution fans out per-side
 /// from a single name → group mapping.
@@ -638,7 +764,7 @@ fn border_tree_honors_palette_cycling() {
     let area = tree.arena.get(top_id).unwrap().get().glyph_area().unwrap();
     let regions = area.regions.all_regions();
     assert!(
-        regions.len() >= 1,
+        !regions.is_empty(),
         "top fill should emit at least one region (got {})",
         regions.len()
     );

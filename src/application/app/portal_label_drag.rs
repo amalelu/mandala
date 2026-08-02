@@ -60,9 +60,12 @@ pub(in crate::application::app) fn apply_portal_label_drag(
     // always attached to the node named by `endpoint_node_id`
     // (one of `edge.from_id` / `edge.to_id`), and that id reached
     // us via a click hit-test, so a missing node here means the
-    // node was deleted between click and drag.
+    // node was deleted between click and drag. `debug!`, not
+    // `warn!`, per CODE_CONVENTIONS §9: returning `false` skips the
+    // move without ending the drag, so this branch re-fires on every
+    // cursor move until mouse-up.
     let Some(node) = doc.mindmap.nodes.get(endpoint_node_id) else {
-        log::warn!("apply_portal_label_drag: endpoint node {endpoint_node_id} disappeared mid-drag");
+        log::debug!("portal label drag: endpoint node {endpoint_node_id} disappeared mid-drag");
         return false;
     };
     let node_pos = node.pos_vec2();

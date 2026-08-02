@@ -29,6 +29,12 @@ use log::{debug, warn};
 /// inside the walker; not a stable public API but `pub` so mutator
 /// authors can substitute custom terminators when extending the
 /// walker.
+///
+/// The after-mutations attached under `mutator_id` are treated as a
+/// channel-sorted stream (same logic as the normal child-alignment
+/// walk): arena order is not assumed to be ascending. Every
+/// after-mutation whose channel equals `t_chan` is dispatched via
+/// [`walk_tree_from`]; the scan stops as soon as it passes `t_chan`.
 pub const DEFAULT_TERMINATOR: fn(
     &mut Tree<GfxElement, GfxMutator>,
     &MutatorTree<GfxMutator>,
@@ -43,28 +49,19 @@ pub const DEFAULT_TERMINATOR: fn(
     // The predicate failed, so the target has not been mutated (yet)
     // But the mutator is one step behind
     debug!("The Terminator has received a mission.");
-    let mutator = get_mutator(&mutator_tree.arena, mutator_id);
     let target = get_target(&mut gfx_tree.arena, target_id);
     let t_chan = target.get().channel();
-    let mut option_next_mutator_id = mutator.first_child();
-    loop {
-        if option_next_mutator_id.is_some() {
-            let next_mutator_id = option_next_mutator_id.unwrap();
-            let next_mutator = get_mutator(&mutator_tree.arena, next_mutator_id);
-            if next_mutator.get().channel() == t_chan {
-                debug!("Next mutator matches the target, starting walk..");
-                walk_tree_from(gfx_tree, mutator_tree, target_id, next_mutator_id);
-            } else if next_mutator.get().channel() > t_chan {
-                debug!("Next mutator channel is higher than target channel, ending branch..");
-                break;
-            }
-            debug!("Trying next mutator sibling...");
-            option_next_mutator_id = next_mutator.next_sibling();
-        } else {
-            debug!("No more mutators, ending branch..");
+    let after_mutators = collect_sorted_children(&mutator_tree.arena, mutator_id, |m| m.channel());
+    for (after_id, after_chan) in after_mutators {
+        if after_chan == t_chan {
+            debug!("Next mutator matches the target, starting walk..");
+            walk_tree_from(gfx_tree, mutator_tree, target_id, after_id);
+        } else if after_chan > t_chan {
+            debug!("Next mutator channel is higher than target channel, ending branch..");
             break;
         }
     }
+    debug!("No more mutators, ending branch..");
 };
 
 /// Walk the entire `mutator_tree` against the `gfx_tree`, starting
@@ -87,12 +84,13 @@ pub fn walk_tree_from(
     mutator_id: NodeId,
 ) {
     let mutator = get_mutator(&mutator_tree.arena, mutator_id).get();
-    let target = get_target(&mut gfx_tree.arena, target_id).get_mut();
 
     match mutator {
         GfxMutator::Single { .. } | GfxMutator::Macro { .. } => {
             debug!("Processing Delta Node...");
-            apply_if_matching_channel(mutator, target);
+            if apply_if_matching_channel(gfx_tree, target_id, mutator) {
+                gfx_tree.invalidate_caches();
+            }
         }
         GfxMutator::Void { .. } => {
             debug!("Void mutator node, skipping")
@@ -105,7 +103,9 @@ pub fn walk_tree_from(
             debug!("Processing Instruction node...");
             if section.is_some() {
                 debug!("This instruction node has a Delta..");
-                apply_if_matching_channel(mutator, target);
+                if apply_if_matching_channel(gfx_tree, target_id, mutator) {
+                    gfx_tree.invalidate_caches();
+                }
             }
             process_instruction_node(gfx_tree, mutator_tree, target_id, mutator_id, instruction);
             return;
@@ -115,12 +115,19 @@ pub fn walk_tree_from(
 }
 
 #[inline]
-fn apply_if_matching_channel(mutator: &GfxMutator, target: &mut GfxElement) {
+fn apply_if_matching_channel(
+    gfx_tree: &mut Tree<GfxElement, GfxMutator>,
+    target_id: NodeId,
+    mutator: &GfxMutator,
+) -> bool {
+    let target = get_target(&mut gfx_tree.arena, target_id).get_mut();
     if mutator.channel() == target.channel() {
         debug!("Delta and target channel match, applying..");
         mutator.apply_to(target);
+        true
     } else {
-        debug!("Delta mutator channel does not match target channel.")
+        debug!("Delta mutator channel does not match target channel.");
+        false
     }
 }
 
@@ -140,21 +147,15 @@ fn process_instruction_node(
             // children to repeat) should degrade the walk, not abort
             // mutation application. The caller treats a no-op as
             // success.
-            let Some(current_mutator_child_id) = mutator.first_child() else {
+            if mutator.first_child().is_none() {
                 warn!("RepeatWhile instruction node has no children, skipping branch");
                 return;
-            };
-            let Some(current_target_child_id) = target.first_child() else {
+            }
+            if target.first_child().is_none() {
                 debug!("The target has no children - completing walk down this branch.");
                 return;
-            };
-            compare_apply_repeat_while(
-                gfx_tree,
-                mutator_tree,
-                current_target_child_id,
-                current_mutator_child_id,
-                condition,
-            )
+            }
+            compare_apply_repeat_while(gfx_tree, mutator_tree, target_id, mutator_id, condition)
         }
         Instruction::RotateWhile(_, _) => {
             // Reserved instruction (see `format/mutators.md` —
@@ -178,64 +179,51 @@ fn process_instruction_node(
     };
 }
 
-/// Walk siblings comparing channels, applying [`repeat_while`]
-/// where they match. Channel-ascending invariant on both sides
-/// is the same one [`align_child_walks`] documents.
+/// Walk the children of `target_parent` and `mutator_parent` as
+/// channel-sorted streams, applying [`repeat_while`] for every
+/// matching (target, mutator) pair.
 ///
-/// Iterative driver — the original recursive shape was tail-call
-/// in two places; flattening to a `loop` removes the unwrap chain
-/// and makes the channel-advance state explicit.
+/// Mirrors [`align_child_walks`]: arena order is **not** assumed to
+/// be channel-ascending, so both sibling rows are collected and
+/// sorted before the merge walk. The sorted merge advances only the
+/// mutator when `m_chan < t_chan` and only the target when
+/// `m_chan > t_chan`, preserving broadcast semantics (one mutator
+/// may apply to multiple consecutive targets sharing its channel).
+///
+/// Cost: O(n log n) per sibling row for the sort, where `n` is the
+/// sibling count under one parent. Sibling counts are small in
+/// practice (single-digit), so the sort is effectively free next to
+/// the per-pair `repeat_while` recursion.
 fn compare_apply_repeat_while(
     gfx_tree: &mut Tree<GfxElement, GfxMutator>,
     mutator_tree: &MutatorTree<GfxMutator>,
-    initial_target_id: NodeId,
-    initial_mutator_id: NodeId,
+    target_parent_id: NodeId,
+    mutator_parent_id: NodeId,
     condition: &Predicate,
 ) {
-    let mut target_id = initial_target_id;
-    let mut mutator_id = initial_mutator_id;
-    loop {
-        let mutator_node = get_mutator(&mutator_tree.arena, mutator_id);
-        let target_node = get_target(&mut gfx_tree.arena, target_id);
-        let mutator = mutator_node.get();
-        let maybe_next_target = target_node.next_sibling();
-        let target = target_node.get_mut();
+    let mutator_children = collect_sorted_children(&mutator_tree.arena, mutator_parent_id, |m| m.channel());
+    if mutator_children.is_empty() {
+        debug!("RepeatWhile mutator has no children - nothing to align.");
+        return;
+    }
+    let target_children = collect_sorted_children(&gfx_tree.arena, target_parent_id, |t| t.channel());
 
-        let m_chan = mutator.channel();
-        let t_chan = target.channel();
-        let next_mutator = mutator_node.next_sibling();
-
-        if m_chan == t_chan {
-            debug!("Mutator and target channels matches - applying RepeatWhile.");
-            repeat_while(
-                gfx_tree,
-                mutator_tree,
-                target_id,
-                mutator_id,
-                condition,
-                DEFAULT_TERMINATOR,
-            );
-        }
-
-        // More target siblings with the same channel: advance the
-        // target only, keep the mutator pointed at the current
-        // node so additional sibling matches still apply.
-        if m_chan >= t_chan {
-            if let Some(next_t) = maybe_next_target {
-                target_id = next_t;
-                continue;
+    let mut t_idx = 0usize;
+    for (m_id, m_chan) in mutator_children.iter().copied() {
+        while t_idx < target_children.len() {
+            let (t_id, t_chan) = target_children[t_idx];
+            if t_chan == m_chan {
+                t_idx += 1;
+                repeat_while(gfx_tree, mutator_tree, t_id, m_id, condition, DEFAULT_TERMINATOR);
+            } else if t_chan > m_chan {
+                debug!(
+                    "Target channel {} exceeds mutator channel {}, advancing to next mutator.",
+                    t_chan, m_chan
+                );
+                break;
+            } else {
+                t_idx += 1;
             }
-        }
-
-        // No more target matches at the current mutator: advance
-        // both pointers and try the next pair.
-        match (next_mutator, maybe_next_target) {
-            (Some(next_m), Some(next_t)) => {
-                debug!("Changing to next mutator-sibling");
-                target_id = next_t;
-                mutator_id = next_m;
-            }
-            _ => return,
         }
     }
 }
@@ -433,6 +421,7 @@ fn zip_map_children(
                 _ => None,
             }
         };
+        gfx_tree.invalidate_caches();
         match forwarded_instruction {
             Some(instruction) => {
                 // Nested instruction: dispatch at the paired target.
@@ -483,8 +472,16 @@ fn zip_map_children(
     }
 }
 
-/// As long as the condition holds true, keep applying it recursively
-fn repeat_while(
+/// As long as `condition` holds true, keep applying `mutator_id`
+/// (and its descendants) to `target_id` (and its descendants). When
+/// the condition fails, call `terminator` to resume the normal walk.
+///
+/// This is the engine behind [`Instruction::RepeatWhile`]; it is
+/// exposed so mutator authors can supply a custom `terminator`
+/// without forking the walker (see [`DEFAULT_TERMINATOR`] for the
+/// default continuation). The `terminator` receives the same tree
+/// pair and the current target/mutator ids.
+pub fn repeat_while(
     gfx_tree: &mut Tree<GfxElement, GfxMutator>,
     mutator_tree: &MutatorTree<GfxMutator>,
     target_id: NodeId,
@@ -497,14 +494,21 @@ fn repeat_while(
         mutator_id: NodeId,
     ),
 ) {
-    let target = get_target(&mut gfx_tree.arena, target_id).get_mut();
-    if condition.test(&target) {
+    let condition_matches = {
+        let target = get_target(&mut gfx_tree.arena, target_id).get_mut();
+        condition.test(&target)
+    };
+    if condition_matches {
         debug!(
             "Condition is met, applying mutator {} to target {}",
             mutator_id, target_id
         );
         let mutator = get_mutator(&mutator_tree.arena, mutator_id).get();
-        mutator.apply_to(target);
+        {
+            let target = get_target(&mut gfx_tree.arena, target_id).get_mut();
+            mutator.apply_to(target);
+        }
+        gfx_tree.invalidate_caches();
         apply_repeat_while_to_children(
             gfx_tree,
             mutator_tree,
@@ -596,8 +600,11 @@ fn spatial_descend(
     let mutator = get_mutator(&mutator_tree.arena, mutator_id).get();
     if let GfxMutator::Instruction { mutation, .. } = mutator {
         if mutation.is_some() {
-            let target = get_target(&mut gfx_tree.arena, hit_id).get_mut();
-            mutation.apply_to(target);
+            {
+                let target = get_target(&mut gfx_tree.arena, hit_id).get_mut();
+                mutation.apply_to(target);
+            }
+            gfx_tree.invalidate_caches();
         }
     }
 }
@@ -676,14 +683,40 @@ pub(crate) fn bvh_find(
                 if point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y {
                     let mut hit = true;
                     if refine_with_shape {
-                        // Inflating the bounds by `slack` on every side and
-                        // shifting the local point by `slack` into the
-                        // inflated frame gives rectangle and ellipse the
-                        // same isotropic fuzzy margin the caller asked
-                        // for. `slack == 0` is the exact-hit case (no-op
-                        // inflation).
-                        let local = Vec2::new(point.x - pos.x + slack, point.y - pos.y + slack);
-                        let inflated = Vec2::new(bounds.x + 2.0 * slack, bounds.y + 2.0 * slack);
+                        // Shift into the inflated local frame so
+                        // rectangle and ellipse get the same isotropic
+                        // fuzzy margin the caller asked for. `slack == 0`
+                        // is the exact-hit case (no-op inflation).
+                        //
+                        // The frame is derived from the very `min` / `max`
+                        // the AABB test above used, not recomputed from
+                        // `pos` and `bounds`. Float addition is not
+                        // associative: for an area at x = 872.0 of width
+                        // 22.4, `pos.x + bounds.x` rounds to 894.40002
+                        // while `894.40002 - 872.0` rounds to 22.400024,
+                        // which is *greater* than `bounds.x`. Refining
+                        // against `bounds` therefore rejected points the
+                        // AABB test had just accepted — a click exactly on
+                        // a rectangle's right or bottom edge fell through
+                        // to whatever lay beneath. Whether it bit depended
+                        // on the coordinates: the same fixture's y axis
+                        // rounds the other way (22.399994), so one edge
+                        // could misbehave while the opposite one did not.
+                        //
+                        // Every hit test in the app funnels through here —
+                        // `Tree::descendant_at` backs both the canvas-role
+                        // routing and `document::hit_test`'s node and
+                        // section picking — so this was a whole-app edge
+                        // defect, not a portal one.
+                        //
+                        // Subtracting the same `min` from both sides makes
+                        // the boundary compare exact. For a rectangle the
+                        // refinement is then a provable no-op (the
+                        // accepted set is exactly the closed AABB); for an
+                        // ellipse the frame shifts by at most an ULP and
+                        // stays inside the unchanged AABB.
+                        let local = Vec2::new(point.x - min_x, point.y - min_y);
+                        let inflated = Vec2::new(max_x - min_x, max_y - min_y);
                         hit = area.shape.contains_local(local, inflated);
                     }
                     if hit {

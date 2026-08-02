@@ -8,31 +8,31 @@ use crate::application::color_picker::ColorPickerState;
 use crate::application::console::commands::Command;
 use crate::application::console::parser::{parse, Args, ParseResult};
 use crate::application::console::{ConsoleEffects, ConsoleSideEffect, ConsoleState, ExecResult};
-use baumhard::mindmap::scene_cache::SceneConnectionCache;
-use baumhard::mindmap::tree_builder::MindMapTree;
 use crate::application::document::MindMapDocument;
 use crate::application::renderer::Renderer;
+use baumhard::mindmap::scene_cache::SceneConnectionCache;
+use baumhard::mindmap::tree_builder::MindMapTree;
 
 use super::super::color_picker_flow::{
     close_color_picker_standalone, open_color_picker_contextual, open_color_picker_standalone,
 };
-use super::super::label_edit::{open_label_edit, open_portal_text_edit, LabelEditState, PortalTextEditState};
 use super::super::scene_rebuild::rebuild_all;
+use super::super::single_line_edit::{open_single_line_edit, SingleLineEditTarget, SingleLineEditor};
 use super::{push_scrollback_error, push_scrollback_output, push_scrollback_output_in_font};
 
 /// Parse and execute a console line. Drains deferred modal handoffs
-/// (`open_label_edit`, `open_color_picker`), custom mutation apply
+/// (`open_single_line_edit`, `open_color_picker`), custom mutation apply
 /// requests (`run_mutation`, needs tree access), binding overlay
 /// updates (`bind_mutation` / `unbind_mutation`, need
 /// `ResolvedKeybinds` access), and alias writes (`set_alias`).
 /// Appends the result to the scrollback; rebuilds the scene on any
 /// document mutation.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 pub(in crate::application::app) fn execute_console_line(
     line: &str,
     console_state: &mut ConsoleState,
-    label_edit_state: &mut LabelEditState,
-    portal_text_edit_state: &mut PortalTextEditState,
+    single_line_edit_state: &mut SingleLineEditor,
     color_picker_state: &mut ColorPickerState,
     text_edit_state: &mut super::super::text_edit::TextEditState,
     doc: &mut MindMapDocument,
@@ -86,8 +86,7 @@ pub(in crate::application::app) fn execute_console_line(
         doc,
         interaction_mode,
         mindmap_tree,
-        label_edit_state,
-        portal_text_edit_state,
+        single_line_edit_state,
         color_picker_state,
         macros,
         renderer,
@@ -95,15 +94,21 @@ pub(in crate::application::app) fn execute_console_line(
 
     // Any successful command may have mutated the doc; rebuild.
     scene_cache.clear();
-    rebuild_all(doc, interaction_mode, mindmap_tree, app_scene, renderer, scene_cache);
+    rebuild_all(
+        doc,
+        interaction_mode,
+        mindmap_tree,
+        app_scene,
+        renderer,
+        scene_cache,
+    );
 
     let opened_modal = handle_post_rebuild_side_effect(
         post_rebuild,
         doc,
         interaction_mode,
         mindmap_tree,
-        label_edit_state,
-        portal_text_edit_state,
+        single_line_edit_state,
         color_picker_state,
         text_edit_state,
         app_scene,
@@ -128,8 +133,7 @@ fn handle_pre_rebuild_side_effect(
     doc: &mut MindMapDocument,
     interaction_mode: &mut super::super::InteractionMode,
     mindmap_tree: &mut Option<MindMapTree>,
-    label_edit_state: &mut LabelEditState,
-    portal_text_edit_state: &mut PortalTextEditState,
+    single_line_edit_state: &mut SingleLineEditor,
     color_picker_state: &mut ColorPickerState,
     macros: &mut crate::application::macros::MacroRegistry,
     renderer: &mut Renderer,
@@ -138,8 +142,7 @@ fn handle_pre_rebuild_side_effect(
         ConsoleSideEffect::ReplaceDocument(new_doc) => {
             *doc = new_doc;
             *mindmap_tree = None;
-            *label_edit_state = LabelEditState::Closed;
-            *portal_text_edit_state = PortalTextEditState::Closed;
+            *single_line_edit_state = SingleLineEditor::Closed;
             *color_picker_state = ColorPickerState::Closed;
             // Reset interaction mode: a stale `NodeEdit { node_id }`
             // or `Resize { target }` from the prior document points
@@ -208,8 +211,7 @@ fn handle_post_rebuild_side_effect(
     doc: &mut MindMapDocument,
     interaction_mode: &mut super::super::InteractionMode,
     mindmap_tree: &mut Option<MindMapTree>,
-    label_edit_state: &mut LabelEditState,
-    portal_text_edit_state: &mut PortalTextEditState,
+    single_line_edit_state: &mut SingleLineEditor,
     color_picker_state: &mut ColorPickerState,
     text_edit_state: &mut super::super::text_edit::TextEditState,
     app_scene: &mut crate::application::scene_host::AppScene,
@@ -218,17 +220,51 @@ fn handle_post_rebuild_side_effect(
 ) -> bool {
     let Some(eff) = side_effect else { return false };
     match eff {
+        // `label edit` seeds the editor with the existing text —
+        // the verb has no "clean" spelling, so `clean = false`.
         ConsoleSideEffect::OpenLabelEdit(er) => {
-            open_label_edit(&er, doc, label_edit_state, app_scene, renderer);
+            open_single_line_edit(
+                SingleLineEditTarget::EdgeLabel { edge_ref: er },
+                false,
+                doc,
+                single_line_edit_state,
+                app_scene,
+                renderer,
+            );
         }
         ConsoleSideEffect::OpenPortalTextEdit(er, endpoint) => {
-            open_portal_text_edit(&er, &endpoint, doc, portal_text_edit_state, app_scene, renderer);
+            open_single_line_edit(
+                SingleLineEditTarget::PortalText {
+                    edge_ref: er,
+                    endpoint_node_id: endpoint,
+                },
+                false,
+                doc,
+                single_line_edit_state,
+                app_scene,
+                renderer,
+            );
         }
         ConsoleSideEffect::OpenColorPicker(target) => {
-            open_color_picker_contextual(target, doc, color_picker_state, interaction_mode, app_scene, renderer, scene_cache);
+            open_color_picker_contextual(
+                target,
+                doc,
+                color_picker_state,
+                interaction_mode,
+                app_scene,
+                renderer,
+                scene_cache,
+            );
         }
         ConsoleSideEffect::OpenColorPickerStandalone => {
-            open_color_picker_standalone(doc, color_picker_state, interaction_mode, app_scene, renderer, scene_cache);
+            open_color_picker_standalone(
+                doc,
+                color_picker_state,
+                interaction_mode,
+                app_scene,
+                renderer,
+                scene_cache,
+            );
         }
         ConsoleSideEffect::CloseColorPicker => {
             close_color_picker_standalone(

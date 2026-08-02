@@ -77,8 +77,14 @@ fn test_matches_modifiers_exactly() {
     assert!(!k.matches("z", false, false, false));
 }
 
+/// One row of [`test_default_config_resolves_every_documented_binding`]'s
+/// table: `(context, key, ctrl, shift, alt, expected_action)`.
+/// Named because the tuple is six wide and clippy's
+/// `type_complexity` is right that the inline spelling is unreadable.
+type BindingCase = (Option<InputContext>, &'static str, bool, bool, bool, Action);
+
 /// Default-config bindings resolve in every context Mandala
-/// honours: the bare `Document` context plus the four modal
+/// honors: the bare `Document` context plus the four modal
 /// contexts (`Console`, `ColorPicker`, `LabelEdit`, `TextEdit`).
 /// Table-driven so a binding rename / removal triggers exactly
 /// one diffable failure rather than scrolling through a wall
@@ -87,8 +93,7 @@ fn test_matches_modifiers_exactly() {
 fn test_default_config_resolves_every_documented_binding() {
     let resolved = KeybindConfig::default().resolve();
 
-    // (context, key, ctrl, shift, alt, expected_action)
-    let cases: &[(Option<InputContext>, &str, bool, bool, bool, Action)] = &[
+    let cases: &[BindingCase] = &[
         // Document context (the bare-context resolver).
         (None, "z", true, false, false, Action::Undo),
         (None, "p", true, false, false, Action::EnterReparentMode),
@@ -100,33 +105,162 @@ fn test_default_config_resolves_every_documented_binding() {
         (None, "enter", false, false, false, Action::EditSelection),
         (None, "backspace", false, false, false, Action::EditSelectionClean),
         (None, "undo", false, false, false, Action::Undo), // bare alias
-
         // Console.
-        (Some(InputContext::Console), "escape", false, false, false, Action::ConsoleClose),
-        (Some(InputContext::Console), "enter", false, false, false, Action::ConsoleSubmit),
-        (Some(InputContext::Console), "tab", false, false, false, Action::ConsoleTabComplete),
-        (Some(InputContext::Console), "c", true, false, false, Action::ConsoleClearLine),
-        (Some(InputContext::Console), "a", true, false, false, Action::ConsoleJumpStart),
-        (Some(InputContext::Console), "e", true, false, false, Action::ConsoleJumpEnd),
-        (Some(InputContext::Console), "u", true, false, false, Action::ConsoleKillToStart),
-        (Some(InputContext::Console), "w", true, false, false, Action::ConsoleKillWord),
-        (Some(InputContext::Console), "backspace", false, false, false, Action::ConsoleDeleteBack),
-        (Some(InputContext::Console), "space", false, false, false, Action::ConsoleInsertSpace),
-
+        (
+            Some(InputContext::Console),
+            "escape",
+            false,
+            false,
+            false,
+            Action::ConsoleClose,
+        ),
+        (
+            Some(InputContext::Console),
+            "enter",
+            false,
+            false,
+            false,
+            Action::ConsoleSubmit,
+        ),
+        (
+            Some(InputContext::Console),
+            "tab",
+            false,
+            false,
+            false,
+            Action::ConsoleTabComplete,
+        ),
+        (
+            Some(InputContext::Console),
+            "c",
+            true,
+            false,
+            false,
+            Action::ConsoleClearLine,
+        ),
+        (
+            Some(InputContext::Console),
+            "a",
+            true,
+            false,
+            false,
+            Action::ConsoleJumpStart,
+        ),
+        (
+            Some(InputContext::Console),
+            "e",
+            true,
+            false,
+            false,
+            Action::ConsoleJumpEnd,
+        ),
+        (
+            Some(InputContext::Console),
+            "u",
+            true,
+            false,
+            false,
+            Action::ConsoleKillToStart,
+        ),
+        (
+            Some(InputContext::Console),
+            "w",
+            true,
+            false,
+            false,
+            Action::ConsoleKillWord,
+        ),
+        (
+            Some(InputContext::Console),
+            "backspace",
+            false,
+            false,
+            false,
+            Action::ConsoleDeleteBack,
+        ),
+        (
+            Some(InputContext::Console),
+            "space",
+            false,
+            false,
+            false,
+            Action::ConsoleInsertSpace,
+        ),
         // ColorPicker.
-        (Some(InputContext::ColorPicker), "escape", false, false, false, Action::PickerCancel),
-        (Some(InputContext::ColorPicker), "enter", false, false, false, Action::PickerCommit),
-        (Some(InputContext::ColorPicker), "h", false, false, false, Action::PickerNudgeHueDown),
-        (Some(InputContext::ColorPicker), "h", false, true, false, Action::PickerNudgeHueUp),
-        (Some(InputContext::ColorPicker), "s", false, false, false, Action::PickerNudgeSatDown),
-        (Some(InputContext::ColorPicker), "v", false, false, false, Action::PickerNudgeValDown),
-
+        (
+            Some(InputContext::ColorPicker),
+            "escape",
+            false,
+            false,
+            false,
+            Action::PickerCancel,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "enter",
+            false,
+            false,
+            false,
+            Action::PickerCommit,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "h",
+            false,
+            false,
+            false,
+            Action::PickerNudgeHueDown,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "h",
+            false,
+            true,
+            false,
+            Action::PickerNudgeHueUp,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "s",
+            false,
+            false,
+            false,
+            Action::PickerNudgeSatDown,
+        ),
+        (
+            Some(InputContext::ColorPicker),
+            "v",
+            false,
+            false,
+            false,
+            Action::PickerNudgeValDown,
+        ),
         // LabelEdit.
-        (Some(InputContext::LabelEdit), "escape", false, false, false, Action::LabelEditCancel),
-        (Some(InputContext::LabelEdit), "enter", false, false, false, Action::LabelEditCommit),
-
+        (
+            Some(InputContext::LabelEdit),
+            "escape",
+            false,
+            false,
+            false,
+            Action::LabelEditCancel,
+        ),
+        (
+            Some(InputContext::LabelEdit),
+            "enter",
+            false,
+            false,
+            false,
+            Action::LabelEditCommit,
+        ),
         // TextEdit.
-        (Some(InputContext::TextEdit), "escape", false, false, false, Action::TextEditCancel),
+        (
+            Some(InputContext::TextEdit),
+            "escape",
+            false,
+            false,
+            false,
+            Action::TextEditCancel,
+        ),
     ];
 
     for &(ctx, key, ctrl, shift, alt, ref expected) in cases {
@@ -377,10 +511,7 @@ fn test_wasm_compatibility_section_aabb_actions_are_compatible() {
 #[test]
 fn test_wasm_compatibility_border_no_payload_actions_are_compatible() {
     use crate::application::keybinds::WasmCompatibility::Compatible;
-    for a in [
-        Action::CycleBorderPreset,
-        Action::ToggleBorderVisible,
-    ] {
+    for a in [Action::CycleBorderPreset, Action::ToggleBorderVisible] {
         assert_eq!(a.wasm_compatibility(), Compatible, "{:?} should be Compatible", a);
     }
 }
@@ -457,29 +588,45 @@ fn test_wasm_compatibility_modal_actions_are_native_only() {
 }
 
 /// Mixed-branch Actions (whose dispatch arm reads/writes
-/// different state per branch) classify as NativeOnly per the
-/// "ANY NativeOnly branch ⇒ NativeOnly" rule. Locks the
-/// classification so a future contributor can't silently
-/// downgrade the rule to "the WASM-reachable branch is
-/// reachable in practice" — that's the looser semantic the
-/// reviewer flagged as a forward-compat trap.
+/// different state per branch) classify per the "ANY NativeOnly
+/// branch ⇒ NativeOnly" rule. Locks the classification so a future
+/// contributor can't silently downgrade the rule to "the
+/// WASM-reachable branch is reachable in practice" — that's the
+/// looser semantic the reviewer flagged as a forward-compat trap.
+///
+/// The set is not written out here: it is
+/// [`MIXED_BRANCH_ACTIONS`](crate::application::keybinds::MIXED_BRANCH_ACTIONS),
+/// the same constant `lift_mixed_branch_for_wasm_macro` reads. Two
+/// hand-written copies drifted — this test named three members and
+/// the lift named four — so there is one list now and adding a member
+/// obliges both consumers.
+///
+/// The classification travels *with* each member because it is not
+/// uniform: `ExitMode` is mixed-branch and `Compatible` (its native
+/// leftover is a step, not a branch reaching native-only state).
+/// Asserting a blanket `NativeOnly` is what made a shared list look
+/// impossible.
 #[test]
 fn test_wasm_compatibility_mixed_branch_actions_are_native_only() {
-    use crate::application::keybinds::WasmCompatibility::NativeOnly;
-    for a in [
-        // EdgeLabel branch reaches `open_label_edit` (NativeOnly state).
-        Action::DoubleClickActivate,
-        // EdgeLabel + Portal* selection branches reach NativeOnly editors.
-        Action::EditSelection,
-        Action::EditSelectionClean,
-    ] {
+    use crate::application::keybinds::MIXED_BRANCH_ACTIONS;
+    for (a, expected) in MIXED_BRANCH_ACTIONS {
         assert_eq!(
             a.wasm_compatibility(),
-            NativeOnly,
-            "{:?} should be NativeOnly under the 'ANY NativeOnly branch' rule",
-            a
+            expected,
+            "{:?} should classify {:?} under the 'ANY NativeOnly branch' rule",
+            a,
+            expected,
         );
     }
+    // The rule has to bite somewhere: at least one member must be
+    // NativeOnly, or the loop above would pass against a list that
+    // had quietly become all-Compatible.
+    assert!(
+        MIXED_BRANCH_ACTIONS
+            .iter()
+            .any(|(_, c)| *c == crate::application::keybinds::WasmCompatibility::NativeOnly),
+        "the mixed-branch set must contain at least one NativeOnly member",
+    );
 }
 
 /// Exhaustiveness pin: every variant kind classifies cleanly under
@@ -833,7 +980,7 @@ fn test_bare_right_drag_returns_none_with_default_config() {
 
 /// Users can opt in to bare `RightDrag` for fast-resize by
 /// rebinding `fast_resize_start` to remove the Ctrl modifier.
-/// Pins the user-customisation path the doc-comment promises.
+/// Pins the user-customization path the doc-comment promises.
 #[test]
 fn test_user_rebind_to_bare_right_drag_works() {
     let cfg = KeybindConfig {
@@ -943,7 +1090,7 @@ fn test_action_for_gesture_exact_modifier_match_wins_over_fallback() {
     assert_eq!(
         r.action_for_gesture("wheelup", false, false, false),
         Some(Action::ZoomOut),
-        "bare wheelup honours its bare binding"
+        "bare wheelup honors its bare binding"
     );
 }
 

@@ -15,7 +15,7 @@
 //!   `//!` inner-module docs against the parent module's namespace,
 //!   not this module's own — `self::` and bare names both fail.)
 //!
-//! Both honour the per-region color, font pin, and grapheme-aware
+//! Both honor the per-region color, font pin, and grapheme-aware
 //! byte slicing — `Range` indices on `ColorFontRegion` carry
 //! grapheme-cluster offsets (see `CONCEPTS.md`'s `Range` entry,
 //! `format/text-runs.md`, and `lib/baumhard/CONVENTIONS.md §B1`).
@@ -36,9 +36,8 @@
 //! - `src/application/renderer/tree_walker.rs` — main
 //!   tree-to-buffer walker for nodes / connections / portals
 //!   (Baumhard tree path).
-//! - `src/application/renderer/scene_buffers.rs::rebuild_border_buffers` —
-//!   per-side border rebuild for framed nodes (flat-pipeline
-//!   `BorderElement` path).
+//! - `lib/baumhard/src/mindmap/tree_builder/border.rs` — per-side
+//!   border runs for framed nodes.
 
 use cosmic_text::{Attrs, AttrsList, Color, Family, FontSystem, Metrics, Style};
 use log::warn;

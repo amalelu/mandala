@@ -4,9 +4,13 @@
 //!
 //! Handles every Compatible-classified `Action` arm whose body
 //! has been factored into a `cross_dispatch::apply_*` helper, plus
-//! the cross-platform slice of two mixed-branch NativeOnly Actions
-//! (`Action::ExitMode`'s mode reset + `last_click` clear,
-//! `Action::EditSelection*`-Single open). Returns `Handled` when
+//! the cross-platform slice of the four mixed-branch Actions
+//! [`MIXED_BRANCH_ACTIONS`] names (`Action::ExitMode`'s mode reset +
+//! `last_click` clear, `Action::EditSelection*`-Single open, and
+//! `Action::DoubleClickActivate` — everything except the edge-label
+//! branch's single-line editor open). Three of the four classify
+//! `NativeOnly`; `ExitMode` is `Compatible`, because its native
+//! leftover is a step rather than a branch. Returns `Handled` when
 //! the body ran; `Unhandled` for variants this dispatcher doesn't
 //! own — the caller's fall-through (native only) runs the
 //! platform-specific arm.
@@ -30,7 +34,7 @@
 use baumhard::util::geometry::is_positive_finite;
 
 use crate::application::document::OptionEdit;
-use crate::application::keybinds::{Action, WasmCompatibility};
+use crate::application::keybinds::{Action, WasmCompatibility, MIXED_BRANCH_ACTIONS};
 
 use super::super::input_context_core::InputContextCore;
 use super::super::InteractionMode;
@@ -51,10 +55,15 @@ pub(super) fn parse_action_runs_mode(s: &str) -> Option<bool> {
 
 /// Parse the `at` / `at_grapheme` payload on
 /// `Action::AddSection` / `Action::SplitSection`. Empty string
-/// → `Some(None)` (default — append / end-of-text); parseable
-/// → `Some(Some(n))`; unparseable → `None` (caller logs +
-/// bails). Outer Option is "did the parse succeed?"; inner
-/// Option is the value semantics.
+/// → `Some(None)`; parseable → `Some(Some(n))`; unparseable →
+/// `None` (caller logs + bails). Outer Option is "did the parse
+/// succeed?"; inner Option is the value semantics.
+///
+/// What `Some(None)` *means* is the arm's business, not the
+/// parser's: `AddSection` reads it as "append", while
+/// `SplitSection` rejects it — the console verb requires `at=`
+/// because splitting at end-of-text silently creates an empty
+/// suffix section, and the macro path holds the same line.
 pub(super) fn parse_action_optional_usize(s: &str) -> Option<Option<usize>> {
     if s.is_empty() {
         return Some(None);
@@ -82,30 +91,88 @@ where
     }
 }
 
-/// Lift `Unhandled → Handled` for the two mixed-branch arms whose
+/// Lift `Unhandled → Handled` for the mixed-branch arms whose
 /// cross-platform slice IS the totality of what WASM can do
-/// (`ExitMode`, `EditSelection*`). On native, `Unhandled` flows
-/// to the dispatcher's existing match for the target-picker
-/// (Reparent / Connect) overlay clear or
-/// EdgeLabel/Portal editor open. WASM has no such fall-through —
+/// (`ExitMode`, `EditSelection*`, and `DoubleClickActivate`'s
+/// edge-label branch). On native, `Unhandled` flows to the
+/// dispatcher's existing match for the target-picker
+/// (Reparent / Connect) overlay clear or EdgeLabel/Portal editor
+/// open. WASM has no such fall-through —
 /// `WasmMacroDispatchTarget::dispatch_action` calls
 /// [`dispatch_compatible`] directly, so the macro loop's
 /// `any_ran` flag would stop bumping for these arms without this
 /// lift.
+///
+/// `double_click_residual` is what makes the `DoubleClickActivate`
+/// entry safe to list. That arm produces **two different**
+/// `Unhandled`s, and the outcome alone cannot tell them apart —
+/// neither can "was there a hit", which is the *wrong* discriminator
+/// and was the one this function used before:
+///
+/// - **No residual at all** (`None`): the arm never reached the apply
+///   half because there was no `DispatchHit`. A soft-skip — it logged
+///   and touched no document state, which
+///   `MacroDispatchTarget::dispatch_action`'s contract defines as
+///   "did not run". Lifting it would report `any_ran=true` for a step
+///   that did nothing, and a User-tier macro whose step list is
+///   `[Action(DoubleClickActivate)]` would stop falling through to
+///   the custom-mutation tier.
+/// - **`OpenEdgeLabelEditor`**: a hit *was* present, but the shared
+///   half may legitimately have done nothing — it skips the commit
+///   and the rebuild when the label is already the current selection
+///   ([`edge_label_selection_is_current`](super::cross_dispatch::edge_label_selection_is_current)),
+///   which is the normal case because the double-click's first click
+///   already committed it. "There was a hit" therefore does **not**
+///   mean "work ran"; treating it that way reproduced the very
+///   misreport this lift exists to prevent, one condition deeper.
+///
+/// So the verdict is read from
+/// [`double_click_outcome`](super::cross_dispatch::double_click_outcome)
+/// — the single place the residual → outcome mapping is written, and
+/// the same one the dispatcher arm returns — rather than inferred
+/// here. Today a macro carries no hit, so the residual is always
+/// `None` and the entry always declines; that is the correct answer
+/// by construction, not an accident of reachability, and it stays
+/// correct if a future macro step gains a hit payload.
+///
+/// Membership is [`MIXED_BRANCH_ACTIONS`], shared with the keybind
+/// test that pins each member's classification, so the two cannot
+/// name different sets.
 ///
 /// Public-in-app so the WASM macro target's impl can call it,
 /// and so unit tests under `#[cfg(test)]` can pin the contract
 /// without spinning up a `WasmInputState`.
 pub(in crate::application::app) fn lift_mixed_branch_for_wasm_macro(
     action: &Action,
+    double_click_residual: Option<super::cross_dispatch::DoubleClickResidual>,
     outcome: DispatchOutcome,
 ) -> DispatchOutcome {
-    if matches!(outcome, DispatchOutcome::Unhandled)
-        && matches!(
-            action,
-            Action::ExitMode | Action::EditSelection | Action::EditSelectionClean,
-        )
-    {
+    if !matches!(outcome, DispatchOutcome::Unhandled) {
+        return outcome;
+    }
+    if !MIXED_BRANCH_ACTIONS.iter().any(|(a, _)| a == action) {
+        return outcome;
+    }
+    let work_ran = match action {
+        Action::ExitMode | Action::EditSelection | Action::EditSelectionClean => true,
+        Action::DoubleClickActivate => matches!(
+            super::cross_dispatch::double_click_outcome(double_click_residual),
+            DispatchOutcome::Handled
+        ),
+        other => {
+            // Reachable only by adding a member to
+            // `MIXED_BRANCH_ACTIONS` without giving it a verdict —
+            // the guard above already excluded everything else. A
+            // silent `false` there is the misreport this function
+            // exists to prevent, so it fails any test build.
+            debug_assert!(
+                false,
+                "mixed-branch Action {other:?} has no lift verdict — add an arm",
+            );
+            false
+        }
+    };
+    if work_ran {
         DispatchOutcome::Handled
     } else {
         outcome
@@ -117,9 +184,17 @@ pub(in crate::application::app) fn lift_mixed_branch_for_wasm_macro(
 /// own (NativeOnly Actions without a cross-platform slice, or
 /// mixed-branch Actions whose cross-platform slice didn't apply
 /// — caller's fall-through runs the native arm).
+///
+/// `hit` carries the pointer-event-only payload (what the press
+/// landed on, where it landed in canvas space). Keyboard, macro and
+/// touch callers pass `None`; the mouse handlers on **both** targets
+/// populate it, which is what lets `DoubleClickActivate` resolve
+/// through the keybind table in the browser instead of being
+/// hardcoded there.
 pub(in crate::application::app) fn dispatch_compatible(
     action: &Action,
     core: &mut InputContextCore<'_>,
+    hit: Option<&super::cross_dispatch::DispatchHit>,
 ) -> DispatchOutcome {
     // Mixed-branch arms — handle the cross-platform slice here.
     // Caller's fall-through (native only) handles the residual
@@ -189,13 +264,8 @@ pub(in crate::application::app) fn dispatch_compatible(
                         // Other selection states (Multi, edge,
                         // portal) stay untouched — the user steered
                         // away from the active node deliberately.
-                        if doc
-                            .selection
-                            .primary_node_id()
-                            .map_or(false, |id| id == node_id)
-                        {
-                            doc.selection =
-                                crate::application::document::SelectionState::Single(node_id);
+                        if doc.selection.primary_node_id().is_some_and(|id| id == node_id) {
+                            doc.selection = crate::application::document::SelectionState::Single(node_id);
                         }
                     }
                     let mut rc = super::cross_dispatch::RebuildContext {
@@ -240,6 +310,31 @@ pub(in crate::application::app) fn dispatch_compatible(
                 DispatchOutcome::Unhandled
             };
         }
+        Action::DoubleClickActivate => {
+            // Routes by what the press hit. The mouse handlers on
+            // both targets populate `hit` before dispatching; without
+            // it there is no target and the gesture silently no-ops
+            // (it was bound but fired from a non-pointer source, e.g.
+            // a macro carrying no hit context). That is a soft-skip:
+            // the step logs and changes no document state, which is
+            // exactly the case `MacroDispatchTarget::dispatch_action`'s
+            // contract (`macro_core.rs`) pins as "did not run".
+            //
+            // `None` residual is that fact, and
+            // `double_click_outcome` — not this arm — turns it into
+            // the reported outcome. The mapping lives there because
+            // `lift_mixed_branch_for_wasm_macro` has to reach the
+            // same verdict, and because it is pure data the suite can
+            // pin without a `Renderer` (`TEST_CONVENTIONS §T8`/§T9).
+            let residual = match hit {
+                Some(h) => Some(super::cross_dispatch::apply_double_click_activate(h, core)),
+                None => {
+                    log::debug!("DoubleClickActivate: no DispatchHit; skipping");
+                    None
+                }
+            };
+            return super::cross_dispatch::double_click_outcome(residual);
+        }
         _ => {}
     }
 
@@ -278,13 +373,9 @@ pub(in crate::application::app) fn dispatch_compatible(
             }
         }
         // ── Document-lifecycle ─────────────────────────────────
-        Action::Undo => with_doc_rebuild(core, |rc| super::cross_dispatch::apply_undo(rc)),
-        Action::DeleteSelection => {
-            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_delete_selection(rc))
-        }
-        Action::OrphanSelection => {
-            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_orphan_selection(rc))
-        }
+        Action::Undo => with_doc_rebuild(core, super::cross_dispatch::apply_undo),
+        Action::DeleteSelection => with_doc_rebuild(core, super::cross_dispatch::apply_delete_selection),
+        Action::OrphanSelection => with_doc_rebuild(core, super::cross_dispatch::apply_orphan_selection),
         Action::CreateOrphanNode => {
             let canvas_pos = core
                 .renderer
@@ -325,7 +416,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                 super::cross_dispatch::apply_center_on_selection(doc, core.renderer);
             }
         }
-        Action::JumpToRoot => with_doc_rebuild(core, |rc| super::cross_dispatch::apply_jump_to_root(rc)),
+        Action::JumpToRoot => with_doc_rebuild(core, super::cross_dispatch::apply_jump_to_root),
         // ── FPS overlay ────────────────────────────────────────
         Action::ToggleFps => super::cross_dispatch::apply_toggle_fps(core.renderer),
         Action::ToggleFpsDebug => super::cross_dispatch::apply_toggle_fps_debug(core.renderer),
@@ -362,11 +453,9 @@ pub(in crate::application::app) fn dispatch_compatible(
         Action::SetBorderField { field, value } => with_doc_rebuild(core, |rc| {
             super::cross_dispatch::apply_set_border_field(field, value, rc)
         }),
-        Action::CycleBorderPreset => {
-            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_cycle_border_preset(rc))
-        }
+        Action::CycleBorderPreset => with_doc_rebuild(core, super::cross_dispatch::apply_cycle_border_preset),
         Action::ToggleBorderVisible => {
-            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_toggle_border_visible(rc))
+            with_doc_rebuild(core, super::cross_dispatch::apply_toggle_border_visible)
         }
         Action::SetBorderPreview {
             target_kind,
@@ -376,10 +465,10 @@ pub(in crate::application::app) fn dispatch_compatible(
             super::cross_dispatch::apply_set_border_preview(*target_kind, field, value, rc)
         }),
         Action::CommitBorderPreview => {
-            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_commit_border_preview(rc))
+            with_doc_rebuild(core, super::cross_dispatch::apply_commit_border_preview)
         }
         Action::CancelBorderPreview => {
-            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_cancel_border_preview(rc))
+            with_doc_rebuild(core, super::cross_dispatch::apply_cancel_border_preview)
         }
         Action::SetEdgeCap { from, to } => {
             with_doc_rebuild(core, |rc| super::cross_dispatch::apply_set_edge_cap(from, to, rc))
@@ -434,7 +523,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                 super::cross_dispatch::apply_set_zoom_window(min, max, rc)
             });
         }
-        Action::ClearZoom => with_doc_rebuild(core, |rc| super::cross_dispatch::apply_clear_zoom(rc)),
+        Action::ClearZoom => with_doc_rebuild(core, super::cross_dispatch::apply_clear_zoom),
         Action::SetSectionOffsetDelta { dx, dy } => {
             let (Some(dx_v), Some(dy_v)) = (dx.parse::<f64>().ok(), dy.parse::<f64>().ok()) else {
                 log::warn!("SetSectionOffsetDelta: invalid dx='{}' or dy='{}'", dx, dy);
@@ -451,14 +540,17 @@ pub(in crate::application::app) fn dispatch_compatible(
             };
             with_doc_rebuild(core, |rc| {
                 super::cross_dispatch::apply_set_section_size(
-                    Some(baumhard::mindmap::model::Size { width: w_v, height: h_v }),
+                    Some(baumhard::mindmap::model::Size {
+                        width: w_v,
+                        height: h_v,
+                    }),
                     rc,
                 )
             });
         }
-        Action::SetSectionSizeFillParent => with_doc_rebuild(core, |rc| {
-            super::cross_dispatch::apply_set_section_size(None, rc)
-        }),
+        Action::SetSectionSizeFillParent => {
+            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_set_section_size(None, rc))
+        }
         Action::SetSectionOffsetAbs { x, y } => {
             let (Some(x_v), Some(y_v)) = (x.parse::<f64>().ok(), y.parse::<f64>().ok()) else {
                 log::warn!("SetSectionOffsetAbs: invalid x='{}' or y='{}'", x, y);
@@ -471,7 +563,7 @@ pub(in crate::application::app) fn dispatch_compatible(
         Action::SetSectionText { text, runs_mode } => {
             let Some(clear_runs) = parse_action_runs_mode(runs_mode) else {
                 log::warn!(
-                    "SetSectionText: runs_mode='{}' not recognised; use 'preserve' or 'clear'",
+                    "SetSectionText: runs_mode='{}' not recognized; use 'preserve' or 'clear'",
                     runs_mode
                 );
                 return DispatchOutcome::Handled;
@@ -491,9 +583,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                 super::cross_dispatch::apply_add_section(at_opt, text_owned, rc)
             });
         }
-        Action::DeleteSection => with_doc_rebuild(core, |rc| {
-            super::cross_dispatch::apply_delete_section(rc)
-        }),
+        Action::DeleteSection => with_doc_rebuild(core, super::cross_dispatch::apply_delete_section),
         Action::SplitSection { at_grapheme } => {
             let Some(at_opt) = parse_action_optional_usize(at_grapheme) else {
                 log::warn!(
@@ -502,9 +592,7 @@ pub(in crate::application::app) fn dispatch_compatible(
                 );
                 return DispatchOutcome::Handled;
             };
-            with_doc_rebuild(core, |rc| {
-                super::cross_dispatch::apply_split_section(at_opt, rc)
-            });
+            with_doc_rebuild(core, |rc| super::cross_dispatch::apply_split_section(at_opt, rc));
         }
         // ── Clipboard ─────────────────────────────────────────
         // Compatible because `clipboard::{read,write}_clipboard`
@@ -524,14 +612,14 @@ pub(in crate::application::app) fn dispatch_compatible(
                 rc.rebuild_after_geometry_change();
             }
         }),
-        Action::Paste => with_doc_rebuild(core, |rc| super::cross_dispatch::apply_paste(rc)),
+        Action::Paste => with_doc_rebuild(core, super::cross_dispatch::apply_paste),
         // ── Create-orphan-and-edit (keyboard shape) ───────────
-        // Mouse-driven empty-canvas double-click stays in
-        // `dispatch.rs` (DoubleClickActivate::Empty calls
-        // `dispatch_create_orphan_and_edit` directly with
-        // `DispatchHit::canvas_pos`). The keyboard-bound case
-        // — and the WASM target which has no DispatchHit on this
-        // path — uses `cursor_pos` here.
+        // The mouse-driven empty-canvas double-click reaches the
+        // same `apply_create_orphan_node_and_edit` body through
+        // `DoubleClickRoute::CreateOrphanAndEdit`, which uses
+        // `DispatchHit::canvas_pos`. This arm is the keyboard shape
+        // and uses `cursor_pos`; the two differ only in where the
+        // position comes from.
         Action::CreateOrphanNodeAndEdit => {
             let canvas_pos = core
                 .renderer
@@ -654,24 +742,102 @@ mod tests {
     //! here so the WASM-macro `any_ran` regression flagged by the
     //! Track-C parity reviewer can't recur silently.
     use super::*;
+    use crate::application::app::dispatch::cross_dispatch::DoubleClickResidual;
     use crate::application::keybinds::Action;
 
     #[test]
     fn exit_mode_unhandled_lifts_to_handled() {
-        let out = lift_mixed_branch_for_wasm_macro(&Action::ExitMode, DispatchOutcome::Unhandled);
+        let out = lift_mixed_branch_for_wasm_macro(&Action::ExitMode, None, DispatchOutcome::Unhandled);
         assert_eq!(out, DispatchOutcome::Handled);
     }
 
     #[test]
     fn edit_selection_unhandled_lifts_to_handled() {
-        let out = lift_mixed_branch_for_wasm_macro(&Action::EditSelection, DispatchOutcome::Unhandled);
+        let out = lift_mixed_branch_for_wasm_macro(&Action::EditSelection, None, DispatchOutcome::Unhandled);
         assert_eq!(out, DispatchOutcome::Handled);
     }
 
     #[test]
     fn edit_selection_clean_unhandled_lifts_to_handled() {
-        let out = lift_mixed_branch_for_wasm_macro(&Action::EditSelectionClean, DispatchOutcome::Unhandled);
+        let out =
+            lift_mixed_branch_for_wasm_macro(&Action::EditSelectionClean, None, DispatchOutcome::Unhandled);
         assert_eq!(out, DispatchOutcome::Handled);
+    }
+
+    /// No residual means the arm never reached the apply half: there
+    /// was no `DispatchHit`, so it logged and touched no document
+    /// state. `MacroDispatchTarget::dispatch_action`'s contract
+    /// defines that as "did not run", so the lift must decline and
+    /// the macro loop's `any_ran` must stay `false`.
+    ///
+    /// This is the shape a macro actually reaches today — macros
+    /// carry no hit — so it is the case that decides whether a
+    /// User-tier `[Action(DoubleClickActivate)]` macro falls through
+    /// to the custom-mutation tier on WASM. It must.
+    #[test]
+    fn test_double_click_activate_unhandled_without_a_residual_stays_unhandled() {
+        let out =
+            lift_mixed_branch_for_wasm_macro(&Action::DoubleClickActivate, None, DispatchOutcome::Unhandled);
+        assert_eq!(out, DispatchOutcome::Unhandled);
+    }
+
+    /// **The regression this arm keeps producing, at the level where
+    /// it is now decidable.** `OpenEdgeLabelEditor` says native has
+    /// an editor left to open; it does *not* say the shared half did
+    /// anything. It is returned unconditionally, including when the
+    /// label was already the current selection and both the commit
+    /// and the rebuild were skipped — the normal case, since the
+    /// double-click's first click commits the selection.
+    ///
+    /// The previous discriminator was `hit.is_some()`, which is
+    /// `true` here, so this exact input lifted to `Handled` and
+    /// reported `any_ran=true` for a step that touched nothing.
+    #[test]
+    fn test_double_click_activate_edge_label_residual_stays_unhandled() {
+        let out = lift_mixed_branch_for_wasm_macro(
+            &Action::DoubleClickActivate,
+            Some(DoubleClickResidual::OpenEdgeLabelEditor),
+            DispatchOutcome::Unhandled,
+        );
+        assert_eq!(out, DispatchOutcome::Unhandled);
+    }
+
+    /// The other direction of the same discriminator: the verdict is
+    /// *read* from `double_click_outcome`, not hardwired to "never
+    /// lift". A `Done` residual is the arm having run the whole
+    /// behavior, and that is `Handled`.
+    ///
+    /// The pair (`Done`, `Unhandled`) cannot come out of the
+    /// dispatcher — `Done` makes the arm return `Handled` and this
+    /// function returns early on anything but `Unhandled` — so this
+    /// pins the lift's *decision rule* rather than a reachable
+    /// dispatch state. Without it, replacing the rule with a constant
+    /// `false` would pass the suite while making the entry a lie.
+    #[test]
+    fn test_double_click_activate_verdict_follows_the_residual_not_a_constant() {
+        let out = lift_mixed_branch_for_wasm_macro(
+            &Action::DoubleClickActivate,
+            Some(DoubleClickResidual::Done),
+            DispatchOutcome::Unhandled,
+        );
+        assert_eq!(out, DispatchOutcome::Handled);
+    }
+
+    /// Every member of the one canonical mixed-branch set reaches a
+    /// verdict arm in the lift. A member added to
+    /// `MIXED_BRANCH_ACTIONS` without one hits the `debug_assert!`
+    /// in the catch-all and panics here, which is the enforcement
+    /// that keeps the list and the lift from drifting apart again.
+    #[test]
+    fn test_lift_decides_every_mixed_branch_member() {
+        for (action, _) in crate::application::keybinds::MIXED_BRANCH_ACTIONS {
+            let out = lift_mixed_branch_for_wasm_macro(&action, None, DispatchOutcome::Unhandled);
+            assert!(
+                matches!(out, DispatchOutcome::Handled | DispatchOutcome::Unhandled),
+                "{:?} produced no verdict",
+                action,
+            );
+        }
     }
 
     #[test]
@@ -684,15 +850,16 @@ mod tests {
             Action::ExitMode,
             Action::EditSelection,
             Action::EditSelectionClean,
+            Action::DoubleClickActivate,
         ] {
-            let out = lift_mixed_branch_for_wasm_macro(&action, DispatchOutcome::Handled);
+            let out = lift_mixed_branch_for_wasm_macro(&action, None, DispatchOutcome::Handled);
             assert_eq!(out, DispatchOutcome::Handled, "action={:?}", action);
         }
     }
 
     #[test]
     fn non_mixed_branch_actions_pass_through_both_outcomes() {
-        // PURE Compatible arms: their dispatch_compatible behaviour
+        // PURE Compatible arms: their dispatch_compatible behavior
         // is authoritative on both targets. The lift must NOT alter
         // outcomes for them — if cross-platform returned Unhandled
         // for `Undo` (e.g. no document loaded), it stays Unhandled.
@@ -704,7 +871,7 @@ mod tests {
             (Action::SelectAll, DispatchOutcome::Unhandled),
         ];
         for (action, outcome) in cases {
-            let out = lift_mixed_branch_for_wasm_macro(&action, outcome);
+            let out = lift_mixed_branch_for_wasm_macro(&action, None, outcome);
             assert_eq!(out, outcome, "action={:?}", action);
         }
     }
@@ -722,7 +889,7 @@ mod tests {
             Action::SaveDocument,
         ];
         for action in cases {
-            let out = lift_mixed_branch_for_wasm_macro(&action, DispatchOutcome::Unhandled);
+            let out = lift_mixed_branch_for_wasm_macro(&action, None, DispatchOutcome::Unhandled);
             assert_eq!(
                 out,
                 DispatchOutcome::Unhandled,

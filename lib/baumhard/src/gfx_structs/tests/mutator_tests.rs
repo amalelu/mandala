@@ -135,6 +135,59 @@ pub fn do_mutation_noop_leaves_tree_unchanged() {
     assert_eq!(element.glyph_area().unwrap().text, text_before);
 }
 
+// ── Mutation::writes_the_same ──────────────────────────────────────
+
+#[test]
+fn test_writes_the_same_is_reflexive_where_partial_eq_is_not() {
+    do_writes_the_same_is_reflexive_where_partial_eq_is_not();
+}
+
+/// The property the derived `PartialEq` cannot provide, and the
+/// reason [`Mutation::writes_the_same`] exists: `flat_mutations`
+/// decides whether a mutator runs by asking whether two payloads
+/// agree, and `scope::self_and_descendants` asks that of a payload
+/// and a clone of itself.
+pub fn do_writes_the_same_is_reflexive_where_partial_eq_is_not() {
+    let nan = Mutation::area_command(GlyphAreaCommand::NudgeRight(f32::NAN));
+    assert_ne!(nan, nan.clone(), "precondition: `==` is not reflexive here");
+    assert!(nan.writes_the_same(&nan.clone()), "but agreement must be");
+
+    // Reflexive for every payload, not only the pathological one.
+    for m in [
+        Mutation::area_command(GlyphAreaCommand::NudgeRight(1.0)),
+        Mutation::area_command(GlyphAreaCommand::MoveTo(f32::NAN, 2.0)),
+        Mutation::area_command(GlyphAreaCommand::NudgeUp(f32::INFINITY)),
+        Mutation::none(),
+    ] {
+        assert!(m.writes_the_same(&m.clone()), "not reflexive for {m:?}");
+    }
+}
+
+#[test]
+fn test_writes_the_same_separates_values_that_write_differently() {
+    do_writes_the_same_separates_values_that_write_differently();
+}
+
+/// Restoring reflexivity must not degrade into "anything unordered
+/// agrees". `0.0`/`-0.0` do write the same thing and so agree;
+/// `NaN`/`inf` do not, which is also why the predicate is not
+/// defined over the serialized form (JSON writes both as `null`).
+pub fn do_writes_the_same_separates_values_that_write_differently() {
+    let nan = Mutation::area_command(GlyphAreaCommand::NudgeRight(f32::NAN));
+    let inf = Mutation::area_command(GlyphAreaCommand::NudgeRight(f32::INFINITY));
+    let one = Mutation::area_command(GlyphAreaCommand::NudgeRight(1.0));
+    let pos_zero = Mutation::area_command(GlyphAreaCommand::NudgeRight(0.0));
+    let neg_zero = Mutation::area_command(GlyphAreaCommand::NudgeRight(-0.0));
+    let other_axis = Mutation::area_command(GlyphAreaCommand::NudgeUp(1.0));
+
+    assert!(!nan.writes_the_same(&inf));
+    assert!(!nan.writes_the_same(&one));
+    assert!(!one.writes_the_same(&other_axis));
+    assert!(!one.writes_the_same(&Mutation::none()));
+    assert!(pos_zero.writes_the_same(&neg_zero), "0.0 and -0.0 write alike");
+    assert!(neg_zero.writes_the_same(&pos_zero), "and symmetrically");
+}
+
 // ── Instruction::RepeatWhile with always_true ──────────────────────
 
 #[test]

@@ -28,6 +28,9 @@
 //! - [`scene_host`] — canvas vs overlay scene-tree slot
 //!   routing (the boundary between renderer and the modal
 //!   editors).
+//! - [`source_tier`] — the `App < User < Map < Inline`
+//!   provenance ladder both the mutation and macro registries
+//!   resolve and gate against.
 //! - [`user_config`] — XDG / web-storage shared loader
 //!   plumbing for keybinds / mutations / macros.
 //! - [`frame_throttle`] — per-frame cap math.
@@ -56,5 +59,6 @@ pub(crate) mod macros;
 pub(crate) mod platform;
 pub mod renderer;
 pub(crate) mod scene_host;
+pub(crate) mod source_tier;
 pub(crate) mod user_config;
 pub(crate) mod widgets;

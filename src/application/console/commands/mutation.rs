@@ -239,7 +239,7 @@ fn help(args: &Args, eff: &ConsoleEffects) -> ExecResult {
         .document
         .mutation_sources
         .get(id)
-        .map(source_label)
+        .map(|tier| tier.label())
         .unwrap_or("unknown");
 
     let mut lines = vec![
@@ -284,7 +284,7 @@ fn inspect(args: &Args, eff: &ConsoleEffects) -> ExecResult {
         .document
         .mutation_sources
         .get(id)
-        .map(source_label)
+        .map(|tier| tier.label())
         .unwrap_or("unknown");
 
     let visibility = if cm.is_internal() {
@@ -355,25 +355,10 @@ fn behavior_label(b: &baumhard::mindmap::custom_mutation::MutationBehavior) -> &
     }
 }
 
-fn source_label(s: &crate::application::document::mutations_loader::MutationSource) -> &'static str {
-    use crate::application::document::mutations_loader::MutationSource::*;
-    // `MutationSource` is `#[non_exhaustive]`; the wildcard arm is a
-    // forward-compat seam for future variants (e.g. plugin sources).
-    // Currently unreachable because all variants are matched.
-    #[allow(unreachable_patterns)]
-    match s {
-        App => "app",
-        User => "user",
-        Map => "map",
-        Inline => "inline",
-        _ => "(unknown source)",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::document::mutations_loader::MutationSource;
+    use crate::application::source_tier::SourceTier;
     use baumhard::mindmap::custom_mutation::{CustomMutation, TargetScope};
 
     /// Build a fresh doc by loading the testament map, then overwrite
@@ -383,7 +368,7 @@ mod tests {
     /// for the FONT_SYSTEM-lock-contention rationale.
     fn fixture_doc(
         reg: Vec<(&str, CustomMutation)>,
-        sources: Vec<(&str, MutationSource)>,
+        sources: Vec<(&str, SourceTier)>,
     ) -> MindMapDocument {
         let mut doc = crate::application::document::tests_common::load_test_doc();
         doc.mutation_registry = reg.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
@@ -496,7 +481,7 @@ mod tests {
                 "grow-font",
                 make_cm("grow-font", vec!["map.node", "map.tree"], "The description"),
             )],
-            vec![("grow-font", MutationSource::App)],
+            vec![("grow-font", SourceTier::App)],
         );
         match run("mutation help grow-font", &mut doc) {
             ExecResult::Lines(ls) => {
@@ -577,7 +562,7 @@ mod tests {
     fn help_uses_human_readable_scope_and_behavior_labels() {
         let mut doc = fixture_doc(
             vec![("nudge", make_cm("nudge", vec!["map.node", "map.tree"], "d"))],
-            vec![("nudge", MutationSource::App)],
+            vec![("nudge", SourceTier::App)],
         );
         match run("mutation help nudge", &mut doc) {
             ExecResult::Lines(ls) => {
@@ -600,7 +585,7 @@ mod tests {
     fn inspect_surfaces_dispatch_source_and_payload() {
         let mut doc = fixture_doc(
             vec![("nudge", make_cm("nudge", vec!["map.node"], "Nudge right"))],
-            vec![("nudge", MutationSource::App)],
+            vec![("nudge", SourceTier::App)],
         );
         match run("mutation inspect nudge", &mut doc) {
             ExecResult::Lines(ls) => {

@@ -22,21 +22,26 @@ fn test_grapheme_space_insertion_via_helper() {
 }
 
 #[test]
-fn test_grapheme_insert_advances_cursor_by_one_per_char() {
-    // Simulate three-char insertion via the grapheme_chad helper
-    // directly — mirrors what `handle_console_key` does on each
-    // character key.
-    use baumhard::util::grapheme_chad::{count_grapheme_clusters, insert_str_at_grapheme};
+fn test_grapheme_insert_advances_cursor_by_cluster_delta() {
+    // Simulate a single console payload insertion via the counted
+    // grapheme_chad helper directly.
+    use baumhard::util::grapheme_chad::{count_grapheme_clusters, insert_str_at_grapheme_counted};
     let mut input = String::new();
     let mut cursor = 0usize;
-    for ch in "abc".chars() {
-        let mut buf = [0u8; 4];
-        insert_str_at_grapheme(&mut input, cursor, ch.encode_utf8(&mut buf));
-        cursor += 1;
-    }
+    cursor += insert_str_at_grapheme_counted(&mut input, cursor, "abc");
     assert_eq!(input, "abc");
     assert_eq!(cursor, 3);
     assert_eq!(count_grapheme_clusters(&input), 3);
+}
+
+#[test]
+fn test_grapheme_combining_mark_insert_does_not_overadvance_cursor() {
+    use baumhard::util::grapheme_chad::{count_grapheme_clusters, insert_str_at_grapheme_counted};
+    let mut input = String::from("e");
+    let mut cursor = 1usize;
+    cursor += insert_str_at_grapheme_counted(&mut input, cursor, "\u{0301}");
+    assert_eq!(input, "e\u{0301}");
+    assert_eq!(cursor, count_grapheme_clusters(&input));
 }
 
 #[test]

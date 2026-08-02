@@ -22,6 +22,7 @@ use super::Canvas;
 /// O(1). Edges have no stable id; callers identify them by the
 /// `(from_id, to_id, edge_type)` triple.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MindEdge {
     /// Id of the source node.
     pub from_id: String,
@@ -32,7 +33,7 @@ pub struct MindEdge {
     /// (unstable) identity.
     #[serde(rename = "type")]
     pub edge_type: String,
-    /// Stroke colour as `#RRGGBB[AA]` or `var(--name)`.
+    /// Stroke color as `#RRGGBB[AA]` or `var(--name)`.
     pub color: String,
     /// Stroke width in points.
     pub width: i32,
@@ -153,6 +154,89 @@ impl MindEdge {
             None => edge_window,
         }
     }
+
+    /// This edge's **body** color, as authored — the raw string
+    /// before `var(--name)` theme resolution.
+    ///
+    /// Cascade: the `color` of the connection config
+    /// [`GlyphConnectionConfig::resolved_for`] selects
+    /// (`edge.glyph_connection` → `canvas.default_connection` →
+    /// hardcoded default) → `edge.color`.
+    ///
+    /// **Struct-level, not field-level.** Once an edge has forked
+    /// a `glyph_connection` of its own, the canvas default drops
+    /// out of the cascade entirely, even for fields the fork left
+    /// at `None` — the "computed style copy" rule the document
+    /// mutation layer establishes when it forks. Resolving
+    /// `color` field-by-field would silently re-attach a forked
+    /// edge to the canvas default. The hardcoded default's
+    /// `color` is `None`, so the chain bottoms out at
+    /// `edge.color`, which the model always carries: the result
+    /// is never empty and is always safe to hand to
+    /// `resolve_var`.
+    ///
+    /// Single source of truth for the body color cascade — the
+    /// sibling of [`Self::zoom_window`] on the color axis.
+    /// Scene-builder connection emission and the document layer's
+    /// clipboard resolver both read through here, so a future
+    /// third tier is one edit. O(1), no allocation.
+    pub fn body_color<'a>(&'a self, canvas: &'a Canvas) -> &'a str {
+        self.glyph_connection
+            .as_ref()
+            .or(canvas.default_connection.as_ref())
+            .and_then(|cfg| cfg.color.as_deref())
+            .unwrap_or(self.color.as_str())
+    }
+
+    /// This edge's **label** color, as authored (line-mode
+    /// edges). Cascade: `label_config.color` → the body cascade
+    /// ([`Self::body_color`]).
+    ///
+    /// The label channel's own override wins; absent an override
+    /// the label follows the edge body so the two stay visually
+    /// consistent unless deliberately detached. O(1).
+    pub fn label_color<'a>(&'a self, canvas: &'a Canvas) -> &'a str {
+        self.label_config
+            .as_ref()
+            .and_then(|c| c.color.as_deref())
+            .unwrap_or_else(|| self.body_color(canvas))
+    }
+
+    /// One portal endpoint's **icon** color, as authored.
+    /// Cascade: `endpoint.color` → the body cascade
+    /// ([`Self::body_color`]).
+    ///
+    /// `endpoint` is the state for the side being drawn — resolve
+    /// it with [`portal_endpoint_state`] first. `None` means the
+    /// endpoint carries no overrides and inherits the body color
+    /// verbatim. O(1).
+    pub fn portal_endpoint_color<'a>(
+        &'a self,
+        canvas: &'a Canvas,
+        endpoint: Option<&'a PortalEndpointState>,
+    ) -> &'a str {
+        endpoint
+            .and_then(|s| s.color.as_deref())
+            .unwrap_or_else(|| self.body_color(canvas))
+    }
+
+    /// One portal endpoint's **text** color, as authored.
+    /// Cascade: `endpoint.text_color` → the endpoint icon cascade
+    /// ([`Self::portal_endpoint_color`]).
+    ///
+    /// The two channels are independent by design so a colored
+    /// badge can carry a differently-colored annotation beside
+    /// it; falling through to the icon color keeps a
+    /// half-styled portal coherent. O(1).
+    pub fn portal_endpoint_text_color<'a>(
+        &'a self,
+        canvas: &'a Canvas,
+        endpoint: Option<&'a PortalEndpointState>,
+    ) -> &'a str {
+        endpoint
+            .and_then(|s| s.text_color.as_deref())
+            .unwrap_or_else(|| self.portal_endpoint_color(canvas, endpoint))
+    }
 }
 
 /// Per-endpoint overrides for a portal-mode edge's marker (the
@@ -171,8 +255,8 @@ impl MindEdge {
 ///
 /// Text color cascade (for the per-endpoint text label, highest
 /// first): `PortalEndpointState.text_color` → icon color cascade.
-/// The two channels are deliberately independent so a coloured
-/// badge can carry a differently-coloured label beside it — the
+/// The two channels are deliberately independent so a colored
+/// badge can carry a differently-colored label beside it — the
 /// user asked for this parity with line-mode edge labels.
 ///
 /// Position: `border_t` parameterizes a point on the owning node's
@@ -182,6 +266,7 @@ impl MindEdge {
 /// direction of the partner endpoint, so the label always faces
 /// its counterpart until the user drags it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortalEndpointState {
     /// Icon color override as `#RRGGBB` or `var(--name)`. `None` =
     /// inherit from the edge color cascade. Cleared by "cut" on
@@ -323,6 +408,7 @@ pub const PORTAL_GLYPH_PRESETS: &[&str] = &[
 /// Connections are composed of repeating body glyphs and optional end caps,
 /// laid out along the path from source to target.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlyphConnectionConfig {
     /// The glyph(s) used for the body/middle of the connection, repeated to fill length.
     #[serde(default = "default_connection_body")]
@@ -455,6 +541,7 @@ impl GlyphConnectionConfig {
 /// the two concepts share shape but not identity (line-mode has one
 /// label per edge; portal mode has one per endpoint).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EdgeLabelConfig {
     /// Tangential position on the connection path, `[0.0, 1.0]`.
     /// `0.0` is the from-anchor, `1.0` the to-anchor, `0.5` (or
@@ -516,7 +603,7 @@ pub struct EdgeLabelConfig {
 /// adjacent text inherits the icon size at 1:1, not 1.1× — a
 /// multiplied text would overflow beside a 50pt badge. The
 /// factor applies only to line-mode edge labels. See
-/// `scene_builder::portal::resolve_portal_endpoint_text_style`
+/// `tree_builder::portal::resolve_portal_endpoint_text_style`
 /// for the portal-text cascade.
 pub const DEFAULT_LABEL_SIZE_FACTOR: f32 = 1.1;
 
@@ -571,6 +658,7 @@ impl EdgeLabelConfig {
 /// `f64` fields keep parity with the JSON precision of the source
 /// format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlPoint {
     /// Canvas-space x coordinate.
     pub x: f64,

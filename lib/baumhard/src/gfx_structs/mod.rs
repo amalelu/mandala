@@ -18,6 +18,9 @@ pub mod area_fields;
 pub mod area_mutators;
 /// 2D pan/zoom camera — canvas ↔ screen-space projection.
 pub mod camera;
+/// `Delta` — the field-set container and `DeltaField` vocabulary
+/// trait shared by the area-side and model-side mutation surfaces.
+pub mod delta;
 /// `GfxElement` — tree-node variant (`GlyphArea` / `GlyphModel` /
 /// `Void`) plus its field enum, flags, and AABB caching.
 pub mod element;

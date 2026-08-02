@@ -3,11 +3,12 @@
 //! Tests for [`crate::gfx_structs::tree::Tree`] — arena operations,
 //! mutations, events, and subscriber dispatch (§T1).
 
-use crossbeam_channel::unbounded;
 use glam::Vec2;
 use indextree::NodeId;
 use lazy_static::lazy_static;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use strum::IntoEnumIterator;
 
@@ -29,7 +30,7 @@ use crate::gfx_structs::tree_walker::walk_tree_from;
 use crate::util::color::{add_rgba, Color, FloatRgba};
 
 use crate::core::primitives::{
-    Applicable, ApplyOperation, ColorFontRegion, ColorFontRegionField, ColorFontRegions, Range,
+    Applicable, ApplyOperation, ColorFontRegion, ColorFontRegionField, ColorFontRegions, Discriminated, Range,
 };
 use crate::gfx_structs::predicate::{Comparator, Predicate};
 use crate::gfx_structs::util::regions::RegionParams;
@@ -166,6 +167,16 @@ lazy_static!(
              (GlyphAreaCommand::MoveTo(500.0, 500.0),
                 vec![(GfxElementField::GlyphArea(
                 GlyphAreaField::position(500.0, 500.0)), ApplyOperation::Assign)]),
+             // Rotating about the area's own position is the one
+             // rotation with a bit-exact expectation (the translated
+             // vector is exactly zero, so no trig error can leak in) —
+             // and it is exactly the case the missing translate-back
+             // used to teleport to the origin.
+             // `area_rotate_moves_position_around_pivot` covers a
+             // displaced pivot with the geometry epsilon.
+             (GlyphAreaCommand::Rotate { pivot: Vec2::new(500.0, 500.0), degrees: 90.0 },
+                vec![(GfxElementField::GlyphArea(
+                GlyphAreaField::position(500.0, 500.0)), ApplyOperation::Assign)]),
              (GlyphAreaCommand::SetRegionColor(Range::new(0,0),[25.0, 25.0, 25.0, 25.0]),
                 vec![(GfxElementField::Region(Range::new(0,0),
                 ColorFontRegionField::Color([25.0, 25.0, 25.0, 25.0])), ApplyOperation::Assign)]),
@@ -196,6 +207,35 @@ lazy_static!(
                    vec![(GfxElementField::GlyphModel(GlyphModelField::position(0.0, 200.0)), ApplyOperation::Add)]),
                (GlyphModelCommand::NudgeDown(200.0),
                    vec![(GfxElementField::GlyphModel(GlyphModelField::position(0.0, 200.0)), ApplyOperation::Assign)]),
+               (GlyphModelCommand::NudgeUp(200.0),
+                   vec![(GfxElementField::GlyphModel(GlyphModelField::position(0.0, -200.0)), ApplyOperation::Add)]),
+               (GlyphModelCommand::NudgeLeft(75.0),
+                   vec![(GfxElementField::GlyphModel(GlyphModelField::position(-75.0, 0.0)), ApplyOperation::Add)]),
+               (GlyphModelCommand::NudgeRight(75.0),
+                   vec![(GfxElementField::GlyphModel(GlyphModelField::position(75.0, 0.0)), ApplyOperation::Add)]),
+
+               // Rotating about the element's own position is the one
+               // rotation with a bit-exact expectation (the translated
+               // vector is exactly zero, so no trig error can leak in).
+               // `model_rotate_moves_position_around_pivot` covers a
+               // displaced pivot with the geometry epsilon.
+               (GlyphModelCommand::Rotate { pivot: Vec2::new(0.0, 0.0), degrees: 90.0 },
+                   vec![(GfxElementField::GlyphModel(GlyphModelField::position(0.0, 0.0)), ApplyOperation::Assign)]),
+
+               // Polite (expanding) insert into the middle of the
+               // reference line's two-space run splits it in half and
+               // sandwiches the new component, rather than overwriting
+               // as `RudeInsert` does.
+               (GlyphModelCommand::PoliteInsert {
+                           line_num: 0,
+                           at_idx: 1,
+                           component: GlyphComponent::text("hi", AlphaMusicMan, Color::black())},
+                   vec![(GfxElementField::GlyphModel(
+                   GlyphModelField::GlyphLine(0, GlyphLine::new_with_vec(vec![
+                       GlyphComponent::space(1),
+                       GlyphComponent::text("hi", AlphaMusicMan, Color::black()),
+                       GlyphComponent::space(1)], false))),
+                   ApplyOperation::Assign)]),
 
                // this is the operation to be tested
                (GlyphModelCommand::RudeInsert {
@@ -365,7 +405,11 @@ pub fn model_block_commands() {
                     GlyphModelField::GlyphLine(num, line) => {
                         let mut my_reference = reference_model.clone();
                         apply_operation.apply(
-                            my_reference.glyph_model_mut().unwrap().glyph_matrix.ensure_line(num),
+                            my_reference
+                                .glyph_model_mut()
+                                .unwrap()
+                                .glyph_matrix
+                                .ensure_line(num),
                             line,
                         );
                         assert_eq!(my_reference, my_model);
@@ -398,6 +442,17 @@ pub fn model_block_commands() {
                 _ => {}
             }
         }
+    }
+    // Every model command kind must be represented in MODEL_COMMANDS,
+    // mirroring the area-side assertion below. The tag enum is derived
+    // from `GlyphModelCommand`, so a newly added command shows up here
+    // as an untested type rather than slipping through unnoticed.
+    for command_type in GlyphModelCommandType::iter() {
+        assert!(
+            command_type_set.contains(&command_type),
+            "The type {} was not tested",
+            command_type
+        );
     }
 }
 
@@ -1033,9 +1088,8 @@ pub fn test_event_propagation_complex_symmetric() {
 pub fn event_propagation_complex_symmetric() {
     // This is necessary to initialize lazy statics
     fonts::init();
-    let (mock_sender, _mock_receiver) = unbounded();
-    let region_params = Arc::new(RegionParams::new(10, (1000, 1000)));
-    let mut model: Tree<GfxElement, GfxMutator> = Tree::new(region_params, mock_sender);
+    let region_params = Rc::new(RegionParams::new(10, (1000, 1000)));
+    let mut model: Tree<GfxElement, GfxMutator> = Tree::new(region_params);
     let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new();
 
     let mut model_index: FxHashMap<String, NodeId> = FxHashMap::default();
@@ -1045,7 +1099,7 @@ pub fn event_propagation_complex_symmetric() {
 
     let subscriber: EventSubscriber = {
         let results_index = Arc::clone(&results_index);
-        Arc::new(Mutex::new(
+        Rc::new(RefCell::new(
             move |gfx_element: &mut GfxElement, event: GlyphTreeEventInstance| {
                 // Example logic for handling the event
                 println!(
@@ -1127,7 +1181,7 @@ pub fn event_propagation_simple() {
     let mut model_root = GfxElement::new_void_with_id(0, incr(&mut id_head));
     let mut model_baby = GfxElement::new_void_with_id(0, incr(&mut id_head));
 
-    let subscriber: EventSubscriber = Arc::new(Mutex::new(
+    let subscriber: EventSubscriber = Rc::new(RefCell::new(
         |gfx_element: &mut GfxElement, event: GlyphTreeEventInstance| {
             // Example logic for handling the event
             println!(

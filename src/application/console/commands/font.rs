@@ -44,7 +44,7 @@ use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
 use crate::application::console::traits::{apply_to_targets, AcceptsFontFamily};
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
-use crate::application::document::{SectionSel, SelectionState};
+use crate::application::document::SelectionState;
 
 pub const KEYS: &[&str] = &["size", "min", "max", "section"];
 /// Positional subverbs surfaced as token-0 completions alongside
@@ -171,15 +171,57 @@ fn parse_pt(key: &str, value: &str) -> Result<f32, ExecResult> {
     crate::application::console::helpers::parse_finite_pt(key, value).map_err(ExecResult::err)
 }
 
-/// Parsed `font` kv-form arguments. Built once by
-/// [`parse_font_args`]; the per-selection-variant dispatcher
-/// in [`apply_font_args`] reads from it without re-parsing.
-struct FontArgs {
+/// One selection-wide font edit: the `(size, min, max)` triple
+/// plus the optional `section=N` / `range=A..B` narrowing.
+///
+/// Built once by [`parse_font_args`] on the verb path and
+/// synthesized from a single slot by
+/// [`apply_font_kv_to_selection`] on the `Action` path. Both feed
+/// the one selection dispatcher, [`apply_font_edit_to_selection`].
+struct FontSizeEdit {
     size: Option<f32>,
     min: Option<f32>,
     max: Option<f32>,
     section_target: Option<usize>,
     range_target: Option<(usize, usize)>,
+}
+
+/// Which surface a font edit landed on — the shape the verb needs
+/// to render its scrollback line.
+enum FontApplyScope {
+    /// A whole node (every section's runs).
+    Node,
+    /// One section, optionally narrowed to a grapheme range.
+    Section {
+        idx: usize,
+        range: Option<(usize, usize)>,
+    },
+    /// A fan-out across `kind`-shaped targets (`"node"` /
+    /// `"section"`), reported as a count.
+    Fanout { kind: &'static str },
+    /// A single edge-adjacent channel, named for the message
+    /// (`"edge"`, `"edge label"`, `"portal label"`,
+    /// `"portal text"`). These are the only surfaces that carry
+    /// screen-space clamps.
+    Channel { kind: &'static str },
+}
+
+/// Outcome of [`apply_font_edit_to_selection`].
+///
+/// `changed` is all the `Action` path needs (it gates the scene
+/// rebuild); the other two fields carry exactly the extra context
+/// the verb path needs to phrase its message. Having both paths
+/// read one report is what keeps the keybind and the verb from
+/// drifting — pre-dedup the two dispatchers disagreed on
+/// `Multi` / `MultiSection` with `min` / `max`, where the verb
+/// explained itself and the Action arm silently returned `false`.
+struct FontApplyReport {
+    /// Targets whose setter reported a real change.
+    changed: usize,
+    scope: FontApplyScope,
+    /// `Some(noun)` when `min` / `max` were asked for on a surface
+    /// that has no screen-space clamps.
+    clamps_rejected: Option<&'static str>,
 }
 
 fn execute_font(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
@@ -203,13 +245,13 @@ fn execute_font(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     apply_font_args(&mut eff.document, &parsed)
 }
 
-/// Parse every recognised kv up front so the atomic application
-/// sees a complete `FontArgs` value. Returns `Err(ExecResult)`
+/// Parse every recognized kv up front so the atomic application
+/// sees a complete `FontSizeEdit` value. Returns `Err(ExecResult)`
 /// for unknown keys, malformed values, mutually-exclusive
 /// combinations, or empty input — all surface to the caller via
 /// the same error channel `apply_font_args` would use.
-fn parse_font_args(args: &Args) -> Result<FontArgs, ExecResult> {
-    let mut out = FontArgs {
+fn parse_font_args(args: &Args) -> Result<FontSizeEdit, ExecResult> {
+    let mut out = FontSizeEdit {
         size: None,
         min: None,
         max: None,
@@ -224,14 +266,14 @@ fn parse_font_args(args: &Args) -> Result<FontArgs, ExecResult> {
             "min" => out.min = Some(parse_pt("min", v)?),
             "max" => out.max = Some(parse_pt("max", v)?),
             "section" => {
-                out.section_target = Some(
-                    super::range_kv::parse_section_kv("font", v).map_err(ExecResult::err)?,
-                );
+                out.section_target =
+                    Some(super::range_kv::parse_section_kv("font", v).map_err(ExecResult::err)?);
             }
             "range" => {
-                out.range_target = Some(super::range_kv::parse_range_kv(v).map_err(|msg| {
-                    ExecResult::err(format!("font: range='{}' — {}", v, msg))
-                })?);
+                out.range_target = Some(
+                    super::range_kv::parse_range_kv(v)
+                        .map_err(|msg| ExecResult::err(format!("font: range='{}' — {}", v, msg)))?,
+                );
             }
             other => return Err(ExecResult::err(format!("unknown key '{}'", other))),
         }
@@ -258,7 +300,7 @@ fn parse_font_args(args: &Args) -> Result<FontArgs, ExecResult> {
     // Reject obviously-inverted explicit bounds up front so the
     // user sees a clear error instead of a silent no-op from the
     // setter's inverted-bounds guard. The setter still re-checks
-    // against resolved (post-override) bounds for defence in
+    // against resolved (post-override) bounds for defense in
     // depth — that catches the case where the user passes only
     // one side and it inverts against the existing struct.
     if let (Some(lo), Some(hi)) = (out.min, out.max) {
@@ -271,220 +313,226 @@ fn parse_font_args(args: &Args) -> Result<FontArgs, ExecResult> {
     Ok(out)
 }
 
-/// Selection-variant dispatch. A `Multi` node selection fans
-/// out over each node (size only; min/max are NotApplicable
-/// for nodes). The edge-adjacent variants each write to their
-/// own channel.
-fn apply_font_args(
+/// The one selection dispatcher for font edits.
+///
+/// Every font write — kv-form verb, `Action::SetFontKv` keybind,
+/// macro step — resolves its target here. `Err` carries a
+/// user-facing message (no selection, or a `range=` that starts
+/// past the section's grapheme count); `Ok` reports what landed.
+fn apply_font_edit_to_selection(
     doc: &mut crate::application::document::MindMapDocument,
-    a: &FontArgs,
-) -> ExecResult {
+    a: &FontSizeEdit,
+) -> Result<FontApplyReport, String> {
+    // Nodes and sections carry a font size but no screen-space
+    // clamp pair — only the edge-adjacent channels do.
+    let clamps_asked = a.min.is_some() || a.max.is_some();
+    let section_report = |changed: usize, idx: usize, range: Option<(usize, usize)>| FontApplyReport {
+        changed,
+        scope: FontApplyScope::Section { idx, range },
+        clamps_rejected: clamps_asked.then_some("section"),
+    };
+    let channel_report = |changed: bool, kind: &'static str| FontApplyReport {
+        changed: usize::from(changed),
+        scope: FontApplyScope::Channel { kind },
+        clamps_rejected: None,
+    };
     match doc.selection.clone() {
-        // `section=N` (E5 verb syntax) routes to that specific
-        // section's runs; absent, the write applies to every
-        // section on the node.
+        // `section=N` (E5 verb syntax) narrows to that section's
+        // runs; absent, the write applies to the whole node.
         SelectionState::Single(id) => match a.section_target {
-            Some(idx) => section_font_outcome(doc, &id, idx, a.size, a.min, a.max, a.range_target),
-            None => node_font_outcome(doc, &id, a.size, a.min, a.max),
+            Some(idx) => {
+                let changed = write_section_font(doc, &id, idx, a.size, a.range_target)?;
+                Ok(section_report(changed, idx, a.range_target))
+            }
+            None => Ok(FontApplyReport {
+                changed: usize::from(a.size.map(|pt| doc.set_node_font_size(&id, pt)).unwrap_or(false)),
+                scope: FontApplyScope::Node,
+                clamps_rejected: clamps_asked.then_some("node"),
+            }),
         },
+        // Section selection: an explicit `section=N` overrides the
+        // active section index; otherwise write the section the
+        // user pointed at.
         SelectionState::Section(s) => {
-            // Section selection: explicit `section=N` overrides
-            // the active section index; otherwise fall through to
-            // the section the user pointed at.
             let idx = a.section_target.unwrap_or(s.section_idx);
-            section_font_outcome(doc, &s.node_id, idx, a.size, a.min, a.max, a.range_target)
+            let changed = write_section_font(doc, &s.node_id, idx, a.size, a.range_target)?;
+            Ok(section_report(changed, idx, a.range_target))
         }
-        SelectionState::Multi(ids) => fanout_size_outcome(
-            ids.iter().filter_map(|id| {
-                a.size.map(|pt| doc.set_node_font_size(id, pt))
-            }),
-            a.min,
-            a.max,
-            "node",
-        ),
-        SelectionState::MultiSection(secs) => fanout_size_outcome(
-            secs.iter().filter_map(|s| {
-                a.size
-                    .map(|pt| doc.set_section_font_size(&s.node_id, s.section_idx, pt))
-            }),
-            a.min,
-            a.max,
-            "section",
-        ),
-        SelectionState::Edge(er) => {
-            let changed = doc.set_edge_font(&er, a.size, a.min, a.max);
-            super::applied_or_no_change("font", "edge", changed)
-        }
-        SelectionState::EdgeLabel(s) => {
-            let changed = doc.set_edge_label_font(&s.edge_ref, a.size, a.min, a.max);
-            super::applied_or_no_change("font", "edge label", changed)
-        }
-        SelectionState::PortalLabel(s) => {
-            // Portal icon routes to the owning edge's
-            // `glyph_connection` channel (same sink as `Edge`).
-            let changed = doc.set_edge_font(&s.edge_ref(), a.size, a.min, a.max);
-            super::applied_or_no_change("font", "portal label", changed)
-        }
-        SelectionState::PortalText(s) => {
-            let changed = doc.set_portal_text_font(
-                &s.edge_ref(),
-                &s.endpoint_node_id,
-                a.size,
-                a.min,
-                a.max,
-            );
-            super::applied_or_no_change("font", "portal text", changed)
-        }
+        // SectionRange: layer an explicit `range=A..B` on top of
+        // the selection's own range when both are set (kv wins —
+        // explicit user input).
         SelectionState::SectionRange { sel, range } => {
-            // SectionRange: route to the section, layering an
-            // explicit `range=A..B` from the kv parser on top of
-            // the selection's own range when both are set
-            // (kv wins — explicit user input).
             let idx = a.section_target.unwrap_or(sel.section_idx);
             let effective_range = a.range_target.or(Some(range));
-            section_font_outcome(doc, &sel.node_id, idx, a.size, a.min, a.max, effective_range)
+            let changed = write_section_font(doc, &sel.node_id, idx, a.size, effective_range)?;
+            Ok(section_report(changed, idx, effective_range))
         }
-        SelectionState::None => ExecResult::err("font: no selection"),
+        SelectionState::Multi(ids) => {
+            let mut changed = 0usize;
+            if let Some(pt) = a.size {
+                for id in &ids {
+                    changed += usize::from(doc.set_node_font_size(id, pt));
+                }
+            }
+            Ok(FontApplyReport {
+                changed,
+                scope: FontApplyScope::Fanout { kind: "node" },
+                clamps_rejected: clamps_asked.then_some("node"),
+            })
+        }
+        SelectionState::MultiSection(secs) => {
+            let mut changed = 0usize;
+            if let Some(pt) = a.size {
+                for s in &secs {
+                    changed += usize::from(doc.set_section_font_size(&s.node_id, s.section_idx, pt));
+                }
+            }
+            Ok(FontApplyReport {
+                changed,
+                scope: FontApplyScope::Fanout { kind: "section" },
+                clamps_rejected: clamps_asked.then_some("section"),
+            })
+        }
+        SelectionState::Edge(er) => Ok(channel_report(
+            doc.set_edge_font(&er, a.size, a.min, a.max),
+            "edge",
+        )),
+        SelectionState::EdgeLabel(s) => Ok(channel_report(
+            doc.set_edge_label_font(&s.edge_ref, a.size, a.min, a.max),
+            "edge label",
+        )),
+        // Portal icon routes to the owning edge's
+        // `glyph_connection` channel (same sink as `Edge`).
+        SelectionState::PortalLabel(s) => Ok(channel_report(
+            doc.set_edge_font(&s.edge_ref(), a.size, a.min, a.max),
+            "portal label",
+        )),
+        SelectionState::PortalText(s) => Ok(channel_report(
+            doc.set_portal_text_font(&s.edge_ref(), &s.endpoint_node_id, a.size, a.min, a.max),
+            "portal text",
+        )),
+        SelectionState::None => Err("font: no selection".to_string()),
     }
 }
 
-/// Outcome formatter for the `Multi` / `MultiSection` fanout
-/// arms. `applied_iter` yields one bool per attempted target
-/// (true = the setter changed the doc); `kind` is the singular
-/// noun used in the "applied to N `kind`(s)" line.
-///
-/// The `min` / `max` arms surface a single
-/// "min/max: `kind`s have no screen-space clamps" message rather
-/// than one per target — the message is identical across nodes
-/// and sections; the only difference is the noun.
-fn fanout_size_outcome(
-    applied_iter: impl Iterator<Item = bool>,
-    min: Option<f32>,
-    max: Option<f32>,
-    kind: &str,
-) -> ExecResult {
-    let changed = applied_iter.filter(|b| *b).count();
-    let applicable_msg = (min.is_some() || max.is_some())
-        .then(|| format!("min/max: {}s have no screen-space clamps", kind));
-    if changed == 0 && applicable_msg.is_none() {
-        return ExecResult::ok_msg("font: no change");
-    }
-    let mut lines = Vec::new();
-    if changed > 0 {
-        lines.push(format!("font: applied to {} {}(s)", changed, kind));
-    }
-    if let Some(m) = applicable_msg {
-        lines.push(m);
-    }
-    ExecResult::lines(lines)
-}
-
-/// Per-section font outcome — the `section=N` verb syntax routes
-/// here. Mirrors [`node_font_outcome`] for the shape, but writes
-/// only to section `section_idx` via
-/// [`super::super::super::document::MindMapDocument::set_section_font_size`].
-/// `min` / `max` remain NotApplicable for nodes / sections; the
-/// surface message is the same.
-fn section_font_outcome(
+/// Write one section's font size, optionally narrowed to a
+/// grapheme range. Returns the number of targets changed (0 or 1)
+/// so the caller can fold it into a [`FontApplyReport`].
+fn write_section_font(
     doc: &mut crate::application::document::MindMapDocument,
-    id: &str,
+    node_id: &str,
     section_idx: usize,
     size: Option<f32>,
-    min: Option<f32>,
-    max: Option<f32>,
     range: Option<(usize, usize)>,
-) -> ExecResult {
+) -> Result<usize, String> {
+    // Pre-flight the range so an out-of-bounds start surfaces as a
+    // clear error instead of the setter's silent no-op (which is
+    // indistinguishable from "already that size").
     if let Some((rs, _re)) = range {
-        if let Some(node) = doc.mindmap.nodes.get(id) {
-            if let Some(section) = node.sections.get(section_idx) {
-                let total = baumhard::util::grapheme_chad::count_grapheme_clusters(&section.text);
-                if rs >= total {
-                    return ExecResult::err(format!(
-                        "font: range_start={} is past the section's grapheme count ({})",
-                        rs, total
-                    ));
-                }
+        if let Some(section) = doc
+            .mindmap
+            .nodes
+            .get(node_id)
+            .and_then(|n| n.sections.get(section_idx))
+        {
+            let total = baumhard::util::grapheme_chad::count_grapheme_clusters(&section.text);
+            if rs >= total {
+                return Err(format!(
+                    "font: range_start={} is past the section's grapheme count ({})",
+                    rs, total
+                ));
             }
         }
     }
-    let mut messages = Vec::new();
-    let mut any_applied = false;
-    if let Some(pt) = size {
-        let applied = match range {
-            Some((rs, re)) => {
-                let ok = doc.set_section_font_size_range(id, section_idx, rs, re, pt);
-                if !ok {
-                    // Mirror the picker path's stale-range diagnostic
-                    // (see `color_picker_flow::commit`). Pre-flight
-                    // already catches `rs >= total`; a `false` here
-                    // means `range_end` extends past the section's
-                    // grapheme count or the section was deleted.
-                    log::warn!(
-                        "font verb on section {} of node {} \
-                         range {}..{} produced no change \
-                         (range may extend past the section's \
-                         grapheme count or section was deleted)",
-                        section_idx, id, rs, re
-                    );
-                }
-                ok
+    let Some(pt) = size else {
+        return Ok(0);
+    };
+    let applied = match range {
+        Some((rs, re)) => {
+            let ok = doc.set_section_font_size_range(node_id, section_idx, rs, re, pt);
+            if !ok {
+                // Mirror the picker path's stale-range diagnostic
+                // (see `color_picker_flow::commit`). The pre-flight
+                // above already catches `rs >= total`; a `false`
+                // here means `range_end` extends past the section's
+                // grapheme count or the section was deleted.
+                log::warn!(
+                    "font on section {} of node {} range {}..{} produced no change \
+                     (range may extend past the section's grapheme count or \
+                     section was deleted)",
+                    section_idx,
+                    node_id,
+                    rs,
+                    re
+                );
             }
-            None => doc.set_section_font_size(id, section_idx, pt),
-        };
-        if applied {
-            any_applied = true;
+            ok
         }
-    }
-    if min.is_some() || max.is_some() {
-        messages.push("min/max: nodes have no screen-space clamps".to_string());
-    }
-    if !messages.is_empty() {
-        if !any_applied {
-            return ExecResult::err(messages.join("; "));
-        }
-        return ExecResult::lines(messages);
-    }
-    if any_applied {
-        let scope = match range {
-            Some((rs, re)) => format!("section {} range {}..{}", section_idx, rs, re),
-            None => format!("section {}", section_idx),
-        };
-        ExecResult::ok_msg(format!("font applied to {}", scope))
-    } else {
-        ExecResult::ok_msg("font: no change")
+        None => doc.set_section_font_size(node_id, section_idx, pt),
+    };
+    Ok(usize::from(applied))
+}
+
+/// Verb-path adapter: run the shared core and render its report as
+/// scrollback.
+fn apply_font_args(doc: &mut crate::application::document::MindMapDocument, a: &FontSizeEdit) -> ExecResult {
+    match apply_font_edit_to_selection(doc, a) {
+        Ok(report) => font_report_to_exec(report),
+        Err(msg) => ExecResult::err(msg),
     }
 }
 
-fn node_font_outcome(
-    doc: &mut crate::application::document::MindMapDocument,
-    id: &str,
-    size: Option<f32>,
-    min: Option<f32>,
-    max: Option<f32>,
-) -> ExecResult {
-    let mut messages = Vec::new();
-    let mut any_applied = false;
-    if let Some(pt) = size {
-        if doc.set_node_font_size(id, pt) {
-            any_applied = true;
+/// Render a [`FontApplyReport`] as the verb's scrollback line.
+fn font_report_to_exec(report: FontApplyReport) -> ExecResult {
+    let clamp_msg = report
+        .clamps_rejected
+        .map(|noun| format!("min/max: {}s have no screen-space clamps", noun));
+    match report.scope {
+        FontApplyScope::Node => single_target_result(report.changed, clamp_msg, "font applied"),
+        FontApplyScope::Section { idx, range } => {
+            let scope = match range {
+                Some((rs, re)) => format!("section {} range {}..{}", idx, rs, re),
+                None => format!("section {}", idx),
+            };
+            single_target_result(report.changed, clamp_msg, &format!("font applied to {}", scope))
         }
-    }
-    if min.is_some() || max.is_some() {
-        messages.push("min/max: nodes have no screen-space clamps".to_string());
-    }
-    if !messages.is_empty() {
-        if !any_applied {
-            return ExecResult::err(messages.join("; "));
+        // The fan-out arms surface a single clamp message rather
+        // than one per target — the sentence is identical across
+        // targets; only the noun differs.
+        FontApplyScope::Fanout { kind } => {
+            if report.changed == 0 && clamp_msg.is_none() {
+                return ExecResult::ok_msg("font: no change");
+            }
+            let mut lines = Vec::new();
+            if report.changed > 0 {
+                lines.push(format!("font: applied to {} {}(s)", report.changed, kind));
+            }
+            if let Some(m) = clamp_msg {
+                lines.push(m);
+            }
+            ExecResult::lines(lines)
         }
-        return ExecResult::lines(messages);
-    }
-    if any_applied {
-        ExecResult::ok_msg("font applied")
-    } else {
-        ExecResult::ok_msg("font: no change")
+        FontApplyScope::Channel { kind } => super::applied_or_no_change("font", kind, report.changed > 0),
     }
 }
 
+/// Shared tail for the single-target (node / section) arms: a
+/// clamp rejection outranks the success line, and becomes a hard
+/// error when nothing else applied.
+fn single_target_result(changed: usize, clamp_msg: Option<String>, success: &str) -> ExecResult {
+    if let Some(m) = clamp_msg {
+        return if changed == 0 {
+            ExecResult::err(m)
+        } else {
+            ExecResult::lines(vec![m])
+        };
+    }
+    if changed == 0 {
+        ExecResult::ok_msg("font: no change")
+    } else {
+        ExecResult::ok_msg(success.to_string())
+    }
+}
 
 /// `font set <family>` — pin the font family on the current
 /// selection through the `AcceptsFontFamily` trait. Validates the
@@ -566,9 +614,7 @@ fn execute_font_set(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             SelectionState::SectionRange { sel, .. } => sel.node_id,
             _ => return ExecResult::err("font: section=N requires a node or section selection"),
         };
-        let applied = eff
-            .document
-            .set_section_font_family(&node_id, idx, Some(&family));
+        let applied = eff.document.set_section_font_family(&node_id, idx, Some(&family));
         return if applied {
             ExecResult::ok_msg(format!("font set: {} on section {}", family, idx))
         } else {
@@ -609,10 +655,19 @@ pub(crate) fn apply_font_family_to_selection(
     report.any_applied
 }
 
-/// Mutation core: apply a font-size / min / max kv (one at a time)
-/// to the current selection. `which` selects the slot
-/// (`"size" | "min" | "max"`); mirrors the verb's per-channel
-/// dispatch but only for one slot. Returns `true` on a real change.
+/// Mutation core: apply one font-size slot (`"size" | "min" |
+/// "max"`) to the current selection for the parametric
+/// `Action::SetFontKv` arm.
+///
+/// Routes through the same [`apply_font_edit_to_selection`]
+/// dispatcher the kv-form verb uses, so the keybind and the verb
+/// cannot disagree about which channel a selection writes to.
+/// Rejections that the verb would print to scrollback are logged
+/// here instead — the Action path has no scrollback, and a silent
+/// no-op leaves the user with no signal at all.
+///
+/// Returns `true` on a real change; the bool gates the scene
+/// rebuild.
 #[must_use = "the bool gates the scene rebuild — drop it explicitly with `let _ = …` if you don't care"]
 pub(crate) fn apply_font_kv_to_selection(
     doc: &mut crate::application::document::MindMapDocument,
@@ -628,61 +683,29 @@ pub(crate) fn apply_font_kv_to_selection(
         "max" => (None, None, Some(pt)),
         _ => return false,
     };
-    match doc.selection.clone() {
-        // Whole-node: writes every section's runs.
-        SelectionState::Single(id) => {
-            // Nodes only accept `size`; `min` / `max` are
-            // NotApplicable. Mirror the verb's behaviour.
-            if size.is_some() {
-                doc.set_node_font_size(&id, pt)
-            } else {
-                false
+    let edit = FontSizeEdit {
+        size,
+        min,
+        max,
+        section_target: None,
+        range_target: None,
+    };
+    match apply_font_edit_to_selection(doc, &edit) {
+        Ok(report) => {
+            if let Some(noun) = report.clamps_rejected {
+                log::info!(
+                    "font {}: {}s have no screen-space clamps \
+                     (Action path; no scrollback)",
+                    which,
+                    noun
+                );
             }
+            report.changed > 0
         }
-        // Section: route through `set_section_font_size` so the
-        // Action path (keybinds / palette) matches the verb path
-        // (`font size=N section=K`) — only the targeted section's
-        // runs grow, siblings stay put.
-        SelectionState::Section(SectionSel { node_id, section_idx }) => {
-            if size.is_some() {
-                doc.set_section_font_size(&node_id, section_idx, pt)
-            } else {
-                false
-            }
+        Err(msg) => {
+            log::warn!("font {}: {} (Action path; no scrollback)", which, msg);
+            false
         }
-        SelectionState::Multi(ids) => {
-            if size.is_none() {
-                return false;
-            }
-            let mut changed = false;
-            for id in &ids {
-                changed |= doc.set_node_font_size(id, pt);
-            }
-            changed
-        }
-        SelectionState::MultiSection(secs) => {
-            if size.is_none() {
-                return false;
-            }
-            let mut changed = false;
-            for s in &secs {
-                changed |= doc.set_section_font_size(&s.node_id, s.section_idx, pt);
-            }
-            changed
-        }
-        SelectionState::Edge(er) => doc.set_edge_font(&er, size, min, max),
-        SelectionState::EdgeLabel(s) => doc.set_edge_label_font(&s.edge_ref, size, min, max),
-        SelectionState::PortalLabel(s) => doc.set_edge_font(&s.edge_ref(), size, min, max),
-        SelectionState::PortalText(s) => {
-            doc.set_portal_text_font(&s.edge_ref(), &s.endpoint_node_id, size, min, max)
-        }
-        SelectionState::SectionRange { sel, range } => {
-            if size.is_none() {
-                return false;
-            }
-            doc.set_section_font_size_range(&sel.node_id, sel.section_idx, range.0, range.1, pt)
-        }
-        SelectionState::None => false,
     }
 }
 
@@ -1090,6 +1113,83 @@ mod tests {
         assert!(!super::apply_font_kv_to_selection(&mut doc, "max", 32.0));
     }
 
+    /// The named drift the dedup closed: on a `Multi` selection
+    /// with `min` / `max`, the verb path used to surface an
+    /// explanatory message while the Action path silently returned
+    /// `false`. Both now route through the one dispatcher — the
+    /// model outcome is identical and the verb still explains
+    /// itself.
+    #[test]
+    fn min_max_on_multi_selection_agrees_between_verb_and_action() {
+        let mut doc = fixture_doc();
+        let ids: Vec<String> = doc.mindmap.nodes.keys().take(2).cloned().collect();
+        doc.selection = SelectionState::Multi(ids);
+        match run("font min=20", &mut doc) {
+            ExecResult::Lines(rows) => assert!(
+                join_lines(&rows).contains("nodes have no screen-space clamps"),
+                "verb path must explain the clamp rejection: {:?}",
+                rows
+            ),
+            other => panic!("expected Lines, got {:?}", other),
+        }
+        assert!(
+            !super::apply_font_kv_to_selection(&mut doc, "min", 20.0),
+            "Action path must agree with the verb: nothing changed"
+        );
+    }
+
+    /// Same parity on `MultiSection`, where the noun differs.
+    #[test]
+    fn min_max_on_multi_section_agrees_between_verb_and_action() {
+        let (mut doc, id) = crate::application::document::tests_common::pinned_two_section_node();
+        doc.selection = SelectionState::MultiSection(vec![
+            crate::application::document::SectionSel {
+                node_id: id.clone(),
+                section_idx: 0,
+            },
+            crate::application::document::SectionSel {
+                node_id: id,
+                section_idx: 1,
+            },
+        ]);
+        match run("font max=40", &mut doc) {
+            ExecResult::Lines(rows) => assert!(
+                join_lines(&rows).contains("sections have no screen-space clamps"),
+                "verb path must name the section noun: {:?}",
+                rows
+            ),
+            other => panic!("expected Lines, got {:?}", other),
+        }
+        assert!(!super::apply_font_kv_to_selection(&mut doc, "max", 40.0));
+    }
+
+    /// A `Section` selection routes to that section on both paths
+    /// — the verb through `section=`-less resolution, the Action
+    /// through the same dispatcher. Sibling sections stay put.
+    #[test]
+    fn section_selection_size_agrees_between_verb_and_action() {
+        let (mut doc, id) = crate::application::document::tests_common::pinned_two_section_node();
+        doc.selection = SelectionState::Section(crate::application::document::SectionSel {
+            node_id: id.clone(),
+            section_idx: 1,
+        });
+        assert!(super::apply_font_kv_to_selection(&mut doc, "size", 21.0));
+        let node = doc.mindmap.nodes.get(&id).expect("pinned node");
+        for run in &node.sections[1].text_runs {
+            assert_eq!(run.size_pt, 21, "Action write lands on the selected section");
+        }
+        // The verb reaches the same state, so re-running it is a
+        // no-op rather than a second write.
+        match run("font size=21", &mut doc) {
+            ExecResult::Ok(msg) => assert!(
+                msg.contains("no change"),
+                "verb must agree the section is already at 21pt: {}",
+                msg
+            ),
+            other => panic!("expected Ok, got {:?}", other),
+        }
+    }
+
     #[test]
     fn apply_font_kv_size_writes_to_edge_glyph_connection() {
         let mut doc = fixture_doc();
@@ -1201,7 +1301,7 @@ mod tests {
     /// Action path used by keybinds and palette entries) with a
     /// `SelectionState::Section` routes through
     /// `set_section_font_size` so it matches the verb path's
-    /// per-section behaviour. Pre-Tier-2A this Action arm
+    /// per-section behavior. Pre-Tier-2A this Action arm
     /// collapsed to whole-node, lagging behind the verb. Pins
     /// Item 10.
     #[test]
@@ -1227,7 +1327,7 @@ mod tests {
     /// `apply_font_family_to_selection(family)` (the parametric
     /// Action path) with a `SelectionState::Section` routes
     /// through `AcceptsFontFamily` → `set_section_font_family` —
-    /// the same per-section behaviour the verb path lands. Sister
+    /// the same per-section behavior the verb path lands. Sister
     /// pin to `font_size_action_section_writes_through_section_setter`
     /// so both Action arms (size + family) have direct-call
     /// coverage on a Section selection, not just transitive

@@ -22,10 +22,11 @@ Four loader tiers contribute to the active registry, in ascending
 precedence (later writers override earlier ones with the same `id`):
 
 <!-- SOURCE-OF-TRUTH: the tier order below is also encoded in
-     four other places that must move together when the order or
+     five other places that must move together when the order or
      set of tiers changes:
-       1. src/application/macros/mod.rs — MacroSource enum variant
-          order.
+       1. src/application/source_tier.rs — the SourceTier enum
+          variant order, shared with the custom-mutation registry
+          and pinned by that module's tests.
        2. src/application/app/run_native_init.rs::build — the load
           order of the App + User tier calls AND the
           rebuild_map_macros + rebuild_inline_macros calls.
@@ -33,31 +34,35 @@ precedence (later writers override earlier ones with the same `id`):
           rebuild_map_macros + rebuild_inline_macros invocations
           in the document-replace path. Inline rebuilds AFTER Map
           so Inline's higher precedence wins on id collision.
-       4. src/application/macros/loader.rs — the parse_*_macros /
+       4. src/application/macros/loader/ — the parse_*_macros /
           rebuild_*_macros helpers themselves.
-     Update all five in the same commit. -->
+       5. format/ipc.md §"Trust model" + work_plans/LLM_IPC.md §D4
+          — the IPC surface is pinned to the User tier (it is
+          deliberately NOT a tier of its own); adding or reordering
+          tiers must re-evaluate that mapping.
+     Update all six in the same commit. -->
 
 1. **Application bundle** — `assets/macros/application.json`,
    compiled into the binary via `include_str!`. Lowest precedence so
-   users can customise anything shipped by the app. Tier:
-   `MacroSource::App`. Cross-platform (native + WASM).
+   users can customize anything shipped by the app. Tier:
+   `SourceTier::App`. Cross-platform (native + WASM).
 2. **User file** — `$XDG_CONFIG_HOME/mandala/macros.json` on native
    (falls back to `$HOME/.config/mandala/macros.json`). On WASM,
    `?macros=<urlencoded-json>` query param > `localStorage` under
    the `mandala_macros` key > empty. Both targets parse through
    the shared `loader::parse_user_macros_json`. Tier:
-   `MacroSource::User`.
+   `SourceTier::User`.
 3. **Map-inline** — `MindMap.macros` on the loaded document.
    Refreshed at initial load on both targets, plus every `open` /
-   `new` console verb on native. Tier: `MacroSource::Map`.
+   `new` console verb on native. Tier: `SourceTier::Map`.
 4. **Node-inline** — `MindNode.inline_macros` on individual nodes.
    Loaded alongside Map tier (same trigger sites). Highest
    precedence — overrides Map / User / App on id collisions.
    Authors should namespace ids (e.g. `"node-id.action"`) to
    avoid collisions across nodes since the registry is
-   id-keyed flat. Tier: `MacroSource::Inline`. Cross-platform.
+   id-keyed flat. Tier: `SourceTier::Inline`. Cross-platform.
 
-The `MacroSource` tier is **loader-pinned** — assigned at the
+The `SourceTier` of a macro is **loader-pinned** — assigned at the
 loader call site, never read from the on-disk content. A user
 editing `~/.config/mandala/macros.json` cannot smuggle `App` tier
 into their entries.
@@ -100,16 +105,16 @@ the Inline-tier note above.
 
 ## Privilege model — read this before shipping a non-User loader
 
-The dispatcher gates two surfaces on `MacroSource` tier:
+The dispatcher gates two surfaces on the macro's `SourceTier`:
 
 - **`MacroStep::ConsoleLine`** runs an arbitrary console verb
   (`save`, `open`, `mutation apply`, kv-shaped style setters, etc.).
-  User-tier-only via `MacroSource::allows_console_line`.
+  User-tier-only via `SourceTier::allows_console_line`.
 - **Destructive / I/O / clipboard `Action` variants**
   (`SaveDocument`, `DeleteSelection`, `Cut`, `Paste`, `Copy`,
   `OrphanSelection`, `CreateOrphanNode`, `CreateOrphanNodeAndEdit`,
   `NewDocument`) are User-tier-only via
-  `MacroSource::allows_action`. Navigation / view-state Actions
+  `SourceTier::allows_action`. Navigation / view-state Actions
   (zoom, pan, selection traversal, undo, etc.) pass freely.
 
 Privilege rejections **fail-closed** — the dispatcher aborts the
@@ -118,6 +123,13 @@ rest of the macro on a rejected step so a hostile pattern like
 sneak its outer steps past the gate. Honest mistakes (unbound
 action, no document loaded) keep the existing best-effort
 `continue` semantic.
+
+**IPC is not a tier.** Commands arriving over the `--ipc` socket
+([`format/ipc.md`](./ipc.md)) execute at `User` posture — the user
+owns the flag exactly as they own this file. Macros fired *via* IPC
+(`act.macro`) keep their own loader-pinned tier: IPC initiates, it
+never escalates, and the fail-closed gates above run unchanged.
+Rationale: `work_plans/LLM_IPC.md` §D4.
 
 ### Threat model
 
@@ -193,7 +205,7 @@ input use.
 ```
 
 The `action` value is the variant name from
-`src/application/keybinds/action.rs`. Examples: `"Undo"`,
+`src/application/keybinds/action/mod.rs`. Examples: `"Undo"`,
 `"SaveDocument"`, `"ZoomReset"`, `"SelectAll"`,
 `"DoubleClickActivate"`. Modal-context actions (`TextEditCursorLeft`,
 `PickerCommit`, `ConsoleSubmit` etc.) are accepted but only fire

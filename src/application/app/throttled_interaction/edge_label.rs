@@ -14,14 +14,13 @@
 
 use std::collections::HashMap;
 
-use glam::Vec2;
-
 use crate::application::document::EdgeRef;
-use crate::application::frame_throttle::MutationFrequencyThrottle;
 
 use super::super::edge_label_drag::apply_edge_label_drag;
-use super::super::scene_rebuild::{flush_canvas_scene_buffers, update_connection_label_tree};
-use super::{DrainContext, ThrottledInteraction};
+use super::super::scene_rebuild::{flush_canvas_scene_buffers, CanvasFrame};
+use super::pending::ThrottledPending;
+use super::release::{ReleaseCommit, ReleaseRefresh};
+use super::{DrainContext, ThrottledDragInteraction, ThrottledInteraction};
 
 /// Drag state for repositioning one line-mode edge's label along
 /// its edge path.
@@ -31,10 +30,10 @@ pub(in crate::application::app) struct EdgeLabelInteraction {
     /// `UndoAction::EditEdge` commit and for the no-op skip check
     /// on release (compares `label_config` only).
     pub original: baumhard::mindmap::model::MindEdge,
-    /// Latest cursor position in canvas space; overwritten per
-    /// event, taken once per successful drain.
-    pub pending_cursor: Option<Vec2>,
-    pub throttle: MutationFrequencyThrottle,
+    /// Cursor-latch pending state plus this gesture's adaptive
+    /// throttle: the latest canvas-space cursor, overwritten per
+    /// event and taken once per successful drain.
+    pub pending: ThrottledPending,
 }
 
 impl EdgeLabelInteraction {
@@ -45,19 +44,18 @@ impl EdgeLabelInteraction {
         Self {
             edge_ref,
             original,
-            pending_cursor: None,
-            throttle: MutationFrequencyThrottle::with_default_budget(),
+            pending: ThrottledPending::latching_cursor(),
         }
     }
 }
 
 impl ThrottledInteraction for EdgeLabelInteraction {
-    fn has_pending(&self) -> bool {
-        self.pending_cursor.is_some()
+    fn pending(&self) -> &ThrottledPending {
+        &self.pending
     }
 
-    fn throttle(&mut self) -> &mut MutationFrequencyThrottle {
-        &mut self.throttle
+    fn pending_mut(&mut self) -> &mut ThrottledPending {
+        &mut self.pending
     }
 
     fn drain(&mut self, ctx: DrainContext<'_>) {
@@ -65,12 +63,11 @@ impl ThrottledInteraction for EdgeLabelInteraction {
             document,
             app_scene,
             renderer,
-            scene_cache,
             interaction_mode,
             ..
         } = ctx;
 
-        let Some(cursor) = self.pending_cursor.take() else {
+        let Some(cursor) = self.pending.take_cursor() else {
             return;
         };
 
@@ -78,19 +75,51 @@ impl ThrottledInteraction for EdgeLabelInteraction {
             let changed = apply_edge_label_drag(doc, &self.edge_ref, cursor);
             if changed {
                 // A label move never invalidates connection-path
-                // geometry, so every edge hits the cache's fast
-                // path and only `build_label_elements` (which
-                // runs per-frame regardless) produces new work.
-                let scene = doc.build_scene_with_cache(
-                    &HashMap::new(),
-                    scene_cache,
-                    renderer.camera_zoom(),
+                // geometry, so the connection role does not need
+                // re-projecting at all — only `build_label_elements`
+                // (which runs per-frame regardless) produces new
+                // work.
+                let offsets = HashMap::new();
+                CanvasFrame::new(
+                    doc,
+                    &offsets,
                     interaction_mode.resize_handle_overrides(),
-                );
-                update_connection_label_tree(&scene, app_scene, renderer);
+                    renderer.camera_zoom(),
+                )
+                .update_connection_label_tree(app_scene);
                 flush_canvas_scene_buffers(app_scene, renderer);
             }
         }
+    }
+}
+
+impl ThrottledDragInteraction for EdgeLabelInteraction {
+    /// Release-commit body, renderer-free. See [`super::release`].
+    ///
+    /// Flushes the final cursor if one is buffered — see the portal
+    /// counterpart for the rationale. The undo entry is skipped
+    /// when nothing actually moved.
+    ///
+    /// The decree is [`ReleaseRefresh::SceneOnly`]: every per-frame
+    /// drain already narrowed to the label tree because node trees
+    /// are untouched by a label move, and the release commit is the
+    /// same story.
+    ///
+    /// `original` is cloned rather than moved out so the body can
+    /// take `&mut self` like every other release commit; one clone
+    /// per gesture end.
+    fn commit_on_release_core(&mut self, c: ReleaseCommit<'_>) -> ReleaseRefresh {
+        let pending_cursor = self.pending.take_cursor();
+        if let (Some(doc), Some(cursor)) = (c.document.as_mut(), pending_cursor) {
+            apply_edge_label_drag(doc, &self.edge_ref, cursor);
+        }
+        let Some(doc) = c.document.as_mut() else {
+            return ReleaseRefresh::None;
+        };
+        doc.commit_throttled_edge_drag(&self.edge_ref, self.original.clone(), |c, o| {
+            c.label_config != o.label_config
+        });
+        ReleaseRefresh::SceneOnly
     }
 }
 
@@ -98,33 +127,41 @@ impl ThrottledInteraction for EdgeLabelInteraction {
 mod tests {
     use super::*;
     use crate::application::app::throttled_interaction::test_utils::{
-        drive_throttle_over_budget, fixture_edge, trait_default_tests_for_throttled_interaction,
+        drive_throttle_over_budget, fixture_edge, moved, sample,
+        trait_default_tests_for_throttled_interaction,
     };
+    use glam::Vec2;
 
     fn fixture_interaction() -> EdgeLabelInteraction {
         EdgeLabelInteraction::new(EdgeRef::new("a", "b", "parent_child"), fixture_edge())
     }
 
     #[test]
-    fn test_new_initialises_pending_cursor_to_none() {
+    fn test_new_initializes_pending_cursor_to_none() {
         let i = fixture_interaction();
         assert_eq!(i.edge_ref.from_id, "a");
         assert_eq!(i.edge_ref.to_id, "b");
-        assert!(i.pending_cursor.is_none());
-        assert_eq!(i.throttle.current_n(), 1);
+        assert!(i.pending.peek_cursor().is_none());
+        assert_eq!(i.pending.throttle.current_n(), 1);
     }
 
+    /// This gesture is wired to the cursor-latch discipline, not
+    /// the delta accumulator: its drain projects an absolute
+    /// position, so a summed delta would be meaningless input.
+    ///
+    /// The sample is the discriminating one — zero delta, non-zero
+    /// absolute position, the shape a stationary pointer produces.
+    /// A delta-wired gesture reports no pending state at all on it,
+    /// so this fails loudly rather than reading back the same
+    /// numbers from the wrong half.
     #[test]
-    fn test_has_pending_false_when_pending_cursor_is_none() {
-        let i = fixture_interaction();
-        assert!(!i.has_pending());
-    }
-
-    #[test]
-    fn test_has_pending_true_when_pending_cursor_is_some() {
+    fn test_pending_uses_the_cursor_latch_discipline() {
         let mut i = fixture_interaction();
-        i.pending_cursor = Some(Vec2::new(0.5, 0.5));
+        assert!(!i.has_pending());
+        i.accumulate(sample(Vec2::ZERO, Vec2::new(0.5, 0.5)));
         assert!(i.has_pending());
+        assert_eq!(i.pending.peek_cursor(), Some(Vec2::new(0.5, 0.5)));
+        assert_eq!(i.pending.total_delta(), Vec2::ZERO);
     }
 
     #[test]
@@ -132,28 +169,28 @@ mod tests {
         // Label target is a function of the final cursor only, so
         // intermediate writes must be discarded rather than queued.
         let mut i = fixture_interaction();
-        i.pending_cursor = Some(Vec2::new(1.0, 1.0));
-        i.pending_cursor = Some(Vec2::new(42.0, -7.0));
-        assert_eq!(i.pending_cursor, Some(Vec2::new(42.0, -7.0)));
+        i.accumulate(sample(Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0)));
+        i.accumulate(sample(Vec2::new(41.0, -8.0), Vec2::new(42.0, -7.0)));
+        assert_eq!(i.pending.peek_cursor(), Some(Vec2::new(42.0, -7.0)));
     }
 
     #[test]
     fn test_reset_preserves_pending_cursor() {
         let mut i = fixture_interaction();
-        i.pending_cursor = Some(Vec2::new(8.0, 9.0));
-        drive_throttle_over_budget(&mut i.throttle);
-        assert!(i.throttle.current_n() > 1);
+        i.accumulate(sample(Vec2::new(3.0, 3.0), Vec2::new(8.0, 9.0)));
+        drive_throttle_over_budget(&mut i.pending.throttle);
+        assert!(i.pending.throttle.current_n() > 1);
 
         i.reset();
 
-        assert_eq!(i.throttle.current_n(), 1);
-        assert_eq!(i.pending_cursor, Some(Vec2::new(8.0, 9.0)));
+        assert_eq!(i.pending.throttle.current_n(), 1);
+        assert_eq!(i.pending.peek_cursor(), Some(Vec2::new(8.0, 9.0)));
     }
 
     trait_default_tests_for_throttled_interaction! {
         build = fixture_interaction,
         set_pending = |i: &mut EdgeLabelInteraction| {
-            i.pending_cursor = Some(Vec2::new(0.0, 0.0));
+            i.accumulate(moved(1.0, 1.0));
         },
     }
 }

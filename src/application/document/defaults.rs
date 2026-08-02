@@ -12,6 +12,58 @@ use baumhard::mindmap::model::{
     MindEdge, MindNode, MindSection, NodeLayout, NodeStyle, Position, Size, TextRun,
 };
 
+/// Font family a freshly-authored [`TextRun`] carries when
+/// nothing else in the cascade supplies one.
+pub(in crate::application) const DEFAULT_RUN_FONT_FAMILY: &str = "LiberationSans";
+
+/// Point size a freshly-authored [`TextRun`] carries.
+///
+/// **Not the same number as the renderer's no-runs fallback.**
+/// [`baumhard::mindmap::tree_builder::DEFAULT_SECTION_FONT_SCALE`]
+/// (14) is what the tree builder measures a section with when it
+/// has *no* runs at all; this 24 is what the authoring layer
+/// writes when it *creates* a run. The two answer different
+/// questions and are deliberately different values: a new node's
+/// text reads at 24pt, while a run-less legacy section keeps
+/// rendering at the historical 14pt until something authors a
+/// run onto it.
+pub(in crate::application) const DEFAULT_RUN_SIZE_PT: u32 = 24;
+
+/// Color a freshly-authored [`TextRun`] carries — the same
+/// fall-through-to-white floor the renderer applies to a node
+/// with no explicit `style.text_color`.
+pub(in crate::application) const DEFAULT_RUN_COLOR: &str = "#ffffff";
+
+/// One unstyled [`TextRun`] covering `[0, end)` graphemes, in the
+/// authoring defaults above.
+///
+/// The single template every "this section has no run to inherit
+/// from" path reaches for — node/section text setters, the
+/// range-setter gap filler, the clipboard cut/paste splice
+/// templates. Callers that need one field different use struct
+/// update syntax, e.g.
+/// `TextRun { color: node.style.text_color.clone(), ..default_text_run(0) }`.
+///
+/// `end == 0` is legal here because most callers use the result
+/// purely as a *template* (they overwrite `start` / `end` from
+/// the text they are about to write). A caller installing the
+/// run directly must pass a non-zero `end`: `text_run_ops`
+/// requires `start < end` and panics in debug builds on a
+/// degenerate run.
+pub(in crate::application) fn default_text_run(end: usize) -> TextRun {
+    TextRun {
+        start: 0,
+        end,
+        bold: false,
+        italic: false,
+        underline: false,
+        font: DEFAULT_RUN_FONT_FAMILY.to_string(),
+        size_pt: DEFAULT_RUN_SIZE_PT,
+        color: DEFAULT_RUN_COLOR.to_string(),
+        hyperlink: None,
+    }
+}
+
 pub(in crate::application) fn default_parent_child_edge(from_id: &str, to_id: &str) -> MindEdge {
     MindEdge {
         from_id: from_id.to_string(),
@@ -39,17 +91,9 @@ pub(in crate::application) fn default_parent_child_edge(from_id: &str, to_id: &s
 /// `position` and marked as a root (`parent_id = None`).
 pub(in crate::application) fn default_orphan_node(id: &str, position: Vec2) -> MindNode {
     let text = "New node".to_string();
-    let text_runs = vec![TextRun {
-        start: 0,
-        end: baumhard::util::grapheme_chad::count_grapheme_clusters(&text),
-        bold: false,
-        italic: false,
-        underline: false,
-        font: "LiberationSans".to_string(),
-        size_pt: 24,
-        color: "#ffffff".to_string(),
-        hyperlink: None,
-    }];
+    let text_runs = vec![default_text_run(
+        baumhard::util::grapheme_chad::count_grapheme_clusters(&text),
+    )];
     MindNode {
         id: id.to_string(),
         parent_id: None,

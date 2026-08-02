@@ -20,12 +20,12 @@ use crate::application::document::{EdgeRef, MindMapDocument};
 pub(in crate::application::app) fn apply_edge_handle_drag(
     doc: &mut MindMapDocument,
     edge_ref: &EdgeRef,
-    handle: baumhard::mindmap::scene_builder::EdgeHandleKind,
+    handle: baumhard::mindmap::tree_builder::EdgeHandleKind,
     start_handle_pos: Vec2,
     total_delta: Vec2,
-) -> baumhard::mindmap::scene_builder::EdgeHandleKind {
+) -> baumhard::mindmap::tree_builder::EdgeHandleKind {
     use baumhard::mindmap::model::ControlPoint;
-    use baumhard::mindmap::scene_builder::EdgeHandleKind;
+    use baumhard::mindmap::tree_builder::EdgeHandleKind;
 
     let idx = match doc.edge_index(edge_ref) {
         Some(i) => i,
@@ -87,9 +87,14 @@ pub(in crate::application::app) fn apply_edge_handle_drag(
             // this function; if the node vanished between then and
             // here (a delete racing the drag), keep the anchor at
             // its current value rather than panicking the frame.
+            // `debug!`, not `warn!`, per CODE_CONVENTIONS §9: the
+            // drag is not cancelled, so this runs once per cursor
+            // move until mouse-up — a `warn!` would emit the same
+            // line at input-event rate, and the user already sees
+            // the deletion they asked for.
             let Some(from_node) = doc.mindmap.nodes.get(&edge.from_id) else {
-                log::warn!(
-                    "apply_edge_handle_drag: AnchorFrom from_id {} disappeared mid-drag",
+                log::debug!(
+                    "edge drag: AnchorFrom from_id {} disappeared mid-drag",
                     edge.from_id
                 );
                 return handle;
@@ -100,9 +105,10 @@ pub(in crate::application::app) fn apply_edge_handle_drag(
             EdgeHandleKind::AnchorFrom
         }
         EdgeHandleKind::AnchorTo => {
+            // Same per-cursor-move reasoning as `AnchorFrom` above.
             let Some(to_node) = doc.mindmap.nodes.get(&edge.to_id) else {
-                log::warn!(
-                    "apply_edge_handle_drag: AnchorTo to_id {} disappeared mid-drag",
+                log::debug!(
+                    "edge drag: AnchorTo to_id {} disappeared mid-drag",
                     edge.to_id
                 );
                 return handle;

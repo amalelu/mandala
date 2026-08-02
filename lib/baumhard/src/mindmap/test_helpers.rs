@@ -3,7 +3,7 @@
 //! Shared synthetic-map fixtures for the mindmap-layer tests.
 //!
 //! Co-located with `mindmap/` (same directory as `model/`,
-//! `tree_builder/`, `scene_builder/`, `loader.rs`) so every
+//! `tree_builder/`, `loader.rs`) so every
 //! test inside the mindmap layer reaches the same primitives
 //! through one canonical path. Pre-consolidation each
 //! per-module `tests/fixtures.rs` carried its own
@@ -51,7 +51,7 @@ pub(crate) fn testament_map_path() -> PathBuf {
 /// `1.0` frame thickness, `map`/`auto`/`0.0` layout, no border).
 ///
 /// Per-module wrappers in `tree_builder/tests/fixtures.rs` and
-/// `scene_builder/tests/fixtures.rs` thin over this with their
+/// `tree_builder/tests/fixtures.rs` thins over this with its
 /// preferred argument shape — neither call-site list rewrites
 /// 161+ lines as a result.
 ///
@@ -127,7 +127,7 @@ pub(crate) fn synthetic_map(nodes_vec: Vec<MindNode>, edges: Vec<MindEdge>) -> M
 
 /// Build a minimal cross-link `MindEdge` with explicit endpoints
 /// and anchors. Color `#fff`, width 1, no label, no glyph
-/// connection. The shape every scene_builder edge fixture wanted.
+/// connection. The shape every connection-pass edge fixture wants.
 ///
 /// Cost: ~7 `String` heap allocations (endpoints, anchors, plus
 /// the static-defaulted edge_type / color / line_style). Empty
@@ -192,7 +192,7 @@ pub(crate) fn synthetic_portal_edge(a: &str, b: &str, color: &str) -> MindEdge {
 
 /// Trivial `Canvas` with `#000` background, no defaults, empty
 /// theme tables. Used by tests that need a Canvas placeholder
-/// but don't exercise canvas behaviour.
+/// but don't exercise canvas behavior.
 ///
 /// Cost: one `String` allocation for the background hex, two
 /// empty `HashMap` allocations (theme variables + variants).

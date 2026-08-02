@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Mindmap-model tests: ancestry, connection config resolution, label
-//! position + display_mode round-trips. Kept in a sibling file so
+//! position + display_mode round-trips, and the edge color cascade.
+//! Kept in a sibling file so
 //! the `mod.rs` itself reads purely as the public surface.
 
 use super::*;
 use crate::mindmap::loader;
-use crate::mindmap::test_helpers::{blank_canvas, testament_map_path as test_map_path};
+use crate::mindmap::test_helpers::{
+    blank_canvas, synthetic_edge, synthetic_map, synthetic_node_full, synthetic_portal_edge,
+    testament_map_path as test_map_path,
+};
 use crate::util::geometry::is_positive_finite;
 
 #[test]
@@ -499,6 +503,39 @@ fn display_mode_portal_round_trips_through_json() {
     assert!(is_portal_edge(&back));
 }
 
+/// `format/schema.md` §"Portal-mode edges" prints a portal edge as
+/// literal JSON, and `maptool convert` emits exactly this shape for
+/// every folded legacy portal. A documented example that does not
+/// deserialize is worse than none — a reader hand-authoring an edge
+/// from it produces a file the loader refuses.
+///
+/// The example is **read out of the spec**, not restated here: a
+/// hard-copied literal would pin this test against itself and let
+/// the doc drift away from the code undetected (the same reasoning
+/// as `gfx_structs::tests::area_tests::documented_rotate_example`).
+#[test]
+fn test_documented_portal_edge_example_deserializes() {
+    let doc = crate::util::doc_fixtures::format_doc_path("schema.md");
+    let published =
+        crate::util::doc_fixtures::documented_json_block(&doc, "### Portal-mode edges", 0);
+
+    let edge: MindEdge = serde_json::from_str(&published).unwrap_or_else(|e| {
+        panic!("format/schema.md's portal-edge example must deserialize: {e}\n{published}")
+    });
+    assert!(is_portal_edge(&edge));
+    assert_eq!(edge.from_id, "0.3");
+    assert_eq!(edge.to_id, "1.7.2");
+    assert_eq!(edge.glyph_connection.as_ref().unwrap().body, "◈");
+
+    // `label` has no `skip_serializing_if`, so every serializer
+    // writes it. The spec must show it, or the two portal-edge
+    // examples in `format/` disagree about the shape on disk.
+    assert!(
+        published.contains("\"label\""),
+        "the published portal edge must carry `label`, which is always serialized:\n{published}"
+    );
+}
+
 #[test]
 fn display_mode_none_omitted_in_serialize() {
     let edge = synthetic_edge_with_label(None, None);
@@ -536,7 +573,12 @@ fn portal_glyph_presets_are_nonempty_and_unique() {
 /// fires the same test.
 #[test]
 fn zoom_window_skip_default_and_round_trip_on_every_struct() {
-    fn check_pair(label: &str, default_json: &str, authored_min: f32, mut set_pair: impl FnMut(Option<f32>, Option<f32>) -> (String, Option<f32>, Option<f32>)) {
+    fn check_pair(
+        label: &str,
+        default_json: &str,
+        authored_min: f32,
+        mut set_pair: impl FnMut(Option<f32>, Option<f32>) -> (String, Option<f32>, Option<f32>),
+    ) {
         // Default: neither key emitted.
         assert!(
             !default_json.contains("min_zoom_to_render"),
@@ -557,7 +599,10 @@ fn zoom_window_skip_default_and_round_trip_on_every_struct() {
         // One-sided: only min present, max absent both in JSON and after round-trip.
         let (json, back_min, back_max) = set_pair(Some(authored_min), None);
         assert!(json.contains(&format!("\"min_zoom_to_render\":{authored_min}")));
-        assert!(!json.contains("max_zoom_to_render"), "{label}: one-sided max leaked: {json}");
+        assert!(
+            !json.contains("max_zoom_to_render"),
+            "{label}: one-sided max leaked: {json}"
+        );
         assert_eq!(back_min, Some(authored_min));
         assert!(back_max.is_none());
     }
@@ -599,7 +644,7 @@ fn zoom_window_skip_default_and_round_trip_on_every_struct() {
 
 /// `MindNode` round-trip — node-level pair follows the same
 /// pattern; the border inherits the resolved window by
-/// construction (see `scene_builder::node_pass`), so there is
+/// construction (see `tree_builder::node_clip`), so there is
 /// no separate border serde surface.
 #[test]
 fn mindnode_zoom_window_round_trips() {
@@ -612,7 +657,7 @@ fn mindnode_zoom_window_round_trips() {
         "id":"0","parent_id":null,
         "position":{"x":0,"y":0},
         "size":{"width":100,"height":100},
-        "text":"","text_runs":[],
+        "sections":[{"text":""}],
         "style":{
             "background_color":"#000","frame_color":"#000","text_color":"#fff",
             "shape":"rectangle","corner_radius_percent":0,"frame_thickness":0,
@@ -691,24 +736,24 @@ fn edge_locations_uses_bracket_index_stamp() {
 
 /// `MindSection` defaults round-trip cleanly on a freshly-built
 /// node. The default shape — `offset=(0,0)`, `size=None`,
-/// `channel=None`, no runs — must serialise to a minimal JSON
-/// form (only `text` is serialised) so the on-disk file stays
+/// `channel=None`, no runs — must serialize to a minimal JSON
+/// form (only `text` is serialized) so the on-disk file stays
 /// tight for the migration-default case where every node ships
 /// exactly one default section. Pins the `skip_serializing_if`
 /// contracts on `text_runs`, `offset`, `size`, and `channel`.
 #[test]
 fn mindsection_defaults_serialize_minimally() {
     let section = MindSection::new_default("hi".into(), Vec::new());
-    let json = serde_json::to_string(&section).expect("serialises");
+    let json = serde_json::to_string(&section).expect("serializes");
     // Only the `text` field should be present.
     assert!(json.contains("\"text\":\"hi\""), "json: {json}");
-    assert!(!json.contains("text_runs"), "empty runs must not serialise");
-    assert!(!json.contains("offset"), "default offset must not serialise");
-    assert!(!json.contains("\"size\""), "None size must not serialise");
-    assert!(!json.contains("channel"), "default channel must not serialise");
+    assert!(!json.contains("text_runs"), "empty runs must not serialize");
+    assert!(!json.contains("offset"), "default offset must not serialize");
+    assert!(!json.contains("\"size\""), "None size must not serialize");
+    assert!(!json.contains("channel"), "default channel must not serialize");
     assert!(
         !json.contains("trigger_bindings"),
-        "empty trigger_bindings must not serialise"
+        "empty trigger_bindings must not serialize"
     );
 
     // Round-trip: parse the minimal JSON back; defaults must hold.
@@ -752,7 +797,7 @@ fn mindsection_effective_size_falls_back_to_node_size_when_none() {
             width: 50.0,
             height: 30.0
         },
-        "Some-sized honours the explicit pin"
+        "Some-sized honors the explicit pin"
     );
 }
 
@@ -784,7 +829,10 @@ fn mindsection_channel_option_round_trip() {
     // None ⇒ skip-serialize.
     let none_section = MindSection::new_default("a".into(), Vec::new());
     let none_json = serde_json::to_string(&none_section).unwrap();
-    assert!(!none_json.contains("channel"), "default channel must skip-serialize");
+    assert!(
+        !none_json.contains("channel"),
+        "default channel must skip-serialize"
+    );
     let parsed_none: MindSection = serde_json::from_str("{\"text\":\"a\"}").unwrap();
     assert_eq!(parsed_none.channel, None, "absent field parses as None");
 
@@ -816,7 +864,7 @@ fn mindsection_channel_option_round_trip() {
 /// stamp it; the runtime ignores it today (whole-node bindings
 /// still live on `MindNode.trigger_bindings`). The field must
 /// round-trip through serde, and an empty bindings vec must not
-/// serialise (skip-empty contract for forward compatibility).
+/// serialize (skip-empty contract for forward compatibility).
 #[test]
 fn mindsection_trigger_bindings_round_trip() {
     use crate::mindmap::custom_mutation::{Trigger, TriggerBinding};
@@ -833,7 +881,7 @@ fn mindsection_trigger_bindings_round_trip() {
         }],
         frame_border: None,
     };
-    let json = serde_json::to_string(&section).expect("serialises");
+    let json = serde_json::to_string(&section).expect("serializes");
     assert!(json.contains("trigger_bindings"));
     assert!(json.contains("m_focus"));
     let back: MindSection = serde_json::from_str(&json).expect("round-trips");
@@ -842,7 +890,7 @@ fn mindsection_trigger_bindings_round_trip() {
 }
 
 /// `MindSection.frame_border` is `Option<GlyphBorderConfig>` —
-/// `None` (the default) must skip serialisation entirely so
+/// `None` (the default) must skip serialization entirely so
 /// existing maps round-trip byte-identical, and `Some(cfg)` must
 /// preserve every field on the round trip.
 #[test]
@@ -850,10 +898,10 @@ fn test_mindsection_frame_border_round_trip() {
     use crate::mindmap::model::{CustomBorderGlyphs, GlyphBorderConfig};
     // Default-constructed section: no `frame_border` key in JSON.
     let plain = MindSection::new_default("hi".into(), Vec::new());
-    let json = serde_json::to_string(&plain).expect("serialises");
+    let json = serde_json::to_string(&plain).expect("serializes");
     assert!(
         !json.contains("frame_border"),
-        "None must skip serialisation: {}",
+        "None must skip serialization: {}",
         json
     );
 
@@ -880,7 +928,7 @@ fn test_mindsection_frame_border_round_trip() {
         color_palette: Some("rainbow".into()),
         color_palette_field: Some("frame".into()),
     });
-    let json = serde_json::to_string(&authored).expect("serialises");
+    let json = serde_json::to_string(&authored).expect("serializes");
     assert!(json.contains("frame_border"));
     assert!(json.contains("+=##=+"));
     let back: MindSection = serde_json::from_str(&json).expect("round-trips");
@@ -896,7 +944,7 @@ fn test_mindsection_frame_border_round_trip() {
 
 /// `Canvas.default_section_frame_border` and
 /// `default_focused_section_frame_border` round-trip the same way
-/// — `None` skips serialisation, `Some(cfg)` survives the
+/// — `None` skips serialization, `Some(cfg)` survives the
 /// full serialize → deserialize cycle.
 #[test]
 fn test_canvas_section_frame_defaults_round_trip() {
@@ -913,8 +961,12 @@ fn test_canvas_section_frame_defaults_round_trip() {
         theme_variables: HashMap::new(),
         theme_variants: HashMap::new(),
     };
-    let json = serde_json::to_string(&plain).expect("serialises");
-    assert!(!json.contains("default_section_frame_border"), "None skips: {}", json);
+    let json = serde_json::to_string(&plain).expect("serializes");
+    assert!(
+        !json.contains("default_section_frame_border"),
+        "None skips: {}",
+        json
+    );
     assert!(!json.contains("default_focused_section_frame_border"));
 
     // Authored canvas: both fields land + round-trip.
@@ -939,10 +991,12 @@ fn test_canvas_section_frame_defaults_round_trip() {
         color_palette: None,
         color_palette_field: None,
     });
-    let json = serde_json::to_string(&authored).expect("serialises");
+    let json = serde_json::to_string(&authored).expect("serializes");
     let back: Canvas = serde_json::from_str(&json).expect("round-trips");
     let unfocused = back.default_section_frame_border.expect("unfocused survives");
-    let focused = back.default_focused_section_frame_border.expect("focused survives");
+    let focused = back
+        .default_focused_section_frame_border
+        .expect("focused survives");
     assert_eq!(unfocused.preset, "double");
     assert_eq!(unfocused.color.as_deref(), Some("#aaaaaa"));
     assert_eq!(focused.preset, "heavy");
@@ -952,7 +1006,7 @@ fn test_canvas_section_frame_defaults_round_trip() {
 /// `MindNode.display_text` joins every section's text with `'\n'`
 /// — the legacy bridge for export / clipboard / copy paths that
 /// want one rendered string per node. Single-section nodes
-/// round-trip identically with the pre-section behaviour.
+/// round-trip identically with the pre-section behavior.
 #[test]
 fn mindnode_display_text_joins_sections() {
     use crate::mindmap::test_helpers::synthetic_node_full;
@@ -973,4 +1027,273 @@ fn node_and_edge_locations_empty_on_blank_map() {
     let map = MindMap::new_blank("blank");
     assert_eq!(map.node_locations().count(), 0);
     assert_eq!(map.edge_locations().count(), 0);
+}
+
+// Defense in depth (P0-05): `loader::load_from_str` rejects a
+// `parent_id` cycle before a `MindMap` value ever exists, but these
+// three walkers can in principle be reached with a cycle built by
+// other means (e.g. a future in-memory mutation bug), so each one
+// caps its own walk instead of trusting the loader alone. These
+// tests build the cyclic map directly via `synthetic_map` —
+// bypassing the loader entirely — to exercise that cap.
+
+#[test]
+fn is_hidden_by_fold_does_not_hang_on_parent_cycle() {
+    let a = synthetic_node_full("a", Some("b"), 0.0, 0.0, 10.0, 10.0, false);
+    let b = synthetic_node_full("b", Some("a"), 0.0, 0.0, 10.0, 10.0, false);
+    let map = synthetic_map(vec![a, b], vec![]);
+    let node = map.nodes.get("a").unwrap();
+    // Must return rather than loop forever; the guarded default is "not hidden".
+    assert!(!map.is_hidden_by_fold(node));
+}
+
+#[test]
+fn all_descendants_does_not_overflow_on_parent_cycle() {
+    let a = synthetic_node_full("a", Some("b"), 0.0, 0.0, 10.0, 10.0, false);
+    let b = synthetic_node_full("b", Some("a"), 0.0, 0.0, 10.0, 10.0, false);
+    let map = synthetic_map(vec![a, b], vec![]);
+    // Must return a bounded result rather than recurse forever.
+    let descendants = map.all_descendants("a");
+    assert!(descendants.len() <= map.nodes.len());
+}
+
+#[test]
+fn is_ancestor_or_self_does_not_hang_on_parent_cycle() {
+    let a = synthetic_node_full("a", Some("b"), 0.0, 0.0, 10.0, 10.0, false);
+    let b = synthetic_node_full("b", Some("a"), 0.0, 0.0, 10.0, 10.0, false);
+    let c = synthetic_node_full("c", None, 0.0, 0.0, 10.0, 10.0, false);
+    let map = synthetic_map(vec![a, b, c], vec![]);
+    // "c" is not part of the cycle and not an ancestor of "a"; the
+    // walk up "a"'s cyclic parent chain must terminate and say so.
+    assert!(!map.is_ancestor_or_self("c", "a"));
+}
+
+/// `ChildIndex` exposes the same root/child order as `root_nodes` /
+/// `children_of` but in O(N) total instead of O(N²).
+#[test]
+fn child_index_matches_root_nodes_and_children_of_order() {
+    let map = loader::load_from_file(&test_map_path()).unwrap();
+    let index = map.child_index();
+
+    let expected_roots = map.root_nodes();
+    assert_eq!(index.roots().len(), expected_roots.len());
+    for (a, b) in index.roots().iter().zip(expected_roots.iter()) {
+        assert_eq!(a.id, b.id);
+    }
+
+    for node in map.nodes.values() {
+        let expected = map.children_of(&node.id);
+        let actual = index.children_of(&node.id);
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "children_of mismatch for {}",
+            node.id
+        );
+        for (a, b) in actual.iter().zip(expected.iter()) {
+            assert_eq!(a.id, b.id);
+        }
+    }
+}
+
+/// `ChildIndex::all_descendant_ids` matches `MindMap::all_descendants`
+/// without rebuilding the index on every recursive step.
+#[test]
+fn child_index_all_descendant_ids_matches_all_descendants() {
+    let map = loader::load_from_file(&test_map_path()).unwrap();
+    let index = map.child_index();
+    for node in map.nodes.values() {
+        let expected = map.all_descendants(&node.id);
+        let mut actual = index.all_descendant_ids(&node.id, map.nodes.len());
+        actual.sort();
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+        assert_eq!(actual, expected_sorted, "descendants mismatch for {}", node.id);
+    }
+}
+
+/// `fold_hidden_set` captures every node under a folded ancestor and
+/// nothing else.
+#[test]
+fn fold_hidden_set_hides_descendants_of_folded_nodes() {
+    let mut root = synthetic_node_full("0", None, 0.0, 0.0, 10.0, 10.0, false);
+    root.folded = true;
+    let child = synthetic_node_full("0.0", Some("0"), 0.0, 0.0, 10.0, 10.0, false);
+    let grand = synthetic_node_full("0.0.0", Some("0.0"), 0.0, 0.0, 10.0, 10.0, false);
+    let other_root = synthetic_node_full("1", None, 0.0, 0.0, 10.0, 10.0, false);
+    let map = synthetic_map(vec![root, child, grand, other_root], vec![]);
+
+    let hidden: std::collections::HashSet<&str> = map.fold_hidden_set();
+    assert!(hidden.contains("0.0"), "child of folded root should be hidden");
+    assert!(
+        hidden.contains("0.0.0"),
+        "grandchild of folded root should be hidden"
+    );
+    assert!(!hidden.contains("0"), "folded root itself is visible");
+    assert!(!hidden.contains("1"), "unrelated root is visible");
+}
+
+/// `fold_hidden_set` tolerates a parent cycle by treating the cycle
+/// nodes as visible rather than hanging.
+#[test]
+fn fold_hidden_set_does_not_hang_on_parent_cycle() {
+    let a = synthetic_node_full("a", Some("b"), 0.0, 0.0, 10.0, 10.0, false);
+    let b = synthetic_node_full("b", Some("a"), 0.0, 0.0, 10.0, 10.0, false);
+    let map = synthetic_map(vec![a, b], vec![]);
+    let hidden = map.fold_hidden_set();
+    assert!(hidden.is_empty());
+}
+
+/// Nodes whose parent_id is missing from the map are treated as
+/// root-like by the loader; folding such an orphan must still hide
+/// its descendants.
+#[test]
+fn fold_hidden_set_traverses_orphan_component() {
+    let mut orphan = synthetic_node_full("0", Some("missing"), 0.0, 0.0, 10.0, 10.0, false);
+    orphan.folded = true;
+    let child = synthetic_node_full("0.0", Some("0"), 0.0, 0.0, 10.0, 10.0, false);
+    let map = synthetic_map(vec![orphan, child], vec![]);
+    let hidden = map.fold_hidden_set();
+    assert!(hidden.contains("0.0"), "child of folded orphan should be hidden");
+    assert!(!hidden.contains("0"), "folded orphan itself is visible");
+}
+
+// ── Edge color cascade (`MindEdge::*_color`) ──────────────────
+//
+// The three channels' precedence used to be re-typed at six call
+// sites across two crates. These pin the cascade the helpers now
+// own; the scene builder and the document's clipboard resolvers
+// read through them.
+
+/// With no overrides anywhere, every channel bottoms out at
+/// `edge.color` — the field the model always carries, so a
+/// resolver can never hand back an empty string.
+#[test]
+fn test_edge_colors_bottom_out_at_edge_color() {
+    let edge = synthetic_edge("a", "b", "auto", "auto");
+    let canvas = blank_canvas();
+    assert_eq!(edge.body_color(&canvas), "#fff");
+    assert_eq!(edge.label_color(&canvas), "#fff");
+    assert_eq!(edge.portal_endpoint_color(&canvas, None), "#fff");
+    assert_eq!(edge.portal_endpoint_text_color(&canvas, None), "#fff");
+}
+
+/// The canvas default connection supplies the body color for an
+/// edge that has not forked a `glyph_connection` of its own, and
+/// every downstream channel inherits it.
+#[test]
+fn test_edge_body_color_falls_back_to_canvas_default_connection() {
+    let edge = synthetic_edge("a", "b", "auto", "auto");
+    let mut canvas = blank_canvas();
+    canvas.default_connection = Some(GlyphConnectionConfig {
+        color: Some("#canvas".into()),
+        ..GlyphConnectionConfig::default()
+    });
+    assert_eq!(edge.body_color(&canvas), "#canvas");
+    assert_eq!(edge.label_color(&canvas), "#canvas");
+}
+
+/// **Struct-level, not field-level.** Once an edge forks a
+/// `glyph_connection`, the canvas default drops out of the
+/// cascade entirely — even for `color`, which the fork left at
+/// `None`. Resolving field-by-field would silently re-attach a
+/// forked edge to the canvas default; this is the regression
+/// guard for that.
+#[test]
+fn test_edge_body_color_ignores_canvas_default_once_forked() {
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.glyph_connection = Some(GlyphConnectionConfig::default());
+    let mut canvas = blank_canvas();
+    canvas.default_connection = Some(GlyphConnectionConfig {
+        color: Some("#canvas".into()),
+        ..GlyphConnectionConfig::default()
+    });
+    assert_eq!(
+        edge.body_color(&canvas),
+        "#fff",
+        "a forked edge with color=None uses edge.color, not the canvas default"
+    );
+}
+
+/// A per-edge `glyph_connection.color` wins over both the canvas
+/// default and `edge.color`.
+#[test]
+fn test_edge_body_color_prefers_glyph_connection_override() {
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.glyph_connection = Some(GlyphConnectionConfig {
+        color: Some("#body".into()),
+        ..GlyphConnectionConfig::default()
+    });
+    let mut canvas = blank_canvas();
+    canvas.default_connection = Some(GlyphConnectionConfig {
+        color: Some("#canvas".into()),
+        ..GlyphConnectionConfig::default()
+    });
+    assert_eq!(edge.body_color(&canvas), "#body");
+}
+
+/// The label channel detaches from the body when it authors its
+/// own color, and follows it otherwise.
+#[test]
+fn test_edge_label_color_override_detaches_from_body() {
+    let mut edge = synthetic_edge("a", "b", "auto", "auto");
+    edge.glyph_connection = Some(GlyphConnectionConfig {
+        color: Some("#body".into()),
+        ..GlyphConnectionConfig::default()
+    });
+    let canvas = blank_canvas();
+    assert_eq!(edge.label_color(&canvas), "#body");
+    edge.label_config = Some(EdgeLabelConfig {
+        color: Some("#label".into()),
+        ..EdgeLabelConfig::default()
+    });
+    assert_eq!(edge.label_color(&canvas), "#label");
+    assert_eq!(edge.body_color(&canvas), "#body", "body is unaffected");
+}
+
+/// A portal endpoint's icon color overrides the body cascade,
+/// and its text color overrides the icon — the two portal
+/// channels are independent so a colored badge can carry a
+/// differently-colored annotation.
+#[test]
+fn test_portal_endpoint_color_channels_are_independent() {
+    let mut edge = synthetic_portal_edge("a", "b", "#edge");
+    let canvas = blank_canvas();
+    edge.portal_from = Some(PortalEndpointState {
+        color: Some("#icon".into()),
+        ..PortalEndpointState::default()
+    });
+    let from = portal_endpoint_state(&edge, "a");
+    assert_eq!(edge.portal_endpoint_color(&canvas, from), "#icon");
+    assert_eq!(
+        edge.portal_endpoint_text_color(&canvas, from),
+        "#icon",
+        "text with no override follows the icon"
+    );
+
+    edge.portal_from = Some(PortalEndpointState {
+        color: Some("#icon".into()),
+        text_color: Some("#text".into()),
+        ..PortalEndpointState::default()
+    });
+    let from = portal_endpoint_state(&edge, "a");
+    assert_eq!(edge.portal_endpoint_color(&canvas, from), "#icon");
+    assert_eq!(edge.portal_endpoint_text_color(&canvas, from), "#text");
+}
+
+/// An endpoint with no state at all inherits the body cascade on
+/// both channels, and one endpoint's override never leaks to the
+/// other side.
+#[test]
+fn test_portal_endpoint_color_does_not_leak_across_endpoints() {
+    let mut edge = synthetic_portal_edge("a", "b", "#edge");
+    let canvas = blank_canvas();
+    edge.portal_from = Some(PortalEndpointState {
+        color: Some("#icon".into()),
+        ..PortalEndpointState::default()
+    });
+    let to = portal_endpoint_state(&edge, "b");
+    assert!(to.is_none());
+    assert_eq!(edge.portal_endpoint_color(&canvas, to), "#edge");
+    assert_eq!(edge.portal_endpoint_text_color(&canvas, to), "#edge");
 }

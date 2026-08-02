@@ -21,6 +21,7 @@ use super::{scope, CustomMutation, DocumentAction, MutationBehavior, TargetScope
 /// `mutations` + `target_scope` pair. `mutator` takes precedence
 /// when both are present.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CustomMutationIn {
     pub id: String,
     pub name: String,

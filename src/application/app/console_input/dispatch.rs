@@ -291,9 +291,7 @@ use crate::application::app::input_context::InputHandlerContext;
 /// `pub(in crate::application::app)` so the funneled
 /// `Action::ConsoleSubmit` dispatch arm in `dispatch.rs` reaches it.
 #[cfg(not(target_arch = "wasm32"))]
-pub(in crate::application::app) fn submit_line(
-    ctx: &mut InputHandlerContext<'_>,
-) {
+pub(in crate::application::app) fn submit_line(ctx: &mut InputHandlerContext<'_>) {
     // Local re-bindings preserve the original
     // SubmitLineContext-destructure shape. Without these, `match
     // ctx.console_state` doesn't trigger match-ergonomics on the
@@ -343,8 +341,7 @@ pub(in crate::application::app) fn submit_line(
             execute_console_line(
                 &line,
                 ctx.console_state,
-                ctx.label_edit_state,
-                ctx.portal_text_edit_state,
+                ctx.single_line_edit_state,
                 ctx.color_picker_state,
                 ctx.text_edit_state,
                 doc,

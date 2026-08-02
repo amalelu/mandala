@@ -2,13 +2,14 @@
 
 //! `GlyphComponent` + `GlyphComponentField` — the leaf of the glyph
 //! model hierarchy: one contiguous run of text sharing a font and a
-//! colour. A `GlyphLine` is a `Vec<GlyphComponent>`; a `GlyphMatrix`
+//! color. A `GlyphLine` is a `Vec<GlyphComponent>`; a `GlyphMatrix`
 //! is a `Vec<GlyphLine>`; a `GlyphModel` wraps the matrix.
 
 use crate::font::fonts::AppFont;
 use crate::util::color::{Color, FloatRgba};
 use crate::util::grapheme_chad::{
-    count_grapheme_clusters, delete_back_unicode, delete_front_unicode, split_off_graphemes,
+    count_grapheme_clusters, delete_back_unicode, delete_front_unicode, first_non_whitespace_grapheme,
+    split_off_graphemes,
 };
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
@@ -23,21 +24,22 @@ pub enum GlyphComponentField {
     Text(String),
     /// Font assignment.
     Font(AppFont),
-    /// Colour assignment.
+    /// Color assignment.
     Color(FloatRgba),
 }
 
-/// The leaf: one run of text rendered in a single font and colour.
+/// The leaf: one run of text rendered in a single font and color.
 /// Stacks into a [`crate::gfx_structs::model::GlyphLine`], which
 /// stacks into a [`crate::gfx_structs::model::GlyphMatrix`], which
 /// belongs to a [`crate::gfx_structs::model::GlyphModel`].
 #[derive(Serialize, Debug, Eq, PartialEq, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct GlyphComponent {
     /// The text run — may contain multi-byte / multi-grapheme clusters.
     pub text: String,
     /// Font used for this run.
     pub font: AppFont,
-    /// RGBA colour (u8 per channel).
+    /// RGBA color (u8 per channel).
     pub color: Color,
 }
 
@@ -67,7 +69,10 @@ impl MulAssign for GlyphComponent {
 impl AddAssign for GlyphComponent {
     fn add_assign(&mut self, rhs: Self) {
         if !rhs.text.is_empty() {
-            self.text = self.text.clone() + &*rhs.text;
+            // Append in place: the old `self.text.clone() + &rhs.text`
+            // allocated a second String for every concatenation on a
+            // hot path (§B7).
+            self.text.push_str(&rhs.text);
         }
         if self.font == AppFont::Any {
             self.font = rhs.font;
@@ -81,10 +86,11 @@ impl AddAssign for GlyphComponent {
 impl Add for GlyphComponent {
     type Output = Self;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        let mut output = self.clone();
-        output += rhs;
-        output
+    fn add(mut self, rhs: Self) -> Self::Output {
+        // `self` is already owned — cloning it first was a wasted
+        // allocation of the whole text run.
+        self += rhs;
+        self
     }
 }
 
@@ -99,7 +105,7 @@ impl GlyphComponent {
         }
     }
 
-    /// Build an invisible-colour spacer of `n` ASCII spaces. Used by
+    /// Build an invisible-color spacer of `n` ASCII spaces. Used by
     /// the matrix painter to pad lines. O(n) for the repeat.
     pub fn space(n: usize) -> Self {
         GlyphComponent {
@@ -110,7 +116,7 @@ impl GlyphComponent {
     }
 
     /// Split off the graphemes at-and-after `at_idx` into a new
-    /// component (inheriting this component's font / colour). O(n)
+    /// component (inheriting this component's font / color). O(n)
     /// in `at_idx` for the grapheme walk.
     pub fn split_off(&mut self, at_idx: usize) -> Self {
         let split_str = split_off_graphemes(&mut self.text, at_idx);
@@ -146,20 +152,34 @@ impl GlyphComponent {
     }
 
     /// True when the text contains at least one non-whitespace
-    /// character. O(n) in the text length.
+    /// character.
+    ///
+    /// Defined as "[`Self::index_of_first_non_space_grapheme`] found
+    /// something" rather than as a second whitespace scan, so the
+    /// predicate and the index it guards cannot disagree about what
+    /// counts as content.
+    ///
+    /// Costs: O(n) grapheme walk that short-circuits at the first
+    /// content cluster; no allocation.
     pub fn contains_non_space(&self) -> bool {
-        self.text.chars().any(|c| !c.is_whitespace())
+        self.index_of_first_non_space_grapheme().is_some()
     }
 
-    /// Index of the first non-whitespace character (by `char`
-    /// iteration, not grapheme), or `None` if the run is all
-    /// whitespace. O(n).
-    pub fn index_of_first_non_space_char(&self) -> Option<usize> {
-        self.text
-            .chars()
-            .enumerate()
-            .find(|&(_, c)| !c.is_whitespace())
-            .map(|(i, _)| i)
+    /// Grapheme-cluster index of the first cluster carrying
+    /// non-whitespace content, or `None` if the run is all whitespace.
+    ///
+    /// The unit is grapheme clusters — the same unit
+    /// [`Self::length`], [`Self::split_off`], and every `GlyphLine`
+    /// offset speak in — so the result composes with them directly.
+    /// It was a `char` ordinal, which agreed with neither the byte
+    /// offset it was sliced with nor the cluster offset it was added
+    /// to (CONVENTIONS §B3).
+    ///
+    /// Costs: delegates to
+    /// [`first_non_whitespace_grapheme`]; O(n) grapheme walk that
+    /// short-circuits at the first content cluster, no allocation.
+    pub fn index_of_first_non_space_grapheme(&self) -> Option<usize> {
+        first_non_whitespace_grapheme(&self.text)
     }
 
     /// Borrow the text as a `&str`. O(1).

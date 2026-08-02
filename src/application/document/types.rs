@@ -2,7 +2,7 @@
 
 //! Document-level data structures: the animation runtime record,
 //! the ref types (`EdgeRef`, `ReparentUndoData`), the selection
-//! state enum, and the reparent-highlight / selection colour
+//! state enum, and the reparent-highlight / selection color
 //! constants. Methods on `MindMapDocument` live in the sibling
 //! submodules.
 
@@ -15,7 +15,7 @@ use baumhard::mindmap::scene_cache::EdgeKey;
 pub const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
 
 // `InteractionModeOverrides` lives in baumhard
-// (`baumhard::mindmap::scene_builder::InteractionModeOverrides`) — its
+// (`baumhard::mindmap::tree_builder::InteractionModeOverrides`) — its
 // home is next to the `SceneSelectionContext` it feeds. Re-exported
 // from `document/mod.rs` for the convenient `InteractionModeOverrides::none()`
 // path that production callers use.
@@ -45,7 +45,7 @@ pub struct AnimationInstance {
     /// dedup key in `start_animation` is `(mutation_id,
     /// target_id, section_idx)` so two simultaneous animations
     /// from different sections of the same node with the same
-    /// mutation id (e.g. a section-scoped recolour wired to
+    /// mutation id (e.g. a section-scoped recolor wired to
     /// every section's `OnClick`) coexist instead of coalescing
     /// to one.
     pub section_idx: Option<usize>,
@@ -168,7 +168,7 @@ pub enum SelectionState {
     Multi(Vec<String>),
     /// One section of one node — emitted when the user clicks on a
     /// section-area in a multi-section node and routes per-section
-    /// edits (text, font, colour) to that specific section. Single-
+    /// edits (text, font, color) to that specific section. Single-
     /// section migrated nodes prefer [`Self::Single`] so today's
     /// per-node verbs continue to fire on the whole-node target;
     /// the section variant is the seam that surfaces when richer
@@ -274,7 +274,7 @@ impl SelectionState {
     /// [`Self::MultiSection`]. Keeps two invariants in one
     /// place: `MultiSection.len() >= 2` and "every entry is
     /// unique" — downstream consumers (`selection_targets`
-    /// fan-out, highlight pipeline, font / colour fan-out)
+    /// fan-out, highlight pipeline, font / color fan-out)
     /// implicitly assume uniqueness; duplicates would inflate
     /// fan-out counts and potentially write the same setter
     /// twice on the same section.
@@ -510,7 +510,7 @@ impl SelectionState {
 
     /// A cached `EdgeKey` borrow for the selected portal label,
     /// if any, suitable for building a
-    /// [`baumhard::mindmap::scene_builder::SelectedPortalLabel`]
+    /// [`baumhard::mindmap::tree_builder::SelectedPortalLabel`]
     /// without allocating a fresh key per frame. `EdgeKey` and
     /// `EdgeRef` share the same `(from, to, type)` shape — we
     /// store the key form inside `SelectionState::PortalLabel`
@@ -521,7 +521,7 @@ impl SelectionState {
     /// behavior (icon vs. text) is a follow-up refinement.
     pub fn selected_portal_label_scene_ref(
         &self,
-    ) -> Option<baumhard::mindmap::scene_builder::SelectedPortalLabel<'_>> {
+    ) -> Option<baumhard::mindmap::tree_builder::SelectedPortalLabel<'_>> {
         let PortalLabelSel {
             edge_key,
             endpoint_node_id,
@@ -529,7 +529,7 @@ impl SelectionState {
             SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => s,
             _ => return None,
         };
-        Some(baumhard::mindmap::scene_builder::SelectedPortalLabel {
+        Some(baumhard::mindmap::tree_builder::SelectedPortalLabel {
             edge_key,
             endpoint_node_id: endpoint_node_id.as_str(),
         })

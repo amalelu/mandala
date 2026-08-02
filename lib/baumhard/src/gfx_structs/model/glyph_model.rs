@@ -8,6 +8,7 @@ use super::component::GlyphComponent;
 use super::line::GlyphLine;
 use super::matrix::GlyphMatrix;
 use super::mutator::DeltaGlyphModel;
+use crate::core::primitives::ApplyOperation;
 use crate::gfx_structs::util::hitbox::HitBox;
 use crate::util::geometry;
 use crate::util::ordered_vec2::OrderedVec2;
@@ -61,7 +62,7 @@ impl GlyphModel {
         &mut self.hitbox
     }
 
-    /// Append one [`GlyphLine`] to the matrix. O(1) amortised.
+    /// Append one [`GlyphLine`] to the matrix. O(1) amortized.
     pub fn add_line(&mut self, line: GlyphLine) {
         self.glyph_matrix.push(line);
     }
@@ -122,11 +123,55 @@ impl GlyphModel {
         }
 
         if let Some(delta_layer) = delta.layer() {
-            operation.apply(&mut self.layer, delta_layer);
+            match operation {
+                ApplyOperation::Add => self.layer += delta_layer,
+                ApplyOperation::Assign => self.layer = delta_layer,
+                ApplyOperation::Subtract => self.layer = self.layer.saturating_sub(delta_layer),
+                ApplyOperation::Multiply => self.layer *= delta_layer,
+                ApplyOperation::Delete => self.layer = 0,
+                ApplyOperation::Noop => {}
+            }
         }
 
+        // `apply_ref` clones the payload only on the arms that
+        // consume it — a `Noop` or `Delete` model delta no longer
+        // deep-copies the whole matrix just to discard it.
         if let Some(glyph_matrix) = delta.glyph_matrix() {
-            operation.apply(&mut self.glyph_matrix, glyph_matrix);
+            operation.apply_ref(&mut self.glyph_matrix, glyph_matrix);
         }
+
+        if let Some((line_num, line)) = delta.glyph_line() {
+            self.apply_line_delta(operation, line_num, line);
+        }
+
+        if let Some(lines) = delta.glyph_lines() {
+            for (line_num, line) in lines {
+                self.apply_line_delta(operation, *line_num, line);
+            }
+        }
+    }
+
+    fn apply_line_delta(&mut self, operation: ApplyOperation, line_num: usize, line: &GlyphLine) {
+        match operation {
+            ApplyOperation::Add | ApplyOperation::Assign => {
+                operation.apply_ref(self.glyph_matrix.ensure_line(line_num), line);
+            }
+            ApplyOperation::Subtract
+            | ApplyOperation::Multiply
+            | ApplyOperation::Delete
+            | ApplyOperation::Noop => {
+                if let Some(target_line) = self.glyph_matrix.get_mut(line_num) {
+                    operation.apply_ref(target_line, line);
+                }
+            }
+        }
+    }
+}
+
+/// Mirrors [`GlyphMatrix`] and [`GlyphLine`], which both carry one —
+/// an empty model at the origin on layer 0.
+impl Default for GlyphModel {
+    fn default() -> Self {
+        GlyphModel::new()
     }
 }

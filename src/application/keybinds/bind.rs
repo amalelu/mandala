@@ -48,7 +48,12 @@ pub enum MouseGesture {
     /// Left-button held down + cursor movement past the drag threshold,
     /// only when the press landed on empty canvas. Continuous: the bound
     /// action's body runs for the duration of the press. Dispatched
-    /// from `event_cursor_moved` for `Action::PanCanvas` only.
+    /// from `event_cursor_moved` through `dispatch_action` for whatever
+    /// Action the gesture resolves to — there is **no** `PanCanvas`
+    /// special-case in the handler, and reintroducing one would silently
+    /// un-bind every other Action a user maps here. The threshold
+    /// frame's pan delta is gated on the dispatch having entered
+    /// `DragState::Panning`.
     #[strum(serialize = "leftdrag")]
     LeftDrag,
     /// Two left-button presses within the double-click time + distance

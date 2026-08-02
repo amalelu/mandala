@@ -4,37 +4,139 @@ members = ["lib/baumhard", "lib/mandala_derive", "crates/maptool"]
 [workspace.package]
 license = "MPL-2.0"
 
+# Single source of truth for the version of every dependency more than
+# one workspace member needs. The rule, which
+# `baumhard::util::manifests::tests` enforces rather than merely
+# stating:
+#
+#   a dependency belongs in this table exactly when two or more
+#   members depend on it, and when it is here no member may name a
+#   version of it — they write `dep.workspace = true`.
+#
+# Both halves matter. Without the first, two manifests can name the
+# same crate at different versions and cargo will happily build both;
+# that is not hypothetical, it is what happened to `strum` (0.27 in
+# the app crate, 0.28 in baumhard), costing two copies of the runtime
+# crate and two proc-macro compilations until #106 unified them by
+# hand. Without the second, hoisting is decorative: a member that
+# still writes `strum = "0.27"` silently wins over the workspace
+# entry. And a dependency only one member uses is *not* listed here —
+# separating a version from its single use site buys nothing and
+# costs a lookup.
+#
+# Per-member feature differences survive: `features` in a member
+# manifest is additive on top of whatever this table declares, and a
+# member can therefore ask for more without editing this table. The
+# live example is `syn`, listed here without features — baumhard's
+# dev-dependency adds `["full"]` for `util::serde_coverage`'s
+# `parse_file`, while `mandala_derive` asks for nothing beyond the
+# defaults its macro needs.
+#
+# "Asks for" and "compiles against" are not the same thing, and this
+# comment used to conflate them. Cargo unifies features per resolved
+# package node, so what any member compiles against is the union over
+# that node's dependents; `mandala_derive` in a workspace-wide build
+# gets the proc-macro graph's `syn`, `full` and all. See the note in
+# `lib/mandala_derive/Cargo.toml` for the detail. Listing a dependency
+# featureless here is about where the *declaration* lives, not about
+# what gets compiled.
+[workspace.dependencies]
+glam = { version = "0.32.1", features = ["serde"] }
+indextree = { version = "4.8.1", features = ["serde"] }
+# `release_max_level_warn`: `warn!`/`error!` survive into release
+# builds so CODE_CONVENTIONS §9's "log and degrade" posture is real in
+# the binaries users run; `info!`/`debug!`/`trace!` still compile to
+# nothing so hot paths keep their zero-cost posture.
+#
+# This one line replaces a rule that used to be enforced by luck and a
+# comment. The app crate and baumhard each declared the feature
+# separately, and the reason a mismatch was survivable is that cargo
+# unions log's features across the workspace and log
+# `compile_error!`s on "multiple release_max_level_* features set"
+# (`log-0.4.29/src/lib.rs:376-394`) — a mixed workspace failed to
+# build rather than resolving to something. Worth knowing what that
+# saved us from: `STATIC_MAX_LEVEL` (`lib.rs:1611`) matches its arms
+# in declaration order, `off` first, so absent the guard a mixed
+# `off`/`warn` set would have silently resolved to `Off` and deleted
+# the channel. There is now nothing to mix — the feature is declared
+# once. What still has no compiler behind it is *this* declaration
+# drifting to the wrong level (back to `off`, or dropped entirely,
+# which uncaps release to `Trace`); `baumhard::util::log::tests` pins
+# that, and separately pins the `log` version the `compile_error!`
+# above was read in, so a bump has to re-verify the citation rather
+# than inherit it.
+log = { version = "0.4.29", features = ["release_max_level_warn"] }
+rustc-hash = "2.1.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+strum = "0.28.0"
+strum_macros = "0.28.0"
+# Deliberately featureless here; see the `features` note above. `syn`
+# is one of the heaviest compile dependencies in the graph, so the
+# default-feature set is the one to inherit and `["full"]` the one to
+# ask for.
+syn = "2.0.117"
+
+# The profile `./build.sh --fat` selects, and the reason that flag
+# exists: `release` keeps `codegen-units = 16` and thin-local LTO so
+# incremental release builds stay tolerable during development, which
+# leaves cross-crate inlining on the table. `release-lto` trades build
+# time for that — one codegen unit per crate and whole-graph LTO — and
+# is what a shipped native binary should be built with. It is a
+# separate profile rather than a change to `release` so the everyday
+# `cargo build --release` loop is not taxed.
+#
+# Kept in the root manifest because cargo only honors `[profile.*]`
+# there: a `[profile.release-lto]` in `lib/baumhard/Cargo.toml` is
+# ignored with a warning, so this is the one place it can live.
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
 [package]
 name = "mandala"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
+# TEST_CONVENTIONS §T2.3 as a manifest fact rather than a sentence:
+# this crate has no benchmark harness. Without this, cargo
+# auto-discovers anything dropped into `benches/` as a bench target
+# built against the *default* libtest harness, which ignores
+# `criterion_main!` and yields a binary that runs zero benchmarks
+# while looking like it runs some. That is what used to be here.
+autobenches = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rustc-hash = "2.1.2"
-unicode-segmentation = "1.13.2"
+rustc-hash.workspace = true
+# NOTE: `unicode-segmentation` is deliberately NOT a dependency of the
+# app crate. Every grapheme primitive lives in
+# `baumhard::util::grapheme_chad` (lib/baumhard/CONVENTIONS.md §B3);
+# leaving the crate out makes that containment compiler-enforced
+# rather than a review convention.
+# NOTE: `cosmic-text` is deliberately NOT a dependency of the app
+# crate either. `lib/baumhard/CONVENTIONS.md` §B5 concentrates every
+# cosmic-text touch in `lib/baumhard/src/font/`, which re-exports the
+# handful of types the renderer needs (`baumhard::font::Buffer`,
+# `::Color`, `::FontSystem`, ...). Leaving the crate out of this
+# manifest makes that containment compiler-enforced: a `use
+# cosmic_text::...` in `src/` no longer resolves.
 wgpu = { version = "29.0", features = ["webgl"] }
 bytemuck = "1.16"
 glyphon = "0.11.0"
-cosmic-text = "0.18.2"
-tinyvec = "1.11.0"
 # Alternative: https://crates.io/crates/ab_glyph
-glam = {version = "0.32.1", features = ["serde"]}
-futures = "0.3.32"
+glam.workspace = true
 winit = "0.30.13"
-serde = {version = "1.0.228", features = ["derive"]}
-serde_json = "1.0.149"
-serde-lexpr = "0.1.3"
-lazy_static = "1.5.0"
-syn = "2.0.117"
-log = { version = "0.4.29", features = ["release_max_level_off"] }
-smol_str = "0.3.6"
-strum = "0.27"
-strum_macros = "0.27"
-indextree = {version = "4.8.1", features = ["serde"]}
-ttf-parser = "0.25.1"
+serde.workspace = true
+serde_json.workspace = true
+# `release_max_level_warn` and the reasoning behind it now live once,
+# in `[workspace.dependencies]` above.
+log.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+indextree.workspace = true
 baumhard = {path="./lib/baumhard"}
 mandala_derive = {path="./lib/mandala_derive"}
 # Cross-platform `Instant` — on native re-exports `std::time::Instant`;
@@ -43,12 +145,14 @@ mandala_derive = {path="./lib/mandala_derive"}
 # ("time not implemented on this platform").
 web-time = "1.1.0"
 
-[build-dependencies]
-walkdir = "2.5.0"
-path-slash = "0.2.1"
-ttf-parser = "0.25.1"
-regex = "1.12.3"
-lazy_static = "1.5.0"
+# NOTE: no `[build-dependencies]` here on purpose — this crate has no
+# `build.rs`. The font-manifest generator that needs
+# walkdir/path-slash/ttf-parser is `lib/baumhard/build.rs`, and it
+# declares them itself. Cargo still resolves a `[build-dependencies]`
+# table on a crate with no build script — it lands in `Cargo.lock` and
+# participates in version unification — while nothing ever compiles
+# against it, so the block that used to sit here was pure carrying
+# cost. If a build script is ever added, declare its deps then.
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 num_cpus = "1.17.0"
@@ -60,7 +164,24 @@ wasm-bindgen = "0.2.118"
 wasm-bindgen-futures = "0.4.68"
 js-sys = "0.3.95"
 web-sys = { version = "0.3.95", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Storage", "Location", "Performance", "EventTarget", "KeyboardEvent", "Response"] }
+# Load-bearing despite having no call site anywhere in `src/`, which
+# is exactly why it is worth a comment: this entry exists to turn a
+# *feature* on, and the next dead-dependency sweep will otherwise find
+# it and delete it. `getrandom` reaches the graph through
+# `baumhard`'s `rand`, and on `wasm32-unknown-unknown` it has no
+# default backend — without `wasm_js` it fails to compile its own
+# `backends` module (`cannot find function 'inner_u32' in module
+# 'backends'`, reproduced by removing this line and running the
+# `./test.sh` wasm32 gate). Cargo unions features across the
+# workspace, so declaring it in the crate that *is* the wasm binary
+# is what makes the browser build resolve.
 getrandom = { version = "0.4.2", features = ["wasm_js"] }
 
-[dev-dependencies]
-criterion = { version = "0.8.2", features = ["html_reports"] }
+# No `[dev-dependencies]`, and in particular no `criterion`: this
+# crate has no benchmark harness (TEST_CONVENTIONS §T2.3) and every
+# mandala-side test lives inline. `benches/` used to hold a
+# `_template.rs` that cargo auto-discovered under the *default*
+# libtest harness — which ignores `criterion_main!` — so it linked
+# criterion into the build and then ran zero benchmarks. The
+# benchmark harness is baumhard's; see
+# `lib/baumhard/benches/test_bench.rs`.

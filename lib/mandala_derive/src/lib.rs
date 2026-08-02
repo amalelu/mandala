@@ -10,7 +10,7 @@
 //! `keybinds/action/{destructive, context, wasm}.rs`:
 //!
 //! - `is_destructive(&self) -> bool` — the privilege gate consulted
-//!   by `MacroSource::allows_action`.
+//!   by `SourceTier::allows_action`.
 //! - `context(&self) -> InputContext` — modal-context routing for
 //!   the keybind resolver.
 //! - `wasm_compatibility(&self) -> WasmCompatibility` — WASM-port

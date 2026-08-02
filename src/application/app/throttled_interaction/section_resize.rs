@@ -5,14 +5,15 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use baumhard::mindmap::model::{Position, Size};
-use baumhard::mindmap::scene_builder::{build_section_resize_handles, ResizeHandleSide};
+use baumhard::mindmap::tree_builder::{build_section_resize_handles, ResizeHandleSide};
 use glam::Vec2;
 
 use crate::application::document::apply_section_resize_to_tree;
-use crate::application::frame_throttle::MutationFrequencyThrottle;
 
 use super::super::scene_rebuild::{flush_canvas_scene_buffers, update_section_resize_handle_tree_from_slice};
-use super::{DrainContext, ThrottledInteraction};
+use super::pending::ThrottledPending;
+use super::release::{ReleaseCommit, ReleaseRefresh};
+use super::{DrainContext, ThrottledDragInteraction, ThrottledInteraction};
 
 /// Per-frame drains apply a side-aware delta to the section's
 /// `offset` and `size` in the tree only; the model is unchanged
@@ -32,12 +33,10 @@ pub(in crate::application::app) struct SectionResizeInteraction {
     /// (`None`-sized) sections, since they have no AABB to
     /// resize.
     pub start_size: Size,
-    /// Accumulated total delta across the entire drag.
-    pub total_delta: Vec2,
-    /// Delta accumulated since the last successful drain.
-    pub pending_delta: Vec2,
-    /// Per-interaction adaptive throttle.
-    pub throttle: MutationFrequencyThrottle,
+    /// Delta-accumulate pending state plus this gesture's adaptive
+    /// throttle. The running total is what `resolve` folds into the
+    /// start AABB.
+    pub pending: ThrottledPending,
     /// `true` when the drag was started by the right mouse
     /// button (fast-resize gesture); `false` for left-button
     /// handle drags. Right-release finalize gates on this so
@@ -61,9 +60,7 @@ impl SectionResizeInteraction {
             side,
             start_offset,
             start_size,
-            total_delta: Vec2::ZERO,
-            pending_delta: Vec2::ZERO,
-            throttle: MutationFrequencyThrottle::with_default_budget(),
+            pending: ThrottledPending::accumulating_deltas(),
             started_with_right,
         }
     }
@@ -72,15 +69,25 @@ impl SectionResizeInteraction {
         self.side
             .resolve_aabb(self.start_offset, self.start_size, total_delta)
     }
+
+    /// Which gesture produced this drag — see
+    /// [`super::node_resize::NodeResizeInteraction`]'s counterpart.
+    fn gesture_label(&self) -> &'static str {
+        if self.started_with_right {
+            "fast-resize section"
+        } else {
+            "section resize"
+        }
+    }
 }
 
 impl ThrottledInteraction for SectionResizeInteraction {
-    fn has_pending(&self) -> bool {
-        self.pending_delta != Vec2::ZERO
+    fn pending(&self) -> &ThrottledPending {
+        &self.pending
     }
 
-    fn throttle(&mut self) -> &mut MutationFrequencyThrottle {
-        &mut self.throttle
+    fn pending_mut(&mut self) -> &mut ThrottledPending {
+        &mut self.pending
     }
 
     fn drain(&mut self, ctx: DrainContext<'_>) {
@@ -100,9 +107,10 @@ impl ThrottledInteraction for SectionResizeInteraction {
         // release via `set_section_aabb`. The section's
         // canvas-space position derives from the *current
         // model* node.position plus the in-progress offset, so
-        // a concurrent node move doesn't desynchronise mid-drag.
+        // a concurrent node move doesn't desynchronize mid-drag.
+        self.pending.take_delta();
         if let (Some(doc), Some(tree)) = (document.as_ref(), mindmap_tree.as_mut()) {
-            let (new_offset, new_size) = self.resolve(self.total_delta);
+            let (new_offset, new_size) = self.resolve(self.pending.total_delta());
             let node_pos = doc
                 .mindmap
                 .nodes
@@ -123,13 +131,7 @@ impl ThrottledInteraction for SectionResizeInteraction {
                     (new_size.width as f32).max(MIN_DRAG_SIZE_PX),
                     (new_size.height as f32).max(MIN_DRAG_SIZE_PX),
                 );
-                apply_section_resize_to_tree(
-                    tree,
-                    &self.node_id,
-                    self.section_idx,
-                    canvas_pos,
-                    canvas_size,
-                );
+                apply_section_resize_to_tree(tree, &self.node_id, self.section_idx, canvas_pos, canvas_size);
                 renderer.rebuild_buffers_from_tree(&tree.tree);
                 let elements = build_section_resize_handles(
                     &self.node_id,
@@ -141,8 +143,52 @@ impl ThrottledInteraction for SectionResizeInteraction {
                 flush_canvas_scene_buffers(app_scene, renderer);
             }
         }
+    }
+}
 
-        self.pending_delta = Vec2::ZERO;
+impl ThrottledDragInteraction for SectionResizeInteraction {
+    /// Release-commit body, renderer-free. See [`super::release`].
+    ///
+    /// Routes through `set_section_aabb`, which validates the
+    /// post-mutation `(offset, size)` against the parent in one
+    /// step, so a W-grow gesture (shrink offset, grow width) passes
+    /// the right-edge guard the two-step `set_section_size` +
+    /// `set_section_offset` path rejected (intermediate state had
+    /// new size at old offset, overflowing). Pushes an
+    /// `EditNodeStyle` undo entry via the section's parent node
+    /// (sections share their owning node's style undo envelope —
+    /// see `mutate_section_with_style_undo` in `nodes/`).
+    fn commit_on_release_core(&mut self, c: ReleaseCommit<'_>) -> ReleaseRefresh {
+        let Some(doc) = c.document.as_mut() else {
+            return ReleaseRefresh::None;
+        };
+        let (new_offset, new_size) = self.resolve(self.pending.total_delta());
+        match doc.set_section_aabb(&self.node_id, self.section_idx, new_offset, new_size) {
+            Ok(true) => {}
+            Ok(false) => {
+                log::debug!(
+                    "{} release committed no-op on '{}' section[{}]",
+                    self.gesture_label(),
+                    self.node_id,
+                    self.section_idx
+                );
+            }
+            Err(msg) => {
+                log::info!(
+                    "{} release rejected: {} (snapping back)",
+                    self.gesture_label(),
+                    msg
+                );
+            }
+        }
+        c.scene_cache.clear();
+        ReleaseRefresh::All
+    }
+
+    /// See [`super::node_resize::NodeResizeInteraction`]'s
+    /// counterpart.
+    fn started_with_right(&self) -> bool {
+        self.started_with_right
     }
 }
 
@@ -150,7 +196,7 @@ impl ThrottledInteraction for SectionResizeInteraction {
 mod tests {
     use super::*;
     use crate::application::app::throttled_interaction::test_utils::{
-        drive_throttle_over_budget, trait_default_tests_for_throttled_interaction,
+        drive_throttle_over_budget, moved, trait_default_tests_for_throttled_interaction,
     };
 
     fn fixture(side: ResizeHandleSide) -> SectionResizeInteraction {
@@ -168,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_initialises_fields_with_zero_deltas() {
+    fn test_new_initializes_fields_with_zero_deltas() {
         let i = fixture(ResizeHandleSide::SE);
         assert_eq!(i.node_id, "n");
         assert_eq!(i.section_idx, 0);
@@ -177,9 +223,9 @@ mod tests {
         assert_eq!(i.start_offset.y, 20.0);
         assert_eq!(i.start_size.width, 100.0);
         assert_eq!(i.start_size.height, 50.0);
-        assert_eq!(i.pending_delta, Vec2::ZERO);
-        assert_eq!(i.total_delta, Vec2::ZERO);
-        assert_eq!(i.throttle.current_n(), 1);
+        assert_eq!(i.pending.pending_delta(), Vec2::ZERO);
+        assert_eq!(i.pending.total_delta(), Vec2::ZERO);
+        assert_eq!(i.pending.throttle.current_n(), 1);
     }
 
     /// SE handle: drag right + down → size grows, offset
@@ -252,39 +298,58 @@ mod tests {
         assert_eq!(size.height, 57.0);
     }
 
+    /// Delta-accumulate discipline — see the `MovingNode`
+    /// counterpart for why the wiring is worth its own test.
     #[test]
-    fn test_has_pending_false_for_zero_delta() {
-        let i = fixture(ResizeHandleSide::SE);
-        assert!(!i.has_pending());
-    }
-
-    #[test]
-    fn test_has_pending_true_for_nonzero_delta() {
+    fn test_pending_uses_the_delta_accumulate_discipline() {
         let mut i = fixture(ResizeHandleSide::SE);
-        i.pending_delta = Vec2::new(1.0, 0.0);
+        assert!(!i.has_pending());
+        i.accumulate(moved(1.0, 0.0));
         assert!(i.has_pending());
+        assert_eq!(i.pending.total_delta(), Vec2::new(1.0, 0.0));
+        assert_eq!(i.pending.peek_cursor(), None);
     }
 
     #[test]
     fn test_reset_resets_only_throttle() {
         let mut i = fixture(ResizeHandleSide::SE);
-        i.pending_delta = Vec2::new(11.0, 13.0);
-        i.total_delta = Vec2::new(17.0, 19.0);
-        drive_throttle_over_budget(&mut i.throttle);
-        assert!(i.throttle.current_n() > 1);
+        i.accumulate(moved(11.0, 13.0));
+        drive_throttle_over_budget(&mut i.pending.throttle);
+        assert!(i.pending.throttle.current_n() > 1);
 
         i.reset();
 
-        assert_eq!(i.throttle.current_n(), 1);
-        assert_eq!(i.pending_delta, Vec2::new(11.0, 13.0));
-        assert_eq!(i.total_delta, Vec2::new(17.0, 19.0));
+        assert_eq!(i.pending.throttle.current_n(), 1);
+        assert_eq!(i.pending.pending_delta(), Vec2::new(11.0, 13.0));
+        assert_eq!(i.pending.total_delta(), Vec2::new(11.0, 13.0));
         assert_eq!(i.side, ResizeHandleSide::SE);
+    }
+
+    /// The right-release path finalizes only gestures the right
+    /// button started; the trait predicate must report the field.
+    #[test]
+    fn test_started_with_right_reports_the_origin_button() {
+        assert!(!ThrottledDragInteraction::started_with_right(&fixture(
+            ResizeHandleSide::SE
+        )));
+        let fast = SectionResizeInteraction::new(
+            "n".to_string(),
+            0,
+            ResizeHandleSide::SE,
+            Position { x: 0.0, y: 0.0 },
+            Size {
+                width: 100.0,
+                height: 50.0,
+            },
+            true,
+        );
+        assert!(ThrottledDragInteraction::started_with_right(&fast));
     }
 
     trait_default_tests_for_throttled_interaction! {
         build = || fixture(ResizeHandleSide::SE),
         set_pending = |i: &mut SectionResizeInteraction| {
-            i.pending_delta = Vec2::new(1.0, 0.0);
+            i.accumulate(moved(1.0, 0.0));
         },
     }
 }

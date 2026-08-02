@@ -4,7 +4,7 @@
 //! Batch 2 of `SECTIONS_BORDERS_RESIZE_PLAN.md`.
 //!
 //! Pre-Batch-2 the scene-builder gate at
-//! `MindMapDocument::assemble_scene_overrides` read `SelectionState`
+//! `MindMapDocument::frame_overrides` read `SelectionState`
 //! directly: `Single(node)` → 8 node handles, `Section(s)` →
 //! 8 section handles. That auto-emission produced the user-facing
 //! "we often find ourselves accidentally resizing when we only want
@@ -30,7 +30,7 @@ fn test_default_mode_with_single_selection_emits_no_resize_handles() {
     let mut doc = load_test_doc();
     let id = first_testament_node_id(&doc);
     doc.selection = SelectionState::Single(id);
-    let scene = doc.build_scene_with_selection(1.0, InteractionModeOverrides::none());
+    let scene = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
     assert!(
         scene.node_resize_handles.is_empty(),
         "Default mode + Single selection must NOT emit node resize handles"
@@ -52,7 +52,7 @@ fn test_default_mode_with_section_selection_emits_no_resize_handles() {
         node_id: id,
         section_idx: 1,
     });
-    let scene = doc.build_scene_with_selection(1.0, InteractionModeOverrides::none());
+    let scene = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
     assert!(
         scene.node_resize_handles.is_empty(),
         "Default mode + Section selection must NOT emit node resize handles"
@@ -70,7 +70,7 @@ fn test_default_mode_with_section_selection_emits_no_resize_handles() {
 fn test_resize_mode_node_target_emits_eight_node_handles() {
     let doc = load_test_doc();
     let id = first_testament_node_id(&doc);
-    let scene = doc.build_scene_with_selection(
+    let scene = crate::application::document::tests_common::project_roles(&doc, 
         1.0,
         InteractionModeOverrides {
             node: Some(id.as_str()),
@@ -103,7 +103,7 @@ fn test_resize_mode_node_target_emits_eight_node_handles() {
 #[test]
 fn test_resize_mode_section_target_emits_eight_section_handles() {
     let (doc, id) = pinned_two_section_node();
-    let scene = doc.build_scene_with_selection(
+    let scene = crate::application::document::tests_common::project_roles(&doc, 
         1.0,
         InteractionModeOverrides {
             node: None,
@@ -143,7 +143,7 @@ fn test_resize_mode_section_target_fill_parent_emits_no_handles() {
             s.size = None;
         }
     }
-    let scene = doc.build_scene_with_selection(
+    let scene = crate::application::document::tests_common::project_roles(&doc, 
         1.0,
         InteractionModeOverrides {
             node: None,

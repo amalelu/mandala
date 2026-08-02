@@ -8,6 +8,14 @@
 //! connection labels) and the screen-space overlays (console, color
 //! picker). Each role's tree is registered/unregistered or updated in
 //! place via §B2 mutator dispatch driven by a structural signature.
+//!
+//! It is also the app's hit-test entry point for tree-rendered
+//! content. `overlay_at` resolves screen-space overlay clicks;
+//! `portal_at` / `edge_label_at` resolve canvas-space clicks on the
+//! interactive canvas roles by running Baumhard's BVH over the very
+//! tree that produced the pixels, then naming the hit through the
+//! role's identity index. There is one spatial index for canvas
+//! content — the per-tree BVH — and no side table of rectangles.
 
 use std::collections::HashMap;
 
@@ -15,6 +23,8 @@ use baumhard::gfx_structs::element::GfxElement;
 use baumhard::gfx_structs::mutator::GfxMutator;
 use baumhard::gfx_structs::scene::{Scene, SceneTreeId};
 use baumhard::gfx_structs::tree::{MutatorTree, Tree};
+use baumhard::mindmap::scene_cache::EdgeKey;
+use baumhard::mindmap::tree_builder::{ConnectionLabelHitIndex, PortalHit, PortalHitIndex};
 use glam::Vec2;
 use indextree::NodeId;
 
@@ -67,8 +77,8 @@ pub enum CanvasRole {
 /// Two arms of the §B2 canvas-tree dispatch: apply a mutator to the
 /// existing arena, or rebuild wholesale and re-register. Returned
 /// from [`AppScene::canvas_dispatch`] so the caller can route
-/// side-effects (hitbox updates, renderer state) through the
-/// matching arm without re-implementing the check.
+/// side-effects (hit-index re-stamping, renderer state) through
+/// the matching arm without re-implementing the check.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum CanvasDispatch {
     /// Signature matched the registered tree — apply the mutator.
@@ -184,6 +194,17 @@ pub struct AppScene {
     /// cell count is a compile-time constant). Cleared on
     /// `unregister_overlay`.
     overlay_signatures: HashMap<OverlayRole, u64>,
+    /// Channel-path → `(EdgeKey, endpoint)` names for the
+    /// [`CanvasRole::Portals`] tree. Re-stamped by the portal
+    /// dispatcher on both the rebuild and in-place arms, so it
+    /// always describes the tree currently registered. Carries no
+    /// geometry — [`Self::portal_at`] gets that from the tree's own
+    /// BVH.
+    portal_hit_index: PortalHitIndex,
+    /// Channel → `EdgeKey` names for the
+    /// [`CanvasRole::ConnectionLabels`] tree. Same contract as
+    /// [`Self::portal_hit_index`].
+    connection_label_hit_index: ConnectionLabelHitIndex,
 }
 
 impl Default for AppScene {
@@ -210,6 +231,8 @@ impl AppScene {
             section_frames: None,
             canvas_signatures: HashMap::new(),
             overlay_signatures: HashMap::new(),
+            portal_hit_index: PortalHitIndex::default(),
+            connection_label_hit_index: ConnectionLabelHitIndex::default(),
         }
     }
 
@@ -257,12 +280,20 @@ impl AppScene {
     /// Remove a canvas role's tree, if registered. Also clears any
     /// recorded structural signature — a future re-register starts
     /// from a clean slate, forcing a full rebuild before the in-place
-    /// mutator path can run again.
+    /// mutator path can run again — and the role's hit index, so no
+    /// per-role state outlives the tree it describes.
     pub fn unregister_canvas(&mut self, role: CanvasRole) {
         if let Some(id) = self.canvas_role_slot_mut(role).take() {
             self.canvas.remove(id);
         }
         self.canvas_signatures.remove(&role);
+        match role {
+            CanvasRole::Portals => self.portal_hit_index = PortalHitIndex::default(),
+            CanvasRole::ConnectionLabels => {
+                self.connection_label_hit_index = ConnectionLabelHitIndex::default()
+            }
+            _ => {}
+        }
     }
 
     /// Record the structural signature of the tree currently
@@ -418,11 +449,79 @@ impl AppScene {
         }
     }
 
-    /// Hit-test the overlay sub-scene. Canvas-space roles are
-    /// intentionally not checked — overlay hits should always
-    /// win over canvas hits, and the canvas hit-test still goes
-    /// through `document::hit_test` (unifying those two paths is
-    /// deferred work).
+    /// Record the identity names for the currently registered
+    /// [`CanvasRole::Portals`] tree. Called by the portal
+    /// dispatcher on both §B2 arms — the index is cheap to rebuild,
+    /// and stamping it unconditionally in the same call that
+    /// registers or mutates the tree is what keeps channel order
+    /// and identity order in step.
+    ///
+    /// [`Self::unregister_canvas`] clears it again, so the index
+    /// never outlives the tree it names.
+    pub fn set_portal_hit_index(&mut self, index: PortalHitIndex) {
+        self.portal_hit_index = index;
+    }
+
+    /// Record the identity names for the currently registered
+    /// [`CanvasRole::ConnectionLabels`] tree. Mirrors
+    /// [`Self::set_portal_hit_index`].
+    pub fn set_connection_label_hit_index(&mut self, index: ConnectionLabelHitIndex) {
+        self.connection_label_hit_index = index;
+    }
+
+    /// Hit-test the portal role at a canvas-space point and name
+    /// the sub-part that was hit.
+    ///
+    /// Resolution runs through the registered tree's BVH
+    /// ([`Scene::component_in`]), so overlapping markers resolve
+    /// by the tree's own rule — **smallest area wins**, ties
+    /// broken toward the earlier sibling — rather than by the
+    /// iteration order of a side map. Two icons stacked on each
+    /// other therefore route the click to the visually topmost
+    /// one, deterministically and independently of node ids.
+    ///
+    /// Returns `None` when no portal tree is registered or the
+    /// point misses every marker. A text-less endpoint's reserved
+    /// text slot lays out at zero extent and is invisible here,
+    /// so a click beside a bare icon falls through to whatever is
+    /// underneath instead of selecting empty portal text.
+    ///
+    /// # Costs
+    ///
+    /// One memoized tree-AABB reject, then on a hit one BVH
+    /// descent plus an O(1) index lookup.
+    pub fn portal_at(&mut self, canvas_pt: Vec2) -> Option<PortalHit> {
+        let id = self.portals?;
+        let node_id = self.canvas.component_in(id, canvas_pt)?;
+        let tree = self.canvas.tree(id)?;
+        self.portal_hit_index.resolve(tree, node_id)
+    }
+
+    /// Hit-test the connection-label role at a canvas-space point
+    /// and name the owning edge. Sibling of [`Self::portal_at`]
+    /// with the same resolution rule: labels on crossing edges
+    /// that overlap resolve to the smaller label, not to whichever
+    /// edge happened to hash first.
+    ///
+    /// # Costs
+    ///
+    /// One memoized tree-AABB reject, then on a hit one BVH
+    /// descent plus an O(1) index lookup.
+    pub fn edge_label_at(&mut self, canvas_pt: Vec2) -> Option<EdgeKey> {
+        let id = self.connection_labels?;
+        let node_id = self.canvas.component_in(id, canvas_pt)?;
+        let tree = self.canvas.tree(id)?;
+        self.connection_label_hit_index.resolve(tree, node_id)
+    }
+
+    /// Hit-test the overlay sub-scene. Canvas-space roles have
+    /// their own entry points ([`Self::portal_at`],
+    /// [`Self::edge_label_at`]) rather than being folded in here:
+    /// overlay hits always win over canvas hits, and the canvas
+    /// side is a priority ladder (node → portal → label → edge)
+    /// that the app owns, not a flat top-most query. Node hits
+    /// still go through `document::hit_test` against the mindmap
+    /// tree, which has not migrated into `AppScene`.
     pub fn overlay_at(&mut self, screen_pt: Vec2) -> Option<(OverlayRole, NodeId)> {
         let hit = self.overlay.component_at(screen_pt)?;
         let role = self.overlay_role_for_id(hit.0)?;
@@ -465,6 +564,373 @@ mod tests {
     use super::*;
     use baumhard::font::fonts;
     use baumhard::gfx_structs::area::GlyphArea;
+    use baumhard::mindmap::tree_builder::PortalPart;
+
+    // ── canvas-role hit-testing ───────────────────────────────────
+
+    /// Two portal-mode edges leaving `hub`, one carrying endpoint
+    /// text. Written as JSON and pushed through the real loader so
+    /// the fixture exercises the same parse path the app does —
+    /// and because portal-mode edges are absent from every map in
+    /// `maps/`, there is no on-disk fixture to borrow.
+    const PORTAL_FIXTURE_JSON: &str = r##"
+        {
+          "canvas": {
+            "background_color": "#141414",
+            "theme_variables": {}
+          },
+          "edges": [
+            {
+              "anchor_from": "auto",
+              "anchor_to": "auto",
+              "color": "#ff0000",
+              "control_points": [],
+              "display_mode": "portal",
+              "from_id": "hub",
+              "glyph_connection": {
+                "body": "\u25c8",
+                "font_size_pt": 16.0
+              },
+              "label": null,
+              "line_style": "solid",
+              "portal_from": {
+                "text": "label"
+              },
+              "to_id": "far",
+              "type": "cross_link",
+              "visible": true,
+              "width": 3
+            },
+            {
+              "anchor_from": "auto",
+              "anchor_to": "auto",
+              "color": "#00ff00",
+              "control_points": [],
+              "display_mode": "portal",
+              "from_id": "hub",
+              "glyph_connection": {
+                "body": "\u25c8",
+                "font_size_pt": 16.0
+              },
+              "label": null,
+              "line_style": "solid",
+              "to_id": "near",
+              "type": "cross_link",
+              "visible": true,
+              "width": 3
+            }
+          ],
+          "name": "portal_hit_fixture",
+          "nodes": {
+            "far": {
+              "channel": 0,
+              "folded": false,
+              "id": "far",
+              "layout": {
+                "direction": "auto",
+                "spacing": 50.0,
+                "type": "map"
+              },
+              "notes": "",
+              "parent_id": null,
+              "position": {
+                "x": 600.0,
+                "y": 0.0
+              },
+              "sections": [
+                {
+                  "text": "far",
+                  "text_runs": []
+                }
+              ],
+              "size": {
+                "height": 40.0,
+                "width": 80.0
+              },
+              "style": {
+                "background_color": "#141414",
+                "corner_radius_percent": 0.0,
+                "frame_color": "#888888",
+                "frame_thickness": 1.0,
+                "shape": "rectangle",
+                "show_frame": true,
+                "show_shadow": false,
+                "text_color": "#eeeeee"
+              }
+            },
+            "hub": {
+              "channel": 0,
+              "folded": false,
+              "id": "hub",
+              "layout": {
+                "direction": "auto",
+                "spacing": 50.0,
+                "type": "map"
+              },
+              "notes": "",
+              "parent_id": null,
+              "position": {
+                "x": 0.0,
+                "y": 0.0
+              },
+              "sections": [
+                {
+                  "text": "hub",
+                  "text_runs": []
+                }
+              ],
+              "size": {
+                "height": 40.0,
+                "width": 80.0
+              },
+              "style": {
+                "background_color": "#141414",
+                "corner_radius_percent": 0.0,
+                "frame_color": "#888888",
+                "frame_thickness": 1.0,
+                "shape": "rectangle",
+                "show_frame": true,
+                "show_shadow": false,
+                "text_color": "#eeeeee"
+              }
+            },
+            "near": {
+              "channel": 0,
+              "folded": false,
+              "id": "near",
+              "layout": {
+                "direction": "auto",
+                "spacing": 50.0,
+                "type": "map"
+              },
+              "notes": "",
+              "parent_id": null,
+              "position": {
+                "x": 0.0,
+                "y": 400.0
+              },
+              "sections": [
+                {
+                  "text": "near",
+                  "text_runs": []
+                }
+              ],
+              "size": {
+                "height": 40.0,
+                "width": 80.0
+              },
+              "style": {
+                "background_color": "#141414",
+                "corner_radius_percent": 0.0,
+                "frame_color": "#888888",
+                "frame_thickness": 1.0,
+                "shape": "rectangle",
+                "show_frame": true,
+                "show_shadow": false,
+                "text_color": "#eeeeee"
+              }
+            }
+          },
+          "version": "1.0"
+        }
+    "##;
+
+    /// Two portal-mode edges from `hub`, one carrying text, laid
+    /// out by the real tree builder. Returns the map so a test can
+    /// re-derive the pair data it needs.
+    fn portal_fixture_map() -> baumhard::mindmap::model::MindMap {
+        baumhard::mindmap::loader::load_from_str(PORTAL_FIXTURE_JSON).expect("portal fixture loads")
+    }
+
+    /// Register the portal role from `map` exactly the way
+    /// `CanvasFrame::update_portal_tree` does — tree and hit index
+    /// stamped together.
+    fn register_portals(app: &mut AppScene, map: &baumhard::mindmap::model::MindMap) {
+        fonts::init();
+        let hidden = map.fold_hidden_set();
+        let pairs = baumhard::mindmap::tree_builder::portal_pair_data(
+            map,
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+            1.0,
+            &hidden,
+        );
+        let built = baumhard::mindmap::tree_builder::build_portal_tree_from_pairs(&pairs);
+        app.set_portal_hit_index(built.hit_index);
+        app.register_canvas(CanvasRole::Portals, built.tree, Vec2::ZERO);
+    }
+
+    /// The `(position, extent)` of every clickable leaf in the
+    /// registered portal tree, paired with the identity the index
+    /// gives it — the ground truth a probe is aimed at.
+    fn portal_leaf_probes(app: &AppScene) -> Vec<(Vec2, PortalHit)> {
+        let id = app.canvas_id(CanvasRole::Portals).expect("portals registered");
+        let tree = app.canvas_scene().tree(id).expect("portal tree");
+        let mut out = Vec::new();
+        for pair in tree.root.children(&tree.arena) {
+            for endpoint in pair.children(&tree.arena) {
+                for leaf in endpoint.children(&tree.arena) {
+                    let area = match tree.arena.get(leaf).and_then(|n| n.get().glyph_area()) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    let pos = Vec2::new(area.position.x.0, area.position.y.0);
+                    let extent = Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0);
+                    if extent.x <= 0.0 || extent.y <= 0.0 {
+                        continue;
+                    }
+                    if let Some(hit) = app.portal_hit_index.resolve(tree, leaf) {
+                        out.push((pos + extent * 0.5, hit));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_portal_at_names_every_clickable_leaf_and_misses_elsewhere() {
+        let map = portal_fixture_map();
+        let mut app = AppScene::new();
+        register_portals(&mut app, &map);
+
+        let probes = portal_leaf_probes(&app);
+        // Two pairs × two endpoints = four icons, plus one text
+        // label on the `hub` side of the first edge. The other
+        // three text slots are zero-extent and unclickable.
+        assert_eq!(probes.len(), 5, "unexpected clickable-leaf count: {probes:?}");
+        assert_eq!(
+            probes.iter().filter(|(_, h)| h.part == PortalPart::Text).count(),
+            1
+        );
+        for (point, expected) in &probes {
+            assert_eq!(app.portal_at(*point).as_ref(), Some(expected));
+        }
+        assert_eq!(app.portal_at(Vec2::new(-5000.0, -5000.0)), None);
+    }
+
+    #[test]
+    fn test_portal_at_is_none_when_the_role_is_not_registered() {
+        // Two independent guards, both asserted here because either
+        // alone would let a click resolve against state that no
+        // longer describes anything on screen.
+        let map = portal_fixture_map();
+        let mut app = AppScene::new();
+        assert_eq!(app.portal_at(Vec2::ZERO), None);
+
+        // 1. An index with no tree behind it answers nothing —
+        //    `portal_at` gates on the role slot, not on the index.
+        register_portals(&mut app, &map);
+        let probe = portal_leaf_probes(&app)[0].0;
+        let orphan_index = app.portal_hit_index.clone();
+        assert!(app.portal_at(probe).is_some());
+
+        let mut bare = AppScene::new();
+        bare.set_portal_hit_index(orphan_index);
+        assert_eq!(
+            bare.portal_at(probe),
+            None,
+            "an index with no registered tree must never produce a hit"
+        );
+
+        // 2. Unregistering drops the index too, so no per-role state
+        //    outlives the tree it names.
+        app.unregister_canvas(CanvasRole::Portals);
+        assert_eq!(app.portal_at(probe), None);
+        assert!(
+            app.portal_hit_index.is_empty(),
+            "unregister_canvas must clear the role's hit index"
+        );
+    }
+
+    #[test]
+    fn test_edge_label_at_names_the_owning_edge() {
+        use baumhard::mindmap::tree_builder::{build_connection_label_tree, build_label_elements};
+
+        fonts::init();
+        let map = baumhard::mindmap::loader::load_from_file(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/maps/testament.mindmap.json"
+        )))
+        .expect("testament map loads");
+        let hidden = map.fold_hidden_set();
+        let elements = build_label_elements(&map, &HashMap::new(), None, None, None, 1.0, &hidden);
+        assert!(!elements.is_empty(), "fixture should carry labels");
+        let built = build_connection_label_tree(&elements);
+
+        let mut app = AppScene::new();
+        app.set_connection_label_hit_index(built.hit_index);
+        app.register_canvas(CanvasRole::ConnectionLabels, built.tree, Vec2::ZERO);
+
+        // A label center could in principle sit inside a smaller
+        // overlapping label, in which case the smaller one is the
+        // correct answer. Count how many label rects cover each
+        // center so the assertion can be exact where the answer is
+        // unambiguous, and still meaningful where it isn't.
+        let rects: Vec<(Vec2, Vec2, &baumhard::mindmap::scene_cache::EdgeKey)> = elements
+            .iter()
+            .map(|e| {
+                let min = Vec2::new(e.position.0, e.position.1);
+                (min, min + Vec2::new(e.bounds.0, e.bounds.1), &e.edge_key)
+            })
+            .collect();
+        let mut unambiguous = 0usize;
+        for elem in &elements {
+            let center = Vec2::new(
+                elem.position.0 + elem.bounds.0 * 0.5,
+                elem.position.1 + elem.bounds.1 * 0.5,
+            );
+            let covering: Vec<_> = rects
+                .iter()
+                .filter(|(min, max, _)| {
+                    center.x >= min.x && center.x <= max.x && center.y >= min.y && center.y <= max.y
+                })
+                .collect();
+            let hit = app.edge_label_at(center);
+            if covering.len() == 1 {
+                unambiguous += 1;
+                assert_eq!(
+                    hit.as_ref(),
+                    Some(elem.edge_key.clone()).as_ref(),
+                    "a label's own center must route to that label"
+                );
+            } else {
+                // Overlap: whichever label answers must at least be
+                // one of the labels actually covering the point.
+                let hit = hit.expect("label center must hit some label");
+                assert!(
+                    covering.iter().any(|(_, _, k)| **k == hit),
+                    "overlap answer {hit:?} is not one of the covering labels"
+                );
+            }
+        }
+        assert!(
+            unambiguous > 0,
+            "fixture should contain labels that do not overlap anything"
+        );
+        assert_eq!(app.edge_label_at(Vec2::new(-1.0e6, -1.0e6)), None);
+    }
+
+    #[test]
+    fn test_canvas_role_hit_tests_honor_the_registered_offset() {
+        // `register_canvas` takes an offset; a role registered away
+        // from the origin must be hit-tested in the same space the
+        // caller passes (canvas coordinates), not tree-local ones.
+        let map = portal_fixture_map();
+        let mut app = AppScene::new();
+        register_portals(&mut app, &map);
+        let probe = portal_leaf_probes(&app)[0].0;
+        let expected = app.portal_at(probe).expect("baseline hit");
+
+        let id = app.canvas_id(CanvasRole::Portals).unwrap();
+        let shift = Vec2::new(1000.0, -250.0);
+        app.canvas.set_offset(id, shift);
+        assert_eq!(app.portal_at(probe), None, "old location must stop hitting");
+        assert_eq!(app.portal_at(probe + shift).as_ref(), Some(&expected));
+    }
 
     fn overlay_tree(position: Vec2, bounds: Vec2) -> (Tree<GfxElement, GfxMutator>, NodeId) {
         fonts::init();

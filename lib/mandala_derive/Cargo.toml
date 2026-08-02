@@ -8,10 +8,30 @@ license.workspace = true
 proc-macro = true
 
 [dependencies]
-# Default features (`derive`, `parsing`, `printing`, `clone-impls`,
-# `proc-macro`) are sufficient — the macro never reaches into syn's
-# expression / statement / item parsers, which is what `["full"]`
-# adds. Default-only halves syn's compile cost for this crate.
-syn = "2.0.117"
+# Inherited featureless, because the default set (`derive`, `parsing`,
+# `printing`, `clone-impls`, `proc-macro`) is all this macro asks for:
+# it never reaches into syn's expression / statement / item parsers,
+# which is what `["full"]` adds.
+#
+# Asking for less is not the same as compiling against less, and it is
+# worth being exact about that here rather than believing the
+# comfortable version. Cargo unifies features per *resolved package
+# node*, not per declaring manifest, so what this crate compiles
+# against is the union of what every dependent of that node asked for.
+# In a workspace-wide build — which is what `./test.sh` now runs —
+# `syn`'s proc-macro-graph node carries
+# `full,extra-traits,visit,...`, put there by `strum_macros`,
+# `wasm-bindgen-backend` and friends, and mandala_derive gets that
+# node. `cargo tree -p mandala_derive` in isolation shows default-only,
+# but that is single-package resolution, not a build anyone runs.
+#
+# What inheriting featureless does buy is the structural half: a
+# member can add `features` on top of the shared entry without editing
+# the shared entry, which is how baumhard's dev-dependency asks for
+# `full` (see `lib/baumhard/Cargo.toml`). Under resolver 2 that
+# dev-dependency lands on the *target*-graph `syn` node, a different
+# node from the proc-macro one above — which is the only sense in
+# which the two asks are independent.
+syn.workspace = true
 quote = "1.0.41"
 proc-macro2 = "1.0.103"

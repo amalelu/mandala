@@ -102,7 +102,7 @@ pub struct CachedConnection {
 /// index from node ID → edges that touch it so a drag of node N
 /// dirties the right edges in `O(k_N)` instead of walking the whole
 /// edge list. Owned by the app's document / renderer glue and passed
-/// into [`crate::mindmap::scene_builder::build_scene_with_cache`] on
+/// into [`crate::mindmap::tree_builder::build_connection_elements`] on
 /// each frame.
 #[derive(Default, Debug)]
 pub struct SceneConnectionCache {
@@ -145,7 +145,7 @@ impl SceneConnectionCache {
     /// Ensure the cache is consistent with `camera_zoom`. If the stored
     /// zoom differs from the incoming one beyond `ZOOM_EPSILON`, drop
     /// all cached samples; either way, stamp the new zoom. Called by
-    /// `build_scene_with_cache` on entry so the invariant is enforced
+    /// the connection pass on entry so the invariant is enforced
     /// locally instead of requiring every caller to remember to flush
     /// on zoom changes.
     ///

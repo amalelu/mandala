@@ -3,7 +3,7 @@
 //! Macro loaders for the four-tier registry.
 //!
 //! The format reference is in `format/macros.md`. Each tier has a
-//! pinned `MacroSource`; the registry picks the highest-tier macro
+//! pinned `SourceTier`; the registry picks the highest-tier macro
 //! by id when collisions happen. All four tiers ship on both native
 //! and WASM (Track B in `WASM_CONVERGENCE.md`):
 //! - **App** — `assets/macros/application.json`, embedded with
@@ -37,13 +37,14 @@ pub use platform_desktop::load_user_macros;
 pub use platform_web::load_user_macros;
 
 use super::Macro;
+use crate::application::source_tier::SourceTier;
 
 /// Application-bundle JSON, embedded at compile time. Parsed by
 /// [`load_app_macros`]. Empty array today; future shipped macros
 /// land here.
 const APP_MACROS_JSON: &str = include_str!("../../../../assets/macros/application.json");
 
-/// Load the application-bundle macros. Tier: `MacroSource::App`,
+/// Load the application-bundle macros. Tier: `SourceTier::App`,
 /// assigned at the call site in `run_native_init::build` and the
 /// WASM init block.
 ///
@@ -76,7 +77,7 @@ pub fn parse_user_macros_json(source: &str) -> Result<Vec<Macro>, String> {
 /// `mindmap.macros: Vec<serde_json::Value>`. Per-entry parse
 /// failures log a `warn!` and are skipped — a malformed Map-tier
 /// macro doesn't break document loading. Tier assignment
-/// (`MacroSource::Map`) happens at the call site in the document-
+/// (`SourceTier::Map`) happens at the call site in the document-
 /// load path.
 ///
 /// Map-tier macros are stored as untyped JSON in baumhard because
@@ -119,18 +120,18 @@ pub fn rebuild_map_macros(
     registry: &mut super::MacroRegistry,
     doc: &crate::application::document::MindMapDocument,
 ) {
-    registry.clear_tier(super::MacroSource::Map);
+    registry.clear_tier(SourceTier::Map);
     let map_macros = parse_map_macros(&doc.mindmap.macros);
     if !map_macros.is_empty() {
         log::info!("macros: loaded {} Map-tier macro(s)", map_macros.len());
     }
-    registry.extend_with_tier(map_macros, super::MacroSource::Map);
+    registry.extend_with_tier(map_macros, SourceTier::Map);
 }
 
 /// Walk every node's `inline_macros` and parse them into typed
 /// `Macro`s. Per-entry parse failures log `warn!` and skip — same
 /// resilience posture as `parse_map_macros`. Tier assignment
-/// (`MacroSource::Inline`) happens at the call site.
+/// (`SourceTier::Inline`) happens at the call site.
 ///
 /// Inline macros are scoped to the node they live on, but the
 /// registry is flat (id-keyed). Authors should namespace inline
@@ -198,12 +199,12 @@ pub fn rebuild_inline_macros(
     registry: &mut super::MacroRegistry,
     doc: &crate::application::document::MindMapDocument,
 ) {
-    registry.clear_tier(super::MacroSource::Inline);
+    registry.clear_tier(SourceTier::Inline);
     let inline_macros = parse_inline_macros(doc);
     if !inline_macros.is_empty() {
         log::info!("macros: loaded {} Inline-tier macro(s)", inline_macros.len());
     }
-    registry.extend_with_tier(inline_macros, super::MacroSource::Inline);
+    registry.extend_with_tier(inline_macros, SourceTier::Inline);
 }
 
 /// Refresh both document-derived tiers (Map and Inline) in the
@@ -224,11 +225,59 @@ pub fn rebuild_document_macros(
     rebuild_inline_macros(registry, doc);
 }
 
-/// `load_user_macros` lives in the cfg-routed sibling modules
-/// [`platform_desktop`] and [`platform_web`]; the platform-routed
-/// `pub use` at the top of this file picks the right one for the
-/// current target. Both expose the same `pub fn load_user_macros()
-/// -> Vec<Macro>` signature.
+/// Build the load-time macro registry: App and User tiers from the
+/// platform loaders, then the document-derived Map and Inline tiers.
+///
+/// This is the whole of what both runtimes do at startup, and both
+/// used to do it in their own copy — same loop, same counters, same
+/// `log::info!` format string. The logging shape is load-bearing:
+/// cross-target log triage compares browser-console output against
+/// desktop stderr, so a divergence in the message is a divergence in
+/// the tooling.
+///
+/// Tier precedence is App < User < Map < Inline, enforced by insert
+/// order plus the registry's last-writer-wins semantics. Higher-tier
+/// ids shadow lower-tier ones; clearing a higher tier reveals what
+/// is underneath. `format/macros.md` carries the threat model and the
+/// SOURCE-OF-TRUTH list of places that must move together when the
+/// order changes — this function is now one place rather than two.
+///
+/// `document` is `None` when no map loaded (native can start with no
+/// file); the two document-derived tiers are then simply absent.
+pub fn build_macro_registry(
+    document: Option<&crate::application::document::MindMapDocument>,
+) -> super::MacroRegistry {
+    let mut macros = super::MacroRegistry::new();
+    let mut app_count = 0usize;
+    for m in load_app_macros() {
+        macros.insert(m, SourceTier::App);
+        app_count += 1;
+    }
+    let mut user_count = 0usize;
+    for m in load_user_macros() {
+        macros.insert(m, SourceTier::User);
+        user_count += 1;
+    }
+    if app_count > 0 || user_count > 0 {
+        log::info!(
+            "loaded {} macro(s): {} app-tier, {} user-tier",
+            macros.len(),
+            app_count,
+            user_count
+        );
+    }
+    if let Some(d) = document {
+        rebuild_document_macros(&mut macros, d);
+    }
+    macros
+}
+
+// `load_user_macros` lives in the cfg-routed sibling modules
+// `platform_desktop` and `platform_web`; the platform-routed
+// `pub use` at the top of this file picks the right one for the
+// current target. Both expose the same `pub fn load_user_macros()
+// -> Vec<Macro>` signature. Written as a plain comment because a
+// `///` here would attach itself to the test module below.
 
 #[cfg(test)]
 mod tests {
@@ -241,6 +290,78 @@ mod tests {
     #[test]
     fn app_bundle_parses() {
         let _ = load_app_macros();
+    }
+
+    /// `build_macro_registry` folds the document-derived tiers in
+    /// when a document is present. Both runtimes' init calls this;
+    /// before the extraction each had its own copy of the loop, so a
+    /// tier added on one target could silently miss the other.
+    ///
+    /// Not hermetic in the App / User tiers — those read the bundled
+    /// asset and the user's config dir — so the assertions are about
+    /// the *document* tiers and about `None` versus `Some` being
+    /// distinguishable, which is the part the extraction could have
+    /// broken.
+    #[test]
+    fn test_build_macro_registry_includes_map_tier_when_a_document_is_given() {
+        use crate::application::document::tests_common::load_test_doc;
+        use crate::application::source_tier::SourceTier;
+
+        let mut doc = load_test_doc();
+        doc.mindmap.macros = vec![json!({
+            "id": "from-the-map",
+            "steps": [{"kind": "Action", "action": "Undo"}]
+        })];
+
+        let with_doc = build_macro_registry(Some(&doc));
+        assert_eq!(
+            with_doc.get_with_source("from-the-map").map(|(_, t)| t),
+            Some(SourceTier::Map),
+            "a map-tier macro must be registered at the Map tier",
+        );
+
+        // The same call with no document must not carry it. This is
+        // the positive control for the assertion above: without it,
+        // a registry that ignored its argument entirely would still
+        // pass the first check on a machine whose config dir happens
+        // to define the id.
+        let without_doc = build_macro_registry(None);
+        assert!(
+            without_doc.get("from-the-map").is_none(),
+            "document tiers must be absent when no document is passed",
+        );
+    }
+
+    /// Inline tier outranks Map on an id collision — the precedence
+    /// `format/macros.md` names as SOURCE-OF-TRUTH-critical, now
+    /// enforced in the single body both targets run.
+    #[test]
+    fn test_build_macro_registry_lets_inline_tier_shadow_map_tier() {
+        use crate::application::document::tests_common::load_test_doc;
+        use crate::application::source_tier::SourceTier;
+
+        let mut doc = load_test_doc();
+        doc.mindmap.macros = vec![json!({
+            "id": "collides",
+            "steps": [{"kind": "Action", "action": "Undo"}]
+        })];
+        let mut node_ids: Vec<String> = doc.mindmap.nodes.keys().cloned().collect();
+        node_ids.sort();
+        doc.mindmap
+            .nodes
+            .get_mut(&node_ids[0])
+            .expect("test doc has at least one node")
+            .inline_macros = vec![json!({
+            "id": "collides",
+            "steps": [{"kind": "Action", "action": "SelectAll"}]
+        })];
+
+        let reg = build_macro_registry(Some(&doc));
+        assert_eq!(
+            reg.get_with_source("collides").map(|(_, t)| t),
+            Some(SourceTier::Inline),
+            "Inline must shadow Map on an id collision",
+        );
     }
 
     /// `parse_map_macros` is best-effort: malformed entries log

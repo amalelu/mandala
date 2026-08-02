@@ -129,6 +129,103 @@ pub fn do_scene_insert_and_component_at() {
 }
 
 #[test]
+pub fn test_scene_component_in_scopes_the_hit_to_one_tree() {
+    do_scene_component_in_scopes_the_hit_to_one_tree();
+}
+
+pub fn do_scene_component_in_scopes_the_hit_to_one_tree() {
+    // Two trees stacked on the same rectangle. `component_at`
+    // answers with the topmost one; `component_in` answers for
+    // whichever tree the caller names, ignoring layering — that is
+    // the whole point of the scoped form for a caller whose own
+    // priority ladder already picked the component.
+    let (tree_bg, leaf_bg) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0), 0);
+    let (tree_fg, leaf_fg) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0), 0);
+
+    let mut scene = Scene::new();
+    let id_bg = scene.insert(tree_bg, 0, Vec2::ZERO);
+    let id_fg = scene.insert(tree_fg, 10, Vec2::ZERO);
+
+    assert_eq!(scene.component_at(Vec2::new(10.0, 10.0)), Some((id_fg, leaf_fg)));
+    assert_eq!(scene.component_in(id_bg, Vec2::new(10.0, 10.0)), Some(leaf_bg));
+    assert_eq!(scene.component_in(id_fg, Vec2::new(10.0, 10.0)), Some(leaf_fg));
+    // Outside every area: a miss, not a fall-through to a sibling.
+    assert_eq!(scene.component_in(id_bg, Vec2::new(500.0, 500.0)), None);
+}
+
+#[test]
+pub fn test_scene_component_in_honors_offset_and_visibility() {
+    do_scene_component_in_honors_offset_and_visibility();
+}
+
+pub fn do_scene_component_in_honors_offset_and_visibility() {
+    let (tree, leaf) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(50.0, 50.0), 0);
+    let mut scene = Scene::new();
+    let id = scene.insert(tree, 0, Vec2::new(200.0, 200.0));
+
+    // Callers pass scene coordinates; the entry offset is applied
+    // for them, exactly as `component_at` does.
+    assert_eq!(scene.component_in(id, Vec2::new(210.0, 210.0)), Some(leaf));
+    assert_eq!(scene.component_in(id, Vec2::new(10.0, 10.0)), None);
+
+    // A hidden entry answers nothing — hiding a role must take it
+    // out of hit-testing as well as out of the draw.
+    scene.set_visible(id, false);
+    assert_eq!(scene.component_in(id, Vec2::new(210.0, 210.0)), None);
+    scene.set_visible(id, true);
+    assert_eq!(scene.component_in(id, Vec2::new(210.0, 210.0)), Some(leaf));
+
+    // An unknown handle degrades to a miss rather than panicking —
+    // the app calls this with a role slot that may be empty.
+    scene.remove(id);
+    assert_eq!(scene.component_in(id, Vec2::new(210.0, 210.0)), None);
+}
+
+#[test]
+pub fn test_scene_component_in_resolves_overlap_by_smallest_area() {
+    do_scene_component_in_resolves_overlap_by_smallest_area();
+}
+
+pub fn do_scene_component_in_resolves_overlap_by_smallest_area() {
+    // The rule the app's portal / label routing rests on: inside a
+    // single tree, an overlap resolves to the smallest area, not to
+    // insertion order and not to anything hash-derived. Registered
+    // large-first here and small-first below to show the answer does
+    // not move.
+    fonts::init();
+    let build = |small_first: bool| {
+        let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
+        let big = GlyphArea::new_with_str("big", 1.0, 10.0, Vec2::ZERO, Vec2::new(100.0, 100.0));
+        let small = GlyphArea::new_with_str("small", 1.0, 10.0, Vec2::new(40.0, 40.0), Vec2::new(10.0, 10.0));
+        let big_id = tree
+            .arena
+            .new_node(GfxElement::new_area_non_indexed_with_id(big, 1, 1));
+        let small_id = tree
+            .arena
+            .new_node(GfxElement::new_area_non_indexed_with_id(small, 2, 2));
+        if small_first {
+            tree.root.append(small_id, &mut tree.arena);
+            tree.root.append(big_id, &mut tree.arena);
+        } else {
+            tree.root.append(big_id, &mut tree.arena);
+            tree.root.append(small_id, &mut tree.arena);
+        }
+        (tree, small_id)
+    };
+
+    for small_first in [false, true] {
+        let (tree, small_id) = build(small_first);
+        let mut scene = Scene::new();
+        let id = scene.insert(tree, 0, Vec2::ZERO);
+        assert_eq!(
+            scene.component_in(id, Vec2::new(45.0, 45.0)),
+            Some(small_id),
+            "overlap must resolve to the smaller area (small_first={small_first})"
+        );
+    }
+}
+
+#[test]
 pub fn test_scene_layer_order_controls_hit_priority() {
     do_scene_layer_order_controls_hit_priority();
 }
@@ -196,6 +293,27 @@ pub fn do_scene_remove_drops_entry() {
     assert!(scene.remove(id).is_some());
     assert_eq!(scene.len(), 0);
     assert!(scene.component_at(Vec2::new(10.0, 10.0)).is_none());
+}
+
+#[test]
+pub fn test_scene_entry_into_tree_returns_ownership() {
+    do_scene_entry_into_tree_returns_ownership();
+}
+
+/// `Scene::remove` returns a `SceneEntry`; `SceneEntry::into_tree`
+/// consumes it to recover the owned tree. Verifies the ownership seam
+/// promised by the public API.
+pub fn do_scene_entry_into_tree_returns_ownership() {
+    let (tree, leaf) = tree_with_area(Vec2::new(0.0, 0.0), Vec2::new(50.0, 50.0), 0);
+    let expected_aabb = tree.descendants_aabb();
+    let mut scene = Scene::new();
+    let id = scene.insert(tree, 0, Vec2::ZERO);
+
+    let entry = scene.remove(id).expect("entry was just inserted");
+    let mut recovered = entry.into_tree();
+    // The recovered tree carries the same structure and remains hit-testable.
+    assert_eq!(recovered.descendants_aabb(), expected_aabb);
+    assert_eq!(recovered.descendant_at(Vec2::new(10.0, 10.0)), Some(leaf));
 }
 
 #[test]

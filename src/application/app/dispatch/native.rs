@@ -4,42 +4,38 @@
 //! bodies on native. Mouse handlers and the keyboard handler funnel
 //! through here. WASM has its own dispatch path today; the
 //! convergence track is documented in `WASM_CONVERGENCE.md`.
-//! Adding a new behaviour
+//! Adding a new behavior
 //! is variant + default + arm, in that order; never inline a body in
 //! a handler.
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use glam::Vec2;
-
 use crate::application::document::{EdgeRef, SelectionState, UndoAction};
 use crate::application::keybinds::Action;
 
 use super::super::click::rebuild_all_with_mode;
-use super::super::color_picker_flow::{close_color_picker_standalone, open_color_picker_standalone};
+use super::super::color_picker_flow::{
+    apply_picker_nudge, cancel_color_picker, close_color_picker_standalone, commit_color_picker,
+    commit_color_picker_to_selection, open_color_picker_standalone, picker_decline_reason, picker_op_for,
+    PickerOp,
+};
 use super::super::console_input::{
     rebuild_console_overlay, save_console_history, save_document_to_bound_path,
 };
 use super::super::input_context::InputHandlerContext;
-use super::super::label_edit::{open_label_edit, open_portal_text_edit};
 use super::super::scene_rebuild::rebuild_all;
-use super::super::text_edit::open_text_edit;
-use super::super::{ClickHit, DragState, InteractionMode};
+use super::super::single_line_edit::{
+    close_single_line_edit, open_single_line_edit, resolve_single_line_target, SingleLineEditTarget,
+};
+use super::super::{DragState, InteractionMode};
 use super::apply_keybind_custom_mutation;
 use crate::application::console::ConsoleState;
 
-/// Per-event payload that mouse-driven Actions need but keyboard
-/// dispatch doesn't. Populated by mouse handlers right before they
-/// call `dispatch_action`; `None` for keyboard / macro callers.
-#[derive(Debug, Clone)]
-pub struct DispatchHit {
-    /// What the click landed on. The `DoubleClickActivate` arm routes
-    /// on this.
-    pub click_hit: ClickHit,
-    /// Canvas-space cursor position at the gesture's trigger time.
-    /// Used by orphan-creation / open-editor arms.
-    pub canvas_pos: Vec2,
-}
+// `DispatchHit` lives in `cross_dispatch::pointer` — both targets'
+// mouse handlers populate one now, so the payload is cross-platform.
+// Re-exported through `dispatch/mod.rs` so the `super::dispatch::
+// DispatchHit` import shape at the call sites is unchanged.
+pub(in crate::application::app) use super::cross_dispatch::DispatchHit;
 
 // `DispatchOutcome` lives in `cross_dispatch`; the dispatch arms
 // here name it via `super::DispatchOutcome` (re-exported in
@@ -91,12 +87,29 @@ fn quote_console_arg(s: &str) -> String {
 ///   - a mixed-branch arm's native residual (`ExitMode`'s mode
 ///     reset + rebuild; `EditSelection*` on EdgeLabel / Portal
 ///     selections),
-///   - the mouse-mixed branch of `DoubleClickActivate` and the
-///     mouse-with-hit branch of `CreateOrphanNodeAndEdit`, both
-///     of which need `DispatchHit::canvas_pos` (a payload
-///     `dispatch_compatible` doesn't carry). The keyboard /
-///     no-hit branch of `CreateOrphanNodeAndEdit` is handled
-///     in `dispatch_compatible` (uses `cursor_pos`).
+///   - the edge-label branch of `DoubleClickActivate`. Not a
+///     payload question — `dispatch_compatible` takes the same
+///     `Option<&DispatchHit>` this function does, and both targets
+///     populate it from their mouse handlers. What the branch needs
+///     is `single_line_edit_state`, a `NativeContextExt` field the
+///     browser has no counterpart for; the arm below is that one
+///     step and nothing else. `CreateOrphanNodeAndEdit` no longer
+///     appears here at all: `dispatch_create_orphan_and_edit` is
+///     gone and the mouse path reaches
+///     `apply_create_orphan_node_and_edit` through
+///     `DoubleClickRoute::CreateOrphanAndEdit`,
+///   - a `DoubleClickActivate` dispatched with no `DispatchHit` at
+///     all (a macro, say). That is a soft-skip: nothing ran. The arm
+///     below finds no target, does nothing, and returns `Unhandled`
+///     itself, so this function — which is what the *native* macro
+///     loop reads — reports "did not run" for it. That is a behavior
+///     change on native: the arm used to return `Handled`
+///     unconditionally, so a native macro step
+///     `[Action(DoubleClickActivate)]` bumped `any_ran` for a step
+///     that touched nothing, and stopped falling through to the
+///     custom-mutation tier. WASM was fixed first; this is the same
+///     fix on the other side of the seam, so the two targets now
+///     answer identically for identical input.
 ///
 /// `WASM_CONVERGENCE.md` Track C records the architecture; calling
 /// `dispatch_compatible` from this fn is the seam.
@@ -115,7 +128,7 @@ pub(in crate::application::app) fn dispatch_action(
         // only arms below re-borrow from `ctx` directly after this
         // scope drops.
         let (mut core, _) = ctx.split_borrow();
-        super::action_core::dispatch_compatible(&action, &mut core)
+        super::action_core::dispatch_compatible(&action, &mut core, hit)
     };
     if matches!(cross_outcome, DispatchOutcome::Handled) {
         return cross_outcome;
@@ -243,11 +256,7 @@ pub(in crate::application::app) fn dispatch_action(
                     scene_cache: core.scene_cache,
                     interaction_mode: core.interaction_mode,
                 };
-                let _ = super::cross_dispatch::apply_enter_node_edit(
-                    clean,
-                    &mut rc,
-                    core.text_edit_state,
-                );
+                let _ = super::cross_dispatch::apply_enter_node_edit(clean, &mut rc, core.text_edit_state);
             }
             DispatchOutcome::Handled
         }
@@ -265,11 +274,7 @@ pub(in crate::application::app) fn dispatch_action(
                     scene_cache: core.scene_cache,
                     interaction_mode: core.interaction_mode,
                 };
-                let _ = super::cross_dispatch::apply_enter_section_edit(
-                    false,
-                    &mut rc,
-                    core.text_edit_state,
-                );
+                let _ = super::cross_dispatch::apply_enter_section_edit(false, &mut rc, core.text_edit_state);
             }
             DispatchOutcome::Handled
         }
@@ -404,32 +409,12 @@ pub(in crate::application::app) fn dispatch_action(
             // which means selection was non-Single — so we go
             // straight to the EdgeLabel / Portal native-only
             // branches without re-checking Single.
-            let _clean = matches!(action, Action::EditSelectionClean);
-            if let Some(doc) = ctx.document.as_mut() {
-                match doc.selection.clone() {
-                    SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => {
-                        let er = s.edge_ref();
-                        open_portal_text_edit(
-                            &er,
-                            &s.endpoint_node_id,
-                            doc,
-                            ctx.portal_text_edit_state,
-                            ctx.app_scene,
-                            ctx.renderer,
-                        );
-                    }
-                    SelectionState::EdgeLabel(s) => {
-                        open_label_edit(
-                            &s.edge_ref,
-                            doc,
-                            ctx.label_edit_state,
-                            ctx.app_scene,
-                            ctx.renderer,
-                        );
-                    }
-                    _ => {}
-                }
-            }
+            //
+            // `clean` is threaded into the single-line editors so
+            // `EditSelectionClean` keeps its empty-buffer contract
+            // on edge-label / portal selections, not just on nodes.
+            let clean = matches!(action, Action::EditSelectionClean);
+            open_editor_for_edge_selection(clean, ctx);
             DispatchOutcome::Handled
         }
         Action::SaveDocument => {
@@ -441,124 +426,51 @@ pub(in crate::application::app) fn dispatch_action(
 
         // ── Mouse-gesture Actions ──────────────────────────────
         Action::DoubleClickActivate => {
-            // Routes by what the press hit. The mouse handler populates
-            // `hit` before calling here; without it we have no target
-            // and silently no-op (the gesture was bound but fired from
-            // a non-mouse source like a macro that didn't carry hit
-            // context).
-            let Some(h) = hit else {
-                log::debug!("DoubleClickActivate: no DispatchHit; skipping");
-                return DispatchOutcome::Handled;
-            };
-            match &h.click_hit {
-                ClickHit::Node(node_id, section_idx) => {
-                    if let Some(doc) = ctx.document.as_mut() {
-                        let nid = node_id.clone();
-                        // Preserve the section identity so the
-                        // editor opens on the section the user
-                        // pointed at. Pre-fix this collapsed to
-                        // `SelectionState::Single` unconditionally,
-                        // and `open_text_edit` then defaulted to
-                        // `section_idx = 0` — so a double-click on
-                        // section[1] opened the editor on
-                        // section[0].
-                        doc.selection = match section_idx {
-                            Some(idx) => SelectionState::Section(
-                                crate::application::document::SectionSel {
-                                    node_id: nid.clone(),
-                                    section_idx: *idx,
-                                },
-                            ),
-                            None => SelectionState::Single(nid.clone()),
-                        };
-                        rebuild_all(
-                            doc,
-                            ctx.interaction_mode,
-                            ctx.mindmap_tree,
-                            ctx.app_scene,
-                            ctx.renderer,
-                            ctx.scene_cache,
-                        );
-                        open_text_edit(
-                            &nid,
-                            false,
-                            doc,
-                            ctx.text_edit_state,
-                            ctx.mindmap_tree,
-                            ctx.app_scene,
-                            ctx.renderer,
-                        );
-                    }
+            // The cross-platform stage above ran the whole gesture
+            // except one branch: an edge-label double-click commits
+            // the selection there and hands back
+            // `DoubleClickResidual::OpenEdgeLabelEditor`, which
+            // surfaces here as `Unhandled`. The single-line editor is
+            // the only piece that needs `NativeContextExt` state, so
+            // it is the only piece left in this arm.
+            //
+            // `edge_label_target` is the same `EdgeKey` -> `EdgeRef`
+            // conversion the route resolver used, so the editor
+            // cannot open on a different edge than the one the
+            // selection just committed to.
+            let target = hit.and_then(|h| super::edge_label_target(&h.click_hit));
+            match (target, ctx.document.as_mut()) {
+                (Some(edge_ref), Some(doc)) => {
+                    // Double-click on an edge label edits the existing
+                    // text — not clean.
+                    open_single_line_edit(
+                        SingleLineEditTarget::EdgeLabel { edge_ref },
+                        false,
+                        doc,
+                        ctx.single_line_edit_state,
+                        ctx.app_scene,
+                        ctx.renderer,
+                    );
+                    DispatchOutcome::Handled
                 }
-                ClickHit::PortalMarker { edge, endpoint } | ClickHit::PortalText { edge, endpoint } => {
-                    // Pan to the partner endpoint of the portal-mode
-                    // edge — the node "on the other side."
-                    let other_id = if *endpoint == edge.from_id {
-                        edge.to_id.clone()
-                    } else {
-                        edge.from_id.clone()
-                    };
-                    if let Some(doc) = ctx.document.as_ref() {
-                        if let Some(node) = doc.mindmap.nodes.get(&other_id) {
-                            ctx.renderer.set_camera_center(node.center_vec2());
-                        }
-                    }
-                    if let Some(doc) = ctx.document.as_mut() {
-                        doc.selection = SelectionState::Edge(crate::application::document::EdgeRef::new(
-                            &edge.from_id,
-                            &edge.to_id,
-                            &edge.edge_type,
-                        ));
-                        rebuild_all(
-                            doc,
-                            ctx.interaction_mode,
-                            ctx.mindmap_tree,
-                            ctx.app_scene,
-                            ctx.renderer,
-                            ctx.scene_cache,
-                        );
-                    }
-                }
-                ClickHit::EdgeLabel(edge_key) => {
-                    if let Some(doc) = ctx.document.as_mut() {
-                        let er = crate::application::document::EdgeRef::new(
-                            edge_key.from_id.as_str(),
-                            edge_key.to_id.as_str(),
-                            edge_key.edge_type.as_str(),
-                        );
-                        let prev = doc.selection.clone();
-                        doc.selection = SelectionState::EdgeLabel(
-                            crate::application::document::EdgeLabelSel::new(er.clone()),
-                        );
-                        super::super::scene_rebuild::rebuild_after_selection_change(
-                            &prev,
-                            doc,
-                            ctx.interaction_mode,
-                            ctx.mindmap_tree,
-                            ctx.app_scene,
-                            ctx.renderer,
-                            ctx.scene_cache,
-                        );
-                        open_label_edit(&er, doc, ctx.label_edit_state, ctx.app_scene, ctx.renderer);
-                    }
-                }
-                ClickHit::Empty => {
-                    // Empty-canvas double-click: only fire
-                    // CreateOrphanNodeAndEdit if the user has explicitly
-                    // bound it (any binding counts as opt-in). Ships
-                    // unbound by default — empty-canvas double-click
-                    // is a no-op out of the box per user request.
-                    let edge_selected = ctx
-                        .document
-                        .as_ref()
-                        .map(|d| matches!(d.selection, SelectionState::Edge(_)))
-                        .unwrap_or(false);
-                    if !edge_selected && ctx.keybinds.has_any_binding_for(Action::CreateOrphanNodeAndEdit) {
-                        dispatch_create_orphan_and_edit(ctx, h);
-                    }
-                }
+                // No edge-label target means no `DispatchHit` at all:
+                // the cross-platform stage only hands this arm an
+                // `Unhandled` for the edge-label residual (which
+                // always has one) or for the hitless soft-skip. So
+                // this is the soft-skip — nothing ran here and
+                // nothing ran above — and it is now reported as such
+                // on native too. It previously returned `Handled`,
+                // which bumped the *native* macro loop's `any_ran`
+                // for a step that did nothing, the mirror image of
+                // the WASM misreport fixed in `c023ff9`. Both targets
+                // now report the same thing for the same input.
+                (None, _) => DispatchOutcome::Unhandled,
+                // A label hit with no document loaded cannot reach
+                // here — `apply_double_click_activate` returns `Done`
+                // (and so `Handled`) when there is no document — but
+                // "nothing ran" is the honest answer if it ever does.
+                (Some(_), None) => DispatchOutcome::Unhandled,
             }
-            DispatchOutcome::Handled
         }
         Action::PanCanvas => {
             // Continuous gesture: enter pan mode for the duration of
@@ -600,36 +512,10 @@ pub(in crate::application::app) fn dispatch_action(
         }
         Action::LabelEditOnSelection => {
             // Mirror `label edit`: open the inline editor on the
-            // currently-selected edge / portal-endpoint.
-            if let Some(doc) = ctx.document.as_mut() {
-                match doc.selection.clone() {
-                    SelectionState::EdgeLabel(s) => {
-                        open_label_edit(
-                            &s.edge_ref,
-                            doc,
-                            ctx.label_edit_state,
-                            ctx.app_scene,
-                            ctx.renderer,
-                        );
-                    }
-                    SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => {
-                        let er = s.edge_ref();
-                        open_portal_text_edit(
-                            &er,
-                            &s.endpoint_node_id,
-                            doc,
-                            ctx.portal_text_edit_state,
-                            ctx.app_scene,
-                            ctx.renderer,
-                        );
-                    }
-                    _ => {
-                        log::debug!(
-                            "LabelEditOnSelection: selection is not an edge / portal endpoint; no-op"
-                        );
-                    }
-                }
-            }
+            // currently-selected edge / portal-endpoint, seeded
+            // with the existing text (the console verb has no
+            // "clean" spelling).
+            open_editor_for_edge_selection(false, ctx);
             DispatchOutcome::Handled
         }
 
@@ -650,71 +536,69 @@ pub(in crate::application::app) fn dispatch_action(
         // editor — never two at once). Order is observationally
         // equivalent because at most one is_open(); checking
         // portal-text first picks the more specific selection.
-        Action::LabelEditCancel => {
+        Action::LabelEditCancel | Action::LabelEditCommit => {
             if let Some(doc) = ctx.document.as_mut() {
-                if ctx.portal_text_edit_state.is_open() {
-                    super::super::label_edit::close_portal_text_edit(
-                        false,
-                        doc,
-                        ctx.interaction_mode,
-                        ctx.portal_text_edit_state,
-                        ctx.mindmap_tree,
-                        ctx.app_scene,
-                        ctx.renderer,
-                        ctx.scene_cache,
-                    );
-                } else if ctx.label_edit_state.is_open() {
-                    super::super::label_edit::close_label_edit(
-                        false,
-                        doc,
-                        ctx.interaction_mode,
-                        ctx.label_edit_state,
-                        ctx.mindmap_tree,
-                        ctx.app_scene,
-                        ctx.renderer,
-                        ctx.scene_cache,
-                    );
-                }
-            }
-            DispatchOutcome::Handled
-        }
-        Action::LabelEditCommit => {
-            if let Some(doc) = ctx.document.as_mut() {
-                if ctx.portal_text_edit_state.is_open() {
-                    super::super::label_edit::close_portal_text_edit(
-                        true,
-                        doc,
-                        ctx.interaction_mode,
-                        ctx.portal_text_edit_state,
-                        ctx.mindmap_tree,
-                        ctx.app_scene,
-                        ctx.renderer,
-                        ctx.scene_cache,
-                    );
-                } else if ctx.label_edit_state.is_open() {
-                    super::super::label_edit::close_label_edit(
-                        true,
-                        doc,
-                        ctx.interaction_mode,
-                        ctx.label_edit_state,
-                        ctx.mindmap_tree,
-                        ctx.app_scene,
-                        ctx.renderer,
-                        ctx.scene_cache,
-                    );
-                }
+                close_single_line_edit(
+                    matches!(action, Action::LabelEditCommit),
+                    doc,
+                    ctx.interaction_mode,
+                    ctx.single_line_edit_state,
+                    ctx.mindmap_tree,
+                    ctx.app_scene,
+                    ctx.renderer,
+                    ctx.scene_cache,
+                );
             }
             DispatchOutcome::Handled
         }
 
         // ── LabelEdit cursor primitives ───────────────────────
+        //
+        // Three declared behavior changes live on this arm, all of
+        // them consequences of routing the funnel through the same
+        // `handle_input_core` a keystroke takes instead of mutating
+        // the buffer directly. Macros, the console and IPC are the
+        // callers that reach it without a keystroke.
+        //
+        // 1. The preview is refreshed after the caret moves; before,
+        //    it wrote state and painted nothing.
+        // 2. It reaches the portal caption at all; before, it wrote
+        //    to the edge-label state only.
+        // 3. It meets `still_editable` first — so one of these
+        //    actions arriving while the portal caption editor is
+        //    open on an edge that has since been deleted or left
+        //    portal mode now closes the editor and **discards the
+        //    buffer uncommitted**, where before the buffer survived
+        //    until Enter or a click outside. That guard existed on
+        //    `main` only on the keystroke path; unifying the entry
+        //    points widened its reach here. It is the consistent
+        //    behavior — one editor, one guard — and it is pinned by
+        //    `single_line_edit::tests::oracle::
+        //    test_oracle_funnel_action_on_an_invalidated_portal_caption_discards_the_buffer`
+        //    so it stays a decision rather than a side effect.
+        //
+        // The `if let Some(doc)` gate also makes these actions
+        // no-ops with no document loaded, where before they still
+        // mutated the buffer. Unobservable — an open editor implies
+        // a document — noted so the audit is complete.
         Action::LabelEditCursorLeft
         | Action::LabelEditCursorRight
         | Action::LabelEditCursorHome
         | Action::LabelEditCursorEnd
         | Action::LabelEditDeleteBack
         | Action::LabelEditDeleteForward => {
-            apply_label_edit_action(action, ctx.label_edit_state);
+            if let Some(doc) = ctx.document.as_mut() {
+                super::super::single_line_edit::apply_single_line_edit_action(
+                    action,
+                    ctx.single_line_edit_state,
+                    doc,
+                    ctx.interaction_mode,
+                    ctx.mindmap_tree,
+                    ctx.app_scene,
+                    ctx.renderer,
+                    ctx.scene_cache,
+                );
+            }
             DispatchOutcome::Handled
         }
 
@@ -741,8 +625,7 @@ pub(in crate::application::app) fn dispatch_action(
                 crate::application::app::console_input::exec::execute_console_line(
                     &line,
                     ctx.console_state,
-                    ctx.label_edit_state,
-                    ctx.portal_text_edit_state,
+                    ctx.single_line_edit_state,
                     ctx.color_picker_state,
                     ctx.text_edit_state,
                     doc,
@@ -759,6 +642,35 @@ pub(in crate::application::app) fn dispatch_action(
             DispatchOutcome::Handled
         }
 
+        // ── Color-picker modal Actions (NativeOnly) ─────────────
+        // `PickerCancel` / `PickerCommit` / the six `PickerNudge*`.
+        // These used to run entirely inside the picker's own key
+        // handler, which made `MacroStep::Action { PickerCommit }`
+        // a silent no-op while `TextEditCommit` from a macro
+        // worked — the third modal was the odd one out. Same
+        // rationale as the `LabelEdit*` arms above: commit /
+        // cancel / nudge are user-named effects, not the §3
+        // carve-out for literal Key payloads.
+        //
+        // The guard is `picker_op_for`, the picker module's single
+        // source of truth for "the picker owns this Action". The
+        // keyboard pre-filter (`event_keyboard.rs`) and the click
+        // router (`color_picker_flow::click`) resolve through the
+        // same fn, so nothing can be routed toward this funnel
+        // without an arm here to receive it, and a ninth `Picker*`
+        // variant is live on all three surfaces the moment it is
+        // added there.
+        ref a if picker_op_for(a).is_some() => {
+            let Some(op) = picker_op_for(a) else {
+                // The guard just proved `Some`; a mismatch means
+                // `picker_op_for` is not a pure function any more.
+                // Fail safe per CODE_CONVENTIONS §9.
+                log::error!("picker arm guard/body disagreement on {:?}", a);
+                return DispatchOutcome::Unhandled;
+            };
+            dispatch_picker_op(op, ctx)
+        }
+
         // Console / Picker / LabelEdit / TextEdit modal-context actions
         // not handled above (e.g. cancel/commit) are dispatched by their
         // respective modal handlers. Falling through to `Unhandled`
@@ -770,11 +682,127 @@ pub(in crate::application::app) fn dispatch_action(
     }
 }
 
-/// Apply a LabelEdit cursor / delete primitive to a generic
-/// `(buffer, cursor)` pair. Both `LabelEditState` and
-/// `PortalTextEditState` share the same single-line semantics; this
-/// helper is generic over the carrier so the dispatch arms can fan
-/// out into either modal. Returns `true` when state changed.
+/// Open the single-line editor the current selection names: the
+/// edge-label editor for an `EdgeLabel` selection, the portal-text
+/// editor for `PortalLabel` / `PortalText`. Any other selection
+/// logs and no-ops.
+///
+/// One body for two arms. `Action::EditSelection` /
+/// `EditSelectionClean` reach it as the native residual after
+/// `dispatch_compatible` declines the node-scoped selections;
+/// `Action::LabelEditOnSelection` (the `label edit` console verb's
+/// Action mirror) reaches it directly. The two used to carry
+/// byte-identical match bodies, and the `EditSelectionClean` half
+/// computed a `clean` flag it then discarded — so the "empty
+/// buffer" contract held on nodes and silently didn't on edge
+/// labels and portal endpoints.
+///
+/// A selection whose target evaporated between the selection and
+/// the dispatch leaves the editor closed; the `open_*` helpers own
+/// that `log::warn!` themselves, so there is nothing for callers
+/// here to branch on.
+fn open_editor_for_edge_selection(clean: bool, ctx: &mut InputHandlerContext<'_>) {
+    let Some(doc) = ctx.document.as_mut() else {
+        return;
+    };
+    let Some(target) = resolve_single_line_target(&doc.selection) else {
+        log::debug!(
+            "open_editor_for_edge_selection: selection is not an edge label / portal endpoint; no-op"
+        );
+        return;
+    };
+    open_single_line_edit(
+        target,
+        clean,
+        doc,
+        ctx.single_line_edit_state,
+        ctx.app_scene,
+        ctx.renderer,
+    );
+}
+
+/// Run a [`PickerOp`] against the live picker. Body of the
+/// `dispatch_action` picker arm, lifted out so the arm stays a
+/// two-liner and the mode branches read in one place.
+///
+/// Returns `Unhandled` whenever nothing ran — see
+/// [`picker_decline_reason`] for the three cases and why each one
+/// must not report `Handled`. `Handled` means the op reached its
+/// effect, so a nudge that the picker state rejected also reports
+/// `Unhandled` rather than claiming success.
+fn dispatch_picker_op(op: PickerOp, ctx: &mut InputHandlerContext<'_>) -> DispatchOutcome {
+    let standalone = ctx.color_picker_state.is_standalone();
+    if let Some(reason) = picker_decline_reason(
+        op,
+        ctx.color_picker_state.is_open(),
+        standalone,
+        ctx.document.is_some(),
+    ) {
+        log::debug!("picker action {:?} declined: {:?}", op, reason);
+        return DispatchOutcome::Unhandled;
+    }
+    // `picker_decline_reason` just proved the document is present.
+    let Some(doc) = ctx.document.as_mut() else {
+        log::error!("picker arm: decline check and document borrow disagree");
+        return DispatchOutcome::Unhandled;
+    };
+    match op {
+        PickerOp::Cancel => cancel_color_picker(
+            ctx.color_picker_state,
+            doc,
+            ctx.interaction_mode,
+            ctx.mindmap_tree,
+            ctx.app_scene,
+            ctx.renderer,
+            ctx.scene_cache,
+        ),
+        PickerOp::Commit => {
+            if standalone {
+                // Standalone: fan the wheel color across the
+                // document selection and stay open.
+                commit_color_picker_to_selection(
+                    ctx.color_picker_state,
+                    doc,
+                    ctx.interaction_mode,
+                    ctx.mindmap_tree,
+                    ctx.app_scene,
+                    ctx.renderer,
+                    ctx.scene_cache,
+                );
+            } else {
+                // Contextual: write the bound handle and close.
+                commit_color_picker(
+                    ctx.color_picker_state,
+                    doc,
+                    ctx.interaction_mode,
+                    ctx.mindmap_tree,
+                    ctx.app_scene,
+                    ctx.renderer,
+                    ctx.scene_cache,
+                );
+            }
+        }
+        PickerOp::Nudge(nudge) => {
+            // Renderer-free: the preview stamp marks
+            // `picker_hover.dirty` and the per-frame drain rebuilds.
+            // The helper's `false` means the picker state rejected
+            // the nudge, so the op did not take effect — report
+            // that rather than a blanket `Handled`.
+            if !apply_picker_nudge(nudge, ctx.color_picker_state, doc, ctx.picker_hover) {
+                log::debug!("picker nudge {:?} did not apply; reporting Unhandled", nudge);
+                return DispatchOutcome::Unhandled;
+            }
+        }
+    }
+    DispatchOutcome::Handled
+}
+
+/// Apply a `LabelEdit*` cursor / delete primitive to a bare
+/// `(buffer, cursor)` pair.
+///
+/// Generic over the carrier so it serves both the single-line
+/// editor and any other buffer with grapheme-cursor semantics.
+/// Returns `true` when state changed.
 pub(in crate::application::app) fn apply_label_edit_action_to_buffer(
     action: Action,
     buffer: &mut String,
@@ -814,24 +842,6 @@ pub(in crate::application::app) fn apply_label_edit_action_to_buffer(
         _ => {}
     }
     *cursor != before || buffer.len() != len_before
-}
-
-/// Convenience wrapper for the dispatch-table call site that takes
-/// the LabelEditState carrier directly.
-pub(in crate::application::app) fn apply_label_edit_action(
-    action: Action,
-    state: &mut super::super::label_edit::LabelEditState,
-) -> bool {
-    use super::super::label_edit::LabelEditState;
-    let LabelEditState::Open {
-        buffer,
-        cursor_grapheme_pos,
-        ..
-    } = state
-    else {
-        return false;
-    };
-    apply_label_edit_action_to_buffer(action, buffer, cursor_grapheme_pos)
 }
 
 // `sibling_id` lifted to `dispatch/cross_dispatch/selection/mod.rs`
@@ -924,7 +934,7 @@ impl<'a, 'b> super::macro_core::MacroDispatchTarget for NativeMacroDispatchTarge
         // `&mut MindMapDocument`, not `Option`). Macros fired before
         // any document is loaded silently skip and return false so
         // the macro's `any_ran` doesn't bump on the no-op path —
-        // matches pre-Track-B behaviour where the warn arm left
+        // matches pre-Track-B behavior where the warn arm left
         // `any_ran` unchanged.
         let Some(doc) = self.ctx.document.as_mut() else {
             log::warn!("macro step ConsoleLine: no document loaded; skipping '{}'", line,);
@@ -933,8 +943,7 @@ impl<'a, 'b> super::macro_core::MacroDispatchTarget for NativeMacroDispatchTarge
         crate::application::app::console_input::exec::execute_console_line(
             line,
             self.ctx.console_state,
-            self.ctx.label_edit_state,
-            self.ctx.portal_text_edit_state,
+            self.ctx.single_line_edit_state,
             self.ctx.color_picker_state,
             self.ctx.text_edit_state,
             doc,
@@ -967,53 +976,6 @@ impl<'a, 'b> super::macro_core::MacroDispatchTarget for NativeMacroDispatchTarge
     }
 }
 
-/// Resolve a custom-mutation key binding and apply it through the same
-/// path the click-trigger handler at `click.rs:35-64` uses: animation-
-/// aware (`start_animation` when `timing.duration_ms > 0`), and always
-/// invoking `apply_document_actions`. Returns `true` when a mutation
-/// was found and applied.
-///
-/// Phase-7 fix: the previous keyboard-side fall-through at
-/// `event_keyboard.rs:528-553` skipped both `apply_document_actions`
-/// and the timing envelope, so document-action and animated mutations
-/// silently mis-fired when triggered from a key. This helper unifies
-/// the two paths through `apply_keybind_custom_mutation`.
-pub(in crate::application::app) fn dispatch_custom_mutation_for_key(
-    ctx: &mut InputHandlerContext<'_>,
-    key_name: &str,
-    ctrl: bool,
-    shift: bool,
-    alt: bool,
-) -> bool {
-    let id = match ctx.keybinds.custom_mutation_for(key_name, ctrl, shift, alt) {
-        Some(s) => s.to_string(),
-        None => return false,
-    };
-    let Some(doc) = ctx.document.as_mut() else {
-        return false;
-    };
-    let SelectionState::Single(nid) = doc.selection.clone() else {
-        return false;
-    };
-    let Some(cm) = doc.mutation_registry.get(&id).cloned() else {
-        return false;
-    };
-    let now = super::super::now_ms() as u64;
-    let applied = apply_keybind_custom_mutation(doc, ctx.mindmap_tree, ctx.scene_cache, &cm, &nid, now);
-    if applied {
-        rebuild_all(
-            doc,
-            ctx.interaction_mode,
-            ctx.mindmap_tree,
-            ctx.app_scene,
-            ctx.renderer,
-            ctx.scene_cache,
-        );
-    }
-    applied
-}
-
-/// Inline helper for the empty-canvas orphan-and-edit gesture so
 /// Fast-resize gesture start (`Action::FastResizeStart`).
 ///
 /// Threshold-cross arm in `event_cursor_moved.rs` dispatches this
@@ -1034,10 +996,11 @@ pub(in crate::application::app) fn dispatch_custom_mutation_for_key(
 /// - section's `size` is `None` (fill-parent — can't resize)
 /// - node / section vanished between press and threshold (e.g.
 ///   the user deleted via console while right-button was held)
+///
 /// In each case the state resets to `None` so the cursor doesn't
 /// re-fire the threshold-cross.
 fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&DispatchHit>) {
-    use baumhard::mindmap::scene_builder::infer_resize_anchor;
+    use baumhard::mindmap::tree_builder::infer_resize_anchor;
     use glam::Vec2;
 
     use super::super::throttled_interaction::{
@@ -1110,14 +1073,16 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
         let aabb_size = Vec2::new(start_size.width as f32, start_size.height as f32);
         let side = infer_resize_anchor(h.canvas_pos, aabb_pos, aabb_size);
         ctx.scene_cache.clear();
-        *ctx.drag_state = DragState::Throttled(ThrottledDrag::SectionResize(
-            SectionResizeInteraction::new(
-                node_id, section_idx, side, start_offset, start_size,
-                // Fast-resize gesture (`PendingRight` promotion) — the
-                // right-button release path may finalize this drag.
-                true,
-            ),
-        ));
+        *ctx.drag_state = DragState::throttled(ThrottledDrag::SectionResize(SectionResizeInteraction::new(
+            node_id,
+            section_idx,
+            side,
+            start_offset,
+            start_size,
+            // Fast-resize gesture (`PendingRight` promotion) — the
+            // right-button release path may finalize this drag.
+            true,
+        )));
     } else {
         let Some(node) = doc.mindmap.nodes.get(&node_id) else {
             log::debug!("FastResizeStart: node '{}' not found; skipping", node_id);
@@ -1130,34 +1095,13 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
         let aabb_size = Vec2::new(start_size.width as f32, start_size.height as f32);
         let side = infer_resize_anchor(h.canvas_pos, aabb_pos, aabb_size);
         ctx.scene_cache.clear();
-        *ctx.drag_state = DragState::Throttled(ThrottledDrag::NodeResize(
-            NodeResizeInteraction::new(node_id, side, start_position, start_size, true),
-        ));
-    }
-}
-
-/// `DoubleClickActivate` and `CreateOrphanNodeAndEdit` share one
-/// implementation.
-fn dispatch_create_orphan_and_edit(ctx: &mut InputHandlerContext<'_>, hit: &DispatchHit) {
-    if let Some(doc) = ctx.document.as_mut() {
-        let new_id = doc.create_orphan_and_select(hit.canvas_pos);
-        rebuild_all(
-            doc,
-            ctx.interaction_mode,
-            ctx.mindmap_tree,
-            ctx.app_scene,
-            ctx.renderer,
-            ctx.scene_cache,
-        );
-        open_text_edit(
-            &new_id,
+        *ctx.drag_state = DragState::throttled(ThrottledDrag::NodeResize(NodeResizeInteraction::new(
+            node_id,
+            side,
+            start_position,
+            start_size,
             true,
-            doc,
-            ctx.text_edit_state,
-            ctx.mindmap_tree,
-            ctx.app_scene,
-            ctx.renderer,
-        );
+        )));
     }
 }
 

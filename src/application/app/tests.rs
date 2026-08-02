@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Double-click detection + already-editing guard tests. The
-//! predicates under test (`is_double_click`, the guard
-//! predicate embedded in the MouseInput handler) are pure
-//! cursor / time math, so exercising them here keeps the
-//! winit event loop out of the test scaffold.
+//! predicates under test ([`super::is_double_click`],
+//! [`super::already_editing_same_target`], [`super::wheel_lines`]
+//! and [`super::wheel_gesture`]) are pure cursor / time / scroll
+//! math, so exercising them here keeps the winit event loop out of
+//! the test scaffold.
 
 use super::*;
 
@@ -107,7 +108,76 @@ fn test_double_click_just_under_boundary_fires() {
 // that re-opens are skipped if the editor is already on that
 // target. We verify the guard predicate here; the actual event
 // loop wiring is manually verified via `cargo run`.
+//
+// These tests were promised in this file from the day the guard
+// landed and could not be written: the predicate was inline in
+// `event_mouse_click.rs`'s handler body, reachable only with a
+// live winit event loop. It is now
+// `already_editing_same_target`, which both targets call, so the
+// promise is finally fulfillable — and the cross-target part
+// matters, because the two copies of this guard had *different*
+// predicates (the browser's had no single-line term).
 
+#[test]
+fn test_guard_is_open_when_the_press_lands_on_the_edited_node() {
+    assert!(already_editing_same_target(Some("n1"), Some("n1"), false));
+}
+
+/// The common productive case: an editor is open and the user
+/// double-clicks a *different* node to move the edit there. The
+/// guard must not fire, or that gesture stops working.
+#[test]
+fn test_guard_is_closed_for_a_press_on_a_different_node() {
+    assert!(!already_editing_same_target(Some("n1"), Some("n2"), false));
+}
+
+/// Empty-canvas press while an editor is open. `hit_node` is
+/// `None`, which must not be read as "matches".
+#[test]
+fn test_guard_is_closed_for_an_empty_canvas_press_while_editing() {
+    assert!(!already_editing_same_target(Some("n1"), None, false));
+}
+
+/// No editor open at all. Pinned separately from the case above
+/// because the two `None`s sit on opposite sides of the
+/// comparison, and a predicate that confused them would report
+/// "already editing" with nothing open — suppressing every
+/// double-click on the map.
+#[test]
+fn test_guard_is_closed_when_no_editor_is_open() {
+    assert!(!already_editing_same_target(None, Some("n1"), false));
+    assert!(!already_editing_same_target(None, None, false));
+}
+
+/// The single-line term stands alone: the edge-label / portal-caption
+/// editor is open on this press's target even though no *node*
+/// editor is. Native computes this from `single_line_edit_state`;
+/// the browser has no single-line editor and passes `false`.
+#[test]
+fn test_guard_is_open_on_the_single_line_term_alone() {
+    assert!(already_editing_same_target(None, None, true));
+    assert!(already_editing_same_target(None, Some("n1"), true));
+}
+
+/// Both terms true. Pinned so the disjunction cannot be narrowed to
+/// a conjunction without a test going red — a `&&` here would leave
+/// the single-line editor unguarded on every press that isn't also
+/// on the edited node.
+#[test]
+fn test_guard_is_open_when_both_terms_hold() {
+    assert!(already_editing_same_target(Some("n1"), Some("n1"), true));
+}
+
+/// The node term stands alone, with the single-line term false —
+/// exactly the input shape the browser produces, so a predicate
+/// that leaned on the single-line term would be dead on WASM.
+/// Paired with the converse (single-line true, node term false) so
+/// both disjuncts are shown to carry the result on their own.
+#[test]
+fn test_guard_each_term_carries_the_result_alone() {
+    assert!(already_editing_same_target(Some("n1"), Some("n1"), false));
+    assert!(already_editing_same_target(Some("n1"), Some("n2"), true));
+}
 
 // -----------------------------------------------------------------
 // Drag-helper + release-flush invariants
@@ -461,5 +531,124 @@ mod click_hit_priority_tests {
             (101.0, 100.0),
             &ClickHit::Node("node-a".to_string(), Some(1)),
         ));
+    }
+}
+
+// -----------------------------------------------------------------
+// Wheel decomposition
+//
+// `wheel_lines` and `wheel_gesture` are the two halves of "what did
+// the user's scroll mean". Before unification the arithmetic lived
+// at both wheel handlers and the browser's half never reached the
+// second step at all — it went straight to a hardcoded 1.1x zoom.
+// These pin the shared bodies both targets now run.
+// -----------------------------------------------------------------
+
+mod wheel_tests {
+    use super::super::{wheel_gesture, wheel_lines};
+    use crate::application::keybinds::MouseGesture;
+    use crate::application::platform::input::MouseScrollDelta;
+
+    /// A notched wheel reports whole lines and they pass through
+    /// untouched — no divisor is applied to this shape.
+    #[test]
+    fn test_wheel_lines_passes_line_deltas_through_unscaled() {
+        assert_eq!(wheel_lines(MouseScrollDelta::LineDelta(0.0, 1.0)), 1.0);
+        assert_eq!(wheel_lines(MouseScrollDelta::LineDelta(0.0, -3.0)), -3.0);
+    }
+
+    /// The horizontal component is discarded: this app zooms on
+    /// vertical scroll only, and a trackpad's sideways drift must
+    /// not be read as a zoom.
+    #[test]
+    fn test_wheel_lines_ignores_the_horizontal_component() {
+        assert_eq!(wheel_lines(MouseScrollDelta::LineDelta(99.0, 1.0)), 1.0);
+    }
+
+    /// Pixel deltas divide by the app's 50-px-per-line convention.
+    /// Pinned as an exact value so a change to the divisor is a
+    /// visible test edit rather than a silent shift in trackpad
+    /// sensitivity on one target.
+    #[test]
+    fn test_wheel_lines_converts_pixel_deltas_at_fifty_px_per_line() {
+        let d = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 100.0));
+        assert_eq!(wheel_lines(d), 2.0);
+        let up = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, -25.0));
+        assert_eq!(wheel_lines(up), -0.5);
+    }
+
+    #[test]
+    fn test_wheel_gesture_maps_positive_to_up_and_negative_to_down() {
+        assert_eq!(wheel_gesture(1.0), MouseGesture::WheelUp);
+        assert_eq!(wheel_gesture(0.01), MouseGesture::WheelUp);
+        assert_eq!(wheel_gesture(-1.0), MouseGesture::WheelDown);
+    }
+
+    /// Zero is a decision, not arithmetic: a scroll event with no
+    /// vertical component resolves to `WheelDown`, matching the
+    /// `> 0.0` test both handlers used before unification. Pinned
+    /// because it is the one input where a `>=` would diverge, and
+    /// because both targets must make the same call.
+    #[test]
+    fn test_wheel_gesture_treats_zero_as_down() {
+        assert_eq!(wheel_gesture(0.0), MouseGesture::WheelDown);
+        assert_eq!(wheel_gesture(-0.0), MouseGesture::WheelDown);
+    }
+}
+
+// -----------------------------------------------------------------
+// One-shot NativeOnly-binding warn latch
+//
+// `warn_unhandled_native_only_once` is what a user gets when they
+// bind a NativeOnly Action to a browser gesture: one line, once. It
+// lived inside `run_wasm`, which is `#![cfg(target_arch = "wasm32")]`
+// and therefore out of `cargo test`'s reach, though nothing in it is
+// browser-specific (§T9). It is cross-platform now, and its return
+// value is the emission decision — the only way to assert "exactly
+// one emission" in a workspace with no log-capture facility and a
+// §T10 rule against process-global mocks.
+// -----------------------------------------------------------------
+
+mod native_only_warn_latch_tests {
+    use super::super::warn_unhandled_native_only_once;
+    use crate::application::keybinds::Action;
+    use std::sync::atomic::AtomicBool;
+
+    fn warn(latch: &AtomicBool) -> bool {
+        warn_unhandled_native_only_once(latch, "DoubleClick", &Action::OpenConsole, "remedy")
+    }
+
+    /// Once means once. The second call and every call after it are
+    /// silent, so a gesture the user repeats does not fill the
+    /// console — `warn!` survives into release (§9).
+    #[test]
+    fn test_warn_unhandled_native_only_once_emits_exactly_once() {
+        let latch = AtomicBool::new(false);
+        assert!(warn(&latch), "the first call must emit");
+        assert!(!warn(&latch), "the second call must not emit");
+        assert!(!warn(&latch), "and neither must any later one");
+    }
+
+    /// The latch is per-input-class, and that is the whole reason it
+    /// is a parameter rather than a `static` inside the function: a
+    /// dead double-click binding must not silence a dead wheel
+    /// binding, which is what one shared latch across three call
+    /// sites would do.
+    #[test]
+    fn test_warn_unhandled_native_only_once_latches_are_independent() {
+        let double_click = AtomicBool::new(false);
+        let wheel = AtomicBool::new(false);
+        assert!(warn(&double_click));
+        assert!(!warn(&double_click));
+        assert!(warn(&wheel), "a separate input class gets its own line");
+    }
+
+    /// A latch that arrives already set stays silent — the caller's
+    /// `static` is `false` at startup and never reset, so "already
+    /// warned in this session" is the steady state.
+    #[test]
+    fn test_warn_unhandled_native_only_once_respects_a_pre_set_latch() {
+        let latch = AtomicBool::new(true);
+        assert!(!warn(&latch));
     }
 }

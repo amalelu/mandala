@@ -1,254 +1,382 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use lazy_static::lazy_static;
+//! Build script for the compiled-in font table.
+//!
+//! Scans `src/font/fonts/` for `.ttf` / `.otf` files and emits
+//! `$OUT_DIR/generated_fonts_data.rs`, which `src/font/fonts.rs`
+//! pulls in with `include!`. The generated file defines the
+//! `AppFont` enum (one variant per compiled-in font, plus the `Any`
+//! sentinel) and the `FONT_DATA` table that binds each variant to
+//! its `include_bytes!`-embedded payload.
+//!
+//! Two properties this script owes its callers:
+//!
+//! - **Determinism.** Two clean builds of an unchanged tree produce
+//!   byte-identical output. Nothing here iterates a `HashMap`, and
+//!   every ordering decision routes through
+//!   [`name_rules::select_font_variants`], whose comparators are
+//!   total. Without this the `AppFont` variant order — and so the
+//!   discriminants and the generated diff — churned on every build.
+//! - **Correct rebuild triggers.** Emitting even one
+//!   `cargo:rerun-if-changed` line switches Cargo from "watch the
+//!   whole package" to "watch exactly these paths", so the font
+//!   *directories* are registered alongside the files. Watching only
+//!   the files found on the previous run means a newly dropped font
+//!   never triggers the regeneration that would notice it.
+//!
+//! Every naming rule lives in `src/font/name_rules.rs`, which this
+//! script `include!`s and the library compiles as a normal module —
+//! Cargo never builds a build script under `cfg(test)`, so that is
+//! what makes the rules unit-testable.
+
+use std::collections::BTreeSet;
+use std::error::Error;
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+use std::{env, fs};
+
 use path_slash::PathExt;
-use regex::Regex;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::ffi::OsString;
-use std::{env, error::Error, fs::File, io::Write, path::Path};
+use ttf_parser::Face;
 
-const NUM_SPECIAL_FONT: usize = 1;
-const ANY_STR: &'static str = "Any";
-const DOC_ANY_STR: &'static str =
-    "Indicates that the defining party does not give two fucks about the font used";
+mod name_rules {
+    include!("src/font/name_rules.rs");
+}
 
-const FONT_DIR: &'static str = "src/font/fonts";
-const FONTS_RS_FILE: &'static str = "generated_fonts_data.rs";
-const VALID_EXTENSIONS: [&str; 2] = ["otf", "ttf"];
-const MAX_LEN: usize = 20;
-const MIN_LEN: usize = 5;
-const MIN_TOKEN_LEN: usize = 4;
+use name_rules::{
+    decode_name_record, is_font_extension, select_font_variants, FontCandidate, NameEncoding, ANY_VARIANT,
+};
+
+/// Font root, relative to the crate manifest directory.
+const FONT_DIR: &str = "src/font/fonts";
+/// Name of the generated file inside `OUT_DIR`.
+const FONTS_RS_FILE: &str = "generated_fonts_data.rs";
+/// Sources whose edits must re-run this script but that the font
+/// walk below never visits.
+const OWN_SOURCES: [&str; 2] = ["build.rs", "src/font/name_rules.rs"];
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let out_dir = env::var_os("OUT_DIR").expect("OUT_DIR not found");
-    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").expect("MANIFEST_DIR not found");
-    prepare_font_file(out_dir.clone(), manifest_dir.clone())?;
-
-    Ok(())
+    let out_dir = env::var_os("OUT_DIR").expect("OUT_DIR not set by cargo");
+    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set by cargo");
+    prepare_font_file(&out_dir, &manifest_dir)
 }
 
-fn prepare_font_file(out_dir: OsString, manifest_dir: OsString) -> Result<(), Box<dyn Error>> {
-    let manifest_path = Path::new(&manifest_dir);
-    let mut fonts = collect_fonts(FONT_DIR, manifest_path)?;
-    fonts.push((ANY_STR.to_string(), "".to_string()));
+/// Scan the font tree and write `$OUT_DIR/generated_fonts_data.rs`.
+fn prepare_font_file(out_dir: &OsStr, manifest_dir: &OsStr) -> Result<(), Box<dyn Error>> {
+    let manifest_path = Path::new(manifest_dir);
+    let font_root = manifest_path.join(FONT_DIR);
 
-    let out_file = Path::new(&out_dir).join(FONTS_RS_FILE);
-    generate_font_file(out_file, &fonts)
+    emit_rerun_directives(manifest_path, &font_root);
+
+    let selection = select_font_variants(collect_candidates(&font_root)?);
+    for warning in &selection.warnings {
+        println!("cargo:warning={warning}");
+    }
+
+    let out_file = Path::new(out_dir).join(FONTS_RS_FILE);
+    generate_font_file(&out_file, &selection.fonts)
 }
 
-fn generate_font_file(out_file: impl AsRef<Path>, fonts: &[(String, String)]) -> Result<(), Box<dyn Error>> {
-    let mut file = File::create(&out_file)?;
+/// Register every path whose change must re-run this script.
+///
+/// Cargo's default is to watch the whole package; the first
+/// `cargo:rerun-if-changed` line replaces that default with an
+/// explicit allow-list. The previous version of this script listed
+/// only the font files it had found, which meant a font *added*
+/// after the last run was invisible: nothing in the watch set had
+/// changed, the script never re-ran, and the promised variant never
+/// appeared. Registering the directories themselves closes that —
+/// Cargo stats a watched directory recursively, so creating,
+/// renaming, or deleting a file under it is a change.
+///
+/// The font files stay in the list as well: a directory's recursive
+/// stat covers content edits too, but naming the files keeps the
+/// dependency explicit and survives any future narrowing of Cargo's
+/// directory handling. `build.rs` and `name_rules.rs` are added
+/// because the allow-list must cover this script's own sources.
+///
+/// Output is sorted so the emitted directive block is as stable as
+/// the generated source.
+fn emit_rerun_directives(manifest_path: &Path, font_root: &Path) {
+    let mut watched: BTreeSet<String> = BTreeSet::new();
+    for source in OWN_SOURCES {
+        watched.insert(manifest_path.join(source).to_slash_lossy().into_owned());
+    }
+    watched.insert(font_root.to_slash_lossy().into_owned());
 
+    for entry in walkdir::WalkDir::new(font_root).follow_links(true) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                println!("cargo:warning=font directory walk failed: {error}");
+                continue;
+            }
+        };
+        let path = entry.path();
+        let is_font_file = path
+            .extension()
+            .and_then(|extension| is_font_extension(&extension.to_string_lossy()))
+            .is_some();
+        if entry.file_type().is_dir() || is_font_file {
+            watched.insert(path.to_slash_lossy().into_owned());
+        }
+    }
+
+    for path in watched {
+        println!("cargo:rerun-if-changed={path}");
+    }
+}
+
+/// Walk the font tree and turn every `.ttf` / `.otf` file into a
+/// [`FontCandidate`]. Ordering of the returned vector is whatever
+/// the filesystem hands back; [`select_font_variants`] is
+/// responsible for making the result deterministic, and is the only
+/// consumer.
+fn collect_candidates(font_root: &Path) -> Result<Vec<FontCandidate>, Box<dyn Error>> {
+    let mut candidates = Vec::new();
+    for entry in walkdir::WalkDir::new(font_root).follow_links(true) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // Already reported by `emit_rerun_directives`, which
+            // walks the same tree; skipping quietly here avoids
+            // doubling every warning.
+            Err(_) => continue,
+        };
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(extension) = path
+            .extension()
+            .and_then(|extension| is_font_extension(&extension.to_string_lossy()))
+        else {
+            continue;
+        };
+        let Some(file_stem) = path.file_stem() else {
+            continue;
+        };
+        let relative_path = path
+            .strip_prefix(font_root)
+            .map(|relative| relative.to_slash_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_slash_lossy().into_owned());
+
+        let full_name = read_full_name(path)?;
+        candidates.push(FontCandidate::new(
+            path.to_slash_lossy().into_owned(),
+            relative_path,
+            &file_stem.to_string_lossy(),
+            extension,
+            full_name.as_deref(),
+        ));
+    }
+    Ok(candidates)
+}
+
+/// Read a font's `FULL_NAME` record, decoded through
+/// [`decode_name_record`].
+///
+/// Returns the first `FULL_NAME` record that survives
+/// [`name_rules::is_usable_font_name`], or `None` when the file has
+/// none — in which case the caller falls back to the file stem.
+///
+/// Two failure modes are deliberately *not* build errors. An
+/// unparseable container and an undecodable name table both warn and
+/// degrade to the file-stem path, because a build script that
+/// panics on a font file leaves no recovery short of deleting the
+/// file. In particular the previous
+/// `str::from_utf8(name.name).expect("Not UTF-8")` turned any
+/// non-ASCII Windows-platform name — UTF-16BE, so a single accented
+/// character makes the bytes invalid UTF-8 — into a hard build
+/// failure, and made the fallback path unreachable for exactly the
+/// fonts that needed it. An I/O error *is* propagated: a font file
+/// we can see but cannot read is a broken checkout, not a font
+/// problem.
+fn read_full_name(path: &Path) -> Result<Option<String>, Box<dyn Error>> {
+    let data = fs::read(path)?;
+    let Ok(face) = Face::parse(&data, 0) else {
+        println!(
+            "cargo:warning=font '{}' could not be parsed as an OpenType face; naming it from \
+             its file name",
+            path.display()
+        );
+        return Ok(None);
+    };
+
+    for name in face.names() {
+        if name.name_id != ttf_parser::name_id::FULL_NAME {
+            continue;
+        }
+        let encoding = if name.is_unicode() {
+            NameEncoding::Utf16Be
+        } else {
+            NameEncoding::Legacy
+        };
+        let decoded = decode_name_record(name.name, encoding);
+        if name_rules::is_usable_font_name(&decoded) {
+            return Ok(Some(decoded));
+        }
+    }
+    Ok(None)
+}
+
+/// Escape a path for embedding in a Rust string literal. Font
+/// directories are ordinary names today, but a `\` or `"` anywhere
+/// in the absolute path would otherwise emit source that does not
+/// parse.
+fn escape_string_literal(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Make a value safe to interpolate into a generated `///` line:
+/// no line breaks (which would silently truncate the comment and
+/// then be parsed as code) and no backticks (which would unbalance
+/// the inline-code spans the doc uses).
+fn escape_doc_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '`' => '\'',
+            ch if ch.is_control() => ' ',
+            ch => ch,
+        })
+        .collect()
+}
+
+/// Write the generated `AppFont` enum and `FONT_DATA` table.
+///
+/// `fonts` arrives sorted and collision-free from
+/// [`select_font_variants`]; this function adds no ordering of its
+/// own, so the emitted bytes are a pure function of that slice.
+fn generate_font_file(out_file: &Path, fonts: &[FontCandidate]) -> Result<(), Box<dyn Error>> {
+    let mut file = File::create(out_file)?;
+
+    writeln!(file, "// @generated by lib/baumhard/build.rs — do not edit.")?;
+    writeln!(file, "//")?;
+    writeln!(file, "// One variant per font file under `{FONT_DIR}`, plus the")?;
+    writeln!(
+        file,
+        "// `{ANY_VARIANT}` sentinel. The sentinel comes first and the rest are"
+    )?;
+    writeln!(
+        file,
+        "// sorted by variant name, so two clean builds of an unchanged"
+    )?;
+    writeln!(file, "// font tree emit byte-identical source.")?;
+    writeln!(file)?;
+
+    writeln!(file, "/// Every font compiled into the binary, plus the")?;
+    writeln!(
+        file,
+        "/// [`AppFont::{ANY_VARIANT}`] sentinel for text that expresses no"
+    )?;
+    writeln!(file, "/// preference.")?;
+    writeln!(file, "///")?;
+    writeln!(
+        file,
+        "/// Generated by `build.rs` from the files under `{FONT_DIR}`;"
+    )?;
+    writeln!(
+        file,
+        "/// drop a `.ttf` or `.otf` in there and the variant appears on the"
+    )?;
+    writeln!(
+        file,
+        "/// next build. Variant names come from each font's `FULL_NAME`"
+    )?;
+    writeln!(
+        file,
+        "/// record, or from its file name when that record is missing or"
+    )?;
+    writeln!(
+        file,
+        "/// unreadable; the rules live in `src/font/name_rules.rs`."
+    )?;
+    writeln!(file, "///")?;
+    writeln!(
+        file,
+        "/// Ordering is fixed — sentinel first, then variants sorted by"
+    )?;
+    writeln!(
+        file,
+        "/// name — so the generated source does not churn between builds."
+    )?;
+    writeln!(
+        file,
+        "/// Adding or removing a font still shifts the discriminants of the"
+    )?;
+    writeln!(
+        file,
+        "/// variants after it, which is safe because nothing persists them:"
+    )?;
+    writeln!(
+        file,
+        "/// the derived `Serialize` / `Deserialize` impls key on the variant"
+    )?;
+    writeln!(
+        file,
+        "/// *name*, and `.mindmap.json` stores fonts as family-name strings"
+    )?;
+    writeln!(file, "/// resolved through `app_font_by_family`.")?;
+    writeln!(file, "///")?;
+    writeln!(
+        file,
+        "/// Costs: `Copy`, one machine word. Cheap to pass by value."
+    )?;
     writeln!(
         file,
         "#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]"
     )?;
     writeln!(file, "pub enum AppFont {{")?;
-    for (name, _) in fonts {
-        if name.eq(ANY_STR) {
-            writeln!(file, "///{}", DOC_ANY_STR)?;
-            writeln!(file, "{},", name)?;
-        } else {
-            writeln!(file, "{},", name)?;
-        }
-    }
-    writeln!(file, "}}")?;
     writeln!(
         file,
-        "pub(crate) static FONT_DATA: [(AppFont, &'static [u8]); {}] = [",
-        fonts.len() - NUM_SPECIAL_FONT
+        "    /// No font preference — the face is left to cosmic-text's"
     )?;
-    for (name, path) in fonts {
-        if !name.eq(ANY_STR) {
-            writeln!(file, "    ({}, include_bytes!(\"{}\")),", name, path)?;
-        }
+    writeln!(
+        file,
+        "    /// fallback chain. The default pin for text that carries no"
+    )?;
+    writeln!(file, "    /// explicit family.")?;
+    writeln!(file, "    {ANY_VARIANT},")?;
+    for font in fonts {
+        writeln!(
+            file,
+            "    /// `{}` — `{}`.",
+            escape_doc_text(&font.display_name),
+            escape_doc_text(&font.relative_path)
+        )?;
+        writeln!(file, "    {},", font.variant)?;
+    }
+    writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    writeln!(
+        file,
+        "/// Every compiled-in font paired with its embedded bytes, in the"
+    )?;
+    writeln!(
+        file,
+        "/// same order as the [`AppFont`] variants. The [`AppFont::{ANY_VARIANT}`]"
+    )?;
+    writeln!(file, "/// sentinel has no payload and is absent. Read once by")?;
+    writeln!(
+        file,
+        "/// `load_font_sources` at startup; the byte slices live in the"
+    )?;
+    writeln!(file, "/// binary's read-only data, so nothing is copied.")?;
+    writeln!(
+        file,
+        "pub(crate) static FONT_DATA: [(AppFont, &[u8]); {}] = [",
+        fonts.len()
+    )?;
+    for font in fonts {
+        writeln!(
+            file,
+            "    (AppFont::{}, include_bytes!(\"{}\")),",
+            font.variant,
+            escape_string_literal(&font.absolute_path)
+        )?;
     }
     writeln!(file, "];")?;
     Ok(())
-}
-
-use std::borrow::Borrow;
-
-fn collect_fonts(source_dir: &str, manifest_dir: &Path) -> Result<Vec<(String, String)>, Box<dyn Error>> {
-    let mut fonts_map: HashMap<String, (String, String)> = HashMap::new();
-    for entry in walkdir::WalkDir::new(source_dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| !e.file_type().is_dir())
-    {
-        let path = entry.path();
-
-        if let Some(extension) = path.extension() {
-            if extension != "otf" && extension != "ttf" {
-                continue;
-            }
-        } else {
-            continue;
-        }
-
-        let filename: String = path
-            .strip_prefix(source_dir)?
-            .file_name()
-            .expect("no file name")
-            .to_str()
-            .expect("no str")
-            .to_string();
-
-        let full_path: String =
-            Cow::to_string(&manifest_dir.to_slash_lossy()) + "/" + Cow::borrow(&path.to_slash_lossy());
-        let filename_without_extension = filename.trim_end_matches(".otf").trim_end_matches(".ttf");
-        let font_file_name = filename_without_extension
-            .split_once("-")
-            .unwrap_or((filename_without_extension, ""))
-            .0
-            .to_lowercase()
-            .to_string();
-
-        let font_name = get_font_name(&full_path)?;
-        let sanitized_name = camel_case(&font_name);
-        let font_camel_case;
-        if sanitized_name.is_err() {
-            font_camel_case = fallback_sanitize(&filename);
-        } else {
-            font_camel_case = sanitized_name.unwrap();
-        }
-
-        if let Some((_font, existing_path)) = fonts_map.get(&font_file_name) {
-            if existing_path.ends_with(VALID_EXTENSIONS[0]) && filename.ends_with(VALID_EXTENSIONS[1]) {
-                fonts_map.insert(
-                    font_file_name.clone(),
-                    (font_camel_case.clone(), full_path.clone()),
-                );
-            }
-        } else {
-            fonts_map.insert(
-                font_file_name.clone(),
-                (font_camel_case.clone(), full_path.clone()),
-            );
-        }
-        println!("cargo:rerun-if-changed={}", full_path);
-    }
-
-    let fonts: Vec<(String, String)> = fonts_map.into_iter().map(|(_k, v)| v).collect();
-
-    Ok(fonts)
-}
-
-fn fallback_sanitize(font_name: &str) -> String {
-    // Remove leading and trailing numbers
-    let trim_name = font_name
-        .trim_start_matches(|c: char| c.is_numeric())
-        .trim_end_matches(|c: char| c.is_numeric());
-
-    // Split on any whitespace, hyphen, or underscore.
-    let mut words: Vec<String> = trim_name
-        .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
-        .filter(|s| s.len() >= MIN_TOKEN_LEN) // Only keep segments with MIN_TOKEN_LEN or more letters.
-        .map(String::from)
-        .collect();
-
-    // If the input is less than or equal to MIN_LEN, return it as is
-    if trim_name.len() <= MIN_LEN {
-        return trim_name.to_string();
-    }
-
-    // Check first token
-    if let Some(first_word) = words.get(0) {
-        let first_word = first_word.clone(); // Clone first_word
-        if first_word.len() >= MIN_LEN {
-            return first_word;
-        }
-
-        // If the first token + second token is of length MIN_LEN or longer
-        if words.get(1).map_or(0, |s| s.len()) + first_word.len() >= MIN_LEN {
-            words.remove(1); // Consume the second token
-            return first_word + "_" + words.get(0).unwrap_or(&"".to_string());
-        }
-    }
-
-    let mut final_name = String::new();
-
-    for word in &words {
-        if final_name.len() + word.len() <= MAX_LEN {
-            if !final_name.is_empty() {
-                final_name.push_str("_");
-            }
-            final_name.push_str(word);
-        } else if final_name.is_empty() {
-            final_name = word.clone();
-            final_name.truncate(MAX_LEN);
-            break;
-        } else {
-            break;
-        }
-    }
-
-    final_name
-}
-
-use ttf_parser::Face;
-
-fn get_font_name(font_path: &str) -> Result<String, &'static str> {
-    // Read the font data
-    let font_data = std::fs::read(font_path).map_err(|_| "Could not read font file")?;
-
-    // Create a Face instance
-    let face = Face::parse(&font_data, 0).map_err(|_| "Could not parse font file")?;
-
-    // Get the font name
-    let names = face.names();
-
-    for name in names {
-        if name.name_id == ttf_parser::name_id::FULL_NAME {
-            return Ok(std::str::from_utf8(name.name)
-                .expect("Not UTF-8")
-                .chars()
-                .filter(|&c| !c.is_whitespace())
-                .filter(|&c| c.is_ascii_alphanumeric())
-                .collect::<String>());
-        }
-    }
-
-    Err("Could not find font name")
-}
-
-fn camel_case(input: &str) -> Result<String, Box<dyn Error>> {
-    lazy_static! {
-        static ref RE_NUMBERS: Regex = Regex::new(r"^\d+").unwrap();
-        static ref RE_WHITESPACE_ONLY: Regex = Regex::new(r"^\s*$").unwrap();
-        static ref RE_NUMBERS_ONLY: Regex = Regex::new(r"^\d+$").unwrap();
-    }
-
-    if RE_WHITESPACE_ONLY.is_match(input) || RE_NUMBERS_ONLY.is_match(input) {
-        return Err("invalid name".into());
-    }
-
-    let result: String;
-
-    if let Some(m) = RE_NUMBERS.find(input) {
-        result = format!("{}{}", &input[m.end()..], &input[..m.end()]);
-    } else {
-        result = input.into();
-    }
-
-    let result = result
-        .chars()
-        .filter(|&c| !",'.!?()&\"+:;".contains(c))
-        .collect::<String>();
-
-    let result = result
-        .split_whitespace()
-        .map(|word| {
-            let mut c = word.chars();
-            match c.next() {
-                None => String::new(),
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-            }
-        })
-        .collect::<Vec<String>>()
-        .join("");
-
-    Ok(result)
 }

@@ -7,9 +7,10 @@
 //!
 //! Operates at the `serde_json::Value` level so legacy maps that
 //! the typed `load_from_str` would now reject (per CODE_CONVENTIONS
-//! §10 "no dual shapes") still flow through cleanly. The pipeline
-//! mirrors `convert_portals` — read raw JSON, transform, write
-//! pretty-printed JSON.
+//! §10 "no dual shapes") still flow through cleanly. Read, transform,
+//! and write are the shared `super::transform_map_file` scaffold —
+//! the same one `convert_portals` and `convert_legacy` use — so this
+//! verb also lands on disk through the atomic staging-file + rename.
 
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -31,28 +32,21 @@ use super::nodes_obj_mut;
 /// A node with both `sections` *and* legacy `text` is treated as
 /// a partial migration: legacy fields are dropped and the
 /// existing sections remain authoritative.
+///
+/// Input and output may be the same path — the write is atomic, so an
+/// interrupted in-place migration cannot truncate the user's only copy.
 pub fn convert_sections(input_path: &Path, output_path: &Path) -> Result<(), String> {
-    let content = std::fs::read_to_string(input_path)
-        .map_err(|e| format!("failed to read {}: {e}", input_path.display()))?;
-
-    let mut root: Value = serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse {}: {e}", input_path.display()))?;
-
-    let mut migrated = 0usize;
-    if let Some(nodes) = nodes_obj_mut(&mut root) {
-        for (_id, node) in nodes.iter_mut() {
-            if migrate_one_node(node) {
-                migrated += 1;
+    super::transform_map_file(input_path, output_path, |root| {
+        let mut migrated = 0usize;
+        if let Some(nodes) = nodes_obj_mut(root) {
+            for (_id, node) in nodes.iter_mut() {
+                if migrate_one_node(node) {
+                    migrated += 1;
+                }
             }
         }
-    }
-
-    let json = serde_json::to_string_pretty(&root).map_err(|e| format!("failed to serialize: {e}"))?;
-    std::fs::write(output_path, &json)
-        .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
-
-    eprintln!("converted {} nodes into section-bearing shape", migrated);
-    Ok(())
+        Ok(format!("converted {migrated} nodes into section-bearing shape"))
+    })
 }
 
 /// Migrate one node's JSON object. Returns `true` when the node
@@ -85,7 +79,7 @@ pub(super) fn migrate_one_node(node: &mut Value) -> bool {
 
     // Build the default section. `MindSection.text` carries
     // `#[serde(default)]` so a missing key parses as empty, but
-    // we synthesise the key explicitly here to keep the on-disk
+    // we synthesize the key explicitly here to keep the on-disk
     // shape predictable for downstream tooling (grep / show /
     // hand-inspection). Pre-fix this comment claimed the default
     // was implicit without `#[serde(default)]` — wrong; the
@@ -95,7 +89,7 @@ pub(super) fn migrate_one_node(node: &mut Value) -> bool {
     let text = legacy_text.unwrap_or_else(|| Value::String(String::new()));
     section.insert("text".to_string(), text);
     if let Some(runs) = legacy_runs {
-        // Skip serialising an empty runs array — matches the
+        // Skip serializing an empty runs array — matches the
         // typed `MindSection`'s `skip_serializing_if =
         // "Vec::is_empty"` so converted maps stay byte-stable
         // against unconverted-but-otherwise-identical sibling
@@ -147,7 +141,7 @@ mod tests {
         let s0 = node.get("sections").unwrap().as_array().unwrap()[0]
             .as_object()
             .unwrap();
-        assert!(s0.get("text_runs").is_none(), "empty runs not serialised");
+        assert!(s0.get("text_runs").is_none(), "empty runs not serialized");
     }
 
     #[test]

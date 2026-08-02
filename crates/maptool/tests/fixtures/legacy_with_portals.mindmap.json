@@ -1,0 +1,166 @@
+{
+  "version": "1.0",
+  "name": "legacy_with_portals",
+  "canvas": {
+    "background_color": "#000000"
+  },
+  "nodes": {
+    "348068464": {
+      "id": "348068464",
+      "parent_id": null,
+      "index": 0,
+      "position": { "x": 0.0, "y": 0.0 },
+      "size": { "width": 180.0, "height": 48.0 },
+      "text": "Legacy root",
+      "text_runs": [
+        {
+          "start": 0,
+          "end": 11,
+          "bold": true,
+          "italic": false,
+          "underline": false,
+          "font": "LiberationSans",
+          "size_pt": 16,
+          "color": "#ffffff",
+          "hyperlink": null
+        }
+      ],
+      "style": {
+        "background_color": "#141414",
+        "frame_color": "#30b082",
+        "text_color": "#ffffff",
+        "shape_type": 1,
+        "corner_radius_percent": 10.0,
+        "frame_thickness": 4.0,
+        "show_frame": true,
+        "show_shadow": false
+      },
+      "layout": { "type": 0, "direction": 0, "spacing": 50.0 },
+      "folded": false,
+      "notes": "",
+      "color_schema": {
+        "palette": "coral",
+        "variant": 3,
+        "theme_id": 7,
+        "level": 0,
+        "starts_at_root": true,
+        "connections_colored": true,
+        "groups": [
+          {
+            "background": "#141414",
+            "frame": "#30b082",
+            "text": "#ffffff",
+            "title": "#ffffff"
+          },
+          {
+            "background": "#1c1c1c",
+            "frame": "#b03080",
+            "text": "#eeeeee",
+            "title": "#eeeeee"
+          }
+        ]
+      }
+    },
+    "348069120": {
+      "id": "348069120",
+      "parent_id": "348068464",
+      "index": 0,
+      "position": { "x": 240.0, "y": -60.0 },
+      "size": { "width": 160.0, "height": 40.0 },
+      "text": "Portal source",
+      "text_runs": [],
+      "style": {
+        "background_color": "#1c1c1c",
+        "frame_color": "#b03080",
+        "text_color": "#eeeeee",
+        "shape_type": 2,
+        "corner_radius_percent": 0.0,
+        "frame_thickness": 2.0,
+        "show_frame": true,
+        "show_shadow": false
+      },
+      "layout": { "type": 1, "direction": 4, "spacing": 40.0 },
+      "folded": false,
+      "notes": "endpoint_a of the legacy portal",
+      "color_schema": {
+        "palette": "coral",
+        "variant": 3,
+        "theme_id": 7,
+        "level": 1,
+        "starts_at_root": true,
+        "connections_colored": true,
+        "groups": []
+      }
+    },
+    "348069776": {
+      "id": "348069776",
+      "parent_id": "348068464",
+      "index": 1,
+      "position": { "x": 240.0, "y": 60.0 },
+      "size": { "width": 160.0, "height": 40.0 },
+      "text": "Portal target",
+      "text_runs": [],
+      "style": {
+        "background_color": "#1c1c1c",
+        "frame_color": "#b03080",
+        "text_color": "#eeeeee",
+        "shape_type": 99,
+        "corner_radius_percent": 0.0,
+        "frame_thickness": 2.0,
+        "show_frame": false,
+        "show_shadow": false
+      },
+      "layout": { "type": 2, "direction": 3, "spacing": 40.0 },
+      "folded": false,
+      "notes": "endpoint_b of the legacy portal",
+      "color_schema": {
+        "palette": "coral",
+        "variant": 3,
+        "theme_id": 7,
+        "level": 1,
+        "starts_at_root": true,
+        "connections_colored": true,
+        "groups": []
+      }
+    }
+  },
+  "edges": [
+    {
+      "from_id": "348068464",
+      "to_id": "348069120",
+      "type": "parent_child",
+      "color": "#30b082",
+      "width": 2,
+      "line_style": 0,
+      "visible": true,
+      "label": null,
+      "anchor_from": 2,
+      "anchor_to": 4,
+      "control_points": []
+    },
+    {
+      "from_id": "348068464",
+      "to_id": "348069776",
+      "type": "parent_child",
+      "color": "#30b082",
+      "width": 2,
+      "line_style": 1,
+      "visible": true,
+      "label": null,
+      "anchor_from": 0,
+      "anchor_to": 0,
+      "control_points": []
+    }
+  ],
+  "portals": [
+    {
+      "endpoint_a": "348069120",
+      "endpoint_b": "348069776",
+      "label": "Cross-reference",
+      "glyph": "⬢",
+      "color": "#ff00aa",
+      "font": "LiberationSans",
+      "font_size_pt": 18.0
+    }
+  ]
+}

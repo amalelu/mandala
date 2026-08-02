@@ -51,13 +51,13 @@ pub(in crate::application::app) fn apply_zoom_step(
     });
 }
 
-/// Reset zoom to 1.0 anchored at the screen centre (NOT the
+/// Reset zoom to 1.0 anchored at the screen center (NOT the
 /// cursor). A cursor-anchored zoom emits a `CameraZoom` decree
 /// whose canvas-position formula shifts the camera when the focus
-/// is off-centre — so a Ctrl+0 with the cursor in a corner would
+/// is off-center — so a Ctrl+0 with the cursor in a corner would
 /// scoot the view by 200+ px instead of cleanly resetting in
 /// place. Computing the factor inverse against current zoom keeps
-/// the multiplicative path; using screen-centre as the focus
+/// the multiplicative path; using screen-center as the focus
 /// cancels the position shift algebraically.
 pub(in crate::application::app) fn apply_zoom_reset(renderer: &mut Renderer) {
     let zoom = renderer.camera_zoom().max(f32::EPSILON);
@@ -130,29 +130,29 @@ pub(in crate::application::app) fn apply_center_on_selection(
 }
 
 /// Set the document's selection to its first root node (id-sorted)
-/// and return the canvas-space centre the camera should jump to.
+/// and return the canvas-space center the camera should jump to.
 /// Returns `None` when the document is empty (and selection is
 /// untouched).
 ///
 /// Lives in camera.rs alongside [`apply_jump_to_root`] (its sole
 /// consumer) — the function pair is the cross-bucket arm
 /// described in this file's `//!` header.
-#[must_use = "Some(centre) is the camera target — drop with `let _ = …` to skip the camera move"]
+#[must_use = "Some(center) is the camera target — drop with `let _ = …` to skip the camera move"]
 pub(in crate::application::app) fn jump_to_root_in(doc: &mut MindMapDocument) -> Option<glam::Vec2> {
-    let (id, centre) = doc
+    let (id, center) = doc
         .mindmap
         .root_nodes()
         .first()
         .map(|n| (n.id.clone(), n.center_vec2()))?;
     doc.selection = SelectionState::Single(id);
-    Some(centre)
+    Some(center)
 }
 
-/// Select the document's first root node and centre the camera on
+/// Select the document's first root node and center the camera on
 /// it. No-op when the document is empty.
 pub(in crate::application::app) fn apply_jump_to_root(rc: &mut RebuildContext<'_>) {
-    if let Some(centre) = jump_to_root_in(rc.document) {
-        rc.renderer.set_camera_center(centre);
+    if let Some(center) = jump_to_root_in(rc.document) {
+        rc.renderer.set_camera_center(center);
         rc.rebuild_after_selection_change();
     }
 }
@@ -214,11 +214,11 @@ mod tests {
     }
 
     #[test]
-    fn jump_to_root_in_returns_first_root_centre_and_selects_it() {
+    fn jump_to_root_in_returns_first_root_center_and_selects_it() {
         let mut doc = load_test_doc();
         let expected_root = first_root_id(&doc);
-        let centre = jump_to_root_in(&mut doc).expect("non-empty fixture");
-        assert!(centre.x.is_finite() && centre.y.is_finite());
+        let center = jump_to_root_in(&mut doc).expect("non-empty fixture");
+        assert!(center.x.is_finite() && center.y.is_finite());
         assert!(matches!(
             doc.selection,
             SelectionState::Single(ref s) if s == &expected_root

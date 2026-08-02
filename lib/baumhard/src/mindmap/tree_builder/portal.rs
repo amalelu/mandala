@@ -19,31 +19,36 @@
 //!         └── GlyphArea slot=2 (text)
 //! ```
 //!
-//! Mirrors the [`scene_builder::portal`] emission rule: color,
-//! glyph, font size, and text all resolve through
-//! [`scene_builder::portal::resolve_portal_endpoint_style`] plus
-//! the `layout_portal_label` / `layout_portal_text` helpers so
-//! the scene-path and tree-path cannot drift.
+//! Color, glyph, font size, and text all resolve through
+//! [`super::portal_style`] — [`resolve_portal_endpoint_style`],
+//! [`resolve_portal_endpoint_text_style`], `layout_portal_label`,
+//! and `layout_portal_text` — so this file owns projection only
+//! and never re-derives a style.
 //!
-//! [`scene_builder::portal`]: crate::mindmap::scene_builder::portal
-//! [`scene_builder::portal::resolve_portal_endpoint_style`]: crate::mindmap::scene_builder::portal::resolve_portal_endpoint_style
+//! Click routing reads that same shape. The tree's BVH answers
+//! *where* a click landed; [`PortalHitIndex`] turns the resulting
+//! channel path — pair channel, endpoint channel, icon-vs-text
+//! slot — back into `(EdgeKey, endpoint node id, sub-part)`. No
+//! rectangles are stored twice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::Vec2;
+use indextree::NodeId;
 
 use crate::core::primitives::ColorFontRegions;
 use crate::gfx_structs::area::GlyphArea;
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::GfxMutator;
-use crate::gfx_structs::tree::Tree;
+use crate::gfx_structs::tree::{BranchChannel, Tree};
 use crate::mindmap::model::{is_portal_edge, portal_endpoint_state, MindMap, MindNode};
-use crate::mindmap::scene_builder::portal::{
+use crate::util::geometry::aabb_center;
+
+use super::overrides::{PortalColorPreview, PortalTextEditOverride};
+use super::portal_style::{
     layout_portal_label, layout_portal_text, resolve_portal_endpoint_style,
     resolve_portal_endpoint_text_style, SelectedPortalLabel,
 };
-use crate::util::geometry::aabb_center;
-use crate::mindmap::scene_builder::PortalTextEditOverride;
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color;
@@ -55,37 +60,159 @@ use crate::util::color;
 /// `SelectedPortalLabel` instead.
 pub type SelectedEdgeRef<'a> = (&'a str, &'a str, &'a str);
 
-/// Optional live preview of one portal-mode edge's color, mirroring
-/// `scene_builder::PortalColorPreview`. Wins over selection on the
-/// previewed edge so the live HSV feedback is visible on both
-/// markers.
-#[derive(Debug, Clone, Copy)]
-pub struct PortalColorPreviewRef<'a> {
-    pub edge_key: &'a EdgeKey,
-    pub color: &'a str,
-}
-
-/// Result of [`build_portal_tree`]. Bundles the tree with two
-/// hitbox maps — one per clickable sub-part of a portal label
-/// (icon vs. text) — that the renderer consults for click
-/// dispatch. Splitting them lets the event loop route icon
-/// clicks to `SelectionState::PortalLabel` and text clicks to
-/// `SelectionState::PortalText`, so per-endpoint color / font
-/// / clipboard operations target the channel the user clicked.
+/// Result of [`build_portal_tree`]: the tree plus the
+/// [`PortalHitIndex`] that names what each of its leaves *is*.
+/// Geometry is in the tree and only in the tree — the index
+/// carries identity alone, so there is no second copy of the
+/// AABBs to keep in sync.
 pub struct PortalTree {
     pub tree: Tree<GfxElement, GfxMutator>,
-    /// `(edge_key, endpoint_node_id) → (min, max)` for the
-    /// **icon** AABB. One entry per visible portal-mode edge
-    /// endpoint; never absent (an endpoint always renders its
-    /// icon, even when `text` is empty).
-    pub icon_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
-    /// `(edge_key, endpoint_node_id) → (min, max)` for the
-    /// **text** AABB. Entries are present only for endpoints
-    /// with non-empty text — an empty-string text slot reserves
-    /// a GlyphArea channel in the tree but registers no hitbox,
-    /// so text-less portals don't grow a phantom ~30×65px hot
-    /// zone next to the icon.
-    pub text_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    /// Channel-path → `(EdgeKey, endpoint)` identity for every
+    /// leaf in `tree`. Feed a `NodeId` from
+    /// [`Tree::descendant_at`](crate::gfx_structs::tree::Tree::descendant_at)
+    /// (or [`Scene::component_in`](crate::gfx_structs::scene::Scene::component_in))
+    /// into [`PortalHitIndex::resolve`] to name the hit.
+    pub hit_index: PortalHitIndex,
+}
+
+/// Which clickable sub-part of a portal endpoint a hit landed on.
+/// The two are separate tree leaves under the same endpoint void,
+/// so a click resolves to exactly one of them.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum PortalPart {
+    /// The portal marker glyph itself.
+    Icon,
+    /// The endpoint's adjacent text label. Never hit when the
+    /// endpoint has no text: an empty text slot lays out at zero
+    /// extent, and zero-extent areas are invisible to the BVH.
+    Text,
+}
+
+/// A portal hit resolved back to model identity: the owning
+/// edge, the endpoint node the marker floats above, and which
+/// sub-part of that endpoint was hit.
+///
+/// The endpoint id is the *near* side — the double-click
+/// navigation target is the other endpoint of `edge_key`.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct PortalHit {
+    /// The portal-mode edge the hit marker belongs to.
+    pub edge_key: EdgeKey,
+    /// The node this marker floats above — one of
+    /// `edge_key.from_id` / `edge_key.to_id`.
+    pub endpoint_node_id: String,
+    /// Which of the endpoint's two leaves was hit.
+    pub part: PortalPart,
+}
+
+/// Identity of one visible portal pair, indexed by its
+/// `pair_channel`. Endpoint ids are in canonical order —
+/// index 0 is `from_id`, index 1 is `to_id` — matching the
+/// endpoint-void channel layout the tree builder emits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PortalPairIdentity {
+    edge_key: EdgeKey,
+    endpoint_node_ids: [String; 2],
+}
+
+/// The channel-path → portal-identity map for one built portal
+/// tree.
+///
+/// The portal tree's shape *is* its identity encoding: a leaf's
+/// own channel says icon-vs-text, its parent's channel says which
+/// endpoint, and its grandparent's channel says which visible
+/// pair. This index supplies the one thing the shape cannot —
+/// the `(EdgeKey, endpoint node id)` behind a pair channel — so
+/// hit-testing needs no parallel spatial structure: the BVH over
+/// the tree answers *where*, this answers *what*.
+///
+/// # Costs
+///
+/// Construction is O(pairs) with two `String` clones per
+/// endpoint. [`Self::resolve`] is O(1): two parent hops in the
+/// arena plus one slice index.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PortalHitIndex {
+    pairs: Vec<PortalPairIdentity>,
+}
+
+impl PortalHitIndex {
+    /// Build the index from the same [`PortalPairData`] slice the
+    /// tree (or mutator) is built from, so the two cannot
+    /// disagree about which pair owns which channel.
+    ///
+    /// # Costs
+    ///
+    /// O(pairs); one allocation for the vector plus two `String`
+    /// clones per pair.
+    pub fn from_pairs(pairs: &[PortalPairData]) -> Self {
+        PortalHitIndex {
+            pairs: pairs
+                .iter()
+                .map(|p| PortalPairIdentity {
+                    edge_key: p.identity.clone(),
+                    endpoint_node_ids: [
+                        p.endpoints[0].endpoint_node_id.clone(),
+                        p.endpoints[1].endpoint_node_id.clone(),
+                    ],
+                })
+                .collect(),
+        }
+    }
+
+    /// Number of visible portal pairs the index names. Two
+    /// clickable endpoints each.
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    /// Whether the index names no pairs — i.e. the portal tree is
+    /// empty and no click can resolve to a portal.
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    /// Name the portal sub-part a hit `NodeId` belongs to.
+    ///
+    /// `hit` must come from the tree this index was built
+    /// alongside. Returns `None` for any node that is not a
+    /// portal leaf (the root, a pair void, an endpoint void).
+    ///
+    /// An index *shorter* than the tree degrades to "no hit" on
+    /// the uncovered pair channels. An index of the right length
+    /// built from a different pair *order* would name the wrong
+    /// portal — nothing in the data can catch that, so the
+    /// contract is that the index is stamped in the same call that
+    /// registers or mutates the tree (see
+    /// `CanvasFrame::update_portal_tree`, which does both on both
+    /// §B2 arms).
+    ///
+    /// # Costs
+    ///
+    /// O(1) — two `parent()` hops plus a slice index. No
+    /// allocation beyond the two `String` clones in the returned
+    /// [`PortalHit`].
+    pub fn resolve(&self, tree: &Tree<GfxElement, GfxMutator>, hit: NodeId) -> Option<PortalHit> {
+        let leaf = tree.arena.get(hit)?;
+        let part = match leaf.get().channel() {
+            ICON_SLOT => PortalPart::Icon,
+            TEXT_SLOT => PortalPart::Text,
+            _ => return None,
+        };
+        let endpoint_void_id = leaf.parent()?;
+        let endpoint_void = tree.arena.get(endpoint_void_id)?;
+        // Endpoint voids are 1-based by the tree-shape contract:
+        // channel 1 is `from_id`, channel 2 is `to_id`.
+        let endpoint_idx = endpoint_void.get().channel().checked_sub(1)?;
+        let pair_void_id = endpoint_void.parent()?;
+        let pair_channel = tree.arena.get(pair_void_id)?.get().channel();
+        let pair = self.pairs.get(pair_channel.checked_sub(1)?)?;
+        Some(PortalHit {
+            edge_key: pair.edge_key.clone(),
+            endpoint_node_id: pair.endpoint_node_ids.get(endpoint_idx)?.clone(),
+            part,
+        })
+    }
 }
 
 /// Identity tuple for one portal-mode edge: the `EdgeKey` of the
@@ -96,11 +223,16 @@ pub struct PortalTree {
 pub type PortalIdentity = EdgeKey;
 
 /// Per-endpoint tree-build output: the icon + text glyph areas
-/// at their per-slot channels, the endpoint id, and the two
-/// hit-test rectangles (one per clickable sub-part). Each field
-/// is computed from the same source of truth
-/// (`layout_portal_label` + `layout_portal_text`) so the scene
-/// and tree paths cannot drift.
+/// at their per-slot channels, plus the endpoint id. Both areas
+/// come from the same source of truth (`layout_portal_label` +
+/// `layout_portal_text`) so the initial-build and in-place
+/// mutator paths cannot drift.
+///
+/// The areas carry their own hit geometry — an area's
+/// `position` + `render_bounds` *is* its clickable rectangle,
+/// resolved through the tree's BVH. A text-less endpoint's text
+/// area lays out at zero extent and is therefore unclickable
+/// (see `layout_portal_text`).
 #[derive(Clone, Debug)]
 pub struct EndpointAreas {
     /// Icon glyph area (always slot channel 1 under the
@@ -114,18 +246,10 @@ pub struct EndpointAreas {
     /// in-place update path keep working.
     pub text: GlyphArea,
     /// Endpoint node id (identical to one of `edge.from_id` /
-    /// `edge.to_id`). Used by the renderer to key per-endpoint
-    /// hitboxes and to route click dispatch.
+    /// `edge.to_id`). Carried into [`PortalHitIndex`] so a hit
+    /// on either leaf resolves back to the endpoint it belongs
+    /// to.
     pub endpoint_node_id: String,
-    /// AABB for the **icon** sub-part. Always present.
-    pub icon_hitbox: (Vec2, Vec2),
-    /// AABB for the **text** sub-part. `None` when the
-    /// endpoint has no visible text — an empty-string slot
-    /// still reserves its channel in the tree, but clicking
-    /// the phantom area beside a text-less icon should fall
-    /// through to the icon hitbox or the node beneath, not
-    /// select `PortalText`.
-    pub text_hitbox: Option<(Vec2, Vec2)>,
 }
 
 /// Per-pair output of [`portal_pair_data`]. Single source of
@@ -151,14 +275,26 @@ pub struct PortalPairData {
 /// Compute the visible portal-mode-edge layout for the given
 /// map state. Single source of truth shared by
 /// [`build_portal_tree`] and [`build_portal_mutator_tree`].
+///
+/// `hidden_set` is the output of [`MindMap::fold_hidden_set`]. The
+/// caller should build it once per frame and share it across the
+/// border / connection / portal passes instead of recomputing it
+/// here.
+// `clippy::too_many_arguments`: three of these are independent
+// selection channels (whole edge, per-label, inline text edit) and
+// two more are the color preview and the camera zoom. Collapsing
+// them into one struct would hide which channel a caller is
+// actually setting, which is the whole point of the split.
+#[allow(clippy::too_many_arguments)]
 pub fn portal_pair_data(
     map: &MindMap,
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<SelectedEdgeRef>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
-    color_preview: Option<PortalColorPreviewRef>,
+    color_preview: Option<PortalColorPreview<'_>>,
     portal_text_edit: Option<PortalTextEditOverride<'_>>,
     camera_zoom: f32,
+    hidden_set: &HashSet<&str>,
 ) -> Vec<PortalPairData> {
     let mut pairs: Vec<PortalPairData> = Vec::new();
     let mut pair_channel: usize = 1;
@@ -176,12 +312,12 @@ pub fn portal_pair_data(
         let Some(node_b) = map.nodes.get(&edge.to_id) else {
             continue;
         };
-        if map.is_hidden_by_fold(node_a) || map.is_hidden_by_fold(node_b) {
+        if hidden_set.contains(node_a.id.as_str()) || hidden_set.contains(node_b.id.as_str()) {
             continue;
         }
 
         let edge_key = EdgeKey::from_edge(edge);
-        let is_edge_selected = selected_edge.map_or(false, |(f, t, ty)| {
+        let is_edge_selected = selected_edge.is_some_and(|(f, t, ty)| {
             f == edge.from_id && t == edge.to_id && ty == edge.edge_type
         });
         let preview_for_this_edge: Option<&str> = color_preview.and_then(|p| {
@@ -201,9 +337,8 @@ pub fn portal_pair_data(
             let partner_size = partner.size_vec2();
 
             let endpoint_state = portal_endpoint_state(edge, &owner.id);
-            let is_this_label_selected = selected_portal_label.map_or(false, |s| {
-                *s.edge_key == edge_key && s.endpoint_node_id == owner.id
-            });
+            let is_this_label_selected = selected_portal_label
+                .is_some_and(|s| *s.edge_key == edge_key && s.endpoint_node_id == owner.id);
             let raw_color_override: Option<&str> = if let Some(p) = preview_for_this_edge {
                 Some(p)
             } else if is_edge_selected || is_this_label_selected {
@@ -286,27 +421,10 @@ pub fn portal_pair_data(
             let text_clusters = crate::util::grapheme_chad::count_grapheme_clusters(&text_string);
             text_area.regions = ColorFontRegions::single_span(text_clusters, Some(text_color_rgba), None);
 
-            // Two hitboxes — one per clickable sub-part. The icon
-            // hitbox always exists; the text hitbox exists only
-            // when the endpoint has visible text. An empty-string
-            // slot reserves its channel in the tree (the mutator
-            // path requires a stable channel layout) but must not
-            // accept clicks: a text-less portal would otherwise
-            // grow a phantom ~30×65 px hot zone next to the icon
-            // at default font size.
-            let icon_hitbox = (icon_layout.top_left, icon_layout.top_left + icon_layout.bounds);
-            let text_hitbox = if text_string.is_empty() {
-                None
-            } else {
-                Some((text_layout.top_left, text_layout.top_left + text_layout.bounds))
-            };
-
             EndpointAreas {
                 icon: icon_area,
                 text: text_area,
                 endpoint_node_id: owner.id.clone(),
-                icon_hitbox,
-                text_hitbox,
             }
         };
 
@@ -340,10 +458,11 @@ pub fn build_portal_tree(
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<SelectedEdgeRef>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
-    color_preview: Option<PortalColorPreviewRef>,
+    color_preview: Option<PortalColorPreview<'_>>,
     portal_text_edit: Option<PortalTextEditOverride<'_>>,
     camera_zoom: f32,
 ) -> PortalTree {
+    let hidden_set = map.fold_hidden_set();
     let pairs = portal_pair_data(
         map,
         offsets,
@@ -352,6 +471,7 @@ pub fn build_portal_tree(
         color_preview,
         portal_text_edit,
         camera_zoom,
+        &hidden_set,
     );
     build_portal_tree_from_pairs(&pairs)
 }
@@ -360,8 +480,6 @@ pub fn build_portal_tree(
 /// pair data.
 pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut icon_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
-    let mut text_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
     let mut unique_id: usize = 1;
 
     for pair in pairs {
@@ -394,30 +512,23 @@ pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
             ));
             unique_id += 1;
             endpoint_void.append(text_leaf, &mut tree.arena);
-
-            let key = (pair.identity.clone(), ep.endpoint_node_id.clone());
-            icon_hitboxes.insert(key.clone(), ep.icon_hitbox);
-            if let Some(text_hb) = ep.text_hitbox {
-                text_hitboxes.insert(key, text_hb);
-            }
         }
     }
 
     PortalTree {
+        hit_index: PortalHitIndex::from_pairs(pairs),
         tree,
-        icon_hitboxes,
-        text_hitboxes,
     }
 }
 
 /// Result of [`build_portal_mutator_tree`]. Carries the same
-/// icon/text hitbox split as [`PortalTree`] so the renderer's
-/// click-dispatch maps stay aligned across the initial-build
-/// vs. in-place-update paths.
+/// [`PortalHitIndex`] as [`PortalTree`]: an in-place update can
+/// move a portal's geometry without changing the pair identity
+/// sequence, but the caller re-stamps the index anyway so the
+/// two build paths hand back interchangeable values.
 pub struct PortalMutator {
     pub mutator: crate::gfx_structs::tree::MutatorTree<GfxMutator>,
-    pub icon_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
-    pub text_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)>,
+    pub hit_index: PortalHitIndex,
 }
 
 /// Build a [`MutatorTree`](crate::gfx_structs::tree::MutatorTree)
@@ -428,10 +539,11 @@ pub fn build_portal_mutator_tree(
     offsets: &HashMap<String, (f32, f32)>,
     selected_edge: Option<SelectedEdgeRef>,
     selected_portal_label: Option<SelectedPortalLabel<'_>>,
-    color_preview: Option<PortalColorPreviewRef>,
+    color_preview: Option<PortalColorPreview<'_>>,
     portal_text_edit: Option<PortalTextEditOverride<'_>>,
     camera_zoom: f32,
 ) -> PortalMutator {
+    let hidden_set = map.fold_hidden_set();
     let pairs = portal_pair_data(
         map,
         offsets,
@@ -440,6 +552,7 @@ pub fn build_portal_mutator_tree(
         color_preview,
         portal_text_edit,
         camera_zoom,
+        &hidden_set,
     );
     build_portal_mutator_tree_from_pairs(&pairs)
 }
@@ -452,8 +565,6 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
     use crate::gfx_structs::tree::MutatorTree;
 
     let mut mt: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::new_void(0));
-    let mut icon_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
-    let mut text_hitboxes: HashMap<(EdgeKey, String), (Vec2, Vec2)> = HashMap::new();
 
     for pair in pairs {
         let pair_node = mt.arena.new_node(GfxMutator::new_void(pair.pair_channel));
@@ -471,18 +582,11 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
                     .new_node(GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), slot));
                 endpoint_void.append(leaf, &mut mt.arena);
             }
-
-            let key = (pair.identity.clone(), ep.endpoint_node_id.clone());
-            icon_hitboxes.insert(key.clone(), ep.icon_hitbox);
-            if let Some(text_hb) = ep.text_hitbox {
-                text_hitboxes.insert(key, text_hb);
-            }
         }
     }
 
     PortalMutator {
         mutator: mt,
-        icon_hitboxes,
-        text_hitboxes,
+        hit_index: PortalHitIndex::from_pairs(pairs),
     }
 }

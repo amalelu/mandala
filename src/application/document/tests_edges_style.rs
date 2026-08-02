@@ -9,7 +9,7 @@ use super::*;
 
 use baumhard::mindmap::model::ControlPoint;
 use baumhard::mindmap::model::GlyphConnectionConfig;
-use baumhard::mindmap::scene_builder::EdgeHandleKind;
+use baumhard::mindmap::tree_builder::EdgeHandleKind;
 use glam::Vec2;
 
 #[test]
@@ -633,8 +633,8 @@ fn test_color_picker_preview_does_not_push_undo_or_dirty() {
     // And the scene builder substitutes the preview color into
     // the matching edge's label element.
     doc.selection = SelectionState::Edge(er.clone());
-    let scene = doc.build_scene_with_selection(1.0, InteractionModeOverrides::none());
-    // The edge has a glyph label → scene_builder should emit a
+    let scene = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
+    // The edge has a glyph label → the label pass should emit a
     // ConnectionLabelElement for it. If the edge has no label
     // this test case simply verifies nothing crashes.
     let edge_key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(&doc.mindmap.edges[idx]);
@@ -671,8 +671,11 @@ fn test_edge_label_selection_paints_label_cyan() {
     // Baseline: no selection, label takes the committed color
     // (whatever the cascade resolves to from the model).
     doc.selection = SelectionState::None;
-    let baseline = doc
-        .build_scene_with_selection(1.0, InteractionModeOverrides::none())
+    let baseline = crate::application::document::tests_common::project_roles(
+        &doc,
+        1.0,
+        InteractionModeOverrides::none(),
+    )
         .connection_label_elements
         .iter()
         .find(|c| c.edge_key == edge_key)
@@ -687,8 +690,11 @@ fn test_edge_label_selection_paints_label_cyan() {
 
     // EdgeLabel selection: label tints cyan.
     doc.selection = SelectionState::EdgeLabel(EdgeLabelSel::new(er.clone()));
-    let highlighted = doc
-        .build_scene_with_selection(1.0, InteractionModeOverrides::none())
+    let highlighted = crate::application::document::tests_common::project_roles(
+        &doc,
+        1.0,
+        InteractionModeOverrides::none(),
+    )
         .connection_label_elements
         .iter()
         .find(|c| c.edge_key == edge_key)
@@ -701,8 +707,11 @@ fn test_edge_label_selection_paints_label_cyan() {
     // the user reads "selected" the same way regardless of
     // which sub-part the click landed on.
     doc.selection = SelectionState::Edge(er.clone());
-    let edge_selected = doc
-        .build_scene_with_selection(1.0, InteractionModeOverrides::none())
+    let edge_selected = crate::application::document::tests_common::project_roles(
+        &doc,
+        1.0,
+        InteractionModeOverrides::none(),
+    )
         .connection_label_elements
         .iter()
         .find(|c| c.edge_key == edge_key)
@@ -726,7 +735,7 @@ fn test_color_picker_preview_cleared_returns_to_committed() {
         key,
         color: "#112233".to_string(),
     });
-    // ... hover frames would call build_scene here ...
+    // ... hover frames would re-run the projection here ...
     doc.color_picker_preview = None;
 
     // Model is untouched across the full preview session.
@@ -1270,5 +1279,313 @@ fn test_set_portal_text_font_does_not_clear_other_endpoint_default_state() {
         doc.mindmap.edges[idx].portal_to,
         Some(PortalEndpointState::default()),
         "unrelated endpoint's default state must survive"
+    );
+}
+
+// ── Edge font setters through `mutate_edge` ────────────────────
+//
+// `set_edge_font`, `set_edge_label_font`, `set_portal_text_font`
+// and `set_edge_font_family` used to re-implement the lookup →
+// clone → mutate → rollback → push(EditEdge) → dirty scaffolding
+// each in their own way, with three copies of the `final_min` /
+// `final_max` inversion guard. They now route through
+// `mutate_edge` over the shared `font_triple` core; these pin the
+// contract at each of the four public entry points.
+
+/// The no-op contract for all four font setters: an unchanged
+/// value pushes nothing, dirties nothing, and — critically — does
+/// not leave a forked `glyph_connection` / `label_config` /
+/// `PortalEndpointState` behind. `mutate_edge`'s rollback is what
+/// guarantees the last part; before the fold, each setter
+/// hand-rolled it.
+#[test]
+fn test_edge_font_setters_no_op_leaves_no_forked_config() {
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    assert!(doc.mindmap.edges[0].glyph_connection.is_none());
+    assert!(doc.mindmap.edges[0].label_config.is_none());
+
+    // All-`None` request: nothing to apply on any channel.
+    assert!(!doc.set_edge_font(&er, None, None, None));
+    assert!(!doc.set_edge_label_font(&er, None, None, None));
+    assert!(!doc.set_portal_text_font(&er, "0", None, None, None));
+    // Clearing a family that was never set.
+    assert!(!doc.set_edge_font_family(&er, None));
+
+    assert!(
+        doc.mindmap.edges[0].glyph_connection.is_none(),
+        "a no-op font edit must not fork glyph_connection"
+    );
+    assert!(
+        doc.mindmap.edges[0].label_config.is_none(),
+        "a no-op label-font edit must not fork label_config"
+    );
+    assert!(
+        doc.mindmap.edges[0].portal_from.is_none() && doc.mindmap.edges[0].portal_to.is_none(),
+        "a no-op portal-text edit must not fork endpoint state"
+    );
+    assert!(doc.undo_stack.is_empty(), "no-op font edits pushed an undo entry");
+    assert!(!doc.dirty, "no-op font edits dirtied the document");
+}
+
+/// Re-applying the value a channel already carries is a no-op on
+/// every channel — the second half of the idempotency contract,
+/// with the config already forked.
+#[test]
+fn test_edge_font_setters_no_op_when_value_already_set() {
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+    assert!(doc.set_edge_font(&er, Some(20.0), Some(6.0), Some(60.0)));
+    assert!(doc.set_edge_label_font(&er, Some(18.0), Some(5.0), Some(50.0)));
+    assert!(doc.set_edge_font_family(&er, Some("Norse")));
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    assert!(!doc.set_edge_font(&er, Some(20.0), Some(6.0), Some(60.0)));
+    assert!(!doc.set_edge_label_font(&er, Some(18.0), Some(5.0), Some(50.0)));
+    assert!(!doc.set_edge_font_family(&er, Some("Norse")));
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+}
+
+/// The atomic-ordering contract at the public API: `min` / `max`
+/// land before the clamped `size`, so `size=14 max=10` resolves
+/// to `size=10, max=10` on every channel rather than the wrong
+/// `size=14`. Previously three separate implementations of this.
+#[test]
+fn test_edge_font_setters_clamp_size_against_the_new_bounds() {
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+
+    assert!(doc.set_edge_font(&er, Some(14.0), None, Some(10.0)));
+    let cfg = doc.mindmap.edges[0]
+        .glyph_connection
+        .as_ref()
+        .expect("body config forked");
+    assert_eq!(cfg.font_size_pt, 10.0);
+    assert_eq!(cfg.max_font_size_pt, 10.0);
+
+    assert!(doc.set_edge_label_font(&er, Some(14.0), None, Some(9.0)));
+    let label = doc.mindmap.edges[0]
+        .label_config
+        .as_ref()
+        .expect("label config forked");
+    assert_eq!(label.font_size_pt, Some(9.0));
+    assert_eq!(label.max_font_size_pt, Some(9.0));
+
+    assert!(doc.set_portal_text_font(&er, "0", Some(14.0), None, Some(8.0)));
+    let state = doc.mindmap.edges[0]
+        .portal_from
+        .as_ref()
+        .expect("endpoint state forked");
+    assert_eq!(state.text_font_size_pt, Some(8.0));
+    assert_eq!(state.text_max_font_size_pt, Some(8.0));
+}
+
+/// An inverted `(min, max)` request is rejected on every channel
+/// without mutating — the guard that keeps `f32::clamp` from
+/// panicking here and in the next renderer frame. One
+/// implementation now, three call sites.
+#[test]
+fn test_edge_font_setters_reject_inverted_bounds() {
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    assert!(!doc.set_edge_font(&er, None, Some(60.0), Some(10.0)));
+    assert!(!doc.set_edge_label_font(&er, None, Some(60.0), Some(10.0)));
+    assert!(!doc.set_portal_text_font(&er, "0", None, Some(60.0), Some(10.0)));
+
+    assert!(doc.mindmap.edges[0].glyph_connection.is_none());
+    assert!(doc.mindmap.edges[0].label_config.is_none());
+    assert!(doc.mindmap.edges[0].portal_from.is_none());
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+}
+
+/// Inversion is checked against the clamps a channel *inherits*,
+/// not just the ones it authors: a label that sets only `min`
+/// must still be ordered against the body's `max`, or the
+/// renderer clamps an inverted pair.
+#[test]
+fn test_edge_label_font_rejects_inversion_against_inherited_body_max() {
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+    // Pin a tight body clamp for the label to inherit.
+    assert!(doc.set_edge_font(&er, Some(12.0), Some(8.0), Some(20.0)));
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    assert!(
+        !doc.set_edge_label_font(&er, None, Some(50.0), None),
+        "label min=50 against an inherited body max=20 must be rejected"
+    );
+    assert!(doc.mindmap.edges[0].label_config.is_none());
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+}
+
+/// One labeled edge setter in a table-driven battery — the
+/// `EdgeRef` sibling of `tests_nodes::NodeSetterCase`, aliased
+/// for the same `clippy::type_complexity` reason.
+type EdgeSetterCase = (&'static str, Box<dyn Fn(&mut MindMapDocument, &EdgeRef) -> bool>);
+
+/// A real font edit on any channel pushes exactly one `EditEdge`
+/// entry, and one `undo()` restores the whole edge — including
+/// un-forking a config the edit created.
+#[test]
+fn test_edge_font_setters_round_trip_through_undo() {
+    let cases: Vec<EdgeSetterCase> = vec![
+        (
+            "set_edge_font",
+            Box::new(|doc: &mut MindMapDocument, er: &EdgeRef| doc.set_edge_font(er, Some(21.0), None, None)),
+        ),
+        (
+            "set_edge_label_font",
+            Box::new(|doc: &mut MindMapDocument, er: &EdgeRef| {
+                doc.set_edge_label_font(er, Some(19.0), None, None)
+            }),
+        ),
+        (
+            "set_portal_text_font",
+            Box::new(|doc: &mut MindMapDocument, er: &EdgeRef| {
+                doc.set_portal_text_font(er, "0", Some(17.0), None, None)
+            }),
+        ),
+        (
+            "set_edge_font_family",
+            Box::new(|doc: &mut MindMapDocument, er: &EdgeRef| doc.set_edge_font_family(er, Some("Norse"))),
+        ),
+    ];
+
+    for (label, call) in cases {
+        let (mut doc, er) = super::tests_common::doc_with_one_edge();
+        doc.undo_stack.clear();
+        let before = doc.mindmap.edges[0].clone();
+
+        assert!(call(&mut doc, &er), "{label}: expected a real change");
+        assert_eq!(doc.undo_stack.len(), 1, "{label}: expected one undo entry");
+        assert!(matches!(doc.undo_stack[0], UndoAction::EditEdge { .. }));
+        assert!(doc.dirty, "{label}: a real change must dirty the document");
+
+        assert!(doc.undo(), "{label}: undo must succeed");
+        assert_eq!(
+            doc.mindmap.edges[0], before,
+            "{label}: undo did not restore the pre-edit edge"
+        );
+    }
+}
+
+/// A bogus endpoint id is a no-op, not a panic, and forks
+/// nothing. `mutate_edge`'s rollback covers the clone the old
+/// hand-rolled version took pains to avoid.
+#[test]
+fn test_set_portal_text_font_rejects_stranger_endpoint_id() {
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    assert!(!doc.set_portal_text_font(&er, "not_an_endpoint", Some(20.0), None, None));
+    assert!(doc.mindmap.edges[0].portal_from.is_none());
+    assert!(doc.mindmap.edges[0].portal_to.is_none());
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+}
+
+/// Missing edge: every font setter degrades to `false`.
+#[test]
+fn test_edge_font_setters_no_op_on_missing_edge() {
+    let (mut doc, _er) = super::tests_common::doc_with_one_edge();
+    let ghost = EdgeRef::new("nope-from", "nope-to", "cross_link");
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    assert!(!doc.set_edge_font(&ghost, Some(20.0), None, None));
+    assert!(!doc.set_edge_label_font(&ghost, Some(20.0), None, None));
+    assert!(!doc.set_portal_text_font(&ghost, "0", Some(20.0), None, None));
+    assert!(!doc.set_edge_font_family(&ghost, Some("Norse")));
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+}
+
+/// Forking is undoable: an edit that materializes a
+/// `label_config` / `PortalEndpointState` on an edge that had
+/// none must restore the pre-fork `None` on undo. `mutate_edge`
+/// snapshots before the fork, which is what makes this hold
+/// without a per-setter scrub.
+#[test]
+fn test_edge_font_setters_undo_restores_the_pre_fork_none() {
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+    assert!(doc.mindmap.edges[0].label_config.is_none());
+    assert!(doc.set_edge_label_font(&er, Some(18.0), None, None));
+    assert!(doc.mindmap.edges[0].label_config.is_some());
+    assert!(doc.undo());
+    assert!(
+        doc.mindmap.edges[0].label_config.is_none(),
+        "undo must restore the pre-fork None on label_config"
+    );
+
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+    assert!(doc.mindmap.edges[0].portal_from.is_none());
+    assert!(doc.set_portal_text_font(&er, "0", Some(18.0), None, None));
+    assert!(doc.mindmap.edges[0].portal_from.is_some());
+    assert!(
+        doc.mindmap.edges[0].portal_to.is_none(),
+        "the other endpoint must stay untouched"
+    );
+    assert!(doc.undo());
+    assert!(
+        doc.mindmap.edges[0].portal_from.is_none(),
+        "undo must restore the pre-fork None on portal_from"
+    );
+}
+
+/// The clipboard color resolvers read the same
+/// `MindEdge::*_color` cascade the scene builder does. A label
+/// override detaches the label; the portal text channel falls
+/// through to the icon.
+#[test]
+fn test_resolve_color_readers_follow_the_model_cascade() {
+    let (mut doc, er) = super::tests_common::doc_with_one_edge();
+    let edge_color = doc.mindmap.edges[0].color.clone();
+    assert_eq!(doc.resolve_edge_color(&er).as_deref(), Some(edge_color.as_str()));
+    assert_eq!(
+        doc.resolve_edge_label_color(&er).as_deref(),
+        Some(edge_color.as_str()),
+        "an un-overridden label follows the edge body"
+    );
+
+    assert!(doc.set_edge_color(&er, Some("#112233")));
+    assert_eq!(doc.resolve_edge_color(&er).as_deref(), Some("#112233"));
+    assert_eq!(
+        doc.resolve_edge_label_color(&er).as_deref(),
+        Some("#112233"),
+        "the label still follows the body cascade"
+    );
+
+    assert!(doc.set_edge_label_color(&er, Some("#445566")));
+    assert_eq!(doc.resolve_edge_label_color(&er).as_deref(), Some("#445566"));
+    assert_eq!(
+        doc.resolve_edge_color(&er).as_deref(),
+        Some("#112233"),
+        "the body is unaffected by a label override"
+    );
+
+    // Portal channels: icon override wins over the body, text
+    // falls through to the icon until it has its own.
+    assert!(doc.set_portal_label_color(&er, "0", Some("#778899")));
+    assert_eq!(
+        doc.resolve_portal_label_color(&er, "0").as_deref(),
+        Some("#778899")
+    );
+    assert_eq!(
+        doc.resolve_portal_text_color(&er, "0").as_deref(),
+        Some("#778899"),
+        "portal text with no override follows the icon"
+    );
+    assert!(doc.set_portal_label_text_color(&er, "0", Some("#aabbcc")));
+    assert_eq!(
+        doc.resolve_portal_text_color(&er, "0").as_deref(),
+        Some("#aabbcc")
+    );
+    assert_eq!(
+        doc.resolve_portal_label_color(&er, "0").as_deref(),
+        Some("#778899"),
+        "the icon is unaffected by a text override"
     );
 }

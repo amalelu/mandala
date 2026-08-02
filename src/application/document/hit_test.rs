@@ -18,7 +18,10 @@ use baumhard::gfx_structs::tree::MutatorTree;
 use baumhard::gfx_structs::tree_walker::walk_tree_from;
 use baumhard::mindmap::connection;
 use baumhard::mindmap::model::MindMap;
-use baumhard::mindmap::scene_builder::{build_node_resize_handles, build_section_resize_handles, ResizeHandleSide};
+use baumhard::mindmap::tree_builder::{
+    build_node_resize_handles, build_section_resize_handles, ResizeHandleSide,
+    INACTIVE_NODE_ALPHA_MULTIPLIER,
+};
 use baumhard::mindmap::tree_builder::MindMapTree;
 
 use super::types::EdgeRef;
@@ -38,7 +41,7 @@ pub fn hit_test(canvas_pos: Vec2, tree: &mut MindMapTree) -> Option<String> {
     // to the owning MindNode container, then re-apply the
     // container's shape filter — a click on the rectangular AABB
     // of a section inside an ellipse-shaped node must not register
-    // as a hit on that node, just like the pre-section behaviour
+    // as a hit on that node, just like the pre-section behavior
     // where the node area's shape was the only one consulted.
     let landed = tree.tree.descendant_at(canvas_pos)?;
     let mind_id = tree.owning_mind_id(landed)?.to_owned();
@@ -157,7 +160,7 @@ pub fn hit_test_target(canvas_pos: Vec2, tree: &mut MindMapTree) -> Option<HitTa
 /// `Tree::ensure_subtree_aabbs`, which the tree walker and
 /// `descendant_near` keep fresh in normal use). When the cache is
 /// dirty the function falls back to the container-only check —
-/// matches pre-section behaviour for regressions in the cache path.
+/// matches pre-section behavior for regressions in the cache path.
 pub fn point_in_node_aabb(canvas_pos: Vec2, node_id: &str, tree: &MindMapTree) -> bool {
     let Some(arena_id) = tree.arena_id_for(node_id) else {
         return false;
@@ -193,7 +196,7 @@ pub fn point_in_node_aabb(canvas_pos: Vec2, node_id: &str, tree: &MindMapTree) -
 /// units of `canvas_pos`. Returns an `EdgeRef` for the closest edge, or
 /// `None` if nothing is within range.
 ///
-/// Visibility filter mirrors `scene_builder::build_scene_with_offsets` — an
+/// Visibility filter mirrors the per-role projection passes — an
 /// edge is eligible only if `edge.visible` is true, both endpoint nodes
 /// exist, and neither endpoint is hidden by fold state.
 pub fn hit_test_edge(canvas_pos: Vec2, map: &MindMap, tolerance: f32) -> Option<EdgeRef> {
@@ -232,7 +235,7 @@ pub fn hit_test_edge(canvas_pos: Vec2, map: &MindMap, tolerance: f32) -> Option<
         if dist > tolerance {
             continue;
         }
-        if best.as_ref().map_or(true, |(_, best_dist)| dist < *best_dist) {
+        if best.as_ref().is_none_or(|(_, best_dist)| dist < *best_dist) {
             best = Some((EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type), dist));
         }
     }
@@ -263,7 +266,7 @@ pub fn rect_select(corner_a: Vec2, corner_b: Vec2, tree: &MindMapTree) -> Vec<St
 
         // Translate the selection rectangle into the node's local
         // frame and let the shape decide. Rectangle keeps the old
-        // pure-AABB behaviour; non-rect shapes refine.
+        // pure-AABB behavior; non-rect shapes refine.
         let local_min = Vec2::new(min_x - x, min_y - y);
         let local_max = Vec2::new(max_x - x, max_y - y);
         if area
@@ -274,6 +277,91 @@ pub fn rect_select(corner_a: Vec2, corner_b: Vec2, tree: &MindMapTree) -> Vec<St
         }
     }
     hits
+}
+
+/// Dim every node *other* than `active_node_id` to
+/// [`INACTIVE_NODE_ALPHA_MULTIPLIER`] alpha — the
+/// `InteractionMode::NodeEdit` "you are inside this node"
+/// affordance.
+///
+/// A render-layer overlay, deliberately **not** part of
+/// [`MindMapDocument::build_tree`](super::MindMapDocument::build_tree):
+/// that projection is what the `Persistent` custom-mutation apply
+/// path syncs back to the model, so baking a dim into it would
+/// write half-transparent text colors into the saved file. Same
+/// posture as [`apply_tree_highlights`], and applied from the same
+/// rebuild sites, *before* the highlights so a deliberate selection
+/// tint still wins on a node that is both inactive and selected.
+///
+/// The border half of the affordance lives in the border pass
+/// (`tree_builder::border::border_node_data`), which reads the same
+/// constant — the two must agree or the frame and the text of one
+/// node fade by different amounts.
+///
+/// # Costs
+///
+/// One `walk_tree_from` per section of every inactive node, each
+/// carrying one `SetRegionColor` per existing run. Runs only while
+/// `NodeEdit` is open; `None` is a no-op with no walk at all.
+pub fn apply_inactive_node_dimming(tree: &mut MindMapTree, active_node_id: Option<&str>) {
+    let Some(active) = active_node_id else {
+        return;
+    };
+    // §B7 borrow-split: `node_ids()` borrows the tree immutably and
+    // the stamping loop below needs `&mut tree`, so the inactive set
+    // is materialized first. Bounded by visible-node count, once per
+    // NodeEdit-mode rebuild.
+    let inactive: Vec<String> = tree
+        .node_ids()
+        .filter(|(mind_id, _)| *mind_id != active)
+        .map(|(mind_id, _)| mind_id.to_string())
+        .collect();
+
+    for mind_id in inactive {
+        let Some(node_id) = tree.arena_id_for(&mind_id) else { continue };
+        let section_ids: Vec<indextree::NodeId> = node_id
+            .children(&tree.tree.arena)
+            .filter(|cid| {
+                tree.tree
+                    .arena
+                    .get(*cid)
+                    .map(|n| n.get().flag_is_set(Flag::SectionRoot))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        for section_node_id in section_ids {
+            let (dimmed, target_channel): (Vec<(Range, [f32; 4])>, usize) = {
+                let Some(node) = tree.tree.arena.get(section_node_id) else { continue };
+                let element = node.get();
+                let Some(area) = element.glyph_area() else { continue };
+                let dimmed = area
+                    .regions
+                    .all_regions()
+                    .iter()
+                    .filter_map(|r| {
+                        let mut rgba = r.color?;
+                        rgba[3] *= INACTIVE_NODE_ALPHA_MULTIPLIER;
+                        Some((r.range, rgba))
+                    })
+                    .collect();
+                let channel = {
+                    use baumhard::gfx_structs::tree::BranchChannel;
+                    element.channel()
+                };
+                (dimmed, channel)
+            };
+            if dimmed.is_empty() {
+                continue;
+            }
+            let mutations: Vec<Mutation> = dimmed
+                .into_iter()
+                .map(|(r, rgba)| Mutation::area_command(GlyphAreaCommand::SetRegionColor(r, rgba)))
+                .collect();
+            let mutator_tree = MutatorTree::new_with(GfxMutator::new_macro(mutations, target_channel));
+            walk_tree_from(&mut tree.tree, &mutator_tree, section_node_id, mutator_tree.root);
+        }
+    }
 }
 
 /// Apply a set of node highlights as baumhard mutations. For each
@@ -316,7 +404,7 @@ where
         // `node_id.children(&tree.tree.arena)` borrows the arena
         // immutably; the loop body needs `&mut tree.tree` to call
         // `walk_tree_from`. Holding the iterator across the mutable
-        // borrow won't compile, so the fix is to materialise the
+        // borrow won't compile, so the fix is to materialize the
         // section ids first and drop the immutable borrow before
         // the mutation pass starts. The vec is `O(sections per
         // node)` — bounded by user authoring (typically 1–4 per
@@ -434,7 +522,7 @@ fn apply_drag_delta_inner(
         // with the node container or they'll visibly detach. Child
         // mind-nodes (without `Flag::SectionRoot`) are skipped —
         // the historical `include_descendants=false` semantic.
-        walk_drag_node_and_sections(&mut tree.tree.arena, tree_node_id, dx, dy, patches.as_deref_mut());
+        walk_drag_node_and_sections(&mut tree.tree.arena, tree_node_id, dx, dy, patches);
     }
     tree.tree.invalidate_caches();
 }
@@ -535,7 +623,7 @@ fn nearest_handle_within(
         if dist > tolerance {
             continue;
         }
-        if best.as_ref().map_or(true, |(_, d)| dist < *d) {
+        if best.as_ref().is_none_or(|(_, d)| dist < *d) {
             best = Some((side, dist));
         }
     }

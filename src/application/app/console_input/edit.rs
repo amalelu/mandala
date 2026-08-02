@@ -12,8 +12,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use baumhard::util::grapheme_chad::{
-    count_grapheme_clusters, delete_front_unicode, delete_grapheme_at, find_byte_index_of_grapheme,
-    insert_str_at_grapheme,
+    count_grapheme_clusters, delete_front_unicode, delete_grapheme_at, insert_str_at_grapheme_counted,
+    prev_word_boundary_ws,
 };
 
 use crate::application::console::ConsoleState;
@@ -167,7 +167,6 @@ pub(super) fn kill_to_start(state: &mut ConsoleState) -> EditOutcome {
 }
 
 pub(super) fn kill_word(state: &mut ConsoleState) -> EditOutcome {
-    use unicode_segmentation::UnicodeSegmentation;
     let ConsoleState::Open { input, cursor, .. } = state else {
         return EditOutcome::Unchanged;
     };
@@ -175,15 +174,9 @@ pub(super) fn kill_word(state: &mut ConsoleState) -> EditOutcome {
     if end_g == 0 {
         return EditOutcome::Unchanged;
     }
-    let prefix_bytes = find_byte_index_of_grapheme(input, end_g).unwrap_or(input.len());
-    let clusters: Vec<&str> = input[..prefix_bytes].graphemes(true).collect();
-    let mut start_g = clusters.len();
-    while start_g > 0 && clusters[start_g - 1].chars().all(|c| c.is_whitespace()) {
-        start_g -= 1;
-    }
-    while start_g > 0 && !clusters[start_g - 1].chars().all(|c| c.is_whitespace()) {
-        start_g -= 1;
-    }
+    // Whitespace-delimited, not alphanumeric-run: `Ctrl+W` kills a
+    // whole shell token, so `key=value` goes in one stroke.
+    let start_g = prev_word_boundary_ws(input, end_g);
     if start_g == end_g {
         return EditOutcome::Unchanged;
     }
@@ -268,18 +261,9 @@ pub(super) fn insert_text(state: &mut ConsoleState, text: &str) -> EditOutcome {
     else {
         return EditOutcome::Unchanged;
     };
-    let mut changed = false;
-    for ch in text.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        let mut buf = [0u8; 4];
-        let encoded = ch.encode_utf8(&mut buf);
-        insert_str_at_grapheme(input, *cursor, encoded);
-        *cursor += 1;
-        changed = true;
-    }
-    if changed {
+    let filtered: String = text.chars().filter(|ch| !ch.is_control()).collect();
+    if !filtered.is_empty() {
+        *cursor += insert_str_at_grapheme_counted(input, *cursor, &filtered);
         *history_idx = None;
         EditOutcome::InputChanged
     } else {

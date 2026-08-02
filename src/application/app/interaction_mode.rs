@@ -122,8 +122,8 @@ impl InteractionMode {
     }
 
     /// The node that should receive auto-emitted resize handles this
-    /// frame, or `None` if no node should. Read by the scene-builder
-    /// gate in `document/mod.rs::assemble_scene_overrides` (via
+    /// frame, or `None` if no node should. Read by the projection
+    /// gate in `document/mod.rs::frame_overrides` (via
     /// `resize_handle_overrides()`).
     pub fn resize_handle_node(&self) -> Option<&str> {
         match self {
@@ -155,10 +155,11 @@ impl InteractionMode {
     }
 
     /// The active NodeEdit target, or `None` for any non-NodeEdit
-    /// mode. Drives the scene builder's inactive-node dimming pass:
-    /// every node other than this one renders chrome + text at
-    /// half alpha while NodeEdit is open. Read by the scene-builder
-    /// gate in `document/mod.rs::assemble_scene_overrides` (via
+    /// mode. Drives inactive-node dimming: every node other than
+    /// this one renders its frame (border pass) and its text
+    /// (`apply_inactive_node_dimming` overlay) at half alpha while
+    /// NodeEdit is open. Read by the projection gate in
+    /// `document/mod.rs::frame_overrides` (via
     /// `resize_handle_overrides()`, which packs both the resize
     /// handle target and the dimming target into one bundle).
     pub fn node_edit_for(&self) -> Option<&str> {
@@ -175,8 +176,8 @@ impl InteractionMode {
     /// than reaching for the per-field predicates separately.
     pub fn resize_handle_overrides(
         &self,
-    ) -> baumhard::mindmap::scene_builder::InteractionModeOverrides<'_> {
-        baumhard::mindmap::scene_builder::InteractionModeOverrides {
+    ) -> baumhard::mindmap::tree_builder::InteractionModeOverrides<'_> {
+        baumhard::mindmap::tree_builder::InteractionModeOverrides {
             node: self.resize_handle_node(),
             section: self.resize_handle_section(),
             node_edit_for: self.node_edit_for(),

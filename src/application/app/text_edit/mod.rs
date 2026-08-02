@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Inline node text editor: state, grapheme-aware cursor helpers
-//! shared with [`super::label_edit`]. Lifecycle in [`editor`].
+//! shared with `super::single_line_edit` (native-gated, so a plain
+//! code-span — an intra-doc link to it fails the wasm32 doc build).
+//! Lifecycle in [`editor`].
 
 use baumhard::util::grapheme_chad;
 
@@ -88,12 +90,12 @@ pub(in crate::application::app) enum TextEditState {
         /// editor). On close, the closer flips `interaction_mode`
         /// back to `Default` rather than leaving the user in
         /// NodeEdit on a single-section node — there's nothing
-        /// else to edit there, and a stranded NodeEdit + dimming
-        /// + status bar reads as a UX dead-end. Multi-section
-        /// opens (where the user explicitly entered NodeEdit and
-        /// then asked to edit a specific section) keep the
-        /// `false` value so `close_text_edit` returns to NodeEdit
-        /// for further section-picking.
+        /// else to edit there, and a stranded NodeEdit + dimming +
+        /// status bar reads as a UX dead-end. Multi-section opens
+        /// (where the user explicitly entered NodeEdit and then
+        /// asked to edit a specific section) keep the `false` value
+        /// so `close_text_edit` returns to NodeEdit for further
+        /// section-picking.
         exit_to_default_on_close: bool,
     },
 }
@@ -108,6 +110,61 @@ impl TextEditState {
             TextEditState::Closed => None,
         }
     }
+}
+
+/// Is `canvas_pos` inside `node_id`, counting overflowing sections?
+///
+/// Refreshes the subtree-AABB cache **before** the containment test,
+/// which is the load-bearing half.
+/// [`crate::application::document::point_in_node_aabb`] reads
+/// `subtree_aabb()`, which returns `None` while the cache is dirty
+/// (post-mutation / post-tree-rebuild) and then falls back to the
+/// container-only AABB — reporting a point over an *overflowing*
+/// second section as "outside". `ensure_subtree_aabbs` is O(1) on a
+/// clean cache and O(arena) on the first call after a mutation;
+/// either way it is cheap relative to a click handler.
+///
+/// Every click-outside gate in the app runs this pair, and the
+/// refresh is exactly the step that gets forgotten when the pair is
+/// written by hand. Callers: the text editor's click-outside-commit
+/// gate on both targets (via [`release_stays_inside_edited_node`])
+/// and the `NodeEdit` mode-exit gate in `event_mouse_click`.
+///
+/// Returns `false` when no tree is built — there is nothing to be
+/// inside of.
+pub(in crate::application::app) fn point_inside_node_fresh_aabb(
+    node_id: &str,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    canvas_pos: glam::Vec2,
+) -> bool {
+    if let Some(tree) = mindmap_tree.as_mut() {
+        tree.tree.ensure_subtree_aabbs();
+    }
+    mindmap_tree
+        .as_ref()
+        .map(|tree| crate::application::document::point_in_node_aabb(canvas_pos, node_id, tree))
+        .unwrap_or(false)
+}
+
+/// Did a pointer release land on the node the editor has open?
+///
+/// `true` keeps the edit alive and consumes the release; `false`
+/// means the release was outside and the caller commits through the
+/// funnel. Both targets' release paths run this — it is the whole of
+/// what they used to have written twice.
+///
+/// Returns `false` when the editor is closed — there is nothing to
+/// stay inside of.
+pub(in crate::application::app) fn release_stays_inside_edited_node(
+    text_edit_state: &TextEditState,
+    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
+    release_canvas: glam::Vec2,
+) -> bool {
+    text_edit_state
+        .node_id()
+        .map(str::to_string)
+        .map(|id| point_inside_node_fresh_aabb(&id, mindmap_tree, release_canvas))
+        .unwrap_or(false)
 }
 
 /// Glyph rendered at the cursor position while a node, edge-label,
@@ -138,8 +195,7 @@ const TEXT_EDIT_CARET: char = '|';
 /// Insert one character at grapheme index `cursor` in `buffer`,
 /// returning the new cursor position (one grapheme past the insert).
 pub(in crate::application::app) fn insert_at_cursor(buffer: &mut String, cursor: usize, ch: char) -> usize {
-    grapheme_chad::insert_str_at_grapheme(buffer, cursor, &ch.to_string());
-    cursor + 1
+    cursor + grapheme_chad::insert_str_at_grapheme_counted(buffer, cursor, &ch.to_string())
 }
 
 /// Delete the grapheme cluster immediately before `cursor` (Backspace
@@ -164,36 +220,27 @@ pub(in crate::application::app) fn delete_at_cursor(buffer: &mut String, cursor:
 }
 
 /// Return the grapheme index of the start of the line containing
-/// `cursor` — i.e. the position just after the most recent `\n`
-/// strictly before `cursor`, or 0 if no prior `\n`. `\n` is always its
-/// own grapheme cluster, so walking by graphemes is correct here.
+/// `cursor` — i.e. the position just after the most recent line
+/// terminator strictly before `cursor`, or 0 if no terminator
+/// precedes it.
+///
+/// Editor-vocabulary name for the first half of
+/// [`grapheme_chad::line_bounds_at`], which owns the walk
+/// (`lib/baumhard/CONVENTIONS.md` §B3). Prefer calling
+/// `line_bounds_at` directly when the caller wants both bounds — it
+/// produces them from one walk.
 pub(in crate::application::app) fn cursor_to_line_start(buffer: &str, cursor: usize) -> usize {
-    use unicode_segmentation::UnicodeSegmentation;
-    let mut line_start = 0usize;
-    for (i, g) in buffer.graphemes(true).enumerate() {
-        if i >= cursor {
-            break;
-        }
-        if g == "\n" {
-            line_start = i + 1;
-        }
-    }
-    line_start
+    grapheme_chad::line_bounds_at(buffer, cursor).0
 }
 
 /// Return the grapheme index of the end of the line containing
-/// `cursor` — the position of the next `\n` at or after `cursor`, or
-/// the total grapheme count if no `\n` follows.
+/// `cursor` — the position of the next line terminator at or after
+/// `cursor`, or the total grapheme count if none follows.
+///
+/// Editor-vocabulary name for the second half of
+/// [`grapheme_chad::line_bounds_at`].
 pub(in crate::application::app) fn cursor_to_line_end(buffer: &str, cursor: usize) -> usize {
-    use unicode_segmentation::UnicodeSegmentation;
-    let mut total = 0usize;
-    for (i, g) in buffer.graphemes(true).enumerate() {
-        total = i + 1;
-        if i >= cursor && g == "\n" {
-            return i;
-        }
-    }
-    total
+    grapheme_chad::line_bounds_at(buffer, cursor).1
 }
 
 /// Move the cursor up one line, preserving the visual column. Column
@@ -217,8 +264,8 @@ pub(in crate::application::app) fn move_cursor_up_line(buffer: &str, cursor: usi
 /// No-op if already on the last line.
 pub(in crate::application::app) fn move_cursor_down_line(buffer: &str, cursor: usize) -> usize {
     let total = grapheme_chad::count_grapheme_clusters(buffer);
-    let line_start = cursor_to_line_start(buffer, cursor);
-    let line_end = cursor_to_line_end(buffer, cursor);
+    // One walk for both bounds of the current line.
+    let (line_start, line_end) = grapheme_chad::line_bounds_at(buffer, cursor);
     if line_end == total {
         return cursor;
     }

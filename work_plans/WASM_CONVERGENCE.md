@@ -30,10 +30,14 @@ If you're picking this work up, **start here, then read in order**:
   plus a `MacroRegistry`.
 - An inline `match action { ... }` block for keyboard input where
   every Compatible Action arm calls into the shared
-  `dispatch::cross_dispatch` helper module.
-- An inline `match &click_hit { ... }` ladder for double-click —
-  the largest remaining Track-A duplication. Not yet routed through
-  `dispatch_action`.
+  `dispatch::cross_dispatch` helper module. The keyboard chain runs
+  all three tiers — Action → Macro → CustomMutation — the same as
+  native.
+- No double-click ladder. **Closed by #29**: the `match &click_hit`
+  ladder that used to be "the largest remaining Track-A duplication"
+  is gone from `run_wasm/`. Both targets resolve
+  `MouseGesture::DoubleClick` through the keybind table and run one
+  body in `dispatch::cross_dispatch::pointer`.
 
 Tracks B (macro registry) and C (full context-type unification)
 landed; both targets dispatch every Compatible Action through the
@@ -105,7 +109,7 @@ dispatchers. **Three paths**, in order of preference:
 
 ## Track-D meta — keep the privilege model intact
 
-The macro privilege gate (`MacroSource::allows_console_line`,
+The macro privilege gate (`SourceTier::allows_console_line`,
 `allows_action`, fail-closed in `dispatch_macro`) MUST remain
 single-sourced on both targets. The
 [`format/macros.md`](../format/macros.md) "Privilege model"
@@ -114,12 +118,12 @@ section is the authoritative spec; the implementation lives in
 `src/application/app/dispatch/macro_core.rs`. The
 `WasmCompatibility` classification is orthogonal — a
 `Compatible` Action might still be denylisted by
-`MacroSource::allows_action` for non-User macros (e.g.
+`SourceTier::allows_action` for non-User macros (e.g.
 `Action::SaveDocument` would be `Compatible` once WASM gains a
 save path, but it'd still be in the denylist because hostile
 mindmaps shouldn't invoke it).
 
-`MacroSource::allows_action` and `allows_console_line` live in
+`SourceTier::allows_action` and `allows_console_line` live in
 `src/application/macros/mod.rs` (cross-platform). The fail-closed
 enforcement loop is in `dispatch::macro_core::dispatch_macro`,
 abstracted over a `MacroDispatchTarget` trait so native and WASM
@@ -142,14 +146,84 @@ contributor adds an Action to the denylist.
 - Filesystem on WASM (`OpenDocument` / `SaveDocumentAs` /
   `NewDocumentAt` parametric Action variants stay `NativeOnly`
   pending a chosen storage strategy).
-- Touch / IME / Focused input event arms — the catch-all in
+- IME / Focused input event arms — the catch-all in
   `WasmApp::handle_window_event` documents these by name; each
-  needs its own `event_*.rs` sibling once wired. Touch is
-  mobile-budget-binding (§4); IME is required for non-Latin
-  text editing in the inline node-text editor.
+  needs its own `event_*.rs` sibling once wired. IME is required
+  for non-Latin text editing in the inline node-text editor.
+  (Touch left this list when `run_wasm/event_touch.rs` landed; its
+  recognizer driving is shared as of #29 — see below.)
 - Maptool migration on WASM (`maptool convert --sections` is
   native-only by construction; a browser-only authoring flow
   that loads a legacy map needs an in-app migration path).
+
+## Closed by #29 — input-path duplication
+
+These behaviors had a body on each target. Each now has exactly one,
+in `dispatch::cross_dispatch` or alongside it, called from both. Grep
+for the helper name to find both call sites.
+
+| Behavior | Shared body |
+| --- | --- |
+| Double-click routing (node / portal / edge-label / empty) | `cross_dispatch::pointer::resolve_double_click_route` + `apply_double_click_activate` |
+| Create-orphan-and-edit (was 3 copies) | `cross_dispatch::apply_create_orphan_node_and_edit` |
+| Text-edit click-outside containment | `text_edit::release_stays_inside_edited_node` |
+| Already-editing guard | `app::already_editing_same_target` |
+| Wheel-delta decomposition | `app::wheel_lines` + `app::wheel_gesture` |
+| Touch ingest → tick → dispatch | `cross_dispatch::pointer::drive_touch_event` + `touch_phase` |
+| Load-time canvas warm | `scene_rebuild::warm_scene_at_load` |
+| Macro-registry build | `macros::loader::build_macro_registry` |
+| Camera-geometry reprojection | `scene_rebuild::rebuild_camera_geometry` |
+
+Three funnel gaps closed with them:
+
+- **Double-click now consults the keybind table on WASM.** It used to
+  hardcode the behavior, so rebinding or unbinding
+  `double_click_activate` was silently ignored in the browser.
+- **Wheel zoom goes through the funnel on WASM.** It used to hardcode
+  `factor = 1.1` and emit `CameraZoom` directly, bypassing
+  `action_for_gesture` entirely. The post-zoom rebuild converges on
+  native's narrow set too: base WASM ran `rebuild_scene_only` (all
+  seven canvas roles) and now runs `rebuild_camera_geometry` (three).
+  The four dropped roles — borders, section frames, and both
+  resize-handle trees — are canvas-space and zoom-independent, so a
+  zoom cannot move them; §4's mobile budget is the reason to converge
+  on the narrow set rather than the wide one. Two consequences the
+  call site spells out: `CameraPan` does not set
+  `connection_geometry_dirty` (only `CameraZoom` does), so a wheel
+  rebound to a pan Action reprojects nothing — identically to native;
+  and there is no `!is_moving_node` term in the browser's guard,
+  which is safe only while `WasmInputState` carries no `drag_state`.
+- **The keyboard chain reaches the custom-mutation tier on WASM.** It
+  stopped at Macro, so a `custom_mutation_bindings` entry worked on
+  the desktop and was dead on the web. **Instant mutations only** —
+  an entry with `timing.duration_ms > 0` takes
+  `apply_keybind_custom_mutation`'s `start_animation` branch, which
+  only queues the envelope. `drain_animation_tick` is the sole
+  advance site and `drain_frame.rs` is native-gated, so a browser
+  animation starts and never ticks. Pre-existing on the click-trigger
+  path; the keystroke tier widens it. Registered in CLAUDE.md's
+  "Dual-target status"; parity is a browser drain hung off the
+  existing rAF render loop, pumping the same body.
+
+`DoubleClickActivate` stays `wasm = NativeOnly`: its `EdgeLabel`
+branch still reaches the single-line editor, and the "ANY NativeOnly
+branch" rule classifies on that. Flipping it to `Compatible` waits on
+the browser gaining a single-line editor.
+
+It is a member of the **mixed-branch set**, which is now one list —
+`keybinds::action::MIXED_BRANCH_ACTIONS` — read by both
+`lift_mixed_branch_for_wasm_macro` and
+`keybinds::tests::test_wasm_compatibility_mixed_branch_actions_are_native_only`.
+Written out twice, the two drifted: the test named three members and
+the lift named four. They could not simply be merged, either, because
+the members do **not** share a classification — `ExitMode` is
+mixed-branch and `Compatible`, since its native leftover is a step
+(the `hovered_node` clear) rather than a branch reaching native-only
+state. The list therefore carries the expected `WasmCompatibility`
+alongside each member: the test asserts it per member instead of
+asserting a blanket `NativeOnly`, and the lift's `debug_assert` fires
+in any test build for a member with no verdict arm. Adding a member
+now obliges both consumers instead of silently satisfying neither.
 
 ## Per-arm event-handler shape divergence
 

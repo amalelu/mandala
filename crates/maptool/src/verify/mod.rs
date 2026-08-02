@@ -5,6 +5,7 @@
 //! bounds, zoom-bound ordering. Each check returns `Vec<Violation>`;
 //! `verify()` runs them all.
 
+mod edges;
 mod enums;
 mod ids;
 mod palettes;
@@ -19,11 +20,22 @@ mod test_helpers;
 
 use baumhard::mindmap::model::{MindMap, MindNode};
 
+/// Severity of a [`Violation`]. Warnings are printed but do not make
+/// `maptool verify` exit nonzero — they flag likely mistakes (e.g.
+/// section channel collisions) where the resulting behavior is still
+/// well-defined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     pub category: &'static str,
     pub location: String,
     pub message: String,
+    pub severity: Severity,
 }
 
 impl Violation {
@@ -33,6 +45,17 @@ impl Violation {
             category,
             location: node.id.clone(),
             message: message.into(),
+            severity: Severity::Error,
+        }
+    }
+
+    /// Warning at a node's id.
+    pub fn node_warn(category: &'static str, node: &MindNode, message: impl Into<String>) -> Self {
+        Self {
+            category,
+            location: node.id.clone(),
+            message: message.into(),
+            severity: Severity::Warning,
         }
     }
 
@@ -42,6 +65,7 @@ impl Violation {
             category,
             location: format!("edge[{}]", edge_index),
             message: message.into(),
+            severity: Severity::Error,
         }
     }
 
@@ -51,6 +75,7 @@ impl Violation {
             category,
             location: location.into(),
             message: message.into(),
+            severity: Severity::Error,
         }
     }
 }
@@ -68,6 +93,7 @@ pub fn verify(map: &MindMap) -> Vec<Violation> {
     out.extend(tree::check(map));
     out.extend(ids::check(map));
     out.extend(references::check(map));
+    out.extend(edges::check(map));
     out.extend(palettes::check(map));
     out.extend(enums::check(map));
     out.extend(text_runs::check(map));

@@ -3,8 +3,7 @@
 //! Markdown export: node text → headings by tree depth, everything
 //! else ignored. Empty-text nodes are transparent.
 
-use baumhard::mindmap::model::{id_sort_key, MindMap, MindNode};
-use std::collections::HashMap;
+use baumhard::mindmap::model::{ChildIndex, MindMap, MindNode};
 
 /// Convert `map` into a Markdown document containing only node text,
 /// indented by tree depth via `#` heading characters. The first line
@@ -20,40 +19,8 @@ use std::collections::HashMap;
 pub fn mindmap_to_markdown(map: &MindMap) -> String {
     let index = ChildIndex::build(map);
     let mut out = String::new();
-    emit_level(&index, &index.roots, 1, &mut out);
+    emit_level(&index, index.roots(), 1, &mut out);
     out
-}
-
-/// One-shot parent → sorted-children lookup built up front so the
-/// recursive walk doesn't re-scan `map.nodes` (an O(N) filter) once
-/// per node. `MindMap::children_of` is the obvious call here but
-/// using it would make the export O(N²) — fine for a 243-node map,
-/// noticeable on very large ones.
-struct ChildIndex<'a> {
-    roots: Vec<&'a MindNode>,
-    by_parent: HashMap<&'a str, Vec<&'a MindNode>>,
-}
-
-impl<'a> ChildIndex<'a> {
-    fn build(map: &'a MindMap) -> Self {
-        let mut roots: Vec<&'a MindNode> = Vec::new();
-        let mut by_parent: HashMap<&'a str, Vec<&'a MindNode>> = HashMap::new();
-        for node in map.nodes.values() {
-            match &node.parent_id {
-                None => roots.push(node),
-                Some(pid) => by_parent.entry(pid.as_str()).or_default().push(node),
-            }
-        }
-        roots.sort_by_key(|n| id_sort_key(&n.id));
-        for children in by_parent.values_mut() {
-            children.sort_by_key(|n| id_sort_key(&n.id));
-        }
-        Self { roots, by_parent }
-    }
-
-    fn children_of(&self, id: &str) -> &[&'a MindNode] {
-        self.by_parent.get(id).map(Vec::as_slice).unwrap_or(&[])
-    }
 }
 
 fn emit_level(index: &ChildIndex, nodes: &[&MindNode], depth: usize, out: &mut String) {

@@ -9,7 +9,7 @@
 //! `tr`, `bl`, `br`) but writes to
 //! [`baumhard::mindmap::model::MindSection::frame_border`] instead
 //! of `MindNode.style.border`. Same parsing, same auto-promotion
-//! behaviour (any `top=` / corner edit promotes `preset` to
+//! behavior (any `top=` / corner edit promotes `preset` to
 //! `"custom"`), same per-side pattern grammar.
 //!
 //! Section frames don't carry a visibility flag — they're drawn
@@ -29,17 +29,16 @@
 use baumhard::mindmap::border::resolve_section_frame_border;
 
 use crate::application::console::commands::border::{
-    custom_preset_hint, edits_has_glyph_field, nodes_in_selection, stage_kv,
-    KEYS as BORDER_KEYS,
+    custom_preset_hint, edits_has_glyph_field, nodes_in_selection, stage_kv, KEYS as BORDER_KEYS,
 };
 use crate::application::console::completion::{
     kv_key_completions_with_hints, prefix_filter, Completion, CompletionContext, CompletionState,
 };
 use crate::application::console::parser::Args;
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
-use crate::application::document::{
-    BorderConfigEdits, BorderEditOutcome, OptionEdit, SectionSel, SelectionState,
-};
+use crate::application::document::{BorderConfigEdits, BorderEditOutcome, OptionEdit, SelectionState};
+
+use super::target::{parse_section_target_kv, SectionTargetPolicy};
 
 /// Subverbs surfaced as token-2 completions after `section frame`.
 pub const VERBS: &[&str] = &["show", "reset", "preview"];
@@ -105,7 +104,7 @@ pub fn execute_section_frame(args: &Args, eff: &mut ConsoleEffects) -> ExecResul
     if let Some(verb) = args.positional(1) {
         // C14: case-insensitive match — same posture as `border
         // preview commit` / `cancel` already use, and as the
-        // committing `border …` verb arms. Without normalising
+        // committing `border …` verb arms. Without normalizing
         // here `Show` / `RESET` / `Preview` would route through
         // the kv-form path and produce a confusing error.
         match verb.to_ascii_lowercase().as_str() {
@@ -177,7 +176,7 @@ fn apply_edits(args: &Args, eff: &mut ConsoleEffects, edits: BorderConfigEdits) 
         Ok(ids) => ids,
         Err(e) => return e,
     };
-    let kv_idx = match parse_section_kv(args) {
+    let kv_idx = match parse_section_target_kv(args, "section frame") {
         Ok(v) => v,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -203,23 +202,12 @@ fn apply_edits(args: &Args, eff: &mut ConsoleEffects, edits: BorderConfigEdits) 
             .get(node_id)
             .map(|n| n.sections.len())
             .unwrap_or(0);
-        let section_idx = match resolve_section_idx_for(
-            &eff.document.selection,
-            node_id,
-            kv_idx,
-            n_sections,
-        ) {
+        let section_idx = match resolve_section_idx_for(&eff.document.selection, node_id, kv_idx, n_sections)
+        {
             Ok(idx) => idx,
             Err(msg) => return ExecResult::err(msg),
         };
-        let count = eff
-            .document
-            .mindmap
-            .nodes
-            .get(node_id)
-            .map(|n| n.sections.len())
-            .unwrap_or(0);
-        if section_idx >= count {
+        if section_idx >= n_sections {
             return ExecResult::err(format!(
                 "section[{}] not found on node '{}'",
                 section_idx, node_id
@@ -317,7 +305,7 @@ fn execute_show(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         return ExecResult::err("section frame show: single-section target only; pick one section first");
     }
     let node_id = node_ids.into_iter().next().expect("len==1");
-    let kv_idx = match parse_section_kv(args) {
+    let kv_idx = match parse_section_target_kv(args, "section frame") {
         Ok(v) => v,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -328,12 +316,7 @@ fn execute_show(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         .get(&node_id)
         .map(|n| n.sections.len())
         .unwrap_or(0);
-    let section_idx = match resolve_section_idx_for(
-        &eff.document.selection,
-        &node_id,
-        kv_idx,
-        n_sections,
-    ) {
+    let section_idx = match resolve_section_idx_for(&eff.document.selection, &node_id, kv_idx, n_sections) {
         Ok(idx) => idx,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -366,7 +349,7 @@ fn execute_show(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
 }
 
 /// Append the resolved-style readout for one focus state. The
-/// labelled `source` walks the cascade the same way
+/// labeled `source` walks the cascade the same way
 /// `resolve_section_frame_border` does — per-section override,
 /// then focused canvas default (focused branch only), then
 /// unfocused canvas default (focused branch falls through to
@@ -410,10 +393,7 @@ fn push_resolved_section_frame(
     } else {
         canvas.default_section_frame_border.as_ref()
     };
-    let chosen_cfg: Option<&GlyphBorderConfig> = section
-        .frame_border
-        .as_ref()
-        .or(canvas_default_for_focus);
+    let chosen_cfg: Option<&GlyphBorderConfig> = section.frame_border.as_ref().or(canvas_default_for_focus);
     lines.push(format!("  [{}]", header));
     lines.push(format!("    source:    {}", source));
     lines.push(format!(
@@ -453,58 +433,28 @@ fn push_resolved_section_frame(
     }
 }
 
-fn parse_section_kv(args: &Args) -> Result<Option<usize>, String> {
-    for (k, v) in args.kvs() {
-        if k == "section" {
-            return super::super::range_kv::parse_section_kv("section", v).map(Some);
-        }
-    }
-    Ok(None)
-}
-
 /// Resolve `(node_id, section_idx)` for a `section frame …` write.
 ///
-/// Cascade matching `section/mod.rs::resolve_section_idx`'s rule
-/// table (kept in sync; review-fix CRIT-2 closed the divergence
-/// where this resolver lacked the rule-3 single-section
-/// auto-resolve, so `section frame preset=heavy` against a
-/// `Single(node)` with one section spuriously errored "node 'X'
-/// has multiple sections" while `section preset=heavy` worked):
+/// Thin wrapper over the shared cascade in
+/// [`super::target::resolve_section_index`] under
+/// [`SectionTargetPolicy::Frame`]. The Frame policy lets a
+/// `MultiSection` selection fall through to the count-based rules
+/// because this verb fans out over the deduplicated owning nodes
+/// of the selection — `node_id` is one candidate among several,
+/// not "the" selected node.
 ///
-/// 1. `kv_idx` (from a `section=K` kv) → that idx.
-/// 2. `Section` / `SectionRange` whose `node_id` matches → that idx.
-/// 3. `n_sections == 1` (caller passes the section count for the
-///    target node) → `Ok(0)`. Mirrors `section/mod.rs` rule 3.
-/// 4. Multi-section node with no Section selection → error with
-///    the count + the `section=<idx>` hint.
+/// This used to be a hand-maintained copy of the `section …` rule
+/// table, and it drifted: review-fix CRIT-2 closed the gap where
+/// this resolver lacked the single-section auto-resolve, so
+/// `section frame preset=heavy` against a `Single(node)` with one
+/// section spuriously errored while `section preset=heavy` worked.
 fn resolve_section_idx_for(
     sel: &SelectionState,
     node_id: &str,
     kv_idx: Option<usize>,
     n_sections: usize,
 ) -> Result<usize, String> {
-    if let Some(idx) = kv_idx {
-        return Ok(idx);
-    }
-    match sel {
-        SelectionState::Section(SectionSel {
-            node_id: nid,
-            section_idx,
-        }) if nid == node_id => Ok(*section_idx),
-        SelectionState::SectionRange {
-            sel: SectionSel {
-                node_id: nid,
-                section_idx,
-            },
-            ..
-        } if nid == node_id => Ok(*section_idx),
-        _ if n_sections == 1 => Ok(0),
-        _ => Err(format!(
-            "section frame: node '{}' has {} sections — pick one (click) \
-             or pass section=<idx>",
-            node_id, n_sections
-        )),
-    }
+    super::target::resolve_section_index(sel, node_id, kv_idx, Some(n_sections), SectionTargetPolicy::Frame)
 }
 
 // `edits_has_glyph_field` and `custom_preset_hint` are shared with
@@ -529,7 +479,7 @@ fn execute_section_frame_preview(args: &Args, eff: &mut ConsoleEffects) -> ExecR
     // section index — same shape `apply_edits` uses, copied here
     // because the preview path's target is fixed at dispatch
     // time (not inferred per-target like the committing path).
-    let kv_idx = match parse_section_kv(args) {
+    let kv_idx = match parse_section_target_kv(args, "section frame") {
         Ok(v) => v,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -564,10 +514,8 @@ fn execute_section_frame_preview(args: &Args, eff: &mut ConsoleEffects) -> ExecR
             // `cross_dispatch/style.rs` already uses for the same
             // case.
             if let SelectionState::MultiSection(sels) = sel {
-                let pairs: Vec<(String, usize)> = sels
-                    .iter()
-                    .map(|s| (s.node_id.clone(), s.section_idx))
-                    .collect();
+                let pairs: Vec<(String, usize)> =
+                    sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect();
                 return Ok(BorderPreviewTarget::Sections(pairs));
             }
             let node_ids = nodes_in_selection(sel, "section frame preview")?;
@@ -620,10 +568,7 @@ mod tests {
         let result = run("section frame preset=heavy", &mut doc);
         match result {
             ExecResult::Ok(_) | ExecResult::Lines(_) => {}
-            other => panic!(
-                "expected single-section auto-resolve to succeed, got {:?}",
-                other
-            ),
+            other => panic!("expected single-section auto-resolve to succeed, got {:?}", other),
         }
         let cfg = doc.mindmap.nodes.get(&id).unwrap().sections[0]
             .frame_border
@@ -647,11 +592,7 @@ mod tests {
             other => panic!("expected Err, got {:?}", other),
         };
         assert!(msg.contains("has 2 sections"), "missing count: {}", msg);
-        assert!(
-            msg.contains("section=<idx>"),
-            "missing kv hint: {}",
-            msg
-        );
+        assert!(msg.contains("section=<idx>"), "missing kv hint: {}", msg);
     }
 
     #[test]
@@ -1053,11 +994,8 @@ mod tests {
         // Synthesise an edge selection. Any edge will do — the
         // verb's branch fires before any per-edge inspection runs.
         if let Some(edge) = doc.mindmap.edges.first() {
-            let edge_ref = crate::application::document::EdgeRef::new(
-                &edge.from_id,
-                &edge.to_id,
-                &edge.edge_type,
-            );
+            let edge_ref =
+                crate::application::document::EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type);
             doc.selection = SelectionState::Edge(edge_ref);
             assert_exec_err_contains(
                 run("section frame preset=heavy", &mut doc),

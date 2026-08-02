@@ -115,6 +115,7 @@ pub fn at_anchor(mutations: Vec<Mutation>) -> MutatorNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::primitives::Discriminated;
     use crate::gfx_structs::area::GlyphAreaCommand;
     use crate::gfx_structs::mutator::{Instruction, MutatorType};
     use crate::mutator_builder::{build, SectionContext};
@@ -148,7 +149,7 @@ mod tests {
         let node = self_only(vec![nudge(10.0)]);
         let mt = build(&node, &NoCtx);
         let root = mt.arena.get(mt.root).unwrap().get();
-        assert!(matches!(root.get_type(), MutatorType::Macro));
+        assert!(matches!(root.variant(), MutatorType::Macro));
     }
 
     #[test]

@@ -130,7 +130,7 @@ pub struct KeybindConfig {
     // ── Border Preview ───────────────────────────────────────────
     /// Discard the active border preview.
     ///
-    /// **Default: unbound** — but the user-visible Esc behaviour
+    /// **Default: unbound** — but the user-visible Esc behavior
     /// is "if a preview is active, cancel it; otherwise exit the
     /// current mode" because `Action::ExitMode` (the default Esc
     /// binding) calls `cancel_border_preview()` first and
@@ -269,7 +269,7 @@ pub struct KeybindConfig {
     pub set_section_size_fill_parent: Vec<ParametricBinding>,
     /// Filesystem-touching parametric variants — NativeOnly +
     /// denylisted from non-User macro tiers (see
-    /// `MacroSource::allows_action`).
+    /// `SourceTier::allows_action`).
     pub open_document: Vec<ParametricBinding>,
     pub save_document_as: Vec<ParametricBinding>,
     pub new_document_at: Vec<ParametricBinding>,
@@ -398,7 +398,7 @@ impl Default for KeybindConfig {
             // Default unbound — `Home` is consumed by the text editor
             // when it's open (already routed to TextEditCursorHome),
             // and binding it at the Document level would shadow that
-            // for users who haven't customised. Users who want a
+            // for users who haven't customized. Users who want a
             // jump-to-root key bind it themselves.
             jump_to_root: vec![],
 
@@ -450,7 +450,7 @@ impl Default for KeybindConfig {
 
             // LabelEdit cursor primitives. Same routing path as
             // TextEdit but single-line — no Up/Down/Word*. Defaults
-            // mirror what `route_label_edit_key` previously
+            // mirror what `route_single_line_key` previously
             // hardcoded.
             label_edit_cursor_left: vec!["ArrowLeft".into()],
             label_edit_cursor_right: vec!["ArrowRight".into()],
@@ -608,11 +608,23 @@ impl KeybindConfig {
             (Action::TextEditCursorDown, &self.text_edit_cursor_down),
             (Action::TextEditCursorHome, &self.text_edit_cursor_home),
             (Action::TextEditCursorEnd, &self.text_edit_cursor_end),
-            (Action::TextEditCursorLeftSelect, &self.text_edit_cursor_left_select),
-            (Action::TextEditCursorRightSelect, &self.text_edit_cursor_right_select),
+            (
+                Action::TextEditCursorLeftSelect,
+                &self.text_edit_cursor_left_select,
+            ),
+            (
+                Action::TextEditCursorRightSelect,
+                &self.text_edit_cursor_right_select,
+            ),
             (Action::TextEditCursorUpSelect, &self.text_edit_cursor_up_select),
-            (Action::TextEditCursorDownSelect, &self.text_edit_cursor_down_select),
-            (Action::TextEditCursorHomeSelect, &self.text_edit_cursor_home_select),
+            (
+                Action::TextEditCursorDownSelect,
+                &self.text_edit_cursor_down_select,
+            ),
+            (
+                Action::TextEditCursorHomeSelect,
+                &self.text_edit_cursor_home_select,
+            ),
             (Action::TextEditCursorEndSelect, &self.text_edit_cursor_end_select),
             (Action::TextEditWordLeft, &self.text_edit_word_left),
             (Action::TextEditWordRight, &self.text_edit_word_right),
@@ -643,7 +655,7 @@ impl KeybindConfig {
             for s in *strings {
                 match KeyBind::parse(s) {
                     Ok(k) => binds.push((action.clone(), k)),
-                    Err(e) => warn!("skipping invalid keybind '{}': {}", s, e),
+                    Err(e) => warn!("keybinds: skipping invalid keybind '{}': {}", s, e),
                 }
             }
         }
@@ -705,7 +717,7 @@ impl KeybindConfig {
         // Color: `args = [axis, value]` where axis = `bg|text|border`.
         // `axis.parse::<ColorAxis>()` is the strum-`EnumString`-derived
         // round-trip with `IntoStaticStr` (`Bg.into() == "bg"` etc.) —
-        // unrecognised tokens land in `Err`, which `push_parametric`
+        // unrecognized tokens land in `Err`, which `push_parametric`
         // then warns and skips on.
         push_parametric(&mut binds, "set_color", 2, &self.set_color, |args| match args {
             [axis, value] => axis
@@ -900,14 +912,17 @@ impl KeybindConfig {
         for (combo, mutation_id) in &self.custom_mutation_bindings {
             match KeyBind::parse(combo) {
                 Ok(k) => custom_binds.push((k, mutation_id.clone())),
-                Err(e) => warn!("skipping invalid custom_mutation_binding '{}': {}", combo, e),
+                Err(e) => warn!(
+                    "keybinds: skipping invalid custom_mutation_binding '{}': {}",
+                    combo, e
+                ),
             }
         }
         let mut macro_binds: Vec<(KeyBind, String)> = Vec::new();
         for (combo, macro_id) in &self.macro_bindings {
             match KeyBind::parse(combo) {
                 Ok(k) => macro_binds.push((k, macro_id.clone())),
-                Err(e) => warn!("skipping invalid macro_binding '{}': {}", combo, e),
+                Err(e) => warn!("keybinds: skipping invalid macro_binding '{}': {}", combo, e),
             }
         }
 
@@ -946,14 +961,14 @@ fn push_parametric<F>(
             Ok(k) => match build(&binding.args) {
                 Some(action) => binds.push((action, k)),
                 None => warn!(
-                    "skipping {} binding '{}': wrong args (got {}, expected {})",
+                    "keybinds: skipping {} binding '{}': wrong args (got {}, expected {})",
                     name,
                     binding.combo,
                     binding.args.len(),
                     expected_arity,
                 ),
             },
-            Err(e) => warn!("skipping invalid keybind '{}': {}", binding.combo, e),
+            Err(e) => warn!("keybinds: skipping invalid keybind '{}': {}", binding.combo, e),
         }
     }
 }

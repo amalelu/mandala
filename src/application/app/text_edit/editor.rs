@@ -543,34 +543,12 @@ pub(in crate::application::app) fn apply_literal_char_insert(
         }
         _ => {
             if let Key::Character(c) = logical_key {
-                // Insert the payload as a single grapheme-aware
-                // splice rather than codepoint-by-codepoint. An
-                // IME delivering `"한"` (Hangul, three jamo /
-                // codepoints, one cluster) or a dead-key sequence
-                // delivering `"e\u{0301}"` would otherwise call
-                // `insert_at_cursor` once per char and increment
-                // `cursor` by `+1` per char — but
-                // `count_grapheme_clusters` of the resulting
-                // buffer collapses the codepoints into one
-                // cluster, leaving `cursor_grapheme_pos` past
-                // the buffer's grapheme count. Route through
-                // `grapheme_chad::insert_str_at_grapheme` (which
-                // walks the cluster boundary and calls
-                // `String::insert_str`), then derive the cursor
-                // advance from the pre/post cluster-count delta
-                // so the combining-mark merge case is handled
-                // uniformly with the additive case.
                 let payload = c.as_str();
                 let trimmed: String = payload.chars().filter(|ch| !ch.is_control()).collect();
                 if !trimmed.is_empty() {
-                    let pre_clusters =
-                        baumhard::util::grapheme_chad::count_grapheme_clusters(buffer);
-                    baumhard::util::grapheme_chad::insert_str_at_grapheme(
+                    let advance = baumhard::util::grapheme_chad::insert_str_at_grapheme_counted(
                         buffer, *cursor, &trimmed,
                     );
-                    let post_clusters =
-                        baumhard::util::grapheme_chad::count_grapheme_clusters(buffer);
-                    let advance = post_clusters.saturating_sub(pre_clusters);
                     // Any successful insertion (including the
                     // combining-mark merge case) collapses the
                     // shift-select anchor.
@@ -686,9 +664,58 @@ mod tests {
 
     use super::*;
     use crate::application::document::tests_common::test_map_path;
+    use crate::application::platform::input::SmolStr;
     use baumhard::core::primitives::{ColorFontRegion, ColorFontRegions, Range};
     use baumhard::mindmap::loader;
     use baumhard::mindmap::tree_builder::build_mindmap_tree;
+
+    fn open_state(buffer: &str, cursor: usize) -> TextEditState {
+        TextEditState::Open {
+            node_id: "n-test".to_string(),
+            section_idx: 0,
+            buffer: buffer.to_string(),
+            cursor_grapheme_pos: cursor,
+            buffer_regions: ColorFontRegions::new_empty(),
+            original_text: buffer.to_string(),
+            original_regions: ColorFontRegions::new_empty(),
+            selection_anchor: None,
+            exit_to_default_on_close: false,
+        }
+    }
+
+    fn text_key(s: &str) -> Key {
+        Key::Character(SmolStr::new(s))
+    }
+
+    fn text_state_buffer_and_cursor(state: &TextEditState) -> (&str, usize) {
+        match state {
+            TextEditState::Open {
+                buffer,
+                cursor_grapheme_pos,
+                ..
+            } => (buffer, *cursor_grapheme_pos),
+            TextEditState::Closed => panic!("expected open text edit state"),
+        }
+    }
+
+    #[test]
+    fn literal_insert_ime_payload_advances_by_grapheme_delta() {
+        let mut state = open_state("", 0);
+        let jamo = "\u{1112}\u{1161}\u{11AB}";
+        assert!(apply_literal_char_insert(None, &text_key(jamo), &mut state));
+        let (buffer, cursor) = text_state_buffer_and_cursor(&state);
+        assert_eq!(buffer, jamo);
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn literal_insert_combining_mark_merge_does_not_overadvance_cursor() {
+        let mut state = open_state("e", 1);
+        assert!(apply_literal_char_insert(None, &text_key("\u{0301}"), &mut state));
+        let (buffer, cursor) = text_state_buffer_and_cursor(&state);
+        assert_eq!(buffer, "e\u{0301}");
+        assert_eq!(cursor, 1);
+    }
 
     /// Build a fresh tree from the testament map and pick the first
     /// MindNode id whose first section-area carries non-empty text.

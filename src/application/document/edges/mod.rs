@@ -21,12 +21,16 @@
 //!   `Self`. The first style edit on a stock edge forks its
 //!   `GlyphConnectionConfig` off the canvas defaults via
 //!   `ensure_glyph_connection_inline` here before writing to it.
+//! - [`font_triple`]: the `(size, min, max)` resolution — request
+//!   ordering, inversion guard, clamp — shared by the body,
+//!   label, and portal-text font channels.
 //!
 //! Tests live inline under each axis's own file (per
 //! `TEST_CONVENTIONS.md §T2.1`); the shared helpers' tests are in
-//! `structural.rs` and `closure_helpers.rs`.
+//! `structural.rs`, `closure_helpers.rs`, and `font_triple.rs`.
 
 mod closure_helpers;
+mod font_triple;
 mod label;
 mod mode;
 mod portal;

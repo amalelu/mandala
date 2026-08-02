@@ -17,6 +17,64 @@ use super::RebuildContext;
 /// inline editor.
 const MULTI_TARGET_SEPARATOR: &str = "\n\n";
 
+/// Resolve a custom-mutation key binding and apply it through the same
+/// path the click-trigger handler in `click.rs` uses: animation-aware
+/// (`start_animation` when `timing.duration_ms > 0`), and always
+/// invoking `apply_document_actions`. Returns `true` when a mutation
+/// was found and applied.
+///
+/// This is the third and lowest tier of the keyboard resolution chain
+/// (Action → Macro → CustomMutation, CONCEPTS §5). It takes
+/// [`InputContextCore`](crate::application::app::input_context_core::InputContextCore)
+/// rather than the native context because both
+/// targets' keyboard handlers run the same chain: a
+/// `custom_mutation_bindings` entry that fires on the desktop has to
+/// fire in the browser too, and before this lift the browser's chain
+/// stopped one tier short.
+///
+/// Rebuilds via bare `rebuild_all`, deliberately **not**
+/// [`RebuildContext::rebuild_after_geometry_change`]:
+/// [`super::apply_keybind_custom_mutation`] already clears the
+/// connection cache on the non-animated branch, and the animated
+/// branch leaves the cache for the animation envelope to invalidate —
+/// an extra clear here would cost a full re-sample on every animated
+/// keystroke.
+pub(in crate::application::app) fn dispatch_custom_mutation_for_key(
+    core: &mut super::super::super::input_context_core::InputContextCore<'_>,
+    key_name: &str,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+) -> bool {
+    let id = match core.keybinds.custom_mutation_for(key_name, ctrl, shift, alt) {
+        Some(s) => s.to_string(),
+        None => return false,
+    };
+    let Some(doc) = core.document.as_deref_mut() else {
+        return false;
+    };
+    let crate::application::document::SelectionState::Single(nid) = doc.selection.clone() else {
+        return false;
+    };
+    let Some(cm) = doc.mutation_registry.get(&id).cloned() else {
+        return false;
+    };
+    let now = crate::application::app::now_ms() as u64;
+    let applied =
+        super::apply_keybind_custom_mutation(doc, core.mindmap_tree, core.scene_cache, &cm, &nid, now);
+    if applied {
+        crate::application::app::scene_rebuild::rebuild_all(
+            doc,
+            core.interaction_mode,
+            core.mindmap_tree,
+            core.app_scene,
+            core.renderer,
+            core.scene_cache,
+        );
+    }
+    applied
+}
+
 /// Walk the undo stack one step back. If an animation is in flight
 /// when undo fires, fast-forward it first so the undo lands on a
 /// settled scene state rather than mid-transition (otherwise the
@@ -45,14 +103,19 @@ pub(in crate::application::app) fn apply_create_orphan_node(
 
 /// Create a new orphan node at `canvas_pos`, select it, rebuild,
 /// then open the inline text editor on the new node pre-cleared.
-/// The keyboard-driven shape of `Action::CreateOrphanNodeAndEdit`.
 ///
-/// Mouse-driven empty-canvas double-click reaches the same
-/// outcome through `dispatch::dispatch_create_orphan_and_edit`
-/// (which uses `DispatchHit::canvas_pos` instead of `cursor_pos`)
-/// — that helper is called inline by the `DoubleClickActivate`
-/// arm and stays in `dispatch.rs` because `DispatchHit` doesn't
-/// flow through `dispatch_compatible`.
+/// The single body for `Action::CreateOrphanNodeAndEdit` — this
+/// existed in three copies before #29 (here, a private helper in
+/// `dispatch/native.rs`, and inline in the browser's double-click
+/// ladder). All three callers now land here:
+///
+/// - the keyboard shape, via `dispatch_compatible`'s
+///   `CreateOrphanNodeAndEdit` arm, which supplies `cursor_pos`;
+/// - both targets' mouse-driven empty-canvas double-click, via
+///   [`super::DoubleClickRoute::CreateOrphanAndEdit`], which
+///   supplies `DispatchHit::canvas_pos`.
+///
+/// The position is the only thing that ever differed between them.
 pub(in crate::application::app) fn apply_create_orphan_node_and_edit(
     canvas_pos: glam::Vec2,
     rc: &mut RebuildContext<'_>,

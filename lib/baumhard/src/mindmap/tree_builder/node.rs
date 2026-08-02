@@ -41,9 +41,30 @@ use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::shape::NodeShape;
 use crate::gfx_structs::tree::Tree;
 use crate::mindmap::border::{resolve_border_style, BORDER_APPROX_CHAR_WIDTH_FRAC};
-use crate::mindmap::model::{MindMap, MindNode, MindSection};
+use crate::mindmap::model::{ChildIndex, MindMap, MindNode, MindSection};
 use crate::util::color::{self, Color as BaumhardColor};
 use glam::Vec2;
+
+/// Nominal font scale, in points, for a mindmap `GlyphArea` with
+/// no `text_runs` to take a size from — the historical
+/// `cosmic_text` fall-through this builder has always used.
+///
+/// Two areas land here. A **section** with no runs is measured
+/// and laid out at this scale. A **node container area** carries
+/// it as its nominal scale but renders no glyphs of its own
+/// (sections do), so there it keeps the area's scale field
+/// well-defined rather than sizing anything drawn.
+///
+/// This is the **renderer's** fallback, deliberately distinct from
+/// the *authoring* default a newly-created run gets (24pt, in the
+/// app crate's `document::defaults`). A run-less legacy section
+/// keeps rendering at 14pt; the moment something authors a run
+/// onto it, the authoring default applies instead. Named so the
+/// reverse converter
+/// (`document::custom::sync::DEFAULT_TEXT_RUN_SIZE_PT`) can pin
+/// itself to the forward path's number rather than repeating the
+/// literal and drifting from it.
+pub const DEFAULT_SECTION_FONT_SCALE: f32 = 14.0;
 
 /// Build the *container* `GlyphArea` for a mind node — the chrome-
 /// bearing area that owns background fill, border padding, shape,
@@ -70,7 +91,12 @@ pub(super) fn mindnode_container_area(
     // so the subtree-AABB cache stays well-defined.
     let position = node.pos_vec2();
     let bounds = node.size_vec2();
-    let mut area = GlyphArea::new(14.0, 14.0 * 1.2, position, bounds);
+    let mut area = GlyphArea::new(
+        DEFAULT_SECTION_FONT_SCALE,
+        DEFAULT_SECTION_FONT_SCALE * 1.2,
+        position,
+        bounds,
+    );
 
     // `background_padding` math — see `mindmap/border.rs` for the
     // derivation. Same shape as pre-section nodes; the container
@@ -132,10 +158,10 @@ pub(super) fn mindnode_section_area(
     // Effective scale: pick the *largest* run size so a multi-run
     // section with a small first run and a 96pt later run gets a
     // line-height tall enough to keep the larger glyphs from
-    // clipping. Falls through to the cosmic-text / historical
-    // default (14pt) when the section has no runs. The single-
+    // clipping. Falls through to [`DEFAULT_SECTION_FONT_SCALE`]
+    // when the section has no runs. The single-
     // section default-migration shape (one run spanning all of
-    // `text`) round-trips with the pre-section behaviour because
+    // `text`) round-trips with the pre-section behavior because
     // there's only one size to pick. Mirrors the same `max`
     // posture in `grow_one_node_to_fit_text`.
     let scale_max = section
@@ -143,7 +169,11 @@ pub(super) fn mindnode_section_area(
         .iter()
         .map(|r| r.size_pt as f32)
         .fold(0.0_f32, f32::max);
-    let scale = if scale_max > 0.0 { scale_max } else { 14.0 };
+    let scale = if scale_max > 0.0 {
+        scale_max
+    } else {
+        DEFAULT_SECTION_FONT_SCALE
+    };
     let line_height = scale * 1.2;
     let position = node.pos_vec2() + Vec2::new(section.offset.x as f32, section.offset.y as f32);
     let bounds = section
@@ -165,11 +195,9 @@ pub(super) fn mindnode_section_area(
     // family resolves to `None` (cosmic-text picks; warns at
     // attrs-build time).
     //
-    // The cascade for a section without runs falls through to
-    // `node.style.text_color` at scene-emit time (see
-    // `scene_builder/node_pass.rs`); the tree-walker side keeps
-    // the section's own `regions` empty, which the renderer
-    // interprets as "use defaults".
+    // A section without runs keeps its `regions` empty, which the
+    // renderer interprets as "use defaults" — `node.style.text_color`
+    // never enters the region table.
     let mut regions = ColorFontRegions::new_empty();
     for run in &section.text_runs {
         let resolved = color::resolve_var(&run.color, vars);
@@ -208,7 +236,7 @@ pub(super) fn mindnode_section_model(section: &MindSection, area: &GlyphArea) ->
     }
 
     // Same dominant-style trick as the picker overlay: read the
-    // first region's font + colour as the model's effective
+    // first region's font + color as the model's effective
     // styling. Sections without runs fall through to
     // `(Any, black)`, mirroring cosmic-text's defaults — the
     // structural model is conservative; per-component refinement
@@ -234,8 +262,38 @@ pub(super) fn mindnode_section_model(section: &MindSection, area: &GlyphArea) ->
     model
 }
 
+/// Whether a section has an on-screen surface at all.
+///
+/// A non-finite offset or a non-finite / non-positive explicit size
+/// produces a degenerate or NaN AABB. Emitting one poisons the
+/// subtree-AABB cache, hands cosmic-text a zero-area or NaN buffer,
+/// and gives hit-testing a rectangle that can never be hit — so the
+/// section is skipped entirely and `maptool verify` reports it to
+/// the author instead.
+///
+/// Shared with [`super::build_section_frames`], which must frame
+/// exactly the sections that render: the two would otherwise agree
+/// only by both open-coding the same four comparisons, which is how
+/// they drifted apart in the first place. (The clip-AABB pass is
+/// node-level and has no section logic, so it is not a consumer.)
+///
+/// Note this is *not* an empty-text check: a section with no text
+/// still owns a real rectangle (it is where the user's next
+/// keystroke lands), so it keeps its area and its `section_map`
+/// entry.
+pub(super) fn renderable_section(section: &MindSection) -> bool {
+    if !section.offset.x.is_finite() || !section.offset.y.is_finite() {
+        return false;
+    }
+    match section.size.as_ref() {
+        Some(sz) => sz.width.is_finite() && sz.height.is_finite() && sz.width > 0.0 && sz.height > 0.0,
+        None => true,
+    }
+}
+
 /// Append the section subtree (one `GlyphArea` + one `GlyphModel`
-/// per [`MindSection`]) under `parent_node_id` and record the
+/// per renderable [`MindSection`] — see [`renderable_section`])
+/// under `parent_node_id` and record the
 /// section-area's `NodeId` in `section_map`. Each section element
 /// carries `Flag::SectionRoot` so click-routing and per-section
 /// scene rebuild can discriminate them from sibling child mind-
@@ -257,6 +315,9 @@ pub(super) fn append_node_sections(
     id_counter: &mut usize,
 ) {
     for (section_idx, section) in node.sections.iter().enumerate() {
+        if !renderable_section(section) {
+            continue;
+        }
         // Effective channel: use the authored value when the
         // user explicitly set one (`Some(_)`); otherwise default
         // to the section's index. The `Option<usize>` shape
@@ -297,9 +358,22 @@ pub(super) fn append_node_sections(
 /// container, sections, and child mind-nodes as a flat sibling
 /// list under the parent container — same shape as the
 /// pre-section tree, just with extra section siblings.
+///
+/// `parent_folded` is `true` when an ancestor (including the
+/// immediate parent) is folded. Children of a folded node are
+/// hidden by construction, so the recursive fold check from the
+/// old `is_hidden_by_fold` path is redundant here.
+// `clippy::too_many_arguments`: a recursive arena walk threading
+// four out-parameters (`tree`, `node_map`, `section_map`,
+// `id_counter`) plus the read-only `(map, index, parent)` triple.
+// Bundling the out-params into a struct would just add a borrow
+// indirection on every recursion step.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_children_recursive(
     map: &MindMap,
+    index: &ChildIndex<'_>,
     parent_mind_id: &str,
+    parent_folded: bool,
     parent_node_id: NodeId,
     tree: &mut Tree<GfxElement, GfxMutator>,
     node_map: &mut HashMap<String, NodeId>,
@@ -308,9 +382,9 @@ pub(super) fn build_children_recursive(
 ) {
     let vars = &map.canvas.theme_variables;
     let canvas_default_border = map.canvas.default_border.as_ref();
-    let children = map.children_of(parent_mind_id);
-    for child in &children {
-        if map.is_hidden_by_fold(child) {
+    let children = index.children_of(parent_mind_id);
+    for child in children {
+        if parent_folded {
             continue;
         }
         let area = mindnode_container_area(child, vars, canvas_default_border);
@@ -325,7 +399,9 @@ pub(super) fn build_children_recursive(
 
         build_children_recursive(
             map,
+            index,
             &child.id,
+            child.folded,
             child_node_id,
             tree,
             node_map,

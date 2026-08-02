@@ -47,6 +47,7 @@ use glam::Vec2;
 /// instant mutation into an animated transition. Serde-default
 /// throughout so old maps without timing fields still load.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AnimationTiming {
     /// How long the animation runs after `delay_ms` elapses.
     /// `0` means "instant" — the dispatcher should bypass the
@@ -68,9 +69,15 @@ pub struct AnimationTiming {
     /// in-memory so the eventual dispatcher lands without a
     /// wire-format migration, but `#[serde(skip)]` keeps the
     /// field out of `.mindmap.json` until the tick loop reads
-    /// it. Authoring `"then": "Loop"` today would be a silent
-    /// half-feature (§4) — the map loads, the animation runs
-    /// once, and nothing ever loops. The gate lifts when
+    /// it. Shipping it as a silent half-feature (§4) — the map
+    /// loads, the animation runs once, nothing ever loops — is
+    /// what the skip prevents.
+    ///
+    /// Because the container denies unknown fields, `"then"` in
+    /// a map is now a **load error** rather than a key quietly
+    /// swallowed and then erased on the next save. The author
+    /// finds out the followup is unwired while they still have
+    /// the file they wrote. The gate lifts when
     /// `tick_animations` gains the followup dispatch.
     #[serde(skip)]
     pub then: Option<Followup>,
@@ -147,7 +154,7 @@ pub enum Followup {
 
 /// Linear interpolation between `from` and `to` at progress `t`
 /// (already eased). `t` should be in `[0, 1]`; values outside
-/// the range extrapolate, which is the right behaviour for
+/// the range extrapolate, which is the right behavior for
 /// `EaseOut` curves that reach `t = 1` early but get evaluated
 /// once more at `t > 1` due to frame-time jitter — clamp at the
 /// caller if extrapolation isn't desired.
@@ -317,22 +324,32 @@ mod tests {
         assert!(!json.contains("then"));
     }
 
-    /// `Followup` variants are not reachable via the wire
-    /// format. Authoring `"then": "Loop"` in a `.mindmap.json`
-    /// today would be a silent half-feature (§4): the map would
-    /// load, the animation would run once, and nothing would
-    /// loop. The gate lifts when `tick_animations` gains the
-    /// followup dispatch.
+    /// `Followup` variants are not reachable via the wire format,
+    /// and authoring one says so out loud. `"then"` used to be
+    /// swallowed in silence — the map loaded, the animation ran
+    /// once, nothing looped, and the key was gone from the file
+    /// after the next save. Denying unknown fields turns that into
+    /// a rejection while the author still has what they wrote.
+    ///
+    /// The gate itself is unchanged: no `.mindmap.json` can put a
+    /// `Followup` into the model. The gate lifts when
+    /// `tick_animations` gains the followup dispatch.
     #[test]
-    fn test_followup_is_never_deserialized() {
-        let with_followup = r#"{
-            "duration_ms": 200,
-            "then": {"Reverse": {"hold_ms": 50}}
-        }"#;
-        let parsed: AnimationTiming = serde_json::from_str(with_followup).unwrap();
-        assert!(parsed.then.is_none());
-        let loop_followup = r#"{"duration_ms": 200, "then": "Loop"}"#;
-        let parsed: AnimationTiming = serde_json::from_str(loop_followup).unwrap();
+    fn test_followup_is_rejected_rather_than_silently_dropped() {
+        for authored in [
+            r#"{"duration_ms": 200, "then": {"Reverse": {"hold_ms": 50}}}"#,
+            r#"{"duration_ms": 200, "then": "Loop"}"#,
+        ] {
+            let err = serde_json::from_str::<AnimationTiming>(authored)
+                .expect_err("an unwired `then` must not load silently");
+            assert!(
+                err.to_string().contains("unknown field `then`"),
+                "the rejection must name the key the author wrote: {err}"
+            );
+        }
+        // And the field is still absent from every timing the
+        // loader can produce.
+        let parsed: AnimationTiming = serde_json::from_str(r#"{"duration_ms": 200}"#).unwrap();
         assert!(parsed.then.is_none());
     }
 }

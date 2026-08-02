@@ -19,22 +19,73 @@ impl MindMapDocument {
     /// become roots with cascaded ID renames), and removing every edge
     /// that touched the deleted node.
     pub fn delete_node(&mut self, node_id: &str) -> Option<UndoAction> {
-        let node = self.mindmap.nodes.remove(node_id)?;
+        // Reject a missing id up front; the `expect` on removal below relies
+        // on this check.
+        if !self.mindmap.nodes.contains_key(node_id) {
+            return None;
+        }
 
-        // Orphan immediate children: each gets a fresh root-level ID,
-        // and ALL descendants have their IDs cascaded (old prefix → new).
-        let child_ids: Vec<String> = self
+        // Mint fresh root ids strictly above every live id's *leading* Dewey
+        // segment — computed while `node_id` is still present so its own
+        // segment counts. A root at or above this value has an entirely
+        // unused `id` / `id.` prefix, which buys two guarantees at once:
+        //   * no re-rooted child can ever be handed `node_id` (or a Dewey
+        //     prefix of it) — the collision that let undo overwrite a live
+        //     node and destroy data (issue #1); and
+        //   * the cascade into that fresh prefix can never collide with an
+        //     unrelated node, so `cascade_rename`'s guard never trips here.
+        let mut next_root = self.next_free_root_segment();
+
+        // Remove the node *before* any cascade. Ids and tree structure can
+        // diverge — `apply_reparent` / `apply_orphan_selection` re-point
+        // `parent_id` without re-keying — so a structural child's id may be a
+        // Dewey prefix of `node_id` (child "1" whose parent is "1.0").
+        // Cascading that child while `node_id` is still present would sweep
+        // the deleted node up by prefix and strand this removal; removing
+        // first makes the cascade blind to it. Regression:
+        // `tests_delete::test_delete_node_*prefix*`.
+        let node = self
             .mindmap
             .nodes
-            .values()
-            .filter(|n| n.parent_id.as_deref() == Some(node_id))
+            .remove(node_id)
+            .expect("node presence checked at entry");
+
+        // Orphan immediate children (by `parent_id`): each gets a fresh
+        // root-level id, and every id-prefix descendant cascades with it.
+        // `children_of` returns them in `id_sort_key` order, so fresh roots
+        // are assigned deterministically regardless of `HashMap` iteration
+        // order — stable across runs, platforms, and saved output.
+        let child_ids: Vec<String> = self
+            .mindmap
+            .children_of(node_id)
+            .iter()
             .map(|n| n.id.clone())
             .collect();
         let mut orphaned_children: Vec<(String, String)> = Vec::new();
         for cid in &child_ids {
-            let new_root_id = self.fresh_child_id(None);
+            let new_root_id = next_root.to_string();
+            next_root += 1;
+            if !self.cascade_rename(cid, &new_root_id) {
+                // Unreachable in normal operation: `next_root` sits above
+                // every live leading segment, so the target prefix is empty.
+                // If a future divergence ever trips the guard, degrade
+                // without corrupting (CODE_CONVENTIONS §9): reverse the
+                // orphans already re-rooted, restore the node, and report the
+                // delete as a no-op rather than leave a dangling child.
+                log::error!(
+                    "delete_node({node_id}): re-rooting child '{cid}' to '{new_root_id}' was \
+                     refused; aborting delete to avoid corrupting the map"
+                );
+                for (done_cid, done_root) in orphaned_children.iter().rev() {
+                    self.cascade_rename(done_root, done_cid);
+                    if let Some(child) = self.mindmap.nodes.get_mut(done_cid) {
+                        child.parent_id = Some(node_id.to_string());
+                    }
+                }
+                self.mindmap.nodes.insert(node_id.to_string(), node);
+                return None;
+            }
             orphaned_children.push((cid.clone(), new_root_id.clone()));
-            self.cascade_rename(cid, &new_root_id);
             // Clear parent_id on the newly-rooted child.
             if let Some(child) = self.mindmap.nodes.get_mut(&new_root_id) {
                 child.parent_id = None;
@@ -65,7 +116,12 @@ impl MindMapDocument {
     /// Rename a node and all its descendants from `old_id` to `new_id`,
     /// updating the node's `id` field, `parent_id` of descendants,
     /// and all edge/portal references.
-    pub(super) fn cascade_rename(&mut self, old_id: &str, new_id: &str) {
+    ///
+    /// Returns `true` when the rename was applied, `false` when it was
+    /// refused because a target id is already occupied by an unrelated node
+    /// (in which case nothing is mutated). Callers that must stay consistent
+    /// on refusal — `delete_node` — check the result and roll back.
+    pub(super) fn cascade_rename(&mut self, old_id: &str, new_id: &str) -> bool {
         // Collect the full old→new mapping: the node itself + all descendants.
         let old_prefix = format!("{}.", old_id);
         let renames: Vec<(String, String)> = self
@@ -83,17 +139,39 @@ impl MindMapDocument {
             })
             .collect();
 
+        // old → new lookup, built once up front and shared by both the
+        // collision guard (its keys are exactly the old ids being vacated)
+        // and the parent_id / edge rewrites below. Replaces the former inner
+        // `for (ro, rn) in &renames` linear scans (CODE_CONVENTIONS §5):
+        // O(renames) + O(edges) instead of O(renames²) + O(edges·renames).
+        let rename_map: std::collections::HashMap<&str, &str> =
+            renames.iter().map(|(o, n)| (o.as_str(), n.as_str())).collect();
+
+        // Defense in depth (CODE_CONVENTIONS §9: degrade, don't corrupt).
+        // A target id already occupied by a node *outside* this rename set
+        // (i.e. not one of the old ids we're vacating) means the caller
+        // minted a colliding id — the historical delete+undo corruption.
+        // Refuse the whole rename rather than let the `nodes.insert(new, ..)`
+        // below silently clobber a live node. With the `delete_node` fix this
+        // never fires; it is a backstop against any future bad caller.
+        for (_, new) in &renames {
+            if !rename_map.contains_key(new.as_str()) && self.mindmap.nodes.contains_key(new) {
+                log::error!(
+                    "cascade_rename({old_id} -> {new_id}): target id '{new}' is already \
+                     occupied by an unrelated node; aborting rename to avoid corrupting the map"
+                );
+                return false;
+            }
+        }
+
         // Rename nodes in the HashMap.
         for (old, new) in &renames {
             if let Some(mut node) = self.mindmap.nodes.remove(old) {
                 node.id = new.clone();
                 // Update parent_id if it references another renamed node.
-                if let Some(ref pid) = node.parent_id {
-                    for (ro, rn) in &renames {
-                        if pid == ro {
-                            node.parent_id = Some(rn.clone());
-                            break;
-                        }
+                if let Some(pid) = node.parent_id.as_deref() {
+                    if let Some(new_pid) = rename_map.get(pid) {
+                        node.parent_id = Some((*new_pid).to_string());
                     }
                 }
                 self.mindmap.nodes.insert(new.clone(), node);
@@ -102,15 +180,33 @@ impl MindMapDocument {
 
         // Update edge references.
         for edge in &mut self.mindmap.edges {
-            for (old, new) in &renames {
-                if edge.from_id == *old {
-                    edge.from_id = new.clone();
-                }
-                if edge.to_id == *old {
-                    edge.to_id = new.clone();
-                }
+            if let Some(new) = rename_map.get(edge.from_id.as_str()) {
+                edge.from_id = (*new).to_string();
+            }
+            if let Some(new) = rename_map.get(edge.to_id.as_str()) {
+                edge.to_id = (*new).to_string();
             }
         }
+        true
+    }
+
+    /// One past the highest *leading* Dewey segment across every node id in
+    /// the map (`0` for an empty map). A root minted at or above this value
+    /// has an entirely unused `id` / `id.` prefix, so re-rooting a subtree
+    /// there can neither reuse a live id nor collide with one.
+    ///
+    /// `delete_node` uses it to re-root orphans without ever reusing (a
+    /// prefix of) the id it is about to delete. For a structurally-consistent
+    /// map this equals `fresh_child_id(None)`; the two diverge only when an
+    /// intermediate root has been deleted, leaving dotted ids whose leading
+    /// segment no longer has a matching root.
+    fn next_free_root_segment(&self) -> usize {
+        self.mindmap
+            .nodes
+            .keys()
+            .filter_map(|id| id.split('.').next().and_then(|seg| seg.parse::<usize>().ok()))
+            .max()
+            .map_or(0, |m| m + 1)
     }
 
     /// Create a new unattached (orphan) node at the given canvas position.
@@ -187,9 +283,7 @@ impl MindMapDocument {
             // MultiSection delete targets the deduplicated set
             // of owning nodes — routes through the shared
             // `dedup_owning_node_ids` helper.
-            SelectionState::MultiSection(_) => {
-                Some(DelKind::Nodes(self.selection.dedup_owning_node_ids()))
-            }
+            SelectionState::MultiSection(_) => Some(DelKind::Nodes(self.selection.dedup_owning_node_ids())),
             SelectionState::Multi(ids) => Some(DelKind::Nodes(ids.clone())),
             // Delete on any edge-sub-part selection (label, icon,
             // text) targets the owning edge — the sub-parts are

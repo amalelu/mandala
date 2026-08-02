@@ -556,6 +556,23 @@ fn edge_paste_valid_hex_sets_color() {
 }
 
 #[test]
+fn edge_paste_valid_short_hex_sets_color() {
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    let tid = TargetId::Edge(er.clone());
+    let outcome = {
+        let mut view = view_for(&mut doc, &tid);
+        view.clipboard_paste("#abc")
+    };
+    assert_eq!(outcome, Outcome::Applied);
+    let edge = doc.mindmap.edges.iter().find(|e| er.matches(e)).unwrap();
+    assert_eq!(
+        edge.glyph_connection.as_ref().and_then(|c| c.color.as_deref()),
+        Some("#abc")
+    );
+}
+
+#[test]
 fn edge_paste_invalid_content_reports_invalid() {
     // The paste path rejects arbitrary text — it expects a hex
     // code or `var(--name)` — so garbage produces `Invalid`
@@ -567,6 +584,20 @@ fn edge_paste_invalid_content_reports_invalid() {
     match view.clipboard_paste("not a color") {
         Outcome::Invalid(msg) => assert!(msg.contains("not a color")),
         other => panic!("expected Invalid, got {:?}", other),
+    }
+}
+
+#[test]
+fn edge_paste_rejects_bare_hex_like_words() {
+    let mut doc = load_test_doc();
+    let er = select_first_edge(&mut doc);
+    for word in ["bad", "fade", "decade"] {
+        let tid = TargetId::Edge(er.clone());
+        let mut view = view_for(&mut doc, &tid);
+        match view.clipboard_paste(word) {
+            Outcome::Invalid(_) => {}
+            other => panic!("expected Invalid for bare hex-like word {word:?}, got {other:?}"),
+        }
     }
 }
 

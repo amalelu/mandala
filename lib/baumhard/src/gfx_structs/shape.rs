@@ -54,6 +54,20 @@ pub const SHAPE_ID_RECTANGLE: u32 = 0;
 /// shader.
 pub const SHAPE_ID_ELLIPSE: u32 = 1;
 
+/// Canonical named-enum spellings for `NodeStyle.shape`, as used by
+/// `format/enums.md` and by `maptool verify`. The runtime accepts
+/// these case-insensitively (and treats `"circle"` as an alias for
+/// `"ellipse"`); verify normalises to lowercase before matching.
+pub const KNOWN_SHAPES: &[&str] = &[
+    "rectangle",
+    "rounded_rectangle",
+    "ellipse",
+    "circle",
+    "diamond",
+    "parallelogram",
+    "hexagon",
+];
+
 impl NodeShape {
     /// Stable id fed to the fragment shader. Must stay in lock-step
     /// with the `SHAPE_*` constants in
@@ -106,7 +120,19 @@ impl NodeShape {
 
     /// Point-in-shape test in the node's **local** coordinate space,
     /// where the bounding box runs from `(0, 0)` to `bounds`.
-    /// Callers pre-translate `local = world_point - area.position`.
+    ///
+    /// Callers pre-translate into that frame, and **which two values
+    /// they subtract matters**: derive `local` and `bounds` from the
+    /// same `min` / `max` pair, as
+    /// `local = point - min`, `bounds = max - min`. Recomputing
+    /// either side independently (say `local = point - position`
+    /// against a separately-stored extent) makes the boundary
+    /// compare inexact — f32 addition is not associative, so
+    /// `(position + extent) - position` can exceed `extent` by an
+    /// ULP and a point exactly on the far edge then reports `false`.
+    /// `bvh_find` in
+    /// [`tree_walker`](crate::gfx_structs::tree_walker) is the
+    /// reference caller.
     ///
     /// A degenerate `bounds` (either dimension `<= 0`) always
     /// reports `false`, matching how the BVH skips zero-size areas

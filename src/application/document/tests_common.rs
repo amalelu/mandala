@@ -147,11 +147,11 @@ pub(in crate::application) fn doc_with_one_edge() -> (MindMapDocument, super::Ed
     (doc, er)
 }
 
-/// Materialise `node_id` into a two-section node with one pinned
+/// Materialize `node_id` into a two-section node with one pinned
 /// text run per section. Sets the node's `style.text_color` to
-/// `text_color_default` so the cascade source the section colour
-/// setter consults (and the colour picker reads) resolves against
-/// a known anchor. Each section's single run carries the colour
+/// `text_color_default` so the cascade source the section color
+/// setter consults (and the color picker reads) resolves against
+/// a known anchor. Each section's single run carries the color
 /// at the matching index in `section_run_colors`; both share
 /// `font` and `size_pt`. The pre-existing first section's `text`
 /// field is preserved (only its runs are replaced).
@@ -330,7 +330,7 @@ impl TestNudgeMutation {
         self
     }
 
-    /// Materialise the `CustomMutation`. Consumes the builder.
+    /// Materialize the `CustomMutation`. Consumes the builder.
     pub(in crate::application) fn build(self) -> baumhard::mindmap::custom_mutation::CustomMutation {
         use baumhard::gfx_structs::area::GlyphAreaCommand;
         use baumhard::gfx_structs::mutator::Mutation;
@@ -349,5 +349,100 @@ impl TestNudgeMutation {
             document_actions: vec![],
             timing: self.timing,
         }
+    }
+}
+
+/// Every per-role element list one canvas rebuild produces, in one
+/// value.
+///
+/// Test scaffolding, not a pipeline stage: the app has no such
+/// aggregate — `CanvasFrame` hands each pass's output straight to
+/// its canvas role. Document-level tests want to assert against a
+/// role without standing up an `AppScene` and a `Renderer`, so
+/// [`project_roles`] runs the passes in `CanvasFrame::update_all`'s
+/// order against the same shared inputs and collects the results.
+pub(crate) struct ProjectedRoles {
+    pub connection_elements: Vec<baumhard::mindmap::tree_builder::ConnectionElement>,
+    pub edge_handles: Vec<baumhard::mindmap::tree_builder::EdgeHandleElement>,
+    pub connection_label_elements: Vec<baumhard::mindmap::tree_builder::ConnectionLabelElement>,
+    pub section_frames: Vec<baumhard::mindmap::tree_builder::SectionFrameElement>,
+    pub node_resize_handles: Vec<baumhard::mindmap::tree_builder::NodeResizeHandleElement>,
+    pub section_resize_handles: Vec<baumhard::mindmap::tree_builder::SectionResizeHandleElement>,
+    pub border_nodes: Vec<baumhard::mindmap::tree_builder::BorderNodeData>,
+}
+
+/// Project every canvas role from `doc` at `camera_zoom`, with no
+/// drag offsets — the document-side mirror of one
+/// `CanvasFrame::update_all` pass.
+pub(crate) fn project_roles(
+    doc: &MindMapDocument,
+    camera_zoom: f32,
+    resize_overrides: baumhard::mindmap::tree_builder::InteractionModeOverrides<'_>,
+) -> ProjectedRoles {
+    use baumhard::mindmap::scene_cache::{EdgeKey, SceneConnectionCache};
+    use baumhard::mindmap::tree_builder as tb;
+
+    let offsets = std::collections::HashMap::new();
+    let overrides = doc.frame_overrides(resize_overrides);
+    let hidden = doc.mindmap.fold_hidden_set();
+    let mut cache = SceneConnectionCache::new();
+    cache.ensure_zoom(camera_zoom);
+    let node_aabbs = tb::node_clip_aabbs(&doc.mindmap, &offsets, overrides.border, &hidden);
+    let (connection_elements, edge_handles) = tb::build_connection_elements(
+        &doc.mindmap,
+        &offsets,
+        &node_aabbs,
+        overrides.selection.edge,
+        overrides.edge_color,
+        &mut cache,
+        camera_zoom,
+        &hidden,
+    );
+    let highlight_key: Option<EdgeKey> = overrides
+        .selection
+        .edge_label
+        .clone()
+        .or_else(|| overrides.selection.edge.map(|(f, t, ty)| EdgeKey::new(f, t, ty)));
+    ProjectedRoles {
+        connection_elements,
+        edge_handles,
+        connection_label_elements: tb::build_label_elements(
+            &doc.mindmap,
+            &offsets,
+            overrides.selection.label_edit,
+            overrides.edge_color,
+            highlight_key.as_ref(),
+            camera_zoom,
+            &hidden,
+        ),
+        section_frames: tb::build_section_frames(
+            &doc.mindmap,
+            &offsets,
+            overrides.selection.node_edit_for,
+            overrides.selection.focused_section,
+            overrides.border,
+            &hidden,
+        ),
+        node_resize_handles: tb::build_selected_node_handles(
+            &doc.mindmap,
+            &offsets,
+            overrides.selection.selected_node_for_resize,
+            &hidden,
+        ),
+        section_resize_handles: tb::build_selected_section_handles(
+            &doc.mindmap,
+            &offsets,
+            overrides.selection.selected_section,
+            &hidden,
+        ),
+        border_nodes: tb::border_node_data(
+            &doc.mindmap,
+            &offsets,
+            tb::BorderChromeOverrides {
+                preview: overrides.border,
+                node_edit_for: overrides.selection.node_edit_for,
+            },
+            &hidden,
+        ),
     }
 }

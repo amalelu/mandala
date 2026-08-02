@@ -5,13 +5,12 @@
 
 use crate::core::primitives::{Applicable, ApplyOperation, ColorFontRegions, Range};
 use crate::font::fonts::AppFont;
+use crate::gfx_structs::delta::Delta;
 use crate::gfx_structs::shape::NodeShape;
 use crate::util::color::FloatRgba;
 use glam::f32::Vec2;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::ops::Add;
-use strum_macros::{Display, EnumIter};
+use strum_macros::{Display, EnumDiscriminants, EnumIter};
 
 use super::area::GlyphArea;
 use super::area_fields::{GlyphAreaField, GlyphAreaFieldType, OutlineStyle};
@@ -21,57 +20,22 @@ use super::zoom_visibility::ZoomVisibility;
 /////// GlyphAreaCommand Mutator ///////
 ///////////////////////////////////////
 
-/// Tag enum for [`GlyphAreaCommand`] — identifies the command kind
-/// without carrying payload. Used as a key in `HashSet`/`HashMap`
-/// look-ups where the caller needs to know *which* command was
-/// scheduled but not its parameters.
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Eq, Hash, EnumIter, Display)]
-pub enum GlyphAreaCommandType {
-    /// Remove grapheme clusters from the front of the text.
-    PopFront,
-    /// Remove grapheme clusters from the back of the text.
-    PopBack,
-    /// Shift position left by a pixel delta.
-    NudgeLeft,
-    /// Shift position right by a pixel delta.
-    NudgeRight,
-    /// Shift position down by a pixel delta.
-    NudgeDown,
-    /// Shift position up by a pixel delta.
-    NudgeUp,
-    /// Teleport position to an absolute (x, y).
-    MoveTo,
-    /// Increase font scale by a delta.
-    GrowFont,
-    /// Decrease font scale by a delta.
-    ShrinkFont,
-    /// Replace font scale with an absolute value.
-    SetFontSize,
-    /// Replace the line-height multiplier.
-    SetLineHeight,
-    /// Increase line-height by a delta.
-    GrowLineHeight,
-    /// Decrease line-height by a delta.
-    ShrinkLineHeight,
-    /// Replace render bounds with absolute (w, h).
-    SetBounds,
-    /// Assign a font to a character range.
-    SetRegionFont,
-    /// Assign a colour to a character range.
-    SetRegionColor,
-    /// Remove the colour/font region at a character range.
-    DeleteColorFontRegion,
-    /// Move an existing region's span to a new character range.
-    ChangeRegionRange,
-}
-
 /// Imperative mutation command applied to a [`GlyphArea`] via its
 /// [`Applicable`] impl. Unlike [`DeltaGlyphArea`] (which is
 /// arithmetic — `Add`/`Assign`/`Subtract`), a command performs a
 /// single named operation whose semantics are fixed. All variants
 /// are O(1) except the `ColorFontRegion`-touching ones, which are
 /// O(n) in the number of existing regions.
-#[derive(Clone, Debug, Copy, Serialize, Deserialize)]
+///
+/// The payload-free `GlyphAreaCommandType` tag is derived from this
+/// enum, so a new command cannot ship without its tag.
+#[derive(Clone, Debug, Copy, Serialize, Deserialize, PartialEq, EnumDiscriminants)]
+#[strum_discriminants(name(GlyphAreaCommandType))]
+#[strum_discriminants(derive(Hash, Serialize, Deserialize, EnumIter, Display))]
+#[strum_discriminants(doc = "Payload-free tag for [`GlyphAreaCommand`], derived by strum. Keys")]
+#[strum_discriminants(doc = "the `HashSet`/`HashMap` look-ups where a caller needs to know")]
+#[strum_discriminants(doc = "*which* command was scheduled but not its parameters.")]
+#[serde(deny_unknown_fields)]
 pub enum GlyphAreaCommand {
     /// Remove `n` grapheme clusters from the front of the text.
     PopFront(usize),
@@ -87,6 +51,19 @@ pub enum GlyphAreaCommand {
     NudgeUp(f32),
     /// Teleport position to absolute `(x, y)`.
     MoveTo(f32, f32),
+    /// Rotate position around `pivot` by `degrees` (clockwise). The
+    /// area-side twin of
+    /// [`GlyphModelCommand::Rotate`](crate::gfx_structs::model::GlyphModelCommand::Rotate);
+    /// both bottom out in `clockwise_rotation_around_pivot`.
+    Rotate {
+        /// Pivot in world coordinates. On the wire this is a
+        /// two-element `[x, y]` array — `glam` serializes `Vec2` as a
+        /// sequence and its deserializer rejects the
+        /// `{"x": …, "y": …}` object form. See `format/mutations.md`.
+        pivot: Vec2,
+        /// Rotation angle in degrees.
+        degrees: f32,
+    },
     /// Increase font scale by a delta.
     GrowFont(f32),
     /// Decrease font scale by a delta.
@@ -103,41 +80,14 @@ pub enum GlyphAreaCommand {
     SetBounds(f32, f32),
     /// Assign a font to the given character range. O(n) in region count.
     SetRegionFont(Range, AppFont),
-    /// Assign a colour to the given character range. O(n) in region count.
+    /// Assign a color to the given character range. O(n) in region count.
     SetRegionColor(Range, FloatRgba),
-    /// Remove the colour/font region at the given character range.
+    /// Remove the color/font region at the given character range.
     /// O(n) in region count.
     DeleteColorFontRegion(Range),
     /// Move an existing region from `current` to `new` range. O(n) in
     /// region count.
     ChangeRegionRange(Range, Range),
-}
-
-impl GlyphAreaCommand {
-    /// Discriminant tag for this command, useful for set/map keys.
-    /// O(1), no allocation.
-    pub fn variant(&self) -> GlyphAreaCommandType {
-        match self {
-            GlyphAreaCommand::PopFront(_) => GlyphAreaCommandType::PopFront,
-            GlyphAreaCommand::PopBack(_) => GlyphAreaCommandType::PopBack,
-            GlyphAreaCommand::NudgeLeft(_) => GlyphAreaCommandType::NudgeLeft,
-            GlyphAreaCommand::NudgeRight(_) => GlyphAreaCommandType::NudgeRight,
-            GlyphAreaCommand::NudgeDown(_) => GlyphAreaCommandType::NudgeDown,
-            GlyphAreaCommand::NudgeUp(_) => GlyphAreaCommandType::NudgeUp,
-            GlyphAreaCommand::MoveTo(_, _) => GlyphAreaCommandType::MoveTo,
-            GlyphAreaCommand::GrowFont(_) => GlyphAreaCommandType::GrowFont,
-            GlyphAreaCommand::ShrinkFont(_) => GlyphAreaCommandType::ShrinkFont,
-            GlyphAreaCommand::SetFontSize(_) => GlyphAreaCommandType::SetFontSize,
-            GlyphAreaCommand::SetLineHeight(_) => GlyphAreaCommandType::SetLineHeight,
-            GlyphAreaCommand::GrowLineHeight(_) => GlyphAreaCommandType::GrowLineHeight,
-            GlyphAreaCommand::ShrinkLineHeight(_) => GlyphAreaCommandType::ShrinkLineHeight,
-            GlyphAreaCommand::SetBounds(_, _) => GlyphAreaCommandType::SetBounds,
-            GlyphAreaCommand::SetRegionFont(_, _) => GlyphAreaCommandType::SetRegionFont,
-            GlyphAreaCommand::SetRegionColor(_, _) => GlyphAreaCommandType::SetRegionColor,
-            GlyphAreaCommand::DeleteColorFontRegion(_) => GlyphAreaCommandType::DeleteColorFontRegion,
-            GlyphAreaCommand::ChangeRegionRange { .. } => GlyphAreaCommandType::ChangeRegionRange,
-        }
-    }
 }
 
 impl Applicable<GlyphArea> for GlyphAreaCommand {
@@ -147,6 +97,9 @@ impl Applicable<GlyphArea> for GlyphAreaCommand {
             GlyphAreaCommand::PopBack(pop_count) => target.pop_back(*pop_count),
             GlyphAreaCommand::MoveTo(x, y) => {
                 target.set_position((*x, *y));
+            }
+            GlyphAreaCommand::Rotate { pivot, degrees } => {
+                target.rotate(*pivot, *degrees);
             }
             GlyphAreaCommand::NudgeLeft(value) => {
                 target.nudge_left(*value);
@@ -206,57 +159,20 @@ impl Applicable<GlyphArea> for GlyphAreaCommand {
 /// and (via the co-located `Operation` entry) the arithmetic semantics
 /// to apply. Applied via [`Applicable::apply_to`], which dispatches
 /// into [`GlyphArea::apply_operation`].
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct DeltaGlyphArea {
-    /// One entry per touched field type. `GlyphAreaFieldType::ApplyOperation`
-    /// is a sibling entry that carries the global `Add`/`Assign`/`Subtract`
-    /// mode for the rest of the delta.
-    pub fields: FxHashMap<GlyphAreaFieldType, GlyphAreaField>,
-}
+///
+/// Storage, `new()`, the operation lookup, and the additive merge come
+/// from the shared [`Delta`] container — the area and model deltas are
+/// the same container over different vocabularies, not two hand-kept
+/// twins. The accessors below are what *is* area-specific.
+pub type DeltaGlyphArea = Delta<GlyphAreaField>;
 
 impl Applicable<GlyphArea> for DeltaGlyphArea {
     fn apply_to(&self, target: &mut GlyphArea) {
-        target.apply_operation(&self)
-    }
-}
-
-impl Add for DeltaGlyphArea {
-    type Output = DeltaGlyphArea;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        let mut fields = FxHashMap::default();
-        for (key, value) in self.fields {
-            if let Some(other_value) = rhs.fields.get(&key) {
-                // If both sides have the same field, add them together
-                fields.insert(key, value + other_value.clone());
-            } else {
-                // If only one side has the field, just copy it over
-                fields.insert(key, value);
-            }
-        }
-        // Copy over any fields that are only in the rhs
-        for (key, value) in rhs.fields {
-            if !fields.contains_key(&key) {
-                fields.insert(key, value);
-            }
-        }
-        DeltaGlyphArea { fields }
+        target.apply_operation(self)
     }
 }
 
 impl DeltaGlyphArea {
-    /// Collect a vector of fields into a delta, keyed by their
-    /// `GlyphAreaFieldType`. Duplicate variants collapse to the last
-    /// entry in `fields` (FxHashMap semantics). O(n) over `fields`.
-    pub fn new(fields: Vec<GlyphAreaField>) -> DeltaGlyphArea {
-        let mut field_map = FxHashMap::default();
-        for field in fields {
-            field_map.insert(field.variant(), field);
-        }
-
-        DeltaGlyphArea { fields: field_map }
-    }
-
     /// Build a full-coverage `Assign` delta that mirrors every
     /// per-glyph field of `area` the in-place mutator path needs to
     /// re-stamp on a tree leaf. Emits `Text`, `position`, `bounds`,
@@ -291,74 +207,52 @@ impl DeltaGlyphArea {
         ])
     }
 
-    /// The global arithmetic mode this delta applies with
-    /// (`Assign` / `Add` / `Subtract`), or `Noop` when no
-    /// `Operation` entry is present. O(1).
-    pub fn operation_variant(&self) -> ApplyOperation {
-        if let Some(GlyphAreaField::Operation(operation)) =
-            self.fields.get(&GlyphAreaFieldType::ApplyOperation)
-        {
-            *operation
-        } else {
-            ApplyOperation::Noop
-        }
-    }
-
-    /// Return the delta's colour/font region payload, if any. O(1).
+    /// Borrow the delta's color/font region payload, if any. O(1).
     pub fn color_font_regions(&self) -> Option<&ColorFontRegions> {
-        if let Some(GlyphAreaField::ColorFontRegions(color_font_regions)) =
-            self.fields.get(&GlyphAreaFieldType::ColorFontRegions)
-        {
-            Some(color_font_regions)
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::ColorFontRegions)? {
+            GlyphAreaField::ColorFontRegions(regions) => Some(regions),
+            _ => None,
         }
     }
 
     /// Return the delta's position payload as a `Vec2`, if any. O(1).
     pub fn position(&self) -> Option<Vec2> {
-        if let Some(GlyphAreaField::Position(x)) = self.fields.get(&GlyphAreaFieldType::Position) {
-            Some(x.to_vec2())
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::Position)? {
+            GlyphAreaField::Position(position) => Some(position.to_vec2()),
+            _ => None,
         }
     }
 
     /// Return the delta's scale payload, if any. O(1).
     pub fn scale(&self) -> Option<f32> {
-        if let Some(GlyphAreaField::Scale(scale)) = self.fields.get(&GlyphAreaFieldType::Scale) {
-            Some(scale.0)
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::Scale)? {
+            GlyphAreaField::Scale(scale) => Some(scale.0),
+            _ => None,
         }
     }
 
     /// Return the delta's line-height payload, if any. O(1).
     pub fn line_height(&self) -> Option<f32> {
-        if let Some(GlyphAreaField::LineHeight(line_height)) =
-            self.fields.get(&GlyphAreaFieldType::LineHeight)
-        {
-            Some(line_height.0)
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::LineHeight)? {
+            GlyphAreaField::LineHeight(line_height) => Some(line_height.0),
+            _ => None,
         }
     }
 
-    /// Borrow the delta's text payload, if any. O(1).
+    /// Borrow the delta's text payload, if any. O(1) — no copy of
+    /// the string.
     pub fn text_ref(&self) -> Option<&str> {
-        if let Some(GlyphAreaField::Text(text)) = self.fields.get(&GlyphAreaFieldType::Text) {
-            Some(text)
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::Text)? {
+            GlyphAreaField::Text(text) => Some(text),
+            _ => None,
         }
     }
 
     /// Return the delta's bounds payload as a `Vec2`, if any. O(1).
     pub fn bounds(&self) -> Option<Vec2> {
-        if let Some(GlyphAreaField::Bounds(x)) = self.fields.get(&GlyphAreaFieldType::Bounds) {
-            Some(x.to_vec2())
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::Bounds)? {
+            GlyphAreaField::Bounds(bounds) => Some(bounds.to_vec2()),
+            _ => None,
         }
     }
 
@@ -368,10 +262,9 @@ impl DeltaGlyphArea {
     /// explicitly clears the outline" (returns `Some(None)`); the
     /// latter is how a mutator removes a previously-set halo.
     pub fn outline(&self) -> Option<Option<OutlineStyle>> {
-        if let Some(GlyphAreaField::Outline(outline)) = self.fields.get(&GlyphAreaFieldType::Outline) {
-            Some(*outline)
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::Outline)? {
+            GlyphAreaField::Outline(outline) => Some(*outline),
+            _ => None,
         }
     }
 
@@ -380,10 +273,9 @@ impl DeltaGlyphArea {
     /// `shape` field alone; `Some(shape)` means it replaces (under
     /// Assign/Add) or resets-to-rectangle (under Subtract). O(1).
     pub fn shape(&self) -> Option<NodeShape> {
-        if let Some(GlyphAreaField::Shape(shape)) = self.fields.get(&GlyphAreaFieldType::Shape) {
-            Some(*shape)
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::Shape)? {
+            GlyphAreaField::Shape(shape) => Some(*shape),
+            _ => None,
         }
     }
 
@@ -393,12 +285,9 @@ impl DeltaGlyphArea {
     /// replaces (under Assign/Add) or resets-to-unbounded (under
     /// Subtract). O(1).
     pub fn zoom_visibility(&self) -> Option<ZoomVisibility> {
-        if let Some(GlyphAreaField::ZoomVisibility(window)) =
-            self.fields.get(&GlyphAreaFieldType::ZoomVisibility)
-        {
-            Some(*window)
-        } else {
-            None
+        match self.get(GlyphAreaFieldType::ZoomVisibility)? {
+            GlyphAreaField::ZoomVisibility(window) => Some(*window),
+            _ => None,
         }
     }
 }
@@ -430,7 +319,7 @@ mod tests {
         assert!(delta.fields.contains_key(&GlyphAreaFieldType::ColorFontRegions));
         assert!(delta.fields.contains_key(&GlyphAreaFieldType::Outline));
         assert!(delta.fields.contains_key(&GlyphAreaFieldType::ZoomVisibility));
-        assert!(delta.fields.contains_key(&GlyphAreaFieldType::ApplyOperation));
+        assert!(delta.fields.contains_key(&GlyphAreaFieldType::Operation));
         assert_eq!(delta.operation_variant(), ApplyOperation::Assign);
     }
 

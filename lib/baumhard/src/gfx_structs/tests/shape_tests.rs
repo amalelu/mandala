@@ -52,7 +52,7 @@ pub fn do_shape_from_style_string_empty_and_unknown_fall_back_to_rectangle() {
 
 /// Rectangle `contains_local` matches the classic inclusive-AABB
 /// predicate: corners and edges hit, anything outside `[0, bounds]`
-/// misses. Locks in the happy path for the legacy behaviour that
+/// misses. Locks in the happy path for the legacy behavior that
 /// every existing node still depends on.
 #[test]
 pub fn test_shape_rectangle_contains_local() {
@@ -68,16 +68,16 @@ pub fn do_shape_rectangle_contains_local() {
     assert!(!NodeShape::Rectangle.contains_local(Vec2::new(100.1, 25.0), b));
 }
 
-/// Perfect-circle case: bounds 100×100, radius 50, centre
-/// `(50, 50)`. Centre and the four cardinal rim points all count
+/// Perfect-circle case: bounds 100×100, radius 50, center
+/// `(50, 50)`. Center and the four cardinal rim points all count
 /// as inside. Pins the "rim is inclusive" edge-case the BVH hit
-/// test relies on for click-on-border behaviour.
+/// test relies on for click-on-border behavior.
 #[test]
-pub fn test_shape_ellipse_contains_centre_and_rim() {
-    do_shape_ellipse_contains_centre_and_rim();
+pub fn test_shape_ellipse_contains_center_and_rim() {
+    do_shape_ellipse_contains_center_and_rim();
 }
 
-pub fn do_shape_ellipse_contains_centre_and_rim() {
+pub fn do_shape_ellipse_contains_center_and_rim() {
     let b = Vec2::new(100.0, 100.0);
     assert!(NodeShape::Ellipse.contains_local(Vec2::new(50.0, 50.0), b));
     assert!(NodeShape::Ellipse.contains_local(Vec2::new(0.0, 50.0), b));
@@ -86,7 +86,7 @@ pub fn do_shape_ellipse_contains_centre_and_rim() {
     assert!(NodeShape::Ellipse.contains_local(Vec2::new(50.0, 100.0), b));
 }
 
-/// Bounding-box corners sit at distance `√2 · r` from the centre
+/// Bounding-box corners sit at distance `√2 · r` from the center
 /// of an inscribed circle — comfortably outside. This is the
 /// exact case the whole refactor exists to reject: under the
 /// pre-change AABB-only hit test, a corner click on an ellipse
@@ -105,7 +105,7 @@ pub fn do_shape_ellipse_rejects_aabb_corners() {
 }
 
 /// Stretched conic case: bounds `200 × 50`, radii `(100, 25)`.
-/// Centre and cardinal rim points still hit; bounding-box corners
+/// Center and cardinal rim points still hit; bounding-box corners
 /// still miss. Guards the "ellipse handles wider-than-tall without
 /// extra parameters" claim from the shape doc comment.
 #[test]
@@ -139,7 +139,7 @@ pub fn do_shape_degenerate_bounds_never_hit() {
 }
 
 /// Selection rect tucked fully inside the ellipse: the closest
-/// point on the rect to the ellipse centre is the ellipse centre
+/// point on the rect to the ellipse center is the ellipse center
 /// itself, so `distance == 0` and the test registers a hit.
 /// Without this branch, the lasso would report "no nodes
 /// selected" whenever the user drew a small rectangle inside a

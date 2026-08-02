@@ -208,9 +208,57 @@ pub fn do_bvh_descend_point_on_exact_boundary() {
 
     assert_eq!(tree.descendant_at(Vec2::new(10.0, 20.0)), Some(id));
     assert_eq!(tree.descendant_at(Vec2::new(40.0, 60.0)), Some(id));
+    // Just outside on each of the four sides.
     assert!(tree.descendant_at(Vec2::new(40.01, 60.0)).is_none());
     assert!(tree.descendant_at(Vec2::new(40.0, 60.01)).is_none());
     assert!(tree.descendant_at(Vec2::new(9.99, 20.0)).is_none());
+    assert!(tree.descendant_at(Vec2::new(20.0, 19.99)).is_none());
+}
+
+#[test]
+fn test_bvh_far_edge_hit_survives_float_rounding() {
+    do_bvh_far_edge_hit_survives_float_rounding();
+}
+
+/// A click exactly on the far edge of an area whose `position +
+/// render_bounds` does not round-trip through f32 must still hit.
+///
+/// The AABB test compares against `pos + bounds`; the shape
+/// refinement then re-expresses the point in the area's local
+/// frame. Recomputing that frame as `point - pos` versus `bounds`
+/// broke the tie: for the coordinates below, `872.0 + 22.4` rounds
+/// to `894.40002`, and `894.40002 - 872.0` rounds to `22.400024`,
+/// which compares *greater* than `bounds.x`. The refinement then
+/// rejected a point the AABB test had just accepted, so a click on
+/// the right or bottom edge of a portal marker fell through to
+/// whatever sat beneath it. Found by the tree-builder's
+/// differential hit-test sweep (`tree_builder::tests::canvas_hit`).
+///
+/// The coordinates are the real ones from that sweep, not invented:
+/// a 16 pt portal marker on a node at x = 900.
+pub fn do_bvh_far_edge_hit_survives_float_rounding() {
+    fonts::init();
+    let pos = Vec2::new(872.0, 391.02222);
+    let bounds = Vec2::new(22.4, 22.4);
+    let mut tree = Tree::new_non_indexed();
+    let area = GfxElement::new_area_non_indexed(GlyphArea::new_with_str("m", 14.0, 14.0, pos, bounds), 0);
+    let id = tree.arena.new_node(area);
+    tree.root.append(id, &mut tree.arena);
+
+    // The corner the AABB test admits is exactly `pos + bounds`.
+    let far = pos + bounds;
+    assert_ne!(
+        far.x - pos.x,
+        bounds.x,
+        "fixture must actually exercise the non-associative case"
+    );
+    assert_eq!(tree.descendant_at(far), Some(id), "far corner");
+    assert_eq!(tree.descendant_at(Vec2::new(far.x, pos.y)), Some(id), "top-right");
+    assert_eq!(
+        tree.descendant_at(Vec2::new(pos.x, far.y)),
+        Some(id),
+        "bottom-left"
+    );
 }
 
 // ── point in subtree AABB but outside own area ────────────────────

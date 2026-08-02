@@ -6,7 +6,7 @@
 //! - `build_connection_path` turns an edge's anchors + control points
 //!   into a `ConnectionPath` (straight or cubic Bezier).
 //! - `sample_path` walks evenly-spaced points along a path —
-//!   `scene_builder` uses these to place per-glyph anchors along a
+//!   the connection pass uses these to place per-glyph anchors along a
 //!   rendered connection.
 //! - `distance_to_path` backs the edge hit-test.
 //!
@@ -166,7 +166,7 @@ pub fn point_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
 }
 
 /// Return the unit tangent direction of `path` at parameter `t`,
-/// clamped to `[0, 1]`. Straight paths return the normalised
+/// clamped to `[0, 1]`. Straight paths return the normalized
 /// (end - start) vector for every `t`; cubic Bezier paths evaluate
 /// the analytical derivative at `t`. If the path is degenerate
 /// (zero length or coincident controls) the returned vector is
@@ -195,7 +195,7 @@ pub fn tangent_at_t(path: &ConnectionPath, t: f32) -> Vec2 {
 
 /// Uniform-t sample count for the cubic-Bezier closest-point
 /// search. 32 keeps the sweep well under 1µs at f32 and is
-/// sufficient to seed the Newton refiner in the neighbourhood of
+/// sufficient to seed the Newton refiner in the neighborhood of
 /// the true minimum for labels on typical mindmap curvatures.
 const CLOSEST_POINT_SAMPLES: usize = 32;
 
@@ -261,7 +261,7 @@ pub fn closest_point_on_path(path: &ConnectionPath, cursor: Vec2) -> (f32, f32) 
             let p1 = *control1;
             let p2 = *control2;
             let p3 = *end;
-            // Uniform t-sample sweep to find the neighbourhood of
+            // Uniform t-sample sweep to find the neighborhood of
             // the closest point.
             let mut best_t = 0.0f32;
             let mut best_dist_sq = f32::MAX;

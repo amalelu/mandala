@@ -10,6 +10,7 @@ use super::capabilities::{
 };
 use super::color_value::ColorValue;
 use super::outcome::{ClipboardContent, Outcome};
+use crate::application::document::defaults::default_text_run;
 use crate::application::document::{EdgeRef, MindMapDocument, SectionPayload, SelectionState};
 
 /// A mutable view into one selected component, holding the doc ref
@@ -582,27 +583,13 @@ impl<'a> HandlesCut for TargetView<'a> {
 }
 
 /// Minimal recognizer for the two color-literal forms the document
-/// model accepts: `#rrggbb` / `#rrggbbaa` hex codes and
-/// `var(--name)` theme references. Keeps the paste path from
-/// writing arbitrary strings into the color field — anything else
-/// the user might paste (prose, a URL, a number) should surface
-/// as `Outcome::Invalid` instead of a corrupt model value.
-///
-/// Hex: `#` plus exactly 6 or 8 ASCII hex digits, case-insensitive
-/// (mixed case `#ABcDef` is accepted — matches CSS semantics).
-///
-/// `var(...)`: `var(--name)` with a non-empty name. Trailing
-/// characters after the closing `)` are rejected —
-/// `var(--accent)garbage` previously slipped through a `starts_with
-/// / ends_with` pair.
+/// paste path accepts: `#`-prefixed Baumhard hex colors and
+/// `var(--name)` theme references. Clipboard content is arbitrary
+/// text, so paste requires the `#` prefix for hex even though
+/// Baumhard's canonical parser also accepts bare hex.
 fn is_valid_color_literal(s: &str) -> bool {
-    if let Some(rest) = s.strip_prefix('#') {
-        return (rest.len() == 6 || rest.len() == 8) && rest.chars().all(|c| c.is_ascii_hexdigit());
-    }
-    if let Some(inner) = s.strip_prefix("var(--").and_then(|s| s.strip_suffix(')')) {
-        return !inner.is_empty() && !inner.contains(|c: char| c == '(' || c == ')');
-    }
-    false
+    (s.starts_with('#') && baumhard::util::color::is_valid_hex_color(s))
+        || baumhard::util::color::is_var_ref(s)
 }
 
 fn read_edge_label(doc: &MindMapDocument, er: &EdgeRef) -> Option<String> {
@@ -765,15 +752,8 @@ fn cut_section_range(
         .first()
         .cloned()
         .unwrap_or_else(|| baumhard::mindmap::model::TextRun {
-            start: 0,
-            end: 0,
-            bold: false,
-            italic: false,
-            underline: false,
-            font: "LiberationSans".to_string(),
-            size_pt: 24,
             color: node.style.text_color.clone(),
-            hyperlink: None,
+            ..default_text_run(0)
         });
     baumhard::mindmap::model::text_run_ops::splice_range(
         &mut new_runs,
@@ -856,15 +836,8 @@ fn paste_section_range(
     .map(|idx| section.text_runs[idx].clone())
     .or_else(|| section.text_runs.first().cloned())
     .unwrap_or_else(|| baumhard::mindmap::model::TextRun {
-        start: 0,
-        end: 0,
-        bold: false,
-        italic: false,
-        underline: false,
-        font: "LiberationSans".to_string(),
-        size_pt: 24,
         color: node.style.text_color.clone(),
-        hyperlink: None,
+        ..default_text_run(0)
     });
     baumhard::mindmap::model::text_run_ops::splice_range(
         &mut new_runs,

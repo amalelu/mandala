@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Node text / background / border / text-colour / font-size setters + set_node_style_field helper.
+//! Node text / background / border / text-color / font-size
+//! setters, plus the per-call-site contract of the shared
+//! `nodes/undo_envelope.rs` envelope they all route through.
 //!
 //! Part of the tests split for `document`. Helpers live in
 //! `tests_common`; only the tests for this theme live here.
@@ -2786,5 +2788,565 @@ fn test_border_on_off_clears_active_node_preview() {
     assert!(
         doc.border_preview.is_none(),
         "border on must clear an active per-node preview (implicit-cancel rule)"
+    );
+}
+
+// ── Envelope contract, pinned at each call site ────────────────
+//
+// `nodes/undo_envelope.rs` owns the snapshot → verdict →
+// undo-push → auto-fit sequence for every node-scoped setter.
+// Testing the envelope in isolation is not enough: the bug class
+// this replaces was always a *caller* that wired the sequence up
+// slightly differently from its siblings. So each committing
+// setter gets its no-op contract pinned here, at the public API
+// the app actually calls.
+
+/// Run `call` against a fresh document with a clean undo stack
+/// and `dirty` cleared, and assert the call reported no change,
+/// pushed no undo entry, did not dirty the document, and left the
+/// node byte-identical.
+///
+/// The four-part no-op contract every setter in this module
+/// shares. Named per call site by the tests below so a failure
+/// says which setter drifted.
+fn assert_setter_no_op<F>(label: &str, call: F)
+where
+    F: FnOnce(&mut MindMapDocument, &str) -> bool,
+{
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    let before = doc.mindmap.nodes.get(&nid).expect("node").clone();
+
+    let changed = call(&mut doc, &nid);
+
+    assert!(!changed, "{label}: expected a no-op verdict");
+    assert!(doc.undo_stack.is_empty(), "{label}: no-op pushed an undo entry");
+    assert!(!doc.dirty, "{label}: no-op dirtied the document");
+    let after = doc.mindmap.nodes.get(&nid).expect("node");
+    assert_eq!(
+        node_fingerprint(&before),
+        node_fingerprint(after),
+        "{label}: no-op mutated the node"
+    );
+}
+
+/// Structural fingerprint of a node for whole-value comparison.
+/// `NodeStyle` and `MindSection` deliberately do not implement
+/// `PartialEq` (they are data-model records, not value types), so
+/// the tests compare their serialized form — which also catches a
+/// field a future `PartialEq` impl might forget.
+fn node_fingerprint(node: &MindNode) -> String {
+    serde_json::to_string(node).expect("MindNode serializes")
+}
+
+/// Every style / text setter that is handed the value it already
+/// holds must report no change and leave nothing behind. One
+/// assertion per call site, because a shared envelope only helps
+/// if the callers actually reach it.
+#[test]
+fn test_node_setters_are_no_ops_when_value_is_unchanged() {
+    assert_setter_no_op("set_node_bg_color", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().style.background_color.clone();
+        doc.set_node_bg_color(nid, current)
+    });
+    assert_setter_no_op("set_node_border_color", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().style.frame_color.clone();
+        doc.set_node_border_color(nid, current)
+    });
+    assert_setter_no_op("set_node_text_color", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().style.text_color.clone();
+        doc.set_node_text_color(nid, current)
+    });
+    assert_setter_no_op("set_node_border_visible", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().style.show_frame;
+        doc.set_node_border_visible(nid, current)
+    });
+    assert_setter_no_op("set_node_text", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().sections[0].text.clone();
+        doc.set_node_text(nid, current)
+    });
+    assert_setter_no_op("set_section_text", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().sections[0].text.clone();
+        doc.set_section_text(nid, 0, current)
+    });
+    assert_setter_no_op("set_section_text_preserving_runs", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().sections[0].text.clone();
+        doc.set_section_text_preserving_runs(nid, 0, current)
+    });
+    assert_setter_no_op("set_node_font_size", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().sections[0].text_runs[0].size_pt;
+        doc.set_node_font_size(nid, current as f32)
+    });
+    assert_setter_no_op("set_section_font_size", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().sections[0].text_runs[0].size_pt;
+        doc.set_section_font_size(nid, 0, current as f32)
+    });
+    assert_setter_no_op("set_node_font_family", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().sections[0].text_runs[0]
+            .font
+            .clone();
+        doc.set_node_font_family(nid, Some(&current))
+    });
+    assert_setter_no_op("set_section_font_family", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().sections[0].text_runs[0]
+            .font
+            .clone();
+        doc.set_section_font_family(nid, 0, Some(&current))
+    });
+    assert_setter_no_op("set_section_offset", |doc, nid| {
+        let o = doc.mindmap.nodes.get(nid).unwrap().sections[0].offset;
+        doc.set_section_offset(nid, 0, o.x, o.y).expect("valid offset")
+    });
+    assert_setter_no_op("set_section_size", |doc, nid| {
+        let s = doc.mindmap.nodes.get(nid).unwrap().sections[0].size;
+        doc.set_section_size(nid, 0, s).expect("valid size")
+    });
+    assert_setter_no_op("set_section_text_color", |doc, nid| {
+        let current = doc.mindmap.nodes.get(nid).unwrap().sections[0].text_runs[0]
+            .color
+            .clone();
+        doc.set_section_text_color(nid, 0, current)
+    });
+    assert_setter_no_op("set_node_border_config", |doc, nid| {
+        doc.set_node_border_config(nid, BorderConfigEdits::default())
+            .changed
+    });
+    assert_setter_no_op("set_section_frame_border_config", |doc, nid| {
+        doc.set_section_frame_border_config(nid, 0, BorderConfigEdits::default())
+            .changed
+    });
+    assert_setter_no_op("apply_section_payload", |doc, nid| {
+        let section = &doc.mindmap.nodes.get(nid).unwrap().sections[0];
+        let text = section.text.clone();
+        let payload = SectionPayload::from_section(section);
+        doc.apply_section_payload(nid, 0, text, &payload)
+    });
+    assert_setter_no_op("set_section_text_color_range", |doc, nid| {
+        let color = doc.mindmap.nodes.get(nid).unwrap().sections[0].text_runs[0]
+            .color
+            .clone();
+        doc.set_section_text_color_range(nid, 0, 0, 3, color)
+    });
+    assert_setter_no_op("set_section_font_size_range", |doc, nid| {
+        let size = doc.mindmap.nodes.get(nid).unwrap().sections[0].text_runs[0].size_pt;
+        doc.set_section_font_size_range(nid, 0, 0, 3, size as f32)
+    });
+    assert_setter_no_op("set_section_font_family_range", |doc, nid| {
+        let font = doc.mindmap.nodes.get(nid).unwrap().sections[0].text_runs[0]
+            .font
+            .clone();
+        doc.set_section_font_family_range(nid, 0, 0, 3, Some(&font))
+    });
+}
+
+/// The same battery against a node id that does not exist. Every
+/// setter must degrade to the no-op verdict rather than panicking
+/// — `CODE_CONVENTIONS.md` §9, and the reason the id lookup now
+/// lives inside the envelope.
+#[test]
+fn test_node_setters_no_op_on_unknown_node_id() {
+    let mut doc = load_test_doc();
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    let ghost = "no-such-node-id";
+
+    assert!(!doc.set_node_bg_color(ghost, "#123456".into()));
+    assert!(!doc.set_node_border_color(ghost, "#123456".into()));
+    assert!(!doc.set_node_text_color(ghost, "#123456".into()));
+    assert!(!doc.set_node_border_visible(ghost, true));
+    assert!(!doc.set_node_text(ghost, "hi".into()));
+    assert!(!doc.set_section_text(ghost, 0, "hi".into()));
+    assert!(!doc.set_section_text_preserving_runs(ghost, 0, "hi".into()));
+    assert!(!doc.set_node_font_size(ghost, 33.0));
+    assert!(!doc.set_section_font_size(ghost, 0, 33.0));
+    assert!(!doc.set_node_font_family(ghost, Some("Norse")));
+    assert!(!doc.set_section_font_family(ghost, 0, Some("Norse")));
+    assert!(!doc.set_section_text_color_range(ghost, 0, 0, 3, "#123456".into()));
+    assert!(!doc.set_section_font_size_range(ghost, 0, 0, 3, 33.0));
+    assert!(!doc.set_section_font_family_range(ghost, 0, 0, 3, Some("Norse")));
+    assert!(
+        !doc.set_node_border_config(ghost, BorderConfigEdits::default())
+            .changed
+    );
+    assert!(
+        !doc.set_section_frame_border_config(ghost, 0, BorderConfigEdits::default())
+            .changed
+    );
+    assert!(!doc.set_section_offset(ghost, 0, 1.0, 1.0).expect("no error"));
+    assert!(!doc
+        .set_node_size(
+            ghost,
+            baumhard::mindmap::model::Size {
+                width: 50.0,
+                height: 50.0
+            }
+        )
+        .expect("no error"));
+    assert!(!doc.fit_node_to_content(ghost).expect("no error"));
+
+    assert!(doc.undo_stack.is_empty(), "unknown id must push no undo entry");
+    assert!(!doc.dirty, "unknown id must not dirty the document");
+}
+
+/// A section index past the end is the same no-op as an unknown
+/// node — the section wrapper folds the lookup in so no caller
+/// can index `sections` out of range. Pre-fix
+/// `mutate_section_with_style_undo` indexed directly and would
+/// have panicked in an interactive path.
+#[test]
+fn test_section_setters_no_op_on_out_of_range_section_index() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    let ghost_idx = 9_999;
+    doc.undo_stack.clear();
+    doc.dirty = false;
+
+    assert!(!doc.set_section_text(&nid, ghost_idx, "hi".into()));
+    assert!(!doc.set_section_text_preserving_runs(&nid, ghost_idx, "hi".into()));
+    assert!(!doc.set_section_text_color(&nid, ghost_idx, "#123456".into()));
+    assert!(!doc.set_section_font_size(&nid, ghost_idx, 33.0));
+    assert!(!doc.set_section_font_family(&nid, ghost_idx, Some("Norse")));
+    assert!(!doc.set_section_text_color_range(&nid, ghost_idx, 0, 3, "#123456".into()));
+    assert!(!doc
+        .set_section_offset(&nid, ghost_idx, 1.0, 1.0)
+        .expect("no error"));
+    assert!(
+        !doc.set_section_frame_border_config(&nid, ghost_idx, BorderConfigEdits::default())
+            .changed
+    );
+
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+}
+
+/// One labelled node setter in a table-driven battery: the name
+/// to report on failure, and a boxed call taking the document and
+/// a node id. Aliased because the bare tuple trips
+/// `clippy::type_complexity`.
+type NodeSetterCase = (&'static str, Box<dyn Fn(&mut MindMapDocument, &str) -> bool>);
+
+/// A real change through any of these setters pushes exactly one
+/// undo entry, and one `undo()` puts the node back. The other
+/// half of the envelope contract: the no-op path must not be so
+/// eager that it swallows genuine edits.
+#[test]
+fn test_node_setters_push_exactly_one_undo_entry_and_round_trip() {
+    let cases: Vec<NodeSetterCase> = vec![
+        (
+            "set_node_bg_color",
+            Box::new(|doc: &mut MindMapDocument, nid: &str| doc.set_node_bg_color(nid, "#0b0b0b".into())),
+        ),
+        (
+            "set_node_text_color",
+            Box::new(|doc: &mut MindMapDocument, nid: &str| doc.set_node_text_color(nid, "#0b0b0b".into())),
+        ),
+        (
+            "set_node_text",
+            Box::new(|doc: &mut MindMapDocument, nid: &str| {
+                doc.set_node_text(nid, "a wholly different string".into())
+            }),
+        ),
+        (
+            "set_section_text",
+            Box::new(|doc: &mut MindMapDocument, nid: &str| {
+                doc.set_section_text(nid, 0, "another different string".into())
+            }),
+        ),
+        (
+            "set_node_font_size",
+            Box::new(|doc: &mut MindMapDocument, nid: &str| doc.set_node_font_size(nid, 37.0)),
+        ),
+        (
+            "set_node_font_family",
+            Box::new(|doc: &mut MindMapDocument, nid: &str| doc.set_node_font_family(nid, Some("Norse"))),
+        ),
+        (
+            "set_section_font_size_range",
+            Box::new(|doc: &mut MindMapDocument, nid: &str| {
+                doc.set_section_font_size_range(nid, 0, 0, 3, 41.0)
+            }),
+        ),
+    ];
+
+    for (label, call) in cases {
+        let mut doc = load_test_doc();
+        let nid = first_testament_node_id(&doc);
+        doc.undo_stack.clear();
+        let before = doc.mindmap.nodes.get(&nid).expect("node").clone();
+
+        assert!(call(&mut doc, &nid), "{label}: expected a real change");
+        assert_eq!(
+            doc.undo_stack.len(),
+            1,
+            "{label}: expected exactly one undo entry"
+        );
+        assert!(doc.dirty, "{label}: a real change must dirty the document");
+
+        assert!(doc.undo(), "{label}: undo must succeed");
+        let after = doc.mindmap.nodes.get(&nid).expect("node");
+        assert_eq!(
+            node_fingerprint(&before),
+            node_fingerprint(after),
+            "{label}: undo did not restore the node"
+        );
+    }
+}
+
+/// Clearing a node's text to `""` must leave *no* runs rather
+/// than a degenerate `TextRun { start: 0, end: 0 }`, which
+/// violates the `text_run_ops` `start < end` invariant and panics
+/// in debug builds on the next slice / splice call.
+///
+/// `set_section_text` has always guarded this; `set_node_text`
+/// did not — the guard never made it across the copy. Regression
+/// test for the drift, named after the symptom.
+#[test]
+fn test_set_node_text_to_empty_leaves_no_degenerate_run() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    assert!(doc.set_node_text(&nid, String::new()));
+    let runs = &doc.mindmap.nodes.get(&nid).expect("node").sections[0].text_runs;
+    assert!(runs.is_empty(), "empty text must yield zero runs, got {runs:?}");
+    // And the sibling setter still agrees.
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    assert!(doc.set_section_text(&nid, 0, String::new()));
+    assert!(doc.mindmap.nodes.get(&nid).expect("node").sections[0]
+        .text_runs
+        .is_empty());
+}
+
+/// Switching a frame on runs the border-fit pass, so a node too
+/// small for its frame glyphs grows to fit — the same tail
+/// `set_node_border_config` runs. Pre-fix `border on` alone
+/// skipped the grow while `border on preset=…` performed it, so
+/// the same user intent sized the node differently depending on
+/// whether an unrelated kv rode along.
+#[test]
+fn test_set_node_border_visible_on_runs_the_border_fit_pass() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).expect("node");
+        node.style.show_frame = false;
+        node.sections[0].text = String::new();
+        node.sections[0].text_runs.clear();
+        node.size = Size {
+            width: 4.0,
+            height: 4.0,
+        };
+    }
+    assert!(doc.set_node_border_visible(&nid, true));
+    let grown = doc.mindmap.nodes.get(&nid).expect("node").size;
+    assert!(
+        grown.width > 4.0,
+        "turning the frame on must grow the node to fit its border glyphs, got {grown:?}"
+    );
+    // Undo restores both the flag and the grown size in one step.
+    assert!(doc.undo());
+    let restored = doc.mindmap.nodes.get(&nid).expect("node");
+    assert!(!restored.style.show_frame);
+    assert_eq!(restored.size.width, 4.0);
+}
+
+/// Turning a frame *off* must not grow anything — the border-fit
+/// pass returns early on `show_frame == false`, so the tail is
+/// harmless in that direction. Guards the other half of the
+/// `NodeEditTail::Border` choice above.
+#[test]
+fn test_set_node_border_visible_off_does_not_grow() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).expect("node");
+        node.style.show_frame = true;
+        node.sections[0].text = String::new();
+        node.sections[0].text_runs.clear();
+        node.size = Size {
+            width: 4.0,
+            height: 4.0,
+        };
+    }
+    assert!(doc.set_node_border_visible(&nid, false));
+    assert_eq!(doc.mindmap.nodes.get(&nid).expect("node").size.width, 4.0);
+}
+
+/// A color-only setter must not run the text-fit pass: a node
+/// the user deliberately shrank below its text floor stays where
+/// they put it. Pins the `NodeEditTail::None` choice, which is
+/// otherwise invisible until someone "helpfully" upgrades it to
+/// `Grow`.
+#[test]
+fn test_color_setters_do_not_run_the_text_fit_pass() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).expect("node");
+        node.style.show_frame = false;
+        node.size = Size {
+            width: 3.0,
+            height: 3.0,
+        };
+    }
+    assert!(doc.set_node_bg_color(&nid, "#0b0b0b".into()));
+    assert_eq!(doc.mindmap.nodes.get(&nid).expect("node").size.width, 3.0);
+    assert!(doc.set_node_text_color(&nid, "#0c0c0c".into()));
+    assert_eq!(doc.mindmap.nodes.get(&nid).expect("node").size.width, 3.0);
+}
+
+/// A range setter whose mutation lands on runs that already carry
+/// the value backs the mutation out and pushes nothing — and,
+/// critically, leaves `dirty` where it found it.
+///
+/// Pre-fix `mutate_section_runs_in_range` committed through the
+/// envelope and then reached for `undo_stack.pop()`, which
+/// removed the entry but left `dirty = true` behind: the document
+/// reported unsaved changes for an edit that never happened. The
+/// file header condemned that exact anti-pattern while the
+/// function below it used it.
+#[test]
+fn test_range_setter_no_op_does_not_leak_dirty() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    // Give the section a uniform, known color so the range
+    // rewrite below is provably a no-op.
+    assert!(doc.set_section_text_color(&nid, 0, "#abcdef".into()));
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    let before = doc.mindmap.nodes.get(&nid).expect("node").sections[0]
+        .text_runs
+        .clone();
+
+    let changed = doc.set_section_text_color_range(&nid, 0, 0, 3, "#abcdef".into());
+
+    assert!(!changed, "re-applying the same color must be a no-op");
+    assert!(doc.undo_stack.is_empty(), "no-op must push no undo entry");
+    assert!(!doc.dirty, "no-op must not leave dirty set");
+    assert_eq!(
+        &before,
+        &doc.mindmap.nodes.get(&nid).expect("node").sections[0].text_runs,
+        "no-op must leave the runs exactly as they were"
+    );
+}
+
+/// A range setter that *does* change something still commits
+/// normally through the envelope — one entry, one undo.
+#[test]
+fn test_range_setter_real_change_commits_once() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    doc.undo_stack.clear();
+    let before = doc.mindmap.nodes.get(&nid).expect("node").sections[0]
+        .text_runs
+        .clone();
+
+    assert!(doc.set_section_text_color_range(&nid, 0, 0, 3, "#fedcba".into()));
+    assert_eq!(doc.undo_stack.len(), 1);
+    assert!(doc.dirty);
+    assert!(doc.undo());
+    assert_eq!(
+        &before,
+        &doc.mindmap.nodes.get(&nid).expect("node").sections[0].text_runs
+    );
+}
+
+/// Repeating an AABB write on a *framed* node no-ops, because the
+/// envelope's verdict is computed after the border-fit pass
+/// inflates the size past what was asked for. Checking before the
+/// pass would report a change on every call and stack undo
+/// entries — a bug this codebase has already shipped once.
+#[test]
+fn test_set_node_size_is_idempotent_on_a_framed_node() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    doc.mindmap.nodes.get_mut(&nid).expect("node").style.show_frame = true;
+    let target = Size {
+        width: 30.0,
+        height: 12.0,
+    };
+    assert!(doc.set_node_size(&nid, target).expect("valid"));
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    assert!(
+        !doc.set_node_size(&nid, target).expect("valid"),
+        "second identical resize must no-op after the border-fit pass"
+    );
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+}
+
+/// The AABB envelope's post-tail verdict is shared, so the other
+/// two `EditNodeAabb` setters inherit the same idempotency. Each
+/// is settled with one call, then repeated: the repeat must
+/// no-op.
+///
+/// These are deliberately *not* in the "unchanged value" battery
+/// above: handing `set_node_size` the size a node currently has
+/// is not necessarily a no-op, because the auto-fit pass may
+/// legitimately grow a node that is sitting below its text floor.
+/// Settling first is what makes the second call comparable.
+#[test]
+fn test_aabb_setters_are_idempotent_once_settled() {
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    let (pos, size) = {
+        let n = doc.mindmap.nodes.get(&nid).expect("node");
+        (n.position, n.size)
+    };
+    // Settle: the first call may grow past `size`.
+    let _ = doc.set_node_aabb(&nid, pos, size).expect("valid");
+    let settled = doc.mindmap.nodes.get(&nid).expect("node").size;
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    assert!(
+        !doc.set_node_aabb(&nid, pos, settled).expect("valid"),
+        "set_node_aabb: repeating a settled AABB must no-op"
+    );
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+
+    // `fit_node_to_content` shrinks to the measured text floor;
+    // running it twice must land the second call on the same
+    // post-border-grow size.
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    let _ = doc.fit_node_to_content(&nid).expect("has measurable text");
+    doc.undo_stack.clear();
+    doc.dirty = false;
+    assert!(
+        !doc.fit_node_to_content(&nid).expect("has measurable text"),
+        "fit_node_to_content: a second fit must no-op"
+    );
+    assert!(doc.undo_stack.is_empty());
+    assert!(!doc.dirty);
+}
+
+/// The structural mutators keep their `GrowAndCleanup` tail: a
+/// section selection stranded past the end of the shortened
+/// `sections` vec is repaired, and undo restores it. Pins the one
+/// tail that does more than auto-fit.
+#[test]
+fn test_delete_section_repairs_stranded_selection_and_undo_restores_it() {
+    let (mut doc, nid) = super::tests_common::pinned_two_section_node();
+    doc.selection = SelectionState::Section(SectionSel {
+        node_id: nid.clone(),
+        section_idx: 1,
+    });
+    doc.undo_stack.clear();
+
+    doc.delete_section(&nid, 1).expect("delete ok");
+    assert!(
+        matches!(&doc.selection, SelectionState::Single(id) if *id == nid),
+        "a selection on the deleted section must demote to the node, got {:?}",
+        doc.selection
+    );
+
+    assert!(doc.undo());
+    assert!(
+        matches!(&doc.selection, SelectionState::Section(s) if s.section_idx == 1),
+        "undo must restore the pre-mutation selection, got {:?}",
+        doc.selection
     );
 }
