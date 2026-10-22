@@ -7,7 +7,9 @@
 //! for the canvas trees (borders, connections, portals, edge handles,
 //! connection labels) and the screen-space overlays (console, color
 //! picker). Each role's tree is registered/unregistered or updated in
-//! place via §B2 mutator dispatch driven by a structural signature.
+//! place via §B2 mutator dispatch driven by a structural signature —
+//! and, for the roles that also record a content signature, left
+//! untouched when nothing it was built from has moved.
 //!
 //! It is also the app's hit-test entry point for tree-rendered
 //! content. `overlay_at` resolves screen-space overlay clicks;
@@ -26,6 +28,7 @@ use baumhard::gfx_structs::tree::{MutatorTree, Tree};
 use baumhard::mindmap::scene_cache::EdgeKey;
 use baumhard::mindmap::tree_builder::{ConnectionLabelHitIndex, PortalHit, PortalHitIndex};
 use glam::Vec2;
+#[cfg(test)]
 use indextree::NodeId;
 
 /// The fixed **screen-space** overlay components that the app's
@@ -87,6 +90,50 @@ pub enum CanvasDispatch {
     FullRebuild,
 }
 
+/// The two signatures a canvas role that records both hands to
+/// its dispatch, as named fields rather than a positional pair.
+///
+/// The order of the two questions *is* the design — structure
+/// first, content second — and swapping them still renders
+/// correctly while undoing the point, which makes it the kind of
+/// mistake a reviewer will not see. Two `u64` parameters are
+/// swappable by typo; two named fields are not. The remaining
+/// bare-`u64` sites read `signatures.structure` /
+/// `signatures.content` at the call, so the field is named there
+/// too.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct CanvasSignatures {
+    /// Covers only what fixes the tree's channel layout — the
+    /// question "can a mutator align against the registered arena
+    /// at all?".
+    pub structure: u64,
+    /// Covers every field either projection reads — the question
+    /// "given that it aligns, has anything it would write moved?".
+    pub content: u64,
+}
+
+/// Three arms of the §B2 canvas-tree dispatch for a role that
+/// records a content signature beside its structural one.
+///
+/// A superset of [`CanvasDispatch`], and a separate type rather
+/// than a third variant on it: the roles that record only a
+/// structural signature cannot produce [`Self::Skip`], and giving
+/// them an arm they can never reach would be an unreachable branch
+/// in three dispatchers. Returned by
+/// [`AppScene::canvas_dispatch_with_content`], which is the single
+/// place the two questions are asked in order.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum CanvasContentDispatch {
+    /// Both signatures matched — the registered tree already holds
+    /// what a rebuild would produce, so the role does nothing.
+    Skip,
+    /// Structure matched, content did not — apply the mutator.
+    InPlaceMutator,
+    /// Structure mismatch (or nothing registered) — rebuild +
+    /// re-register.
+    FullRebuild,
+}
+
 /// Two arms of the §B2 overlay-tree dispatch — mirrors
 /// [`CanvasDispatch`] for the screen-space sub-scene. Returned by
 /// [`AppScene::overlay_dispatch`] so the console / color-picker
@@ -119,8 +166,16 @@ pub fn hash_canvas_signature<T: std::hash::Hash>(identity: &T) -> u64 {
 pub mod layers {
     // --- Canvas-space layers ----------------------------------
 
-    /// Mindmap body — every canvas-space component draws above
-    /// this once the migration reaches that step.
+    /// Mindmap body — the zero point every constant below is
+    /// stated relative to.
+    ///
+    /// Unused as a value: the node text still reaches the GPU
+    /// through the renderer's own `mindmap_buffers` rather than as
+    /// an `AppScene` canvas role, so no `register_canvas` call
+    /// passes it. It is the scale's origin and the thing "just above
+    /// the mindmap text" means, so it stays named. Its consumer is a
+    /// `CanvasRole::Mindmap`.
+    #[allow(dead_code)]
     pub const MINDMAP: i32 = 0;
     /// Borders sit just above the mindmap text.
     pub const BORDERS: i32 = 10;
@@ -185,9 +240,19 @@ pub struct AppScene {
     /// the registration; the next call hashes the new state and uses
     /// equality to decide. Cleared on `unregister_canvas`. The
     /// definition of "structure" is the caller's — for portals, it's
-    /// the visible-pair identity sequence; for edge handles, it's the
-    /// selected-edge identity; etc.
+    /// the visible pairs' identities and channels; for edge handles,
+    /// it's the selected-edge identity; etc.
     canvas_signatures: HashMap<CanvasRole, u64>,
+    /// Opaque per-role hash describing **everything the registered
+    /// canvas tree was built from**, not just its shape. Where
+    /// `canvas_signatures` answers "can a mutator align against
+    /// this arena?", this answers "is there anything left for that
+    /// mutator to write?" — a role whose content signature is
+    /// unchanged is already showing what a rebuild would produce,
+    /// so the dispatcher does nothing at all. Only the roles that
+    /// compute one appear here; the rest never consult it. Cleared
+    /// on `unregister_canvas`.
+    canvas_content_signatures: HashMap<CanvasRole, u64>,
     /// Same as `canvas_signatures`, for the overlay sub-scene. The
     /// console overlay uses `(scrollback_rows, completion_rows)` as
     /// its structural signature; color-picker uses none yet (its
@@ -196,8 +261,10 @@ pub struct AppScene {
     overlay_signatures: HashMap<OverlayRole, u64>,
     /// Channel-path → `(EdgeKey, endpoint)` names for the
     /// [`CanvasRole::Portals`] tree. Re-stamped by the portal
-    /// dispatcher on both the rebuild and in-place arms, so it
-    /// always describes the tree currently registered. Carries no
+    /// dispatcher on every arm that touches the tree, so it always
+    /// describes the tree currently registered — the arm that
+    /// touches nothing leaves it alone precisely because the pair
+    /// data it would be rebuilt from is unchanged. Carries no
     /// geometry — [`Self::portal_at`] gets that from the tree's own
     /// BVH.
     portal_hit_index: PortalHitIndex,
@@ -230,6 +297,7 @@ impl AppScene {
             node_resize_handles: None,
             section_frames: None,
             canvas_signatures: HashMap::new(),
+            canvas_content_signatures: HashMap::new(),
             overlay_signatures: HashMap::new(),
             portal_hit_index: PortalHitIndex::default(),
             connection_label_hit_index: ConnectionLabelHitIndex::default(),
@@ -282,11 +350,18 @@ impl AppScene {
     /// from a clean slate, forcing a full rebuild before the in-place
     /// mutator path can run again — and the role's hit index, so no
     /// per-role state outlives the tree it describes.
+    ///
+    /// Test-gated: roles are registered once and then re-registered
+    /// in place on rebuild, so nothing tears one down. The teardown
+    /// contract stays pinned for the day a canvas role becomes
+    /// conditional.
+    #[cfg(test)]
     pub fn unregister_canvas(&mut self, role: CanvasRole) {
         if let Some(id) = self.canvas_role_slot_mut(role).take() {
             self.canvas.remove(id);
         }
         self.canvas_signatures.remove(&role);
+        self.canvas_content_signatures.remove(&role);
         match role {
             CanvasRole::Portals => self.portal_hit_index = PortalHitIndex::default(),
             CanvasRole::ConnectionLabels => {
@@ -312,6 +387,38 @@ impl AppScene {
         self.canvas_signatures.get(&role).copied()
     }
 
+    /// Record the content signature of the tree currently
+    /// registered for `role` — the hash of every input the tree was
+    /// built from, not just its shape.
+    ///
+    /// Callers record it **after** the dispatch match rather than
+    /// inside one arm, because it is correct on all three outcomes:
+    /// after a skip the stored value already equals `signature`,
+    /// and after a mutator apply or a full rebuild the tree now
+    /// matches it. That is deliberate — the failure mode of a
+    /// content signature recorded on only some paths is a *stale
+    /// skip*, which shows the user last frame's glyphs and says
+    /// nothing.
+    pub fn set_canvas_content_signature(&mut self, role: CanvasRole, signature: u64) {
+        self.canvas_content_signatures.insert(role, signature);
+    }
+
+    /// Whether the content signature recorded for `role` already
+    /// equals `signature`, i.e. nothing the role's tree is built
+    /// from has moved since it was last written.
+    ///
+    /// `false` when no content signature has been recorded — the
+    /// same "assume stale" posture [`Self::canvas_dispatch`] takes
+    /// for an unregistered tree.
+    ///
+    /// Private on purpose: the only caller is
+    /// [`Self::canvas_dispatch_with_content`], so the two questions
+    /// are asked in one place and in one order rather than paired
+    /// by hand at each role.
+    fn canvas_content_unchanged(&self, role: CanvasRole, signature: u64) -> bool {
+        self.canvas_content_signatures.get(&role) == Some(&signature)
+    }
+
     /// Decide which §B2 arm to take for a canvas role at the given
     /// structural signature: [`CanvasDispatch::InPlaceMutator`] if a
     /// tree is registered and its signature matches, else
@@ -327,6 +434,51 @@ impl AppScene {
             CanvasDispatch::InPlaceMutator
         } else {
             CanvasDispatch::FullRebuild
+        }
+    }
+
+    /// Decide which of the three §B2 arms to take for a canvas role
+    /// that records both signatures.
+    ///
+    /// The two questions are different and are asked in this order,
+    /// which is the whole reason this is one function rather than
+    /// two calls at each site:
+    ///
+    /// 1. **`structure`** — can a mutator align against the
+    ///    registered arena at all? Only what fixes the tree's
+    ///    channel layout belongs here. A signature that also moved
+    ///    on every color change would send a color-picker hover
+    ///    down [`CanvasContentDispatch::FullRebuild`] and
+    ///    reallocate the arena the in-place path exists to reuse.
+    /// 2. **`content`** — given that it aligns, has anything it
+    ///    would write actually moved? If not, the role does
+    ///    nothing.
+    ///
+    /// Passing these two the other way round still *renders*
+    /// correctly and does the work the in-place arm exists to
+    /// avoid, which is why nothing but a test catches it. Two
+    /// mechanisms keep it from happening: [`CanvasSignatures`]'
+    /// named fields, so there is no positional pair to transpose;
+    /// and, for the case where somebody writes the wrong field
+    /// name anyway, the sentinel tests in `scene_rebuild`, which
+    /// see the skip stop firing.
+    ///
+    /// The caller then runs the matching build path and, on
+    /// `FullRebuild`, calls `register_canvas` +
+    /// [`Self::set_canvas_signature`]. [`Self::set_canvas_content_signature`]
+    /// is called on every arm — see its doc for why that belongs
+    /// outside the match.
+    pub fn canvas_dispatch_with_content(
+        &self,
+        role: CanvasRole,
+        signatures: &CanvasSignatures,
+    ) -> CanvasContentDispatch {
+        match self.canvas_dispatch(role, signatures.structure) {
+            CanvasDispatch::FullRebuild => CanvasContentDispatch::FullRebuild,
+            CanvasDispatch::InPlaceMutator if self.canvas_content_unchanged(role, signatures.content) => {
+                CanvasContentDispatch::Skip
+            }
+            CanvasDispatch::InPlaceMutator => CanvasContentDispatch::InPlaceMutator,
         }
     }
 
@@ -395,7 +547,7 @@ impl AppScene {
     /// recorded structural signature — a future re-register starts
     /// from a clean slate, forcing a full rebuild before the
     /// in-place mutator path can run again. Mirrors
-    /// [`Self::unregister_canvas`].
+    /// `unregister_canvas`.
     pub fn unregister_overlay(&mut self, role: OverlayRole) {
         if let Some(id) = self.overlay_role_slot_mut(role).take() {
             self.overlay.remove(id);
@@ -456,7 +608,7 @@ impl AppScene {
     /// registers or mutates the tree is what keeps channel order
     /// and identity order in step.
     ///
-    /// [`Self::unregister_canvas`] clears it again, so the index
+    /// `unregister_canvas` clears it again, so the index
     /// never outlives the tree it names.
     pub fn set_portal_hit_index(&mut self, index: PortalHitIndex) {
         self.portal_hit_index = index;
@@ -522,6 +674,13 @@ impl AppScene {
     /// that the app owns, not a flat top-most query. Node hits
     /// still go through `document::hit_test` against the mindmap
     /// tree, which has not migrated into `AppScene`.
+    /// Test-gated with its helper [`Self::overlay_role_for_id`]:
+    /// overlay hit-testing is done by the modal that owns the
+    /// overlay (the picker's `hit_test_picker`, the console's own
+    /// row math), each against geometry the scene tree does not
+    /// carry, so nothing asks the scene which overlay a point is
+    /// over.
+    #[cfg(test)]
     pub fn overlay_at(&mut self, screen_pt: Vec2) -> Option<(OverlayRole, NodeId)> {
         let hit = self.overlay.component_at(screen_pt)?;
         let role = self.overlay_role_for_id(hit.0)?;
@@ -548,6 +707,7 @@ impl AppScene {
         }
     }
 
+    #[cfg(test)]
     fn overlay_role_for_id(&self, id: SceneTreeId) -> Option<OverlayRole> {
         if Some(id) == self.console {
             Some(OverlayRole::Console)
@@ -559,12 +719,20 @@ impl AppScene {
     }
 }
 
+/// Reachable from the rest of `application` under `cfg(test)`: the
+/// portal fixture and its two helpers below are the only place in
+/// the crate that stands a real portal tree up, and `app`'s
+/// click-vs-drag tests need one to ask which sub-part a press
+/// landed on. Same reason `maptool`'s `verify::test_helpers` is
+/// widened — a second copy of a 200-line JSON fixture is a copy
+/// that drifts.
 #[cfg(test)]
-mod tests {
+pub(in crate::application) mod tests {
     use super::*;
     use baumhard::font::fonts;
     use baumhard::gfx_structs::area::GlyphArea;
     use baumhard::mindmap::tree_builder::PortalPart;
+    use baumhard::util::geometry::aabb_center;
 
     // ── canvas-role hit-testing ───────────────────────────────────
 
@@ -738,14 +906,17 @@ mod tests {
     /// Two portal-mode edges from `hub`, one carrying text, laid
     /// out by the real tree builder. Returns the map so a test can
     /// re-derive the pair data it needs.
-    fn portal_fixture_map() -> baumhard::mindmap::model::MindMap {
+    pub(in crate::application) fn portal_fixture_map() -> baumhard::mindmap::model::MindMap {
         baumhard::mindmap::loader::load_from_str(PORTAL_FIXTURE_JSON).expect("portal fixture loads")
     }
 
     /// Register the portal role from `map` exactly the way
     /// `CanvasFrame::update_portal_tree` does — tree and hit index
     /// stamped together.
-    fn register_portals(app: &mut AppScene, map: &baumhard::mindmap::model::MindMap) {
+    pub(in crate::application) fn register_portals(
+        app: &mut AppScene,
+        map: &baumhard::mindmap::model::MindMap,
+    ) {
         fonts::init();
         let hidden = map.fold_hidden_set();
         let pairs = baumhard::mindmap::tree_builder::portal_pair_data(
@@ -766,7 +937,7 @@ mod tests {
     /// The `(position, extent)` of every clickable leaf in the
     /// registered portal tree, paired with the identity the index
     /// gives it — the ground truth a probe is aimed at.
-    fn portal_leaf_probes(app: &AppScene) -> Vec<(Vec2, PortalHit)> {
+    pub(in crate::application) fn portal_leaf_probes(app: &AppScene) -> Vec<(Vec2, PortalHit)> {
         let id = app.canvas_id(CanvasRole::Portals).expect("portals registered");
         let tree = app.canvas_scene().tree(id).expect("portal tree");
         let mut out = Vec::new();
@@ -783,7 +954,7 @@ mod tests {
                         continue;
                     }
                     if let Some(hit) = app.portal_hit_index.resolve(tree, leaf) {
-                        out.push((pos + extent * 0.5, hit));
+                        out.push((aabb_center(pos, extent), hit));
                     }
                 }
             }
@@ -857,7 +1028,9 @@ mod tests {
         )))
         .expect("testament map loads");
         let hidden = map.fold_hidden_set();
-        let elements = build_label_elements(&map, &HashMap::new(), None, None, None, 1.0, &hidden);
+        let offsets = HashMap::new();
+        let mut paths = baumhard::mindmap::tree_builder::EdgePathCache::new(&map, &offsets);
+        let elements = build_label_elements(&map, None, None, None, &mut paths, 1.0, &hidden);
         assert!(!elements.is_empty(), "fixture should carry labels");
         let built = build_connection_label_tree(&elements);
 
@@ -879,15 +1052,13 @@ mod tests {
             .collect();
         let mut unambiguous = 0usize;
         for elem in &elements {
-            let center = Vec2::new(
-                elem.position.0 + elem.bounds.0 * 0.5,
-                elem.position.1 + elem.bounds.1 * 0.5,
+            let center = aabb_center(
+                Vec2::new(elem.position.0, elem.position.1),
+                Vec2::new(elem.bounds.0, elem.bounds.1),
             );
             let covering: Vec<_> = rects
                 .iter()
-                .filter(|(min, max, _)| {
-                    center.x >= min.x && center.x <= max.x && center.y >= min.y && center.y <= max.y
-                })
+                .filter(|(min, max, _)| baumhard::util::geometry::aabb_contains(center, *min, *max))
                 .collect();
             let hit = app.edge_label_at(center);
             if covering.len() == 1 {
@@ -1037,6 +1208,49 @@ mod tests {
 
         app.unregister_canvas(CanvasRole::Portals);
         assert_eq!(app.canvas_signature(CanvasRole::Portals), None);
+    }
+
+    /// An unrecorded content signature reads as "changed", so the
+    /// first projection of a role always does its work.
+    ///
+    /// The opposite default would be a silent stall: a role whose
+    /// content signature happened to hash to whatever `HashMap`
+    /// returned for a missing key would skip its own first update
+    /// and leave the registered tree at whatever the full rebuild
+    /// put there — which is right by accident today and wrong the
+    /// moment a caller records one signature and dispatches on
+    /// another.
+    #[test]
+    fn test_canvas_content_unchanged_is_false_until_something_is_recorded() {
+        let mut app = AppScene::new();
+        assert!(!app.canvas_content_unchanged(CanvasRole::Borders, 0));
+        assert!(!app.canvas_content_unchanged(CanvasRole::Borders, 7));
+
+        app.set_canvas_content_signature(CanvasRole::Borders, 7);
+        assert!(app.canvas_content_unchanged(CanvasRole::Borders, 7));
+        assert!(!app.canvas_content_unchanged(CanvasRole::Borders, 8));
+        assert!(
+            !app.canvas_content_unchanged(CanvasRole::Portals, 7),
+            "content signatures are per role — one role's value must not answer for another"
+        );
+    }
+
+    /// Unregistering a role drops its content signature along with
+    /// its structural one, so a re-registered role cannot skip
+    /// against a value describing a tree that is gone.
+    #[test]
+    fn test_canvas_content_signature_clears_on_unregister() {
+        let mut app = AppScene::new();
+        let (tree, _) = overlay_tree(Vec2::ZERO, Vec2::new(10.0, 10.0));
+        app.register_canvas(CanvasRole::Portals, tree, Vec2::ZERO);
+        app.set_canvas_content_signature(CanvasRole::Portals, 0xC0FFEE);
+        assert!(app.canvas_content_unchanged(CanvasRole::Portals, 0xC0FFEE));
+
+        app.unregister_canvas(CanvasRole::Portals);
+        assert!(
+            !app.canvas_content_unchanged(CanvasRole::Portals, 0xC0FFEE),
+            "a stale content signature would skip the rebuild the re-registration needs"
+        );
     }
 
     #[test]

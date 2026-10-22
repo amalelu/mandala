@@ -97,7 +97,7 @@ impl ThrottledInteraction for EdgeHandleInteraction {
             scene_cache.invalidate_edge(&edge_key);
 
             let offsets: HashMap<String, (f32, f32)> = HashMap::new();
-            let frame = CanvasFrame::new(
+            let mut frame = CanvasFrame::new(
                 doc,
                 &offsets,
                 interaction_mode.resize_handle_overrides(),

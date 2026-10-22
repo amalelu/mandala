@@ -5,21 +5,30 @@
 //! owns the top-level `MindMap` struct plus its tree-shape queries
 //! (root / ancestry / descendants).
 //!
-//! **Every deserializable type here is closed**
-//! (`#[serde(deny_unknown_fields)]`), and so is every type reachable
-//! from one. The app resaves the whole model, so a key serde ignored
-//! at load is a key erased from the author's file at save; rejecting
-//! it is the only outcome that leaves the file intact. The rule is
-//! not maintained by hand — `mindmap::loader`'s
-//! `test_every_loadable_type_rejects_unknown_keys` walks the model's
-//! own source and fails until a newly reachable type opts in. See
-//! `format/schema.md` §"Unknown keys are rejected".
+//! **Every deserializable type here is open, and none of them may
+//! swallow a key.** A map authored by a newer build carries keys this
+//! one has no field for; the load keeps them rather than failing, and
+//! the save writes them back, so an older build can open, edit and
+//! resave a newer map without destroying the newer features. The keys
+//! do not live on these types — they live on
+//! [`MindMap::unknown_keys`](crate::mindmap::model::MindMap::unknown_keys),
+//! captured at the deserializer by
+//! `mindmap::unknown_keys`, which is what lets the guarantee cover
+//! types that cannot hold a `#[serde(flatten)]` catch-all because they
+//! derive `Copy`, `Eq` or `Hash`. What these types owe the mechanism
+//! is only that they do not absorb a key before it is seen: no
+//! `deny_unknown_fields`, no `flatten`, no `untagged` or `tag`. That
+//! rule is not maintained by hand — `mindmap::loader`'s
+//! `test_no_loadable_type_can_swallow_an_unknown_key` walks the
+//! model's own source and fails the moment one appears. See
+//! `format/schema.md` §"Unknown keys are kept".
 
 pub mod canvas;
 pub mod edge;
 pub mod node;
 pub mod palette;
 pub mod text_run_ops;
+pub mod theme;
 pub mod validate;
 
 pub use canvas::Canvas;
@@ -29,8 +38,9 @@ pub use edge::{
     DISPLAY_MODE_PORTAL, PORTAL_GLYPH_PRESETS,
 };
 pub use node::{
-    ColorGroup, ColorSchema, CustomBorderGlyphs, GlyphBorderConfig, MindNode, MindSection, NodeLayout,
-    NodeStyle, Position, Size, TextRun, MAX_NODE_AXIS, MAX_SECTIONS_PER_NODE,
+    default_border_font_size, ColorGroup, ColorOverrides, ColorSchema, CustomBorderGlyphs, GlyphBorderConfig,
+    MindNode, MindSection, NodeLayout, NodeStyle, Position, Size, TextRun, DEFAULT_TEXT_RUN_SIZE_PT,
+    MAX_NODE_AXIS, MAX_SECTIONS_PER_NODE,
 };
 pub use palette::Palette;
 
@@ -53,7 +63,6 @@ use std::collections::{HashMap, HashSet};
 /// with [`Self::fold_hidden_set`] once rather than paying the
 /// per-call cost repeatedly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MindMap {
     pub version: String,
     pub name: String,
@@ -81,6 +90,31 @@ pub struct MindMap {
     /// application's `dispatch_macro`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub macros: Vec<serde_json::Value>,
+    /// Keys the loaded file carried that this build has no field for,
+    /// with the route back to where each one sat.
+    ///
+    /// Not part of the on-disk shape — `#[serde(skip)]` — because the
+    /// keys are written back at their own routes rather than collected
+    /// into a side object. `mindmap::loader::save_to_file` splices them
+    /// into the serialized document; a map built in memory rather than
+    /// loaded carries none. See
+    /// [`crate::mindmap::unknown_keys`].
+    #[serde(skip)]
+    pub unknown_keys: crate::mindmap::unknown_keys::UnknownKeys,
+    /// Constructs the loaded file carried that this build cannot read
+    /// at all — an enum variant a newer build introduced — lifted out
+    /// whole so the rest of the map could load, and written back
+    /// untouched at save.
+    ///
+    /// Not part of the on-disk shape (`#[serde(skip)]`), for the same
+    /// reason [`Self::unknown_keys`] is not: each construct goes back
+    /// at the index it was authored at. A map built in memory rather
+    /// than loaded carries none. `maptool verify` reports every entry
+    /// here as a violation — loading a map and validating it are
+    /// different questions, and a misspelled variant has to still be
+    /// caught. See [`crate::mindmap::unknown_keys::SkippedConstructs`].
+    #[serde(skip)]
+    pub skipped_constructs: crate::mindmap::unknown_keys::SkippedConstructs,
 }
 
 impl MindMap {
@@ -93,20 +127,14 @@ impl MindMap {
         MindMap {
             version: "1.0".to_string(),
             name: name.into(),
-            canvas: Canvas {
-                background_color: "#000000".to_string(),
-                default_border: None,
-                default_connection: None,
-                default_section_frame_border: None,
-                default_focused_section_frame_border: None,
-                theme_variables: HashMap::new(),
-                theme_variants: HashMap::new(),
-            },
+            canvas: Canvas::default(),
             palettes: HashMap::new(),
             nodes: HashMap::new(),
             edges: Vec::new(),
             custom_mutations: Vec::new(),
             macros: Vec::new(),
+            unknown_keys: Default::default(),
+            skipped_constructs: Default::default(),
         }
     }
 
@@ -174,7 +202,7 @@ impl MindMap {
         while let Some(pid) = current_id {
             if steps > self.nodes.len() {
                 log::error!(
-                    "is_hidden_by_fold: parent_id cycle detected walking up from node {:?}; treating as visible",
+                    "mindmap: fold-visibility walk hit a parent_id cycle above node {:?}; treating as visible",
                     node.id
                 );
                 return false;
@@ -193,7 +221,9 @@ impl MindMap {
         false
     }
 
-    /// Collect all descendant IDs of a node (recursive), not including the node itself.
+    /// Collect all descendant IDs of a node, not including the node
+    /// itself. The walk is iterative — see
+    /// [`ChildIndex::all_descendant_ids`], which it delegates to.
     ///
     /// Cost: builds a [`ChildIndex`] once (O(N)) then walks the subtree
     /// in O(descendants). Prefer [`ChildIndex::all_descendant_ids`] when
@@ -210,9 +240,10 @@ impl MindMap {
     pub fn fold_hidden_set(&self) -> HashSet<&str> {
         let index = ChildIndex::build(self);
         let mut hidden = HashSet::new();
+        let budget = self.nodes.len();
         // True roots first...
         for root in index.roots() {
-            Self::mark_hidden_with_index(&index, root, false, &mut hidden);
+            Self::mark_hidden_with_index(&index, root, &mut hidden, budget);
         }
         // ...then any node whose parent_id is missing from the map.
         // The loader treats these as root-like, and their children must
@@ -221,24 +252,68 @@ impl MindMap {
         for node in self.nodes.values() {
             if let Some(pid) = &node.parent_id {
                 if !self.nodes.contains_key(pid) {
-                    Self::mark_hidden_with_index(&index, node, false, &mut hidden);
+                    Self::mark_hidden_with_index(&index, node, &mut hidden, budget);
                 }
             }
         }
         hidden
     }
 
-    fn mark_hidden_with_index<'a, 'b>(
-        index: &'b ChildIndex<'a>,
-        node: &'a MindNode,
-        ancestors_folded: bool,
+    /// Mark every node beneath `root` whose ancestor chain contains a
+    /// folded node.
+    ///
+    /// **The descent carries its stack on the heap, and that is the
+    /// point.** `parent_id` nesting is authored in a
+    /// `.mindmap.json`, which is untrusted input, and a linear chain
+    /// of N nodes is a perfectly legal acyclic tree that the loader's
+    /// cycle check accepts. The recursive form of this walk overflowed
+    /// the real thread stack on such a map and aborted the process —
+    /// a `SIGABRT`, not a panic, so there is no frame to degrade and
+    /// no `warn!` to log (CODE_CONVENTIONS §9). Depth now costs heap,
+    /// which is bounded, rather than stack, which is not.
+    ///
+    /// `budget` caps how many nodes are visited, as defense in depth
+    /// against a `parent_id` cycle reaching this walker despite the
+    /// loader's load-time rejection — the same posture
+    /// [`MindMap::is_hidden_by_fold`] and
+    /// [`ChildIndex::all_descendant_ids`] take. A valid tree never
+    /// reaches it.
+    ///
+    /// Cost: O(subtree) time; the pending vector holds the frontier,
+    /// never the whole subtree.
+    fn mark_hidden_with_index<'a>(
+        index: &ChildIndex<'a>,
+        root: &'a MindNode,
         hidden: &mut HashSet<&'a str>,
+        budget: usize,
     ) {
-        if ancestors_folded {
-            hidden.insert(&node.id);
-        }
-        for child in index.children_of(&node.id) {
-            Self::mark_hidden_with_index(index, child, ancestors_folded || node.folded, hidden);
+        let mut pending: Vec<(&'a MindNode, bool)> = vec![(root, false)];
+        // Bounding the *frontier*, not just the visit count, is what
+        // keeps the budget meaningful. A cycle reaching this walker
+        // would let each of `budget` pops enqueue a fresh fan-out
+        // before the visit counter tripped, so the vector could
+        // reach `budget × width` — trading an unbounded stack for an
+        // unbounded heap and fixing nothing. In a valid tree every
+        // node is enqueued exactly once, so this never binds.
+        let mut enqueued = 1usize;
+        while let Some((node, ancestors_folded)) = pending.pop() {
+            if ancestors_folded {
+                hidden.insert(&node.id);
+            }
+            let subtree_folded = ancestors_folded || node.folded;
+            for child in index.children_of(&node.id) {
+                if enqueued > budget {
+                    log::error!(
+                        "mindmap: fold walk from node {:?} enqueued more than its {} node \
+                         budget; parent_id cycle suspected, truncating",
+                        root.id,
+                        budget
+                    );
+                    return;
+                }
+                enqueued += 1;
+                pending.push((child, subtree_folded));
+            }
         }
     }
 
@@ -263,7 +338,7 @@ impl MindMap {
             }
             if steps > self.nodes.len() {
                 log::error!(
-                    "is_ancestor_or_self: parent_id cycle detected walking up from node {:?}; treating {:?} as not an ancestor",
+                    "mindmap: ancestry walk hit a parent_id cycle above node {:?}; treating {:?} as not an ancestor",
                     node_id, candidate_ancestor
                 );
                 return false;
@@ -272,19 +347,6 @@ impl MindMap {
             current = self.nodes.get(pid).and_then(|n| n.parent_id.as_deref());
         }
         false
-    }
-
-    /// Resolves the effective colors for a themed node by looking up
-    /// the palette from the top-level palettes map.
-    pub fn resolve_theme_colors<'a>(&'a self, node: &'a MindNode) -> Option<&'a ColorGroup> {
-        let schema = node.color_schema.as_ref()?;
-        let palette = self.palettes.get(&schema.palette)?;
-        let level = schema.level as usize;
-        if level < palette.groups.len() {
-            Some(&palette.groups[level])
-        } else {
-            palette.groups.last()
-        }
     }
 
     /// Build a one-pass parent → sorted-children index for tree-shape
@@ -339,8 +401,9 @@ impl<'a> ChildIndex<'a> {
         self.by_parent.get(parent_id).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Collect all descendant IDs of `node_id` (recursive), not
-    /// including `node_id` itself.
+    /// Collect all descendant IDs of `node_id`, not including
+    /// `node_id` itself. Iterative, carrying its frontier on the
+    /// heap — see the note on the walk below.
     ///
     /// `budget` bounds the walk as defense in depth against a
     /// `parent_id` cycle; a valid tree never reaches the budget.
@@ -350,17 +413,47 @@ impl<'a> ChildIndex<'a> {
         result
     }
 
+    /// Iterative pre-order descent, for the reason spelled out on
+    /// [`MindMap::mark_hidden_with_index`]: `parent_id` depth is
+    /// attacker-controlled, and a recursive walk over it overflows
+    /// the stack and aborts the process rather than degrading.
+    ///
+    /// `budget` bounds the result *and* the frontier — both, for the
+    /// reason [`MindMap::mark_hidden_with_index`] spells out: capping
+    /// only the visited count would let each of `budget` pops enqueue
+    /// a fresh fan-out first, so the pending vector could still reach
+    /// `budget × width`. In a valid tree every node is enqueued
+    /// exactly once and neither bound binds.
     fn collect_descendants(&self, node_id: &str, result: &mut Vec<String>, budget: usize) {
-        for child in self.children_of(node_id) {
+        // Children are pushed in reverse so the lowest-sorted one
+        // pops first, preserving the order the recursive walk
+        // produced — callers index into this vector.
+        let mut pending: Vec<&'a MindNode> = self.children_of(node_id).iter().rev().copied().collect();
+        let mut enqueued = pending.len();
+        while let Some(node) = pending.pop() {
             if result.len() >= budget {
                 log::error!(
-                    "collect_descendants: parent_id cycle detected walking down from node {:?}; truncating",
-                    node_id
+                    "mindmap: descendant walk from node {:?} exceeded its {} node budget; \
+                     parent_id cycle suspected, truncating",
+                    node_id,
+                    budget
                 );
                 return;
             }
-            result.push(child.id.clone());
-            self.collect_descendants(&child.id, result, budget);
+            result.push(node.id.clone());
+            for child in self.children_of(&node.id).iter().rev() {
+                if enqueued > budget {
+                    log::error!(
+                        "mindmap: descendant walk from node {:?} enqueued more than its {} \
+                         node budget; parent_id cycle suspected, truncating",
+                        node_id,
+                        budget
+                    );
+                    return;
+                }
+                enqueued += 1;
+                pending.push(child);
+            }
         }
     }
 }
@@ -372,6 +465,48 @@ pub fn id_sort_key(id: &str) -> usize {
         .next()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0)
+}
+
+/// Order two Dewey-decimal node IDs the way a reader expects:
+/// segment by segment, each segment numerically.
+///
+/// **Not `str::cmp`.** Lexicographic order puts `"0.10"` before
+/// `"0.2"` and `"10"` before `"2"`, which is wrong everywhere a
+/// human reads the result — `maptool grep`'s hit list, `maptool
+/// apply`'s target list, `maptool verify`'s violation list. It is
+/// not `id_sort_key` either: that reads the *last* segment only,
+/// which orders siblings under one parent and says nothing about
+/// two ids from different subtrees.
+///
+/// Segments that do not parse as `u64` compare as strings, so a
+/// non-Dewey id still has a total order rather than collapsing
+/// onto zero. A prefix sorts first — `"0.2"` before `"0.2.1"` —
+/// because a parent precedes its children in every listing this
+/// feeds.
+///
+/// Costs: no allocation. One `split('.')` walk over the shared
+/// prefix of the two ids, with a `u64` parse per segment pair.
+pub fn dewey_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut left = a.split('.');
+    let mut right = b.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (Some(x), Some(y)) => {
+                let ordering = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(nx), Ok(ny)) => nx.cmp(&ny),
+                    _ => x.cmp(y),
+                };
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+            // One id is a prefix of the other: the shorter is the
+            // ancestor and comes first.
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, None) => return std::cmp::Ordering::Equal,
+        }
+    }
 }
 
 /// Derive the parent ID from a Dewey-decimal node ID.

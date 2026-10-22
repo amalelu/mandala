@@ -40,7 +40,7 @@ fn layout_subtracts_ink_offsets_for_arms_and_preview() {
     let preview_size = baseline.preview_size;
 
     // Val bar: each arm cell shifts by its own (dx, dy)*cell_fs.
-    // Centre cell at CROSSHAIR_CENTER_CELL is untouched.
+    // Center cell at CROSSHAIR_CENTER_CELL is untouched.
     for i in 0..VAL_CELL_COUNT {
         let (expect_dx, expect_dy) = if i == CROSSHAIR_CENTER_CELL {
             (0.0, 0.0)
@@ -225,7 +225,7 @@ fn layout_keeps_preview_clear_of_adjacent_arm_cells() {
     let min_clearance = preview_radius + layout.font_size * padding_scale;
 
     let center = layout.center;
-    let neighbours = [
+    let neighbors = [
         (
             "val[CENTER - 1]",
             layout.val_cell_positions[CROSSHAIR_CENTER_CELL - 1],
@@ -244,13 +244,13 @@ fn layout_keeps_preview_clear_of_adjacent_arm_cells() {
         ),
     ];
     let slack = 0.5;
-    for (label, (px, py)) in neighbours {
+    for (label, (px, py)) in neighbors {
         let dx = px - center.0;
         let dy = py - center.1;
         let dist = (dx * dx + dy * dy).sqrt();
         assert!(
             dist + slack >= min_clearance,
-            "{label} at ({px:.1}, {py:.1}) is {dist:.1} px from centre — below preview clearance {min_clearance:.1}",
+            "{label} at ({px:.1}, {py:.1}) is {dist:.1} px from center — below preview clearance {min_clearance:.1}",
         );
     }
 }

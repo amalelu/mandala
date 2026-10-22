@@ -2,15 +2,18 @@
 
 //! Tests for [`crate::font::attrs`] — the `ColorFontRegions` →
 //! cosmic-text bridges (`attrs_list_from_regions`,
-//! [`RegionFamilies`], [`rich_text_spans_from_regions`]).
+//! [`RegionFamilies`], [`rich_text_spans_into`] and its allocating
+//! wrapper [`rich_text_spans_from_regions`]).
 //!
-//! Follows the `do_*()` / `test_*()` split from §B8 — every `do_*`
+//! Follows the `do_*()` / `test_*()` split from §T2.2 — every `do_*`
 //! body is benchmarkable from `benches/test_bench.rs`.
 
-use cosmic_text::{Color, Family, FontSystem};
+use cosmic_text::{Attrs, Color, Family, FontSystem};
 
 use crate::core::primitives::{ColorFontRegion, ColorFontRegions, Range};
-use crate::font::attrs::{attrs_list_from_regions, rich_text_spans_from_regions, RegionFamilies};
+use crate::font::attrs::{
+    attrs_list_from_regions, rich_text_spans_from_regions, rich_text_spans_into, RegionFamilies,
+};
 
 // ---------------------------------------------------------------------------
 // attrs_list_from_regions — `Editor::insert_string` shape
@@ -192,8 +195,8 @@ fn test_rich_text_spans_empty_regions_yield_single_whole_text_span() {
 pub fn do_rich_text_spans_empty_regions_yield_single_whole_text_span() {
     let regions = ColorFontRegions::new_empty();
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions("hello", &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve("hello", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].0, "hello");
 }
@@ -218,8 +221,8 @@ pub fn do_rich_text_spans_two_regions_slice_text_per_range() {
         Some([0.0, 1.0, 0.0, 1.0]),
     ));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions("hello world", &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve("hello world", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert_eq!(spans.len(), 2);
     assert_eq!(spans[0].0, "hello");
     assert_eq!(spans[1].0, " world");
@@ -237,8 +240,8 @@ pub fn do_rich_text_spans_drop_zero_width_regions() {
     let mut regions = ColorFontRegions::new_empty();
     regions.submit_region(ColorFontRegion::new(Range::new(3, 3), None, None));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions("hello", &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve("hello", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert!(spans.is_empty());
 }
 
@@ -262,9 +265,9 @@ pub fn do_rich_text_spans_color_override_recolors_every_span() {
         Some([0.0, 1.0, 0.0, 1.0]),
     ));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
+    let families = RegionFamilies::resolve("abcdef", &regions, &mut fs);
     let halo = Color::rgba(255, 255, 0, 255);
-    let spans = rich_text_spans_from_regions("abcdef", &families, 16.0, 18.0, Some(halo));
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, Some(halo));
     assert_eq!(spans.len(), 2);
     for (_slice, attrs) in &spans {
         assert_eq!(attrs.color_opt, Some(halo));
@@ -291,8 +294,8 @@ pub fn do_rich_text_spans_pin_family_name_when_region_has_app_font() {
     let mut fs = crate::font::fonts::acquire_font_system_write(
         "attrs_tests::do_rich_text_spans_pin_family_name_when_region_has_app_font",
     );
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions("abc", &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve("abc", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert_eq!(spans.len(), 1);
     match spans[0].1.family {
         Family::Name(name) => assert_eq!(name, family),
@@ -319,8 +322,8 @@ pub fn do_rich_text_spans_no_family_pin_when_region_has_no_font() {
         Some([1.0, 1.0, 1.0, 1.0]),
     ));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions("abc", &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve("abc", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert_eq!(spans.len(), 1);
     // No `family()` call means cosmic-text's default — *not*
     // `Family::Name`. The contract under test is "we do not pin a
@@ -352,8 +355,8 @@ pub fn do_rich_text_spans_clamps_out_of_range_region_end() {
         Some([1.0, 0.0, 0.0, 1.0]),
     ));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions("hello", &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve("hello", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].0, "hello");
 }
@@ -374,8 +377,8 @@ pub fn do_rich_text_spans_clamps_fully_out_of_range_region() {
         Some([1.0, 0.0, 0.0, 1.0]),
     ));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions("hi", &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve("hi", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert!(spans.is_empty());
 }
 
@@ -392,9 +395,9 @@ pub fn do_rich_text_spans_color_override_applies_to_uncolored_region() {
     let mut regions = ColorFontRegions::new_empty();
     regions.submit_region(ColorFontRegion::new(Range::new(0, 3), None, None));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
+    let families = RegionFamilies::resolve("abc", &regions, &mut fs);
     let halo = Color::rgba(0, 255, 0, 255);
-    let spans = rich_text_spans_from_regions("abc", &families, 16.0, 18.0, Some(halo));
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, Some(halo));
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].1.color_opt, Some(halo));
 }
@@ -412,9 +415,9 @@ pub fn do_rich_text_spans_color_override_drops_zero_width_regions() {
     let mut regions = ColorFontRegions::new_empty();
     regions.submit_region(ColorFontRegion::new(Range::new(2, 2), None, None));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
+    let families = RegionFamilies::resolve("hello", &regions, &mut fs);
     let halo = Color::rgba(0, 0, 255, 255);
-    let spans = rich_text_spans_from_regions("hello", &families, 16.0, 18.0, Some(halo));
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, Some(halo));
     assert!(spans.is_empty());
 }
 
@@ -442,14 +445,8 @@ pub fn do_rich_text_spans_slice_at_grapheme_boundary() {
         Some([1.0, 0.0, 0.0, 1.0]),
     ));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions(
-        "\u{1F1F8}\u{1F1EA}\u{1F1EB}\u{1F1EE}",
-        &families,
-        16.0,
-        18.0,
-        None,
-    );
+    let families = RegionFamilies::resolve("\u{1F1F8}\u{1F1EA}\u{1F1EB}\u{1F1EE}", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert_eq!(spans.len(), 1);
     // First flag is one grapheme = two scalars = 8 UTF-8 bytes.
     assert_eq!(spans[0].0, "\u{1F1F8}\u{1F1EA}");
@@ -478,8 +475,8 @@ pub fn do_rich_text_spans_slice_at_zwj_grapheme_boundary() {
         Some([1.0, 0.0, 0.0, 1.0]),
     ));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions(text, &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve(text, &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].0, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
     assert_eq!(spans[0].0.len(), 18, "5 scalars × 4 + 2 (ZWJs) = 18 bytes");
@@ -503,7 +500,78 @@ pub fn do_rich_text_spans_empty_text_with_region_yields_no_spans() {
         Some([1.0, 0.0, 0.0, 1.0]),
     ));
     let mut fs = FontSystem::new();
-    let families = RegionFamilies::resolve(&regions, &mut fs);
-    let spans = rich_text_spans_from_regions("", &families, 16.0, 18.0, None);
+    let families = RegionFamilies::resolve("", &regions, &mut fs);
+    let spans = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
     assert!(spans.is_empty());
+}
+
+#[test]
+fn test_rich_text_spans_into_refills_rather_than_appends() {
+    do_rich_text_spans_into_refills_rather_than_appends();
+}
+
+/// `rich_text_spans_into` starts from an empty `out`, whatever was
+/// in it, and produces the same spans the allocating wrapper does.
+///
+/// The renderer's halo loop hands the same `Vec` back for the main
+/// glyph after eight halo stamps have filled it; an append would
+/// shape the glyph nine times over on the ninth pass. The
+/// pre-filled sentinel below is what makes that a real check rather
+/// than one that passes on a `Vec` that was empty anyway.
+pub fn do_rich_text_spans_into_refills_rather_than_appends() {
+    let mut regions = ColorFontRegions::new_empty();
+    regions.submit_region(ColorFontRegion::new(
+        Range::new(0, 3),
+        None,
+        Some([1.0, 0.0, 0.0, 1.0]),
+    ));
+    regions.submit_region(ColorFontRegion::new(
+        Range::new(3, 6),
+        None,
+        Some([0.0, 1.0, 0.0, 1.0]),
+    ));
+    let mut fs = FontSystem::new();
+    let families = RegionFamilies::resolve("abcdef", &regions, &mut fs);
+
+    let halo = Color::rgba(0, 0, 0, 255);
+    let expected_halo = rich_text_spans_from_regions(&families, 16.0, 18.0, Some(halo));
+    let expected_main = rich_text_spans_from_regions(&families, 16.0, 18.0, None);
+    assert_eq!(expected_halo.len(), 2);
+    assert_ne!(
+        expected_halo, expected_main,
+        "the halo recolor has to change the spans, or the refill below proves nothing"
+    );
+
+    let mut out = vec![("sentinel", Attrs::new())];
+    rich_text_spans_into(&families, 16.0, 18.0, Some(halo), &mut out);
+    assert_eq!(out, expected_halo, "prior contents must not survive the refill");
+
+    // The ninth pass of the renderer's loop: same buffer, no
+    // override.
+    rich_text_spans_into(&families, 16.0, 18.0, None, &mut out);
+    assert_eq!(out, expected_main);
+}
+
+#[test]
+fn test_rich_text_spans_into_keeps_the_no_region_whole_text_span() {
+    do_rich_text_spans_into_keeps_the_no_region_whole_text_span();
+}
+
+/// The "no regions means uniform styling" contract survives the
+/// refill shape: a `RegionFamilies` resolved from an empty table
+/// yields exactly one span over the whole text, and the second call
+/// into the same buffer yields it again rather than two.
+pub fn do_rich_text_spans_into_keeps_the_no_region_whole_text_span() {
+    let regions = ColorFontRegions::new_empty();
+    let mut fs = FontSystem::new();
+    let families = RegionFamilies::resolve("whole", &regions, &mut fs);
+
+    let mut out = Vec::new();
+    rich_text_spans_into(&families, 16.0, 18.0, None, &mut out);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0, "whole");
+
+    rich_text_spans_into(&families, 16.0, 18.0, None, &mut out);
+    assert_eq!(out.len(), 1, "a second fill must replace, not append");
+    assert_eq!(out[0].0, "whole");
 }

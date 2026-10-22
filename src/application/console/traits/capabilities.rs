@@ -44,11 +44,11 @@ pub trait HasLabel {
     fn set_label(&mut self, s: Option<String>) -> Outcome;
 }
 
-/// Target accepts a single channel-less colour from the standalone
+/// Target accepts a single channel-less color from the standalone
 /// wheel. Each variant decides which channel the color lands on
-/// (nodes → `Bg`; edges → their single colour field). Distinct from
-/// the `Has*` axis traits, which answer "accept a colour on channel
-/// X?" — this answers "where does an unspecified-channel colour go?".
+/// (nodes → `Bg`; edges → their single color field). Distinct from
+/// the `Has*` axis traits, which answer "accept a color on channel
+/// X?" — this answers "where does an unspecified-channel color go?".
 pub trait AcceptsWheelColor {
     fn apply_wheel_color(&mut self, c: ColorValue) -> Outcome;
 }

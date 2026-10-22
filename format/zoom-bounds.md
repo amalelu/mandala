@@ -52,10 +52,15 @@ label:       { min: 1.5,  max: null }     // replace, not intersect
 
 ## Validation
 
-`maptool verify` rejects `min > max` (when both are `Some`) under the
-`zoom_bounds` category. The runtime `ZoomVisibility::contains` check
-still returns cleanly for an inverted window — it just always reports
-"not visible" — but the authoring intent is almost always a typo.
+An inverted window (`min > max`, both `Some`) is **load-blocking**:
+the loader refuses the map, and `maptool verify` reports it under the
+`numeric` category. Nothing crashes on an inverted window — the
+runtime `ZoomVisibility::contains` check is two independent
+comparisons and returns cleanly — but no zoom satisfies both bounds,
+so the element is invisible at every zoom level, which is almost
+always a typo rather than an intent. A non-finite or negative bound
+is refused the same way. See
+[validation.md](./validation.md#numeric-domain).
 
 ## Mutator target
 
@@ -95,6 +100,8 @@ with an error before any model state changes.
 ## Cost
 
 The render-loop cull is two branchless `Option<f32>` comparisons per
-`GlyphArea` per frame (bench: `zoom_visibility_contains` — sub-ns on
-the current hardware). No text reshaping or buffer-cache invalidation
-fires on zoom steps — the cull runs against cached buffers.
+`GlyphArea` per frame (bench:
+`zoom_visibility_unbounded_contains_full_camera_range`, with the
+`zoom_visibility_*_band_*` and `_nan_zoom_*` rows beside it). No text
+reshaping or buffer-cache invalidation fires on zoom steps — the cull
+runs against cached buffers.

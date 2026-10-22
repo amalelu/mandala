@@ -40,6 +40,15 @@ pub(in crate::application::app) struct MovingNodeInteraction {
     /// mid-drag; reused in every `drain` instead of re-walking the
     /// model with `all_descendants` per frame.
     pub descendant_ids: HashSet<String>,
+    /// Scratch `(unique_id, new_position)` buffer handed to
+    /// [`apply_drag_delta_and_collect_patches`] and then to
+    /// `Renderer::patch_drag_positions`. Lives on the interaction
+    /// rather than inside `drain` so the one allocation is made at
+    /// drag start and reused for the rest of the gesture — the
+    /// out-param shape those two functions were given exists for
+    /// exactly this, and a `Vec::new()` per drained frame did not
+    /// honor it.
+    patches: Vec<(usize, (f32, f32))>,
 }
 
 impl MovingNodeInteraction {
@@ -60,6 +69,7 @@ impl MovingNodeInteraction {
             individual,
             pending: ThrottledPending::accumulating_deltas(),
             descendant_ids,
+            patches: Vec::new(),
         }
     }
 }
@@ -89,7 +99,12 @@ impl ThrottledInteraction for MovingNodeInteraction {
             // Position-only patch: move the dragged nodes in the
             // arena and patch the renderer's existing text buffers
             // in place. No text reshaping, no font-system lock.
-            let mut patches = Vec::new();
+            //
+            // One buffer for every anchor: the collector appends
+            // rather than clearing, so the whole gesture's patch set
+            // for this frame accumulates across `node_ids` and the
+            // clear belongs here, once, before the loop.
+            self.patches.clear();
             for nid in &self.node_ids {
                 apply_drag_delta_and_collect_patches(
                     tree,
@@ -97,10 +112,10 @@ impl ThrottledInteraction for MovingNodeInteraction {
                     pending_delta.x,
                     pending_delta.y,
                     !self.individual,
-                    &mut patches,
+                    &mut self.patches,
                 );
             }
-            renderer.patch_drag_positions(&patches);
+            renderer.patch_drag_positions(&self.patches);
             renderer.rebuild_node_backgrounds_from_tree(&tree.tree);
         }
 
@@ -124,7 +139,7 @@ impl ThrottledInteraction for MovingNodeInteraction {
                 }
             }
 
-            let frame = CanvasFrame::new(
+            let mut frame = CanvasFrame::new(
                 doc,
                 &offsets,
                 interaction_mode.resize_handle_overrides(),

@@ -35,31 +35,39 @@
 //!   one [`MindSection`] and fold the index lookup in.
 //!
 //! **No-op semantics.** A `None` verdict restores `style`,
-//! `sections`, `position` and `size` from the snapshot already
-//! taken for the undo entry, pushes nothing, and leaves `dirty`
-//! alone. That is the whole point of the closure-verdict shape: a
-//! caller can mutate first and decide afterwards without reaching
-//! for the `undo_stack.pop()` anti-pattern (which cannot restore
-//! `dirty` and breaks the undo-LIFO invariant if any other entry
-//! slips in between the push and the pop).
+//! `color_schema`, `sections`, `position` and `size` from the
+//! snapshot already taken for the undo entry, pushes nothing, and
+//! leaves `dirty` alone. That is the whole point of the
+//! closure-verdict shape: a caller can mutate first and decide
+//! afterwards without reaching for the `undo_stack.pop()`
+//! anti-pattern (which cannot restore `dirty` and breaks the
+//! undo-LIFO invariant if any other entry slips in between the
+//! push and the pop).
 //!
 //! **The restore set is the contract, and it is not the whole
-//! node.** Those four fields are exactly what
-//! [`UndoAction::EditNodeStyle`] reverses, and a superset of what
-//! [`UndoAction::EditNodeText`] reverses (which carries no
-//! `before_style`). A closure passed to any envelope here must
-//! therefore confine itself to `style`, `sections`, `position` and
-//! `size`. Everything else on [`MindNode`] is **out of bounds**:
-//! `notes`, `folded`, `color_schema`, `channel`,
-//! `trigger_bindings`, `inline_mutations`, `inline_macros`,
-//! `min_zoom_to_render`, `max_zoom_to_render`, `parent_id`, `id`,
-//! `layout`. A closure that writes one of those persists it on a
-//! no-op verdict *and* leaves it un-undoable on a commit — the
-//! `EditNodeStyle` / `EditNodeText` arms of `undo()` will not put
-//! it back. No caller does this today; a mutation that needs one
-//! of those fields wants `UndoAction::CustomMutation` (which
-//! snapshots a whole `target_scope` window) or a new variant, not
-//! this envelope.
+//! node.** There is one per undo kind, because they reverse
+//! different things: [`STYLE_RESTORE_SET`] for
+//! [`UndoAction::EditNodeStyle`], and the strictly smaller
+//! [`TEXT_RESTORE_SET`] for [`UndoAction::EditNodeText`], which
+//! carries neither `before_style` nor `before_color_schema`. A
+//! style closure may write `style`, `color_schema`, `sections`,
+//! `position` and `size`; a text closure may write only the last
+//! three. Everything else on [`MindNode`] is **out of bounds**:
+//! `notes`, `folded`, `channel`, `trigger_bindings`,
+//! `inline_mutations`, `inline_macros`, `min_zoom_to_render`,
+//! `max_zoom_to_render`, `parent_id`, `id`, `layout`. A closure
+//! that writes one of those persists it on a no-op verdict *and*
+//! leaves it un-undoable on a commit — the `EditNodeStyle` /
+//! `EditNodeText` arms of `undo()` will not put it back. No caller
+//! does this today; a mutation that needs one of those fields
+//! wants `UndoAction::CustomMutation` (which snapshots a whole
+//! `target_scope` window) or a new variant, not this envelope.
+//!
+//! `color_schema` joined the style set when the per-node color
+//! setters did: a themed node's fill / frame / text override lives
+//! on its `ColorSchema`, because `style` is the tier the palette
+//! shadows (`format/palettes.md`). Two homes for one node's colors
+//! is the price of a theme that a per-node edit can except.
 //!
 //! **Missing node.** Every envelope resolves the id first and
 //! yields the no-op result when it does not exist, so callers
@@ -69,12 +77,22 @@ use baumhard::mindmap::model::{MindNode, MindSection};
 
 use super::super::undo_action::UndoAction;
 use super::super::{grow_one_node_to_fit_border, grow_one_node_to_fit_text};
-use super::super::{MindMapDocument, SectionSel, SelectionState};
+use super::super::{MindMapDocument, SectionSel, SectionSpan, SelectionState};
 use super::BorderPreviewTarget;
 
 /// The fields [`UndoAction::EditNodeStyle`] restores, and so the
 /// restore set of the two closure-verdict envelopes.
-const STYLE_RESTORE_SET: &[&str] = &["style", "sections", "position", "size"];
+const STYLE_RESTORE_SET: &[&str] = &["style", "color_schema", "sections", "position", "size"];
+
+/// The fields [`UndoAction::EditNodeText`] restores — a strict
+/// subset of [`STYLE_RESTORE_SET`] that leaves out the two color
+/// homes, because a text setter has no business writing either.
+/// Held separately rather than sharing the style set: once
+/// `color_schema` joined that set, a text closure quietly writing
+/// a node's palette binding would have passed a guard whose whole
+/// job is to catch a write the matching `undo()` arm cannot
+/// reverse.
+const TEXT_RESTORE_SET: &[&str] = &["sections", "position", "size"];
 
 /// The fields [`UndoAction::EditNodeAabb`] restores — a strict
 /// subset of [`STYLE_RESTORE_SET`], which is why
@@ -164,9 +182,20 @@ enum NodeUndoKind {
     /// formatting changed; the node's text content did not.
     Style,
     /// [`UndoAction::EditNodeText`] — the node's text content
-    /// changed. Carries no `before_style` because text setters
-    /// never write `NodeStyle`.
+    /// changed. Carries neither `before_style` nor
+    /// `before_color_schema` because text setters write neither.
     Text,
+}
+
+impl NodeUndoKind {
+    /// The fields this kind's undo variant restores, and so the
+    /// contract its closure is held to.
+    fn restore_set(self) -> &'static [&'static str] {
+        match self {
+            NodeUndoKind::Style => STYLE_RESTORE_SET,
+            NodeUndoKind::Text => TEXT_RESTORE_SET,
+        }
+    }
 }
 
 impl MindMapDocument {
@@ -230,13 +259,15 @@ impl MindMapDocument {
     {
         let node = self.mindmap.nodes.get(node_id)?;
         let before_style = node.style.clone();
+        let before_color_schema = node.color_schema.clone();
         let before_sections = node.sections.clone();
         let before_position = node.position;
         let before_size = node.size;
         let before_selection = self.selection.clone();
         let canvas_default = self.mindmap.canvas.default_border.clone();
 
-        let before_untouched = fields_outside_restore_set(node, STYLE_RESTORE_SET);
+        let restore_set = kind.restore_set();
+        let before_untouched = fields_outside_restore_set(node, restore_set);
 
         let node = self
             .mindmap
@@ -252,19 +283,21 @@ impl MindMapDocument {
                 // restoring it would be a promise the commit path
                 // does not keep.
                 node.style = before_style;
+                node.color_schema = before_color_schema;
                 node.sections = before_sections;
                 node.position = before_position;
                 node.size = before_size;
-                debug_assert_restore_set_respected(node, STYLE_RESTORE_SET, &before_untouched);
+                debug_assert_restore_set_respected(node, restore_set, &before_untouched);
                 return None;
             }
         };
-        debug_assert_restore_set_respected(node, STYLE_RESTORE_SET, &before_untouched);
+        debug_assert_restore_set_respected(node, restore_set, &before_untouched);
 
         self.undo_stack.push(match kind {
             NodeUndoKind::Style => UndoAction::EditNodeStyle {
                 node_id: node_id.to_string(),
                 before_style,
+                before_color_schema,
                 before_sections,
                 before_position,
                 before_size,
@@ -487,24 +520,34 @@ fn cleanup_after_structural_mutation(doc: &mut MindMapDocument, node_id: &str) {
 
     // Clamp the selection's section_idx to the new count. A
     // `Section` selection past the end demotes to `Single(node)`
-    // (the natural "section is gone" lift). `SectionRange`
-    // clamps both ends; if the range collapses to nothing,
-    // demote. `MultiSection` filters out the dead pairs; if
-    // none survive, demote.
+    // (the natural "section is gone" lift). `SectionRange` clamps
+    // both ends of its **section span**; if the anchor section is
+    // gone, demote. The grapheme range is left as authored — it
+    // addresses text inside the surviving anchor section, and the
+    // range-aware setters clamp against the live grapheme count on
+    // every use, which a structural section mutation does not
+    // change for sections it did not touch. `MultiSection` filters
+    // out the dead pairs; if none survive, demote.
     match &doc.selection {
         SelectionState::Section(s) if s.node_id == node_id && s.section_idx >= new_count => {
             doc.selection = SelectionState::Single(node_id.to_string());
         }
-        SelectionState::SectionRange { sel, range } if sel.node_id == node_id => {
+        SelectionState::SectionRange {
+            sel,
+            section_span,
+            grapheme_range,
+        } if sel.node_id == node_id => {
             let max_idx = new_count.saturating_sub(1);
-            let lo = range.0.min(range.1).min(max_idx);
-            let hi = range.0.max(range.1).min(max_idx);
+            let lo = section_span.lo().min(max_idx);
+            let hi = section_span.hi().min(max_idx);
             if new_count == 0 {
                 doc.selection = SelectionState::Single(node_id.to_string());
             } else if sel.section_idx >= new_count {
                 // Anchor section gone — demote to a single
                 // surviving section selection at the closest
-                // remaining idx.
+                // remaining idx. The grapheme range dies with its
+                // anchor; a sub-range of deleted text is not a
+                // sub-range of whatever now sits at `lo`.
                 doc.selection = SelectionState::Section(SectionSel {
                     node_id: node_id.to_string(),
                     section_idx: lo,
@@ -512,7 +555,8 @@ fn cleanup_after_structural_mutation(doc: &mut MindMapDocument, node_id: &str) {
             } else {
                 doc.selection = SelectionState::SectionRange {
                     sel: sel.clone(),
-                    range: (lo, hi),
+                    section_span: SectionSpan::new(lo, hi),
+                    grapheme_range: *grapheme_range,
                 };
             }
         }

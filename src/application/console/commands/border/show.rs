@@ -11,9 +11,10 @@
 
 use baumhard::mindmap::border::{resolve_border_style, BORDER_APPROX_CHAR_WIDTH_FRAC};
 use baumhard::mindmap::border_pattern::SidePattern;
-use baumhard::mindmap::model::MindNode;
+use baumhard::mindmap::model::{MindMap, MindNode};
 
 use crate::application::console::parser::Args;
+use crate::application::console::spec::{kvs, Descent};
 use crate::application::console::{ConsoleEffects, ExecResult, OutputLine};
 use crate::application::document::SelectionState;
 
@@ -28,17 +29,22 @@ use crate::application::document::SelectionState;
 /// `verbose` is a bare positional that surfaces the dual color
 /// surface (`style.frame_color` set via `color border=…` vs
 /// `style.border.color` set via `border color`) so the user can
-/// see why their border colour doesn't match —calls
+/// see why their border color doesn't match —calls
 /// this out as a UX bug bake-in.
-pub fn execute_border_show(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    let id = match first_selected_node_id(&eff.document.selection) {
+pub fn execute_border_show(descent: &Descent, args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
+    // `side=` is a key of the *readout*, not of the border
+    // configuration, so the grammar declares it on this subverb
+    // alone: the composed kv form does not read it and the popup at
+    // that slot does not offer it.
+    let pairs = match kvs::read_strict(descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
+    };
+    let id = match first_selected_node_id(&eff.document().selection) {
         Ok(id) => id,
         Err(msg) => return ExecResult::err(msg),
     };
-    let side_filter = args
-        .kvs()
-        .find(|(k, _)| *k == "side")
-        .map(|(_, v)| v.to_ascii_lowercase());
+    let side_filter = kvs::value(&pairs, "side").map(|v| v.to_ascii_lowercase());
     if let Some(ref s) = side_filter {
         if !matches!(s.as_str(), "top" | "bottom" | "left" | "right" | "all") {
             return ExecResult::err(format!(
@@ -47,26 +53,20 @@ pub fn execute_border_show(args: &Args, eff: &mut ConsoleEffects) -> ExecResult 
             ));
         }
     }
-    let verbose = args
-        .positionals()
-        .skip(1)
-        .any(|p| p.eq_ignore_ascii_case("verbose"));
-    let node = match eff.document.mindmap.nodes.get(&id) {
+    let verbose = descent
+        .slot_value(args)
+        .get(0)
+        .is_some_and(|p| p.eq_ignore_ascii_case("verbose"));
+    let node = match eff.document().mindmap.nodes.get(&id) {
         Some(n) => n,
         None => return ExecResult::err(format!("border: node '{}' not found", id)),
     };
-    let mut lines = format_border_readout(
-        node,
-        eff.document.mindmap.canvas.default_border.as_ref(),
-        &eff.document.mindmap.palettes,
-        side_filter.as_deref(),
-        verbose,
-    );
+    let mut lines = format_border_readout(&eff.document().mindmap, node, side_filter.as_deref(), verbose);
     // API/UX M4: when the selection covers more than one node,
     // the readout silently rolls up to the first one. Prepend a
     // single-line note so the user knows there are siblings —
     // mirrors the `font show` Multi-rollup posture.
-    if let Some(extra) = multi_rollup_count(&eff.document.selection) {
+    if let Some(extra) = multi_rollup_count(&eff.document().selection) {
         lines.insert(
             0,
             crate::application::console::OutputLine::plain(format!(
@@ -115,16 +115,62 @@ fn first_selected_node_id(sel: &SelectionState) -> Result<String, String> {
     }
 }
 
+/// Which tier of the palette cascade the node's frame color came
+/// from, phrased for a console readout. The whole point of
+/// `border show verbose` is telling the user *where* a color they
+/// did not expect is coming from, and "the palette" is now one of
+/// the answers.
+fn frame_color_source(map: &MindMap, node: &MindNode) -> String {
+    let Some(schema) = node.color_schema.as_ref() else {
+        return "style.frame_color".to_string();
+    };
+    // Ask the reader whether a themed tier applies at all, rather
+    // than re-deciding here. `node_frame_theme_tier` skips an
+    // **empty** frame in both slots — an empty string is a hole, not
+    // a color — so `overrides.frame == Some("")` and a resolved group
+    // whose `frame` is empty both fall through to `style`. Deciding
+    // it twice is how this readout came to name a tier the renderer
+    // had already skipped, which is the one thing this verb exists
+    // not to do.
+    if map.node_frame_theme_tier(node).is_none() {
+        return match map.resolve_theme_colors(node) {
+            Some(_) => format!(
+                "style.frame_color (palette `{}` sets no frame at level {})",
+                schema.palette, schema.level
+            ),
+            None => format!(
+                "style.frame_color (palette `{}` does not resolve)",
+                schema.palette
+            ),
+        };
+    }
+    if schema.overrides.frame.as_deref().is_some_and(|f| !f.is_empty()) {
+        return format!(
+            "color_schema.overrides.frame (excepting palette `{}`)",
+            schema.palette
+        );
+    }
+    format!("palette `{}` at level {}", schema.palette, schema.level)
+}
+
 fn format_border_readout(
+    map: &MindMap,
     node: &MindNode,
-    canvas_default: Option<&baumhard::mindmap::model::GlyphBorderConfig>,
-    palettes: &std::collections::HashMap<String, baumhard::mindmap::model::Palette>,
     side_filter: Option<&str>,
     verbose: bool,
 ) -> Vec<OutputLine> {
+    let canvas_default = map.canvas.default_border.as_ref();
+    let palettes = &map.palettes;
+    // The **effective** frame color, through the same cascade the
+    // render path uses (`tree_builder/border.rs`). A readout that
+    // reached for `node.style.frame_color` here would print
+    // `#222222` while the glyphs paint the node's palette frame —
+    // which is precisely the confusion this verb exists to clear
+    // up.
     let style = resolve_border_style(
         node.style.border.as_ref(),
         canvas_default,
+        map.node_frame_theme_tier(node),
         &node.style.frame_color,
     );
     let approx_char_width = style.font_size_pt * BORDER_APPROX_CHAR_WIDTH_FRAC;
@@ -174,29 +220,39 @@ fn format_border_readout(
         .as_ref()
         .and_then(|c| c.font.as_deref())
         .map(|_| "per-node override")
-        .or_else(|| canvas_default.and_then(|c| c.font.as_deref()).map(|_| "canvas default"))
+        .or_else(|| {
+            canvas_default
+                .and_then(|c| c.font.as_deref())
+                .map(|_| "canvas default")
+        })
         .unwrap_or("hardcoded floor");
     lines.push(OutputLine::plain(format!(
         "font:    {} ({} pt)  (override: `border font <family>`, source: {})",
         face_str, style.font_size_pt, font_override
     )));
     if verbose {
-        //surface both color surfaces so the user
-        // can see why their border colour doesn't match what they
-        // expected. `style.frame_color` is set via `color border=`;
-        // `style.border.color` is set via `border color`. Different
-        // verbs, different fields, identical-looking authoring.
+        // Surface every color surface the border sits on, so the
+        // user can see why their border color doesn't match what
+        // they expected. Three of them now: the node's *effective*
+        // frame color and where it came from, the raw
+        // `style.frame_color` the palette may be shadowing, and
+        // `style.border.color`, which outranks both. Printing only
+        // the raw field — as this did — reported `#222222` on a
+        // node whose glyphs paint its palette's `#a20000`, which
+        // is exactly the confusion the verb exists to clear up.
         lines.push(OutputLine::plain("color (cascade):".to_string()));
+        let frame_color = map.node_frame_color(node);
         lines.push(OutputLine::plain(format!(
-            "  style.frame_color    = {}          # set via `color border=`",
+            "  node frame (effective) = {}          # source: {}",
+            frame_color,
+            frame_color_source(map, node)
+        )));
+        lines.push(OutputLine::plain(format!(
+            "  style.frame_color    = {}          # the unthemed tier, set via `color border=`",
             node.style.frame_color
         )));
-        let per_node_color = node
-            .style
-            .border
-            .as_ref()
-            .and_then(|c| c.color.as_deref());
-        let cascade_target = per_node_color.unwrap_or(node.style.frame_color.as_str());
+        let per_node_color = node.style.border.as_ref().and_then(|c| c.color.as_deref());
+        let cascade_target = per_node_color.unwrap_or(frame_color);
         let per_node_label = per_node_color.unwrap_or("(unset)");
         lines.push(OutputLine::plain(format!(
             "  style.border.color   = {} [\u{2192} {}]   # set via `border color`",
@@ -289,5 +345,178 @@ fn corner_line(style: &baumhard::mindmap::border::BorderStyle, face: &Option<Str
     match face {
         Some(family) => OutputLine::in_font(text, family),
         None => OutputLine::plain(text),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::document::tests_common::{first_testament_node_id, load_test_doc};
+    use baumhard::mindmap::model::MindMap;
+
+    fn readout_blob(map: &MindMap, node: &MindNode, verbose: bool) -> String {
+        format_border_readout(map, node, None, verbose)
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The readout has to agree with the glyphs. Every testament
+    /// node is themed, so a `border show` that reached for
+    /// `style.frame_color` printed a color the border is not
+    /// painted in — the verb's own doc comment says it exists so
+    /// the user can see why their border color does not match what
+    /// they expected, and it was the thing lying to them.
+    #[test]
+    fn test_border_show_reports_the_effective_frame_color() {
+        // `maps/palette_cascade.mindmap.json` rather than
+        // testament: its `style` values are deliberately different
+        // from its palette's, where testament's have drifted
+        // toward each other and would let a wrong read pass.
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("maps/palette_cascade.mindmap.json");
+        let map =
+            baumhard::mindmap::loader::load_from_file(&path).expect("the palette-cascade fixture must load");
+        let node = map.nodes.get("0").expect("fixture node 0");
+        assert!(node.color_schema.is_some(), "fixture node 0 is themed");
+        let effective = map.node_frame_color(node).to_string();
+        assert_ne!(
+            effective, node.style.frame_color,
+            "the fixture must keep its tiers apart or this test proves nothing"
+        );
+        let blob = readout_blob(&map, node, false);
+        assert!(
+            blob.contains(&format!("color:   {effective}")),
+            "readout must print the color the border is painted in: {blob}"
+        );
+    }
+
+    /// `verbose` names the tier the color came from, which is the
+    /// whole reason the flag exists. A themed node reports its
+    /// palette; a per-node override reports itself.
+    #[test]
+    fn test_border_show_verbose_names_the_cascade_tier() {
+        let mut doc = load_test_doc();
+        let id = first_testament_node_id(&doc);
+        let palette = doc
+            .mindmap
+            .nodes
+            .get(&id)
+            .and_then(|n| n.color_schema.as_ref())
+            .map(|s| s.palette.clone())
+            .expect("testament nodes are themed");
+        let node = doc.mindmap.nodes.get(&id).unwrap();
+        let blob = readout_blob(&doc.mindmap, node, true);
+        assert!(
+            blob.contains(&format!("palette `{palette}`")),
+            "a themed node must be told its color comes from the palette: {blob}"
+        );
+
+        assert!(doc.set_node_border_color(&id, Some("#00ff00")));
+        let node = doc.mindmap.nodes.get(&id).unwrap();
+        let blob = readout_blob(&doc.mindmap, node, true);
+        assert!(
+            blob.contains("color_schema.overrides.frame"),
+            "a hand-recolored node must be told the override is what won: {blob}"
+        );
+        assert!(
+            blob.contains("#00ff00"),
+            "...and the effective color must be the one just set: {blob}"
+        );
+    }
+
+    /// An **empty** frame is a hole, not a color. The readout has
+    /// to name the tier the renderer actually used, and the two
+    /// slots fail differently:
+    ///
+    /// - an empty **override** is skipped and the *group* wins, so
+    ///   the answer is the palette — the old code answered
+    ///   `overrides.frame` because it only asked `is_some()`;
+    /// - an empty **group** with no override leaves no themed tier
+    ///   at all, so the answer is `style.frame_color` — the old
+    ///   code answered `palette` because it only asked whether
+    ///   `resolve_theme_colors` returned `Some`.
+    ///
+    /// Both came from deciding the tier a second time here instead
+    /// of asking the reader, which is the one thing this verb
+    /// exists not to do. No setter can write an empty override, so
+    /// only a hand-authored file reaches it — which is why nothing
+    /// caught it.
+    #[test]
+    fn test_border_show_verbose_does_not_name_a_tier_the_renderer_skipped() {
+        fn empty_the_group(map: &mut MindMap, id: &str) {
+            let schema = map
+                .nodes
+                .get(id)
+                .and_then(|n| n.color_schema.as_ref())
+                .expect("testament nodes are themed");
+            let palette: String = schema.palette.clone();
+            let level: usize = schema.level;
+            if let Some(entry) = map.palettes.get_mut(&palette) {
+                let idx = level.min(entry.groups.len().saturating_sub(1));
+                if let Some(group) = entry.groups.get_mut(idx) {
+                    group.frame = String::new();
+                }
+            }
+        }
+
+        // An empty override falls through to a live group: the
+        // palette is the winning tier, not the override.
+        let mut doc = load_test_doc();
+        let id = first_testament_node_id(&doc);
+        let palette = {
+            let node = doc.mindmap.nodes.get_mut(&id).expect("testament node");
+            let schema = node.color_schema.as_mut().expect("themed");
+            schema.overrides.frame = Some(String::new());
+            schema.palette.clone()
+        };
+        let node = doc.mindmap.nodes.get(&id).expect("testament node");
+        assert!(
+            doc.mindmap.node_frame_theme_tier(node).is_some(),
+            "this case needs a live group frame or it proves nothing"
+        );
+        let blob = readout_blob(&doc.mindmap, node, true);
+        assert!(
+            !blob.contains("color_schema.overrides.frame"),
+            "an empty override is skipped by the reader and must not be named: {blob}"
+        );
+        assert!(
+            blob.contains(&format!("palette `{palette}`")),
+            "the group is what the renderer used, so the readout must say so: {blob}"
+        );
+
+        // Empty the group too: now no themed tier survives at all.
+        empty_the_group(&mut doc.mindmap, &id);
+        let node = doc.mindmap.nodes.get(&id).expect("testament node");
+        assert!(
+            doc.mindmap.node_frame_theme_tier(node).is_none(),
+            "both slots are empty, so there is no themed tier"
+        );
+        let blob = readout_blob(&doc.mindmap, node, true);
+        assert!(
+            blob.contains("style.frame_color"),
+            "with both slots empty the border comes from style: {blob}"
+        );
+
+        // An empty group with no override at all: same answer, and
+        // the tier that resolved must still not be claimed.
+        let mut doc = load_test_doc();
+        let id = first_testament_node_id(&doc);
+        empty_the_group(&mut doc.mindmap, &id);
+        let node = doc.mindmap.nodes.get(&id).expect("testament node");
+        assert!(
+            doc.mindmap.resolve_theme_colors(node).is_some(),
+            "the group still resolves"
+        );
+        assert!(
+            doc.mindmap.node_frame_theme_tier(node).is_none(),
+            "...but its frame is empty, so the themed tier is a hole"
+        );
+        let blob = readout_blob(&doc.mindmap, node, true);
+        assert!(
+            blob.contains("style.frame_color"),
+            "a resolved group with an empty frame still falls through to style: {blob}"
+        );
     }
 }

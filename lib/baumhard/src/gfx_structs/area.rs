@@ -217,6 +217,67 @@ impl Hash for GlyphArea {
 }
 
 impl GlyphArea {
+    /// Hash everything a renderer would draw this area from —
+    /// including the region colors and font pins that [`Hash`]
+    /// above cannot reach.
+    ///
+    /// `Hash` has to agree with this type's `PartialEq`, and that
+    /// equality runs through [`ColorFontRegions`], whose element
+    /// identity is the [`Range`] alone. So a recolored span leaves
+    /// both `==` and `hash` unmoved — which is exactly what a
+    /// color-picker hover produces. Anything folding "would a rebuild of this area
+    /// draw differently?" into one integer must call this instead;
+    /// the canvas-role dispatchers in `scene_rebuild` do, to decide
+    /// whether the registered tree is already correct.
+    ///
+    /// Floats go in as `to_bits`, so `-0.0` and `0.0` are distinct
+    /// values here while `==` calls them equal. That is the safe
+    /// direction for a reuse decision: it can only cost a redundant
+    /// update, never a skipped one.
+    ///
+    /// **`hitbox` is deliberately excluded**, matching `PartialEq`
+    /// (which marks it `ignore`) and `Hash` (which omits it): click
+    /// extents are scene-builder output rather than drawn state. A
+    /// consumer that skips work on a hash match therefore skips
+    /// re-stamping hit boxes too, so it owes its own proof that its
+    /// builder writes none — see
+    /// `test_border_and_portal_areas_carry_no_hitbox`.
+    ///
+    /// Cost: O(text bytes + region count); no allocation. The body
+    /// destructures `self`, so a field added to this struct will not
+    /// compile until it is accounted for here.
+    pub fn hash_content<H: Hasher>(&self, state: &mut H) {
+        let GlyphArea {
+            text,
+            scale,
+            line_height,
+            position,
+            render_bounds,
+            regions,
+            background_color,
+            background_padding,
+            align_center,
+            outline,
+            shape,
+            zoom_visibility,
+            hitbox: _,
+        } = self;
+        text.hash(state);
+        scale.to_bits().hash(state);
+        line_height.to_bits().hash(state);
+        position.x().to_bits().hash(state);
+        position.y().to_bits().hash(state);
+        render_bounds.x().to_bits().hash(state);
+        render_bounds.y().to_bits().hash(state);
+        regions.hash_content(state);
+        background_color.hash(state);
+        background_padding.hash(state);
+        align_center.hash(state);
+        outline.hash(state);
+        shape.hash(state);
+        zoom_visibility.hash(state);
+    }
+
     /// Construct an empty-text area with the given metrics and
     /// placement. Regions and hitbox start empty; `align_center`,
     /// `background_color`, `background_padding`, and `outline`
@@ -292,12 +353,23 @@ impl GlyphArea {
             operation.apply(&mut self.render_bounds.y, bounds.y);
         }
 
+        // The delta path writes the same two shaper metrics the
+        // setters do, so it takes the same clamp. Applying into a
+        // local first keeps the operation semantics (`Add` still
+        // adds, `Multiply` still multiplies) while the *result* is
+        // what gets bounded — otherwise a `GlyphAreaField::Scale`
+        // delta, which a map-carried CustomMutation can carry, walks
+        // straight past the invariant the setters exist to hold.
         if let Some(line_height) = delta.line_height() {
-            operation.apply(&mut self.line_height, OrderedFloat::from(line_height));
+            let mut next = self.line_height;
+            operation.apply(&mut next, OrderedFloat::from(line_height));
+            self.set_line_height_clamped(next.into_inner());
         }
 
         if let Some(scale) = delta.scale() {
-            operation.apply(&mut self.scale, OrderedFloat::from(scale));
+            let mut next = self.scale;
+            operation.apply(&mut next, OrderedFloat::from(scale));
+            self.set_scale_clamped(next.into_inner());
         }
 
         if let Some(x) = delta.color_font_regions() {
@@ -317,7 +389,7 @@ impl GlyphArea {
                 }
                 ApplyOperation::Delete => self.regions = ColorFontRegions::default(),
                 ApplyOperation::Multiply => {
-                    warn!("Multiply is not defined for ColorFontRegions; ignoring")
+                    warn!("gfx_structs::area: Multiply is not defined for ColorFontRegions; ignoring")
                 }
                 ApplyOperation::Noop => {}
             }
@@ -332,7 +404,10 @@ impl GlyphArea {
                 ApplyOperation::Add => self.text += text,
                 ApplyOperation::Delete => self.text.clear(),
                 ApplyOperation::Subtract | ApplyOperation::Multiply => {
-                    warn!("{:?} is not defined for text; ignoring", operation)
+                    warn!(
+                        "gfx_structs::area: {:?} is not defined for text; ignoring",
+                        operation
+                    )
                 }
                 ApplyOperation::Noop => {}
             }
@@ -402,12 +477,47 @@ impl GlyphArea {
 
     /// Add `value` to the font scale. O(1).
     pub fn grow_font(&mut self, value: &f32) {
-        self.scale += value;
+        self.set_scale_clamped(self.scale.into_inner() + value);
+    }
+
+    /// Write `scale`, forced into the shaper's usable range.
+    ///
+    /// **Every mutator that touches the font scale lands here**, and
+    /// that is the point. The scale becomes a `cosmic_text::Metrics`
+    /// term, where zero trips an `assert!` that aborts the process
+    /// and a huge value asks the rasterizer for a glyph the atlas
+    /// cannot hold. The document loader screens the numbers it can
+    /// see (`mindmap::model::validate`), but it only sees *authored
+    /// geometry* — a `CustomMutation` payload carried by the same
+    /// file writes here later, on a click, and so do console verbs,
+    /// macros, and IPC. Clamping at the field rather than at each
+    /// caller is what makes the invariant hold for writers that do
+    /// not exist yet.
+    ///
+    /// Cost: O(1).
+    fn set_scale_clamped(&mut self, value: f32) {
+        self.scale = OrderedFloat::from(crate::font::fonts::clamp_font_metric(
+            value,
+            self.scale.into_inner(),
+        ));
+    }
+
+    /// Write `line_height`, forced into the same range as
+    /// [`Self::set_scale_clamped`] and for the same reason — it is
+    /// the other half of `Metrics::new`, and the half the
+    /// zero-line-height assert actually names.
+    ///
+    /// Cost: O(1).
+    fn set_line_height_clamped(&mut self, value: f32) {
+        self.line_height = OrderedFloat::from(crate::font::fonts::clamp_font_metric(
+            value,
+            self.line_height.into_inner(),
+        ));
     }
 
     /// Subtract `value` from the font scale. O(1).
     pub fn shrink_font(&mut self, value: &f32) {
-        self.scale -= value;
+        self.set_scale_clamped(self.scale.into_inner() - value);
     }
 
     /// Replace the render bounds with `(width, height)`. O(1).
@@ -456,23 +566,23 @@ impl GlyphArea {
 
     /// Replace the font scale with `size`. O(1).
     pub fn set_font_size(&mut self, size: &f32) {
-        self.scale = OrderedFloat::from(*size);
+        self.set_scale_clamped(*size);
     }
 
     /// Replace the line-height multiplier with `line_height`. O(1).
     pub fn set_line_height(&mut self, line_height: &f32) {
-        self.line_height = OrderedFloat::from(*line_height);
+        self.set_line_height_clamped(*line_height);
     }
 
     /// Add `line_height` to the current line-height multiplier. O(1).
     pub fn grow_line_height(&mut self, line_height: &f32) {
-        self.line_height += line_height;
+        self.set_line_height_clamped(self.line_height.into_inner() + line_height);
     }
 
     /// Subtract `line_height` from the current line-height
     /// multiplier. O(1).
     pub fn shrink_line_height(&mut self, line_height: &f32) {
-        self.line_height -= line_height;
+        self.set_line_height_clamped(self.line_height.into_inner() - line_height);
     }
 
     /// Position as a plain `Vec2`. O(1).

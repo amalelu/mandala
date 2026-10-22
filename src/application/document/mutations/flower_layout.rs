@@ -74,10 +74,16 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
             );
             continue;
         }
-        // Position is the top-left corner; centre the child on the
+        // Position is the top-left corner; center the child on the
         // computed point.
-        child.position.x = cx + radius * theta.cos() - child.size.width / 2.0;
-        child.position.y = cy + radius * theta.sin() - child.size.height / 2.0;
+        // Clamped for the same reason as the cascade: the result is
+        // computed from a parent position plus a radius, so it can
+        // leave the domain the loader accepts even when every input
+        // is inside it.
+        child.set_position_clamped(
+            cx + radius * theta.cos() - child.size.width / 2.0,
+            cy + radius * theta.sin() - child.size.height / 2.0,
+        );
     }
 }
 
@@ -85,6 +91,7 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
 mod tests {
     use super::*;
     use crate::application::document::MindMapDocument;
+    use baumhard::util::geometry::almost_equal_f64;
 
     /// Pinned testament fixture. Node `"1"` has four direct children
     /// (`1.0`, `1.1`, `1.2`, `1.3`) by construction; if that changes
@@ -143,7 +150,7 @@ mod tests {
         let cx = parent.position.x + parent.size.width / 2.0;
         let cy = parent.position.y + parent.size.height / 2.0;
         apply(&mut doc, &target_id);
-        // Centroid of child centres should be near the parent's centre
+        // Centroid of child centers should be near the parent's center
         // (within one padding-radius — the layout is rotationally
         // symmetric around the parent so this holds as a sanity check).
         let (mut sx, mut sy) = (0.0_f64, 0.0_f64);
@@ -156,13 +163,13 @@ mod tests {
         let (mx, my) = (sx / n, sy / n);
         assert!(
             (mx - cx).abs() < 2.0 * RADIAL_PADDING,
-            "centroid x {} drifted from parent centre {}",
+            "centroid x {} drifted from parent center {}",
             mx,
             cx
         );
         assert!(
             (my - cy).abs() < 2.0 * RADIAL_PADDING,
-            "centroid y {} drifted from parent centre {}",
+            "centroid y {} drifted from parent center {}",
             my,
             cy
         );
@@ -178,9 +185,9 @@ mod tests {
             .find(|id| doc.mindmap.children_of(id).is_empty())
             .unwrap()
             .clone();
-        let before = doc.mindmap.nodes.get(&leaf).unwrap().position.clone();
+        let before = doc.mindmap.nodes.get(&leaf).unwrap().position;
         apply(&mut doc, &leaf);
-        let after = doc.mindmap.nodes.get(&leaf).unwrap().position.clone();
+        let after = doc.mindmap.nodes.get(&leaf).unwrap().position;
         assert_eq!(before.x, after.x);
         assert_eq!(before.y, after.y);
     }
@@ -234,7 +241,7 @@ mod tests {
         // silently regresses to a no-op.
         let any_moved = baseline.iter().any(|(id, x0, y0)| {
             let n = doc.mindmap.nodes.get(id).unwrap();
-            (n.position.x - x0).abs() > 1e-6 || (n.position.y - y0).abs() > 1e-6
+            !almost_equal_f64(n.position.x, *x0) || !almost_equal_f64(n.position.y, *y0)
         });
         assert!(any_moved, "flower-layout must move at least one child");
 
@@ -243,7 +250,7 @@ mod tests {
         for (id, x0, y0) in &baseline {
             let n = doc.mindmap.nodes.get(id).unwrap();
             assert!(
-                (n.position.x - x0).abs() < 1e-6 && (n.position.y - y0).abs() < 1e-6,
+                almost_equal_f64(n.position.x, *x0) && almost_equal_f64(n.position.y, *y0),
                 "child {id} did not restore: ({}, {}) vs baseline ({x0}, {y0})",
                 n.position.x,
                 n.position.y,

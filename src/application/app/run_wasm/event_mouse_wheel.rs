@@ -17,7 +17,6 @@ use crate::application::platform::input::MouseScrollDelta;
 
 use super::PendingClick;
 use crate::application::app::dispatch::DispatchOutcome;
-use crate::application::app::scene_rebuild::rebuild_camera_geometry;
 use crate::application::app::{dispatch, wheel_gesture, wheel_lines};
 use std::sync::atomic::AtomicBool;
 
@@ -77,49 +76,10 @@ impl super::WasmApp {
             );
         }
         // Native picks the post-camera-change reprojection up in its
-        // per-frame drain (`drain_camera_geometry_rebuild`); the
-        // browser has no drain loop, so the same body runs here under
-        // the same renderer-side dirty flag. Gating on the flag —
-        // rather than rebuilding unconditionally — is what keeps a
-        // non-camera Action bound to the wheel from paying for a
-        // scene reprojection it did not cause.
-        //
-        // Three things a reader of a *shared* body will otherwise
-        // assume are identical at both call sites, and are not:
-        //
-        // 1. **Narrower than the browser's old behavior.** Base WASM
-        //    ran `rebuild_scene_only` here — all seven canvas roles.
-        //    `rebuild_camera_geometry` reprojects three (connections,
-        //    connection labels, portals). The other four — borders,
-        //    section frames, and both resize-handle trees — are
-        //    canvas-space and zoom-independent, so a zoom cannot move
-        //    them; native has always taken the narrow set through
-        //    `drain_camera_geometry_rebuild`, and §4's mobile budget
-        //    is the reason to converge on the narrow one rather than
-        //    the wide one.
-        // 2. **`CameraPan` does not set the flag** (`renderer/
-        //    decree.rs`) — only `CameraZoom` does, because zoom is
-        //    what changes the effective font size and therefore the
-        //    sample spacing. So rebinding `WheelUp` to
-        //    `PanCameraNorth` moves the camera with no reprojection
-        //    at all. Native's drain has exactly the same shape, so
-        //    "rebinding the wheel behaves identically on both
-        //    targets" holds — this is the one input class where
-        //    identical means identically incomplete.
-        // 3. **No `!is_moving_node` term.** Native's drain guards
-        //    with `geometry_dirty && !is_moving_node` so a
-        //    mid-node-drag frame does not reproject. There is no
-        //    equivalent here, and none is needed only because
-        //    `WasmInputState` carries no `drag_state` yet. Whoever
-        //    ports the drag machinery owns adding it.
-        if renderer.take_connection_geometry_dirty() {
-            rebuild_camera_geometry(
-                &input.document,
-                &input.interaction_mode,
-                &mut input.app_scene,
-                renderer,
-                &mut input.scene_cache,
-            );
-        }
+        // per-frame drain; the browser has no drain loop, so every
+        // camera mover on this target runs the same body. See
+        // `WasmInputState::reproject_after_camera_change` for the
+        // three ways it is *not* identical to native's drain.
+        input.reproject_after_camera_change(renderer);
     }
 }

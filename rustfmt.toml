@@ -21,7 +21,19 @@ max_width = 110
 # bare-expression form (the form most one-line let-else sites
 # already used) and tolerates the expansion of the rest.
 #
-# rustfmt emits an informational warning when this value equals
-# max_width; the clamp behaviour matches our intent — accept
-# the noise.
-single_line_let_else_max_width = 110
+# 102 rather than 110, and not deleted (#130). Deleting the line is
+# not a cleanup: the default is 50, and reformatting under it expands
+# 20 one-line let-else sites across 12 files — the knob is
+# load-bearing. Values 103-110 all make rustfmt 1.8.0 print its
+# "cannot have a value that exceeds max_width" clamp warning — not
+# only at equality: the check re-runs against derived layout widths
+# narrower than max_width while formatting, so the silence boundary
+# (102/103 today) is a property of the tree's contents, not of the
+# config. A warning on every run trains readers to skim the stderr
+# where a real config error would appear; if the warning reappears
+# after new code lands, lower this value rather than accepting the
+# noise. `cargo fmt --all` under 102 and under 110 produces
+# byte-identical output on this tree: no let-else site currently
+# renders single-line above 102 columns. The recorded trade: one
+# that would is expanded rather than kept on one line.
+single_line_let_else_max_width = 102

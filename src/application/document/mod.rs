@@ -10,12 +10,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use log::{error, info};
+use log::info;
 
 use baumhard::mindmap::custom_mutation::CustomMutation;
 use baumhard::mindmap::loader;
 use baumhard::mindmap::model::{MindMap, MAX_NODE_AXIS};
-use baumhard::mindmap::tree_builder::{self, FrameOverrides, MindMapTree};
+use baumhard::mindmap::placard;
+use baumhard::mindmap::tree_builder::{
+    self, effective_section_scale, FrameOverrides, MindMapTree, LINE_HEIGHT_FACTOR,
+};
 
 use crate::application::source_tier::SourceTier;
 
@@ -23,6 +26,10 @@ pub mod animations;
 mod custom;
 pub(in crate::application) mod defaults;
 mod edges;
+// Pointer hit-testing and drag/resize tree patching. Every caller
+// is a native-gated mouse handler, so on wasm32 the module
+// compiles unreferenced; the lint stays armed on the host.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod hit_test;
 pub mod mutations;
 pub mod mutations_loader;
@@ -67,26 +74,26 @@ pub use hit_test::hit_test;
 pub use hit_test::{
     apply_inactive_node_dimming, apply_tree_highlights, hit_test_target, point_in_node_aabb, HitTarget,
 };
+// Cross-platform: a connection path is the last rung of the tap's
+// hit chain (`dispatch::cross_dispatch::pointer`), which is one body
+// on both targets. It was in the native-only group below for as long
+// as native's click router was its only caller.
+pub use hit_test::hit_test_edge;
 // Native-only: consumed by drag handlers, the click router, and
 // rect-select drain — none reachable on WASM today.
 #[cfg(not(target_arch = "wasm32"))]
 pub use hit_test::{
     apply_drag_delta, apply_drag_delta_and_collect_patches, apply_node_resize_to_tree,
-    apply_section_drag_delta_and_collect_patches, apply_section_resize_to_tree, hit_test_edge,
-    hit_test_node_resize_handle, hit_test_section_resize_handle, rect_select,
+    apply_section_drag_delta_and_collect_patches, apply_section_resize_to_tree, hit_test_node_resize_handle,
+    hit_test_section_resize_handle, rect_select,
 };
 pub use nodes::{
-    BorderConfigEdits, BorderEditOutcome, BorderPreview, BorderSide, OptionEdit, SectionPayload,
+    BorderConfigEdits, BorderEditOutcome, BorderPreview, BorderPreviewTarget, BorderSide, OptionEdit,
+    SectionPayload,
 };
-// `BorderPreviewTarget` is consumed only by the document setters
-// (and the upcoming preview verbs) — re-exported here so the
-// commits adding the verb files import it from the same place
-// the rest of the public document API lives. Triggers an
-// unused-import warning until commit 5 lands; suppress.
-#[allow(unused_imports)]
-pub use nodes::BorderPreviewTarget;
 pub use types::{
-    AnimationInstance, EdgeLabelSel, EdgeRef, PortalLabelSel, SectionSel, SelectionState, HIGHLIGHT_COLOR,
+    AnimationInstance, EdgeLabelSel, EdgeRef, GraphemeRange, PortalLabelSel, SectionSel, SectionSpan,
+    SelectionState, HIGHLIGHT_COLOR,
 };
 // `InteractionModeOverrides` lives in baumhard (next to the
 // `SceneSelectionContext` it composes into). Re-exported here so
@@ -193,6 +200,53 @@ pub struct MindMapDocument {
     /// `canvas border preview …` /
     /// `canvas section-frame [focused] preview …` console verbs.
     pub border_preview: Option<BorderPreview>,
+    /// Transient rubber-band selection preview: the node ids a
+    /// Shift+drag rectangle currently covers. When `Some(ids)`,
+    /// `app::scene_rebuild::highlight_entries_for` — a plain code
+    /// span because `scene_rebuild` is a private module and rustdoc
+    /// cannot resolve a link into one — paints *those* nodes
+    /// instead of `self.selection`'s: the
+    /// gesture's release replaces the selection with the set
+    /// outright, so the pre-drag selection's highlight stands down
+    /// for the duration rather than sitting under a set that is
+    /// about to overwrite it.
+    ///
+    /// Same discipline as the other `*_preview` fields: never
+    /// serialized, never pushes undo, never flips `dirty`. Written
+    /// only by `set_rect_select_preview` and cleared by
+    /// `take_rect_select_preview` — private, and code spans rather
+    /// than links, because both are native-gated and a link from
+    /// this cross-platform doc into a stripped item breaks the
+    /// wasm32 doc leg (CODE_CONVENTIONS §8). The field is private so
+    /// that claim is the compiler's rather than a request;
+    /// [`Self::rect_select_preview`] is the cross-platform read.
+    ///
+    /// It lives here rather than beside the (native-only)
+    /// `DragState` for the reason the rest of this family does:
+    /// *every* rebuild path has to see it. Before it existed the
+    /// preview was stamped onto a private tree the rubber-band
+    /// drain built for itself each frame, so an animation tick
+    /// landing mid-gesture — its `rebuild_all` runs in the same
+    /// frame, after the drain — wiped the preview until the next
+    /// drain rebuilt it.
+    ///
+    /// **Derived, not owned.** Living here is what makes it visible
+    /// to every rebuild, and *also* what would make it survive the
+    /// gesture that authorized it — `DragState::SelectingRect` has
+    /// more than one way out, and only one of them ever ran a
+    /// `take`. So the authority stays on the drag state and this is
+    /// its projection: `app::drain_frame::drain_rect_select` — a
+    /// plain code span because `app` is a private module and rustdoc
+    /// cannot resolve a link into one — re-derives the two from each
+    /// other on every frame, so no exit has to remember.
+    ///
+    /// **Cross-platform field, native-only writers.** The read is
+    /// shared because both targets' rebuild paths go through the one
+    /// `highlight_entries_for` mapping; the gesture that fills it is
+    /// native-only, because `DragState` and the per-frame drain are.
+    /// On wasm32 this is therefore always `None` — see CLAUDE.md's
+    /// "Dual-target status" registry.
+    rect_select_preview: Option<Vec<String>>,
 }
 
 /// Transient visual-only substitution of a color-pickerable element's
@@ -209,6 +263,22 @@ pub struct MindMapDocument {
 pub struct ColorPickerPreview {
     pub key: baumhard::mindmap::scene_cache::EdgeKey,
     pub color: String,
+}
+
+/// Announce a map that really did load.
+///
+/// Called by [`MindMapDocument::load`] and
+/// [`MindMapDocument::from_json_str`] — the two constructors that
+/// take a `.mindmap.json` and succeed — and deliberately *not* by
+/// `finalize`, which the load-failure placard also goes through.
+/// `info!`, so it is compiled out of release entirely (§9); a
+/// failure is `error!` and reaches the user either way.
+fn log_loaded(map: &MindMap) {
+    info!(
+        "document: loaded mindmap {:?} with {} node(s)",
+        map.name,
+        map.nodes.len()
+    );
 }
 
 fn grow_node_sizes_to_fit_text(map: &mut MindMap) {
@@ -247,6 +317,127 @@ pub(super) fn grow_one_node_to_fit_text(node: &mut baumhard::mindmap::model::Min
     clamp_node_size_to_ceiling(node);
 }
 
+/// How many lines of one section are actually laid out when
+/// measuring its text floor.
+///
+/// The largest section in the canonical fixture is 33 lines, so this
+/// is orders of magnitude above real authored content and never
+/// binds on a map anyone wrote. It binds on a map written to be
+/// expensive — see [`measured_prefix`].
+pub(super) const MEASURED_LINE_BUDGET: usize = 512;
+
+/// The prefix of `text` covering at most `max_lines` lines, together
+/// with the total line count of the whole string.
+///
+/// The count is a byte scan; the prefix is what gets shaped. Cost:
+/// O(text) with no allocation and no layout — which is the entire
+/// point, since laying the same text out costs a cosmic-text
+/// `BufferLine` per line.
+pub(super) fn measured_prefix(text: &str, max_lines: usize) -> (&str, usize) {
+    let total = text.lines().count();
+    if total <= max_lines {
+        return (text, total);
+    }
+    let mut end = text.len();
+    let mut seen = 0usize;
+    for (idx, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            seen += 1;
+            if seen == max_lines {
+                end = idx;
+                break;
+            }
+        }
+    }
+    (&text[..end], total)
+}
+
+/// The `max_lines` widest lines of `text`, in their original order,
+/// joined by `'\n'`.
+///
+/// With an unbounded measuring width nothing wraps, so a text
+/// block's width is simply its widest line's width. Laying out the
+/// *first* `max_lines` therefore measures the right width only when
+/// the widest line happens to be among them — 512 short lines
+/// followed by one long line measured as though the long one were
+/// not there, and the node was sized to clip it. Selecting by width
+/// instead of by position measures the lines that can actually
+/// decide the answer.
+///
+/// **This sample is a candidate set, not an answer.** Ranking uses
+/// `grapheme_display_width` — a column count — while cosmic-text
+/// shapes real advances against a face that is not monospace, so
+/// the proxy can and does rank backwards: at the default face
+/// `"W".repeat(20)` shapes wider than `"i".repeat(30)` while losing
+/// the ranking 20 columns to 30, and a tab counts as one column
+/// while shaping to a tab stop. A sample picked this way can
+/// therefore be *narrower* than the first `max_lines` lines.
+///
+/// That is why the caller measures this sample **and** the
+/// positional prefix and takes the wider of the two, rather than
+/// substituting one for the other — see `compute_one_node_text_floor`.
+/// Neither sample is guaranteed to contain the true widest line,
+/// because finding it means shaping every line and the budget
+/// exists precisely to avoid that; taking the maximum is what makes
+/// the result never worse than either alone.
+///
+/// Cost: O(lines) calls to `grapheme_display_width`, each linear in
+/// its line — so O(text) overall, which dominates the O(lines ·
+/// log max_lines) heap work. O(max_lines) memory for the heap,
+/// which holds `(width, index)` pairs rather than the text, plus a
+/// `Vec` of the chosen indices. The joined result is built by
+/// repeated `push_str` into a `String` with no reserved capacity,
+/// so it reallocates as it grows rather than allocating once — it
+/// is bounded by the selected lines' total length, which is bounded
+/// by the text. Two passes over `text`, no layout.
+pub(super) fn widest_lines(text: &str, max_lines: usize) -> String {
+    use baumhard::util::grapheme_chad::grapheme_display_width;
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    if max_lines == 0 {
+        return String::new();
+    }
+
+    // `BinaryHeap` is a max-heap, so `Reverse` makes this a min-heap
+    // on `(width, index)` and `pop()` evicts the current worst. The
+    // index rides along to keep the eviction total and deterministic;
+    // because it is compared after the width, a tie evicts the
+    // *lowest* index, which means equal-width lines keep the ones
+    // latest in the text. That is arbitrary but fixed — what matters
+    // is that the same input always yields the same sample.
+    let mut best: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::with_capacity(max_lines + 1);
+    for (idx, line) in text.lines().enumerate() {
+        best.push(Reverse((grapheme_display_width(line), idx)));
+        if best.len() > max_lines {
+            best.pop();
+        }
+    }
+
+    let mut chosen: Vec<usize> = best.into_iter().map(|Reverse((_, idx))| idx).collect();
+    chosen.sort_unstable();
+
+    // Separator driven by a count rather than by `out.is_empty()`:
+    // a selected *blank* line leaves `out` empty, so the emptiness
+    // test would skip the newline before the next line and silently
+    // splice two selected lines into one — losing a line from a
+    // sample whose whole contract is `max_lines` of them.
+    let mut out = String::new();
+    let mut emitted = 0usize;
+    let mut wanted = chosen.iter().peekable();
+    for (idx, line) in text.lines().enumerate() {
+        if wanted.peek() == Some(&&idx) {
+            wanted.next();
+            if emitted > 0 {
+                out.push('\n');
+            }
+            out.push_str(line);
+            emitted += 1;
+        }
+    }
+    out
+}
+
 /// Pure floor-compute extracted from [`grow_one_node_to_fit_text`]
 /// so the explicit-shrink path
 /// [`MindMapDocument::fit_node_to_content`] can read the floor
@@ -272,20 +463,20 @@ pub(super) fn compute_one_node_text_floor(node: &baumhard::mindmap::model::MindN
         if !section.offset.x.is_finite() || !section.offset.y.is_finite() {
             continue;
         }
-        let scale = section
-            .text_runs
-            .iter()
-            .map(|r| r.size_pt as f32)
-            .fold(0.0_f32, f32::max);
-        let scale = if scale > 0.0 { scale } else { 14.0 };
-        let line_height = scale * 1.2;
+        // The scale and the line height the tree builder will lay
+        // this section out at, asked of the builder rather than
+        // re-derived: a measurement that disagreed with the render
+        // would grow the node to the wrong height and clip the very
+        // text it was grown for.
+        let scale = effective_section_scale(section);
+        let line_height = scale * LINE_HEIGHT_FACTOR;
         let pad_x = scale * 1.5;
         let pad_y = scale * 0.5;
 
         let measure_font = section
             .text_runs
             .iter()
-            .max_by(|a, b| a.size_pt.cmp(&b.size_pt))
+            .max_by(|a, b| a.size_pt.total_cmp(&b.size_pt))
             .and_then(|r| {
                 if r.font.is_empty() {
                     None
@@ -294,10 +485,73 @@ pub(super) fn compute_one_node_text_floor(node: &baumhard::mindmap::model::MindN
                 }
             });
 
-        let block = {
+        // Shaping is linear in line count and this runs at load, on
+        // text that came out of an untrusted file. A section
+        // carrying millions of newlines would shape millions of
+        // cosmic-text lines here — each one an owned `String`, an
+        // `AttrsList`, and two layout caches — before a single frame
+        // is drawn. So only a bounded prefix is laid out.
+        //
+        // The height loses nothing by it: `TextBlockSize::height` is
+        // `line_count * line_height`, and with an unbounded measuring
+        // width no line wraps, so counting newlines is the same
+        // number for a byte scan instead of a layout pass.
+        //
+        // The width would lose something, and past the budget it
+        // takes **two** samples to lose as little as possible.
+        //
+        // With no wrapping the block's width is its widest line, so
+        // the first `MEASURED_LINE_BUDGET` lines answer the wrong
+        // question: 512 short lines followed by one long line sized
+        // the node as though the long one did not exist and clipped
+        // it. Picking the widest lines instead — [`widest_lines`] —
+        // answers the right question with the wrong ruler: its
+        // ranking is a column count, and cosmic-text shapes real
+        // advances against a proportional face, so the proxy can
+        // rank backwards and produce a sample *narrower* than the
+        // prefix it replaced.
+        //
+        // So both are measured and the wider wins. That costs one
+        // extra bounded shaping pass on sections past the budget,
+        // and it is the only version of this that is never worse
+        // than the alternative it replaced. Neither sample is
+        // guaranteed to hold the true widest line — that needs a
+        // shaping pass per line, which is the cost the budget exists
+        // to refuse — so this is a floor that improves, not a proof.
+        //
+        // Worth stating plainly because an earlier comment here got
+        // it wrong: a node past the budget is *not* saved by the
+        // `MAX_NODE_AXIS` clamp. At the default 14 pt, 513 lines is
+        // 8,618 pt against a 1,000,000 ceiling, and the clamp only
+        // starts covering above roughly 1,624 pt. Nor is this only
+        // the load path — `grow_one_node_to_fit_text` is the
+        // per-edit setter too.
+        let (measured, total_lines) = measured_prefix(&section.text, MEASURED_LINE_BUDGET);
+        let truncated = measured.len() < section.text.len();
+        let mut block = {
             let mut fs = acquire_font_system_write("compute_one_node_text_floor");
-            measure_text_block_unbounded(&mut fs, &section.text, scale, line_height, measure_font)
+            measure_text_block_unbounded(&mut fs, measured, scale, line_height, measure_font)
         };
+        if truncated {
+            // The second sample: the widest lines by column proxy.
+            // Only its *width* is taken — its lines are not
+            // contiguous, so its height means nothing.
+            let widest = widest_lines(&section.text, MEASURED_LINE_BUDGET);
+            let wide_block = {
+                let mut fs = acquire_font_system_write("compute_one_node_text_floor");
+                measure_text_block_unbounded(&mut fs, &widest, scale, line_height, measure_font)
+            };
+            block.width = block.width.max(wide_block.width);
+
+            // Under budget the shaper's own line count is
+            // authoritative and a byte scan must not second-guess
+            // it: `str::lines()` and cosmic-text disagree by exactly
+            // one on text ending in a newline, and that would
+            // shorten every such node by a line. Past it, neither
+            // shaped block spans the whole text, so the counted
+            // total is the only correct source.
+            block.height = total_lines as f32 * line_height;
+        }
 
         // Section dimension contribution: text needs `block + pad`
         // at minimum, but a `Some`-size section also pins a user-
@@ -358,11 +612,17 @@ pub(super) fn grow_one_node_to_fit_border(
     if !node.style.show_frame {
         return;
     }
-    let style = resolve_border_style(
-        node.style.border.as_ref(),
-        canvas_default,
-        &node.style.frame_color,
-    );
+    // **This function is deliberately color-blind.** It reads
+    // `font_size_pt`, `corner_clusters()` and `side_patterns` and
+    // nothing else, and `resolve_border_style`'s own contract says
+    // the last two arguments feed `BorderStyle::color` alone — the
+    // size and preset cascades are independent of both. So the
+    // theme tier is `None` and the floor is `""`: threading a
+    // resolved frame color in here would be an `FxHashMap` and two
+    // `String`s per node on the load pass, plus one `String` per
+    // committed edit, to compute a field this function never
+    // looks at.
+    let style = resolve_border_style(node.style.border.as_ref(), canvas_default, None, "");
     let approx_char_width = style.font_size_pt * BORDER_APPROX_CHAR_WIDTH_FRAC;
     let corners = style.corner_clusters();
 
@@ -430,6 +690,7 @@ impl MindMapDocument {
             portal_text_edit_preview: None,
             color_picker_preview: None,
             border_preview: None,
+            rect_select_preview: None,
             active_animations: Vec::new(),
         };
         doc.build_mutation_registry();
@@ -438,26 +699,46 @@ impl MindMapDocument {
 
     /// Load a MindMap from a file path. Native-only — WASM builds
     /// must use `from_json_str` since the browser has no filesystem.
+    ///
+    /// **The error is returned, not reported.** Reporting belongs to
+    /// whichever surface the caller is: the console `open` verb
+    /// prints it in the overlay, and the startup path renders it on
+    /// the canvas via [`Self::load_failure_placard`]. A constructor
+    /// that both logged and returned the failure made every caller
+    /// choose between reporting it twice and suppressing it, and the
+    /// startup path did the former.
     pub fn load(path: &str) -> Result<Self, String> {
-        loader::load_from_file(Path::new(path))
-            .map(|map| Self::finalize(map, Some(path.to_string())))
-            .map_err(|e| {
-                let msg = format!("Failed to load mindmap '{}': {}", path, e);
-                error!("{}", msg);
-                msg
-            })
+        loader::load_from_file(Path::new(path)).map(|map| {
+            log_loaded(&map);
+            Self::finalize(map, Some(path.to_string()))
+        })
     }
 
     /// Construct a Document from an in-memory JSON string. `file_path`
     /// is the origin tag stored for save-back; pass the URL/path the
     /// JSON came from, or `None` for ad-hoc JSON.
+    ///
+    /// Reports nothing, for the reason spelled out on [`Self::load`].
     pub fn from_json_str(json: &str, file_path: Option<String>) -> Result<Self, String> {
-        loader::load_from_str(json)
-            .map(|map| Self::finalize(map, file_path))
-            .map_err(|e| {
-                error!("Failed to parse mindmap JSON: {}", e);
-                e
-            })
+        loader::load_from_str(json).map(|map| {
+            log_loaded(&map);
+            Self::finalize(map, file_path)
+        })
+    }
+
+    /// The document a rejected load is rendered as: a one-node map
+    /// carrying `message` — the loader's own text — over the
+    /// `source` that was asked for. See
+    /// [`baumhard::mindmap::placard`] for why the failure surface is
+    /// a map rather than an overlay.
+    ///
+    /// **Bound to no file path, on purpose.** `save` and `Ctrl+S`
+    /// both refuse a document with no `file_path`, so a reflexive
+    /// save on the placard cannot overwrite the file that failed to
+    /// parse — which, being unparseable, is likely the only copy of
+    /// whatever the author was hand-editing.
+    pub fn load_failure_placard(source: &str, message: &str) -> Self {
+        Self::finalize(placard::load_failure(source, message), None)
     }
 
     /// Grow undersized node boxes to fit their text and their
@@ -465,8 +746,15 @@ impl MindMapDocument {
     /// tree/scene builders. Both passes only grow, so the order
     /// composes — text-driven floor first, then border-driven —
     /// and the larger of the two wins per node.
+    ///
+    /// **Reports nothing.** The "loaded mindmap …" line belongs to
+    /// the two constructors that really did load one, not here:
+    /// [`Self::load_failure_placard`] also finalizes, and a placard
+    /// is the map that stands in for a load that did not happen.
+    /// Announcing `document: loaded mindmap "load-failure"` beside
+    /// `startup: could not load …` is a log that contradicts itself
+    /// in two consecutive lines.
     fn finalize(mut map: MindMap, file_path: Option<String>) -> Self {
-        info!("Loaded mindmap '{}' with {} nodes", map.name, map.nodes.len());
         grow_node_sizes_to_fit_text(&mut map);
         grow_node_sizes_to_fit_borders(&mut map);
         Self::from_mindmap(map, file_path)
@@ -498,7 +786,10 @@ impl MindMapDocument {
     /// for "smallest interactive doc" — replaces field-by-field
     /// `MindMapDocument { ... }` literal construction at
     /// downstream test sites so the field list lives in one
-    /// place.
+    /// place. Test-gated: the interactive orphan-creation path is
+    /// `Action::CreateOrphanNode`, which adds a node to the open
+    /// document rather than constructing one around it.
+    #[cfg(test)]
     pub fn with_orphan(id: &str, pos: glam::Vec2) -> Self {
         let mut doc = Self::from_mindmap(MindMap::new_blank("t"), None);
         let node = super::document::defaults::default_orphan_node(id, pos);
@@ -521,6 +812,61 @@ impl MindMapDocument {
     /// `sync_node_from_tree` safe.
     pub fn build_tree(&self) -> MindMapTree {
         tree_builder::build_mindmap_tree(&self.mindmap)
+    }
+
+    /// The node ids a live rubber-band rectangle currently covers,
+    /// or `None` when no gesture is live.
+    ///
+    /// The cross-platform read of [`Self::rect_select_preview`]:
+    /// every node-tree rebuild on both targets goes through
+    /// `app::scene_rebuild::highlight_entries_for`, which asks this.
+    /// The two writers are native-gated (the gesture that fills it
+    /// needs `DragState` and the per-frame drain, neither of which
+    /// the browser has), so on wasm32 this is always `None`.
+    ///
+    /// `Some(&[])` and `None` are different answers and the
+    /// distinction is load-bearing: an empty set means "a gesture is
+    /// live and covers nothing", which paints no highlight at all,
+    /// while `None` means "no gesture", which paints the selection.
+    pub fn rect_select_preview(&self) -> Option<&[String]> {
+        self.rect_select_preview.as_deref()
+    }
+
+    /// Install `ids` as the live rubber-band preview and report
+    /// whether that **changed** anything.
+    ///
+    /// `false` means the drag moved without crossing a node
+    /// boundary, so the canvas already shows the right set and the
+    /// caller owes it no repaint at all. That is the whole of what
+    /// makes a rubber-band frame cheap: the hit-test is a geometry
+    /// read over the tree that is already installed, and the tree
+    /// rebuild behind it happens per *change of set*, not per drain.
+    ///
+    /// Order is part of the identity on purpose — `rect_select`
+    /// walks `MindMapTree::node_ids`, which is arena order and
+    /// therefore stable for a given tree, so two frames covering the
+    /// same nodes produce the same `Vec` and compare equal.
+    ///
+    /// Native-only, with the read left cross-platform: the browser
+    /// has no rubber-band select to install one from. See CLAUDE.md's
+    /// "Dual-target status" registry.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_rect_select_preview(&mut self, ids: Vec<String>) -> bool {
+        if self.rect_select_preview.as_deref() == Some(ids.as_slice()) {
+            return false;
+        }
+        self.rect_select_preview = Some(ids);
+        true
+    }
+
+    /// End the rubber-band gesture, handing back the set it was
+    /// previewing. `None` when no preview was live.
+    ///
+    /// Native-only, for the same reason as
+    /// `set_rect_select_preview` above.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn take_rect_select_preview(&mut self) -> Option<Vec<String>> {
+        self.rect_select_preview.take()
     }
 
     /// Assemble every frame-local override the per-role tree
@@ -638,18 +984,12 @@ impl MindMapDocument {
 /// Commit writes `style.show_frame = true` through the normal
 /// setter when the user wants the visibility flip persisted (today
 /// via `border on`); the force flag never reaches the model.
-fn build_border_preview_scene_view<'a>(
-    bp: &'a BorderPreview,
-) -> tree_builder::BorderPreview<'a> {
+fn build_border_preview_scene_view<'a>(bp: &'a BorderPreview) -> tree_builder::BorderPreview<'a> {
     let target = match &bp.target {
         BorderPreviewTarget::Nodes(ids) => tree_builder::BorderPreviewTargetRef::Nodes(ids.as_slice()),
-        BorderPreviewTarget::Sections(ts) => {
-            tree_builder::BorderPreviewTargetRef::Sections(ts.as_slice())
-        }
+        BorderPreviewTarget::Sections(ts) => tree_builder::BorderPreviewTargetRef::Sections(ts.as_slice()),
         BorderPreviewTarget::CanvasDefault => tree_builder::BorderPreviewTargetRef::CanvasDefault,
-        BorderPreviewTarget::CanvasSectionFrame => {
-            tree_builder::BorderPreviewTargetRef::CanvasSectionFrame
-        }
+        BorderPreviewTarget::CanvasSectionFrame => tree_builder::BorderPreviewTargetRef::CanvasSectionFrame,
         BorderPreviewTarget::CanvasSectionFrameFocused => {
             tree_builder::BorderPreviewTargetRef::CanvasSectionFrameFocused
         }

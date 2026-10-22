@@ -11,9 +11,8 @@ use baumhard::gfx_structs::area::OutlineStyle;
 use super::super::areas::{PickerAreas, PickerSection};
 use super::super::make_area::{make_area, PickerAreaStyle};
 use crate::application::color_picker::{
-    arm_bottom_font, arm_bottom_glyphs, arm_top_glyphs, picker_channel, val_cell_to_value,
-    val_value_to_cell, ColorPickerLayout, ColorPickerOverlayGeometry, PickerHit,
-    CROSSHAIR_CENTER_CELL, VAL_CELL_COUNT,
+    arm_bottom_font, arm_bottom_glyphs, arm_top_glyphs, picker_channel, val_cell_to_value, val_value_to_cell,
+    ColorPickerLayout, ColorPickerOverlayGeometry, PickerHit, CROSSHAIR_CENTER_CELL, VAL_CELL_COUNT,
 };
 use crate::application::color_picker_overlay::color::{
     highlight_hovered_cell_color, highlight_selected_cell_color,

@@ -2,9 +2,8 @@
 
 //! Portal edge lifecycle and portal-label mutations.
 
-use baumhard::mindmap::model::{is_portal_edge, portal_endpoint_state_mut, PORTAL_GLYPH_PRESETS};
+use baumhard::mindmap::model::portal_endpoint_state_mut;
 
-use super::super::defaults::default_portal_edge;
 use super::super::types::EdgeRef;
 use super::super::MindMapDocument;
 use super::closure_helpers::write_endpoint_field;
@@ -17,7 +16,19 @@ impl MindMapDocument {
     /// the count of existing portal-mode edges, so successive portal
     /// creations look distinct at a glance. Returns the new edge's
     /// index on success.
+    ///
+    /// Test-gated. There is no one-shot "make a portal" in the
+    /// product: `console/commands/edge.rs` documents the authoring
+    /// flow as build a line edge, then `edge display_mode=portal`,
+    /// and that two-step is the only path a user has. This
+    /// constructor is what the portal tests build their fixtures
+    /// with; it becomes production code again the day a one-shot
+    /// gesture exists.
+    #[cfg(test)]
     pub fn create_portal_edge(&mut self, source_id: &str, target_id: &str) -> Option<usize> {
+        use super::super::defaults::default_portal_edge;
+        use baumhard::mindmap::model::{is_portal_edge, PORTAL_GLYPH_PRESETS};
+
         if source_id == target_id {
             return None;
         }
@@ -168,7 +179,7 @@ impl MindMapDocument {
     /// **text** color override on a portal-mode edge. Sibling of
     /// [`Self::set_portal_label_color`], which targets the icon
     /// cascade; this setter targets `PortalEndpointState.text_color`
-    /// so a coloured badge can host a differently-coloured
+    /// so a colored badge can host a differently-colored
     /// annotation. Returns `true` if the value changed. Rolls back
     /// a newly-installed empty `PortalEndpointState` when clearing
     /// a text color would leave the state entirely default, so an
@@ -194,17 +205,6 @@ impl MindMapDocument {
         })
     }
 
-    /// Read the current portal label text for one endpoint, if
-    /// any. Returns the concrete string (not the hex-color
-    /// cascade like [`Self::resolve_portal_label_color`]) —
-    /// portal text has no inheritance cascade, it's either set
-    /// on the endpoint or absent.
-    pub fn portal_label_text(&self, edge_ref: &EdgeRef, endpoint_node_id: &str) -> Option<String> {
-        let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
-        let state = baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id)?;
-        state.text.clone()
-    }
-
     /// Read the resolved portal label (icon) color for one
     /// endpoint. Walks
     /// [`baumhard::mindmap::model::MindEdge::portal_endpoint_color`]
@@ -222,7 +222,7 @@ impl MindMapDocument {
     pub fn resolve_portal_label_color(&self, edge_ref: &EdgeRef, endpoint_node_id: &str) -> Option<String> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
         let endpoint_state = baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
-        let raw = edge.portal_endpoint_color(&self.mindmap.canvas, endpoint_state);
+        let raw = self.mindmap.edge_portal_endpoint_color(edge, endpoint_state);
         Some(baumhard::util::color::resolve_var(raw, &self.mindmap.canvas.theme_variables).to_string())
     }
 }

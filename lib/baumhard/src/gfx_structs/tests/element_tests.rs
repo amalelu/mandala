@@ -8,7 +8,7 @@
 //! `event_subscribers` accessors, and the stability guarantee on
 //! `unique_id`.
 //!
-//! Follows the `do_*()` / `test_*()` split from §T2.2: every public
+//! Follows the `do_*()` / `test_*()` split from §T2.2: every `do_*`
 //! body is benchmarkable from `benches/test_bench.rs`.
 
 use glam::Vec2;

@@ -182,6 +182,11 @@ impl ThrottledPending {
 
     /// Delta accumulated since the last drain. `Vec2::ZERO` under
     /// the other two disciplines — see [`Self::total_delta`].
+    ///
+    /// Test-gated: drains consume the value through
+    /// [`Self::take_delta`]; only the tests need to look without
+    /// taking.
+    #[cfg(test)]
     pub(in crate::application::app) fn pending_delta(&self) -> Vec2 {
         match &self.input {
             PendingInput::Delta { pending, .. } => *pending,
@@ -211,7 +216,10 @@ impl ThrottledPending {
         }
     }
 
-    /// Read the latched cursor without consuming it.
+    /// Read the latched cursor without consuming it. Test-gated for
+    /// the same reason as [`Self::pending_delta`]: drains use
+    /// [`Self::take_cursor`].
+    #[cfg(test)]
     pub(in crate::application::app) fn peek_cursor(&self) -> Option<Vec2> {
         match &self.input {
             PendingInput::Cursor(latest) => *latest,

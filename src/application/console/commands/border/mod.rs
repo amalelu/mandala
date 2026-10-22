@@ -26,8 +26,9 @@ use baumhard::mindmap::border::BORDER_PRESETS;
 use super::Command;
 use crate::application::console::predicates::node_or_section_selected;
 
-mod complete;
 mod execute;
+mod finish;
+pub(crate) mod grammar;
 mod positional;
 mod preview;
 mod show;
@@ -35,8 +36,6 @@ mod show;
 #[cfg(test)]
 mod tests;
 
-pub use complete::complete_border;
-pub(crate) use complete::{kv_value_completions, preview_subverb_completions};
 pub use execute::execute_border;
 pub(crate) use execute::{
     apply_border_field_to_selection, cycle_border_preset_on_selection, prepend_line,
@@ -52,71 +51,35 @@ pub(crate) use execute::{
 // `stage_kv_for_preview`) are private to `border::preview` —
 // no downstream consumer reaches in.
 pub(crate) use preview::dispatch_border_preview;
-// Re-exports consumed by sibling verbs that share the kv vocabulary
-// (currently `section frame …` and `canvas …`). All are
-// `pub(crate)` on the underlying definitions; the duplication these
-// re-exports replaced (three copies each of `kv_hint`,
-// `edits_has_glyph_field`, `custom_preset_hint`) violated
-// `CODE_CONVENTIONS.md` §5 ("avoid duplicating logic").
-pub(crate) use execute::{custom_preset_hint, edits_has_glyph_field, kv_hint, nodes_in_selection, stage_kv};
+// Re-exports consumed by sibling levels that share the kv
+// vocabulary (`section frame …` and `canvas …`). The duplication
+// these replaced — three copies each of the hint table,
+// `edits_has_glyph_field` and `custom_preset_hint` — violated
+// `CODE_CONVENTIONS.md` §5; the hint table itself is now a column
+// of `grammar::KEYS` rather than a function, and
+// `custom_preset_hint` is reached only through [`BorderEdit`],
+// which is the only thing that still emits it.
+pub(crate) use execute::{edits_has_glyph_field, nodes_in_selection, stage_kv};
+// The closing move all four of them make — see `finish.rs` for
+// what the four copies of it had in common and where they differed.
+pub(crate) use finish::BorderEdit;
 // The positional subverb grammar (`preset` / `color` / `padding` /
 // `palette` / `font` / `side` / `corner`) is surface-agnostic:
-// `canvas border …` and `canvas section-frame [focused] …` speak
-// exactly the same one. `canvas.rs` used to carry a second copy.
+// `canvas border …`, `canvas section-frame [focused] …` and
+// `section frame …` all name the same table rather than
+// transcribing it.
 pub(crate) use positional::{positional_subverb_to_edits, BorderSurface};
 
-/// kv keys recognized on the kv-form path.
-pub const KEYS: &[&str] = &[
-    "preset", "font", "size", "color", "palette", "field", "padding", "top", "bottom", "left", "right", "tl",
-    "tr", "bl", "br",
-];
-
-/// Positional verbs surfaced as token-0 completions alongside kv
-/// keys.added the per-field positional subverbs
-/// (`preset` / `color` / `padding` / `palette` / `font` /
-/// `side` / `corner`) and `toggle`.
-pub const VERBS: &[&str] = &[
-    "on", "off", "toggle", "show", "reset", "preview", "preset", "color", "padding", "palette", "font",
-    "side", "corner",
-];
-
-/// Subverbs surfaced under `border preview` — the
-/// commit/cancel terminator pair plus the kv keys (handled
-/// through completion's `KvKey` arm). `preview <kv>=…` and
-/// `preview commit` / `preview cancel` are siblings.
-pub const PREVIEW_SUBVERBS: &[&str] = &["commit", "cancel"];
-
-/// Border preset names — surfaced in completion.
+/// Border preset names — the vocabulary `stage_preset` and the
+/// positional `preset` subverb validate against.
 pub const PRESETS: &[&str] = BORDER_PRESETS;
 
-/// Palette field names — surfaced in completion. Mirrors
-/// `PaletteField::ALL` but kept here as a `&'static [&'static str]`
-/// for `prefix_filter` ergonomics.
-pub const FIELDS: &[&str] = &["frame", "background", "text", "title"];
-
-/// Common color preset names mirrored from the `color` command so
-/// users can type `border color=accent` and have it resolve the
-/// same way.
-pub const COLOR_PRESETS: &[&str] = &["accent", "edge", "fg", "reset"];
+pub(crate) use grammar::{FIELDS, KEY_NAMES as KEYS};
 
 pub const COMMAND: Command = Command {
     name: "border",
     aliases: &[],
     summary: "Configure the node border (preset, font, color, custom glyphs, palette)",
-    usage: "border on|off|toggle|show|reset \
-         | border preset <name|cycle> \
-         | border color <#hex|var(--name)|preset|reset> \
-         | border padding <px> \
-         | border palette <name|off> [field=<frame|background|text|title>] \
-         | border font <family|off> [size=<pt>] \
-         | border side <top|bottom|left|right|all> <pattern|reset> \
-         | border corner <tl|tr|bl|br|all> <glyph|reset> \
-         | border [preset=…] [font=…] [size=…] [color=…] [palette=…] [field=…] [padding=…] [top=…] [bottom=…] [left=…] [right=…] [tl=…] [tr=…] [bl=…] [br=…] \
-         | border preview <kv>=… | border preview commit|cancel",
-    tags: &[
-        "border", "frame", "glyph", "preset", "corner", "side", "pattern", "palette", "padding", "rounded",
-        "heavy", "double", "light", "custom",
-    ],
     //borders are node-only, so the verb hides on
     // edge / edge-label / portal selections in completion +
     // help. Pre-fix the predicate was `always` which surfaced
@@ -125,6 +88,13 @@ pub const COMMAND: Command = Command {
     // `section` verb's surface (every section sits inside a
     // node, so a section selection implies a node selection).
     applicable: node_or_section_selected,
-    complete: complete_border,
+    grammar: &grammar::BORDER,
+    // Every structural word — the thirteen subverbs, the sixteen
+    // keys — is derived from the grammar. These are the search
+    // words that are neither: the preset names a user might grep
+    // for, and the three nouns the verb is about.
+    synonyms: &[
+        "frame", "glyph", "pattern", "rounded", "heavy", "double", "light", "custom",
+    ],
     execute: execute_border,
 };

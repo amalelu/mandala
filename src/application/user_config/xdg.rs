@@ -30,47 +30,8 @@ pub fn xdg_mandala_path(filename: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::application::user_config::load_desktop_layered;
+    use crate::application::user_config::test_env::with_env;
     use baumhard::util::test_temp::TempDir;
-    use std::sync::Mutex;
-
-    /// Process-wide mutex serializing tests that mutate
-    /// `std::env::*`. Cargo runs unit tests on multiple threads
-    /// by default (one per logical core); env vars are global
-    /// per-process, so two `with_env` calls on different threads
-    /// would race on `XDG_CONFIG_HOME` / `HOME`. The mutex makes
-    /// the save → set → body → restore dance atomic across the
-    /// suite. Poisoning is tolerated — if a previous test
-    /// panicked while holding the guard, we take the lock anyway
-    /// (env state may be slightly off but we'd rather run than
-    /// deadlock).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Run a closure with `XDG_CONFIG_HOME` and `HOME` overridden,
-    /// then restored. Holds [`ENV_LOCK`] for the duration so
-    /// concurrent env-touching tests don't observe each other's
-    /// mid-mutation state.
-    fn with_env<F: FnOnce()>(xdg: Option<&str>, home: Option<&str>, body: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        let prev_home = std::env::var_os("HOME");
-        match xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        body();
-        match prev_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 
     #[test]
     fn xdg_wins_over_home_when_both_set() {
@@ -132,9 +93,11 @@ mod tests {
     /// silence.
     ///
     /// It lives here rather than beside `load_desktop_layered`
-    /// because it mutates `XDG_CONFIG_HOME`, and [`ENV_LOCK`] /
-    /// [`with_env`] already serialize that against this module's own
-    /// tests — a second harness in `desktop.rs` would race this one.
+    /// because it is about what `xdg_mandala_path` resolves to; the
+    /// `XDG_CONFIG_HOME` override it needs comes from the shared
+    /// [`crate::application::user_config::test_env`] harness, which
+    /// serializes it against every other env-touching test in the
+    /// suite.
     #[test]
     fn test_desktop_xdg_layer_wins_when_there_is_no_explicit_path() {
         let dir = TempDir::new("xdg-layer-wins");

@@ -130,13 +130,13 @@ pub(in crate::application::app) fn handle_color_picker_click(
     picker_hover: &mut ColorPickerHoverInteraction,
 ) -> PickerClick {
     use crate::application::color_picker::{
-        hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, ColorPickerState,
+        hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, OpenPicker,
         PickerGesture, PickerHit,
     };
 
-    let hit = if let ColorPickerState::Open {
+    let hit = if let Some(OpenPicker {
         layout: Some(layout), ..
-    } = state
+    }) = state.as_open_mut()
     {
         hit_test_picker(layout, cursor_pos.0 as f32, cursor_pos.1 as f32)
     } else {
@@ -152,11 +152,11 @@ pub(in crate::application::app) fn handle_color_picker_click(
 
     match hit {
         PickerHit::Hue(slot) => {
-            if let ColorPickerState::Open {
+            if let Some(OpenPicker {
                 hue_deg,
                 hover_preview,
                 ..
-            } = state
+            }) = state.as_open_mut()
             {
                 *hue_deg = hue_slot_to_degrees(slot);
                 *hover_preview = None;
@@ -164,9 +164,9 @@ pub(in crate::application::app) fn handle_color_picker_click(
             apply_picker_preview(state, doc, picker_hover);
         }
         PickerHit::SatCell(i) => {
-            if let ColorPickerState::Open {
+            if let Some(OpenPicker {
                 sat, hover_preview, ..
-            } = state
+            }) = state.as_open_mut()
             {
                 *sat = sat_cell_to_value(i);
                 *hover_preview = None;
@@ -174,9 +174,9 @@ pub(in crate::application::app) fn handle_color_picker_click(
             apply_picker_preview(state, doc, picker_hover);
         }
         PickerHit::ValCell(i) => {
-            if let ColorPickerState::Open {
+            if let Some(OpenPicker {
                 val, hover_preview, ..
-            } = state
+            }) = state.as_open_mut()
             {
                 *val = val_cell_to_value(i);
                 *hover_preview = None;
@@ -193,12 +193,12 @@ pub(in crate::application::app) fn handle_color_picker_click(
             // (mutate size_scale). The two gestures are mutually
             // exclusive by construction — `gesture` only holds one
             // variant.
-            if let ColorPickerState::Open {
+            if let Some(OpenPicker {
                 layout: Some(layout),
                 gesture,
                 size_scale,
                 ..
-            } = state
+            }) = state.as_open_mut()
             {
                 let cursor = (cursor_pos.0 as f32, cursor_pos.1 as f32);
                 *gesture = Some(match button {
@@ -242,8 +242,8 @@ pub(in crate::application::app) fn handle_color_picker_click(
 pub(in crate::application::app) fn end_color_picker_gesture(
     state: &mut crate::application::color_picker::ColorPickerState,
 ) -> bool {
-    use crate::application::color_picker::ColorPickerState;
-    if let ColorPickerState::Open { gesture, .. } = state {
+    use crate::application::color_picker::OpenPicker;
+    if let Some(OpenPicker { gesture, .. }) = state.as_open_mut() {
         let was_active = gesture.is_some();
         *gesture = None;
         was_active

@@ -7,6 +7,8 @@
 
 use glam::Vec2;
 
+use baumhard::util::geometry::aabb_center;
+
 use crate::application::document::{EdgeRef, MindMapDocument};
 
 /// Apply a full edge-handle drag to the document model in place —
@@ -45,10 +47,7 @@ pub(in crate::application::app) fn apply_edge_handle_drag(
         let from_size = from_node.size_vec2();
         let to_pos = to_node.pos_vec2();
         let to_size = to_node.size_vec2();
-        (
-            Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5),
-            Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5),
-        )
+        (aabb_center(from_pos, from_size), aabb_center(to_pos, to_size))
     };
     let new_handle_canvas = start_handle_pos + total_delta;
 
@@ -107,10 +106,7 @@ pub(in crate::application::app) fn apply_edge_handle_drag(
         EdgeHandleKind::AnchorTo => {
             // Same per-cursor-move reasoning as `AnchorFrom` above.
             let Some(to_node) = doc.mindmap.nodes.get(&edge.to_id) else {
-                log::debug!(
-                    "edge drag: AnchorTo to_id {} disappeared mid-drag",
-                    edge.to_id
-                );
+                log::debug!("edge drag: AnchorTo to_id {} disappeared mid-drag", edge.to_id);
                 return handle;
             };
             let node_pos = to_node.pos_vec2();

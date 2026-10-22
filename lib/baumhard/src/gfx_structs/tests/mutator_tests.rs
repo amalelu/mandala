@@ -9,7 +9,7 @@
 //! `GfxMutator::Void`, and `MutatorTree::apply_to` forward-apply
 //! behaviour.
 //!
-//! Follows the `do_*()` / `test_*()` split from §T2.2: every public
+//! Follows the `do_*()` / `test_*()` split from §T2.2: every `do_*`
 //! body is benchmarkable from `benches/test_bench.rs`.
 
 use glam::Vec2;

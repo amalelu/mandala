@@ -36,30 +36,67 @@
 //!   for the [`crate::application::scene_host::AppScene`]
 //!   tree handles.
 
+// The overlay-render modules below carry a wasm32-only
+// `allow(dead_code)`: each renders a modal whose *shell* is
+// native-gated (CLAUDE.md "Dual-target status"), so on wasm32 the
+// builders compile with no caller. Scoped to wasm32 so the host
+// lint, which can see the shell, stays armed.
 mod borders;
 mod camera;
+// Color-picker overlay tree + mutators. Shell: the native-gated
+// `app::color_picker_flow`.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod color_picker;
+// Console overlay geometry. Shell: the native-gated
+// `app::console_input`.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod console_geometry;
+// Console overlay glyph areas + mutators. Same shell as
+// `console_geometry`.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod console_pass;
 mod decree;
+// Renderer entry points for the two overlay rebuilds. Same shells
+// as `console_pass` and `color_picker`.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod overlay_dispatch;
 mod pipeline;
 mod render;
+mod scene_shape_cache;
+// Test-only reach-through to the shared scene shape pass. The pass
+// takes a `&Scene` rather than a `&mut Renderer` precisely so its
+// granularity can be asserted without a live device (§T8), and that
+// only helps if the assertion can name it: the canvas half's fixture
+// is a real `AppScene` projected by `app::scene_rebuild`'s
+// `CanvasFrame`, which lives outside this module. The module stays
+// private in a shipped build, so nothing here widens the renderer's
+// production surface.
+#[cfg(test)]
+pub(crate) use scene_shape_cache::{refresh, ScenePassKind, ShapedSceneElement};
+// Rubber-band selection rectangle. Driven by the native-gated
+// drag state machine.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod selection_overlay;
 mod tree_buffers;
 mod tree_walker;
 
 pub use borders::measure_max_glyph_advance;
-// `ConsoleFrameLayout` / `MAX_*` / `build_console_border_strings` are
-// part of the renderer's public surface and consumed by the test
-// block at the bottom of this file plus external callers (the app
-// crate threads `ConsoleFrameLayout` through the rebuild path).
-// cargo check (without `--tests`) doesn't see those usages.
-#[allow(unused_imports)]
+// The console overlay's geometry vocabulary, re-exported for the
+// app-side console shell (`app::console_input`) that fills it in.
+// That shell is native-gated, so on wasm32 nothing consumes these —
+// the same reason the overlay modules above carry a wasm32-only
+// `allow`, scoped the same way so the host lint stays armed.
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 pub use console_geometry::{
-    build_console_border_strings, compute_console_frame_layout, ConsoleFrameLayout, ConsoleOverlayCompletion,
-    ConsoleOverlayGeometry, ConsoleOverlayLine, ConsoleOverlayLineKind, MAX_CONSOLE_COMPLETION_ROWS,
+    ConsoleOverlayCompletion, ConsoleOverlayGeometry, ConsoleOverlayLine, ConsoleOverlayLineKind,
     MAX_CONSOLE_SCROLLBACK_ROWS,
+};
+// Layout math exercised only by this module's test block; the
+// production callers inside `renderer/` reach it through
+// `super::console_geometry::` directly.
+#[cfg(test)]
+use console_geometry::{
+    build_console_border_strings, compute_console_frame_layout, MAX_CONSOLE_COMPLETION_ROWS,
 };
 #[cfg(test)]
 use console_pass::{
@@ -78,13 +115,11 @@ use log::{error, info, warn};
 
 use rustc_hash::FxHashMap;
 
-use wgpu::{
-    Color, Device, Instance, MultisampleState, Queue, RenderPipeline, Surface, SurfaceConfiguration,
-};
+use wgpu::{Color, Device, Instance, MultisampleState, Queue, RenderPipeline, Surface, SurfaceConfiguration};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::application::common::{FpsDisplayMode, PollTimer, RedrawMode, RenderDecree, StopWatch};
+use crate::application::common::{FpsDisplayMode, RenderDecree};
 use baumhard::font::fonts;
 #[cfg(test)]
 use baumhard::gfx_structs::area::GlyphArea;
@@ -102,7 +137,16 @@ use glam::Vec2;
 /// Extending with a new shape: add a `SHAPE_*` constant and a
 /// `case` arm in `fs_main`. The shape id comes from
 /// `NodeShape::shader_id` on the baumhard side; the two must stay
-/// in lock-step.
+/// in lock-step, and
+/// `test_every_node_shape_has_a_matching_wgsl_constant_and_case_arm`
+/// is what holds them there — it reads this string as text, so no
+/// GPU is involved and §T8 is untouched. That it is *this* string
+/// `Renderer::new` compiles, rather than another const beside it, is
+/// pinned by
+/// `test_every_rect_vertex_attribute_lands_in_the_vs_in_field_at_its_location`:
+/// a const read by value can be orphaned, and a decoy handed to
+/// `create_shader_module` would leave both tests holding over a
+/// shader the GPU never sees.
 ///
 /// `shape_id` rides the vertex stream as a plain `f32` (written
 /// with `SHAPE_ID_* as f32`, read with `u32(round(id))`) rather
@@ -136,7 +180,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.color = in.color;
     out.uv = in.uv;
     // `round` then cast — the CPU writes exact integers, so the
-    // round is belt-and-braces against any driver-side rasterisation
+    // round is belt-and-braces against any driver-side rasterization
     // of the attribute. Flat-interpolated onto VsOut as `u32` so
     // the fragment `switch` is a plain integer compare.
     out.shape_id = u32(round(in.shape_id));
@@ -167,13 +211,81 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 /// Bytes-per-vertex for the rect pipeline: `vec2<f32> pos +
-/// vec2<f32> uv + vec4<f32> color + u32 shape_id = 9 × 4 = 36 bytes`.
+/// vec2<f32> uv + vec4<f32> color + f32 shape_id = 9 × 4 = 36 bytes`.
 /// Used when sizing / offsetting the vertex buffer. Declared as a
 /// compile-time const so the layout math is grep-able from a single
-/// place. Keep in sync with the inline `wgpu::VertexAttribute`
-/// table in `Renderer::new` and the per-vertex push in
-/// `push_rect_ndc`.
+/// place.
+///
+/// Not kept in step by hand: it is the running sum of
+/// [`RECT_VERTEX_ATTRIBUTES`]' formats, and
+/// `test_every_rect_vertex_attribute_lands_in_the_vs_in_field_at_its_location`
+/// adds them up and compares. The same test ties it to
+/// [`RECT_VERTEX_FLOATS`] and to the slots `push_rect_ndc` writes,
+/// and pins that this constant — not a literal beside it — is the
+/// `array_stride` `Renderer::new` gives the pipeline. wgpu asks only
+/// that a stride be a multiple of four and leave room for every
+/// attribute, so an over-large one builds cleanly and reads every
+/// vertex after the first from the wrong byte.
 const RECT_VERTEX_SIZE: u64 = 36;
+
+/// The rect pipeline's vertex-attribute table: which run of bytes in
+/// each [`RECT_VERTEX_SIZE`]-byte vertex feeds which `VsIn` field of
+/// [`RECT_SHADER_WGSL`].
+///
+/// Layout: `pos` (8 B) | `uv` (8 B) | `color` (16 B) | `shape_id`
+/// (4 B), the offsets being the running sum of the formats' sizes and
+/// the order being the order `push_rect_ndc` writes them.
+///
+/// **The names in that sentence are the shader's, not this table's.**
+/// An entry here carries a `shader_location` and nothing else; which
+/// field it lands in is decided by the `@location(N)` in `VsIn`. Two
+/// attributes of the same format — `pos` and `uv` both being
+/// `Float32x2` — differ in nothing a pipeline can validate, so
+/// swapping their `shader_location`s builds a byte-identical
+/// pipeline that draws every quad into the `[0, 1]²` corner of NDC.
+/// What holds the two sides together is
+/// `test_every_rect_vertex_attribute_lands_in_the_vs_in_field_at_its_location`,
+/// which reads this table slot for slot against `VsIn`.
+///
+/// A module-level `const` rather than an array literal inline in
+/// `Renderer::new` for that test's sake: nothing here is a
+/// source-level property, so the test reads it as a *value* instead
+/// of re-parsing what the compiler has already parsed. What the test
+/// does read as text is the expression `Renderer::new` writes after
+/// `attributes:`, compared whole against `&RECT_VERTEX_ATTRIBUTES`.
+/// An inline array grown back alongside, a `RECT_VERTEX_ATTRIBUTES_2`
+/// beside this one, or a `&RECT_VERTEX_ATTRIBUTES[..3]` would each
+/// leave this table a decoy the GPU never sees, and the first name in
+/// that list is why the comparison is an equality rather than a
+/// substring search.
+///
+/// `shape_id` rides the stream as `Float32`, not `Uint32`: wgpu's
+/// WebGL2 backend doesn't support integer vertex attributes on every
+/// browser, and we only need a handful of discrete ids. The WGSL
+/// vertex stage rounds + casts to `u32` before flat-interpolating,
+/// so `VsIn.shape_id` is an `f32` on purpose.
+const RECT_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 8,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 16,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 32,
+        shader_location: 3,
+    },
+];
 
 /// How many frames `FpsDisplayMode::Snapshot` waits between readout
 /// refreshes, and how many frames `FpsDisplayMode::Debug` averages
@@ -192,6 +304,15 @@ const FPS_WINDOW: usize = 200;
 const MODE_STATUS_FONT_SIZE_PT: f32 = 14.0;
 const MODE_STATUS_OVERLAY_POS: (f32, f32) = (8.0, 32.0);
 const MODE_STATUS_OVERLAY_BOUNDS: (f32, f32) = (640.0, 24.0);
+
+/// Mode-status text color. The status row and the selection tint
+/// are the same "this is active" affordance, so they are the same
+/// color — derived from the one definition of it rather than
+/// re-quantised here, which is how this used to read
+/// `Color::rgba(0, 230, 255, 255)` against a `#00E5FF` whose green
+/// channel is 229.
+pub(crate) const MODE_STATUS_COLOR: baumhard::font::Color =
+    baumhard::font::color::cosmic_color_from_color(baumhard::mindmap::SELECTION_HIGHLIGHT);
 
 /// Fixed-size ring buffer of frame intervals (microseconds) with an
 /// O(1) running sum. Backs `FpsDisplayMode::Debug`'s rolling-average
@@ -243,9 +364,18 @@ impl FrameIntervalRing {
 }
 
 /// Number of `f32`-sized slots per vertex. The CPU accumulates
-/// packed floats into `main_rect_vertices` / `console_rect_vertices`;
-/// `shape_id` is stored as an `f32` holding the `u32` bit pattern
-/// via `f32::from_bits` so the whole stream stays a single `Vec<f32>`.
+/// packed floats into `main_rect_vertices` / `console_rect_vertices`,
+/// and the draw divides their length by this to get a vertex count,
+/// so it is four bytes times this that has to equal
+/// [`RECT_VERTEX_SIZE`].
+///
+/// `shape_id` keeps the stream a single `Vec<f32>` by riding it as
+/// its own **numeric value** — `shape_id as f32` in `push_rect_ndc`,
+/// read back as `u32(round(in.shape_id))` in the vertex stage. It is
+/// not a bit pattern: this doc claimed `f32::from_bits` until #147,
+/// and nothing in the tree has ever done that. It could not — the
+/// bit pattern of `1u32` is a denormal that rounds straight back to
+/// zero, so every ellipse would draw as a rectangle.
 pub(super) const RECT_VERTEX_FLOATS: usize = 9;
 
 /// Starting capacity (in bytes) for the rect vertex buffer. Big
@@ -258,17 +388,30 @@ pub(super) const RECT_VBUF_INITIAL_CAPACITY: u64 = 8192;
 
 pub struct Renderer {
     surface: Surface<'static>,
+    /// The window the surface was created from. Held, not read: the
+    /// `Surface<'static>` lifetime is bought by handing wgpu an
+    /// `Arc<Window>` clone at `create_surface`, and this is the
+    /// renderer's own share of that ownership — dropping the field
+    /// would make the renderer's lifetime depend on whoever else
+    /// still holds the window. `should_render` gating and
+    /// `ControlFlow::Poll` mean nothing on native asks the window to
+    /// redraw itself; the browser's loop does, through
+    /// [`Self::request_redraw`].
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     window: Arc<Window>,
     config: SurfaceConfiguration,
     device: Device,
     queue: Queue,
     viewport: Viewport,
     swash_cache: SwashCache,
+    /// glyphon's shader / bind-group cache. Held, not read: it is
+    /// borrowed once each by `TextAtlas::new` and `Viewport::new` at
+    /// construction, and both keep their own handle to it. Dropping
+    /// the field would end the renderer's share of a resource its
+    /// two consumers still use.
+    #[allow(dead_code)]
     glyphon_cache: Cache,
     atlas: TextAtlas,
-    timer: PollTimer,
-    target_duration_between_renders: Duration,
-    last_render_time: Duration,
     text_renderer: TextRenderer,
     /// Second glyphon TextRenderer dedicated to the command
     /// palette overlay. Shares `self.atlas` with `text_renderer`
@@ -286,7 +429,6 @@ pub struct Renderer {
     /// frame. A failed prepare skips `present()` too, so the frame
     /// takes no vsync backpressure and the loop can spin at CPU rate.
     prepare_fault_logged: bool,
-    redraw_mode: RedrawMode,
     run: bool,
     should_render: bool,
     fps: Option<usize>,
@@ -325,11 +467,11 @@ pub struct Renderer {
     /// Wall-clock timestamp of the previous rendered frame. The
     /// difference between consecutive values is the actual frame
     /// interval, which is what FPS is derived from. Measuring
-    /// wall-clock here rather than `last_render_time` is load-bearing:
-    /// `render()` can early-return on font-system lock contention
-    /// under heavy interaction, which would otherwise make
-    /// `last_render_time` shrink to near-zero and inflate FPS to a
-    /// false huge value.
+    /// wall-clock here rather than the duration of the `render()`
+    /// call is load-bearing: `render()` can early-return on
+    /// font-system lock contention under heavy interaction, and
+    /// timing the call would then shrink to near-zero and inflate FPS
+    /// to a false huge value.
     last_frame_instant: Option<Instant>,
     /// Frame counter used by `FpsDisplayMode::Snapshot` to refresh the
     /// displayed value only every `FPS_WINDOW` frames. Increments
@@ -349,28 +491,44 @@ pub struct Renderer {
     fps_pending_idle_paint: bool,
 
     camera: Camera2D,
-    /// Mindmap text buffers keyed by `GfxElement::unique_id`
-    /// (stringified for use as a `FxHashMap` key alongside the
-    /// edit / undo paths' Dewey-decimal addressing). The value is
-    /// a `Vec<MindMapTextBuffer>` because the tree walker emits
-    /// **multiple buffers per element** when an outline halo is
-    /// configured: one buffer per halo offset emitted before the
-    /// main glyph, all sharing the same `unique_id`. Pre-vec the
-    /// store collapsed every halo onto the main glyph (last-write-
-    /// wins via `insert`); the vec preserves emission order so
-    /// halos stay behind the main glyph at render time.
-    mindmap_buffers: FxHashMap<String, Vec<MindMapTextBuffer>>,
-    /// Command palette / console overlay buffers. Rendered above
-    /// everything else in screen coordinates. Populated only when
-    /// the console is open; cleared otherwise.
-    console_overlay_buffers: Vec<MindMapTextBuffer>,
+    /// Mindmap text buffers keyed by `GfxElement::unique_id`.
+    ///
+    /// The key is the raw `usize`. It used to be that `usize`
+    /// stringified, justified as fitting "the edit / undo paths'
+    /// Dewey-decimal addressing" — but no Dewey-decimal string ever
+    /// reaches this map: every writer and every reader has a
+    /// `unique_id` integer in hand and was allocating a `String` to
+    /// spell it, once per element per rebuild and once per moved
+    /// node per drained drag frame.
+    ///
+    /// The value is a `Vec<MindMapTextBuffer>` because the tree
+    /// walker emits **multiple buffers per element** when an
+    /// outline halo is configured: one buffer per halo offset
+    /// emitted before the main glyph, all sharing the same
+    /// `unique_id`. Pre-vec the store collapsed every halo onto the
+    /// main glyph (last-write-wins via `insert`); the vec preserves
+    /// emission order so halos stay behind the main glyph at render
+    /// time.
+    mindmap_buffers: FxHashMap<usize, Vec<MindMapTextBuffer>>,
     /// Screen-space geometry of the color picker's opaque backdrop.
     /// Captured inside `rebuild_color_picker_overlay_buffers`; the
     /// `render()` rect-pipeline pass appends a black fill rect for
     /// this region alongside the palette backdrop. `None` whenever
     /// the picker is closed.
     color_picker_backdrop: Option<(f32, f32, f32, f32)>,
-    /// Temporary overlay buffers (e.g., selection rectangle). Camera-transformed.
+    /// The rubber-band selection rectangle's four shaped edges, and
+    /// nothing else. Camera-transformed. Written only by
+    /// [`Self::rebuild_selection_rect_overlay`] and dropped only by
+    /// [`Self::clear_overlay_buffers`]; the color picker, the FPS
+    /// readout and the mode-status line each have their own store.
+    ///
+    /// The exclusivity is load-bearing rather than incidental:
+    /// `app::drain_frame::drain_rect_select` — a plain code span
+    /// because `app` is a private module and rustdoc cannot resolve
+    /// a link into one — clears this on every frame no rubber band
+    /// is live, so anything else parked here would be wiped. The
+    /// doc used to read "temporary overlay buffers (e.g., selection
+    /// rectangle)", which invited exactly that.
     overlay_buffers: Vec<MindMapTextBuffer>,
     /// `(char_count, row_count)` of the most recent selection-rect
     /// shape held in [`Self::overlay_buffers`]. Per-tick rebuilds
@@ -379,24 +537,36 @@ pub struct Renderer {
     /// shapings per drag tick. `None` whenever the overlay is
     /// cleared or holds a non-selection-rect shape.
     selection_rect_shape_cache: Option<(usize, usize)>,
-    /// Screen-space buffers produced by walking the app's
-    /// [`AppScene`](crate::application::scene_host::AppScene).
-    /// Populated by [`Self::rebuild_overlay_scene_buffers`] and
-    /// drawn alongside the existing console/color-picker overlay
-    /// buffer lists. Empty until an overlay migrates to a tree.
-    overlay_scene_buffers: Vec<MindMapTextBuffer>,
-    /// Canvas-space buffers for the app's
+    /// Screen-space output produced by walking the overlay sub-scene
+    /// of the app's
+    /// [`AppScene`](crate::application::scene_host::AppScene), in
+    /// draw order, one entry per walked element. Populated by
+    /// [`Self::rebuild_overlay_scene_buffers`] and drawn alongside
+    /// the existing console/color-picker overlay buffer lists. Empty
+    /// until an overlay migrates to a tree.
+    ///
+    /// Each entry carries the shaping inputs its buffers came from
+    /// so the next pass can reuse them unchanged; see
+    /// [`scene_shape_cache`] for the reuse rule. That is also why
+    /// this is a `Vec` of per-element groups rather than one flat
+    /// buffer list — the grouping is what a walk position can be
+    /// checked against.
+    overlay_scene_elements: Vec<scene_shape_cache::ShapedSceneElement>,
+    /// Canvas-space output for the same
     /// [`AppScene`](crate::application::scene_host::AppScene)'s
-    /// canvas sub-scene (borders, connections, portals, etc.).
-    /// Populated by [`Self::rebuild_canvas_scene_buffers`]. Drawn
-    /// in the main camera-transformed pass. Empty until a canvas
-    /// component migrates to a tree.
-    canvas_scene_buffers: Vec<MindMapTextBuffer>,
-    /// Background-rect instances collected while walking the
-    /// canvas sub-scene — forwarded to the camera-transformed
-    /// rect pipeline so GlyphArea fills on migrated components
-    /// render beneath their glyphs.
-    canvas_scene_background_rects: Vec<NodeBackgroundRect>,
+    /// canvas sub-scene (borders, connections, portals, etc.),
+    /// grouped and reused by the same rule. Populated by
+    /// [`Self::rebuild_canvas_scene_buffers`]. Drawn in the main
+    /// camera-transformed pass. Empty until a canvas component
+    /// migrates to a tree.
+    ///
+    /// Unlike the overlay half, these entries carry the walker's
+    /// background fills as well as its buffers: canvas fills *are*
+    /// wired to the camera-transformed rect pipeline. Holding each
+    /// element's fill inside the element's own entry is what keeps
+    /// that index-ordered draw stream stable while only part of the
+    /// scene re-shapes.
+    canvas_scene_elements: Vec<scene_shape_cache::ShapedSceneElement>,
     /// Set whenever the camera *zoom* changes. The document-side
     /// `SceneConnectionCache` stores pre-clip samples whose spacing
     /// depends on `GlyphConnectionConfig::effective_font_size_pt`, which
@@ -551,10 +721,7 @@ impl Renderer {
     /// adapter/device init is Promise-backed so this stays async
     /// like the native form.
     #[cfg(target_arch = "wasm32")]
-    pub async fn bootstrap_wasm(
-        window: Arc<Window>,
-        canvas: web_sys::HtmlCanvasElement,
-    ) -> Renderer {
+    pub async fn bootstrap_wasm(window: Arc<Window>, canvas: web_sys::HtmlCanvasElement) -> Renderer {
         let instance = wgpu::Instance::default();
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
@@ -607,40 +774,13 @@ impl Renderer {
                 module: &rect_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: RECT_VERTEX_SIZE,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    // Layout: pos (8B) | uv (8B) | color (16B) | shape_id (4B)
-                    //         = 36B total, must match `RECT_VERTEX_SIZE`.
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                        // `shape_id` as `Float32`, not `Uint32`: wgpu's
-                        // WebGL2 backend doesn't support integer vertex
-                        // attributes on every browser, and we only need
-                        // a handful of discrete ids. The WGSL vertex
-                        // stage rounds + casts to `u32` before
-                        // flat-interpolating.
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32,
-                            offset: 32,
-                            shader_location: 3,
-                        },
-                    ],
-                }],
+                    // The layout, its offsets and why `shape_id` is a
+                    // float are all documented on the table itself.
+                    attributes: &RECT_VERTEX_ATTRIBUTES,
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &rect_shader,
@@ -680,15 +820,11 @@ impl Renderer {
             queue,
             atlas,
             swash_cache: SwashCache::new(),
-            timer: PollTimer::new(Duration::from_millis(16)),
-            target_duration_between_renders: Duration::from_millis(10),
-            last_render_time: Duration::from_millis(16),
             text_renderer,
             console_text_renderer,
             prepare_fault_logged: false,
             should_render: false,
             fps: None,
-            redraw_mode: RedrawMode::NoLimit,
             run: true,
             fps_display_mode: FpsDisplayMode::Off,
             fps_overlay_buffers: Vec::new(),
@@ -704,13 +840,11 @@ impl Renderer {
             viewport,
             camera,
             mindmap_buffers: Default::default(),
-            console_overlay_buffers: Vec::new(),
             color_picker_backdrop: None,
             overlay_buffers: Vec::new(),
             selection_rect_shape_cache: None,
-            overlay_scene_buffers: Vec::new(),
-            canvas_scene_buffers: Vec::new(),
-            canvas_scene_background_rects: Vec::new(),
+            overlay_scene_elements: Vec::new(),
+            canvas_scene_elements: Vec::new(),
             connection_geometry_dirty: false,
             rect_pipeline,
             rect_vertex_buffer,
@@ -762,8 +896,8 @@ impl Renderer {
     }
 
     /// Set the screen-space FPS readout mode. Routes through the
-    /// decree bus so `should_render` / `StartRender` / `StopRender`
-    /// and the FPS toggle share a single in-renderer mutation point.
+    /// decree bus so `should_render` / `StartRender` and the FPS
+    /// toggle share a single in-renderer mutation point.
     pub fn set_fps_display(&mut self, mode: FpsDisplayMode) {
         self.process_decree(RenderDecree::SetFpsDisplay(mode));
     }
@@ -787,57 +921,51 @@ impl Renderer {
     /// decide whether the loop should keep iterating without
     /// burning the flag — `take` would consume it before the
     /// next `drain_camera_geometry_rebuild` got a chance to react.
+    // Native-driver-only: read by the native idle-CPU
+    // `needs_continuation` predicate; the browser's rAF loop has no
+    // idle state to decide about.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn connection_geometry_dirty(&self) -> bool {
         self.connection_geometry_dirty
     }
 
     /// Forward a redraw request to the underlying winit window. On
-    /// native this queues a `WindowEvent::RedrawRequested` for the
-    /// next event-loop iteration; on web (winit-web) it schedules
-    /// an internal `requestAnimationFrame`. Multiple calls in one
-    /// event chain coalesce to a single delivery — safe to call
-    /// from any handler that mutated visual state.
+    /// web (winit-web) this schedules an internal
+    /// `requestAnimationFrame`; multiple calls in one event chain
+    /// coalesce to a single delivery, so it is safe to call from any
+    /// handler that mutated visual state.
+    ///
+    /// Browser-only consumer: `run_wasm` drives its frames off winit
+    /// redraw requests, while native's loop runs `ControlFlow::Poll`
+    /// and never asks. Lint armed on wasm32 so the day that changes,
+    /// wasm32 says so.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub fn request_redraw(&self) {
         self.window.request_redraw();
     }
 
-    const ZERO_DURATION: Duration = Duration::new(0, 0);
-
+    /// Draw one frame and report whether the event loop should keep
+    /// going. The loop paces itself — `ControlFlow::Poll` plus the
+    /// surface's own vsync backpressure — so there is no rate gate
+    /// here.
+    ///
+    /// There used to be one: a `RedrawMode` with `OnRequest` /
+    /// `FpsLimit(n)` / `NoLimit` arms. The field was written exactly
+    /// once, to `NoLimit`, so the other two were unreachable, and the
+    /// `FpsLimit` arm subtracted one `Duration` from another with no
+    /// saturation — with its seeded values (10 ms target, 16 ms last
+    /// render) the very first tick would have underflowed and
+    /// panicked. Wiring the mode would not have enabled a feature; it
+    /// would have crashed the frame. Reinstating a frame cap means
+    /// writing the arithmetic, not reviving this.
     #[inline]
     pub fn process(&mut self) -> bool {
-        match self.redraw_mode {
-            RedrawMode::OnRequest => {
-                self.fps = Some(0);
-            }
-            RedrawMode::FpsLimit(_) => {
-                if self.timer.is_expired() {
-                    let delta_duration = self.target_duration_between_renders - self.last_render_time;
-                    if delta_duration.le(&Self::ZERO_DURATION) {
-                        self.timer.expire_in(Duration::from(Self::ZERO_DURATION));
-                    } else {
-                        self.timer.expire_in(delta_duration);
-                    }
-                    if self.fps_display_mode != FpsDisplayMode::Off {
-                        self.tick_fps();
-                        self.rebuild_fps_overlay_if_needed();
-                    }
-                    self.rebuild_mode_status_overlay_if_needed();
-                    let sw = StopWatch::new_start();
-                    self.render();
-                    self.last_render_time = sw.stop();
-                }
-            }
-            RedrawMode::NoLimit => {
-                if self.fps_display_mode != FpsDisplayMode::Off {
-                    self.tick_fps();
-                    self.rebuild_fps_overlay_if_needed();
-                }
-                self.rebuild_mode_status_overlay_if_needed();
-                let sw = StopWatch::new_start();
-                self.render();
-                self.last_render_time = sw.stop();
-            }
+        if self.fps_display_mode != FpsDisplayMode::Off {
+            self.tick_fps();
+            self.rebuild_fps_overlay_if_needed();
         }
+        self.rebuild_mode_status_overlay_if_needed();
+        self.render();
         self.run
     }
 
@@ -865,7 +993,8 @@ impl Renderer {
         if self.mode_status_text.as_deref() == self.last_mode_status_shaped.as_deref() {
             return;
         }
-        let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
+        let Some(mut font_system) = fonts::try_acquire_font_system_write("renderer::mode_status_overlay")
+        else {
             // Lock contention — leave the cache state alone so the
             // next process() cycle retries shaping. Pre-fix this
             // advanced `last_mode_status_shaped` before the lock
@@ -875,12 +1004,7 @@ impl Renderer {
         };
         self.mode_status_overlay_buffers.clear();
         if let Some(text) = self.mode_status_text.as_deref() {
-            // Same cyan as `HIGHLIGHT_COLOR` (the selection-tint
-            // constant in `document::types`) so the status bar
-            // visually pairs with the selection highlight: both are
-            // the canonical "active" affordance.
-            // `HIGHLIGHT_COLOR = [0.0, 0.9, 1.0, 1.0]` → (0, 230, 255).
-            let attrs = Attrs::new().color(baumhard::font::Color::rgba(0, 230, 255, 255));
+            let attrs = Attrs::new().color(MODE_STATUS_COLOR);
             let buf = borders::create_border_buffer(
                 &mut font_system,
                 text,
@@ -919,7 +1043,7 @@ impl Renderer {
         if self.fps == self.last_fps_shaped && !self.fps_overlay_buffers.is_empty() {
             return;
         }
-        let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
+        let Some(mut font_system) = fonts::try_acquire_font_system_write("renderer::fps_overlay") else {
             return;
         };
         let text = match self.fps {
@@ -936,11 +1060,12 @@ impl Renderer {
 
     /// Capture the wall-clock interval since the previous frame and
     /// update `self.fps` according to the active display mode.
-    /// Wall-clock (rather than `last_render_time`) is load-bearing:
-    /// `render()` can early-return on a contended font-system lock
-    /// under heavy drag / scene-rebuild load, which would otherwise
-    /// shrink `last_render_time` to a near-zero early-return cost and
-    /// inflate the reported FPS into the hundreds of thousands.
+    /// Wall-clock (rather than the duration of the `render()` call)
+    /// is load-bearing: `render()` can early-return on a contended
+    /// font-system lock under heavy drag / scene-rebuild load, which
+    /// would otherwise shrink the measured cost to a near-zero
+    /// early-return and inflate the reported FPS into the hundreds of
+    /// thousands.
     ///
     /// A frame interval longer than [`Self::IDLE_FRAME_THRESHOLD_US`]
     /// indicates the previous "frame" was actually idle wall-clock,
@@ -981,7 +1106,7 @@ impl Renderer {
         match self.fps_display_mode {
             FpsDisplayMode::Off => {}
             FpsDisplayMode::Snapshot => {
-                if self.fps_clock % FPS_WINDOW == 0 && frame_micros > 0 {
+                if self.fps_clock.is_multiple_of(FPS_WINDOW) && frame_micros > 0 {
                     self.fps = Some((1_000_000u128 / frame_micros) as usize);
                 }
                 self.fps_clock = self.fps_clock.wrapping_add(1);
@@ -990,10 +1115,13 @@ impl Renderer {
                 if frame_micros > 0 {
                     self.fps_ring.push(frame_micros);
                 }
-                if let Some(avg) = self.fps_ring.avg_micros() {
-                    if avg > 0 {
-                        self.fps = Some((1_000_000u128 / avg) as usize);
-                    }
+                // `checked_div`: a zero average leaves `self.fps` as it was.
+                if let Some(fps) = self
+                    .fps_ring
+                    .avg_micros()
+                    .and_then(|avg| 1_000_000u128.checked_div(avg))
+                {
+                    self.fps = Some(fps as usize);
                 }
             }
         }
@@ -1011,6 +1139,10 @@ impl Renderer {
     /// if the overlay is at the idle marker or has never been
     /// populated. Used by the event loop to decide whether the
     /// overlay needs one more redraw to flip to "-" before parking.
+    // Native-driver-only, with the two below: the active-to-idle FPS
+    // transition belongs to `ControlFlow::Wait`, which only native's
+    // loop enters.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn has_live_fps(&self) -> bool {
         self.fps.is_some()
     }
@@ -1030,6 +1162,7 @@ impl Renderer {
     /// gates produce momentary `needs_continuation == false` gaps
     /// between drain frames would flash "FPS: -" between every
     /// drain — making the readout unusable as a diagnostic.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn fps_idle_defer_deadline(&self, grace: Duration) -> Option<Instant> {
         if !self.has_live_fps() {
             return None;
@@ -1051,14 +1184,10 @@ impl Renderer {
     /// The arm-and-consume flag protects the transitional frame
     /// from `tick_fps` re-computing a numeric reading from the
     /// pre-idle rolling-avg samples.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn set_fps_idle(&mut self) {
         self.fps = None;
         self.fps_pending_idle_paint = true;
-    }
-
-    #[inline]
-    fn get_size(&self) -> PhysicalSize<u32> {
-        self.window.inner_size()
     }
 
     #[inline]
@@ -1089,6 +1218,14 @@ impl Renderer {
 pub struct MindMapTextBuffer {
     pub buffer: Buffer,
     pub pos: (f32, f32),
+    /// The `(dx, dy)` this buffer was emitted at relative to its
+    /// authoring `GlyphArea`'s anchor — `(0, 0)` for a main glyph,
+    /// one of [`OutlineStyle::offsets`](baumhard::gfx_structs::area_fields::OutlineStyle::offsets)
+    /// for an outline-halo stamp. Kept so a position-only patch
+    /// (`Renderer::patch_drag_positions`) can re-derive
+    /// `pos = anchor + emission_offset` instead of collapsing every
+    /// halo of a dragged element onto its main glyph.
+    pub emission_offset: (f32, f32),
     pub bounds: (f32, f32),
     /// Per-`GlyphArea` zoom window copied in at buffer-build time.
     /// The main render loop skips this buffer whenever

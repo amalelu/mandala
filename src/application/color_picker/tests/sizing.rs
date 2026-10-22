@@ -6,7 +6,7 @@
 //! tiny screens.
 
 use super::fixtures::sample_geometry;
-use crate::application::color_picker::compute_color_picker_layout;
+use crate::application::color_picker::{compute_color_picker_layout, CROSSHAIR_CENTER_CELL};
 use crate::application::widgets::color_picker_widget::load_spec;
 
 /// Canonical sizing formula: at `size_scale = 1.0` the picker
@@ -106,4 +106,34 @@ fn layout_safety_clamp_dominates_user_scale_on_tiny_screens() {
     assert!(left >= 0.0 && top >= 0.0);
     assert!(left + bw <= 250.5);
     assert!(top + bh <= 200.5);
+}
+
+/// The width fit is `screen_w / (wheel_side_in_fonts + 2.0)`. It
+/// once carried a `.max(32.0)` floor reserving room for a retired
+/// theme-chip row; that floor was inert, because the preview
+/// clearance puts `wheel_side_in_fonts + 2.0` above 32 for every
+/// `GeometrySpec` the shipped `color_picker.json` can express.
+/// Pinned here so a future spec edit that would make a 32-font
+/// reservation bite again fails loudly instead of silently
+/// re-deriving a constraint nothing computes any more.
+#[test]
+fn wheel_width_in_fonts_clears_the_retired_chip_reservation() {
+    let spec = load_spec();
+    let g = &spec.geometry;
+    // Mirrors `compute_sizing::derive_sizing`'s wheel-side
+    // derivation at its floor: `cell_factor` is floored on the
+    // preview clearance, and the glyph-ring radius can only push
+    // the wheel wider, so substituting the floor yields the
+    // smallest wheel the formula can produce.
+    let cell_factor = g.preview_size_scale * 0.5 + g.bar_to_preview_padding_scale;
+    let ring_scale = g.hue_ring_font_scale;
+    let crosshair_ring_per_font =
+        CROSSHAIR_CENTER_CELL as f32 * cell_factor + ring_scale * g.bar_to_ring_padding_scale;
+    let min_wheel_side_in_fonts = 2.0 * (crosshair_ring_per_font + ring_scale * 0.5 + 1.0);
+    assert!(
+        min_wheel_side_in_fonts + 2.0 > 32.0,
+        "smallest wheel width {} fonts is at or below the retired 32-font chip \
+         reservation — the deleted `.max(32.0)` would have started binding",
+        min_wheel_side_in_fonts + 2.0
+    );
 }

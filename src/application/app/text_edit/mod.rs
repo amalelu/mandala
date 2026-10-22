@@ -13,7 +13,8 @@ mod editor;
 mod tests;
 
 pub(in crate::application::app) use editor::{
-    close_text_edit, handle_text_edit_key, open_text_edit, open_text_edit_with_close_target,
+    cancel_text_edit, commit_text_edit, handle_text_edit_key, open_text_edit,
+    open_text_edit_with_close_target,
 };
 
 /// Inline multi-line text editor for a node. Entered via
@@ -94,7 +95,7 @@ pub(in crate::application::app) enum TextEditState {
         /// status bar reads as a UX dead-end. Multi-section opens
         /// (where the user explicitly entered NodeEdit and then
         /// asked to edit a specific section) keep the `false` value
-        /// so `close_text_edit` returns to NodeEdit for further
+        /// so closing the editor returns to NodeEdit for further
         /// section-picking.
         exit_to_default_on_close: bool,
     },

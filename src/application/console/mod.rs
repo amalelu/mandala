@@ -25,6 +25,7 @@ pub mod constants;
 pub mod helpers;
 pub mod parser;
 pub mod predicates;
+pub mod spec;
 pub mod traits;
 pub mod visuals;
 
@@ -85,7 +86,12 @@ pub enum ConsoleSideEffect {
     /// dispatcher also drops the cached `mindmap_tree` and clears
     /// any open modal-editor state so stale references into the
     /// old document can't outlive the swap.
-    ReplaceDocument(MindMapDocument),
+    ///
+    /// **Boxed.** A whole document is by far the largest payload here,
+    /// and every effect — a one-field `OpenLabelEdit` included — is
+    /// returned by value, so the enum would otherwise be a document
+    /// wide for all of them.
+    ReplaceDocument(Box<MindMapDocument>),
     /// Flip the high-level interaction mode and trigger a scene
     /// rebuild. Mirrors the `SetFpsDisplay` precedent: a UI-state
     /// transition that doesn't pass through `Action` because the
@@ -107,10 +113,7 @@ pub enum ConsoleSideEffect {
     /// opens the editor. Single source of truth for "open
     /// section editor"; the verb is the only producer of this
     /// variant.
-    OpenSectionEdit {
-        node_id: String,
-        section_idx: usize,
-    },
+    OpenSectionEdit { node_id: String, section_idx: usize },
 }
 
 impl std::fmt::Debug for ConsoleSideEffect {
@@ -142,9 +145,31 @@ impl std::fmt::Debug for ConsoleSideEffect {
 /// Mutable handles handed to `execute`. The dispatcher reads
 /// [`Self::side_effect`] and [`Self::close_console`] after the
 /// command returns; everything else is a direct
-/// `MindMapDocument` mutation through [`Self::document`].
+/// `MindMapDocument` mutation through [`Self::document_mut`].
+///
+/// **Reading and writing the document are different calls on
+/// purpose.** The document is reached through
+/// [`Self::document`] (shared) or [`Self::document_mut`]
+/// (exclusive), and taking the exclusive one raises a flag the
+/// dispatcher reads back through [`Self::document_mutated`]. That
+/// flag is what gates the post-command `scene_cache.clear()` +
+/// `rebuild_all`: `help`, `fps` and `mutation list` never take a
+/// `&mut`, so they no longer pay for a rebuild of a document they
+/// only read.
+///
+/// The signal is deliberately **the borrow, not the write**.
+/// Marking on `&mut` over-reports — a `border reset` that turns out
+/// to be a no-op still counts — and that is the safe direction: the
+/// cost of over-reporting is one rebuild the user would have paid
+/// for anyway, while the cost of under-reporting is a canvas that
+/// silently disagrees with the model. It is also the only version a
+/// new command cannot forget, because there is no way to write to
+/// the document without going through the call that raises it.
 pub struct ConsoleEffects<'a> {
-    pub document: &'a mut MindMapDocument,
+    document: &'a mut MindMapDocument,
+    /// Set by [`Self::document_mut`]. See the type's doc comment for
+    /// why the borrow rather than the write is the signal.
+    document_mutated: bool,
     /// Out-of-band transition / state write the dispatcher should
     /// perform after the command. Mutually exclusive — at most
     /// one effect per command.
@@ -159,9 +184,27 @@ impl<'a> ConsoleEffects<'a> {
     pub fn new(document: &'a mut MindMapDocument) -> Self {
         Self {
             document,
+            document_mutated: false,
             side_effect: None,
             close_console: false,
         }
+    }
+
+    /// Read the document. Leaves [`Self::document_mutated`] alone.
+    pub fn document(&self) -> &MindMapDocument {
+        self.document
+    }
+
+    /// Take the document exclusively, marking the command as one
+    /// that may have changed what is drawn.
+    pub fn document_mut(&mut self) -> &mut MindMapDocument {
+        self.document_mutated = true;
+        self.document
+    }
+
+    /// Whether the command took [`Self::document_mut`].
+    pub fn document_mutated(&self) -> bool {
+        self.document_mutated
     }
 }
 
@@ -182,6 +225,61 @@ pub enum ExecResult {
     /// row shapes in its own face, while help text / mutate-list
     /// tables leave it `None` and shape in the console default.
     Lines(Vec<OutputLine>),
+}
+
+/// The diagnostic code a failed console line is logged under when a
+/// caller other than the prompt ran it (a file Action, a macro step,
+/// an IPC command): `log::warn!(code = LINE_FAILED_CODE; …)`. An IPC
+/// reply carries it as a `console_error` warning, matching the
+/// `console_error` error code `act.console` answers with, so an agent
+/// can branch on a console failure however the line was reached. A code
+/// is API there (`format/ipc.md` §Warnings).
+pub const LINE_FAILED_CODE: &str = "console_error";
+
+/// The diagnostic code `Action::SaveDocument` logs when no file path
+/// is bound, so there is nothing to save to. A save-as fixes it. An IPC
+/// reply carries it as a `save_unbound` warning (`format/ipc.md`
+/// §Warnings).
+pub const SAVE_UNBOUND_CODE: &str = "save_unbound";
+
+/// The diagnostic code `Action::SaveDocument` logs when writing the
+/// bound file failed: the disk, the path, permissions. An IPC reply
+/// carries it as a `save_failed` warning.
+pub const SAVE_FAILED_CODE: &str = "save_failed";
+
+/// What running one console line produced, before anything renders
+/// it. The console modal folds it into its scrollback. The IPC
+/// `act.console` command returns it to the client. Neither path
+/// changes what the verb did.
+#[derive(Debug)]
+#[must_use = "a console line's outcome is its only report: print it, log it, or return it"]
+pub enum LineOutcome {
+    /// The line was blank, so nothing ran.
+    Blank,
+    /// The line's head names no verb. Carries the head token.
+    Unknown(String),
+    /// A verb ran and returned this.
+    Ran(ExecResult),
+}
+
+impl LineOutcome {
+    /// Whether the line did what it asked: a verb ran and did not
+    /// report a failure. A blank line, an unknown verb and a verb
+    /// error did not apply.
+    pub fn applied(&self) -> bool {
+        matches!(self, LineOutcome::Ran(ExecResult::Ok(_) | ExecResult::Lines(_)))
+    }
+
+    /// The failure text the console shows for this outcome, or
+    /// `None` when the line succeeded or was blank. One spelling,
+    /// shared by the scrollback, the log and the IPC reply.
+    pub fn failure(&self) -> Option<String> {
+        match self {
+            LineOutcome::Unknown(head) => Some(format!("unknown command: {head}")),
+            LineOutcome::Ran(ExecResult::Err(message)) => Some(message.clone()),
+            LineOutcome::Blank | LineOutcome::Ran(ExecResult::Ok(_) | ExecResult::Lines(_)) => None,
+        }
+    }
 }
 
 /// One line of multi-line console output. Default-shaped (font
@@ -254,15 +352,6 @@ pub enum ConsoleLine {
     },
     /// Error output from a failed command.
     Error(String),
-}
-
-impl ConsoleLine {
-    pub fn text(&self) -> &str {
-        match self {
-            ConsoleLine::Input(s) | ConsoleLine::Error(s) => s,
-            ConsoleLine::Output { text, .. } => text,
-        }
-    }
 }
 
 /// Console UI state. Mirrors the `PaletteState` shape — either

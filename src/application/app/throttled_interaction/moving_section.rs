@@ -31,6 +31,13 @@ pub(in crate::application::app) struct MovingSectionInteraction {
     /// throttle. The running total is what release folds into
     /// `start_offset`.
     pub pending: ThrottledPending,
+    /// Scratch `(unique_id, new_position)` buffer handed to
+    /// [`apply_section_drag_delta_and_collect_patches`] and then to
+    /// `Renderer::patch_drag_positions`. Lives on the interaction so
+    /// the one allocation is made at drag start and reused for the
+    /// rest of the gesture — the reuse the out-param shape exists
+    /// for, which a `Vec::new()` per drained frame did not honor.
+    patches: Vec<(usize, (f32, f32))>,
 }
 
 impl MovingSectionInteraction {
@@ -44,6 +51,7 @@ impl MovingSectionInteraction {
             section_idx,
             start_offset,
             pending: ThrottledPending::accumulating_deltas(),
+            patches: Vec::new(),
         }
     }
 }
@@ -69,16 +77,18 @@ impl ThrottledInteraction for MovingSectionInteraction {
         let pending_delta = self.pending.take_delta();
         let total_delta = self.pending.total_delta();
         if let Some(tree) = mindmap_tree.as_mut() {
-            let mut patches = Vec::new();
+            // The collector appends rather than clearing, so the
+            // reused buffer is emptied here before it is refilled.
+            self.patches.clear();
             apply_section_drag_delta_and_collect_patches(
                 tree,
                 &self.node_id,
                 self.section_idx,
                 pending_delta.x,
                 pending_delta.y,
-                &mut patches,
+                &mut self.patches,
             );
-            renderer.patch_drag_positions(&patches);
+            renderer.patch_drag_positions(&self.patches);
             // The section was Section-selected at threshold-cross
             // (otherwise no `MovingSection` promotion), so the
             // selection-gated resize handles render at the

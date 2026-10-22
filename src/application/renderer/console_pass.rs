@@ -8,8 +8,8 @@
 use glam::Vec2;
 
 use baumhard::core::primitives::{ColorFontRegion, ColorFontRegions, Range as ColorFontRange};
-use baumhard::font::fonts::app_font_by_family;
 use baumhard::font::color::cosmic_color_to_rgba;
+use baumhard::font::fonts::app_font_by_family;
 use baumhard::font::{Color, FontSystem};
 use baumhard::gfx_structs::area::GlyphArea;
 use baumhard::gfx_structs::element::GfxElement;
@@ -345,7 +345,7 @@ pub(super) fn console_overlay_areas(
     let prompt_text = "\u{276F} ";
     let combined = format!("{prompt_text}{input_clipped}");
     let prompt_chars = baumhard::util::grapheme_chad::count_grapheme_clusters(prompt_text);
-    let input_chars = baumhard::util::grapheme_chad::count_grapheme_clusters(&input_clipped);
+    let input_chars = baumhard::util::grapheme_chad::count_grapheme_clusters(input_clipped);
 
     let mut prompt_area = GlyphArea::new_with_str(
         &combined,

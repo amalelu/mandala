@@ -45,7 +45,8 @@ rise and fall together.
   `lib/baumhard/src/gfx_structs/tree.rs`). Never clone-edit-reinsert a
   subtree to change one field.
 - **Font** through `baumhard::font::fonts`. `fonts::init()` once at
-  startup; acquire `FONT_SYSTEM` through `acquire_font_system_write`;
+  startup; acquire `FONT_SYSTEM` through `acquire_font_system_write`
+  (or its `try_` / `_read` siblings — there is no other way in);
   resolve families through `app_font_by_family` /
   `loaded_families_iter`. Region-styled text reaches cosmic-text only
   through `baumhard::font::attrs` (`attrs_list_from_regions`,
@@ -103,28 +104,30 @@ decision, not a drive-by edit.
   - The native `FreezeWatchdog`
     (`src/application/app/freeze_watchdog.rs`) — reads a liveness
     atomic, never touches app state.
-  - The IPC boundary threads (design: `work_plans/LLM_IPC.md` §D2,
-    protocol: `format/ipc.md`; lands with IPC-02). When `--ipc` is
-    active: a persistent acceptor thread (always `accept()`ing, so a
-    second client is rejected immediately with a non-blocking write),
-    plus a per-controller reader thread (blocking read → parse →
-    enqueue → wake the loop via a winit `EventLoopProxy` user event)
-    and a per-controller outbound thread (dequeue → serialize →
-    blocking write) that are spawned and torn down together per
-    connection. Each connection carries a monotonic generation stamp
-    on its requests/replies/events/pending-waits, and the reader's
-    disconnect sends a user event so the main thread cancels that
-    generation's waits and subscriptions — nothing crosses to a
+  - The IPC boundary threads (`src/application/ipc/`; design:
+    `work_plans/LLM_IPC.md` §D2, protocol: `format/ipc.md`). Only
+    when `--ipc` is passed: a persistent acceptor thread (always
+    `accept()`ing, so a second client is rejected immediately with a
+    non-blocking write), plus a per-controller reader thread (blocking
+    read → parse → enqueue → wake the loop via a winit
+    `EventLoopProxy` user event) and a per-controller outbound thread
+    (dequeue → serialize → blocking write) that are spawned and torn
+    down together per connection. Each connection carries a monotonic
+    generation stamp on its requests/replies/events/pending-waits, and
+    the reader's disconnect is queued behind that connection's
+    requests and wakes the main thread, which retires the generation
+    — canceling its waits and subscriptions — so nothing crosses to a
     successor controller. All see only protocol value types; every
-    IPC command executes on the main thread in the `user_event` arm
-    with the same access as any input handler, and a command that
-    changes pixels requests a redraw just as the winit input handlers
-    do. The `std::sync::mpsc` queues at this boundary carry protocol
-    values only — they are not a license for channels between app
-    components — and blocking IPC I/O on the main thread stays
-    forbidden: a stalled client must never trip
-    the `FreezeWatchdog`; the bounded outbound queue tears the
-    connection down instead.
+    IPC command executes on the main thread, in `about_to_wait` right
+    after `drain_inputs` (the `user_event` wake only unparks the
+    loop), with the same access as any input handler, and a command that changes pixels requests a
+    redraw just as the winit input handlers do. The `std::sync::mpsc`
+    queues at this boundary carry protocol values only — they are not
+    a license for channels between app components — and blocking IPC
+    I/O on the main thread stays forbidden: a stalled client must
+    never trip the `FreezeWatchdog`. A full outbound queue pauses that
+    controller's execution until its writer makes room, and a write
+    that makes no progress for ten seconds tears the connection down.
 - **Model / view separation.** `MindMapDocument` owns the data model;
   `Renderer` owns GPU resources. The renderer reads intermediate
   representation (`Tree<GfxElement, GfxMutator>`, one per canvas
@@ -186,15 +189,61 @@ decision, not a drive-by edit.
     `winit::Key` payload (character insertion, IME sequences) which
     `Action` discards.
   - **Pre-funnel state-machine bookkeeping.** Selection updates on
-    single-click, drag-state cleanup on release, double-click time +
-    distance + hit detection, and the `last_click` tracker run
-    before the funnel. They're not user-named effects; they're
-    machinery the funnel rests on.
+    single-click (and on a touch `Tap`), drag-state cleanup on
+    release, double-click time + distance + hit detection, and the
+    `last_click` tracker run before the funnel. They're not
+    user-named effects; they're machinery the funnel rests on.
+
+    **One thing on that same path is a user-named effect, and it is
+    deliberately not an `Action`:** a click or tap that lands on a
+    node runs `click_triggers::fire_onclick_triggers`, which applies
+    whatever `OnClick` `CustomMutation`s the *map author* bound to
+    it, plus their document actions. Those are authored effects by
+    definition. They stay outside the funnel because the funnel
+    reifies behaviors the *application* names — one `Action` per
+    user-facing verb, bindable by key — whereas these are named per
+    node in the document and reach the model through the mutation
+    pipeline instead.
+
+    **They carry no `SourceTier`, and that is a gap rather than a
+    sanction.** An earlier draft of this bullet explained their
+    ungated-ness by saying the trust boundary for document content
+    is the loader — which contradicts this project's actual stated
+    threat model, where a `.mindmap.json` is *untrusted* and a
+    "hostile shared mindmap" is named as the adversary
+    (`src/application/macros/mod.rs`). The loader validates shape,
+    not intent. The correct statement is that `OnClick` triggers
+    are outside the *dispatch funnel*, not outside the security
+    posture: they are a second route from map content to
+    `apply_document_actions` that never passes `dispatch_macro`,
+    which is exactly why the gating rule below says *every* apply
+    site rather than that one.
   - **Per-frame continuous-gesture state.** A drag's per-cursor-move
     delta (e.g. `RenderDecree::CameraPan(dx, dy)` in `event_cursor_moved`)
-    legitimately stays inline. The funnel covers the discrete entry
-    + exit (the press → `Action::PanCanvas`); the per-frame body
-    is not a discrete-action concern.
+    legitimately stays inline. For a *mouse* drag the funnel still
+    covers the discrete entry + exit (the press → `Action::PanCanvas`);
+    the per-frame body is not a discrete-action concern.
+
+    **A touch pan or pinch has no funnel entry at all**, and that is
+    the sanctioned shape rather than an omission. The entry a mouse
+    funnels is `Action::PanCanvas`, which does not move the camera —
+    it arms `DragState::Panning`, which exists only on native — so
+    routing a finger through it would dispatch, return `Unhandled`
+    and warn in the browser. There is also nothing left for an entry
+    to decide: `TouchGestureRecognizer` is the state machine
+    `DragState` is for the mouse, and by the time it emits, the
+    gesture is already identified. So the whole of a touch pan /
+    pinch is per-frame body, reaching the camera through
+    `RenderDecree`s (`dispatch::apply_touch_effect`). A *discrete*
+    touch gesture still goes through the funnel — `LongPress`
+    resolves through `MouseGesture` and `action_for_gesture` like any
+    mouse gesture.
+
+    The line this carve-out draws is therefore "is the effect a
+    continuous camera delta?", not "did a funnelled press start it".
+    A continuous gesture that *mutates the document* per frame is a
+    different question and is not covered here — see the
+    `ThrottledDrag` ladder.
 
   Anything else — a new gesture or a new console-verb behavior that
   mutates document state or changes view state — must go through the
@@ -222,9 +271,33 @@ decision, not a drive-by edit.
   `#[non_exhaustive]`. Today every variant is a pure in-memory
   canvas-theme write, safe to expose. **Any new variant that
   performs file I/O, network access, arbitrary content load, or
-  cross-process side effects MUST add a parallel gate at the
-  `dispatch_macro` site** (look up the existing `allows_*` pattern
-  on `SourceTier` and extend it).
+  cross-process side effects MUST be gated at *every site that
+  applies a `DocumentAction`*** (look up the existing `allows_*`
+  pattern on `SourceTier` and extend it).
+
+  **"Every site" is the load-bearing phrase, and this paragraph
+  used to say "at the `dispatch_macro` site" instead — which is
+  wrong in the direction that matters.** `dispatch_macro` is not
+  the only route from a `.mindmap.json` to
+  `MindMapDocument::apply_document_actions`. There are three, and
+  the second is the one a hostile map would take:
+
+  1. `dispatch::apply_keybind_custom_mutation`
+     (`cross_dispatch/mod.rs`) — the keybind / macro tier, which
+     is the route `dispatch_macro`'s gates cover.
+  2. `click_triggers::fire_onclick_triggers` — a node's `OnClick`
+     binding, authored **in the map**, fired by a click or a touch
+     tap. It carries no `SourceTier` at all, because it is document
+     content rather than a dispatch surface. A variant gated only
+     at `dispatch_macro` stays fully reachable here.
+  3. `console::commands::mutation` — the `mutation` console verb,
+     User tier by construction, since the user typed it.
+
+  Nothing turns on this today: both shipped variants
+  (`SetThemeVariant`, `SetThemeVariables`) are in-memory theme
+  writes and route 2 is harmless for them. The instruction is
+  written down correctly now so the first dangerous variant does
+  not get gated at one site and shipped as though it were gated.
 
   Source-tier assignment is loader-pinned. Each loader call site
   hardcodes the tier; nothing in the on-disk format can affect it.
@@ -337,6 +410,75 @@ industrial cost/benefit reasoning. This is not license for speculation.
   carry a doc comment; a well-named private helper does not.
 - **Module `//!` headers describe the concept, not the item list.**
   `cargo doc` generates the list; the concept is what the reader needs.
+- **Intra-doc links must point at targets that survive `cfg`
+  stripping.** Rustdoc compiles with `cfg(test)` off: a doc link from
+  live code into a `#[cfg(test)]` module is always broken — the
+  target does not exist when rustdoc resolves it — while a broken
+  link *inside* a `#[cfg(test)]` module can never fail anything,
+  because the module is stripped before doc collection ever sees it.
+  The same asymmetry holds per target: a link from cross-platform
+  code to a `#[cfg(target_arch = "wasm32")]` item breaks the host
+  doc leg, a link to a native-gated item breaks the wasm32 leg, and
+  each break is visible to exactly one of `./test.sh --lint`'s two
+  doc targets — which is why there are two. Name a cfg-stripped item
+  as a plain code-span (backticks, no link): the only form that
+  resolves everywhere. The doc gates hold a zero baseline on both
+  targets and fail the run (#134); PR #133 established the
+  stripped-side half of this rule, the #134 incident the live-side
+  half.
+- **A module `//!` header whose `mod` item also carries an outer
+  `///` writes its intra-doc links crate-absolute.** rustdoc merges
+  the two into one doc block, and a *relative* link inside the merged
+  block resolves against no module — `[`Foo`]` fails even where `Foo`
+  is declared in that very file. Both halves of the pair are the
+  house style here (`lib/baumhard/src/mindmap/mod.rs` puts a one-line
+  summary on every `pub mod` it declares, and each of those files
+  opens with its own `//!`), so the combination is normal and the
+  hazard is latent in every one of them. What makes it worth a rule
+  rather than a fix-when-it-bites: the error names neither a file nor
+  a line, so the only way to locate it is to bisect the doc comments.
+  `[`Foo`](crate::path::to::Foo)` resolves.
+- **Prose must not name an item the same change deleted, and a
+  rename sweep is what catches it — with two blind spots worth
+  knowing before you trust one.** A doc that says "which the first
+  `insert` overwrites" after `insert` is gone reads as a pointer and
+  is a dead end; the same sentence inside a *control instruction* is
+  worse, because the next reader runs it. The sweep is: extract every
+  `fn` / `struct` / field name the change removed from its own diff,
+  grep the tree for each, then triage. It found four such sentences in
+  one series. What it does **not** find: (1) removed field names that
+  are ordinary English words — `color`, `font`, `position` — where the
+  prose is in a file the change never touched, so no qualified
+  spelling and no file-locality narrows the grep; (2) a sentence whose
+  every identifier still exists but whose *claim* went false, which
+  needs reading rather than matching. Both were real misses. A
+  deliberate mention of a removed item is fine and sometimes required
+  — naming the input that made a regression test fail, or the shape a
+  rewrite replaced — but it carries its own disclosure that the thing
+  is gone, so a reader is never sent looking.
+- **A figure derived from a recorded constant belongs beside the
+  constant, not copied into prose.** Name the constant and state the
+  relation; a number restated in a doc comment goes stale silently
+  while still reading as authority.
+  `MEASURED_WORST_ESCAPE_ULPS` in
+  `lib/baumhard/src/mindmap/connection/tests.rs` carries the canonical
+  statement of this and the incident that produced it. It has since
+  been broken once more, in prose about that same constant, which is
+  why it is repeated here where the doc rules live.
+- **A comment may assert what the standard says and what this
+  repository does; a claim about what a *named engine* does at
+  runtime needs either a device or a hedge.** The proved-vs-observed
+  discipline, applied to prose. "`touch-action: none` is what the
+  spec says a canvas needs" and "nothing in this repository sets it"
+  are both checkable from a checkout. "Safari ignores
+  `user-scalable=no`" is not — no browser runs in CI, so the claim
+  can only be inherited from memory, and inherited browser trivia
+  goes stale silently and is then quoted as though it were tested.
+  Write the checkable half, and where behavior genuinely varies say
+  it varies and name who owns confirming it. The rule earned its
+  place: `web/index.html` shipped a per-engine claim that a reviewer
+  said was backwards, and neither the author nor the reviewer could
+  settle it from a checkout.
 - **Inline `//` comments explain *why*, never *what*.** `// increment
   counter` on `counter += 1` is noise; `// clamp to canvas bounds so
   the palette cannot scroll off-screen during zoom` is signal.
@@ -357,8 +499,113 @@ industrial cost/benefit reasoning. This is not license for speculation.
   internal invariants".
 - **Startup paths use `expect("<reason>")` with a human-readable
   message.** Startup is everything before the first frame: CLI parse,
-  `Renderer::new`, `fonts::init`, the initial `loader::load_from_file`,
-  the `?map=` parser on WASM. Bare `unwrap()` outside tests is a bug.
+  the winit event loop and its window, the `--ipc` socket when the
+  flag is passed, the renderer bootstrap, `fonts::init`, and — in the
+  browser — hanging a canvas off the page and reading `?map=` from its
+  URL. What can fail says so where it happens, in five groups. **The
+  window:** the event loop — `EventLoop::with_user_event` on native,
+  whose loop carries the IPC wake, and `EventLoop::new` in the
+  browser — then `create_window`, and `run_app`, whose `Err` is the
+  loop itself giving out. The browser's loop and window are created
+  in `Application::new` rather than in its run module, so
+  `create_window` is named on both targets. **The IPC socket, under
+  `--ipc` only:** `IpcServer::start`, whose message names the path
+  and why it was refused — a parent directory other users can write,
+  a path that is not a stale socket of ours, a live listener — so a
+  bad `--ipc` ends the launch instead of leaving IPC silently
+  missing. **The renderer bootstrap:** `create_surface`, then
+  `request_adapter` and `request_device` — no GPU, no program —
+  reached from both `Renderer::bootstrap_native` and
+  `Renderer::bootstrap_wasm`. **The page, in the browser:**
+  `web_sys::window`, the `document`, `body` and `canvas` hung off it,
+  the `append_child` that attaches one to the other, and the
+  `inner_width` / `inner_height` the first surface is sized from —
+  any one of them missing means there is no page to draw on. **The
+  font system, behind `fonts::init`:** the `acquire_font_system_read`
+  the family index is built under, and the `panic!`s that a
+  poisoned, re-entrant or unavailable guard raises — a message rather
+  than an `expect` only because the helper has no `Result` to hand
+  back: a lock that cannot be had is not something the caller can
+  recover from. Two
+  things in the phase list cannot fail, and are inside the boundary
+  rather than exceptions to it: `fonts::init` itself returns `()`, and
+  the query-string extractor is infallible by construction —
+  `search().unwrap_or_default()` then `strip_prefix`, with no
+  failure to report. What that extractor *feeds* is fallible, and is
+  the next bullet — which is also why the map fetch asks
+  `web_sys::window` a second time and *degrades* rather than
+  aborting: by then there is a shell to put the message in. Bare
+  `unwrap()` outside tests is a bug. **This list is checked against
+  the code in all three directions, not trusted:** the tests of the
+  module the next bullet names fail when it holds a name that has
+  moved, when it holds a name that cannot fail, and when a file on
+  the startup path grows a panicking call this list does not name.
+  It held one of each of the first two — a renamed renderer
+  constructor, and a font initializer that returns nothing — for as
+  long as nothing looked; and the third direction did not exist at
+  all, which is how `request_adapter` and `request_device` came to
+  `expect` on every launch of both targets while going unmentioned.
+- **"Bare `unwrap()` outside tests is a bug" is enforced twice, and
+  the two mechanisms are not redundant.**
+  `baumhard::util::unwrap_posture` reads every `.rs` file a shipped
+  build compiles — `#[cfg(test)]` items excised in place,
+  `#[cfg(test)] mod x;` files and `#![cfg(test)]` files dropped,
+  baumhard's ungated `pub mod tests;` trees and `benches/` dropped
+  by path — and fails `./test.sh` naming `file:line`. Beside it,
+  six of the seven cargo targets carry
+  `#![warn(clippy::unwrap_used)]` with
+  `#![cfg_attr(test, allow(...))]`, so the same rule reaches an
+  editor while the code is being written. The seventh is the
+  criterion bench root, which is test code by §T2.2 and which the
+  scan drops by path. **Count the targets, not the libraries:**
+  `lib/baumhard/src/bin/generate_stress_map.rs` and
+  `lib/baumhard/build.rs` are each a crate root of their own, and
+  the attribute in `lib.rs` reaches neither — a planted `unwrap()`
+  in either drew nothing from `cargo clippy` until that file carried
+  the attribute itself. Both were found by writing the count down
+  and then checking it against `cargo metadata`, which is the only
+  reason this sentence states a number at all. The scan is the gate
+  on every `./test.sh`; the lint is the faster feedback — and, under
+  `./test.sh --lint`, a second gate, since clippy's warning baseline
+  reached zero — and it reads post-macro-expansion code the scan
+  cannot. Neither replaces the
+  judgment: `expect("<the invariant relied on>")` is the answer when
+  a value is provably there, binding at the guard is the answer when
+  something already proved it, and degrading is the answer in an
+  interactive path. The count this rule was written against was
+  twenty-six sites (#42); six weeks later ten of them had moved or
+  vanished under unrelated work, leaving sixteen — and the scan
+  found seventeen. The extra one was not new:
+  `mindmap/connection/mod.rs:90` had been at that line since
+  2026-04-15, eleven weeks before the issue was filed, and the hand
+  count missed it. A list does not only go stale, it can be wrong
+  the day it is written, which is why the posture is checked rather
+  than listed.
+- **The initial map load is the one startup path that does not
+  `expect`, and the reason names the boundary.** `expect` is for a
+  *program precondition* that did not hold — no adapter, no fonts,
+  nonsense on the command line. There is no window yet and nothing
+  sensible to draw into it, so a loud abort is the honest outcome. A
+  `.mindmap.json` the loader rejects is not that: it is a user
+  *input* the program is supposed to have an opinion about, and
+  `expect` turns having an opinion into a crash. On a desktop launch
+  — double-click, `.desktop` entry, file association — that crash is
+  a process that vanishes leaving no window at all, which tells the
+  person holding the file strictly less than the empty window it
+  would replace. So the initial `loader::load_from_file` on native
+  and the `?map=` fetch + parse in the browser **put the loader's
+  message in front of the user and keep the shell alive**: both
+  resolve through `app::startup_load`, which logs the message —
+  behind the path or URL that was asked for, because most of the
+  loader's messages do not name it — and hands the shell
+  `baumhard::mindmap::placard`'s one-node map carrying the same
+  words, installed by the same code that installs a real document.
+  Each target makes exactly one call into that module and is handed a
+  document, never a `Result`: a startup-error surface that exists on
+  only one of them is not a fix (§4), and a `Result` in an init site's
+  hands is where the two start to differ. This paragraph is the
+  recorded decision #107 asked for: the code and the convention were
+  in conflict, and they are reconciled here rather than at `expect`.
 - **`warn!` and `error!` survive into release; `info!`, `debug!` and
   `trace!` do not.** Both crates build `log` with
   `release_max_level_warn`, so the degrade half of "degrade the frame,
@@ -388,6 +635,16 @@ industrial cost/benefit reasoning. This is not license for speculation.
   area is what they can name in a bug report. Bare messages with no
   prefix are not acceptable. Normalize prefixes in files you are
   already editing rather than in a repository-wide sweep.
+- **A log line is also a reply.** Under `--ipc`, every `warn!` /
+  `error!` a command's execution emits on the main thread is carried
+  in that command's reply as a warning, in the line's own words
+  (`baumhard::util::log::capture`; `format/ipc.md` §Warnings). So a
+  degrade an agent should be able to *branch* on, rather than read,
+  gets a stable code at the site that logs it, as a key-value:
+  `log::warn!(code = GATE_REJECTED_CODE; "macros: …")`. The constant
+  lives beside the site, and the code is API once it ships. A degrade
+  that does not log is invisible there as well as on stderr, which is
+  one more reason it must.
 
 ## §10 No backwards-compatibility assumptions until V1
 
@@ -420,7 +677,11 @@ Workspace-level commitment:
 - **Tests land in the commit that introduces the code they test.**
 - **`./test.sh` is green before committing.** It also type-checks the
   benchmark targets and the wasm32 leg, so neither can rot between
-  merges. `./test.sh --lint` is advisory; review it.
+  merges. `./test.sh --lint`'s fmt, doc and clippy gates are all hard
+  at zero baselines (#130, #134 for the first two), so a clippy
+  warning fails the run — fix it. CI runs `--lint` on the toolchain
+  pinned in `rust-toolchain.toml`, so a pull request that skips it
+  locally is still held to it.
 - **`./build.sh` is green for cross-platform changes.** Anything
   outside an explicit `cfg` guard must build for
   `wasm32-unknown-unknown` before commit.

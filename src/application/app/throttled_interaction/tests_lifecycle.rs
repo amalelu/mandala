@@ -48,7 +48,7 @@
 
 use glam::Vec2;
 
-use baumhard::mindmap::scene_cache::{CachedConnection, EdgeKey, SceneConnectionCache};
+use baumhard::mindmap::scene_cache::{EdgeKey, SampleParams, SceneConnectionCache};
 use baumhard::mindmap::tree_builder::{MindMapTree, ResizeHandleSide};
 
 use crate::application::document::{apply_drag_delta, EdgeRef, MindMapDocument};
@@ -103,8 +103,10 @@ impl World {
     /// commit body is visible as `cache=0` rather than being
     /// indistinguishable from "was empty anyway".
     fn seed_cache(&mut self) {
-        self.scene_cache
-            .insert(EdgeKey::new("seed", "seed", "parent_child"), seed_connection());
+        seed_connection(
+            &mut self.scene_cache,
+            &EdgeKey::new("seed", "seed", "parent_child"),
+        );
     }
 }
 
@@ -156,18 +158,22 @@ fn line(refresh: Option<ReleaseRefresh>, pending: &str, model: &str, world: &Wor
 /// One entry so a `clear()` inside a commit body is observable as
 /// `cache=0` rather than being indistinguishable from "was empty
 /// anyway".
-fn seed_connection() -> CachedConnection {
-    CachedConnection {
-        pre_clip_positions: Vec::new(),
-        cap_start: None,
-        cap_end: None,
-        body_glyph: "·".to_string(),
-        font: None,
-        font_size_pt: 12.0,
-        color: "#ffffff".to_string(),
-        base_from: Vec2::ZERO,
-        base_to: Vec2::ZERO,
-    }
+///
+/// One sample rather than none: an entry with no points is not
+/// something the cache will store, since a refill that fills nothing
+/// evicts instead.
+fn seed_connection(cache: &mut SceneConnectionCache, key: &EdgeKey) {
+    cache.refill(
+        key,
+        SampleParams {
+            font_size_pt: 12.0,
+            spacing: 0.0,
+            sample_budget: 1000,
+        },
+        Vec2::ZERO,
+        Vec2::ZERO,
+        |out| out.push(Vec2::ZERO),
+    );
 }
 
 /// Drive `script` against one gesture, rendering one trace line per
@@ -1249,17 +1255,33 @@ mod release_gate {
         );
     }
 
-    /// ...and the same fast-resize is still finalized by a left
-    /// release, which is the fourth cell of the gate.
+    /// ...and the same fast-resize is *not* finalized by a left
+    /// release, which is the fourth cell of the gate and the one
+    /// #37 turned over.
+    ///
+    /// The cell became reachable when the left press started being
+    /// refused mid-gesture (`DragState::would_abandon_gesture`):
+    /// refusing the press is what lets the right-started drag
+    /// survive to see a left release at all. Committing there ends a
+    /// resize the user is still performing with the right button
+    /// down, and writes the model at whatever the pointer had
+    /// reached — the same silent loss the right-release cell above
+    /// rejects, mirrored.
     #[test]
-    fn test_left_release_also_commits_a_right_started_drag() {
+    fn test_left_release_hands_back_a_right_started_drag() {
         let mut world = edge_world(false);
+        let before_size = node_size(&world);
         let mut drag = right_started_drag();
 
         let refresh = commit_if_resolved(MouseButton::Left, &mut drag, world.commit());
 
-        assert_eq!(refresh, Some(ReleaseRefresh::All));
-        assert_eq!(undo_depth(&world), 1);
+        assert_eq!(refresh, None, "a put-back owes the canvas no decree");
+        assert_eq!(undo_depth(&world), 0, "a put-back must push no undo entry");
+        assert_eq!(
+            node_size(&world),
+            before_size,
+            "a put-back must not resize the node"
+        );
     }
 
     /// **The gate carries the decree it is handed, it does not

@@ -33,5 +33,10 @@ proc-macro = true
 # node from the proc-macro one above — which is the only sense in
 # which the two asks are independent.
 syn.workspace = true
-quote = "1.0.41"
-proc-macro2 = "1.0.103"
+quote = "1.0.47"
+# Hoisted to `[workspace.dependencies]` when baumhard's tests grew a
+# second declaration of it (§13). Nothing here needs `span-locations`
+# — that ask is baumhard's and, under resolver 2, lands on a
+# different `proc-macro2` node than the one this crate compiles
+# against.
+proc-macro2.workspace = true

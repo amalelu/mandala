@@ -2,14 +2,14 @@
 
 //! Clipboard trait tests for `ColorPickerState`.
 
-use crate::application::color_picker::{ColorPickerState, PickerMode, CROSSHAIR_CENTER_CELL};
+use crate::application::color_picker::{ColorPickerState, OpenPicker, PickerMode, CROSSHAIR_CENTER_CELL};
 use crate::application::console::traits::{ClipboardContent, HandlesCopy, HandlesCut, HandlesPaste, Outcome};
 
-/// Build a `ColorPickerState::Open` in Standalone mode with given HSV.
+/// Build an open `ColorPickerState` in Standalone mode with given HSV.
 /// Only the fields the clipboard traits read/write are meaningful;
-/// the rest are zero/None stubs that let the enum construct.
+/// the rest are zero/None stubs that let the struct construct.
 fn make_standalone_open(hue: f32, sat: f32, val: f32) -> ColorPickerState {
-    ColorPickerState::Open {
+    ColorPickerState::Open(Box::new(OpenPicker {
         mode: PickerMode::Standalone,
         hue_deg: hue,
         sat,
@@ -31,7 +31,7 @@ fn make_standalone_open(hue: f32, sat: f32, val: f32) -> ColorPickerState {
         hover_preview: None,
         pending_error_flash: false,
         last_dynamic_apply: None,
-    }
+    }))
 }
 
 #[test]
@@ -59,9 +59,9 @@ fn paste_valid_hex_sets_hsv() {
     assert_eq!(result, Outcome::Applied);
 
     // After pasting red, hue should be near 0, sat and val near 1.
-    if let ColorPickerState::Open {
+    if let Some(OpenPicker {
         hue_deg, sat, val, ..
-    } = &state
+    }) = state.as_open()
     {
         assert!(
             (*hue_deg - 0.0).abs() < 1.0,

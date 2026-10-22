@@ -3,7 +3,7 @@
 //! Named-enum invariants: check string fields against the known value sets.
 
 use baumhard::gfx_structs::shape::KNOWN_SHAPES;
-use baumhard::mindmap::model::{DISPLAY_MODE_LINE, DISPLAY_MODE_PORTAL, MindMap};
+use baumhard::mindmap::model::{MindMap, DISPLAY_MODE_LINE, DISPLAY_MODE_PORTAL};
 
 use super::Violation;
 
@@ -17,14 +17,18 @@ const DISPLAY_MODES: &[&str] = &[DISPLAY_MODE_LINE, DISPLAY_MODE_PORTAL];
 pub fn check(map: &MindMap) -> Vec<Violation> {
     let mut out = Vec::new();
 
-    for (loc, node) in map.node_locations() {
+    for node in map.nodes.values() {
+        // `node.id`, not `node_locations()`'s stamp — the stamp is
+        // that same id cloned into a fresh `String` and dropped at
+        // the end of the iteration.
+        let loc = node.id.as_str();
         // The runtime parses `style.shape` case-insensitively (and
         // treats "circle" as an alias for "ellipse"), so verify must
         // match that leniency. Every other named enum is compared
         // case-sensitively against its canonical constant.
         check_value(
             &mut out,
-            &loc,
+            loc,
             "style.shape",
             &node.style.shape,
             KNOWN_SHAPES,
@@ -32,7 +36,7 @@ pub fn check(map: &MindMap) -> Vec<Violation> {
         );
         check_value(
             &mut out,
-            &loc,
+            loc,
             "layout.type",
             &node.layout.layout_type,
             LAYOUT_TYPES,
@@ -40,7 +44,7 @@ pub fn check(map: &MindMap) -> Vec<Violation> {
         );
         check_value(
             &mut out,
-            &loc,
+            loc,
             "layout.direction",
             &node.layout.direction,
             DIRECTIONS,
@@ -48,32 +52,14 @@ pub fn check(map: &MindMap) -> Vec<Violation> {
         );
     }
 
+    // `edge_locations()` keeps its stamp: an edge has no id, so
+    // `edge[<idx>]` is built rather than borrowed and there is no
+    // clone to avoid.
     for (loc, edge) in map.edge_locations() {
         check_value(&mut out, &loc, "type", &edge.edge_type, EDGE_TYPES, false);
-        check_value(
-            &mut out,
-            &loc,
-            "line_style",
-            &edge.line_style,
-            LINE_STYLES,
-            false,
-        );
-        check_value(
-            &mut out,
-            &loc,
-            "anchor_from",
-            &edge.anchor_from,
-            ANCHORS,
-            false,
-        );
-        check_value(
-            &mut out,
-            &loc,
-            "anchor_to",
-            &edge.anchor_to,
-            ANCHORS,
-            false,
-        );
+        check_value(&mut out, &loc, "line_style", &edge.line_style, LINE_STYLES, false);
+        check_value(&mut out, &loc, "anchor_from", &edge.anchor_from, ANCHORS, false);
+        check_value(&mut out, &loc, "anchor_to", &edge.anchor_to, ANCHORS, false);
         if let Some(mode) = edge.display_mode.as_deref() {
             check_value(&mut out, &loc, "display_mode", mode, DISPLAY_MODES, false);
         }
@@ -131,7 +117,10 @@ mod tests {
         let mut n = node("0", None);
         n.style.shape = "Rectangle".into();
         map.nodes.insert("0".into(), n);
-        assert!(check(&map).is_empty(), "runtime accepts Rectangle, so verify must too");
+        assert!(
+            check(&map).is_empty(),
+            "runtime accepts Rectangle, so verify must too"
+        );
     }
 
     #[test]

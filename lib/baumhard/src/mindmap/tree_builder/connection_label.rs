@@ -25,7 +25,7 @@
 //! owning `EdgeKey` — so a BVH hit inside the tree resolves to an
 //! edge without a second copy of the label rectangles.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use glam::Vec2;
 use indextree::NodeId;
@@ -36,7 +36,7 @@ use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::tree::{BranchChannel, Tree};
 use crate::mindmap::connection;
-use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig, MindEdge, MindMap, MindNode};
+use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig, MindEdge, MindMap};
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
 use crate::util::color;
@@ -44,6 +44,7 @@ use crate::util::color::resolve_var;
 use crate::util::geometry::almost_equal;
 use crate::util::grapheme_chad::count_grapheme_clusters;
 
+use super::edge_path::EdgePathCache;
 use super::overrides::EdgeColorPreview;
 
 /// A text label attached to a connection edge. Rendered as a
@@ -87,46 +88,38 @@ pub struct ConnectionLabelElement {
 }
 
 /// Compute the geometry + cosmic-text-ready fields for one
-/// connection-label, given pre-resolved text + raw color. Single
-/// source for both the main-pass and synthesized-pass branches —
-/// they previously open-coded the same path build, font-size
-/// derivation, AABB sizing, and `resolve_var` step.
+/// connection-label, given its path plus pre-resolved text + raw
+/// color. Single source for both the main-pass and
+/// synthesized-pass branches — they previously open-coded the same
+/// path build, font-size derivation, AABB sizing, and `resolve_var`
+/// step.
+///
+/// `path` is taken rather than built so a labeled edge that the
+/// connection pass already sampled this frame reuses that build
+/// instead of repeating the anchor resolution and control-point
+/// promotion (#36 item 6). It is passed in rather than the
+/// [`EdgePathCache`] itself because the two
+/// call sites below resolve their edge differently, and the borrow
+/// the cache hands out is what both of them actually want.
 // `clippy::too_many_arguments`: this is the de-duplication of two
-// call sites that each had these nine values in scope already.
-// Bundling them into a struct would just rename the same data at
-// both sites with no readability win.
+// call sites that each had these values in scope already. Bundling
+// them into a struct would just rename the same data at both sites
+// with no readability win.
 #[allow(clippy::too_many_arguments)]
 fn compute_label_layout(
     edge: &MindEdge,
     edge_key: EdgeKey,
-    from_node: &MindNode,
-    to_node: &MindNode,
-    offsets: &HashMap<String, (f32, f32)>,
+    path: &connection::ConnectionPath,
     map: &MindMap,
     camera_zoom: f32,
     rendered_label: String,
     raw_color: &str,
 ) -> ConnectionLabelElement {
-    let (fox, foy) = offsets.get(&from_node.id).copied().unwrap_or((0.0, 0.0));
-    let (tox, toy) = offsets.get(&to_node.id).copied().unwrap_or((0.0, 0.0));
-    let from_pos = from_node.pos_vec2() + Vec2::new(fox, foy);
-    let from_size = from_node.size_vec2();
-    let to_pos = to_node.pos_vec2() + Vec2::new(tox, toy);
-    let to_size = to_node.size_vec2();
-    let path = connection::build_connection_path(
-        from_pos,
-        from_size,
-        &edge.anchor_from,
-        to_pos,
-        to_size,
-        &edge.anchor_to,
-        &edge.control_points,
-    );
     let label_cfg = edge.label_config.as_ref();
     let t = EdgeLabelConfig::effective_position_t(label_cfg);
     let perp = EdgeLabelConfig::effective_perpendicular_offset(label_cfg);
-    let anchor_on_path = connection::point_at_t(&path, t);
-    let anchor = apply_perpendicular_offset(&path, t, anchor_on_path, perp);
+    let anchor_on_path = connection::point_at_t(path, t);
+    let anchor = apply_perpendicular_offset(path, t, anchor_on_path, perp);
     let config = GlyphConnectionConfig::resolved_for(edge, &map.canvas);
     let font_size_pt = EdgeLabelConfig::effective_font_size_pt(label_cfg, edge, &map.canvas, camera_zoom);
     let color = resolve_var(raw_color, &map.canvas.theme_variables).to_string();
@@ -159,17 +152,17 @@ fn compute_label_layout(
 /// label was empty.
 pub fn build_label_elements(
     map: &MindMap,
-    offsets: &HashMap<String, (f32, f32)>,
     label_edit_override: Option<(&EdgeKey, &str)>,
     edge_color_preview: Option<EdgeColorPreview<'_>>,
     selected_edge_label: Option<&EdgeKey>,
+    paths: &mut EdgePathCache<'_>,
     camera_zoom: f32,
     hidden_set: &HashSet<&str>,
 ) -> Vec<ConnectionLabelElement> {
     let mut connection_label_elements: Vec<ConnectionLabelElement> = Vec::new();
     let mut label_override_emitted = false;
 
-    for edge in &map.edges {
+    for (edge_index, edge) in map.edges.iter().enumerate() {
         if !edge.visible {
             continue;
         }
@@ -191,14 +184,18 @@ pub fn build_label_elements(
         }
 
         let edge_key = EdgeKey::from_edge(edge);
-        let is_edited = label_edit_override.is_some_and(|(k, _)| *k == edge_key);
+        // Narrowed to the buffer itself rather than to a `bool`, so
+        // the text below reads the value the test admitted instead of
+        // asking the override a second time.
+        let edited_buffer: Option<&str> = label_edit_override
+            .filter(|(k, _)| **k == edge_key)
+            .map(|(_, buf)| buf);
 
         // The label text to render: either the inline edit buffer
         // (plus caret) for the currently-edited edge, or the
         // committed label. Committed-empty non-edited edges skip
         // emission entirely.
-        let rendered_label: String = if is_edited {
-            let (_, buf) = label_edit_override.unwrap();
+        let rendered_label: String = if let Some(buf) = edited_buffer {
             format!("{buf}\u{258C}")
         } else {
             match edge.label.as_deref() {
@@ -232,19 +229,22 @@ pub fn build_label_elements(
                         None
                     }
                 })
-                .unwrap_or_else(|| edge.label_color(&map.canvas))
+                .unwrap_or_else(|| map.edge_label_color(edge))
         };
 
-        if is_edited {
+        if edited_buffer.is_some() {
             label_override_emitted = true;
         }
 
+        // Asked for only after the empty-label `continue` above, so an
+        // unlabeled edge still costs no path here.
+        let Some(path) = paths.path(edge_index) else {
+            continue;
+        };
         connection_label_elements.push(compute_label_layout(
             edge,
             edge_key,
-            from_node,
-            to_node,
-            offsets,
+            path,
             map,
             camera_zoom,
             rendered_label,
@@ -260,10 +260,11 @@ pub fn build_label_elements(
     // "belt and suspenders" branch was a dead no-op for this case.
     if let Some((target_key, buffer)) = label_edit_override {
         if !label_override_emitted {
-            if let Some(edge) = map
+            if let Some((edge_index, edge)) = map
                 .edges
                 .iter()
-                .find(|e| e.visible && EdgeKey::from_edge(e) == *target_key)
+                .enumerate()
+                .find(|(_, e)| e.visible && EdgeKey::from_edge(e) == *target_key)
             {
                 if let (Some(from_node), Some(to_node)) =
                     (map.nodes.get(&edge.from_id), map.nodes.get(&edge.to_id))
@@ -284,18 +285,18 @@ pub fn build_label_elements(
                                     None
                                 }
                             })
-                            .unwrap_or_else(|| edge.label_color(&map.canvas));
-                        connection_label_elements.push(compute_label_layout(
-                            edge,
-                            target_key.clone(),
-                            from_node,
-                            to_node,
-                            offsets,
-                            map,
-                            camera_zoom,
-                            format!("{buffer}\u{258C}"),
-                            raw_color,
-                        ));
+                            .unwrap_or_else(|| map.edge_label_color(edge));
+                        if let Some(path) = paths.path(edge_index) {
+                            connection_label_elements.push(compute_label_layout(
+                                edge,
+                                target_key.clone(),
+                                path,
+                                map,
+                                camera_zoom,
+                                format!("{buffer}\u{258C}"),
+                                raw_color,
+                            ));
+                        }
                     }
                 }
             }
@@ -437,14 +438,13 @@ fn connection_label_layout(channel: usize, elem: &ConnectionLabelElement) -> (us
 /// matches.
 pub fn build_connection_label_tree(elements: &[ConnectionLabelElement]) -> ConnectionLabelTree {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut unique_id: usize = 1;
 
     for (idx, elem) in elements.iter().enumerate() {
-        let (channel, area) = connection_label_layout(idx + 1, elem);
+        // Ids run 1.. in insertion order.
+        let unique_id = idx + 1;
+        let (channel, area) = connection_label_layout(unique_id, elem);
         let element_node = GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
-        unique_id += 1;
-        let leaf = tree.arena.new_node(element_node);
-        tree.root.append(leaf, &mut tree.arena);
+        tree.root.append_value(element_node, &mut tree.arena);
     }
 
     ConnectionLabelTree {
@@ -480,10 +480,10 @@ pub fn build_connection_label_mutator_tree(elements: &[ConnectionLabelElement]) 
     for (idx, elem) in elements.iter().enumerate() {
         let (channel, area) = connection_label_layout(idx + 1, elem);
         let delta = DeltaGlyphArea::full_assign_from(&area);
-        let leaf = mt
-            .arena
-            .new_node(GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), channel));
-        mt.root.append(leaf, &mut mt.arena);
+        mt.root.append_value(
+            GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), channel),
+            &mut mt.arena,
+        );
     }
 
     ConnectionLabelMutator {

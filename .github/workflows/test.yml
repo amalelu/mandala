@@ -1,7 +1,8 @@
-# Runs ./test.sh on every main push and every pull request. The
-# script itself owns the test logic (native cargo test + workspace-
-# wide wasm32 cargo check); this workflow is a transport for invoking
-# it so the dual-target discipline in CODE_CONVENTIONS.md §2 is
+# Runs ./test.sh --lint on every main push and every pull request.
+# The script itself owns the test logic (native cargo test + workspace-
+# wide wasm32 cargo check, plus the fmt / clippy / doc lint gates);
+# this workflow is a transport for invoking it so the dual-target
+# discipline in CODE_CONVENTIONS.md §2 and the lint baselines are
 # enforced remotely, not just aspirationally locally.
 #
 # `push: branches: [main]` (rather than bare `push:`) prevents the
@@ -21,15 +22,36 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      # No toolchain action: `rust-toolchain.toml` at the repository
+      # root names the channel, the clippy and rustfmt components and
+      # the wasm32 target, and a bare `rustup toolchain install` reads
+      # it. CI and every local run therefore build with the same
+      # pinned compiler, and there is no second copy of the version
+      # here to drift from the file. That pin is what lets the lint
+      # gates below be hard: a new stable release cannot add a lint
+      # to this run until the file is bumped.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
 
-      - name: Run ./test.sh
-        run: ./test.sh
+      # `lib/baumhard/tests/wasm_font_lock.rs` runs wasm32 code under
+      # node and otherwise skips, with a note, when the target or node
+      # is absent. Here both are present by construction (the target
+      # is installed above; ubuntu-latest ships node), so a missing one
+      # means this workflow broke, and the probe must fail rather than
+      # pass by skipping.
+      #
+      # `--lint` adds the fmt, clippy and doc gates (host and wasm32
+      # legs). They are hard gates with zero baselines, and without
+      # this flag nothing outside a contributor's own machine held
+      # them there.
+      - name: Run ./test.sh --lint
+        env:
+          MANDALA_REQUIRE_WASM_PROBE: "1"
+        run: ./test.sh --lint

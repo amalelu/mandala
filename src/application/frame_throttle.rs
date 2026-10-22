@@ -41,7 +41,7 @@ pub const MAX_N: u32 = 8;
 pub const DEFAULT_BUDGET: Duration = Duration::from_micros(14_000);
 
 /// Per-frame throttle that degrades mutation frequency under load.
-/// Call [`Self::reset`] when the drag ends so the next drag starts
+/// Call `reset` when the drag ends so the next drag starts
 /// at `n = 1`.
 #[derive(Debug)]
 pub struct MutationFrequencyThrottle {
@@ -111,8 +111,14 @@ impl MutationFrequencyThrottle {
     }
 
     /// Clear the moving-average window, reset `n` to `1`, reset the
-    /// skip counter. Call this when the drag ends so a fresh drag
-    /// doesn't inherit lingering throttle state from the previous one.
+    /// skip counter.
+    ///
+    /// Test-gated: a drag's throttle lives inside the `ThrottledDrag`
+    /// the release path drops, so a fresh drag starts from a fresh
+    /// throttle without anyone clearing the old one. The doc used to
+    /// claim the drag-end path called this; it never did. Remove the
+    /// gate the day a throttle outlives its interaction.
+    #[cfg(test)]
     pub fn reset(&mut self) {
         self.window.clear();
         self.n = 1;
@@ -120,6 +126,9 @@ impl MutationFrequencyThrottle {
     }
 
     /// Current drain divisor (1 = every frame; higher under load).
+    /// Test-gated: the divisor is consumed inside `should_drain`,
+    /// never read from outside.
+    #[cfg(test)]
     pub fn current_n(&self) -> u32 {
         self.n
     }
@@ -131,11 +140,6 @@ impl MutationFrequencyThrottle {
         }
         let sum: Duration = self.window.iter().sum();
         sum / self.window.len() as u32
-    }
-
-    #[cfg(test)]
-    pub fn budget(&self) -> Duration {
-        self.budget
     }
 }
 
@@ -153,120 +157,293 @@ mod tests {
         Duration::from_millis(n)
     }
 
-    #[test]
-    fn starts_at_n_equals_one() {
-        let t = MutationFrequencyThrottle::new(ms(14));
-        assert_eq!(t.current_n(), 1);
+    fn us(n: u64) -> Duration {
+        Duration::from_micros(n)
     }
 
-    #[test]
-    fn healthy_load_drains_every_frame() {
-        let mut t = MutationFrequencyThrottle::new(ms(14));
-        // 5ms is comfortably under budget.
-        for _ in 0..20 {
-            assert!(t.should_drain());
-            t.record_work_duration(ms(5));
-        }
-        assert_eq!(t.current_n(), 1);
-    }
-
-    #[test]
-    fn sustained_over_budget_raises_n() {
-        let mut t = MutationFrequencyThrottle::new(ms(14));
-        // 30ms is twice the budget; N should start climbing.
-        for _ in 0..20 {
-            if t.should_drain() {
-                t.record_work_duration(ms(30));
-            }
-        }
-        assert!(t.current_n() > 1, "expected n > 1, got {}", t.current_n());
-    }
-
-    #[test]
-    fn very_heavy_load_caps_at_max_n() {
-        let mut t = MutationFrequencyThrottle::new(ms(14));
+    /// Drive `t` until `n` saturates at [`MAX_N`], so a following
+    /// phase measures the phase's own behavior rather than the
+    /// window still emptying itself of the raise phase's samples.
+    ///
+    /// Saturation is what makes that work: while the window holds a
+    /// mix of the old heavy samples and the new light ones the
+    /// average is still over budget, so `n` would keep climbing —
+    /// invisibly, because it is already clamped.
+    fn saturate(t: &mut MutationFrequencyThrottle, heavy: Duration) {
         for _ in 0..200 {
             if t.should_drain() {
-                t.record_work_duration(ms(200));
+                t.record_work_duration(heavy);
             }
+        }
+        assert_eq!(
+            t.current_n(),
+            MAX_N,
+            "the raise phase must saturate at MAX_N, or what follows measures the \
+             window's transition instead of the load it feeds"
+        );
+    }
+
+    /// A fresh throttle drains every frame: `n` starts at 1 and the
+    /// skip counter at 0, so no frame is ever withheld before any
+    /// work has been measured.
+    ///
+    /// Fails when: the constructor starts `n` above 1, or
+    /// `should_drain` compares with `>` instead of `>=` (every frame
+    /// would then be skipped at `n = 1`).
+    ///
+    /// That "always true" is not vacuous is shown by
+    /// `test_sustained_over_budget_raises_n_and_skips_frames`, where
+    /// the same call returns false.
+    #[test]
+    fn test_a_fresh_throttle_starts_at_n_one_and_drains_every_frame() {
+        let mut t = MutationFrequencyThrottle::new(ms(14));
+        assert_eq!(t.current_n(), 1);
+        for frame in 0..50 {
+            assert!(t.should_drain(), "frame {frame} of an idle throttle was skipped");
+        }
+        assert_eq!(t.current_n(), 1);
+    }
+
+    /// Work comfortably under budget never raises `n` — not at the
+    /// end of the run, and not transiently in the middle of it.
+    ///
+    /// Fails when: the raise branch compares against the wrong side
+    /// of the budget, or fires on any sample rather than on the
+    /// average. Asserting inside the loop rather than after it is
+    /// what makes a transient raise reachable; an end-of-run check
+    /// alone is satisfied by a throttle that raised `n` and decayed
+    /// it back.
+    ///
+    /// Control on the feed path: the moving average is checked
+    /// against a value computed here, not by the throttle, so
+    /// "`n` never moved" cannot be explained by durations that were
+    /// never recorded in the first place.
+    #[test]
+    fn test_under_budget_work_keeps_n_at_one_on_every_frame() {
+        let mut t = MutationFrequencyThrottle::new(ms(14));
+        for frame in 0..40 {
+            assert!(t.should_drain(), "frame {frame} was skipped at n = 1");
+            // 3 ms is ~21% of budget — under the decay threshold, so
+            // this also exercises the decay branch finding nothing to
+            // decay.
+            t.record_work_duration(ms(3));
+            assert_eq!(t.current_n(), 1, "n rose on frame {frame} of under-budget work");
+        }
+        assert_eq!(
+            t.moving_average(),
+            ms(3),
+            "every sample was 3 ms, so the window's mean must be 3 ms — if it is \
+             not, the samples never landed and the assertions above prove nothing"
+        );
+    }
+
+    /// Sustained over-budget work raises `n`, and a raised `n` is
+    /// what makes `should_drain` withhold frames.
+    ///
+    /// Fails when: the raise branch is removed (`n` stays 1), or when
+    /// `should_drain` ignores `n` and drains unconditionally — the
+    /// second is the one that leaves the throttle looking healthy
+    /// while doing nothing, since `n` still climbs in the readout.
+    #[test]
+    fn test_sustained_over_budget_raises_n_and_skips_frames() {
+        let mut t = MutationFrequencyThrottle::new(ms(14));
+        // 20 ms against a 14 ms budget: over, but not so far over
+        // that a threshold off by a few percent would still be caught
+        // by the margin.
+        for _ in 0..20 {
+            if t.should_drain() {
+                t.record_work_duration(ms(20));
+            }
+        }
+        assert!(
+            t.current_n() > 1,
+            "expected n > 1 after sustained over-budget work, got {}",
+            t.current_n()
+        );
+
+        let mut skipped = false;
+        for _ in 0..20 {
+            if !t.should_drain() {
+                skipped = true;
+                break;
+            }
+            t.record_work_duration(ms(20));
+        }
+        assert!(skipped, "with n > 1, should_drain must withhold some frames");
+    }
+
+    /// Absurd load climbs to [`MAX_N`] and stops there — the cap is
+    /// a clamp, not a target.
+    ///
+    /// Fails when: the raise branch loses its `n < MAX_N` guard (the
+    /// in-loop assertion fires on the first frame past the cap). The
+    /// end-of-run equality is what keeps that in-loop assertion from
+    /// passing vacuously on a throttle whose `n` never left 1.
+    #[test]
+    fn test_extreme_load_climbs_to_max_n_and_never_past_it() {
+        let mut t = MutationFrequencyThrottle::new(ms(14));
+        for frame in 0..500 {
+            if t.should_drain() {
+                t.record_work_duration(ms(500));
+            }
+            assert!(
+                t.current_n() <= MAX_N,
+                "n exceeded MAX_N on frame {frame}: {}",
+                t.current_n()
+            );
         }
         assert_eq!(t.current_n(), MAX_N);
     }
 
+    /// Load dropping below the hysteresis band decays `n` all the
+    /// way back to 1, one step per recorded frame.
+    ///
+    /// Fails when: the decay branch is removed, or its `n > 1` guard
+    /// is dropped so `n` underflows past 1. The `peak > 1`
+    /// precondition is the control — without it "ended at 1" is
+    /// satisfied by a throttle that never left 1.
     #[test]
-    fn load_drop_decays_n_toward_one() {
+    fn test_load_dropping_below_the_band_decays_n_back_to_one() {
         let mut t = MutationFrequencyThrottle::new(ms(14));
-        // Push it up.
-        for _ in 0..100 {
-            if t.should_drain() {
-                t.record_work_duration(ms(50));
-            }
-        }
-        assert!(t.current_n() > 1);
+        saturate(&mut t, ms(50));
         let peak = t.current_n();
-        // Then drop load well under budget and run long enough to decay.
-        for _ in 0..400 {
+
+        // 1 ms is well under 70% of a 14 ms budget (9.8 ms), so every
+        // recorded frame takes one step off n.
+        for _ in 0..1000 {
             if t.should_drain() {
-                t.record_work_duration(ms(2));
+                t.record_work_duration(ms(1));
             }
         }
         assert!(
             t.current_n() < peak,
-            "expected n to decay from {} but got {}",
-            peak,
+            "expected n to decay from {peak}, got {}",
             t.current_n()
         );
         assert_eq!(t.current_n(), 1, "expected full decay to 1");
     }
 
+    /// `n` holds steady everywhere inside the hysteresis band —
+    /// from just above the 70% decay threshold up to and including a
+    /// frame sitting exactly at budget, which is the oscillation the
+    /// band exists to prevent.
+    ///
+    /// Fails when: the decay threshold widens toward budget (the
+    /// 7.5 ms row decays), or the raise comparison becomes `>=` (the
+    /// exactly-at-budget row would raise, except `n` is already
+    /// clamped — which is why that row asserts the *decay* side and
+    /// the raise side is covered by
+    /// `test_sustained_over_budget_raises_n_and_skips_frames`).
+    ///
+    /// Control on the same path: the final row feeds 6 ms, below the
+    /// threshold, and `n` decays to 1. Without it every row above is
+    /// satisfied by a `record_work_duration` that has stopped
+    /// touching `n` at all.
     #[test]
-    fn decay_has_hysteresis_around_budget() {
-        let mut t = MutationFrequencyThrottle::new(ms(10));
-        // Push to n > 1.
-        for _ in 0..100 {
+    fn test_n_holds_steady_everywhere_inside_the_hysteresis_band() {
+        let budget = ms(10);
+        // 70% of a 10 ms budget is 7 ms. The exact edge is not
+        // tested: `budget.mul_f32(0.7)` round-trips through f32, so
+        // an assertion on 7 ms exactly would be measuring float
+        // representation rather than the band.
+        for inside in [us(7_500), us(8_000), us(9_000), us(10_000)] {
+            let mut t = MutationFrequencyThrottle::new(budget);
+            saturate(&mut t, ms(20));
+            let raised = t.current_n();
+
+            for _ in 0..200 {
+                if t.should_drain() {
+                    t.record_work_duration(inside);
+                }
+            }
+            assert_eq!(
+                t.current_n(),
+                raised,
+                "{inside:?} is inside the hysteresis band, so n must not move"
+            );
+        }
+
+        let mut t = MutationFrequencyThrottle::new(budget);
+        saturate(&mut t, ms(20));
+        for _ in 0..200 {
             if t.should_drain() {
-                t.record_work_duration(ms(20));
+                t.record_work_duration(ms(6));
             }
         }
-        let raised = t.current_n();
-        assert!(raised > 1);
-        // Feed durations right at 90% of budget — under budget but inside
-        // the hysteresis band, so n must NOT decay.
-        for _ in 0..100 {
-            if t.should_drain() {
-                t.record_work_duration(ms(9));
-            }
-        }
-        assert_eq!(t.current_n(), raised, "hysteresis should prevent decay");
+        assert_eq!(
+            t.current_n(),
+            1,
+            "6 ms is below the 7 ms decay threshold — if this does not decay, the \
+             rows above are holding a value nothing can move"
+        );
     }
 
+    /// A raised `n` actually removes work: fewer than every frame
+    /// drains, and never fewer than one in [`MAX_N`].
+    ///
+    /// Fails when: `should_drain` stops consulting `n` (all 32 frames
+    /// drain), or when the skip counter is never cleared (nothing
+    /// drains after the first). The `n > 1` precondition is what
+    /// makes both halves reachable.
     #[test]
-    fn throttled_frames_skip_work() {
+    fn test_throttled_frames_skip_work() {
         let mut t = MutationFrequencyThrottle::new(ms(10));
-        // Drive N up.
-        for _ in 0..50 {
-            if t.should_drain() {
-                t.record_work_duration(ms(50));
-            }
-        }
+        saturate(&mut t, ms(50));
         assert!(t.current_n() > 1);
-        // Count how many of the next 32 frames actually drain.
+
         let mut drained = 0;
         for _ in 0..32 {
             if t.should_drain() {
                 drained += 1;
-                // Keep N stable: feed the same heavy duration.
+                // The same heavy duration, so n stays where it is and
+                // the cadence being counted is one cadence.
                 t.record_work_duration(ms(50));
             }
         }
-        // At N > 1, we should drain fewer than all 32.
-        assert!(drained < 32, "expected throttling to skip frames");
-        // And at least once per N frames.
-        assert!(drained >= 32 / MAX_N as usize);
+        assert!(drained < 32, "expected throttling to skip frames, all 32 drained");
+        assert!(
+            drained >= 32 / MAX_N as usize,
+            "expected at least one drain per MAX_N frames, got {drained}"
+        );
     }
 
+    /// Drains land exactly `n` frames apart once `n` is stable.
+    ///
+    /// Fails when: the skip counter is reset to 1 instead of 0 (the
+    /// spacing shortens by one), or when it is not reset at all
+    /// (there is no second drain to space against).
     #[test]
-    fn moving_average_is_arithmetic_mean_of_window() {
+    fn test_drain_cadence_matches_n() {
+        let mut t = MutationFrequencyThrottle::new(ms(10));
+        saturate(&mut t, ms(100));
+        let n = t.current_n();
+        assert!(n >= 2, "the cadence under test needs n >= 2, got {n}");
+
+        let mut drain_indices = Vec::new();
+        for i in 0..(n * 4) {
+            if t.should_drain() {
+                drain_indices.push(i);
+                // Same duration throughout, so n does not move and
+                // the spacing has one value to have.
+                t.record_work_duration(ms(100));
+            }
+        }
+        assert!(
+            drain_indices.len() >= 2,
+            "need two drains to measure a spacing, got {}",
+            drain_indices.len()
+        );
+        for w in drain_indices.windows(2) {
+            assert_eq!(w[1] - w[0], n, "drains not spaced by n = {n}");
+        }
+    }
+
+    /// The moving average is the arithmetic mean of the window.
+    ///
+    /// Fails when: the sum or the divisor drifts — a mean of 10, 20
+    /// and 30 that is not 20 is one of the two.
+    #[test]
+    fn test_moving_average_is_the_arithmetic_mean_of_the_window() {
         let mut t = MutationFrequencyThrottle::new(ms(100));
         t.record_work_duration(ms(10));
         t.record_work_duration(ms(20));
@@ -274,240 +451,74 @@ mod tests {
         assert_eq!(t.moving_average(), ms(20));
     }
 
+    /// The window holds [`WINDOW_SIZE`] samples and evicts the
+    /// oldest, so a spike ages out instead of weighting forever.
+    ///
+    /// Fails when: the eviction is dropped (the window grows and the
+    /// spike is diluted across more slots than it should be). The
+    /// expectation is computed here from the window size and the two
+    /// sample values, never from the throttle.
     #[test]
-    fn window_evicts_oldest_beyond_size() {
+    fn test_window_evicts_the_oldest_sample_beyond_its_size() {
         let mut t = MutationFrequencyThrottle::new(ms(100));
-        // Fill with 10ms frames.
         for _ in 0..WINDOW_SIZE {
             t.record_work_duration(ms(10));
         }
         assert_eq!(t.moving_average(), ms(10));
-        // Push a single 100ms frame; the oldest 10ms evicts, new window
-        // sum is 7*10 + 100 = 170ms spread across 8 slots = 21.25ms.
-        // `Duration / u32` keeps sub-millisecond precision, so compute
-        // the exact nanosecond expectation rather than truncating.
+
+        // One 100 ms spike evicts the oldest 10 ms: the window is
+        // 7 x 10 + 100 = 170 ms over 8 slots = 21.25 ms. `Duration /
+        // u32` keeps sub-millisecond precision, so the expectation is
+        // in nanoseconds rather than truncated to milliseconds.
         t.record_work_duration(ms(100));
         let expected_nanos = (10 * (WINDOW_SIZE as u64 - 1) + 100) * 1_000_000 / WINDOW_SIZE as u64;
         assert_eq!(t.moving_average(), Duration::from_nanos(expected_nanos));
     }
 
+    /// `reset` returns every piece of state to what a fresh throttle
+    /// carries: `n`, the window, and the skip counter.
+    ///
+    /// Fails when: any one of the three is left behind. The skip
+    /// counter is the one with no readout, so it is checked by
+    /// behavior — three consecutive drains, which a non-zero counter
+    /// at `n = 1` still gives, but a counter left at `n`'s old value
+    /// with `n` uncleared does not.
+    ///
+    /// The pre-reset assertions are the control: both fields are
+    /// observably away from their fresh values before `reset` runs.
     #[test]
-    fn reset_returns_to_fresh_state() {
-        let mut t = MutationFrequencyThrottle::new(ms(10));
-        for _ in 0..50 {
-            if t.should_drain() {
-                t.record_work_duration(ms(50));
-            }
-        }
-        assert!(t.current_n() > 1);
-        t.reset();
-        assert_eq!(t.current_n(), 1);
-        assert_eq!(t.moving_average(), Duration::ZERO);
-        // First post-reset call should drain immediately.
-        assert!(t.should_drain());
-    }
-
-    #[test]
-    fn drain_cadence_matches_n() {
-        // Force n = 4 by hand, then confirm cadence.
-        let mut t = MutationFrequencyThrottle::new(ms(10));
-        // Reach over-budget average then manually inspect.
-        for _ in 0..100 {
-            if t.should_drain() {
-                t.record_work_duration(ms(100));
-            }
-        }
-        // Whatever n landed at, cadence should follow it exactly on a
-        // stable window.
-        let n = t.current_n();
-        assert!(n >= 2);
-        // Track next drain positions assuming stable n (we feed the same
-        // duration so n won't move).
-        let mut drain_indices = Vec::new();
-        for i in 0..(n * 4) {
-            if t.should_drain() {
-                drain_indices.push(i);
-                t.record_work_duration(ms(100));
-            }
-        }
-        // Drain indices should be evenly spaced by `n`.
-        for w in drain_indices.windows(2) {
-            assert_eq!(w[1] - w[0], n, "drains not spaced by n = {}", n);
-        }
-    }
-
-    #[test]
-    fn default_budget_is_sub_frame_time() {
-        // Sanity: default budget should be less than a 60 Hz frame.
-        assert!(DEFAULT_BUDGET < Duration::from_micros(16_667));
-    }
-
-    #[test]
-    fn zero_frames_recorded_reports_zero_average() {
-        let t = MutationFrequencyThrottle::new(ms(14));
-        assert_eq!(t.moving_average(), Duration::ZERO);
-    }
-
-    // ── §T1 comprehensive coverage ─────────────────────────────────
-
-    #[test]
-    fn test_fresh_throttle_always_drains() {
-        // A new throttle with n=1 should return should_drain() == true
-        // on every call, since it starts with frames_since_drain = 0
-        // and n = 1 means drain every frame.
-        let mut t = MutationFrequencyThrottle::new(Duration::from_micros(14_000));
-        for _ in 0..50 {
-            assert!(t.should_drain());
-        }
-        assert_eq!(t.current_n(), 1);
-    }
-
-    #[test]
-    fn test_under_budget_keeps_n_at_one() {
-        // Feed durations well under budget — n must stay 1 throughout.
-        let mut t = MutationFrequencyThrottle::new(Duration::from_micros(14_000));
-        for _ in 0..40 {
-            assert!(t.should_drain());
-            // 3ms is ~21% of budget — comfortably under
-            t.record_work_duration(Duration::from_micros(3_000));
-            assert_eq!(t.current_n(), 1);
-        }
-    }
-
-    #[test]
-    fn test_over_budget_raises_n() {
-        // Feed durations exceeding budget (20ms when budget is 14ms)
-        // repeatedly until n > 1, then verify should_drain() returns
-        // false for some frames.
-        let mut t = MutationFrequencyThrottle::new(Duration::from_micros(14_000));
-        for _ in 0..20 {
-            if t.should_drain() {
-                t.record_work_duration(Duration::from_micros(20_000));
-            }
-        }
-        assert!(
-            t.current_n() > 1,
-            "expected n > 1 after sustained over-budget, got {}",
-            t.current_n()
-        );
-
-        // With n > 1, some should_drain() calls must return false.
-        let mut saw_false = false;
-        for _ in 0..20 {
-            if !t.should_drain() {
-                saw_false = true;
-                break;
-            }
-            t.record_work_duration(Duration::from_micros(20_000));
-        }
-        assert!(
-            saw_false,
-            "with n > 1, should_drain() must sometimes return false"
-        );
-    }
-
-    #[test]
-    fn test_n_clamped_at_max_n() {
-        // Feed extreme durations — n must never exceed MAX_N.
-        let mut t = MutationFrequencyThrottle::new(Duration::from_micros(14_000));
-        for _ in 0..500 {
-            if t.should_drain() {
-                // 500ms — absurdly over budget
-                t.record_work_duration(Duration::from_micros(500_000));
-            }
-            assert!(t.current_n() <= MAX_N, "n exceeded MAX_N: {}", t.current_n());
-        }
-        assert_eq!(t.current_n(), MAX_N);
-    }
-
-    #[test]
-    fn test_recovery_lowers_n() {
-        // After n rises, feed under-budget durations; verify n
-        // eventually returns to 1.
-        let mut t = MutationFrequencyThrottle::new(Duration::from_micros(14_000));
-
-        // Drive n up with heavy load.
-        for _ in 0..100 {
-            if t.should_drain() {
-                t.record_work_duration(Duration::from_micros(50_000));
-            }
-        }
-        let peak = t.current_n();
-        assert!(peak > 1, "n should have risen above 1");
-
-        // Now feed very light durations — well below 70% hysteresis.
-        // 1ms = 1000us, budget is 14000us, 70% is 9800us. 1ms < 9800us.
-        for _ in 0..1000 {
-            if t.should_drain() {
-                t.record_work_duration(Duration::from_micros(1_000));
-            }
-        }
-        assert_eq!(
-            t.current_n(),
-            1,
-            "n should recover to 1 after sustained under-budget load"
-        );
-    }
-
-    #[test]
-    fn test_reset_returns_to_fresh_state() {
-        let mut t = MutationFrequencyThrottle::new(Duration::from_micros(14_000));
-
-        // Drive into stressed state.
-        for _ in 0..100 {
-            if t.should_drain() {
-                t.record_work_duration(Duration::from_micros(50_000));
-            }
-        }
+    fn test_reset_returns_the_throttle_to_its_fresh_state() {
+        let mut t = MutationFrequencyThrottle::new(ms(14));
+        saturate(&mut t, ms(50));
         assert!(t.current_n() > 1);
         assert!(t.moving_average() > Duration::ZERO);
 
-        // Reset and verify everything looks fresh.
         t.reset();
         assert_eq!(t.current_n(), 1);
         assert_eq!(t.moving_average(), Duration::ZERO);
-        // First call after reset should drain.
         assert!(t.should_drain());
-        // And it should keep draining every frame (n=1, no history).
         assert!(t.should_drain());
         assert!(t.should_drain());
     }
 
+    /// The default budget leaves headroom inside a 60 Hz frame.
+    ///
+    /// Fails when: [`DEFAULT_BUDGET`] is raised to or past the frame
+    /// interval, which would let a frame that misses its deadline
+    /// still count as within budget.
     #[test]
-    fn test_hysteresis_prevents_oscillation() {
-        // Feed durations right at the boundary (~70% of budget) — n
-        // should stay stable rather than flipping between 1 and 2.
-        //
-        // Budget = 10_000us. Hysteresis threshold = 70% = 7_000us.
-        // A duration of 8_000us is under budget (no raise) but above
-        // the 70% lower-threshold (no decay). Once n > 1, it should
-        // stay there.
-        let budget = Duration::from_micros(10_000);
-        let mut t = MutationFrequencyThrottle::new(budget);
+    fn test_default_budget_is_under_a_60hz_frame() {
+        assert!(DEFAULT_BUDGET < Duration::from_micros(16_667));
+    }
 
-        // First, push n above 1 with clearly over-budget durations.
-        for _ in 0..50 {
-            if t.should_drain() {
-                t.record_work_duration(Duration::from_micros(20_000));
-            }
-        }
-        let raised_n = t.current_n();
-        assert!(raised_n > 1, "n should be raised above 1");
-
-        // Now feed durations inside the hysteresis band: 8ms is 80% of
-        // budget, which is > 70% (lower threshold) and < 100% (upper
-        // threshold). n must not change.
-        for _ in 0..200 {
-            if t.should_drain() {
-                t.record_work_duration(Duration::from_micros(8_000));
-            }
-        }
-        assert_eq!(
-            t.current_n(),
-            raised_n,
-            "n should stay stable in hysteresis band, expected {} got {}",
-            raised_n,
-            t.current_n()
-        );
+    /// An empty window reports zero rather than dividing by it.
+    ///
+    /// Fails when: the empty guard goes — the division panics rather
+    /// than returning a wrong value, which is worse in an
+    /// interactive path (CODE_CONVENTIONS §9).
+    #[test]
+    fn test_zero_frames_recorded_reports_a_zero_average() {
+        let t = MutationFrequencyThrottle::new(ms(14));
+        assert_eq!(t.moving_average(), Duration::ZERO);
     }
 }

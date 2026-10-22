@@ -135,7 +135,7 @@ pub struct BorderPreview<'a> {
     pub target: BorderPreviewTargetRef<'a>,
     /// View carried by value — it's already a borrow of the
     /// document's `BorderConfigEdits`, so cloning it just copies
-    /// 17 fields of `Option<&str>` / `Option<f32>` / `bool`. No
+    /// 16 fields of `Option<&str>` / `Option<f32>` / `bool`. No
     /// secondary borrow needed.
     pub edits: BorderConfigEditsView<'a>,
     pub force_show_frame: bool,

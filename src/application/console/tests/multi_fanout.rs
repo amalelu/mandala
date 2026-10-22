@@ -19,14 +19,12 @@ fn test_color_bg_fans_out_across_multi_selection() {
     doc.selection = SelectionState::Multi(vec![a.clone(), b.clone()]);
     doc.undo_stack.clear();
     let _ = run("color bg=#402030", &mut doc);
-    assert_eq!(
-        doc.mindmap.nodes.get(&a).unwrap().style.background_color,
-        "#402030"
-    );
-    assert_eq!(
-        doc.mindmap.nodes.get(&b).unwrap().style.background_color,
-        "#402030"
-    );
+    // Through the cascade: the fixture's nodes are themed, so the
+    // fill they paint is not `style.background_color`.
+    for id in [&a, &b] {
+        let node = doc.mindmap.nodes.get(id).unwrap();
+        assert_eq!(doc.mindmap.node_background_color(node), "#402030");
+    }
     // One undo per node — the dispatcher doesn't batch.
     assert_eq!(doc.undo_stack.len(), 2);
 }

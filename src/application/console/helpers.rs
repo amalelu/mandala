@@ -3,14 +3,18 @@
 //! Shared command-execution helpers.
 //!
 //! The bespoke verbs (`anchor` / `cap` / `body` / `edge` / `spacing`
-//! / `label`) all follow the same shape: open with a couple of
-//! guards (selected edge present, kvs non-empty), iterate kvs and
-//! tally per-arg outcomes, and finalize into an [`ExecResult`]. The
-//! helpers here are the shared bits — guards return
-//! `Result<T, ExecResult>` so a verb can `?` past them and the
-//! [`ApplyTally`] aggregator collects per-kv messages plus a
-//! "did anything actually apply?" bit so the closing
+//! / `label`) all follow the same shape: open with a selection
+//! guard, walk the kvs the grammar engine has already validated, and
+//! finalize into an [`ExecResult`]. The helpers here are the shared
+//! bits — the guard returns `Result<T, ExecResult>` so a verb can
+//! `?` past it, and the [`ApplyTally`] aggregator collects per-kv
+//! messages plus a "did anything actually apply?" bit so the closing
 //! [`ApplyTally::finalize`] picks the right Ok/Err shape.
+//!
+//! The kv *collection* used to live here too, as
+//! `collect_kvs_or_usage(args, "<hand-written usage line>")`.
+//! `console::spec::kvs` does that now, from the declaration, so the
+//! usage line is derived and an unread key is refused by name.
 //!
 //! Out of scope: the trait-dispatch path (`color`, `font`, `zoom`)
 //! already routes through [`super::traits::DispatchReport`] and a
@@ -19,7 +23,6 @@
 
 use baumhard::util::geometry::is_positive_finite;
 
-use super::parser::Args;
 use super::{ConsoleEffects, ExecResult};
 use crate::application::document::EdgeRef;
 
@@ -29,27 +32,10 @@ use crate::application::document::EdgeRef;
 /// selection is active so the caller can `?` and forward the
 /// error.
 pub fn require_edge_or_portal(eff: &ConsoleEffects) -> Result<EdgeRef, ExecResult> {
-    eff.document
+    eff.document()
         .selection
         .selected_edge_or_portal_edge()
         .ok_or_else(|| ExecResult::err("no edge selected"))
-}
-
-/// Collect every `key=value` token from `args` into an owned
-/// `Vec`, returning `Err(ExecResult::err(usage))` when the
-/// collection ends up empty. Mirrors the open of every kv-form
-/// verb — the caller passes the verb's `usage:` string and the
-/// helper substitutes it on the empty path.
-///
-/// Accepting `usage` as the empty-error message matches the prior
-/// hand-rolled shape (`"usage: anchor from=<side> to=<side>"`)
-/// without forcing a separate prefix.
-pub fn collect_kvs_or_usage(args: &Args, usage: &str) -> Result<Vec<(String, String)>, ExecResult> {
-    let kvs: Vec<(String, String)> = args.kvs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    if kvs.is_empty() {
-        return Err(ExecResult::err(usage.to_string()));
-    }
-    Ok(kvs)
 }
 
 /// Per-kv outcome aggregator for bespoke verbs. The pre-helper

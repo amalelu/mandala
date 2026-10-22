@@ -12,7 +12,7 @@
 //! commits, Esc cancels.
 //!
 //! The picker wires to `MindEdge.color` (via `set_edge_color`) and the
-//! three node colour axes. Portal-mode edges flow through the same
+//! three node color axes. Portal-mode edges flow through the same
 //! `set_edge_color` sink as line-mode edges — portals are a render mode
 //! on the same entity, so there's no separate portal setter. Node
 //! colors and theme-variable editing become a follow-up session.
@@ -46,8 +46,8 @@ pub use geometry::ColorPickerOverlayGeometry;
 pub use glyph_tables::{
     arm_bottom_font, arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs,
     center_preview_glyph, hue_ring_glyphs, hue_slot_to_degrees, picker_channel, sat_cell_to_value,
-    sat_value_to_cell, val_cell_to_value, val_value_to_cell, CROSSHAIR_CENTER_CELL,
-    HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT,
+    sat_value_to_cell, val_cell_to_value, val_value_to_cell, CROSSHAIR_CENTER_CELL, HUE_SLOT_COUNT,
+    SAT_CELL_COUNT, VAL_CELL_COUNT,
 };
 pub use hit::PickerHit;
 pub use layout::ColorPickerLayout;
@@ -65,7 +65,8 @@ pub use glyph_tables::hue_ring_font_scale;
 pub use hit::hit_test_picker;
 #[cfg(not(target_arch = "wasm32"))]
 pub use state::{
-    request_error_flash, ColorPickerState, FlashKind, PickerDynamicApplyKey, PickerGesture, PickerMode,
+    request_error_flash, ColorPickerState, FlashKind, OpenPicker, PickerDynamicApplyKey, PickerGesture,
+    PickerMode,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use targets::{current_color_at, current_hsv_at, PickerHandle};

@@ -132,8 +132,7 @@ fn test_edge_handle_control_point_position_is_absolute_canvas() {
         .push(crate::mindmap::model::ControlPoint { x: cp_x, y: cp_y });
     let edge = map.edges[edge_idx].clone();
     let from_node = map.nodes.get(&edge.from_id).unwrap();
-    let from_center_x = from_node.position.x as f32 + from_node.size.width as f32 * 0.5;
-    let from_center_y = from_node.position.y as f32 + from_node.size.height as f32 * 0.5;
+    let from_center = from_node.center_vec2();
 
     let mut cache = SceneConnectionCache::new();
     let scene = project_with_cache(
@@ -154,8 +153,8 @@ fn test_edge_handle_control_point_position_is_absolute_canvas() {
         .iter()
         .find(|h| matches!(h.kind, EdgeHandleKind::ControlPoint(0)))
         .unwrap();
-    assert!((cp_handle.position.0 - (from_center_x + cp_x as f32)).abs() < 0.01);
-    assert!((cp_handle.position.1 - (from_center_y + cp_y as f32)).abs() < 0.01);
+    assert!((cp_handle.position.0 - (from_center.x + cp_x as f32)).abs() < 0.01);
+    assert!((cp_handle.position.1 - (from_center.y + cp_y as f32)).abs() < 0.01);
 }
 
 // ====================================================================

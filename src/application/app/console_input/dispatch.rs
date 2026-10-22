@@ -15,7 +15,7 @@ use crate::application::renderer::Renderer;
 
 use super::completion::{accept_console_completion, nav_popup, recompute_console_completions};
 use super::edit::{self, EditOutcome};
-use super::exec::execute_console_line;
+use super::exec::{execute_console_line, print_console_line};
 use super::history::save_console_history;
 use super::rebuild_console_overlay;
 
@@ -183,10 +183,7 @@ pub(in crate::application::app) fn dispatch_console_action(
                 // Match the precedent established in
                 // `dispatch_action_core::dispatch_compatible`.
                 _ => {
-                    log::error!(
-                        "dispatch_console_action: scroll fan-out missed inner-match: {:?}",
-                        action,
-                    );
+                    log::error!("console: scroll fan-out missed inner-match: {:?}", action);
                     return;
                 }
             };
@@ -232,10 +229,7 @@ pub(in crate::application::app) fn dispatch_console_action(
                 // forward-compat reasoning as the scroll cluster
                 // above.
                 _ => {
-                    log::error!(
-                        "dispatch_console_action: pure-edit fan-out missed inner-match: {:?}",
-                        action,
-                    );
+                    log::error!("console: pure-edit fan-out missed inner-match: {:?}", action);
                     return;
                 }
             };
@@ -252,7 +246,7 @@ pub(in crate::application::app) fn dispatch_console_action(
         // added inadvertently to a Console* binding context would
         // land here. Log per CODE_CONVENTIONS §9 (interactive paths
         // fail-safe).
-        _ => log::error!("dispatch_console_action: unrecognized action {:?}", action,),
+        _ => log::error!("console: unrecognized console action {:?}", action),
     }
 }
 
@@ -337,21 +331,8 @@ pub(in crate::application::app) fn submit_line(ctx: &mut InputHandlerContext<'_>
                 ctx.console_history.drain(..drop);
             }
         }
-        if let Some(doc) = ctx.document.as_mut() {
-            execute_console_line(
-                &line,
-                ctx.console_state,
-                ctx.single_line_edit_state,
-                ctx.color_picker_state,
-                ctx.text_edit_state,
-                doc,
-                ctx.interaction_mode,
-                ctx.mindmap_tree,
-                ctx.app_scene,
-                ctx.renderer,
-                ctx.scene_cache,
-                ctx.macros,
-            );
+        if let Some(run) = execute_console_line(ctx, &line) {
+            print_console_line(run.outcome, ctx.console_state);
         }
     }
     if let Some(doc) = ctx.document.as_ref() {

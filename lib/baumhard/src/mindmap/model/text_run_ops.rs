@@ -77,14 +77,10 @@ pub fn insert_run(runs: &mut Vec<TextRun>, run: TextRun) -> usize {
     debug_assert_invariants(runs);
     debug_assert!(run.start < run.end, "insert_run: empty run");
     debug_assert!(
-        runs.iter()
-            .all(|r| r.end <= run.start || r.start >= run.end),
+        runs.iter().all(|r| r.end <= run.start || r.start >= run.end),
         "insert_run: overlap with existing run"
     );
-    let pos = runs
-        .iter()
-        .position(|r| r.start >= run.end)
-        .unwrap_or(runs.len());
+    let pos = runs.iter().position(|r| r.start >= run.end).unwrap_or(runs.len());
     runs.insert(pos, run);
     pos
 }
@@ -117,7 +113,7 @@ pub fn slice(runs: &[TextRun], slice_start: usize, slice_end: usize) -> Vec<Text
     out
 }
 
-/// Coalesce style-equal neighbours that meet at a common
+/// Coalesce style-equal neighbors that meet at a common
 /// boundary. Gap-separated equals stay separate — the gap
 /// carries semantic information (uncovered ranges fall
 /// through to section / node defaults).
@@ -254,6 +250,9 @@ fn style_eq(a: &TextRun, b: &TextRun) -> bool {
 mod tests {
     use super::*;
 
+    /// `font` is the empty string — `format/fonts.md`'s "clears the
+    /// pin". This fixture used to say `"Sans"`, which no family
+    /// resolves, so it pinned a font that did not exist.
     fn run(start: usize, end: usize, color: &str) -> TextRun {
         TextRun {
             start,
@@ -261,8 +260,8 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
-            font: "Sans".into(),
-            size_pt: 12,
+            font: String::new(),
+            size_pt: 12.0,
             color: color.into(),
             hyperlink: None,
         }
@@ -427,11 +426,11 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_run_followed_by_merge_coalesces_with_neighbour() {
+    fn test_insert_run_followed_by_merge_coalesces_with_neighbor() {
         // Range-targeted setter use case: insert a fresh run
         // into a gap, then merge with an adjacent same-style
-        // neighbour. The fresh run's `start` matches the
-        // neighbour's `end` so the merge fires.
+        // neighbor. The fresh run's `start` matches the
+        // neighbor's `end` so the merge fires.
         let mut runs = vec![run(0, 5, "red")];
         insert_run(&mut runs, run(5, 10, "red"));
         merge_adjacent_equal(&mut runs);
@@ -502,7 +501,7 @@ mod tests {
     // ── merge_adjacent_equal ─────────────────────────────────────
 
     #[test]
-    fn test_merge_adjacent_equal_coalesces_matching_neighbours() {
+    fn test_merge_adjacent_equal_coalesces_matching_neighbors() {
         let mut runs = vec![run(0, 5, "red"), run(5, 10, "red")];
         merge_adjacent_equal(&mut runs);
         assert_eq!(runs.len(), 1);
@@ -521,7 +520,7 @@ mod tests {
     fn test_merge_adjacent_equal_preserves_gap_boundary() {
         // Gap means `runs[i].end != runs[i+1].start` — the gap
         // carries semantic information (uncovered range falls
-        // through to defaults), so neighbours separated by a
+        // through to defaults), so neighbors separated by a
         // gap MUST stay separate even when their attributes
         // match.
         let mut runs = vec![run(0, 5, "red"), run(7, 10, "red")];
@@ -533,11 +532,7 @@ mod tests {
 
     #[test]
     fn test_merge_adjacent_equal_chains_three_runs() {
-        let mut runs = vec![
-            run(0, 5, "red"),
-            run(5, 10, "red"),
-            run(10, 15, "red"),
-        ];
+        let mut runs = vec![run(0, 5, "red"), run(5, 10, "red"), run(10, 15, "red")];
         merge_adjacent_equal(&mut runs);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].start, 0);
@@ -548,11 +543,7 @@ mod tests {
     fn test_merge_adjacent_equal_partial_chain() {
         // First two runs match, third differs — only the first
         // pair coalesces.
-        let mut runs = vec![
-            run(0, 5, "red"),
-            run(5, 10, "red"),
-            run(10, 15, "blue"),
-        ];
+        let mut runs = vec![run(0, 5, "red"), run(5, 10, "red"), run(10, 15, "blue")];
         merge_adjacent_equal(&mut runs);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].start, 0);
@@ -588,14 +579,14 @@ mod tests {
         split_at(&mut runs, 7);
         assert_eq!(runs.len(), 3);
 
-        // Mutate the carved-out middle run's colour.
+        // Mutate the carved-out middle run's color.
         for r in runs.iter_mut() {
             if r.start >= 3 && r.end <= 7 {
                 r.color = "blue".into();
             }
         }
 
-        // Merge — neighbours don't match the new blue run, so
+        // Merge — neighbors don't match the new blue run, so
         // the three-run shape survives.
         merge_adjacent_equal(&mut runs);
         assert_eq!(runs.len(), 3);
@@ -606,7 +597,7 @@ mod tests {
 
     /// When the user "sets [3, 7) to red" on an already-red
     /// section, the carved-out middle run matches its
-    /// neighbours and merge collapses back to a single run —
+    /// neighbors and merge collapses back to a single run —
     /// the no-op-write should not leave the section with split
     /// runs.
     #[test]
@@ -720,7 +711,7 @@ mod tests {
         assert_eq!(runs[0], run(0, 5, "blue"));
     }
 
-    /// User applies the same colour the runs already carry —
+    /// User applies the same color the runs already carry —
     /// after the mutate-then-merge dance, the runs collapse
     /// back to their original shape.
     #[test]
@@ -755,17 +746,20 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "zero-length")]
     fn test_invariants_panic_on_zero_length_run() {
-        let runs = vec![run(0, 5, "red"), TextRun {
-            start: 5,
-            end: 5,
-            bold: false,
-            italic: false,
-            underline: false,
-            font: "Sans".into(),
-            size_pt: 12,
-            color: "blue".into(),
-            hyperlink: None,
-        }];
+        let runs = vec![
+            run(0, 5, "red"),
+            TextRun {
+                start: 5,
+                end: 5,
+                bold: false,
+                italic: false,
+                underline: false,
+                font: String::new(),
+                size_pt: 12.0,
+                color: "blue".into(),
+                hyperlink: None,
+            },
+        ];
         let _ = find_run_containing(&runs, 0);
     }
 
@@ -775,8 +769,14 @@ mod tests {
         let template = run(0, 0, "red");
         splice_range(&mut runs, 3, 8, 0, &template);
         assert_eq!(runs.len(), 2);
-        assert_eq!((runs[0].start, runs[0].end, runs[0].color.as_str()), (0, 3, "red"));
-        assert_eq!((runs[1].start, runs[1].end, runs[1].color.as_str()), (3, 7, "green"));
+        assert_eq!(
+            (runs[0].start, runs[0].end, runs[0].color.as_str()),
+            (0, 3, "red")
+        );
+        assert_eq!(
+            (runs[1].start, runs[1].end, runs[1].color.as_str()),
+            (3, 7, "green")
+        );
     }
 
     #[test]
@@ -785,14 +785,23 @@ mod tests {
         let template = run(0, 0, "yellow");
         splice_range(&mut runs, 3, 8, 7, &template);
         assert_eq!(runs.len(), 3);
-        assert_eq!((runs[0].start, runs[0].end, runs[0].color.as_str()), (0, 3, "red"));
-        assert_eq!((runs[1].start, runs[1].end, runs[1].color.as_str()), (3, 10, "yellow"));
-        assert_eq!((runs[2].start, runs[2].end, runs[2].color.as_str()), (10, 14, "green"));
+        assert_eq!(
+            (runs[0].start, runs[0].end, runs[0].color.as_str()),
+            (0, 3, "red")
+        );
+        assert_eq!(
+            (runs[1].start, runs[1].end, runs[1].color.as_str()),
+            (3, 10, "yellow")
+        );
+        assert_eq!(
+            (runs[2].start, runs[2].end, runs[2].color.as_str()),
+            (10, 14, "green")
+        );
     }
 
     #[test]
     fn test_splice_range_cut_partial_overlap_collapses_via_merge() {
-        // Both halves of the cut neighbour are style-equal so
+        // Both halves of the cut neighbor are style-equal so
         // `merge_adjacent_equal` collapses them into one.
         let mut runs = vec![run(0, 10, "red")];
         let template = run(0, 0, "red");
@@ -807,8 +816,14 @@ mod tests {
         let template = run(0, 0, "red");
         splice_range(&mut runs, 3, 7, 0, &template);
         assert_eq!(runs.len(), 2);
-        assert_eq!((runs[0].start, runs[0].end, runs[0].color.as_str()), (0, 3, "red"));
-        assert_eq!((runs[1].start, runs[1].end, runs[1].color.as_str()), (3, 6, "blue"));
+        assert_eq!(
+            (runs[0].start, runs[0].end, runs[0].color.as_str()),
+            (0, 3, "red")
+        );
+        assert_eq!(
+            (runs[1].start, runs[1].end, runs[1].color.as_str()),
+            (3, 6, "blue")
+        );
     }
 
     #[test]
@@ -818,7 +833,10 @@ mod tests {
         splice_range(&mut runs, 5, 5, 4, &template);
         assert_eq!(runs.len(), 3);
         assert_eq!((runs[0].start, runs[0].end), (0, 3));
-        assert_eq!((runs[1].start, runs[1].end, runs[1].color.as_str()), (5, 9, "yellow"));
+        assert_eq!(
+            (runs[1].start, runs[1].end, runs[1].color.as_str()),
+            (5, 9, "yellow")
+        );
         assert_eq!((runs[2].start, runs[2].end), (12, 16));
     }
 }

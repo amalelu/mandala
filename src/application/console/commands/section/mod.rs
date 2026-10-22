@@ -36,35 +36,25 @@
 //! command surface in completion + help.
 
 mod frame;
+pub(crate) mod grammar;
 pub(crate) mod target;
 
 use self::target::{
     multi_section_single_target_error, parse_section_target_kv, resolve_section_index, SectionTargetPolicy,
 };
 use super::Command;
-use crate::application::console::completion::{
-    kv_key_completions_with_hints, prefix_filter, Completion, CompletionContext, CompletionState,
-};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::node_or_section_selected_single_node;
-use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
+use crate::application::console::spec::descent::{descend, Stop};
+use crate::application::console::spec::kvs::Pair;
+use crate::application::console::spec::{kvs, usage, Descent};
+use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::{MindMapDocument, SelectionState};
-
-pub const KEYS: &[&str] = &["section"];
-pub const VERBS: &[&str] = &[
-    "move", "resize", "show", "text", "edit", "add", "delete", "split", "frame",
-];
 
 pub const COMMAND: Command = Command {
     name: "section",
     aliases: &[],
     summary: "Inspect, move, resize, edit text, or structurally modify a section (add / delete / split)",
-    usage:
-        "section show [section=<idx>] | section move dx=<f64> dy=<f64> [section=<idx>] | section move x=<f64> y=<f64> [section=<idx>] | section resize w=<f64> h=<f64> [section=<idx>] | section resize fill [section=<idx>] | section text \"<text>\" [section=<idx>] [runs=preserve|clear] | section edit [section=<idx>] | section add [at=<idx>] [text=\"<text>\"] | section delete [section=<idx>] | section split [section=<idx>] at=<grapheme> | section frame show|reset|<key>=<value> … [section=<idx>] | section frame preview <key>=<value> …|commit|cancel [section=<idx>]",
-    tags: &[
-        "section", "show", "info", "move", "resize", "offset", "size", "text", "add", "delete",
-        "split", "frame", "border", "preset", "glyph", "preview",
-    ],
     // Stricter than `border` — section subverbs need a single
     // node target (or section), so `Multi(_)` is excluded. Pre-
     // fix the shared predicate admitted Multi but the section
@@ -72,224 +62,79 @@ pub const COMMAND: Command = Command {
     // reintroducing the UX-vs-runtime mismatch Critical #5 was
     // meant to fix.
     applicable: node_or_section_selected_single_node,
-    complete: complete_section,
+    grammar: &grammar::SECTION,
+    // Every subverb and key is derived. `info`, `offset`, `size`,
+    // `border` and `preset` are the words a user greps for that the
+    // grammar does not contain — the last two reach the `frame`
+    // subject's vocabulary, which lives one level down under
+    // `border`'s own declaration.
+    synonyms: &["info", "offset", "size", "border", "preset", "glyph"],
     execute: execute_section,
 };
 
-fn complete_section(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Completion> {
-    // `state.tokens[0]` is the command name ("section"); the first
-    // arg (`move`, `resize`, or `frame`) lives at index 1. The
-    // engine's `Token { index }` already counts past the command,
-    // so `index: 0` means "the user is typing the first positional
-    // after `section`."
-    let first_arg = state.tokens.get(1).map(String::as_str);
-    // `frame` opens a sub-verb tree — once the user has typed
-    // `section frame …` we delegate every later token to the
-    // frame-specific completer (which surfaces the same kv keys
-    // the `border …` verb uses).
-    if first_arg == Some("frame") {
-        return frame::complete_section_frame(state, ctx);
-    }
-    match &state.context {
-        CompletionContext::Token { index: 0 } => verb_completions(state.partial),
-        CompletionContext::Token { index: 1 } => match first_arg {
-            // `section resize fill` is the only positional sentinel
-            // — every other subverb takes kvs.
-            Some("resize") => {
-                let mut out = prefix_filter(&["fill"], state.partial);
-                out.extend(kv_key_completions_with_hints(
-                    &["w", "h", "section"],
-                    state.partial,
-                    kv_hint,
-                ));
-                out
-            }
-            Some("move") => {
-                kv_key_completions_with_hints(&["dx", "dy", "x", "y", "section"], state.partial, kv_hint)
-            }
-            Some("text") => {
-                kv_key_completions_with_hints(&["text", "runs", "section"], state.partial, kv_hint)
-            }
-            Some("add") => kv_key_completions_with_hints(&["at", "text"], state.partial, kv_hint),
-            Some("split") => kv_key_completions_with_hints(&["at", "section"], state.partial, kv_hint),
-            Some("delete") | Some("show") | Some("edit") => {
-                kv_key_completions_with_hints(&["section"], state.partial, kv_hint)
-            }
-            _ => Vec::new(),
-        },
-        CompletionContext::Token { .. } => kv_key_completions_with_hints(KEYS, state.partial, kv_hint),
-        // Value-side completers. The plan §4.5 spec calls for
-        // selection-aware integer completion on `section=K`
-        // showing `0..node.sections.len()` with each row's
-        // hint surfacing the section's preview text.
-        CompletionContext::KvValue { key } if key == "section" => {
-            section_idx_value_completions(ctx, state.partial)
-        }
-        // `runs=preserve|clear` — static two-value enum.
-        CompletionContext::KvValue { key } if key == "runs" => {
-            prefix_filter(&["preserve", "clear"], state.partial)
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// `section <TAB>` at token 0 — surface every subverb with a
-/// one-line hint per the sibling-consistency reviewer
-/// (`border` / `font` / `color` already do this; section was
-/// the outlier shipping hint-less verb rows).
-fn verb_completions(partial: &str) -> Vec<Completion> {
-    VERBS
-        .iter()
-        .filter(|v| v.starts_with(partial))
-        .map(|v| Completion {
-            text: v.to_string(),
-            display: v.to_string(),
-            hint: Some(verb_hint(v).to_string()),
-            font_family: None,
-        })
-        .collect()
-}
-
-fn verb_hint(v: &str) -> &'static str {
-    match v {
-        "show" => "print the resolved per-section properties",
-        "move" => "shift section offset (dx/dy delta or x/y absolute)",
-        "resize" => "pin section size (w/h) or clear to fill-parent",
-        "text" => "replace section text (runs=preserve|clear)",
-        "add" => "insert a new section",
-        "delete" => "remove the section (errors when only one remains)",
-        "split" => "split a section in two at a grapheme boundary",
-        "edit" => "open the section text editor on the resolved target",
-        "frame" => "configure the section's frame border (subverb tree)",
-        _ => "",
-    }
-}
-
-/// Selection-aware integer completer for `section=<TAB>`.
-/// Surfaces `0..node.sections.len()` for the selection's
-/// primary node, with each row's hint showing a short text
-/// preview so the user can tell which section is which.
-fn section_idx_value_completions(ctx: &ConsoleContext, partial: &str) -> Vec<Completion> {
-    use baumhard::util::grapheme_chad::take_graphemes;
-    let Some(primary_id) = ctx.document.selection.primary_node_id() else {
-        return Vec::new();
-    };
-    let Some(node) = ctx.document.mindmap.nodes.get(primary_id) else {
-        return Vec::new();
-    };
-    node.sections
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| idx.to_string().starts_with(partial))
-        .map(|(idx, section)| {
-            // Short text preview (≤20 graphemes, grapheme-aware so
-            // a multi-codepoint emoji doesn't slice mid-cluster).
-            // Empty sections render `(empty)` so the row isn't
-            // a bare bullet. One walk, no prefix allocation —
-            // `take_graphemes` returns the borrowed prefix and the
-            // overflow flag together.
-            let (preview, overflow) = take_graphemes(&section.text, 20);
-            let hint = if preview.is_empty() {
-                "(empty)".to_string()
-            } else if overflow {
-                format!("\"{}…\"", preview)
-            } else {
-                format!("\"{}\"", preview)
-            };
-            Completion {
-                text: idx.to_string(),
-                display: idx.to_string(),
-                hint: Some(hint),
-                font_family: None,
-            }
-        })
-        .collect()
-}
-
-fn kv_hint(key: &str) -> Option<&'static str> {
-    match key {
-        "section" => Some("target section index inside a multi-section node"),
-        "dx" => Some("relative move along x axis (canvas units)"),
-        "dy" => Some("relative move along y axis (canvas units)"),
-        "x" => Some("absolute x offset within parent node"),
-        "y" => Some("absolute y offset within parent node"),
-        "w" => Some("section width (canvas units)"),
-        "h" => Some("section height (canvas units)"),
-        "text" => Some("section text payload (quote multi-word values)"),
-        "runs" => Some("preserve|clear — keep or drop per-grapheme styling"),
-        "at" => Some("insertion / split index"),
-        _ => None,
-    }
-}
-
 fn execute_section(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    let verb = match args.positional(0) {
-        Some(v) => v,
-        None => {
-            return ExecResult::err(
-                "usage: section move dx=<f64> dy=<f64> | section move x=<f64> y=<f64> | section resize w=<f64> h=<f64> | section resize fill | section show | section text \"<text>\" | section add | section delete | section split | section frame …",
-            )
+    let descent = descend(&grammar::SECTION, args.tokens());
+    // `frame` is a level of its own: its own selection rules, its
+    // own keyset (the whole `border` vocabulary), and its own
+    // preview child. The descent has already stepped into it.
+    if descent.parent_name(0) == Some("frame") {
+        return frame::execute_section_frame(&descent, args, eff);
+    }
+    let subverb = match descent.stop {
+        Stop::Matched(subverb) => subverb,
+        Stop::Bare => return ExecResult::err(usage::no_arguments_message(&grammar::SECTION)),
+        // The tokenizer splits an unquoted multi-word value, and
+        // `text=` is the key most likely to carry one: `section
+        // text=hello world` used to answer "unknown subverb
+        // 'world'".
+        Stop::KvForm => return ExecResult::err(descent.quoting_hint(args)),
+        // Validated against the declaration *before* the
+        // per-section resolver runs. A `section <typo>` against a
+        // multi-section node used to reach the resolver first and
+        // surface "node 'X' has N sections — pick one", making the
+        // typo masquerade as a selection problem.
+        Stop::Unknown => {
+            return ExecResult::err(usage::unknown_subverb_message(
+                descent.level,
+                descent.typed.unwrap_or_default(),
+            ))
         }
     };
-    // `frame` is a kv-form subverb whose own selection rules differ
-    // from move/resize (it tolerates Single + section=K, walks
-    // multiple nodes, doesn't require a positional dx/dy). Hand
-    // off before move/resize's resolver runs.
-    if verb == "frame" {
-        return frame::execute_section_frame(args, eff);
-    }
+    let pairs = match kvs::read_strict(&descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
+    };
     // `add` resolves its own target — the `at=` kv supplies the
     // insertion index, and the parent node id comes from
     // `selection.primary_node_id()`. Route before the per-section
-    // resolver so a Single(node) selection (no section pre-
-    // selected) doesn't trip the "select a specific section"
+    // resolver so a `Single(node)` selection with no section
+    // pre-selected doesn't trip the "select a specific section"
     // error.
-    if verb == "add" {
-        let node_id = match resolve_node_id(&eff.document.selection) {
+    if subverb.name == "add" {
+        let node_id = match resolve_node_id(&eff.document().selection) {
             Ok(id) => id,
             Err(msg) => return ExecResult::err(msg),
         };
-        return execute_add(args, eff.document, &node_id);
+        return execute_add(&pairs, eff.document_mut(), &node_id);
     }
-    // CRIT-1 (whole-PR review): validate the verb against the known
-    // set BEFORE the per-section resolver runs. Pre-fix a `section
-    // <typo>` against `Single(node)` (multi-section) ran
-    // the per-section resolver first, which surfaced the
-    // "node 'X' has N sections — pick one" error — making the
-    // typo masquerade as a selection problem. Surface the actual
-    // typo with a grouped subverb listing (mirrors the `border`
-    // verb's error shape at `border/execute.rs::unknown_subverb_message`).
-    const KNOWN_VERBS: &[&str] = &[
-        "move", "resize", "show", "text", "edit", "delete", "split", "frame", "add",
-    ];
-    if !KNOWN_VERBS.iter().any(|v| *v == verb) {
-        return ExecResult::err(format!(
-            "section: unknown subverb '{}'\n  \
-             readout:   show\n  \
-             text:      text \"<text>\" [runs=preserve|clear]\n  \
-             geometry:  move dx=… dy=… | move x=… y=… | resize w=… h=… | resize fill\n  \
-             structure: add | delete | split\n  \
-             subject:   frame …  (per-section frame border)\n  \
-             editor:    edit",
-            verb
-        ));
-    }
-    // `move` on a `MultiSection` selection with the **delta**
-    // form (`dx=` / `dy=`) fans out to every targeted section —
-    // each section's offset shifts by the same `(dx, dy)`. Plan
-    // §4.5 rule 4 / §9.1.3. The absolute form (`x=` / `y=`) and
-    // every other subverb stay single-target on MultiSection
-    // (different sections + same absolute coords would all pile
-    // up at the same offset, which is never the intent).
-    if verb == "move" {
-        if let SelectionState::MultiSection(_) = &eff.document.selection {
-            // Peek the form before dispatching; only delta fans
-            // out. The form-mismatch reject for absolute survives
-            // through `execute_move` → `parse_move_kvs` paths.
-            let has_delta = args.kvs().any(|(k, _)| k == "dx" || k == "dy");
-            let has_abs = args.kvs().any(|(k, _)| k == "x" || k == "y");
+    // `move` on a `MultiSection` selection with the **delta** form
+    // (`dx=` / `dy=`) fans out to every targeted section — each
+    // section's offset shifts by the same `(dx, dy)`. The absolute
+    // form (`x=` / `y=`) and every other subverb stay single-target
+    // on MultiSection (different sections plus the same absolute
+    // coords would all pile up at one offset, which is never the
+    // intent).
+    //
+    // The name comes off the declaration rather than off the raw
+    // token, so `section MOVE dx=1` fans out too — the exact-match
+    // this replaced did not, while every other arm on the verb was
+    // already case-insensitive.
+    if subverb.name == "move" {
+        if let SelectionState::MultiSection(_) = &eff.document().selection {
+            let has_delta = pairs.iter().any(|p| matches!(p.key.name, "dx" | "dy"));
+            let has_abs = pairs.iter().any(|p| matches!(p.key.name, "x" | "y"));
             if has_delta && !has_abs {
-                return execute_move_fan_out_multisection(args, eff.document);
+                return execute_move_fan_out_multisection(&descent, &pairs, eff.document_mut());
             }
         }
     }
@@ -297,15 +142,12 @@ fn execute_section(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     // `section=abc` is a syntax error the user can see and fix; if
     // the selection resolver ran first, `MultiSection` would answer
     // "single-target only; pass section=<idx>" — which is exactly
-    // what the user did, with a typo. Same defect class as the
-    // CRIT-1 note above, in the opposite direction. Order matches
-    // the pre-dedup `resolve_section_idx`, which read the kv on its
-    // first line.
+    // what the user did, with a typo.
     let kv_idx = match parse_section_target_kv(args, "section") {
         Ok(v) => v,
         Err(msg) => return ExecResult::err(msg),
     };
-    let node_id = match resolve_node_id(&eff.document.selection) {
+    let node_id = match resolve_node_id(&eff.document().selection) {
         Ok(id) => id,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -317,7 +159,7 @@ fn execute_section(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         .map(|n| n.sections.len())
         .unwrap_or(0);
     let target_idx = match resolve_section_index(
-        &eff.document.selection,
+        &eff.document().selection,
         &node_id,
         kv_idx,
         Some(section_count),
@@ -332,21 +174,32 @@ fn execute_section(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     if target_idx >= section_count {
         return ExecResult::err(format!("section[{}] not found on node '{}'", target_idx, node_id));
     }
-    match verb {
-        "move" => execute_move(args, eff.document, &node_id, target_idx),
-        "resize" => execute_resize(args, eff.document, &node_id, target_idx),
-        "show" => execute_show(args, eff.document, &node_id, target_idx),
-        "text" => execute_text(args, eff.document, &node_id, target_idx),
-        "edit" => execute_edit(args, eff, &node_id, target_idx),
-        "delete" => execute_delete(args, eff.document, &node_id, target_idx),
-        "split" => execute_split(args, eff.document, &node_id, target_idx),
-        "add" => {
-            // Should be routed earlier; defensive Err per
-            // CODE_CONVENTIONS §9 (interactive paths must not panic).
-            log::error!("section add reached the per-section dispatcher; expected upstream routing");
-            ExecResult::err("internal: section add routing miss")
+    match subverb.name {
+        "move" => execute_move(&descent, &pairs, eff.document_mut(), &node_id, target_idx),
+        "resize" => execute_resize(&descent, args, &pairs, eff.document_mut(), &node_id, target_idx),
+        "show" => execute_show(eff.document(), &node_id, target_idx),
+        "text" => execute_text(&descent, args, &pairs, eff.document_mut(), &node_id, target_idx),
+        "edit" => execute_edit(eff, &node_id, target_idx),
+        "delete" => execute_delete(eff.document_mut(), &node_id, target_idx),
+        "split" => execute_split(&pairs, eff.document_mut(), &node_id, target_idx),
+        // `add` is routed above; the arm exists because the match
+        // is over a declared name rather than a closed enum, and an
+        // interactive path degrades rather than panics (§9).
+        other => {
+            log::error!("section: subverb '{other}' reached the per-section dispatcher with no arm");
+            ExecResult::err(format!("internal: section {other} routing miss"))
         }
-        other => ExecResult::err(format!("section: unknown subverb '{}'", other)),
+    }
+}
+
+/// The `usage: …` the matched subverb publishes — the same line
+/// `help section` prints for it, so a rejection and the help page
+/// cannot word one shape two ways.
+fn subverb_usage(descent: &Descent) -> String {
+    match descent.subverb() {
+        Some(subverb) => usage::subverb_usage(descent.level, subverb),
+        // Unreachable: every caller has already matched a subverb.
+        None => usage::no_arguments_message(descent.level),
     }
 }
 
@@ -360,34 +213,12 @@ fn resolve_node_id(selection: &SelectionState) -> Result<String, String> {
     Err("section: requires a node or section selection".into())
 }
 
-/// Reject any kv whose key isn't in `allowed`. Used by each
-/// subverb (`show`, `text`, `add`, `delete`, `split`) to catch
-/// typos like `sectoin=0` that pre-fix silently no-op'd. The
-/// `move` and `resize` parsers already do this inline; this
-/// helper covers the verbs that previously didn't.
-fn reject_unknown_kvs(args: &Args, verb: &str, allowed: &[&str]) -> Result<(), String> {
-    for (k, _) in args.kvs() {
-        if !allowed.iter().any(|a| *a == k) {
-            return Err(format!(
-                "section {}: unknown key '{}'; use {}",
-                verb,
-                k,
-                allowed.join("|")
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Multi-line readout of one section's resolved properties:
 /// text preview, run count breakdown, offset, size (with the
 /// fill-parent fallback noted), channel (with the index-default
 /// noted), and trigger-binding count. Mirrors `border show`'s
 /// shape — purely informational, no mutation.
-fn execute_show(args: &Args, doc: &MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
-    if let Err(msg) = reject_unknown_kvs(args, "show", &["section"]) {
-        return ExecResult::err(msg);
-    }
+fn execute_show(doc: &MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
     let Some(node) = doc.mindmap.nodes.get(node_id) else {
         return ExecResult::err(format!("section show: node '{}' not found", node_id));
     };
@@ -411,11 +242,11 @@ fn execute_show(args: &Args, doc: &MindMapDocument, node_id: &str, idx: usize) -
     // doesn't overflow the readout. Stay grapheme-aware so we
     // don't slice mid-cluster. `take_graphemes` is the single-pass
     // primitive for that: it borrows the prefix (no `String` to
-    // build) and reports overflow from the same walk. This file
-    // used to carry two different hand-rolled truncations — the
-    // other one, in `section_idx_value_completions`, walked the
-    // iterator twice, and the completion popup hits that path on
-    // every key press in some flows.
+    // build) and reports overflow from the same walk. The sibling
+    // truncation — the one behind `section=<TAB>` — now lives in
+    // `commands::range_kv` with the rest of the shared
+    // section-targeting vocabulary, so `color` and `font` reach
+    // the same popup this readout's preview mirrors.
     use baumhard::util::grapheme_chad::take_graphemes;
     let (preview, overflow) = take_graphemes(&section.text, 40);
     let text_display = if overflow {
@@ -505,30 +336,30 @@ fn execute_show(args: &Args, doc: &MindMapDocument, node_id: &str, idx: usize) -
 /// kv — both branches called `set_section_text` (which collapses
 /// runs unconditionally), so preserve and clear produced
 /// identical output.
-fn execute_text(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
-    if let Err(msg) = reject_unknown_kvs(args, "text", &["text", "runs", "section"]) {
-        return ExecResult::err(msg);
-    }
-    // Resolve the text payload: positional(1) or `text=` kv.
-    // `text=` wins when both are present (the kv is the
+fn execute_text(
+    descent: &Descent,
+    args: &Args,
+    pairs: &[Pair],
+    doc: &mut MindMapDocument,
+    node_id: &str,
+    idx: usize,
+) -> ExecResult {
+    // Resolve the text payload: the subverb's own slot 0, or the
+    // `text=` kv. `text=` wins when both are present (the kv is the
     // explicit-named form; the positional is the convenient
     // shorthand).
-    let kv_text = args.kvs().find(|(k, _)| *k == "text").map(|(_, v)| v.to_string());
-    let new_text = match kv_text {
-        Some(t) => t,
-        None => match args.positional(1) {
+    let new_text = match kvs::value(pairs, "text") {
+        Some(t) => t.to_string(),
+        None => match descent.slot_value(args).get(0) {
             Some(t) => t.to_string(),
             None => {
-                return ExecResult::err(
-                    "usage: section text \"<text>\" [section=<idx>] [runs=preserve|clear]",
-                )
+                return ExecResult::err(subverb_usage(descent));
             }
         },
     };
 
     // `runs=preserve|clear` controls run handling.
-    let runs_mode = args.kvs().find(|(k, _)| *k == "runs").map(|(_, v)| v.to_string());
-    let clear_runs = match runs_mode.as_deref() {
+    let clear_runs = match kvs::value(pairs, "runs") {
         Some("clear") => true,
         Some("preserve") | None => false,
         Some(other) => {
@@ -566,10 +397,7 @@ fn execute_text(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usiz
 /// editor on the resolved target.Routes through
 /// `ConsoleSideEffect::OpenSectionEdit`; closes the console
 /// (modal handoff to the editor).
-fn execute_edit(args: &Args, eff: &mut ConsoleEffects, node_id: &str, idx: usize) -> ExecResult {
-    if let Err(msg) = reject_unknown_kvs(args, "edit", &["section"]) {
-        return ExecResult::err(msg);
-    }
+fn execute_edit(eff: &mut ConsoleEffects, node_id: &str, idx: usize) -> ExecResult {
     eff.side_effect = Some(crate::application::console::ConsoleSideEffect::OpenSectionEdit {
         node_id: node_id.to_string(),
         section_idx: idx,
@@ -588,13 +416,10 @@ fn execute_edit(args: &Args, eff: &mut ConsoleEffects, node_id: &str, idx: usize
 /// serde defaults — `offset = (0, 0)`, `size = None` (fill
 /// parent), `channel = None` (→ index), `text_runs = []`,
 /// `trigger_bindings = []`, `frame_border = None`.
-fn execute_add(args: &Args, doc: &mut MindMapDocument, node_id: &str) -> ExecResult {
+fn execute_add(pairs: &[Pair], doc: &mut MindMapDocument, node_id: &str) -> ExecResult {
     use baumhard::mindmap::model::MindSection;
 
-    if let Err(msg) = reject_unknown_kvs(args, "add", &["at", "text"]) {
-        return ExecResult::err(msg);
-    }
-    let at_kv = match args.kvs().find(|(k, _)| *k == "at").map(|(_, v)| v.to_string()) {
+    let at_kv = match kvs::value(pairs, "at") {
         Some(v) => match v.parse::<usize>() {
             Ok(n) => Some(n),
             Err(_) => {
@@ -603,11 +428,7 @@ fn execute_add(args: &Args, doc: &mut MindMapDocument, node_id: &str) -> ExecRes
         },
         None => None,
     };
-    let text = args
-        .kvs()
-        .find(|(k, _)| *k == "text")
-        .map(|(_, v)| v.to_string())
-        .unwrap_or_default();
+    let text = kvs::value(pairs, "text").unwrap_or_default().to_string();
 
     let section = MindSection::new_default(text, Vec::new());
 
@@ -621,10 +442,7 @@ fn execute_add(args: &Args, doc: &mut MindMapDocument, node_id: &str) -> ExecRes
 /// through `MindMapDocument::delete_section`.Errors
 /// when the node has only one section (model invariant) or the
 /// idx is out of range.
-fn execute_delete(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
-    if let Err(msg) = reject_unknown_kvs(args, "delete", &["section"]) {
-        return ExecResult::err(msg);
-    }
+fn execute_delete(doc: &mut MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
     match doc.delete_section(node_id, idx) {
         Ok(_removed) => ExecResult::ok_msg(format!("section[{}] deleted from node '{}'", idx, node_id)),
         Err(msg) => ExecResult::err(msg),
@@ -641,11 +459,8 @@ fn execute_delete(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: us
 /// empty. Forcing the user to spell out `at=` makes the intent
 /// explicit; `section show` surfaces the section's grapheme
 /// count so picking a value is one verb away.
-fn execute_split(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
-    if let Err(msg) = reject_unknown_kvs(args, "split", &["at", "section"]) {
-        return ExecResult::err(msg);
-    }
-    let at_str = match args.kvs().find(|(k, _)| *k == "at").map(|(_, v)| v.to_string()) {
+fn execute_split(pairs: &[Pair], doc: &mut MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
+    let at_str = match kvs::value(pairs, "at") {
         Some(v) => v,
         None => {
             return ExecResult::err(
@@ -697,8 +512,12 @@ fn execute_split(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usi
 /// `section/frame.rs::apply_edits`. On success, an N-section
 /// fan-out produces N `EditNodeStyle` undo entries (same as
 /// the per-pair setter — undo unwinds one section at a time).
-fn execute_move_fan_out_multisection(args: &Args, doc: &mut MindMapDocument) -> ExecResult {
-    let parsed = match parse_move_kvs(args) {
+fn execute_move_fan_out_multisection(
+    descent: &Descent,
+    pairs: &[Pair],
+    doc: &mut MindMapDocument,
+) -> ExecResult {
+    let parsed = match parse_move_kvs(descent, pairs) {
         Ok(p) => p,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -769,8 +588,14 @@ fn execute_move_fan_out_multisection(args: &Args, doc: &mut MindMapDocument) -> 
     ))
 }
 
-fn execute_move(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
-    let parsed = match parse_move_kvs(args) {
+fn execute_move(
+    descent: &Descent,
+    pairs: &[Pair],
+    doc: &mut MindMapDocument,
+    node_id: &str,
+    idx: usize,
+) -> ExecResult {
+    let parsed = match parse_move_kvs(descent, pairs) {
         Ok(p) => p,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -808,12 +633,13 @@ enum MoveTarget {
     Absolute { x: f64, y: f64 },
 }
 
-fn parse_move_kvs(args: &Args) -> Result<MoveTarget, String> {
+fn parse_move_kvs(descent: &Descent, pairs: &[Pair]) -> Result<MoveTarget, String> {
     let mut dx: Option<f64> = None;
     let mut dy: Option<f64> = None;
     let mut x: Option<f64> = None;
     let mut y: Option<f64> = None;
-    for (k, v) in args.kvs() {
+    for pair in pairs {
+        let (k, v) = (pair.key.name, pair.value);
         let target = match k {
             "dx" => &mut dx,
             "dy" => &mut dy,
@@ -821,10 +647,12 @@ fn parse_move_kvs(args: &Args) -> Result<MoveTarget, String> {
             "y" => &mut y,
             "section" => continue, // consumed by the resolver
             other => {
-                return Err(format!(
-                    "section move: unknown key '{}'; use dx|dy|x|y|section",
-                    other
-                ));
+                // Unreachable: `kvs::read_strict` refused every key
+                // this form does not read before the parser ran.
+                // Degrade rather than panic — this is an
+                // interactive path (CODE_CONVENTIONS §9).
+                log::error!("section move: engine admitted unread key '{other}'");
+                continue;
             }
         };
         let parsed: f64 = v
@@ -841,9 +669,7 @@ fn parse_move_kvs(args: &Args) -> Result<MoveTarget, String> {
         return Err("section move: cannot mix delta form (dx/dy) and absolute form (x/y) — pick one".into());
     }
     if !any_delta && !any_abs {
-        return Err(
-            "usage: section move dx=<f64> dy=<f64> | section move x=<f64> y=<f64> [section=<idx>]".into(),
-        );
+        return Err(subverb_usage(descent));
     }
     if any_delta {
         Ok(MoveTarget::Delta {
@@ -868,18 +694,29 @@ fn parse_move_kvs(args: &Args) -> Result<MoveTarget, String> {
 /// <h>`; the `fill` literal replaces `none` ("none" reads as
 /// "remove the section" rather than "fill the parent" — `fill`
 /// is the clearer rename).
-fn execute_resize(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: usize) -> ExecResult {
-    // `fill` arrives as the first positional. Match case-
-    // insensitively so users typing "FILL" or "Fill" don't
+fn execute_resize(
+    descent: &Descent,
+    args: &Args,
+    pairs: &[Pair],
+    doc: &mut MindMapDocument,
+    node_id: &str,
+    idx: usize,
+) -> ExecResult {
+    // `fill` arrives in the subverb's own slot 0. Match
+    // case-insensitively so users typing "FILL" or "Fill" don't
     // surprise themselves with a "not a number" parse error.
-    if args.positional(1).map(str::to_ascii_lowercase).as_deref() == Some("fill") {
+    if descent
+        .slot_value(args)
+        .get(0)
+        .is_some_and(|v| v.eq_ignore_ascii_case("fill"))
+    {
         return match doc.set_section_size(node_id, idx, None) {
             Ok(true) => ExecResult::ok_msg(format!("section[{}] size cleared (fill parent)", idx)),
             Ok(false) => ExecResult::ok_msg("section: no change"),
             Err(msg) => ExecResult::err(msg),
         };
     }
-    let (w, h) = match parse_resize_kvs(args) {
+    let (w, h) = match parse_resize_kvs(descent, pairs) {
         Ok(p) => p,
         Err(msg) => return ExecResult::err(msg),
     };
@@ -891,19 +728,19 @@ fn execute_resize(args: &Args, doc: &mut MindMapDocument, node_id: &str, idx: us
     }
 }
 
-fn parse_resize_kvs(args: &Args) -> Result<(f64, f64), String> {
+fn parse_resize_kvs(descent: &Descent, pairs: &[Pair]) -> Result<(f64, f64), String> {
     let mut w: Option<f64> = None;
     let mut h: Option<f64> = None;
-    for (k, v) in args.kvs() {
+    for pair in pairs {
+        let (k, v) = (pair.key.name, pair.value);
         let target = match k {
             "w" => &mut w,
             "h" => &mut h,
             "section" => continue,
             other => {
-                return Err(format!(
-                    "section resize: unknown key '{}'; use w|h|section",
-                    other
-                ));
+                // Unreachable — see `parse_move_kvs`.
+                log::error!("section resize: engine admitted unread key '{other}'");
+                continue;
             }
         };
         let parsed: f64 = v
@@ -920,7 +757,7 @@ fn parse_resize_kvs(args: &Args) -> Result<(f64, f64), String> {
         *target = Some(parsed);
     }
     let (Some(w), Some(h)) = (w, h) else {
-        return Err("usage: section resize w=<f64> h=<f64> | section resize fill [section=<idx>]".into());
+        return Err(subverb_usage(descent));
     };
     Ok((w, h))
 }
@@ -928,10 +765,20 @@ fn parse_resize_kvs(args: &Args) -> Result<(f64, f64), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::console::completion::{complete, Completion};
     use crate::application::console::tests::fixtures::{assert_exec_err_contains, assert_exec_ok, run};
     use crate::application::console::ExecResult;
     use crate::application::document::tests_common::{load_test_doc, pinned_two_section_node};
     use crate::application::document::SectionSel;
+
+    /// The popup rows for `line` with the cursor at its end,
+    /// driven through the real completion engine rather than
+    /// through a hand-built `CompletionState` — the verb has no
+    /// completer of its own to call any more.
+    fn popup(line: &str, doc: &MindMapDocument) -> Vec<Completion> {
+        let ctx = crate::application::console::ConsoleContext::from_document(doc);
+        complete(line, line.len(), &ctx)
+    }
 
     #[test]
     fn section_move_writes_offset_when_section_selection_supplies_idx() {
@@ -1147,10 +994,10 @@ mod tests {
             node_id: id.clone(),
             section_idx: 1,
         });
-        let before = doc.mindmap.nodes.get(&id).unwrap().sections[1].size.clone();
+        let before = doc.mindmap.nodes.get(&id).unwrap().sections[1].size;
         assert_exec_ok(run("section resize w=80 h=40", &mut doc));
         assert!(doc.undo());
-        let restored = doc.mindmap.nodes.get(&id).unwrap().sections[1].size.clone();
+        let restored = doc.mindmap.nodes.get(&id).unwrap().sections[1].size;
         assert_eq!(restored, before, "undo restores prior size");
     }
 
@@ -1334,7 +1181,8 @@ mod tests {
     }
 
     /// `section resize fill` (renamed from the prior `none`
-    /// literal) clears `size` to fill-parent.    #[test]
+    /// literal) clears `size` to fill-parent.
+    #[test]
     fn section_resize_fill_literal_clears_size() {
         let (mut doc, id) = pinned_two_section_node();
         // Move offset to (0,0) so the fill-parent state passes
@@ -1507,6 +1355,12 @@ mod tests {
         // start with the same multi-run section[1]. `MindMapDocument`
         // doesn't impl Clone, so we set up each side identically
         // rather than clone.
+        //
+        // `font` is the empty string — `format/fonts.md`'s "clears
+        // the pin". These fixtures used to say `"Sans"`, which is
+        // not a family anything resolves, so they were pinning a
+        // font that did not exist and the reverse projection
+        // rewrote it to `""` anyway.
         let seed_runs = vec![
             TextRun {
                 start: 0,
@@ -1514,8 +1368,8 @@ mod tests {
                 bold: true,
                 italic: false,
                 underline: false,
-                font: "Sans".into(),
-                size_pt: 12,
+                font: String::new(),
+                size_pt: 12.0,
                 color: "#ff0000".into(),
                 hyperlink: None,
             },
@@ -1525,8 +1379,8 @@ mod tests {
                 bold: false,
                 italic: true,
                 underline: false,
-                font: "Sans".into(),
-                size_pt: 12,
+                font: String::new(),
+                size_pt: 12.0,
                 color: "#00ff00".into(),
                 hyperlink: None,
             },
@@ -1590,8 +1444,8 @@ mod tests {
                 bold: true,
                 italic: false,
                 underline: false,
-                font: "Sans".into(),
-                size_pt: 12,
+                font: String::new(),
+                size_pt: 12.0,
                 color: "#ff0000".into(),
                 hyperlink: None,
             }];
@@ -1805,22 +1659,13 @@ mod tests {
     /// with `border` / `font` / `color`.
     #[test]
     fn section_completion_token_zero_emits_hints() {
-        use crate::application::console::completion::{CompletionContext, CompletionState};
         let doc = load_test_doc();
-        let ctx = crate::application::console::ConsoleContext::from_document(&doc);
-        let tokens = vec!["section".to_string()];
-        let state = CompletionState {
-            tokens: &tokens,
-            cursor_token: 0,
-            partial: "",
-            context: CompletionContext::Token { index: 0 },
-        };
-        let out = complete_section(&state, &ctx);
+        let out = popup("section ", &doc);
         // Every verb has a hint.
         assert!(!out.is_empty());
         for c in &out {
             assert!(
-                c.hint.as_ref().map_or(false, |h| !h.is_empty()),
+                c.hint.as_deref().is_some_and(|h| !h.is_empty()),
                 "verb '{}' missing hint",
                 c.text
             );
@@ -1841,7 +1686,6 @@ mod tests {
     /// §4.5 line 981 spec'd this as the discoverability path.
     #[test]
     fn section_kv_value_completion_lists_indices_with_text_preview() {
-        use crate::application::console::completion::{CompletionContext, CompletionState};
         let (mut doc, id) = pinned_two_section_node();
         // Seed distinct text on each section so the previews
         // round-trip distinguishably.
@@ -1851,17 +1695,7 @@ mod tests {
             node_id: id.clone(),
             section_idx: 0,
         });
-        let ctx = crate::application::console::ConsoleContext::from_document(&doc);
-        let tokens = vec!["section".to_string(), "show".to_string()];
-        let state = CompletionState {
-            tokens: &tokens,
-            cursor_token: 0,
-            partial: "",
-            context: CompletionContext::KvValue {
-                key: "section".to_string(),
-            },
-        };
-        let out = complete_section(&state, &ctx);
+        let out = popup("section show section=", &doc);
         let labels: Vec<&str> = out.iter().map(|c| c.text.as_str()).collect();
         assert!(
             labels.iter().any(|l| l == &"0"),
@@ -1885,19 +1719,8 @@ mod tests {
     /// `runs=<TAB>` surfaces the two-value enum.
     #[test]
     fn section_runs_kv_value_completion_lists_preserve_clear() {
-        use crate::application::console::completion::{CompletionContext, CompletionState};
         let doc = load_test_doc();
-        let ctx = crate::application::console::ConsoleContext::from_document(&doc);
-        let tokens = vec!["section".to_string(), "text".to_string()];
-        let state = CompletionState {
-            tokens: &tokens,
-            cursor_token: 0,
-            partial: "",
-            context: CompletionContext::KvValue {
-                key: "runs".to_string(),
-            },
-        };
-        let out = complete_section(&state, &ctx);
+        let out = popup("section text runs=", &doc);
         let labels: Vec<&str> = out.iter().map(|c| c.text.as_str()).collect();
         assert!(labels.contains(&"preserve"));
         assert!(labels.contains(&"clear"));
@@ -2039,12 +1862,11 @@ mod tests {
         assert_exec_err_contains(run("section edit section=99", &mut doc), "not found on node");
     }
 
-    /// Sharpened pin per Test Quality #5/6: when the verb's
-    /// own `reject_unknown_kvs` rejects (the only `execute_edit`
-    /// path that fires before the side-effect emit), no
-    /// `OpenSectionEdit` side-effect is emitted and
-    /// `close_console` stays false. Catches a regression that
-    /// might emit-then-error on a typo'd kv.
+    /// Sharpened pin per Test Quality #5/6: when the engine's kv
+    /// read rejects — the only `execute_edit` path that fires
+    /// before the side-effect emit — no `OpenSectionEdit` side
+    /// effect is emitted and `close_console` stays false. Catches
+    /// a regression that might emit-then-error on a typo'd kv.
     #[test]
     fn section_edit_unknown_kv_emits_no_side_effect() {
         let (mut doc, id) = pinned_two_section_node();

@@ -6,8 +6,8 @@
 //! `GlyphArea` with align / outline / single-span color region set.
 
 use baumhard::core::primitives::ColorFontRegions;
-use baumhard::font::fonts::AppFont;
 use baumhard::font::color::cosmic_color_to_rgba;
+use baumhard::font::fonts::AppFont;
 use baumhard::gfx_structs::area::{GlyphArea, OutlineStyle};
 use glam::Vec2;
 

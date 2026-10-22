@@ -78,7 +78,6 @@ pub(in crate::application::app) fn open_color_picker_contextual(
             seed_var_ref,
             seed_hsv: hsv,
         },
-        hsv,
         doc,
         state,
         interaction_mode,
@@ -102,15 +101,8 @@ pub(in crate::application::app) fn open_color_picker_standalone(
 ) {
     use crate::application::color_picker::PickerMode;
 
-    // Seed to a plausible starting color (red, full saturation, full
-    // value). The user will nudge within seconds, so the exact seed
-    // doesn't matter much — red-at-the-top matches the hue ring's
-    // 12-o'clock slot so the wheel opens with the ring's "start" cell
-    // highlighted.
-    let hsv = (0.0_f32, 1.0_f32, 1.0_f32);
     open_picker_inner(
         PickerMode::Standalone,
-        hsv,
         doc,
         state,
         interaction_mode,
@@ -120,14 +112,27 @@ pub(in crate::application::app) fn open_color_picker_standalone(
     );
 }
 
+/// The color the standalone palette opens on: red, full saturation,
+/// full value. The user will nudge within seconds, so the exact seed
+/// doesn't matter much — red-at-the-top matches the hue ring's
+/// 12-o'clock slot so the wheel opens with the ring's "start" cell
+/// highlighted.
+#[cfg(not(target_arch = "wasm32"))]
+const STANDALONE_SEED_HSV: (f32, f32, f32) = (0.0, 1.0, 1.0);
+
 /// Shared picker-open core: measures glyph advances (one font-system
 /// lock per open, amortized across the whole session) and writes the
 /// `Open` state. Split out so Contextual and Standalone modes share a
 /// single measurement pass and state-init shape.
+///
+/// The opening color comes from `mode` rather than a parameter of its
+/// own: a contextual picker opens on the color it is bound to
+/// (`seed_hsv`), the standalone palette on [`STANDALONE_SEED_HSV`]. It
+/// used to be passed beside `mode`, which for the contextual case said
+/// the same thing twice.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) fn open_picker_inner(
     mode: crate::application::color_picker::PickerMode,
-    (hue_deg, sat, val): (f32, f32, f32),
     doc: &mut MindMapDocument,
     state: &mut crate::application::color_picker::ColorPickerState,
     interaction_mode: &super::super::InteractionMode,
@@ -137,7 +142,12 @@ pub(in crate::application::app) fn open_picker_inner(
 ) {
     use crate::application::color_picker::{
         arm_bottom_font, arm_bottom_glyphs, arm_left_glyphs, arm_right_glyphs, arm_top_glyphs,
-        center_preview_glyph, hue_ring_font_scale, hue_ring_glyphs, ColorPickerState,
+        center_preview_glyph, hue_ring_font_scale, hue_ring_glyphs, ColorPickerState, PickerMode,
+    };
+
+    let (hue_deg, sat, val) = match &mode {
+        PickerMode::Contextual { seed_hsv, .. } => *seed_hsv,
+        PickerMode::Standalone => STANDALONE_SEED_HSV,
     };
 
     // Measure the widest shaped advance across every crosshair-arm
@@ -178,7 +188,7 @@ pub(in crate::application::app) fn open_picker_inner(
             &crosshair,
             measurement_font_size,
         );
-        let ring_glyphs: Vec<&str> = hue_ring_glyphs().iter().copied().collect();
+        let ring_glyphs: Vec<&str> = hue_ring_glyphs().to_vec();
         let ring = crate::application::renderer::measure_max_glyph_advance(
             &mut font_system,
             &ring_glyphs,
@@ -239,7 +249,7 @@ pub(in crate::application::app) fn open_picker_inner(
         (cell, ring, arm_top, arm_bottom, arm_left, arm_right, preview)
     };
 
-    *state = ColorPickerState::Open {
+    *state = ColorPickerState::Open(Box::new(crate::application::color_picker::OpenPicker {
         mode,
         hue_deg,
         sat,
@@ -261,9 +271,9 @@ pub(in crate::application::app) fn open_picker_inner(
         hover_preview: None,
         pending_error_flash: false,
         last_dynamic_apply: None,
-    };
+    }));
 
-    rebuild_color_picker_overlay(state, doc, app_scene, renderer);
+    rebuild_color_picker_overlay(state, app_scene, renderer);
     rebuild_scene_only(doc, interaction_mode, app_scene, renderer, scene_cache);
 }
 

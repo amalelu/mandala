@@ -18,11 +18,11 @@ use baumhard::gfx_structs::tree::MutatorTree;
 use baumhard::gfx_structs::tree_walker::walk_tree_from;
 use baumhard::mindmap::connection;
 use baumhard::mindmap::model::MindMap;
-use baumhard::mindmap::tree_builder::{
-    build_node_resize_handles, build_section_resize_handles, ResizeHandleSide,
-    INACTIVE_NODE_ALPHA_MULTIPLIER,
-};
 use baumhard::mindmap::tree_builder::MindMapTree;
+use baumhard::mindmap::tree_builder::{
+    build_node_resize_handles, build_section_resize_handles, ResizeHandleSide, INACTIVE_NODE_ALPHA_MULTIPLIER,
+};
+use baumhard::util::geometry::aabb_contains;
 
 use super::types::EdgeRef;
 
@@ -71,18 +71,6 @@ pub enum HitTarget {
     /// `Section { node_id, section_idx }` so per-section verbs
     /// (text edit, font, color) can operate on just this section.
     Section { node_id: String, section_idx: usize },
-}
-
-impl HitTarget {
-    /// Owning node id — the same value every per-node consumer
-    /// (highlight, drag, …) wants regardless of whether the user
-    /// pointed at the chrome or a specific section.
-    pub fn node_id(&self) -> &str {
-        match self {
-            HitTarget::NodeContainer { node_id } => node_id,
-            HitTarget::Section { node_id, .. } => node_id,
-        }
-    }
 }
 
 /// Hit-test variant that returns a [`HitTarget`] — distinguishes
@@ -173,21 +161,15 @@ pub fn point_in_node_aabb(canvas_pos: Vec2, node_id: &str, tree: &MindMapTree) -
         return false;
     };
 
-    let x = area.position.x.0;
-    let y = area.position.y.0;
-    let w = area.render_bounds.x.0;
-    let h = area.render_bounds.y.0;
+    let min = Vec2::new(area.position.x.0, area.position.y.0);
+    let bounds = Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0);
 
-    let in_container_aabb =
-        canvas_pos.x >= x && canvas_pos.x <= x + w && canvas_pos.y >= y && canvas_pos.y <= y + h;
-
-    if in_container_aabb {
-        let local = Vec2::new(canvas_pos.x - x, canvas_pos.y - y);
-        return area.shape.contains_local(local, Vec2::new(w, h));
+    if aabb_contains(canvas_pos, min, min + bounds) {
+        return area.shape.contains_local(canvas_pos - min, bounds);
     }
 
     if let Some((tl, br)) = element.subtree_aabb() {
-        return canvas_pos.x >= tl.x && canvas_pos.x <= br.x && canvas_pos.y >= tl.y && canvas_pos.y <= br.y;
+        return aabb_contains(canvas_pos, tl, br);
     }
     false
 }
@@ -231,10 +213,16 @@ pub fn hit_test_edge(canvas_pos: Vec2, map: &MindMap, tolerance: f32) -> Option<
             &edge.anchor_to,
             &edge.control_points,
         );
-        let dist = connection::distance_to_path(canvas_pos, &path);
-        if dist > tolerance {
+        // The tolerance-bounded form: an edge whose bounding box is
+        // further than `tolerance` away is rejected without sampling
+        // the curve. It also decides `NaN` the way a hit test should
+        // — `Some` requires `distance <= tolerance`, so a non-finite
+        // cursor or edge geometry yields no candidate, where the
+        // `distance > tolerance` filter this replaced kept one at an
+        // unordered distance.
+        let Some(dist) = connection::distance_to_path_within(canvas_pos, &path, tolerance) else {
             continue;
-        }
+        };
         if best.as_ref().is_none_or(|(_, best_dist)| dist < *best_dist) {
             best = Some((EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type), dist));
         }
@@ -472,10 +460,10 @@ where
 /// section beneath a moving container would visibly detach from its
 /// node).
 pub fn apply_drag_delta(tree: &mut MindMapTree, node_id: &str, dx: f32, dy: f32, include_descendants: bool) {
-    // The recursive walkers take `Option<&mut Vec>`; passing `None`
-    // skips the per-frame allocation that would otherwise leak
-    // through the patch-collecting variant. Same primitive, two
-    // callers, zero overhead for the no-patch path.
+    // The walkers take `Option<&mut Vec>`; passing `None` skips the
+    // per-frame patch allocation that would otherwise leak through
+    // the patch-collecting variant. Same primitive, two callers, no
+    // patch buffer for the no-patch path.
     apply_drag_delta_inner(tree, node_id, dx, dy, include_descendants, None);
 }
 
@@ -483,9 +471,21 @@ pub fn apply_drag_delta(tree: &mut MindMapTree, node_id: &str, dx: f32, dy: f32,
 /// every node that was moved. The renderer uses these patches to
 /// update buffer positions in-place without reshaping text.
 ///
-/// O(moved_nodes) — no text shaping, no font-system lock. Uses
-/// `first_child` / `next_sibling` iteration instead of collecting
-/// descendants into a `Vec` (§B7).
+/// O(moved_nodes) — no text shaping, no font-system lock. Walks via
+/// `first_child` / `next_sibling` rather than collecting the whole
+/// descendant set into a `Vec` (§B7); the buffers it carries are
+/// `walk_drag_subtree`'s frontiers, each holding the unprocessed
+/// sibling rows along its current path. Plural because
+/// `include_descendants == false` routes through
+/// `walk_drag_node_and_sections`, which calls `walk_drag_subtree`
+/// once per `Flag::SectionRoot` child — one frontier per section,
+/// per drag tick.
+///
+/// `patches` is **appended to**, not cleared — a shift+drag calls
+/// this once per anchor node and wants one combined patch set. The
+/// caller owns the buffer and empties it between frames;
+/// `MovingNodeInteraction` holds it as a field and clears it once
+/// before its per-anchor loop.
 pub fn apply_drag_delta_and_collect_patches(
     tree: &mut MindMapTree,
     node_id: &str,
@@ -538,6 +538,11 @@ fn apply_drag_delta_inner(
 /// Per-frame safe; release-commit syncs the model via
 /// `set_section_offset` (which AABB-validates and pushes a single
 /// undo entry).
+///
+/// `patches` is appended to, not cleared, matching
+/// [`apply_drag_delta_and_collect_patches`];
+/// `MovingSectionInteraction` owns the buffer across frames and
+/// clears it before each call.
 pub fn apply_section_drag_delta_and_collect_patches(
     tree: &mut MindMapTree,
     node_id: &str,
@@ -556,10 +561,14 @@ pub fn apply_section_drag_delta_and_collect_patches(
 
 /// Per-frame tree mutation for the section-resize gesture: write
 /// the in-progress `(canvas_position, canvas_size)` to the
-/// targeted section-area's `GlyphArea`. The renderer's
-/// `rebuild_buffers_from_tree` reshapes the section's text against
-/// the new bounds on the next pass, so the user sees the section
-/// resize live (text reflow + handle tracking).
+/// targeted section-area's `GlyphArea`, so the user sees the
+/// section resize live (text reflow + handle tracking).
+///
+/// Returns the section-area's arena id — the one element this
+/// wrote, and so the one element the caller has to re-shape. The
+/// caller used to answer that with
+/// `Renderer::rebuild_buffers_from_tree`, which re-shapes every
+/// text buffer on the map once per drained frame.
 ///
 /// **Tree-only.** The model is unchanged until release-commit
 /// where `set_section_aabb` writes the final state under one
@@ -576,11 +585,8 @@ pub fn apply_section_resize_to_tree(
     section_idx: usize,
     new_position: Vec2,
     new_size: Vec2,
-) {
-    let section_root = match tree.section_arena_id(node_id, section_idx) {
-        Some(id) => id,
-        None => return,
-    };
+) -> Option<indextree::NodeId> {
+    let section_root = tree.section_arena_id(node_id, section_idx)?;
     if let Some(node) = tree.tree.arena.get_mut(section_root) {
         if let Some(area) = node.get_mut().glyph_area_mut() {
             area.set_position((new_position.x, new_position.y));
@@ -588,6 +594,7 @@ pub fn apply_section_resize_to_tree(
         }
     }
     tree.tree.invalidate_caches();
+    Some(section_root)
 }
 
 /// Hit-test the 8 resize handles of a node at `canvas_pos`.
@@ -607,7 +614,11 @@ pub fn hit_test_node_resize_handle(
         return None;
     }
     let handles = build_node_resize_handles(node_id, node.pos_vec2(), node.size_vec2());
-    nearest_handle_within(handles.iter().map(|h| (h.side, h.position)), canvas_pos, tolerance)
+    nearest_handle_within(
+        handles.iter().map(|h| (h.side, h.position)),
+        canvas_pos,
+        tolerance,
+    )
 }
 
 /// Pick the closest handle whose canvas-space position is within
@@ -634,9 +645,24 @@ fn nearest_handle_within(
 /// in-progress `(canvas_position, canvas_size)` to the node's
 /// container `GlyphArea` and shift every `Flag::SectionRoot` child
 /// by `position_delta` so section content tracks the moving frame.
-/// The renderer's `rebuild_buffers_from_tree` reshapes against
-/// the new bounds on the next pass, so the user sees the node
-/// resize live.
+///
+/// Returns the container's arena id, and fills `patches` with one
+/// `(unique_id, new_canvas_position)` entry per shifted section
+/// element — the same shape
+/// [`Renderer::patch_drag_positions`](crate::application::renderer::Renderer::patch_drag_positions)
+/// consumes, and the same one the move-drag path already collects
+/// through [`walk_drag_subtree`]. Together those two outputs name
+/// **everything this function wrote**: the container, whose bounds
+/// changed and so has to be re-shaped, and the section elements,
+/// which only moved and so only need their buffer positions
+/// patched. Callers used to answer the same question with
+/// `Renderer::rebuild_buffers_from_tree`, re-shaping every text
+/// buffer on the map once per drained frame.
+///
+/// `patches` is cleared first; the caller owns it so a drag can
+/// reuse one allocation across frames. The one caller does:
+/// `NodeResizeInteraction` holds the buffer as a field and hands
+/// the same `Vec` back on every drained frame.
 ///
 /// **Tree-only.** The model is unchanged until release-commit
 /// where `set_node_aabb` writes the final state under one
@@ -659,11 +685,10 @@ pub fn apply_node_resize_to_tree(
     new_position: Vec2,
     new_size: Vec2,
     position_delta: Vec2,
-) {
-    let container_id = match tree.arena_id_for(node_id) {
-        Some(id) => id,
-        None => return,
-    };
+    patches: &mut Vec<(usize, (f32, f32))>,
+) -> Option<indextree::NodeId> {
+    patches.clear();
+    let container_id = tree.arena_id_for(node_id)?;
     if let Some(node) = tree.tree.arena.get_mut(container_id) {
         if let Some(area) = node.get_mut().glyph_area_mut() {
             area.set_position((new_position.x, new_position.y));
@@ -679,11 +704,7 @@ pub fn apply_node_resize_to_tree(
         // position was already written above via `set_position`,
         // so we walk children directly rather than calling the
         // sibling helper that would re-shift the container.
-        let mut child = tree
-            .tree
-            .arena
-            .get(container_id)
-            .and_then(|n| n.first_child());
+        let mut child = tree.tree.arena.get(container_id).and_then(|n| n.first_child());
         while let Some(cid) = child {
             child = tree.tree.arena.get(cid).and_then(|n| n.next_sibling());
             let is_section = tree
@@ -693,11 +714,18 @@ pub fn apply_node_resize_to_tree(
                 .map(|n| n.get().flag_is_set(Flag::SectionRoot))
                 .unwrap_or(false);
             if is_section {
-                walk_drag_subtree(&mut tree.tree.arena, cid, position_delta.x, position_delta.y, None);
+                walk_drag_subtree(
+                    &mut tree.tree.arena,
+                    cid,
+                    position_delta.x,
+                    position_delta.y,
+                    Some(patches),
+                );
             }
         }
     }
     tree.tree.invalidate_caches();
+    Some(container_id)
 }
 
 /// Hit-test the 8 resize handles of a `Some`-sized section at
@@ -729,7 +757,11 @@ pub fn hit_test_section_resize_handle(
     );
     let size = Vec2::new(section_size.width as f32, section_size.height as f32);
     let handles = build_section_resize_handles(node_id, section_idx, section_pos, Some(size));
-    nearest_handle_within(handles.iter().map(|h| (h.side, h.position)), canvas_pos, tolerance)
+    nearest_handle_within(
+        handles.iter().map(|h| (h.side, h.position)),
+        canvas_pos,
+        tolerance,
+    )
 }
 
 /// Walk the container's section-bearing children only — siblings
@@ -766,13 +798,38 @@ fn walk_drag_node_and_sections(
     }
 }
 
-/// Recursively apply a drag delta via `first_child` / `next_sibling`
-/// — zero allocations (§B7). When `patches` is `Some`, push one
-/// `(unique_id, new_pos)` per element that owns a renderer buffer
-/// entry (i.e. `GlyphArea`-bearing variants). Section-model
-/// `GlyphModel` siblings have no buffer key, so emitting their
-/// `unique_id` would drive a hash miss in `patch_drag_positions`
-/// per drag tick — they're skipped.
+/// Apply a drag delta to a subtree, carrying the frontier on the
+/// heap. When `patches` is `Some`, push one `(unique_id, new_pos)`
+/// per element that owns a renderer buffer entry (i.e.
+/// `GlyphArea`-bearing variants). Section-model `GlyphModel`
+/// siblings have no buffer key, so emitting their `unique_id` would
+/// drive a hash miss in `patch_drag_positions` per drag tick —
+/// they're skipped.
+///
+/// Iterative rather than recursive, and for the same reason as the
+/// walkers in `baumhard`: a `.mindmap.json` may carry an arbitrarily
+/// long `parent_id` chain, which is legal and acyclic, so the loader
+/// accepts it and the scene tree inherits its depth. The recursive
+/// form died here on a `SIGABRT` — not a panic, so nothing could
+/// catch or log it — on the first *drag* over such a map, after both
+/// the load and the scene build had survived.
+///
+/// Children are pushed in reverse so `pop()` yields them
+/// left-to-right, which preserves the pre-order the recursion
+/// produced. Not for the renderer's sake — `patch_drag_positions`
+/// looks each patch up by `unique_id`, so it is keyed and
+/// order-independent — but so this rewrite stays exactly
+/// comparable to the recursion it replaced, which is what
+/// `test_iterative_drag_matches_the_recursive_order` checks.
+///
+/// Costs: O(n) in the subtree size, plus one heap vector holding
+/// the frontier — the sum of the unprocessed sibling rows along the
+/// current path — **one element for a linear chain**, since each
+/// node's only child replaces it, O(n) for a shallow wide tree, and
+/// O(depth x branching) in general. §B7 — the previous doc claimed zero allocations,
+/// which the recursive form bought at the price of the stack, and
+/// then claimed a branching width, which is what a *breadth*-first
+/// frontier would hold rather than this one.
 fn walk_drag_subtree(
     arena: &mut indextree::Arena<baumhard::gfx_structs::element::GfxElement>,
     node_id: indextree::NodeId,
@@ -780,19 +837,24 @@ fn walk_drag_subtree(
     dy: f32,
     mut patches: Option<&mut Vec<(usize, (f32, f32))>>,
 ) {
-    if let Some(node) = arena.get_mut(node_id) {
-        let elem = node.get_mut();
-        if let Some(area) = elem.glyph_area_mut() {
-            area.move_position(dx, dy);
-            if let Some(p) = patches.as_deref_mut() {
-                let pos = elem.position();
-                p.push((elem.unique_id(), (pos.x, pos.y)));
+    let mut frontier = vec![node_id];
+    while let Some(id) = frontier.pop() {
+        if let Some(node) = arena.get_mut(id) {
+            let elem = node.get_mut();
+            if let Some(area) = elem.glyph_area_mut() {
+                area.move_position(dx, dy);
+                if let Some(p) = patches.as_deref_mut() {
+                    let pos = elem.position();
+                    p.push((elem.unique_id(), (pos.x, pos.y)));
+                }
             }
         }
-    }
-    let mut child = arena.get(node_id).and_then(|n| n.first_child());
-    while let Some(cid) = child {
-        child = arena.get(cid).and_then(|n| n.next_sibling());
-        walk_drag_subtree(arena, cid, dx, dy, patches.as_deref_mut());
+        let mark = frontier.len();
+        let mut child = arena.get(id).and_then(|n| n.first_child());
+        while let Some(cid) = child {
+            frontier.push(cid);
+            child = arena.get(cid).and_then(|n| n.next_sibling());
+        }
+        frontier[mark..].reverse();
     }
 }

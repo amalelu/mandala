@@ -13,61 +13,84 @@
 use baumhard::util::geometry::pretty_inequal;
 
 use super::Command;
-use crate::application::console::completion::{
-    kv_key_completions, prefix_filter, Completion, CompletionContext, CompletionState,
-};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_or_portal_label_selected;
+use crate::application::console::spec::descent::{descend, Stop};
+use crate::application::console::spec::{
+    bare_words, free, kvs, usage, Bare, Form, Grammar, Key, Subverb, Vocabulary, Word,
+};
 use crate::application::console::traits::{apply_kvs, HasLabel};
-use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
+use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::{MindMapDocument, SelectionState};
 
-pub const VERBS: &[&str] = &["edit", "clear"];
-pub const KEYS: &[&str] = &["text", "position", "position_t", "perpendicular"];
 pub const POSITIONS: &[&str] = &["start", "middle", "end"];
+const POSITION_WORDS: &[Word] = &bare_words::<3>(POSITIONS);
+
+const KEYS: &[Key] = &[
+    Key::new("text", "label text (quote multi-word values)", free("text")),
+    Key::new(
+        "position",
+        "anchor the label at the start, middle or end of the edge",
+        Vocabulary::Words(POSITION_WORDS),
+    ),
+    Key::new(
+        "position_t",
+        "fractional position along the edge, 0.0 … 1.0",
+        free("f32"),
+    ),
+    Key::new(
+        "perpendicular",
+        "offset away from the edge, in canvas units",
+        free("f32"),
+    ),
+];
+
+const SUBVERBS: &[Subverb] = &[
+    Subverb::bare("edit", "editor", "open the inline single-line editor"),
+    Subverb::bare("clear", "reset", "drop the label text"),
+];
+
+pub static GRAMMAR: Grammar = Grammar {
+    label: "label",
+    subverb_sets: &[SUBVERBS],
+    key_sets: &[KEYS],
+    bare: Some(Bare::new(
+        "composed",
+        &[Form::opt(&["text", "position", "position_t", "perpendicular"])],
+    )),
+};
 
 pub const COMMAND: Command = Command {
     name: "label",
     aliases: &[],
     summary: "Edit, clear, reposition, or offset the selected edge's label",
-    usage: "label text=\"<text>\" [position=<start|middle|end>] [position_t=<f32>] [perpendicular=<f32>]   |   label edit   |   label clear",
-    tags: &[
-        "edge", "label", "text", "position", "position_t",
-        "perpendicular", "offset", "drag", "clear", "edit",
-    ],
     applicable: edge_or_portal_label_selected,
-    complete: complete_label,
+    grammar: &GRAMMAR,
+    synonyms: &["edge", "offset", "drag"],
     execute: execute_label,
 };
 
-fn complete_label(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match &state.context {
-        CompletionContext::Token { index: 0 } => {
-            // Position 0: either a verb (`edit`, `clear`) or a kv key.
-            let mut out = prefix_filter(VERBS, state.partial);
-            for k in KEYS {
-                if k.starts_with(state.partial) {
-                    out.push(Completion {
-                        text: format!("{}=", k),
-                        display: format!("{}=", k),
-                        hint: None,
-                        font_family: None,
-                    });
-                }
-            }
-            out
-        }
-        CompletionContext::Token { .. } => kv_key_completions(KEYS, state.partial),
-        CompletionContext::KvValue { key } if key == "position" => prefix_filter(POSITIONS, state.partial),
-        _ => Vec::new(),
-    }
-}
-
 fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    // Positional verbs: `edit`, `clear`. These sit *alongside* the
-    // kv surface — `label edit` with no kvs hands off to the modal;
-    // `label clear` empties the label.
-    match args.positional(0) {
+    // Positional subverbs: `edit`, `clear`. These sit *alongside*
+    // the kv surface — `label edit` with no kvs hands off to the
+    // modal; `label clear` empties the label. The descent matches
+    // them case-insensitively, console-wide
+    // (`commands/mod.rs` § Casing).
+    let descent = descend(&GRAMMAR, args.tokens());
+    if let Err(msg) = kvs::read_strict(&descent, args) {
+        return ExecResult::err(msg);
+    }
+    let name = match descent.stop {
+        Stop::Matched(subverb) => Some(subverb.name),
+        Stop::Bare => None,
+        _ => {
+            return ExecResult::err(usage::unknown_subverb_message(
+                descent.level,
+                descent.typed.unwrap_or_default(),
+            ))
+        }
+    };
+    match name {
         Some("edit") => {
             // `label edit` opens the inline editor. Dispatches
             // to the edge label editor for `Edge` selections and
@@ -75,7 +98,7 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             // selections — the console effect fields are
             // mutually exclusive (only one can be Some per
             // command execution).
-            match &eff.document.selection {
+            match &eff.document().selection {
                 SelectionState::Edge(e) => {
                     eff.side_effect = Some(super::super::ConsoleSideEffect::OpenLabelEdit(e.clone()));
                     eff.close_console = true;
@@ -92,9 +115,9 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                 _ => return ExecResult::err("no edge selected"),
             }
         }
-        Some("clear") => match &eff.document.selection {
+        Some("clear") => match eff.document().selection.clone() {
             SelectionState::Edge(e) => {
-                let changed = eff.document.set_edge_label(&e.clone(), None);
+                let changed = eff.document_mut().set_edge_label(&e, None);
                 return if changed {
                     ExecResult::ok_msg("label cleared")
                 } else {
@@ -104,7 +127,7 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             SelectionState::PortalLabel(s) => {
                 let er = s.edge_ref();
                 let ep = s.endpoint_node_id.clone();
-                let changed = eff.document.set_portal_label_text(&er, &ep, None);
+                let changed = eff.document_mut().set_portal_label_text(&er, &ep, None);
                 return if changed {
                     ExecResult::ok_msg("portal label text cleared")
                 } else {
@@ -113,18 +136,12 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             }
             _ => return ExecResult::err("no edge selected"),
         },
-        Some(other) => {
-            return ExecResult::err(format!(
-                "unknown label verb '{}'; use kv form (text=... position=...) or 'edit' / 'clear'",
-                other
-            ))
-        }
-        None => {}
+        _ => {}
     }
 
     let kvs: Vec<(String, String)> = args.kvs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     if kvs.is_empty() {
-        return ExecResult::err("usage: label text=\"<text>\" [position=<start|middle|end>]");
+        return ExecResult::err(usage::no_arguments_message(&GRAMMAR));
     }
 
     // Position / position_t / perpendicular are edge-label-specific
@@ -145,7 +162,7 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     let mut any_applied = false;
 
     if !trait_kvs.is_empty() {
-        let report = apply_kvs(eff.document, &trait_kvs, |view, key, value| match key {
+        let report = apply_kvs(eff.document_mut(), &trait_kvs, |view, key, value| match key {
             "text" => Some(view.set_label(Some(value.to_string()))),
             _ => None,
         });
@@ -174,7 +191,7 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             endpoint_node_id: String,
         },
     }
-    let target: Option<TargetKind> = match &eff.document.selection {
+    let target: Option<TargetKind> = match &eff.document().selection {
         SelectionState::Edge(er) => Some(TargetKind::LineEdge(er.clone())),
         SelectionState::EdgeLabel(s) => Some(TargetKind::LineEdge(s.edge_ref.clone())),
         SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => Some(TargetKind::PortalEndpoint {
@@ -196,7 +213,7 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                 // Route through the mutation core — same setter
                 // path the parametric `Action::SetEdgeLabelPosition`
                 // arm uses.
-                let changed = apply_label_position_to_selection(eff.document, &value);
+                let changed = apply_label_position_to_selection(eff.document_mut(), &value);
                 any_applied |= changed;
                 if !changed {
                     messages.push(format!("position already {}", value));
@@ -227,7 +244,7 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                     if pretty_inequal(t, clamped) {
                         messages.push(format!("position_t {} clamped to {}", value, clamped));
                     }
-                    let changed = eff.document.set_edge_label_position(er, t);
+                    let changed = eff.document_mut().set_edge_label_position(er, t);
                     any_applied |= changed;
                     if !changed {
                         messages.push(format!("position_t already ≈ {:.4}", clamped));
@@ -279,7 +296,7 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         };
         match target.as_ref() {
             Some(TargetKind::LineEdge(er)) => {
-                let changed = eff.document.set_edge_label_perpendicular_offset(er, offset);
+                let changed = eff.document_mut().set_edge_label_perpendicular_offset(er, offset);
                 any_applied |= changed;
                 if !changed {
                     messages.push("perpendicular already applied".into());
@@ -289,9 +306,11 @@ fn execute_label(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
                 edge_ref,
                 endpoint_node_id,
             }) => {
-                let changed =
-                    eff.document
-                        .set_portal_label_perpendicular_offset(edge_ref, endpoint_node_id, offset);
+                let changed = eff.document_mut().set_portal_label_perpendicular_offset(
+                    edge_ref,
+                    endpoint_node_id,
+                    offset,
+                );
                 any_applied |= changed;
                 if !changed {
                     messages.push("perpendicular already applied".into());

@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Custom derive macros for the Mandala application crate. Today
-//! provides exactly one derive: [`ActionClassify`].
+//! Custom derive macros for the Mandala application crate. Two
+//! derives today, both applied to `Action` and both existing to make
+//! a hand-sync into a build error: [`ActionClassify`], which reads
+//! each variant's classification attributes, and
+//! [`PayloadFieldNames`], which reads each variant's *field names*
+//! off the declaration so a second declaration of them elsewhere can
+//! be checked against it at compile time.
 //!
 //! ## `#[derive(ActionClassify)]`
 //!
@@ -69,12 +74,72 @@
 //!
 //! All three preserve the privilege-gate contract previously
 //! enforced by hand-written exhaustive matches.
+//!
+//! ## `#[derive(PayloadFieldNames)]`
+//!
+//! Publishes each named-field variant's field names, in declaration
+//! order, as a `pub const` named after the variant inside a
+//! generated `<enum_in_snake_case>_payload_fields` module:
+//!
+//! ```ignore
+//! #[derive(PayloadFieldNames)]
+//! pub enum Action {
+//!     AddSection { at: String, text: String },
+//!     SetEdgeBodyGlyph(String),   // tuple variants emit nothing
+//! }
+//!
+//! // generated:
+//! pub mod action_payload_fields {
+//!     pub const AddSection: &[&str] = &["at", "text"];
+//! }
+//! ```
+//!
+//! ### Why a *second* statement of the field names is the point
+//!
+//! The consts exist to be compared against a field-name list written
+//! somewhere else. In Mandala that somewhere else is the
+//! `keybind_surface!` table, whose row for a payload-carrying
+//! `Action` names the same fields to define the positional `args`
+//! contract of a `keybinds.json` binding. A struct expression is
+//! order-free, so a row whose fields are written in the wrong order
+//! compiles, resolves, and hands the user's first argument to the
+//! second field — `AddSection { at, text }` written `{ text, at }`
+//! passed the entire test suite.
+//!
+//! With this derive, the table's row and the enum declaration are two
+//! independent sources for the same list, and a `const fn` comparison
+//! between them under `const _: () = assert!(…)` makes the
+//! transposition an `error[E0080]` at the offending row. That is what
+//! a mirror of the declaration could not do: a mirror agrees with
+//! itself.
+//!
+//! Tuple variants are skipped because the defect cannot exist there —
+//! their "field names" at the other site are local bindings whose
+//! order is the same repetition in the pattern and the constructor.
+
+// CODE_CONVENTIONS §9 closes with "Bare `unwrap()` outside tests is
+// a bug", and this is the half of that rule an editor can tell you
+// about while you type. `util::unwrap_posture` is the other half —
+// it reads the workspace's source text and fails every `./test.sh`
+// run; the lint fails only `./test.sh --lint`, a hard gate since
+// clippy's baseline reached zero, but one you have to ask for. Two
+// mechanisms rather than one because they disagree usefully: the lint sees
+// post-expansion code the text scan cannot read, and the scan sees
+// the `pub mod tests;` trees the lint has to be told about.
+//
+// The `cfg_attr` is what keeps the lint off test code. A
+// `#[cfg(test)] mod` does not exist in the build where the lint is
+// live, and in the build where it does exist the whole crate is
+// allowed — so `unwrap()` stays the right spelling in a test and a
+// bug everywhere else.
+#![warn(clippy::unwrap_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, Data, DeriveInput, Ident, Meta, Token, Variant};
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Meta, Token, Variant};
 
 #[cfg(test)]
 use syn::parse_quote;
@@ -317,6 +382,97 @@ fn discriminant_name(input: &DeriveInput) -> syn::Result<Ident> {
     ))
 }
 
+#[proc_macro_derive(PayloadFieldNames)]
+pub fn derive_payload_field_names(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    derive_payload_field_names_impl(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Pure entry point, split from the `proc_macro::TokenStream` shim
+/// for the same reason [`derive_action_classify_impl`] is: the body
+/// is then reachable from a unit test through `parse_quote!`.
+fn derive_payload_field_names_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
+    let enum_name = &input.ident;
+    let Data::Enum(data_enum) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            enum_name,
+            "PayloadFieldNames can only be derived on enums",
+        ));
+    };
+
+    // Named after the enum so two enums in one module can both carry
+    // the derive. The module is the namespace that lets the const be
+    // named for the variant verbatim — which is what makes the const
+    // reachable from a `macro_rules!` expansion, where an `ident`
+    // capture can be pasted but not case-converted.
+    let module = Ident::new(
+        &format!("{}_payload_fields", snake_case(&enum_name.to_string())),
+        enum_name.span(),
+    );
+
+    let consts: Vec<TokenStream2> = data_enum
+        .variants
+        .iter()
+        .filter_map(|variant| match &variant.fields {
+            Fields::Named(named) => Some((&variant.ident, named)),
+            _ => None,
+        })
+        .map(|(variant_name, named)| {
+            let names = named.named.iter().map(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .expect("syn guarantees an ident for every field of a Fields::Named variant")
+                    .to_string()
+            });
+            let doc = format!(
+                "The field names of `{enum_name}::{variant_name}`, in the order the variant \
+                 declares them.",
+            );
+            quote! {
+                #[doc = #doc]
+                pub const #variant_name: &[&str] = &[ #(#names),* ];
+            }
+        })
+        .collect();
+
+    let module_doc = format!(
+        "Field names of every named-field variant of `{enum_name}`, read off the declaration by \
+         `mandala_derive::PayloadFieldNames`. Exists so a second, independent statement of a \
+         variant's field order can be checked against the declaration at compile time; see the \
+         derive's documentation for the defect that motivates it.",
+    );
+    Ok(quote! {
+        #[doc = #module_doc]
+        // The consts are named for their variants, which is the
+        // whole mechanism — a `macro_rules!` caller pastes the
+        // variant ident straight into the path. `dead_code` because
+        // an enum may well have named-field variants that no second
+        // site restates.
+        #[allow(non_upper_case_globals, dead_code)]
+        pub mod #module {
+            #( #consts )*
+        }
+    })
+}
+
+/// `ActionKind` → `action_kind`. Only ever applied to a type ident,
+/// so the acronym cases stock conversions disagree about (`HTTPBody`)
+/// are outside its remit; it inserts an underscore before every
+/// uppercase char but the first and lowercases the rest.
+fn snake_case(ident: &str) -> String {
+    let mut out = String::with_capacity(ident.len() + 4);
+    for (i, ch) in ident.char_indices() {
+        if ch.is_uppercase() && i != 0 {
+            out.push('_');
+        }
+        out.extend(ch.to_lowercase());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     //! Direct coverage of the parser and discriminant-name lookup.
@@ -534,5 +690,96 @@ mod tests {
                 "delegate `{method}` emitted: {s}",
             );
         }
+    }
+
+    // ── PayloadFieldNames ────────────────────────────────────────
+
+    #[test]
+    fn payload_field_names_emits_declaration_order() {
+        // The property the whole derive exists for: the order in the
+        // emitted const is the order of the *declaration*, so a
+        // second statement of it elsewhere can be checked against it.
+        let input: DeriveInput = parse_quote! {
+            enum Action {
+                AddSection { at: String, text: String },
+            }
+        };
+        let out = derive_payload_field_names_impl(input).unwrap();
+        let s = out.to_string();
+        assert!(
+            s.contains(r#"pub const AddSection : & [& str] = & ["at" , "text"]"#),
+            "declared order must survive verbatim: {s}",
+        );
+    }
+
+    #[test]
+    fn payload_field_names_transposed_declaration_emits_transposed_const() {
+        // The negative of the test above, and the reason the check
+        // downstream is not a mirror: the const tracks the
+        // declaration rather than a fixed expectation, so the two
+        // sources can disagree.
+        let input: DeriveInput = parse_quote! {
+            enum Action {
+                AddSection { text: String, at: String },
+            }
+        };
+        let s = derive_payload_field_names_impl(input).unwrap().to_string();
+        assert!(
+            s.contains(r#"& ["text" , "at"]"#),
+            "the const must follow the declaration, not a canonical order: {s}",
+        );
+    }
+
+    #[test]
+    fn payload_field_names_skips_tuple_and_unit_variants() {
+        let input: DeriveInput = parse_quote! {
+            enum Action {
+                Undo,
+                SetEdgeBodyGlyph(String),
+                SetColor { axis: ColorAxis, value: String },
+            }
+        };
+        let s = derive_payload_field_names_impl(input).unwrap().to_string();
+        assert!(
+            s.contains("pub const SetColor"),
+            "named-field variant emitted: {s}"
+        );
+        assert!(
+            !s.contains("SetEdgeBodyGlyph"),
+            "a tuple variant has no declared field names to publish: {s}",
+        );
+        assert!(!s.contains("Undo"), "a unit variant has no fields at all: {s}");
+    }
+
+    #[test]
+    fn payload_field_names_module_is_named_for_the_enum() {
+        // Two enums in one module both carrying the derive must not
+        // collide, so the module name is derived rather than fixed.
+        let input: DeriveInput = parse_quote! {
+            enum ActionKind {
+                X { a: u8 },
+            }
+        };
+        let s = derive_payload_field_names_impl(input).unwrap().to_string();
+        assert!(
+            s.contains("pub mod action_kind_payload_fields"),
+            "module named for the enum: {s}",
+        );
+    }
+
+    #[test]
+    fn payload_field_names_non_enum_input_errors() {
+        let input: DeriveInput = parse_quote! {
+            struct Action { at: String }
+        };
+        let err = derive_payload_field_names_impl(input).unwrap_err();
+        assert!(err.to_string().contains("only be derived on enums"));
+    }
+
+    #[test]
+    fn snake_case_converts_type_idents() {
+        assert_eq!(snake_case("Action"), "action");
+        assert_eq!(snake_case("ActionKind"), "action_kind");
+        assert_eq!(snake_case("X"), "x");
     }
 }

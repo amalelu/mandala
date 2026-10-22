@@ -166,7 +166,7 @@ fn section_paste_collapses_runs_inheriting_first_run_template() {
                 italic: false,
                 underline: false,
                 font: "LiberationSans".into(),
-                size_pt: 18,
+                size_pt: 18.0,
                 color: "#ff0000".into(),
                 hyperlink: None,
             },
@@ -177,7 +177,7 @@ fn section_paste_collapses_runs_inheriting_first_run_template() {
                 italic: true,
                 underline: false,
                 font: "Other".into(),
-                size_pt: 24,
+                size_pt: 24.0,
                 color: "#00ff00".into(),
                 hyperlink: None,
             },
@@ -185,7 +185,8 @@ fn section_paste_collapses_runs_inheriting_first_run_template() {
     }
     let id = nid.clone();
     {
-        let mut view = TargetView::Section { range: None,
+        let mut view = TargetView::Section {
+            range: None,
             doc: &mut doc,
             id,
             section_idx: 1,
@@ -201,7 +202,7 @@ fn section_paste_collapses_runs_inheriting_first_run_template() {
     );
     let r = &section.text_runs[0];
     assert_eq!(r.font, "LiberationSans", "inherits first-run font");
-    assert_eq!(r.size_pt, 18, "inherits first-run size_pt");
+    assert_eq!(r.size_pt, 18.0, "inherits first-run size_pt");
     assert_eq!(r.color, "#ff0000", "inherits first-run color");
     assert!(r.bold, "inherits first-run bold flag");
     assert!(!r.italic, "second-run italic flag must NOT bleed in");
@@ -227,7 +228,8 @@ fn section_paste_clamps_stale_idx_to_last_section() {
     }
     let id = nid.clone();
     {
-        let mut view = TargetView::Section { range: None,
+        let mut view = TargetView::Section {
+            range: None,
             doc: &mut doc,
             id,
             section_idx: 5, // way past the end
@@ -257,9 +259,10 @@ fn section_copy_emits_structured_payload() {
         "#aaaaaa",
         ["#aaaaaa", "#abcdef"],
         "LiberationSans",
-        18,
+        18.0,
     );
-    let tid = TargetId::Section { range: None,
+    let tid = TargetId::Section {
+        range: None,
         node_id: nid.clone(),
         section_idx: 1,
     };
@@ -268,7 +271,7 @@ fn section_copy_emits_structured_payload() {
         ClipboardContent::Section { text: _, payload } => {
             assert_eq!(payload.text_runs.len(), 1);
             assert_eq!(payload.text_runs[0].color, "#abcdef");
-            assert_eq!(payload.text_runs[0].size_pt, 18);
+            assert_eq!(payload.text_runs[0].size_pt, 18.0);
             assert_eq!(payload.text_runs[0].font, "LiberationSans");
         }
         other => panic!("expected ClipboardContent::Section, got {:?}", other),
@@ -288,7 +291,7 @@ fn section_paste_with_matching_buffer_preserves_runs() {
     clear_section_clipboard();
     let mut doc = load_test_doc();
     let nid = first_node_id(&doc);
-    make_two_section_node_with_pinned_runs(&mut doc, &nid, "#ffffff", ["#ffffff", "#ffffff"], "Seed", 14);
+    make_two_section_node_with_pinned_runs(&mut doc, &nid, "#ffffff", ["#ffffff", "#ffffff"], "Seed", 14.0);
     let payload = SectionPayload {
         text_runs: vec![TextRun {
             start: 0,
@@ -297,7 +300,7 @@ fn section_paste_with_matching_buffer_preserves_runs() {
             italic: true,
             underline: false,
             font: "LiberationSans".into(),
-            size_pt: 22,
+            size_pt: 22.0,
             color: "#112233".into(),
             hyperlink: None,
         }],
@@ -310,7 +313,8 @@ fn section_paste_with_matching_buffer_preserves_runs() {
 
     let id = nid.clone();
     {
-        let mut view = TargetView::Section { range: None,
+        let mut view = TargetView::Section {
+            range: None,
             doc: &mut doc,
             id,
             section_idx: 1,
@@ -320,7 +324,7 @@ fn section_paste_with_matching_buffer_preserves_runs() {
     let section = &doc.mindmap.nodes.get(&nid).unwrap().sections[1];
     assert_eq!(section.text, "src");
     assert_eq!(section.text_runs.len(), 1);
-    assert_eq!(section.text_runs[0].size_pt, 22);
+    assert_eq!(section.text_runs[0].size_pt, 22.0);
     assert!(section.text_runs[0].italic);
     assert_eq!(section.text_runs[0].color, "#112233");
     assert_eq!(section.offset.x, 5.0);
@@ -343,7 +347,7 @@ fn section_paste_buffer_match_survives_trailing_newline() {
     clear_section_clipboard();
     let mut doc = load_test_doc();
     let nid = first_node_id(&doc);
-    make_two_section_node_with_pinned_runs(&mut doc, &nid, "#ffffff", ["#ffffff", "#ffffff"], "Seed", 14);
+    make_two_section_node_with_pinned_runs(&mut doc, &nid, "#ffffff", ["#ffffff", "#ffffff"], "Seed", 14.0);
     let payload = SectionPayload {
         text_runs: vec![TextRun {
             start: 0,
@@ -352,7 +356,7 @@ fn section_paste_buffer_match_survives_trailing_newline() {
             italic: false,
             underline: false,
             font: "PreservedFont".into(),
-            size_pt: 30,
+            size_pt: 30.0,
             color: "#aabbcc".into(),
             hyperlink: None,
         }],
@@ -365,7 +369,8 @@ fn section_paste_buffer_match_survives_trailing_newline() {
 
     let id = nid.clone();
     {
-        let mut view = TargetView::Section { range: None,
+        let mut view = TargetView::Section {
+            range: None,
             doc: &mut doc,
             id,
             section_idx: 1,
@@ -393,7 +398,7 @@ fn section_paste_with_mismatched_buffer_falls_back_to_plain() {
     clear_section_clipboard();
     let mut doc = load_test_doc();
     let nid = first_node_id(&doc);
-    make_two_section_node_with_pinned_runs(&mut doc, &nid, "#ffffff", ["#ffffff", "#ffffff"], "Seed", 14);
+    make_two_section_node_with_pinned_runs(&mut doc, &nid, "#ffffff", ["#ffffff", "#ffffff"], "Seed", 14.0);
     let payload = SectionPayload {
         text_runs: vec![TextRun {
             start: 0,
@@ -402,7 +407,7 @@ fn section_paste_with_mismatched_buffer_falls_back_to_plain() {
             italic: false,
             underline: false,
             font: "ShouldNotApply".into(),
-            size_pt: 99,
+            size_pt: 99.0,
             color: "#deadbe".into(),
             hyperlink: None,
         }],
@@ -415,7 +420,8 @@ fn section_paste_with_mismatched_buffer_falls_back_to_plain() {
 
     let id = nid.clone();
     {
-        let mut view = TargetView::Section { range: None,
+        let mut view = TargetView::Section {
+            range: None,
             doc: &mut doc,
             id,
             section_idx: 1,
@@ -426,7 +432,7 @@ fn section_paste_with_mismatched_buffer_falls_back_to_plain() {
     assert_eq!(section.text, "from-elsewhere");
     assert_eq!(section.text_runs.len(), 1);
     assert_eq!(section.text_runs[0].font, "Seed");
-    assert_eq!(section.text_runs[0].size_pt, 14);
+    assert_eq!(section.text_runs[0].size_pt, 14.0);
 }
 
 /// Cut snapshots the structured payload, clears text + runs, and
@@ -443,7 +449,7 @@ fn section_cut_emits_structured_payload_and_clears_text_runs_only() {
         "#ffffff",
         ["#ffffff", "#abc123"],
         "LiberationSans",
-        14,
+        14.0,
     );
     {
         let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
@@ -452,7 +458,8 @@ fn section_cut_emits_structured_payload_and_clears_text_runs_only() {
     }
     let id = nid.clone();
     let cut = {
-        let mut view = TargetView::Section { range: None,
+        let mut view = TargetView::Section {
+            range: None,
             doc: &mut doc,
             id,
             section_idx: 1,
@@ -484,7 +491,7 @@ fn apply_section_payload_round_trips_through_undo() {
     use baumhard::mindmap::model::TextRun;
     let mut doc = load_test_doc();
     let nid = first_node_id(&doc);
-    make_two_section_node_with_pinned_runs(&mut doc, &nid, "#ffffff", ["#ffffff", "#111111"], "Before", 14);
+    make_two_section_node_with_pinned_runs(&mut doc, &nid, "#ffffff", ["#ffffff", "#111111"], "Before", 14.0);
     {
         doc.mindmap.nodes.get_mut(&nid).unwrap().sections[1].channel = Some(2);
     }
@@ -499,7 +506,7 @@ fn apply_section_payload_round_trips_through_undo() {
             italic: true,
             underline: false,
             font: "After".into(),
-            size_pt: 22,
+            size_pt: 22.0,
             color: "#222222".into(),
             hyperlink: None,
         }],

@@ -27,7 +27,7 @@ use baumhard::mindmap::border::PaletteField;
 use baumhard::mindmap::border_pattern::SidePattern;
 use baumhard::mindmap::model::GlyphBorderConfig;
 
-use super::option_edit::{apply_option_edit, apply_string_set, apply_value_set, OptionEdit};
+use super::option_edit::{apply_option_edit, apply_string_set, OptionEdit};
 use super::{MindMapDocument, NodeEditTail, UndoAction};
 
 /// Bundle of optional edits applied atomically by
@@ -130,6 +130,20 @@ pub struct BorderEditOutcome {
     /// `preset_auto_promoted` to phrase the auto-promotion note
     /// (`"preset=heavy was auto-promoted to 'custom'…"`).
     pub requested_preset: Option<String>,
+    /// Why the edit was refused, empty when it was not.
+    ///
+    /// The loader **rejects** a border glyph past
+    /// `MAX_BORDER_GLYPH_CLUSTERS` / `MAX_BORDER_GLYPH_BYTES`, so a
+    /// writer that accepted one would author a map the editor then
+    /// refused to reopen. Refused rather than truncated because
+    /// these are strings, not metrics: cutting a pattern at the
+    /// ceiling can leave an unbalanced fill region, and silently
+    /// rewriting what the author typed is worse than declining it.
+    ///
+    /// The refusal is atomic — when this is non-empty nothing on the
+    /// node changed, so a single bad glyph does not half-apply the
+    /// rest of the same command.
+    pub rejected: Vec<String>,
 }
 
 /// Active live-preview substitution captured on
@@ -140,12 +154,15 @@ pub struct BorderEditOutcome {
 /// dispatches to the matching committing setter and clears the
 /// preview slot, cancel just clears.
 ///
-/// `selection_snapshot` is the live selection at preview-set time —
-/// the scene builder treats the preview as inactive when the
-/// current `MindMapDocument.selection` no longer covers the
-/// snapshot's targets (drift). The actual clear happens at the
-/// next `set_*` / `commit_*` / `cancel_*` call; the steady-state
-/// "orphaned by drift" preview is harmless until then.
+/// Drift — the selection moving off what the preview targets — is
+/// decided by [`MindMapDocument::border_preview_covers_live_selection`],
+/// which reads `target` against the *live* selection with subset
+/// semantics. It used to compare a snapshot of the selection taken
+/// at preview-set time for equality, which rejected
+/// state-preserving subtarget moves; the snapshot went with that
+/// comparison. The scene builder treats a drifted preview as
+/// inactive, and the actual clear happens at the next `set_*` /
+/// `commit_*` / `cancel_*` call.
 ///
 /// One preview at a time: a fresh `set_border_preview` replaces
 /// any active preview atomically.
@@ -153,7 +170,6 @@ pub struct BorderEditOutcome {
 pub struct BorderPreview {
     pub target: BorderPreviewTarget,
     pub edits: BorderConfigEdits,
-    pub selection_snapshot: SelectionState,
 }
 
 /// Which border slot the preview substitutes for at scene-build
@@ -247,6 +263,13 @@ impl MindMapDocument {
     /// `preset=heavy top=…` request resulted in a `custom` border,
     /// not a `heavy` one with a side override.
     pub fn set_node_border_config(&mut self, node_id: &str, edits: BorderConfigEdits) -> BorderEditOutcome {
+        // Screened before anything is touched, and against the
+        // loader's own rule rather than a copy of it. Atomic: a
+        // refusal leaves the node exactly as it was, preview
+        // included.
+        if let Some(refusal) = refuse_border_glyph_edits(&edits) {
+            return refusal;
+        }
         // Scope-gated implicit cancel: a committing per-node edit
         // only clears previews whose visual scope it overlaps —
         // `Nodes(_)` previews target the same surface, and
@@ -329,6 +352,14 @@ impl MindMapDocument {
         section_idx: usize,
         edits: BorderConfigEdits,
     ) -> BorderEditOutcome {
+        // See `set_node_border_config`: refuse an over-ceiling glyph
+        // before the preview is canceled. The loader screens a
+        // section's `frame_border` exactly as it screens a node's
+        // `style.border`, so this surface authors the same
+        // unopenable file when it is left unguarded.
+        if let Some(refusal) = refuse_border_glyph_edits(&edits) {
+            return refusal;
+        }
         // Scope-gated implicit cancel — only clear previews whose
         // visual scope this commit overlaps: `Sections(_)` (same
         // per-section surface) and the two `CanvasSectionFrame*`
@@ -393,6 +424,14 @@ impl MindMapDocument {
     /// field in one step. Same posture as the
     /// `theme switch` verb.
     pub fn set_canvas_default_border(&mut self, edits: BorderConfigEdits) -> BorderEditOutcome {
+        // See `set_node_border_config`: refuse before the preview is
+        // canceled and the `Canvas` is cloned for undo.
+        // `canvas_numeric_violations` screens `default_border` with
+        // the same rule the per-node door uses, so this surface is
+        // no less able to author a map that will not reopen.
+        if let Some(refusal) = refuse_border_glyph_edits(&edits) {
+            return refusal;
+        }
         // Scope-gated implicit cancel — `CanvasDefault` previews
         // share the canvas-border slot directly; `Nodes(_)`
         // previews render against per-node-resolved styles which
@@ -436,7 +475,7 @@ impl MindMapDocument {
         );
 
         self.undo_stack.push(UndoAction::CanvasSnapshot {
-            canvas: canvas_snapshot,
+            canvas: Box::new(canvas_snapshot),
         });
         self.dirty = true;
         outcome.changed = true;
@@ -459,6 +498,13 @@ impl MindMapDocument {
         focused: bool,
         edits: BorderConfigEdits,
     ) -> BorderEditOutcome {
+        // See `set_node_border_config`. Both slots this writes —
+        // `default_section_frame_border` and
+        // `default_focused_section_frame_border` — are screened by
+        // `canvas_numeric_violations` at load.
+        if let Some(refusal) = refuse_border_glyph_edits(&edits) {
+            return refusal;
+        }
         // Scope-gated implicit cancel — clear previews whose
         // visual scope this commit overlaps:
         // `CanvasSectionFrame[Focused]` (same canvas slot) and
@@ -523,7 +569,7 @@ impl MindMapDocument {
         detect_preset_auto_promote(landed, preset_before.as_deref(), &mut outcome);
 
         self.undo_stack.push(UndoAction::CanvasSnapshot {
-            canvas: canvas_snapshot,
+            canvas: Box::new(canvas_snapshot),
         });
         self.dirty = true;
         outcome.changed = true;
@@ -546,6 +592,14 @@ impl MindMapDocument {
         target: BorderPreviewTarget,
         edits: BorderConfigEdits,
     ) -> BorderEditOutcome {
+        // Refused before the preview is recorded at all. A preview the
+        // commit will decline is worse than a plain refusal: the scene
+        // renders the over-ceiling glyph, so the user is shown a border
+        // they cannot keep and finds out at commit — or, before
+        // `merge_outcome` carried the refusal, did not find out.
+        if let Some(refusal) = refuse_border_glyph_edits(&edits) {
+            return refusal;
+        }
         // Drop any orphan-by-drift preview before recording a new
         // one. Defer-clear posture: the scene-build path treats a
         // drifted preview as inactive; the actual slot empties
@@ -623,11 +677,7 @@ impl MindMapDocument {
         // the staged edits are a no-op against the current slot.
         // The simulation already populated it via the helper.
 
-        self.border_preview = Some(BorderPreview {
-            target,
-            edits,
-            selection_snapshot: self.selection.clone(),
-        });
+        self.border_preview = Some(BorderPreview { target, edits });
         outcome
     }
 
@@ -708,24 +758,22 @@ impl MindMapDocument {
         // `show_frame` stays false). For `Nodes(_)` targets we
         // therefore inject `visible = Set(true)` into the
         // commit-time edits whenever the preview's edits touch
-        // any field — same predicate the scene-side preview used
-        // to set `force_show_frame`. Per-section / canvas previews
-        // don't carry a visibility axis (sections render in
-        // NodeEdit unconditionally; canvas defaults don't have a
-        // `show_frame` flag), so the coupling is `Nodes`-only.
+        // any field — the same `edits_touch_cfg_field` the
+        // scene-side preview used to set `force_show_frame`, and
+        // the same one `apply_border_config_edits` uses to decide
+        // whether a slot is worth allocating. It was open-coded
+        // here until #48: two copies of one field list, where a
+        // field added to only one silently stops force-showing at
+        // commit while still previewing. Per-section / canvas
+        // previews don't carry a visibility axis (sections render
+        // in NodeEdit unconditionally; canvas defaults don't have
+        // a `show_frame` flag), so the coupling is `Nodes`-only.
         let mut commit_edits = preview.edits.clone();
-        if matches!(preview.target, BorderPreviewTarget::Nodes(_)) && commit_edits.visible.is_none() {
-            let touches_any_field = !matches!(commit_edits.preset, OptionEdit::Keep)
-                || !matches!(commit_edits.font, OptionEdit::Keep)
-                || !matches!(commit_edits.font_size_pt, OptionEdit::Keep)
-                || !matches!(commit_edits.color, OptionEdit::Keep)
-                || !matches!(commit_edits.padding, OptionEdit::Keep)
-                || !matches!(commit_edits.color_palette, OptionEdit::Keep)
-                || !matches!(commit_edits.color_palette_field, OptionEdit::Keep)
-                || edits_touch_glyphs(&commit_edits);
-            if touches_any_field || commit_edits.clear {
-                commit_edits.visible = Some(true);
-            }
+        if matches!(preview.target, BorderPreviewTarget::Nodes(_))
+            && commit_edits.visible.is_none()
+            && (edits_touch_cfg_field(&commit_edits) || commit_edits.clear)
+        {
+            commit_edits.visible = Some(true);
         }
         let mut merged = BorderEditOutcome::default();
         match preview.target {
@@ -759,7 +807,10 @@ impl MindMapDocument {
 /// `changed` aggregates with OR; the first auto-promotion's
 /// `requested_preset` wins (same posture as
 /// `border/execute.rs::apply_edits`'s tally).
-fn merge_outcome(merged: &mut BorderEditOutcome, one: BorderEditOutcome) {
+pub(in crate::application::document) fn merge_outcome(
+    merged: &mut BorderEditOutcome,
+    one: BorderEditOutcome,
+) {
     if one.changed {
         merged.changed = true;
     }
@@ -767,12 +818,32 @@ fn merge_outcome(merged: &mut BorderEditOutcome, one: BorderEditOutcome) {
         merged.preset_auto_promoted = true;
         merged.requested_preset = one.requested_preset;
     }
+    // Carried, not dropped. This fold is the whole of what
+    // `commit_border_preview` returns, so a `rejected` left behind here
+    // is a refusal the verb never hears about — and a preview commit
+    // that reports success for a border the model does not have is the
+    // same lie as the lockout this branch exists to remove, one step
+    // removed. First target to refuse wins; every target received the
+    // same edit struct, so the reasons are the same.
+    if merged.rejected.is_empty() {
+        merged.rejected = one.rejected;
+    }
 }
 
 /// Set `outcome.preset_auto_promoted = true` when `landed`'s preset
 /// is `"custom"` (case-insensitive), the pre-edit preset wasn't
 /// already custom, and the user explicitly asked for some preset
-/// (i.e. their kv mentioned `preset=`). Shared between the four
+/// **other than `custom`** (i.e. their kv mentioned `preset=` and
+/// named something the glyph then overrode).
+///
+/// The last clause used to be only "mentioned `preset=`", which
+/// made `border preset=custom` on a non-custom node answer
+/// `note: preset='custom' auto-promoted to 'custom' (a side or
+/// corner glyph was set; …)`. Neither half was true: the user asked
+/// for `custom` and got it, and on the bare form no glyph was set at
+/// all. A promotion needs something to be promoted *from*.
+///
+/// Shared between the four
 /// border-style setters (`set_node_border_config`,
 /// `set_section_frame_border_config`,
 /// `set_canvas_default_border`,
@@ -793,7 +864,11 @@ pub(super) fn detect_preset_auto_promote(
     let was_already_custom = preset_before
         .map(|p| p.eq_ignore_ascii_case("custom"))
         .unwrap_or(false);
-    if !was_already_custom && outcome.requested_preset.is_some() {
+    let asked_for_custom = outcome
+        .requested_preset
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case("custom"));
+    if !was_already_custom && outcome.requested_preset.is_some() && !asked_for_custom {
         outcome.preset_auto_promoted = true;
     }
 }
@@ -812,14 +887,21 @@ pub(super) fn apply_border_edits(
     edits: &BorderConfigEdits,
     outcome: &mut BorderEditOutcome,
 ) -> bool {
-    let mut changed = false;
+    // Config fields first: the slot applier screens the eight glyph
+    // fields and refuses the whole bundle. Running it *before* the
+    // `visible` write is what keeps that refusal atomic — otherwise
+    // `border on top=<over-ceiling>` would flip `show_frame` and
+    // then decline the glyph, leaving half the command applied.
+    let mut changed = apply_glyph_border_edits_to_slot(&mut node.style.border, edits, outcome);
+    if !outcome.rejected.is_empty() {
+        return false;
+    }
     if let Some(v) = edits.visible {
         if node.style.show_frame != v {
             node.style.show_frame = v;
             changed = true;
         }
     }
-    changed |= apply_glyph_border_edits_to_slot(&mut node.style.border, edits, outcome);
     changed
 }
 
@@ -844,6 +926,25 @@ pub(crate) fn apply_glyph_border_edits_to_slot(
     edits: &BorderConfigEdits,
     outcome: &mut BorderEditOutcome,
 ) -> bool {
+    // The eight glyph fields are screened *here* — at the one point
+    // every border writer funnels through — rather than at each
+    // setter. This is the same layer the `font_size_pt` and
+    // `padding` clamps below already occupy, and putting the glyph
+    // screen anywhere else is what let three of the four writers go
+    // unguarded (`section frame`, `canvas border`,
+    // `canvas section-frame`) while the fourth looked like it
+    // settled the class.
+    //
+    // Returning `false` means "nothing changed", so a refusal cannot
+    // push an undo entry or flip `dirty`; the caller reads
+    // `outcome.rejected` to report it. The screen runs before the
+    // slot is touched, which is what makes the refusal atomic.
+    let rejected = border_glyph_edit_violations(edits);
+    if !rejected.is_empty() {
+        outcome.rejected = rejected;
+        return false;
+    }
+
     if let OptionEdit::Set(p) = &edits.preset {
         outcome.requested_preset = Some(p.clone());
     }
@@ -857,7 +958,7 @@ pub(crate) fn apply_glyph_border_edits_to_slot(
 
     let mut changed = false;
     let had_cfg = slot.is_some();
-    let cfg = slot.get_or_insert_with(default_glyph_border_config);
+    let cfg = slot.get_or_insert_with(GlyphBorderConfig::default);
     if !had_cfg {
         changed = true;
     }
@@ -869,9 +970,36 @@ pub(crate) fn apply_glyph_border_edits_to_slot(
         }
     }
     changed |= apply_option_edit(&edits.font, &mut cfg.font, |v| v.clone());
-    changed |= apply_value_set(&edits.font_size_pt, &mut cfg.font_size_pt);
+    // Clamp rather than pass through: the loader rejects a border
+    // font size outside the shaper's domain, so an unclamped write
+    // here would let the editor author a map it then refused to
+    // reopen. Same posture as the reverse converter's
+    // `clamp_run_size_pt`.
+    if let crate::application::document::OptionEdit::Set(requested) = &edits.font_size_pt {
+        let clamped = baumhard::font::fonts::clamp_font_metric(*requested, cfg.font_size_pt);
+        if cfg.font_size_pt != clamped {
+            cfg.font_size_pt = clamped;
+            changed = true;
+        }
+    }
     changed |= apply_option_edit(&edits.color, &mut cfg.color, |v| v.clone());
-    changed |= apply_value_set(&edits.padding, &mut cfg.padding);
+    // Clamped for the same reason as `font_size_pt` two lines above,
+    // and it is the same hole: the loader bounds `padding` at
+    // `MAX_NODE_AXIS`, while the console's `border padding=` parses
+    // through `parse_finite_pt`, which accepts any positive finite
+    // f32. `border padding=1e30` reported success and wrote a map
+    // that would not reopen.
+    if let crate::application::document::OptionEdit::Set(requested) = &edits.padding {
+        let clamped = baumhard::mindmap::model::validate::clamp_to_bound(
+            *requested,
+            baumhard::mindmap::model::MAX_NODE_AXIS,
+            cfg.padding,
+        );
+        if cfg.padding != clamped {
+            cfg.padding = clamped;
+            changed = true;
+        }
+    }
     changed |= apply_option_edit(&edits.color_palette, &mut cfg.color_palette, |v| v.clone());
     changed |= apply_option_edit(&edits.color_palette_field, &mut cfg.color_palette_field, |v| {
         v.as_str().to_string()
@@ -905,6 +1033,57 @@ pub(crate) fn apply_glyph_border_edits_to_slot(
     changed
 }
 
+/// Every border-glyph ceiling violation carried by one edit set.
+///
+/// Runs the eight authored glyph fields through the loader's
+/// `validate::border_glyph_violations`, so the writer and the door
+/// cannot drift to different ceilings. Empty for an edit set that
+/// touches no glyph.
+/// Refuse a glyph-bearing edit bundle before the setter takes any
+/// side effect — canceling a live preview, cloning a `Canvas` for
+/// the undo stack.
+///
+/// [`apply_glyph_border_edits_to_slot`] screens the same fields and
+/// is the guarantee that no writer can save a map the loader then
+/// refuses to open. This is the earlier, politer stop, so a declined
+/// edit does not also throw away the preview the user was looking
+/// at. A writer that forgets to call it loses a preview and nothing
+/// more; a writer that skipped the screen entirely would author an
+/// unopenable file, which is why the load-bearing copy lives at the
+/// chokepoint and not here.
+fn refuse_border_glyph_edits(edits: &BorderConfigEdits) -> Option<BorderEditOutcome> {
+    let rejected = border_glyph_edit_violations(edits);
+    if rejected.is_empty() {
+        return None;
+    }
+    Some(BorderEditOutcome {
+        rejected,
+        ..Default::default()
+    })
+}
+
+fn border_glyph_edit_violations(edits: &BorderConfigEdits) -> Vec<String> {
+    use crate::application::document::OptionEdit;
+    let mut out = Vec::new();
+    for (name, edit) in [
+        ("top", &edits.side_top),
+        ("bottom", &edits.side_bottom),
+        ("left", &edits.side_left),
+        ("right", &edits.side_right),
+        ("top_left", &edits.corner_top_left),
+        ("top_right", &edits.corner_top_right),
+        ("bottom_left", &edits.corner_bottom_left),
+        ("bottom_right", &edits.corner_bottom_right),
+    ] {
+        if let OptionEdit::Set(glyph) = edit {
+            out.extend(baumhard::mindmap::model::validate::border_glyph_violations(
+                "border", name, glyph,
+            ));
+        }
+    }
+    out
+}
+
 fn edits_touch_cfg_field(edits: &BorderConfigEdits) -> bool {
     !matches!(edits.preset, OptionEdit::Keep)
         || !matches!(edits.font, OptionEdit::Keep)
@@ -932,7 +1111,6 @@ fn preset_is_custom(s: &str) -> bool {
 }
 
 use baumhard::mindmap::border::default_custom_glyphs;
-use baumhard::mindmap::border::default_glyph_border_config;
 
 /// Resolve the live selection's set of node ids — the same shape
 /// `border_preview_covers_live_selection` uses to compare against
@@ -961,10 +1139,9 @@ fn live_selection_node_ids(sel: &SelectionState) -> Vec<String> {
 fn live_selection_section_pairs(sel: &SelectionState) -> Vec<(String, usize)> {
     match sel {
         SelectionState::Section(s) => vec![(s.node_id.clone(), s.section_idx)],
-        SelectionState::SectionRange { sel, range } => {
-            let (lo, hi) = (range.0.min(range.1), range.0.max(range.1));
-            (lo..=hi).map(|i| (sel.node_id.clone(), i)).collect()
-        }
+        SelectionState::SectionRange {
+            sel, section_span, ..
+        } => section_span.indices().map(|i| (sel.node_id.clone(), i)).collect(),
         SelectionState::MultiSection(sels) => {
             sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect()
         }

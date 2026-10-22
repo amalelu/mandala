@@ -167,13 +167,6 @@ pub fn hue_slot_to_degrees(slot: usize) -> f32 {
     (slot as f32 / HUE_SLOT_COUNT as f32) * 360.0
 }
 
-/// Quantize a degrees value to the nearest hue slot.
-pub fn degrees_to_hue_slot(deg: f32) -> usize {
-    let normalized = deg.rem_euclid(360.0) / 360.0;
-    let slot = (normalized * HUE_SLOT_COUNT as f32).round() as usize;
-    slot % HUE_SLOT_COUNT
-}
-
 /// Convert a saturation-bar cell index to its `[0, 1]` value.
 pub fn sat_cell_to_value(cell: usize) -> f32 {
     cell as f32 / (SAT_CELL_COUNT as f32 - 1.0)

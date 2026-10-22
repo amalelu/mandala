@@ -27,136 +27,74 @@
 //! `section=K` kv when the selection is `Single(node_id)`.
 
 use baumhard::mindmap::border::resolve_section_frame_border;
+use baumhard::mindmap::SELECTION_HIGHLIGHT_HEX;
 
 use crate::application::console::commands::border::{
-    custom_preset_hint, edits_has_glyph_field, nodes_in_selection, stage_kv, KEYS as BORDER_KEYS,
-};
-use crate::application::console::completion::{
-    kv_key_completions_with_hints, prefix_filter, Completion, CompletionContext, CompletionState,
+    edits_has_glyph_field, nodes_in_selection, stage_kv, BorderEdit,
 };
 use crate::application::console::parser::Args;
-use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
+use crate::application::console::spec::descent::Stop;
+use crate::application::console::spec::{kvs, usage, Descent};
+use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::{BorderConfigEdits, BorderEditOutcome, OptionEdit, SelectionState};
 
+use self::grammar::SECTION_FRAME;
 use super::target::{parse_section_target_kv, SectionTargetPolicy};
 
-/// Subverbs surfaced as token-2 completions after `section frame`.
-pub const VERBS: &[&str] = &["show", "reset", "preview"];
-
-pub fn complete_section_frame(state: &CompletionState, ctx: &ConsoleContext) -> Vec<Completion> {
-    // After `section frame preview ` the user gets `commit` /
-    // `cancel` plus the kv keys (preview accepts the same
-    // vocabulary as the committing kv-form). The engine's
-    // `Token { index }` counts past the parent command, so
-    // `section frame preview <here>` lands at index 2.
-    let after_preview = state.tokens.get(2).map(String::as_str) == Some("preview");
-    match &state.context {
-        // The engine's `Token { index }` is the count of non-kv
-        // positionals *after* the command name, so for the input
-        // `section frame ` the cursor sits at `index: 1`. (`index: 0`
-        // is for `section <here>` — handled by `complete_section`.)
-        // Anything past the `frame` subverb (so `index >= 1`) accepts
-        // the same kv keyset the top-level `border …` verb does.
-        CompletionContext::Token { index: 1 } => {
-            let mut out = prefix_filter(VERBS, state.partial);
-            out.extend(kv_key_completions_with_hints(BORDER_KEYS, state.partial, kv_hint));
-            out
-        }
-        CompletionContext::Token { index: 2 } if after_preview => {
-            // C12: surface commit/cancel with their hints (shared
-            // helper) so the popup tells users what each does.
-            let mut out =
-                crate::application::console::commands::border::preview_subverb_completions(state.partial);
-            out.extend(kv_key_completions_with_hints(BORDER_KEYS, state.partial, kv_hint));
-            out
-        }
-        CompletionContext::Token { index: i } if *i > 1 => {
-            kv_key_completions_with_hints(BORDER_KEYS, state.partial, kv_hint)
-        }
-        // KvValue completions for `preset=` / `palette=` / `font=` /
-        // `color=` / `field=`. Mirror `border/complete.rs` so the
-        // popup vocabulary is identical regardless of which border
-        // surface (node / section / canvas) the user is editing.
-        CompletionContext::KvValue { key } => {
-            crate::application::console::commands::border::kv_value_completions(
-                key.as_str(),
-                state.partial,
-                ctx,
-            )
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// Per-key hint table — delegates to the shared
-/// [`super::super::border::kv_hint`] so `border …`,
-/// `section frame …`, and `canvas …` surface identical hints.
-fn kv_hint(key: &str) -> Option<&'static str> {
-    super::super::border::kv_hint(key)
-}
+pub(crate) mod grammar;
 
 /// Entry point dispatched from `section/mod.rs::execute_section`
 /// when the user typed `section frame …`. Args still includes the
 /// `frame` token at positional(0) (the parent dispatcher only
 /// consumed `section`); we read positional(1) to peek at the
 /// optional `show` / `reset` subverb.
-pub fn execute_section_frame(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    if let Some(verb) = args.positional(1) {
-        // C14: case-insensitive match — same posture as `border
-        // preview commit` / `cancel` already use, and as the
-        // committing `border …` verb arms. Without normalizing
-        // here `Show` / `RESET` / `Preview` would route through
-        // the kv-form path and produce a confusing error.
-        match verb.to_ascii_lowercase().as_str() {
-            "show" => return execute_show(args, eff),
-            "reset" => return apply_reset(args, eff),
-            "preview" => return execute_section_frame_preview(args, eff),
-            other if !other.contains('=') => {
-                if args.kvs().next().is_some() {
-                    return ExecResult::err(format!(
-                        "section frame: unexpected positional '{}' alongside a kv pair — \
-                         did you mean to quote a multi-word value? \
-                         e.g. `section frame palette=\"{}\"`",
-                        verb, verb
-                    ));
+pub fn execute_section_frame(descent: &Descent, args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
+    if descent.parent_name(1) == Some("preview") {
+        return execute_section_frame_preview(descent, args, eff);
+    }
+    match descent.stop {
+        Stop::Matched(subverb) => match subverb.name {
+            "show" => match kvs::read_strict(descent, args) {
+                Ok(_) => execute_show(args, eff),
+                Err(msg) => ExecResult::err(msg),
+            },
+            _ => match kvs::read_strict(descent, args) {
+                Ok(_) => apply_reset(args, eff),
+                Err(msg) => ExecResult::err(msg),
+            },
+        },
+        Stop::KvForm => ExecResult::err(descent.quoting_hint(args)),
+        Stop::Unknown => ExecResult::err(usage::unknown_subverb_message(
+            descent.level,
+            descent.typed.unwrap_or_default(),
+        )),
+        Stop::Bare => {
+            let pairs = match kvs::read_strict(descent, args) {
+                Ok(pairs) => pairs,
+                Err(msg) => return ExecResult::err(msg),
+            };
+            let mut edits = BorderConfigEdits::default();
+            let mut saw_any = false;
+            for pair in &pairs {
+                // The `section=K` kv targets the section to write
+                // to; it is not a border field. The level declares
+                // it so the popup offers it and `help` documents
+                // it, and the staging pass skips it — the resolver
+                // below consumes it separately.
+                if pair.key.name == "section" {
+                    continue;
                 }
-                return ExecResult::err(format!(
-                    "section frame: unknown subverb '{}'\n  \
-                     positional today: show | reset | preview\n  \
-                     per-field grammar lives in the kv form for now — \
-                     `section frame preset=heavy padding=8` etc. Per-node \
-                     `border` and `canvas border` accept positional \
-                     `preset / color / padding / palette / font / side / corner`; \
-                     section-frame parity is tracked as a follow-up.\n  \
-                     staged: preview <kv>=… | preview commit | preview cancel\n  \
-                     composed: <key>=<value> [<key>=<value> …]",
-                    verb
-                ));
+                saw_any = true;
+                if let Err(e) = stage_kv(&mut edits, pair.key.name, pair.value) {
+                    return ExecResult::err(e);
+                }
             }
-            _ => {}
+            if !saw_any {
+                return ExecResult::err(usage::no_arguments_message(&SECTION_FRAME));
+            }
+            apply_edits(args, eff, edits)
         }
     }
-
-    let mut edits = BorderConfigEdits::default();
-    let mut saw_any = false;
-    for (k, v) in args.kvs() {
-        if k == "section" {
-            // The `section=K` kv targets the section to write to;
-            // it's not a border field. Skip it on the staging
-            // pass — the resolver below consumes it separately.
-            continue;
-        }
-        saw_any = true;
-        if let Err(e) = stage_kv(&mut edits, k, v) {
-            return ExecResult::err(e);
-        }
-    }
-    if !saw_any {
-        return ExecResult::err(
-            "usage: section frame show|reset | section frame <key>=<value> … [section=<idx>]",
-        );
-    }
-    apply_edits(args, eff, edits)
 }
 
 fn apply_reset(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
@@ -172,7 +110,7 @@ fn apply_edits(args: &Args, eff: &mut ConsoleEffects, edits: BorderConfigEdits) 
     // `nodes_in_selection` rather than collapsing all five branches
     // (no selection / edge / edge-label / portal-label / portal-text)
     // into a single misleading "select a section" message.
-    let node_ids = match nodes_in_selection(&eff.document.selection, "section frame") {
+    let node_ids = match nodes_in_selection(&eff.document().selection, "section frame") {
         Ok(ids) => ids,
         Err(e) => return e,
     };
@@ -202,11 +140,11 @@ fn apply_edits(args: &Args, eff: &mut ConsoleEffects, edits: BorderConfigEdits) 
             .get(node_id)
             .map(|n| n.sections.len())
             .unwrap_or(0);
-        let section_idx = match resolve_section_idx_for(&eff.document.selection, node_id, kv_idx, n_sections)
-        {
-            Ok(idx) => idx,
-            Err(msg) => return ExecResult::err(msg),
-        };
+        let section_idx =
+            match resolve_section_idx_for(&eff.document().selection, node_id, kv_idx, n_sections) {
+                Ok(idx) => idx,
+                Err(msg) => return ExecResult::err(msg),
+            };
         if section_idx >= n_sections {
             return ExecResult::err(format!(
                 "section[{}] not found on node '{}'",
@@ -233,7 +171,7 @@ fn apply_edits(args: &Args, eff: &mut ConsoleEffects, edits: BorderConfigEdits) 
                 .and_then(|s| s.frame_border.as_ref())
                 .map(|c| c.preset.as_str())
                 .or_else(|| {
-                    eff.document
+                    eff.document()
                         .mindmap
                         .canvas
                         .default_section_frame_border
@@ -254,9 +192,10 @@ fn apply_edits(args: &Args, eff: &mut ConsoleEffects, edits: BorderConfigEdits) 
 
     let mut changed = 0usize;
     let mut auto_promoted: Option<String> = None;
+    let mut rejected: Vec<String> = Vec::new();
     for (node_id, section_idx) in &targets {
         let outcome: BorderEditOutcome =
-            eff.document
+            eff.document_mut()
                 .set_section_frame_border_config(node_id, *section_idx, edits.clone());
         if outcome.changed {
             changed += 1;
@@ -264,40 +203,25 @@ fn apply_edits(args: &Args, eff: &mut ConsoleEffects, edits: BorderConfigEdits) 
         if outcome.preset_auto_promoted && auto_promoted.is_none() {
             auto_promoted = outcome.requested_preset.clone();
         }
-    }
-
-    let mut lines: Vec<String> = Vec::new();
-    if changed == 0 {
-        if bare_custom {
-            lines.push("section frame: preset=custom set; no glyph fields were given".into());
-            lines.push(custom_preset_hint("section frame"));
-            return ExecResult::lines(lines);
+        if rejected.is_empty() {
+            rejected = outcome.rejected;
         }
-        return ExecResult::ok_msg("section frame: no change");
     }
-    lines.push(format!("section frame applied to {} section(s)", changed));
-    if let Some(name) = auto_promoted {
-        lines.push(format!(
-            "note: preset='{}' auto-promoted to 'custom' \
-             (a side or corner glyph was set; non-custom presets \
-             ignore the per-section glyph override)",
-            name
-        ));
+    BorderEdit {
+        label: "section frame",
+        scope: "section",
+        headline: (changed > 0).then(|| format!("section frame applied to {} section(s)", changed)),
+        rejected,
+        auto_promoted,
+        bare_custom,
     }
-    if bare_custom {
-        lines.push(custom_preset_hint("section frame"));
-    }
-    if lines.len() == 1 {
-        ExecResult::ok_msg(lines.into_iter().next().expect("len==1"))
-    } else {
-        ExecResult::lines(lines)
-    }
+    .finish()
 }
 
 fn execute_show(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     // Surface the specific not-applicable variant — same shape as
     // `apply_edits`. See its comment for the rationale.
-    let node_ids = match nodes_in_selection(&eff.document.selection, "section frame show") {
+    let node_ids = match nodes_in_selection(&eff.document().selection, "section frame show") {
         Ok(ids) => ids,
         Err(e) => return e,
     };
@@ -316,11 +240,11 @@ fn execute_show(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         .get(&node_id)
         .map(|n| n.sections.len())
         .unwrap_or(0);
-    let section_idx = match resolve_section_idx_for(&eff.document.selection, &node_id, kv_idx, n_sections) {
+    let section_idx = match resolve_section_idx_for(&eff.document().selection, &node_id, kv_idx, n_sections) {
         Ok(idx) => idx,
         Err(msg) => return ExecResult::err(msg),
     };
-    let map = &eff.document.mindmap;
+    let map = &eff.document().mindmap;
     let Some(node) = map.nodes.get(&node_id) else {
         return ExecResult::err(format!("section frame show: node '{}' not found", node_id));
     };
@@ -378,7 +302,10 @@ fn push_resolved_section_frame(
     } else {
         "hardcoded light floor"
     };
-    let resolved = resolve_section_frame_border(section, canvas, focused, "#00E5FF");
+    // Same floor color the tree builder resolves the frame against
+    // (`tree_builder/section_frame.rs`), read from its definition so
+    // the readout cannot report a color the canvas does not draw.
+    let resolved = resolve_section_frame_border(section, canvas, focused, SELECTION_HIGHLIGHT_HEX);
     // Cascade pick — same logic `resolve_section_frame_border`
     // walks. We re-derive it for the per-side / per-corner readout
     // because `resolve_border_style` discards the source `glyphs`
@@ -457,11 +384,11 @@ fn resolve_section_idx_for(
     super::target::resolve_section_index(sel, node_id, kv_idx, Some(n_sections), SectionTargetPolicy::Frame)
 }
 
-// `edits_has_glyph_field` and `custom_preset_hint` are shared with
-// the `border …` and `canvas …` verbs through
-// `border::edits_has_glyph_field` / `border::custom_preset_hint(label)`.
-// They used to live here as byte-identical copies — see CODE_CONVENTIONS.md
-// §5 for why that's forbidden.
+// `edits_has_glyph_field` is shared with the `border …` and
+// `canvas …` verbs through `border::edits_has_glyph_field`, and the
+// closing move this verb makes with the setter's outcome is
+// `border::BorderEdit`. Both used to live here as byte-identical
+// copies — see CODE_CONVENTIONS.md §5 for why that's forbidden.
 
 /// `section frame preview …` — same kv vocabulary, no model
 /// write. Routes to the shared
@@ -472,7 +399,11 @@ fn resolve_section_idx_for(
 /// requires an explicit `section=K` kv (mirroring the committing
 /// `section frame …` verb's posture). The preview's
 /// `selection_snapshot` rides on `self.selection` at set time.
-fn execute_section_frame_preview(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
+fn execute_section_frame_preview(
+    descent: &crate::application::console::spec::Descent,
+    args: &Args,
+    eff: &mut ConsoleEffects,
+) -> ExecResult {
     use crate::application::document::BorderPreviewTarget;
 
     // The `section=K` kv (if any) overrides the selection's
@@ -488,7 +419,7 @@ fn execute_section_frame_preview(args: &Args, eff: &mut ConsoleEffects) -> ExecR
     // single-section auto-resolve (CRIT-2: pre-fix `Single(node)`
     // with one section spuriously errored). Cloning the model into
     // a closure-captured map is cheaper than re-borrowing
-    // `eff.document` inside the closure (the closure is `FnOnce`,
+    // `eff.document()` inside the closure (the closure is `FnOnce`,
     // doc is already borrowed mutably for the dispatch_border_preview
     // call).
     let section_counts: std::collections::HashMap<String, usize> = eff
@@ -498,41 +429,35 @@ fn execute_section_frame_preview(args: &Args, eff: &mut ConsoleEffects) -> ExecR
         .iter()
         .map(|(id, n)| (id.clone(), n.sections.len()))
         .collect();
-    super::super::border::dispatch_border_preview(
-        args,
-        eff,
-        "section frame preview",
-        /* subverb_pos */ 2,
-        move |sel| {
-            // `MultiSection([(A,0),(A,1),(B,0)])` already encodes
-            // distinct (node_id, section_idx) pairs — drop them
-            // straight into `BorderPreviewTarget::Sections` rather
-            // than collapsing to node-ids and re-resolving via
-            // `resolve_section_idx_for` (which doesn't know how
-            // to pick one section idx out of a multi-pair shape).
-            // Mirrors the resolver `apply_set_border_preview` in
-            // `cross_dispatch/style.rs` already uses for the same
-            // case.
-            if let SelectionState::MultiSection(sels) = sel {
-                let pairs: Vec<(String, usize)> =
-                    sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect();
-                return Ok(BorderPreviewTarget::Sections(pairs));
-            }
-            let node_ids = nodes_in_selection(sel, "section frame preview")?;
-            let mut pairs: Vec<(String, usize)> = Vec::with_capacity(node_ids.len());
-            for nid in &node_ids {
-                let n_sections = section_counts.get(nid).copied().unwrap_or(0);
-                let idx = match resolve_section_idx_for(sel, nid, kv_idx, n_sections) {
-                    Ok(i) => i,
-                    Err(msg) => {
-                        return Err(crate::application::console::ExecResult::err(msg));
-                    }
-                };
-                pairs.push((nid.clone(), idx));
-            }
-            Ok(BorderPreviewTarget::Sections(pairs))
-        },
-    )
+    crate::application::console::commands::border::dispatch_border_preview(descent, args, eff, move |sel| {
+        // `MultiSection([(A,0),(A,1),(B,0)])` already encodes
+        // distinct (node_id, section_idx) pairs — drop them
+        // straight into `BorderPreviewTarget::Sections` rather
+        // than collapsing to node-ids and re-resolving via
+        // `resolve_section_idx_for` (which doesn't know how
+        // to pick one section idx out of a multi-pair shape).
+        // Mirrors the resolver `apply_set_border_preview` in
+        // `cross_dispatch/style.rs` already uses for the same
+        // case.
+        if let SelectionState::MultiSection(sels) = sel {
+            let pairs: Vec<(String, usize)> =
+                sels.iter().map(|s| (s.node_id.clone(), s.section_idx)).collect();
+            return Ok(BorderPreviewTarget::Sections(pairs));
+        }
+        let node_ids = nodes_in_selection(sel, "section frame preview")?;
+        let mut pairs: Vec<(String, usize)> = Vec::with_capacity(node_ids.len());
+        for nid in &node_ids {
+            let n_sections = section_counts.get(nid).copied().unwrap_or(0);
+            let idx = match resolve_section_idx_for(sel, nid, kv_idx, n_sections) {
+                Ok(i) => i,
+                Err(msg) => {
+                    return Err(crate::application::console::ExecResult::err(msg));
+                }
+            };
+            pairs.push((nid.clone(), idx));
+        }
+        Ok(BorderPreviewTarget::Sections(pairs))
+    })
 }
 
 #[cfg(test)]
@@ -575,6 +500,52 @@ mod tests {
             .as_ref()
             .expect("section[0]'s frame_border populated");
         assert_eq!(cfg.preset, "heavy");
+    }
+
+    /// `section frame` is the fourth verb that speaks `section=`,
+    /// and the only one whose completion did not: its keyset is
+    /// the `border` verb's, which has no such key, so `section
+    /// frame se<TAB>` offered nothing and `section frame
+    /// section=<TAB>` offered nothing — while its own printed
+    /// usage documents `[section=<idx>]` and
+    /// `parse_section_target_kv` honors it.
+    #[test]
+    fn section_frame_completion_offers_the_section_target_key() {
+        let (mut doc, id) = pinned_two_section_node();
+        doc.selection = SelectionState::Single(id);
+        let popup = |line: &str| -> Vec<String> {
+            let ctx = crate::application::console::ConsoleContext::from_document(&doc);
+            crate::application::console::completion::complete(line, line.len(), &ctx)
+                .into_iter()
+                .map(|c| c.text)
+                .collect()
+        };
+        assert_eq!(popup("section frame se"), vec!["section="]);
+        assert_eq!(popup("section frame preview se"), vec!["section="]);
+        // The value side is the shared section-index popup, the
+        // same rows `section show section=<TAB>` offers.
+        assert_eq!(popup("section frame section="), vec!["0", "1"]);
+        assert_eq!(popup("section frame preview section="), vec!["0", "1"]);
+        // The border vocabulary it borrows is untouched.
+        assert!(popup("section frame ").iter().any(|r| r == "preset="));
+    }
+
+    /// The execute half the popup above was silent about.
+    #[test]
+    fn section_frame_section_kv_targets_that_section() {
+        let (mut doc, id) = pinned_two_section_node();
+        doc.selection = SelectionState::Single(id.clone());
+        assert_exec_ok(run("section frame section=1 preset=heavy", &mut doc));
+        let node = doc.mindmap.nodes.get(&id).expect("node");
+        assert!(node.sections[0].frame_border.is_none());
+        assert_eq!(
+            node.sections[1]
+                .frame_border
+                .as_ref()
+                .expect("section[1] frame_border populated")
+                .preset,
+            "heavy"
+        );
     }
 
     /// Multi-section + Single selection still requires explicit

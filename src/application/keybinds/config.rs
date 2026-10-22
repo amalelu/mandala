@@ -1,912 +1,577 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! `KeybindConfig` — the user-editable config struct + JSON loader +
-//! `resolve()` step that produces the runtime `ResolvedKeybinds` table.
+//! `KeybindConfig` — the user-editable config surface, its JSON
+//! loader, and the `resolve()` step that produces the runtime
+//! `ResolvedKeybinds` table.
+//!
+//! **The struct is generated.** Everything a bindable
+//! [`Action`] needs on the config side — the struct field, its
+//! default, its row in the resolve step, and its arm in the
+//! `ActionKind` → JSON-key match — comes from the one
+//! [`keybind_surface!`] table below. That is the whole point of the
+//! module: the three used to be hand-synced, a field missing from
+//! `resolve()` compiled, and the binding was silently dead. See
+//! [`super::surface`] for the machinery and for what a new variant
+//! now costs (a compile error until it appears in the table).
+//!
+//! What stays hand-written here is what is not per-Action: the JSON
+//! entry point, the unrecognized-key report, and the tail of
+//! `resolve()` that folds in the id-keyed custom-mutation and macro
+//! binding maps.
+
+use std::collections::{BTreeMap, HashMap};
 
 use log::warn;
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use strum::IntoEnumIterator;
 
-use super::action::Action;
+use super::action::{Action, ActionKind};
 use super::bind::KeyBind;
 use super::resolved::ResolvedKeybinds;
+use super::surface::{keybind_surface, BindSurface, ParametricBinding};
 
-/// One binding for a parametric Action — a key combo plus the
-/// positional payload args the resolve step feeds into the
-/// variant's payload. Free-form `String` args; typed validation
-/// happens in the dispatch arm (parse failures emit a warn-log and
-/// the dispatch returns `Handled` as a best-effort no-op — Action
-/// arms have no scrollback surface).
-///
-/// Args are positional rather than keyed so the same shape covers
-/// single-payload (1 arg, e.g. `set_edge_body_glyph(["dash"])`),
-/// from/to (2 args, e.g. `set_edge_anchor(["top", "auto"])`), and
-/// field/value (2 args) variants. Per-variant arg counts are
-/// documented next to each `Action` definition; a binding with the
-/// wrong count emits a warn-log and is skipped.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ParametricBinding {
-    pub combo: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-}
+keybind_surface! {
+    // ─────────────────────────────────────────────────────────────
+    // Unit Actions — a plain list of key combos per action.
+    // ─────────────────────────────────────────────────────────────
+    simple {
+        // ── Document-level (global) ──────────────────────────────
+        /// Undo the last document mutation.
+        Undo => undo = ["Ctrl+Z", "Undo"],
+        /// Enter reparent mode on the current selection.
+        EnterReparentMode => enter_reparent_mode = ["Ctrl+P"],
+        /// Enter connect mode on the current selection.
+        EnterConnectMode => enter_connect_mode = ["Ctrl+D"],
+        /// Enter resize mode on the current selection — Batch 2 of
+        /// `SECTIONS_BORDERS_RESIZE_PLAN.md`.
+        EnterResizeMode => enter_resize_mode = ["r", "LongPress"],
+        /// Start a corner-anchored fast-resize gesture from a
+        /// right-button drag. Lookup goes through
+        /// [`super::ResolvedKeybinds::action_for_gesture`] so the
+        /// standard modifier-fallback applies — a user who clears
+        /// the default and binds bare `["RightDrag"]` gets
+        /// fast-resize on plain right-drag, no Ctrl required.
+        FastResizeStart => fast_resize_start = ["Ctrl+RightDrag"],
+        /// Delete the current selection.
+        DeleteSelection => delete_selection = ["Delete"],
+        /// Leave the active interaction mode. Also cancels an active
+        /// border preview first — see [`Action::ExitMode`].
+        ExitMode => exit_mode = ["Escape"],
+        /// Create an unattached node at the cursor.
+        CreateOrphanNode => create_orphan_node = ["Ctrl+N"],
+        /// Detach every selected node from its parent.
+        OrphanSelection => orphan_selection = ["Ctrl+O"],
+        /// The umbrella "edit the selection" action.
+        EditSelection => edit_selection = ["Enter"],
+        /// As `edit_selection`, but the editor opens empty.
+        EditSelectionClean => edit_selection_clean = ["Backspace"],
+        /// Enter NodeEdit mode (Batch 3 of
+        /// `SECTIONS_BORDERS_RESIZE_PLAN.md`). The umbrella `Enter`
+        /// keybind dispatches `edit_selection` first (which fans out
+        /// here for node-bearing selections), so users normally
+        /// don't rebind this — but the explicit hook is here for
+        /// macros and future GUI buttons. Default unbound.
+        EnterNodeEdit => enter_node_edit = [],
+        /// As `enter_node_edit`, but the editor opens empty.
+        EnterNodeEditClean => enter_node_edit_clean = [],
+        /// Enter SectionEdit mode (text editor) on the active
+        /// section while in NodeEdit mode. Default `Enter` at the
+        /// [`super::InputContext::NodeEdit`] level — the same key as
+        /// `edit_selection` at Document, since the contexts don't
+        /// overlap (the modal cascade picks NodeEdit over Document
+        /// when NodeEdit is active).
+        EnterSectionEdit => enter_section_edit = ["Enter"],
+        /// Open (or toggle) the console.
+        OpenConsole => open_console = ["/"],
+        /// Save the document to its bound path.
+        SaveDocument => save_document = ["Ctrl+S"],
+        /// Copy the focused component's clipboard representation.
+        Copy => copy = ["Ctrl+C", "Copy"],
+        /// Paste the clipboard into the focused component.
+        Paste => paste = ["Ctrl+V", "Paste"],
+        /// Cut: copy, then clear.
+        Cut => cut = ["Ctrl+X", "Cut"],
 
-/// The raw, user-editable config. Every field is a list of binding strings
-/// so users can assign multiple keys to the same action (e.g. Ctrl+Z and
-/// the Undo key both mapped to `Undo`). Fields default via serde so a
-/// partial config only has to mention the actions the user wants to
-/// override.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct KeybindConfig {
-    // ── Document-level (global) ──────────────────────────────────
-    pub undo: Vec<String>,
-    pub enter_reparent_mode: Vec<String>,
-    pub enter_connect_mode: Vec<String>,
-    /// Enter resize mode on the current selection — Batch 2 of
-    /// `SECTIONS_BORDERS_RESIZE_PLAN.md`. Default `r`.
-    pub enter_resize_mode: Vec<String>,
-    /// Start a corner-anchored fast-resize gesture from a
-    /// right-button drag. Default: `["Ctrl+RightDrag"]`. Lookup
-    /// goes through `action_for_gesture` so the standard
-    /// modifier-fallback applies — a user who clears the default
-    /// and binds bare `["RightDrag"]` gets fast-resize on plain
-    /// right-drag, no Ctrl required.
-    ///
-    /// Parametric on the keybind side (a parametric binding has
-    /// no payload arms here — `Action::FastResizeStart` itself
-    /// takes no payload), but kept on the regular `Vec<String>`
-    /// surface for ergonomic JSON. Mirrors the
-    /// `enter_resize_mode` shape.
-    pub fast_resize_start: Vec<String>,
-    pub delete_selection: Vec<String>,
-    pub exit_mode: Vec<String>,
-    pub create_orphan_node: Vec<String>,
-    pub orphan_selection: Vec<String>,
-    pub edit_selection: Vec<String>,
-    pub edit_selection_clean: Vec<String>,
-    /// Enter NodeEdit mode (Batch 3 of
-    /// `SECTIONS_BORDERS_RESIZE_PLAN.md`). The umbrella `Enter`
-    /// keybind dispatches `EditSelection` first (which fans out
-    /// here for node-bearing selections), so users normally don't
-    /// rebind `enter_node_edit` — but the explicit hook is here
-    /// for macros and future GUI buttons. Default unbound.
-    pub enter_node_edit: Vec<String>,
-    pub enter_node_edit_clean: Vec<String>,
-    /// Enter SectionEdit mode (text editor) on the active section
-    /// while in NodeEdit mode. Default `Enter` at the
-    /// `InputContext::NodeEdit` level — same key as `EditSelection`
-    /// at Document, since the contexts don't overlap (the modal
-    /// cascade picks NodeEdit over Document when NodeEdit is active).
-    pub enter_section_edit: Vec<String>,
-    pub open_console: Vec<String>,
-    pub save_document: Vec<String>,
-    pub copy: Vec<String>,
-    pub paste: Vec<String>,
-    pub cut: Vec<String>,
+        // ── Console ──────────────────────────────────────────────
+        /// Close the console (dismiss the completion popup first).
+        ConsoleClose => console_close = ["Escape"],
+        /// Execute the current console line.
+        ConsoleSubmit => console_submit = ["Enter"],
+        /// Cycle tab completions.
+        ConsoleTabComplete => console_tab_complete = ["Tab"],
+        /// Walk history backward / move up the completion popup.
+        ConsoleHistoryUp => console_history_up = ["ArrowUp", "Up"],
+        /// Walk history forward / move down the completion popup.
+        ConsoleHistoryDown => console_history_down = ["ArrowDown", "Down"],
+        /// Move the console cursor one grapheme left.
+        ConsoleCursorLeft => console_cursor_left = ["ArrowLeft", "Left"],
+        /// Move the console cursor one grapheme right.
+        ConsoleCursorRight => console_cursor_right = ["ArrowRight", "Right"],
+        /// Move the console cursor to the start of the line.
+        ConsoleCursorHome => console_cursor_home = ["Home"],
+        /// Move the console cursor to the end of the line.
+        ConsoleCursorEnd => console_cursor_end = ["End"],
+        /// Delete the grapheme before the console cursor.
+        ConsoleDeleteBack => console_delete_back = ["Backspace"],
+        /// Delete the grapheme after the console cursor.
+        ConsoleDeleteForward => console_delete_forward = ["Delete"],
+        /// Insert a literal space (winit delivers Space as Named).
+        ConsoleInsertSpace => console_insert_space = ["Space"],
+        /// Clear the console input line (shell Ctrl+C).
+        ConsoleClearLine => console_clear_line = ["Ctrl+C"],
+        /// Jump to the start of the console line (shell Ctrl+A).
+        ConsoleJumpStart => console_jump_start = ["Ctrl+A"],
+        /// Jump to the end of the console line (shell Ctrl+E).
+        ConsoleJumpEnd => console_jump_end = ["Ctrl+E"],
+        /// Kill from the cursor to the start of the line (Ctrl+U).
+        ConsoleKillToStart => console_kill_to_start = ["Ctrl+U"],
+        /// Kill the word before the cursor (shell Ctrl+W).
+        ConsoleKillWord => console_kill_word = ["Ctrl+W"],
+        /// Scroll the scrollback up one line.
+        ConsoleScrollUp => console_scroll_up = ["Shift+ArrowUp", "Shift+Up"],
+        /// Scroll the scrollback down one line.
+        ConsoleScrollDown => console_scroll_down = ["Shift+ArrowDown", "Shift+Down"],
+        /// Scroll the scrollback up one page.
+        ConsoleScrollPageUp => console_scroll_page_up = ["PageUp"],
+        /// Scroll the scrollback down one page.
+        ConsoleScrollPageDown => console_scroll_page_down = ["PageDown"],
+        /// Pin the scrollback to the newest line.
+        ConsoleScrollEnd => console_scroll_end = ["Shift+End"],
+        /// Pin the scrollback to the oldest reachable line.
+        ConsoleScrollHome => console_scroll_home = ["Shift+Home"],
 
-    // ── Console ──────────────────────────────────────────────────
-    pub console_close: Vec<String>,
-    pub console_submit: Vec<String>,
-    pub console_tab_complete: Vec<String>,
-    pub console_history_up: Vec<String>,
-    pub console_history_down: Vec<String>,
-    pub console_cursor_left: Vec<String>,
-    pub console_cursor_right: Vec<String>,
-    pub console_cursor_home: Vec<String>,
-    pub console_cursor_end: Vec<String>,
-    pub console_delete_back: Vec<String>,
-    pub console_delete_forward: Vec<String>,
-    pub console_insert_space: Vec<String>,
-    pub console_clear_line: Vec<String>,
-    pub console_jump_start: Vec<String>,
-    pub console_jump_end: Vec<String>,
-    pub console_kill_to_start: Vec<String>,
-    pub console_kill_word: Vec<String>,
-    pub console_scroll_up: Vec<String>,
-    pub console_scroll_down: Vec<String>,
-    pub console_scroll_page_up: Vec<String>,
-    pub console_scroll_page_down: Vec<String>,
-    pub console_scroll_end: Vec<String>,
-    pub console_scroll_home: Vec<String>,
+        // ── Color Picker ─────────────────────────────────────────
+        /// Cancel the color picker (contextual mode only).
+        PickerCancel => picker_cancel = ["Escape"],
+        /// Commit the picked color.
+        PickerCommit => picker_commit = ["Enter"],
+        /// Nudge hue down.
+        PickerNudgeHueDown => picker_nudge_hue_down = ["h"],
+        /// Nudge hue up.
+        PickerNudgeHueUp => picker_nudge_hue_up = ["Shift+h"],
+        /// Nudge saturation down.
+        PickerNudgeSatDown => picker_nudge_sat_down = ["s"],
+        /// Nudge saturation up.
+        PickerNudgeSatUp => picker_nudge_sat_up = ["Shift+s"],
+        /// Nudge value down.
+        PickerNudgeValDown => picker_nudge_val_down = ["v"],
+        /// Nudge value up.
+        PickerNudgeValUp => picker_nudge_val_up = ["Shift+v"],
 
-    // ── Color Picker ─────────────────────────────────────────────
-    pub picker_cancel: Vec<String>,
-    pub picker_commit: Vec<String>,
-    pub picker_nudge_hue_down: Vec<String>,
-    pub picker_nudge_hue_up: Vec<String>,
-    pub picker_nudge_sat_down: Vec<String>,
-    pub picker_nudge_sat_up: Vec<String>,
-    pub picker_nudge_val_down: Vec<String>,
-    pub picker_nudge_val_up: Vec<String>,
+        // ── Label Editor ─────────────────────────────────────────
+        /// Discard the inline label editor's changes.
+        LabelEditCancel => label_edit_cancel = ["Escape"],
+        /// Commit the inline label editor.
+        LabelEditCommit => label_edit_commit = ["Enter"],
 
-    // ── Label Editor ─────────────────────────────────────────────
-    pub label_edit_cancel: Vec<String>,
-    pub label_edit_commit: Vec<String>,
+        // ── Text Editor ──────────────────────────────────────────
+        /// Discard the inline text editor's changes.
+        TextEditCancel => text_edit_cancel = ["Escape"],
 
-    // ── Text Editor ──────────────────────────────────────────────
-    pub text_edit_cancel: Vec<String>,
+        // ── Border / border preview ──────────────────────────────
+        /// Discard the active border preview.
+        ///
+        /// **Default: unbound** — but the user-visible Esc behavior
+        /// is "if a preview is active, cancel it; otherwise exit the
+        /// current mode", because [`Action::ExitMode`] (the default
+        /// Esc binding) calls `cancel_border_preview()` first and
+        /// short-circuits if a preview was canceled. See
+        /// `app/dispatch/action_core.rs` for the chain. The chain
+        /// lives in `ExitMode`'s body rather than as a separate
+        /// keybind because the resolver maps `(context, key) →
+        /// Action` deterministically and can't fall through from one
+        /// Action to another based on document state.
+        ///
+        /// Bind this entry to opt out of the chain — e.g. to put
+        /// preview-cancel on a different key while leaving `Escape`
+        /// bound to plain `ExitMode`. The verb path `border preview
+        /// cancel` is the primary surface and works regardless.
+        CancelBorderPreview => cancel_border_preview = [],
+        /// Commit the active border preview through the matching
+        /// committing setter. No default binding — users opt in.
+        /// Unlike `cancel_border_preview`, commit isn't part of any
+        /// implicit chain — the `border preview commit` verb is the
+        /// primary surface and a binding here is purely opt-in
+        /// muscle-memory.
+        CommitBorderPreview => commit_border_preview = [],
+        /// Advance the selected node(s)' border preset to the next
+        /// entry in `BORDER_PRESETS`, wrapping at the end. Mirrors
+        /// `border preset cycle`; default unbound.
+        CycleBorderPreset => cycle_border_preset = [],
+        /// Flip `style.show_frame` per selected node. Mirrors
+        /// `border toggle`; default unbound.
+        ToggleBorderVisible => toggle_border_visible = [],
 
-    // ── Border Preview ───────────────────────────────────────────
-    /// Discard the active border preview.
-    ///
-    /// **Default: unbound** — but the user-visible Esc behavior
-    /// is "if a preview is active, cancel it; otherwise exit the
-    /// current mode" because `Action::ExitMode` (the default Esc
-    /// binding) calls `cancel_border_preview()` first and
-    /// short-circuits if a preview was canceled. See
-    /// `app/dispatch/action_core.rs` for the chain. The chain
-    /// lives in `ExitMode`'s body rather than as a separate
-    /// keybind because the resolver maps `(context, key) →
-    /// Action` deterministically and can't fall through from
-    /// one Action to another based on document state.
-    ///
-    /// Bind this entry to opt out of the chain — e.g. to put
-    /// preview-cancel on a different key while leaving `Escape`
-    /// bound to plain `ExitMode`. The verb path `border preview
-    /// cancel` is the primary surface and works regardless.
-    pub cancel_border_preview: Vec<String>,
-    /// Commit the active border preview through the matching
-    /// committing setter. No default binding — users opt in.
-    /// Unlike `cancel_border_preview`, commit isn't part of any
-    /// implicit chain — the `border preview commit` verb is the
-    /// primary surface and a binding here is purely opt-in
-    /// muscle-memory.
-    pub commit_border_preview: Vec<String>,
+        // ── Mouse-gesture Actions ────────────────────────────────
+        /// Activate whatever the double-click hit — see
+        /// [`Action::DoubleClickActivate`] for the four routes.
+        DoubleClickActivate => double_click_activate = ["DoubleClick"],
+        /// Create an orphan node and open its editor. Intentionally
+        /// unbound by default: the user found the empty-canvas
+        /// double-click annoying, so it is opt-in.
+        CreateOrphanNodeAndEdit => create_orphan_node_and_edit = [],
+        /// Continuous camera pan.
+        PanCanvas => pan_canvas = ["LeftDrag", "MiddleClick"],
 
-    // ── Mouse-gesture Actions ────────────────────────────────────
-    pub double_click_activate: Vec<String>,
-    pub create_orphan_node_and_edit: Vec<String>,
-    pub pan_canvas: Vec<String>,
+        // ── Navigation / camera ──────────────────────────────────
+        // `zoom_in` / `zoom_out` default to the mouse wheel per user
+        // request; key shortcuts (Ctrl++ / Ctrl+-) are opt-in.
+        /// Zoom the camera in one step.
+        ZoomIn => zoom_in = ["WheelUp"],
+        /// Zoom the camera out one step.
+        ZoomOut => zoom_out = ["WheelDown"],
+        /// Reset the camera zoom to 1.0.
+        ZoomReset => zoom_reset = ["Ctrl+0"],
+        /// Fit the whole tree to the viewport.
+        ZoomFit => zoom_fit = ["Ctrl+1"],
+        /// Pan the camera north.
+        PanCameraNorth => pan_camera_north = ["Alt+ArrowUp"],
+        /// Pan the camera south.
+        PanCameraSouth => pan_camera_south = ["Alt+ArrowDown"],
+        /// Pan the camera east.
+        PanCameraEast => pan_camera_east = ["Alt+ArrowRight"],
+        /// Pan the camera west.
+        PanCameraWest => pan_camera_west = ["Alt+ArrowLeft"],
+        /// Center the camera on the selection's centroid.
+        CenterOnSelection => center_on_selection = ["Ctrl+."],
+        /// Jump camera + selection to the root node.
+        ///
+        /// Default unbound — `Home` is consumed by the text editor
+        /// when it's open (already routed to
+        /// `text_edit_cursor_home`), and binding it at the Document
+        /// level would shadow that for users who haven't
+        /// customized. Users who want a jump-to-root key bind it
+        /// themselves.
+        JumpToRoot => jump_to_root = [],
 
-    // ── Navigation / camera ──────────────────────────────────────
-    pub zoom_in: Vec<String>,
-    pub zoom_out: Vec<String>,
-    pub zoom_reset: Vec<String>,
-    pub zoom_fit: Vec<String>,
-    pub pan_camera_north: Vec<String>,
-    pub pan_camera_south: Vec<String>,
-    pub pan_camera_east: Vec<String>,
-    pub pan_camera_west: Vec<String>,
-    pub center_on_selection: Vec<String>,
-    pub jump_to_root: Vec<String>,
+        // ── Selection ────────────────────────────────────────────
+        /// Select every node in the document.
+        SelectAll => select_all = ["Ctrl+a"],
+        /// Clear the selection.
+        ///
+        /// Default unbound — Esc already exits modes via
+        /// `exit_mode`, and rebinding Esc here would conflict with
+        /// the modal-cascade contract. Users opt in by binding e.g.
+        /// `Ctrl+Shift+a`.
+        DeselectAll => deselect_all = [],
+        /// Invert the selection.
+        InvertSelection => invert_selection = ["Ctrl+Shift+i"],
+        /// Select the parent of the selected node.
+        SelectParent => select_parent = ["Alt+p"],
+        /// Select the first child of the selected node.
+        SelectChild => select_child = ["Alt+c"],
+        /// Select the next sibling.
+        SelectNextSibling => select_next_sibling = ["Alt+j"],
+        /// Select the previous sibling.
+        SelectPrevSibling => select_prev_sibling = ["Alt+k"],
 
-    // ── Selection ────────────────────────────────────────────────
-    pub select_all: Vec<String>,
-    pub deselect_all: Vec<String>,
-    pub invert_selection: Vec<String>,
-    pub select_parent: Vec<String>,
-    pub select_child: Vec<String>,
-    pub select_next_sibling: Vec<String>,
-    pub select_prev_sibling: Vec<String>,
+        // ── TextEdit cursor primitives ───────────────────────────
+        // Bodies live in `dispatch::apply_text_edit_action`; the
+        // editor's modal handler routes through dispatch when a
+        // binding matches and falls back to literal-character
+        // insertion otherwise.
+        /// Move the editor cursor one grapheme left.
+        TextEditCursorLeft => text_edit_cursor_left = ["ArrowLeft"],
+        /// Move the editor cursor one grapheme right.
+        TextEditCursorRight => text_edit_cursor_right = ["ArrowRight"],
+        /// Move the editor cursor one visual line up.
+        TextEditCursorUp => text_edit_cursor_up = ["ArrowUp"],
+        /// Move the editor cursor one visual line down.
+        TextEditCursorDown => text_edit_cursor_down = ["ArrowDown"],
+        /// Jump the editor cursor to the start of the line.
+        TextEditCursorHome => text_edit_cursor_home = ["Home"],
+        /// Jump the editor cursor to the end of the line.
+        TextEditCursorEnd => text_edit_cursor_end = ["End"],
+        /// Extend the selection one grapheme left.
+        TextEditCursorLeftSelect => text_edit_cursor_left_select = ["Shift+ArrowLeft"],
+        /// Extend the selection one grapheme right.
+        TextEditCursorRightSelect => text_edit_cursor_right_select = ["Shift+ArrowRight"],
+        /// Extend the selection one visual line up.
+        TextEditCursorUpSelect => text_edit_cursor_up_select = ["Shift+ArrowUp"],
+        /// Extend the selection one visual line down.
+        TextEditCursorDownSelect => text_edit_cursor_down_select = ["Shift+ArrowDown"],
+        /// Extend the selection to the start of the line.
+        TextEditCursorHomeSelect => text_edit_cursor_home_select = ["Shift+Home"],
+        /// Extend the selection to the end of the line.
+        TextEditCursorEndSelect => text_edit_cursor_end_select = ["Shift+End"],
+        /// Move the editor cursor one word left.
+        TextEditWordLeft => text_edit_word_left = ["Ctrl+ArrowLeft"],
+        /// Move the editor cursor one word right.
+        TextEditWordRight => text_edit_word_right = ["Ctrl+ArrowRight"],
+        /// Delete the grapheme before the editor cursor.
+        TextEditDeleteBack => text_edit_delete_back = ["Backspace"],
+        /// Delete the grapheme after the editor cursor.
+        TextEditDeleteForward => text_edit_delete_forward = ["Delete"],
+        /// Delete back through the current word.
+        TextEditDeleteWordBack => text_edit_delete_word_back = ["Ctrl+Backspace"],
+        /// Delete forward through the current word.
+        TextEditDeleteWordForward => text_edit_delete_word_forward = ["Ctrl+Delete"],
+        /// Commit the editor buffer and close.
+        ///
+        /// Default unbound — Enter is a literal `\n` in the
+        /// multi-line node editor. Users who want commit-on-Enter
+        /// bind it themselves (and lose newline insertion in
+        /// exchange). Note: *any* TextEdit action bound to Enter
+        /// wins over literal-newline insertion — the action lookup
+        /// runs before the literal-character fallback in
+        /// `handle_text_edit_key`.
+        TextEditCommit => text_edit_commit = [],
 
-    // ── TextEdit cursor primitives ──────────────────────────────
-    pub text_edit_cursor_left: Vec<String>,
-    pub text_edit_cursor_right: Vec<String>,
-    pub text_edit_cursor_up: Vec<String>,
-    pub text_edit_cursor_down: Vec<String>,
-    pub text_edit_cursor_home: Vec<String>,
-    pub text_edit_cursor_end: Vec<String>,
-    pub text_edit_cursor_left_select: Vec<String>,
-    pub text_edit_cursor_right_select: Vec<String>,
-    pub text_edit_cursor_up_select: Vec<String>,
-    pub text_edit_cursor_down_select: Vec<String>,
-    pub text_edit_cursor_home_select: Vec<String>,
-    pub text_edit_cursor_end_select: Vec<String>,
-    pub text_edit_word_left: Vec<String>,
-    pub text_edit_word_right: Vec<String>,
-    pub text_edit_delete_back: Vec<String>,
-    pub text_edit_delete_forward: Vec<String>,
-    pub text_edit_delete_word_back: Vec<String>,
-    pub text_edit_delete_word_forward: Vec<String>,
-    pub text_edit_commit: Vec<String>,
+        // ── LabelEdit cursor primitives ──────────────────────────
+        // Same routing path as the TextEdit primitives but
+        // single-line — no Up/Down/Word*. Defaults mirror what
+        // `route_single_line_key` previously hardcoded.
+        /// Move the label cursor one grapheme left.
+        LabelEditCursorLeft => label_edit_cursor_left = ["ArrowLeft"],
+        /// Move the label cursor one grapheme right.
+        LabelEditCursorRight => label_edit_cursor_right = ["ArrowRight"],
+        /// Jump the label cursor to the start of the buffer.
+        LabelEditCursorHome => label_edit_cursor_home = ["Home"],
+        /// Jump the label cursor to the end of the buffer.
+        LabelEditCursorEnd => label_edit_cursor_end = ["End"],
+        /// Delete the grapheme before the label cursor.
+        LabelEditDeleteBack => label_edit_delete_back = ["Backspace"],
+        /// Delete the grapheme after the label cursor.
+        LabelEditDeleteForward => label_edit_delete_forward = ["Delete"],
 
-    // ── LabelEdit cursor primitives ─────────────────────────────
-    pub label_edit_cursor_left: Vec<String>,
-    pub label_edit_cursor_right: Vec<String>,
-    pub label_edit_cursor_home: Vec<String>,
-    pub label_edit_cursor_end: Vec<String>,
-    pub label_edit_delete_back: Vec<String>,
-    pub label_edit_delete_forward: Vec<String>,
+        // ── Console-verb Actions ─────────────────────────────────
+        // These mirror typed console verbs; the user opts in by
+        // binding a key, so every default is empty.
+        /// Open the glyph-wheel picker standalone (`color picker on`).
+        OpenColorPicker => open_color_picker = [],
+        /// Close the glyph-wheel picker (`color picker off`).
+        CloseColorPicker => close_color_picker = [],
+        /// Open the label editor on the selected edge (`label edit`).
+        LabelEditOnSelection => label_edit_on_selection = [],
+        /// Toggle the FPS overlay (`fps on` ↔ `fps off`).
+        ToggleFps => toggle_fps = [],
+        /// Toggle the FPS overlay's debug variant (`fps debug`).
+        ToggleFpsDebug => toggle_fps_debug = [],
+        /// Replace the document with a fresh blank one (`new`).
+        NewDocument => new_document = [],
+        /// Drop both zoom clamps on the selection (`zoom clear`).
+        ClearZoom => clear_zoom = [],
+        /// Flip the selected section back to fill-parent
+        /// (`section resize fill`).
+        SetSectionSizeFillParent => set_section_size_fill_parent = [],
+        /// Delete the selected section (`section delete`). Errors
+        /// when the node has only one section — the model invariant.
+        DeleteSection => delete_section = [],
+    }
 
-    // ── Console-verb Actions ────────────────────────────────────
-    pub open_color_picker: Vec<String>,
-    pub close_color_picker: Vec<String>,
-    pub label_edit_on_selection: Vec<String>,
-    pub toggle_fps: Vec<String>,
-    pub toggle_fps_debug: Vec<String>,
-    pub new_document: Vec<String>,
+    // ─────────────────────────────────────────────────────────────
+    // Payload-carrying Actions — `{ "combo": …, "args": [ … ] }`.
+    // The names in the payload pattern are the arg names quoted back
+    // at the user when a binding's `args` array is the wrong length,
+    // and they pick each field's `ArgValue` conversion.
+    // ─────────────────────────────────────────────────────────────
+    parametric {
+        /// `anchor from=<side> to=<side>` on the selected edge.
+        /// Sides: `auto|top|right|bottom|left`.
+        SetEdgeAnchor { from, to } => set_edge_anchor,
+        /// `body glyph=<dot|dash|double|wave|chain>`.
+        SetEdgeBodyGlyph(glyph) => set_edge_body_glyph,
+        /// `border <field>=<value>` on the selected node(s). One kv
+        /// per binding; multi-kv border edits stay console-only.
+        SetBorderField { field, value } => set_border_field,
+        /// `cap from=<arrow|circle|diamond|none> to=<…>`.
+        SetEdgeCap { from, to } => set_edge_cap,
+        /// `args = [axis, value]` where `axis` is `bg|text|border`
+        /// and `value` is a color string (`#rrggbb`, `var(--name)`,
+        /// palette key). Maps to [`Action::SetColor`].
+        SetColor { axis, value } => set_color,
+        /// `args = [target_kind, field, value]` where `target_kind ∈
+        /// {node, section, canvas-border, canvas-sf, canvas-sf-focused}`
+        /// (kebab-case, matching [`super::BorderPreviewTargetKind`]'s
+        /// strum-`IntoStaticStr`-derived form). `field` is one of the
+        /// `border` kv keys (`preset`, `font`, `size`, `color`,
+        /// `palette`, `field`, `padding`, `top`, `bottom`, `left`,
+        /// `right`, `tl`, `tr`, `bl`, `br`); `value` is the same
+        /// kv-form string the verb accepts. Maps to
+        /// [`Action::SetBorderPreview`].
+        SetBorderPreview { target_kind, field, value } => set_border_preview,
+        /// `edge type=<cross_link|parent_child>`.
+        SetEdgeType(edge_type) => set_edge_type,
+        /// `edge display_mode=<line|portal>`.
+        SetEdgeDisplayMode(display_mode) => set_edge_display_mode,
+        /// `edge reset=<straight|curve|style|position>`.
+        ResetEdge(reset_kind) => reset_edge,
+        /// `font set <family>` on the current selection.
+        SetFontFamily(family) => set_font_family,
+        /// `args = [slot, pt]` where `slot` is `size|min|max` and
+        /// `pt` is a positive finite float string. Maps to
+        /// [`Action::SetFont`].
+        SetFont { slot, value } => set_font,
+        /// `label text=<text>`; an empty payload clears the label.
+        SetEdgeLabelText(text) => set_edge_label_text,
+        /// `label position=<start|middle|end>`.
+        SetEdgeLabelPosition(position) => set_edge_label_position,
+        /// `spacing value=<tight|normal|wide|<float>>`.
+        SetSpacing(value) => set_spacing,
+        /// `args = [bound, value]` where `bound` is `min|max` and
+        /// `value` is `"unset"`, `""`, or a positive finite float
+        /// string. Maps to [`Action::SetZoom`].
+        SetZoom { bound, value } => set_zoom,
+        /// `args = [dx, dy]` parsed as f64 at dispatch. Maps to
+        /// [`Action::SetSectionOffsetDelta`].
+        SetSectionOffsetDelta { dx, dy } => set_section_offset_delta,
+        /// `args = [x, y]` parsed as f64 at dispatch — the absolute
+        /// form of `set_section_offset_delta`. Maps to
+        /// [`Action::SetSectionOffsetAbs`].
+        SetSectionOffsetAbs { x, y } => set_section_offset_abs,
+        /// `args = [w, h]` parsed as f64 at dispatch. Maps to
+        /// [`Action::SetSectionSizeAbs`].
+        SetSectionSizeAbs { w, h } => set_section_size_abs,
+        /// `args = [text, runs_mode]` where `runs_mode` is
+        /// `preserve` (clip existing runs to the new length) or
+        /// `clear` (collapse to a single run). Maps to
+        /// [`Action::SetSectionText`].
+        SetSectionText { text, runs_mode } => set_section_text,
+        /// `args = [at, text]` where `at` is `""` (append) or a
+        /// section index, and `text` is the new section's body
+        /// (`""` for an empty section). Maps to
+        /// [`Action::AddSection`].
+        AddSection { at, text } => add_section,
+        /// `args = [at_grapheme]` — the grapheme offset to split the
+        /// active section at. An empty string is rejected, matching
+        /// the verb. Maps to [`Action::SplitSection`].
+        SplitSection { at_grapheme } => split_section,
+        /// `open <path>` — replace the document with the one at
+        /// `path`. Filesystem-touching: NativeOnly and denylisted
+        /// from non-User macro tiers (see
+        /// `SourceTier::allows_action`).
+        OpenDocument(path) => open_document,
+        /// `save <path>` — write the document to `path` and rebind.
+        /// Same NativeOnly + denylist posture as `open_document`.
+        SaveDocumentAs(path) => save_document_as,
+        /// `new <path>` — start a fresh document bound to `path`.
+        /// Same NativeOnly + denylist posture as `open_document`.
+        NewDocumentAt(path) => new_document_at,
+    }
 
-    // ── Parametric console-verb Actions ─────────────────────────
-    // Each field is a list of `ParametricBinding`s. Args are
-    // positional; per-variant shape is documented on the matching
-    // `Action` variant. Defaults are empty — users opt in by adding
-    // a binding to their `keybinds.json`.
-    pub set_edge_anchor: Vec<ParametricBinding>,
-    pub set_edge_body_glyph: Vec<ParametricBinding>,
-    pub set_border_field: Vec<ParametricBinding>,
-    pub set_edge_cap: Vec<ParametricBinding>,
-    /// `args = [axis, value]` where `axis` is `bg|text|border`
-    /// and `value` is a color string (`#rrggbb`, `var(--name)`,
-    /// palette key). Maps to [`Action::SetColor`].
-    pub set_color: Vec<ParametricBinding>,
-    /// `args = [target_kind, field, value]` where `target_kind ∈
-    /// {node, section, canvas-border, canvas-sf, canvas-sf-focused}`
-    /// (kebab-case, matching [`crate::application::keybinds::BorderPreviewTargetKind`]'s
-    /// strum-`IntoStaticStr`-derived form). `field` is one of the
-    /// `border` kv keys (`preset`, `font`, `size`, `color`,
-    /// `palette`, `field`, `padding`, `top`, `bottom`, `left`,
-    /// `right`, `tl`, `tr`, `bl`, `br`); `value` is the same
-    /// kv-form string the verb accepts. Maps to
-    /// [`Action::SetBorderPreview`]. Pre-fix this Action variant
-    /// existed but was *unregistered* — users could not bind a
-    /// key to preview-set via JSON.
-    pub set_border_preview: Vec<ParametricBinding>,
-    pub set_edge_type: Vec<ParametricBinding>,
-    pub set_edge_display_mode: Vec<ParametricBinding>,
-    pub reset_edge: Vec<ParametricBinding>,
-    pub set_font_family: Vec<ParametricBinding>,
-    /// `args = [slot, pt]` where `slot` is `size|min|max` and `pt`
-    /// is a positive finite float string. Maps to [`Action::SetFont`].
-    pub set_font: Vec<ParametricBinding>,
-    pub set_edge_label_text: Vec<ParametricBinding>,
-    pub set_edge_label_position: Vec<ParametricBinding>,
-    pub set_spacing: Vec<ParametricBinding>,
-    /// `args = [bound, value]` where `bound` is `min|max` and
-    /// `value` is `"unset"`, `""`, or a positive finite float
-    /// string. Maps to [`Action::SetZoom`].
-    pub set_zoom: Vec<ParametricBinding>,
-    /// Unit variant — `args` is ignored, only `combo` matters.
-    pub clear_zoom: Vec<ParametricBinding>,
-    /// `args = [dx, dy]` parsed as f64. Maps to
-    /// [`Action::SetSectionOffsetDelta`].
-    pub set_section_offset_delta: Vec<ParametricBinding>,
-    /// `args = [w, h]` parsed as f64. Maps to
-    /// [`Action::SetSectionSizeAbs`].
-    pub set_section_size_abs: Vec<ParametricBinding>,
-    /// Unit variant — `args` ignored. Maps to
-    /// [`Action::SetSectionSizeFillParent`].
-    pub set_section_size_fill_parent: Vec<ParametricBinding>,
-    /// Filesystem-touching parametric variants — NativeOnly +
-    /// denylisted from non-User macro tiers (see
-    /// `SourceTier::allows_action`).
-    pub open_document: Vec<ParametricBinding>,
-    pub save_document_as: Vec<ParametricBinding>,
-    pub new_document_at: Vec<ParametricBinding>,
+    // ─────────────────────────────────────────────────────────────
+    // Actions with no key surface. The reason is required and is
+    // published as documentation on `bind_surface`; the line it has
+    // to be able to state is "a key could not supply this Action's
+    // payload", not "nobody has wired it up yet".
+    // ─────────────────────────────────────────────────────────────
+    unbindable {
+        ReparentToTarget => "confirmation dispatched by the click handler; the payload is the \
+                             hit-tested target node id (`None` for empty canvas), which a static \
+                             binding cannot supply",
+        ConnectToTarget => "confirmation dispatched by the click handler; same hit-test payload as \
+                            `ReparentToTarget`",
+    }
 
-    // ── Style / metadata ─────────────────────────────────────────
-    /// Font family name for the console overlay.
-    pub console_font: String,
-    /// Font size in pixels for the console overlay.
-    pub console_font_size: f32,
-    /// Map of key combo → custom mutation id.
-    pub custom_mutation_bindings: HashMap<String, String>,
-    /// Map of key combo → macro id. Macros are resolved AFTER built-in
-    /// `Action`s and BEFORE custom mutations, so a key bound to both a
-    /// macro and a custom mutation fires the macro.
-    pub macro_bindings: HashMap<String, String>,
-}
-
-impl Default for KeybindConfig {
-    fn default() -> Self {
-        KeybindConfig {
-            // Document-level
-            undo: vec!["Ctrl+Z".into(), "Undo".into()],
-            enter_reparent_mode: vec!["Ctrl+P".into()],
-            enter_connect_mode: vec!["Ctrl+D".into()],
-            enter_resize_mode: vec!["r".into(), "LongPress".into()],
-            fast_resize_start: vec!["Ctrl+RightDrag".into(), "TwoFingerDrag".into()],
-            delete_selection: vec!["Delete".into()],
-            exit_mode: vec!["Escape".into()],
-            create_orphan_node: vec!["Ctrl+N".into()],
-            orphan_selection: vec!["Ctrl+O".into()],
-            edit_selection: vec!["Enter".into()],
-            edit_selection_clean: vec!["Backspace".into()],
-            // `enter_node_edit` is reachable via the umbrella
-            // `Enter` (EditSelection) keybind for node selections;
-            // an explicit binding is offered for users who want
-            // the no-fan-out version (e.g. macros).
-            enter_node_edit: vec![],
-            enter_node_edit_clean: vec![],
-            // `Enter` at the NodeEdit context — same key the
-            // umbrella uses at Document, but the cascade picks
-            // NodeEdit when active.
-            enter_section_edit: vec!["Enter".into()],
-            open_console: vec!["/".into()],
-            save_document: vec!["Ctrl+S".into()],
-            copy: vec!["Ctrl+C".into(), "Copy".into()],
-            paste: vec!["Ctrl+V".into(), "Paste".into()],
-            cut: vec!["Ctrl+X".into(), "Cut".into()],
-
-            // Console
-            console_close: vec!["Escape".into()],
-            console_submit: vec!["Enter".into()],
-            console_tab_complete: vec!["Tab".into()],
-            console_history_up: vec!["ArrowUp".into(), "Up".into()],
-            console_history_down: vec!["ArrowDown".into(), "Down".into()],
-            console_cursor_left: vec!["ArrowLeft".into(), "Left".into()],
-            console_cursor_right: vec!["ArrowRight".into(), "Right".into()],
-            console_cursor_home: vec!["Home".into()],
-            console_cursor_end: vec!["End".into()],
-            console_delete_back: vec!["Backspace".into()],
-            console_delete_forward: vec!["Delete".into()],
-            console_insert_space: vec!["Space".into()],
-            console_clear_line: vec!["Ctrl+C".into()],
-            console_jump_start: vec!["Ctrl+A".into()],
-            console_jump_end: vec!["Ctrl+E".into()],
-            console_kill_to_start: vec!["Ctrl+U".into()],
-            console_kill_word: vec!["Ctrl+W".into()],
-            console_scroll_up: vec!["Shift+ArrowUp".into(), "Shift+Up".into()],
-            console_scroll_down: vec!["Shift+ArrowDown".into(), "Shift+Down".into()],
-            console_scroll_page_up: vec!["PageUp".into()],
-            console_scroll_page_down: vec!["PageDown".into()],
-            console_scroll_end: vec!["Shift+End".into()],
-            console_scroll_home: vec!["Shift+Home".into()],
-
-            // Color Picker
-            picker_cancel: vec!["Escape".into()],
-            picker_commit: vec!["Enter".into()],
-            picker_nudge_hue_down: vec!["h".into()],
-            picker_nudge_hue_up: vec!["Shift+h".into()],
-            picker_nudge_sat_down: vec!["s".into()],
-            picker_nudge_sat_up: vec!["Shift+s".into()],
-            picker_nudge_val_down: vec!["v".into()],
-            picker_nudge_val_up: vec!["Shift+v".into()],
-
-            // Label Editor
-            label_edit_cancel: vec!["Escape".into()],
-            label_edit_commit: vec!["Enter".into()],
-
-            // Text Editor
-            text_edit_cancel: vec!["Escape".into()],
-
-            // Border Preview
-            //
-            // No default keybinding for `cancel` — Esc-cancels-preview
-            // is achieved by chaining inside `ExitMode`'s arm body
-            // (it calls `cancel_border_preview()` before mode-clear
-            // and short-circuits when a preview was canceled).
-            // Binding `Escape` here would shadow `exit_mode` because
-            // the resolver picks the first match per `(context, key)`
-            // and has no per-action active-state guard. Users who
-            // want `cancel` on a different key opt in via JSON.
-            // `commit_border_preview` is purely opt-in — there is
-            // no implicit chain for it.
-            cancel_border_preview: vec![],
-            commit_border_preview: vec![],
-
-            // Mouse-gesture Actions. `create_orphan_node_and_edit`
-            // is intentionally `vec![]` —
-            // the user found the empty-canvas double-click annoying;
-            // it's now opt-in.
-            double_click_activate: vec!["DoubleClick".into()],
-            create_orphan_node_and_edit: vec![],
-            pan_canvas: vec!["LeftDrag".into(), "MiddleClick".into()],
-
-            // Navigation / camera. `ZoomIn`/`ZoomOut` default to mouse
-            // wheel per user request; key shortcuts (e.g. Ctrl++/Ctrl+-)
-            // can be added in user keybinds.json.
-            zoom_in: vec!["WheelUp".into()],
-            zoom_out: vec!["WheelDown".into()],
-            zoom_reset: vec!["Ctrl+0".into()],
-            zoom_fit: vec!["Ctrl+1".into()],
-            pan_camera_north: vec!["Alt+ArrowUp".into()],
-            pan_camera_south: vec!["Alt+ArrowDown".into()],
-            pan_camera_east: vec!["Alt+ArrowRight".into()],
-            pan_camera_west: vec!["Alt+ArrowLeft".into()],
-            center_on_selection: vec!["Ctrl+.".into()],
-            // Default unbound — `Home` is consumed by the text editor
-            // when it's open (already routed to TextEditCursorHome),
-            // and binding it at the Document level would shadow that
-            // for users who haven't customized. Users who want a
-            // jump-to-root key bind it themselves.
-            jump_to_root: vec![],
-
-            // Selection.
-            select_all: vec!["Ctrl+a".into()],
-            // Default unbound — Esc already exits modes via
-            // `ExitMode`, and rebinding Esc here would conflict
-            // with the modal-cascade contract. Users opt in by
-            // binding e.g. `Ctrl+Shift+a`.
-            deselect_all: vec![],
-            invert_selection: vec!["Ctrl+Shift+i".into()],
-            select_parent: vec!["Alt+p".into()],
-            select_child: vec!["Alt+c".into()],
-            select_next_sibling: vec!["Alt+j".into()],
-            select_prev_sibling: vec!["Alt+k".into()],
-
-            // TextEdit cursor primitives. Bodies live in
-            // dispatch::apply_text_edit_action; the editor's modal
-            // handler routes through dispatch when a binding matches
-            // and falls back to literal-character insertion otherwise.
-            text_edit_cursor_left: vec!["ArrowLeft".into()],
-            text_edit_cursor_right: vec!["ArrowRight".into()],
-            text_edit_cursor_up: vec!["ArrowUp".into()],
-            text_edit_cursor_down: vec!["ArrowDown".into()],
-            text_edit_cursor_home: vec!["Home".into()],
-            text_edit_cursor_end: vec!["End".into()],
-            text_edit_cursor_left_select: vec!["Shift+ArrowLeft".into()],
-            text_edit_cursor_right_select: vec!["Shift+ArrowRight".into()],
-            text_edit_cursor_up_select: vec!["Shift+ArrowUp".into()],
-            text_edit_cursor_down_select: vec!["Shift+ArrowDown".into()],
-            text_edit_cursor_home_select: vec!["Shift+Home".into()],
-            text_edit_cursor_end_select: vec!["Shift+End".into()],
-            text_edit_word_left: vec!["Ctrl+ArrowLeft".into()],
-            text_edit_word_right: vec!["Ctrl+ArrowRight".into()],
-            text_edit_delete_back: vec!["Backspace".into()],
-            text_edit_delete_forward: vec!["Delete".into()],
-            text_edit_delete_word_back: vec!["Ctrl+Backspace".into()],
-            text_edit_delete_word_forward: vec!["Ctrl+Delete".into()],
-            // Default unbound — Enter is literal `\n` in the multi-
-            // line node editor. Users who want commit-on-Enter bind
-            // it themselves (and lose newline insertion in exchange).
-            // Note: any TextEdit Action bound to Enter (not just
-            // Commit) wins over literal-newline insertion — the
-            // action lookup runs before the literal-character
-            // fallback in `handle_text_edit_key`. So binding
-            // `text_edit_cursor_down: ["Enter"]` to a multi-line
-            // editor would break newline insertion.
-            text_edit_commit: vec![],
-
-            // LabelEdit cursor primitives. Same routing path as
-            // TextEdit but single-line — no Up/Down/Word*. Defaults
-            // mirror what `route_single_line_key` previously
-            // hardcoded.
-            label_edit_cursor_left: vec!["ArrowLeft".into()],
-            label_edit_cursor_right: vec!["ArrowRight".into()],
-            label_edit_cursor_home: vec!["Home".into()],
-            label_edit_cursor_end: vec!["End".into()],
-            label_edit_delete_back: vec!["Backspace".into()],
-            label_edit_delete_forward: vec!["Delete".into()],
-
-            // Console-verb Actions. Defaults empty — these mirror
-            // typed console verbs and the user opts in by binding
-            // a key.
-            open_color_picker: vec![],
-            close_color_picker: vec![],
-            label_edit_on_selection: vec![],
-            toggle_fps: vec![],
-            toggle_fps_debug: vec![],
-            new_document: vec![],
-
-            // Parametric console-verb Actions. Defaults empty — users
-            // opt in via `keybinds.json` because there's no universal
-            // sensible default for `from=top to=bottom`-style payloads.
-            set_edge_anchor: vec![],
-            set_edge_body_glyph: vec![],
-            set_border_field: vec![],
-            set_edge_cap: vec![],
-            set_color: vec![],
-            set_border_preview: vec![],
-            set_edge_type: vec![],
-            set_edge_display_mode: vec![],
-            reset_edge: vec![],
-            set_font_family: vec![],
-            set_font: vec![],
-            set_edge_label_text: vec![],
-            set_edge_label_position: vec![],
-            set_spacing: vec![],
-            set_zoom: vec![],
-            clear_zoom: vec![],
-            set_section_offset_delta: vec![],
-            set_section_size_abs: vec![],
-            set_section_size_fill_parent: vec![],
-            open_document: vec![],
-            save_document_as: vec![],
-            new_document_at: vec![],
-
-            // Style / metadata
-            console_font: String::new(),
-            console_font_size: 16.0,
-            custom_mutation_bindings: HashMap::new(),
-            macro_bindings: HashMap::new(),
-        }
+    // ─────────────────────────────────────────────────────────────
+    // Top-level keys that are not per-Action.
+    // ─────────────────────────────────────────────────────────────
+    extra {
+        /// Font family name for the console overlay.
+        pub console_font: String = String::new(),
+        /// Font size in pixels for the console overlay. Clamped to a
+        /// 4.0 floor at resolve time.
+        pub console_font_size: f32 = 16.0,
+        /// Map of key combo → custom mutation id.
+        pub custom_mutation_bindings: HashMap<String, String> = HashMap::new(),
+        /// Map of key combo → macro id. Macros resolve AFTER
+        /// built-in `Action`s and BEFORE custom mutations, so a key
+        /// bound to both a macro and a custom mutation fires the
+        /// macro.
+        pub macro_bindings: HashMap<String, String> = HashMap::new(),
     }
 }
 
 impl KeybindConfig {
     /// Parse a JSON string into a config. Missing fields fall back to
-    /// defaults thanks to `#[serde(default)]` on the struct.
+    /// defaults thanks to `#[serde(default)]` on the generated
+    /// struct, and unrecognized top-level keys are warned about
+    /// rather than rejected — see
+    /// [`Self::unknown_top_level_keys`] for why.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        baumhard::format::json::parse(json).map_err(|e| format!("parse keybinds JSON: {}", e))
-    }
-
-    /// Parse every binding string into concrete `KeyBind` values. Any
-    /// binding that fails to parse is logged and skipped so a single typo
-    /// doesn't break the entire config.
-    pub fn resolve(&self) -> ResolvedKeybinds {
-        let mut binds: Vec<(Action, KeyBind)> = Vec::new();
-        let sets: &[(Action, &Vec<String>)] = &[
-            // Document-level
-            (Action::Undo, &self.undo),
-            (Action::EnterReparentMode, &self.enter_reparent_mode),
-            (Action::EnterConnectMode, &self.enter_connect_mode),
-            (Action::EnterResizeMode, &self.enter_resize_mode),
-            (Action::FastResizeStart, &self.fast_resize_start),
-            (Action::DeleteSelection, &self.delete_selection),
-            (Action::ExitMode, &self.exit_mode),
-            (Action::CreateOrphanNode, &self.create_orphan_node),
-            (Action::OrphanSelection, &self.orphan_selection),
-            (Action::EditSelection, &self.edit_selection),
-            (Action::EditSelectionClean, &self.edit_selection_clean),
-            (Action::EnterNodeEdit, &self.enter_node_edit),
-            (Action::EnterNodeEditClean, &self.enter_node_edit_clean),
-            (Action::EnterSectionEdit, &self.enter_section_edit),
-            (Action::OpenConsole, &self.open_console),
-            (Action::SaveDocument, &self.save_document),
-            (Action::Copy, &self.copy),
-            (Action::Paste, &self.paste),
-            (Action::Cut, &self.cut),
-            // Console
-            (Action::ConsoleClose, &self.console_close),
-            (Action::ConsoleSubmit, &self.console_submit),
-            (Action::ConsoleTabComplete, &self.console_tab_complete),
-            (Action::ConsoleHistoryUp, &self.console_history_up),
-            (Action::ConsoleHistoryDown, &self.console_history_down),
-            (Action::ConsoleCursorLeft, &self.console_cursor_left),
-            (Action::ConsoleCursorRight, &self.console_cursor_right),
-            (Action::ConsoleCursorHome, &self.console_cursor_home),
-            (Action::ConsoleCursorEnd, &self.console_cursor_end),
-            (Action::ConsoleDeleteBack, &self.console_delete_back),
-            (Action::ConsoleDeleteForward, &self.console_delete_forward),
-            (Action::ConsoleInsertSpace, &self.console_insert_space),
-            (Action::ConsoleClearLine, &self.console_clear_line),
-            (Action::ConsoleJumpStart, &self.console_jump_start),
-            (Action::ConsoleJumpEnd, &self.console_jump_end),
-            (Action::ConsoleKillToStart, &self.console_kill_to_start),
-            (Action::ConsoleKillWord, &self.console_kill_word),
-            (Action::ConsoleScrollUp, &self.console_scroll_up),
-            (Action::ConsoleScrollDown, &self.console_scroll_down),
-            (Action::ConsoleScrollPageUp, &self.console_scroll_page_up),
-            (Action::ConsoleScrollPageDown, &self.console_scroll_page_down),
-            (Action::ConsoleScrollEnd, &self.console_scroll_end),
-            (Action::ConsoleScrollHome, &self.console_scroll_home),
-            // Color Picker
-            (Action::PickerCancel, &self.picker_cancel),
-            (Action::PickerCommit, &self.picker_commit),
-            (Action::PickerNudgeHueDown, &self.picker_nudge_hue_down),
-            (Action::PickerNudgeHueUp, &self.picker_nudge_hue_up),
-            (Action::PickerNudgeSatDown, &self.picker_nudge_sat_down),
-            (Action::PickerNudgeSatUp, &self.picker_nudge_sat_up),
-            (Action::PickerNudgeValDown, &self.picker_nudge_val_down),
-            (Action::PickerNudgeValUp, &self.picker_nudge_val_up),
-            // Label Editor
-            (Action::LabelEditCancel, &self.label_edit_cancel),
-            (Action::LabelEditCommit, &self.label_edit_commit),
-            // Text Editor
-            (Action::TextEditCancel, &self.text_edit_cancel),
-            // Border Preview
-            (Action::CancelBorderPreview, &self.cancel_border_preview),
-            (Action::CommitBorderPreview, &self.commit_border_preview),
-            // Mouse-gesture Actions
-            (Action::DoubleClickActivate, &self.double_click_activate),
-            (Action::CreateOrphanNodeAndEdit, &self.create_orphan_node_and_edit),
-            (Action::PanCanvas, &self.pan_canvas),
-            // Navigation / camera
-            (Action::ZoomIn, &self.zoom_in),
-            (Action::ZoomOut, &self.zoom_out),
-            (Action::ZoomReset, &self.zoom_reset),
-            (Action::ZoomFit, &self.zoom_fit),
-            (Action::PanCameraNorth, &self.pan_camera_north),
-            (Action::PanCameraSouth, &self.pan_camera_south),
-            (Action::PanCameraEast, &self.pan_camera_east),
-            (Action::PanCameraWest, &self.pan_camera_west),
-            (Action::CenterOnSelection, &self.center_on_selection),
-            (Action::JumpToRoot, &self.jump_to_root),
-            // Selection
-            (Action::SelectAll, &self.select_all),
-            (Action::DeselectAll, &self.deselect_all),
-            (Action::InvertSelection, &self.invert_selection),
-            (Action::SelectParent, &self.select_parent),
-            (Action::SelectChild, &self.select_child),
-            (Action::SelectNextSibling, &self.select_next_sibling),
-            (Action::SelectPrevSibling, &self.select_prev_sibling),
-            // TextEdit cursor primitives
-            (Action::TextEditCursorLeft, &self.text_edit_cursor_left),
-            (Action::TextEditCursorRight, &self.text_edit_cursor_right),
-            (Action::TextEditCursorUp, &self.text_edit_cursor_up),
-            (Action::TextEditCursorDown, &self.text_edit_cursor_down),
-            (Action::TextEditCursorHome, &self.text_edit_cursor_home),
-            (Action::TextEditCursorEnd, &self.text_edit_cursor_end),
-            (
-                Action::TextEditCursorLeftSelect,
-                &self.text_edit_cursor_left_select,
-            ),
-            (
-                Action::TextEditCursorRightSelect,
-                &self.text_edit_cursor_right_select,
-            ),
-            (Action::TextEditCursorUpSelect, &self.text_edit_cursor_up_select),
-            (
-                Action::TextEditCursorDownSelect,
-                &self.text_edit_cursor_down_select,
-            ),
-            (
-                Action::TextEditCursorHomeSelect,
-                &self.text_edit_cursor_home_select,
-            ),
-            (Action::TextEditCursorEndSelect, &self.text_edit_cursor_end_select),
-            (Action::TextEditWordLeft, &self.text_edit_word_left),
-            (Action::TextEditWordRight, &self.text_edit_word_right),
-            (Action::TextEditDeleteBack, &self.text_edit_delete_back),
-            (Action::TextEditDeleteForward, &self.text_edit_delete_forward),
-            (Action::TextEditDeleteWordBack, &self.text_edit_delete_word_back),
-            (
-                Action::TextEditDeleteWordForward,
-                &self.text_edit_delete_word_forward,
-            ),
-            (Action::TextEditCommit, &self.text_edit_commit),
-            // LabelEdit cursor primitives
-            (Action::LabelEditCursorLeft, &self.label_edit_cursor_left),
-            (Action::LabelEditCursorRight, &self.label_edit_cursor_right),
-            (Action::LabelEditCursorHome, &self.label_edit_cursor_home),
-            (Action::LabelEditCursorEnd, &self.label_edit_cursor_end),
-            (Action::LabelEditDeleteBack, &self.label_edit_delete_back),
-            (Action::LabelEditDeleteForward, &self.label_edit_delete_forward),
-            // Console-verb Actions
-            (Action::OpenColorPicker, &self.open_color_picker),
-            (Action::CloseColorPicker, &self.close_color_picker),
-            (Action::LabelEditOnSelection, &self.label_edit_on_selection),
-            (Action::ToggleFps, &self.toggle_fps),
-            (Action::ToggleFpsDebug, &self.toggle_fps_debug),
-            (Action::NewDocument, &self.new_document),
-        ];
-        for (action, strings) in sets {
-            for s in *strings {
-                match KeyBind::parse(s) {
-                    Ok(k) => binds.push((action.clone(), k)),
-                    Err(e) => warn!("keybinds: skipping invalid keybind '{}': {}", s, e),
+        let config: Self =
+            baumhard::format::json::parse(json).map_err(|e| format!("parse keybinds JSON: {}", e))?;
+        let unknown = Self::unknown_top_level_keys(json);
+        if !unknown.is_empty() {
+            // `known_keys()` allocates, so it is built once for the
+            // whole report rather than per offending key.
+            let known = Self::known_keys();
+            for key in unknown {
+                match nearest_known_key(&key, &known) {
+                    Some(near) => warn!(
+                        "keybinds: unrecognized key '{}' — ignored. Did you mean '{}'? Keys \
+                         starting with '_' are treated as comments.",
+                        key, near,
+                    ),
+                    None => warn!(
+                        "keybinds: unrecognized key '{}' — ignored. None of the {} keys this \
+                         config recognizes is close to it; keys starting with '_' are treated as \
+                         comments.",
+                        key,
+                        known.len(),
+                    ),
                 }
             }
         }
+        Ok(config)
+    }
 
-        // Parametric bindings: each variant carries its own payload
-        // shape, so each `push_parametric` call passes a builder
-        // closure that picks the args apart and constructs the
-        // `Action`. Wrong arg counts emit a warn-log and are skipped
-        // — never panic on a user-config typo.
-        push_parametric(
-            &mut binds,
-            "set_edge_anchor",
-            2,
-            &self.set_edge_anchor,
-            |args| match args {
-                [from, to] => Some(Action::SetEdgeAnchor {
-                    from: from.clone(),
-                    to: to.clone(),
-                }),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "set_edge_body_glyph",
-            1,
-            &self.set_edge_body_glyph,
-            |args| match args {
-                [glyph] => Some(Action::SetEdgeBodyGlyph(glyph.clone())),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "set_border_field",
-            2,
-            &self.set_border_field,
-            |args| match args {
-                [field, value] => Some(Action::SetBorderField {
-                    field: field.clone(),
-                    value: value.clone(),
-                }),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "set_edge_cap",
-            2,
-            &self.set_edge_cap,
-            |args| match args {
-                [from, to] => Some(Action::SetEdgeCap {
-                    from: from.clone(),
-                    to: to.clone(),
-                }),
-                _ => None,
-            },
-        );
-        // Color: `args = [axis, value]` where axis = `bg|text|border`.
-        // `axis.parse::<ColorAxis>()` is the strum-`EnumString`-derived
-        // round-trip with `IntoStaticStr` (`Bg.into() == "bg"` etc.) —
-        // unrecognized tokens land in `Err`, which `push_parametric`
-        // then warns and skips on.
-        push_parametric(&mut binds, "set_color", 2, &self.set_color, |args| match args {
-            [axis, value] => axis
-                .parse::<super::ColorAxis>()
-                .ok()
-                .map(|axis| Action::SetColor {
-                    axis,
-                    value: value.clone(),
-                }),
-            _ => None,
-        });
-        // BorderPreview: `args = [target_kind, field, value]`.
-        // `target_kind.parse::<BorderPreviewTargetKind>()` is the
-        // strum-`EnumString`-derived round-trip; unknown tokens
-        // land in `Err` and `push_parametric` warns and skips.
-        push_parametric(
-            &mut binds,
-            "set_border_preview",
-            3,
-            &self.set_border_preview,
-            |args| match args {
-                [target_kind, field, value] => target_kind
-                    .parse::<super::BorderPreviewTargetKind>()
-                    .ok()
-                    .map(|target_kind| Action::SetBorderPreview {
-                        target_kind,
-                        field: field.clone(),
-                        value: value.clone(),
-                    }),
-                _ => None,
-            },
-        );
-        // Edge structural — type / display_mode / reset.
-        push_parametric(
-            &mut binds,
-            "set_edge_type",
-            1,
-            &self.set_edge_type,
-            |args| match args {
-                [t] => Some(Action::SetEdgeType(t.clone())),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "set_edge_display_mode",
-            1,
-            &self.set_edge_display_mode,
-            |args| match args {
-                [m] => Some(Action::SetEdgeDisplayMode(m.clone())),
-                _ => None,
-            },
-        );
-        push_parametric(&mut binds, "reset_edge", 1, &self.reset_edge, |args| match args {
-            [kind] => Some(Action::ResetEdge(kind.clone())),
-            _ => None,
-        });
-        // Font family / size / clamps + label + spacing.
-        push_parametric(
-            &mut binds,
-            "set_font_family",
-            1,
-            &self.set_font_family,
-            |args| match args {
-                [family] => Some(Action::SetFontFamily(family.clone())),
-                _ => None,
-            },
-        );
-        // Font: `args = [slot, pt]` where slot = `size|min|max`.
-        push_parametric(&mut binds, "set_font", 2, &self.set_font, |args| match args {
-            [slot, value] => slot.parse::<super::FontSlot>().ok().map(|slot| Action::SetFont {
-                slot,
-                value: value.clone(),
-            }),
-            _ => None,
-        });
-        push_parametric(
-            &mut binds,
-            "set_edge_label_text",
-            1,
-            &self.set_edge_label_text,
-            |args| match args {
-                [text] => Some(Action::SetEdgeLabelText(text.clone())),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "set_edge_label_position",
-            1,
-            &self.set_edge_label_position,
-            |args| match args {
-                [pos] => Some(Action::SetEdgeLabelPosition(pos.clone())),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "set_spacing",
-            1,
-            &self.set_spacing,
-            |args| match args {
-                [v] => Some(Action::SetSpacing(v.clone())),
-                _ => None,
-            },
-        );
-        // Zoom: `args = [bound, value]` where bound = `min|max`.
-        // `clear_zoom` is a separate unit variant.
-        push_parametric(&mut binds, "set_zoom", 2, &self.set_zoom, |args| match args {
-            [bound, value] => bound
-                .parse::<super::ZoomBound>()
-                .ok()
-                .map(|bound| Action::SetZoom {
-                    bound,
-                    value: value.clone(),
-                }),
-            _ => None,
-        });
-        push_parametric(&mut binds, "clear_zoom", 0, &self.clear_zoom, |args| match args {
-            [] => Some(Action::ClearZoom),
-            _ => None,
-        });
-        push_parametric(
-            &mut binds,
-            "set_section_offset_delta",
-            2,
-            &self.set_section_offset_delta,
-            |args| match args {
-                [dx, dy] => Some(Action::SetSectionOffsetDelta {
-                    dx: dx.clone(),
-                    dy: dy.clone(),
-                }),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "set_section_size_abs",
-            2,
-            &self.set_section_size_abs,
-            |args| match args {
-                [w, h] => Some(Action::SetSectionSizeAbs {
-                    w: w.clone(),
-                    h: h.clone(),
-                }),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "set_section_size_fill_parent",
-            0,
-            &self.set_section_size_fill_parent,
-            |args| match args {
-                [] => Some(Action::SetSectionSizeFillParent),
-                _ => None,
-            },
-        );
-        // Filesystem variants — NativeOnly + privilege-gated.
-        push_parametric(
-            &mut binds,
-            "open_document",
-            1,
-            &self.open_document,
-            |args| match args {
-                [path] => Some(Action::OpenDocument(path.clone())),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "save_document_as",
-            1,
-            &self.save_document_as,
-            |args| match args {
-                [path] => Some(Action::SaveDocumentAs(path.clone())),
-                _ => None,
-            },
-        );
-        push_parametric(
-            &mut binds,
-            "new_document_at",
-            1,
-            &self.new_document_at,
-            |args| match args {
-                [path] => Some(Action::NewDocumentAt(path.clone())),
-                _ => None,
-            },
-        );
+    /// The top-level keys in `json` that this config does not
+    /// recognize, sorted. Keys starting with `_` are skipped: JSON
+    /// has no comment syntax, and the shipped
+    /// `config/default_keybinds.json` carries its instructions in a
+    /// `_comment` key, so the underscore prefix is the documented
+    /// way to annotate a config.
+    ///
+    /// **Warn, don't reject — for an unrecognized *key*.** A
+    /// hand-edited config is exactly the surface where a
+    /// silently-ignored key is the whole bug: a renamed action
+    /// (`cancel_mode` → `exit_mode`) left the shipped template's Esc
+    /// entry inert and said nothing. But `deny_unknown_fields` would
+    /// answer one stale key by discarding every good binding beside
+    /// it, so the loader keeps the config and names the key instead.
+    ///
+    /// **A malformed *value* under a recognized key is the opposite,
+    /// and this is not the good outcome.** Serde fails the whole
+    /// document, [`Self::from_json`] returns `Err`, and
+    /// `user_config::layered::load_layered` answers a failed parse by
+    /// logging one warning and walking to the next layer — so one
+    /// bad value costs the user every good binding in the same file,
+    /// which is precisely what the paragraph above rejects. The
+    /// asymmetry is real, not a design: it falls out of parsing the
+    /// document in one serde pass, and the same seam gives
+    /// `macros.json` and `mutations.json` the same behavior. Issue
+    /// #129 tracks the fix (per-field parsing with warn-and-skip, so
+    /// a malformed value costs its own field and nothing else);
+    /// `test_clear_zoom_rejects_the_parametric_binding_shape` pins
+    /// the blast radius until then.
+    ///
+    /// Costs one extra pass over the source, keys only
+    /// ([`IgnoredAny`] skips the values), on a config that is parsed
+    /// once per launch. A source that is not a JSON object yields no
+    /// keys — the typed parse ahead of it has already failed.
+    pub fn unknown_top_level_keys(json: &str) -> Vec<String> {
+        let Ok(raw) = baumhard::format::json::parse::<BTreeMap<String, IgnoredAny>>(json) else {
+            return Vec::new();
+        };
+        let known = Self::known_keys();
+        raw.into_keys()
+            .filter(|key| !key.starts_with('_') && !known.contains(&key.as_str()))
+            .collect()
+    }
+
+    /// Parse every binding string into concrete `KeyBind` values. Any
+    /// binding that fails to parse is logged and skipped so a single
+    /// typo doesn't break the entire config.
+    ///
+    /// The per-Action half is [`Self::push_action_binds`], generated
+    /// from the `keybind_surface!` table; what is left here is the
+    /// id-keyed maps, which are keyed by combo rather than by action
+    /// and so have no table row.
+    pub fn resolve(&self) -> ResolvedKeybinds {
+        let mut binds: Vec<(Action, KeyBind)> = Vec::new();
+        self.push_action_binds(&mut binds);
 
         let mut custom_binds: Vec<(KeyBind, String)> = Vec::new();
         for (combo, mutation_id) in &self.custom_mutation_bindings {
@@ -936,39 +601,68 @@ impl KeybindConfig {
     }
 }
 
-/// Resolve every binding for one parametric variant. The builder
-/// closure picks the `Action` apart from the positional args; a
-/// `None` return means "wrong arg count for this variant" — the
-/// binding is logged and skipped (never panic on a user-config typo).
+/// The entry of `known` closest to `key`, when one is close enough
+/// to be worth quoting back at the user.
 ///
-/// `expected_arity` is the count the builder closure expects (used
-/// only to make the warn-log self-explanatory: a user typo'ing a
-/// binding sees the verb name AND the arg count their config should
-/// have used). Passing the right value here is mechanical — it has
-/// to match the closure's accepted arm; mismatches just produce a
-/// slightly less helpful warn message.
-fn push_parametric<F>(
-    binds: &mut Vec<(Action, KeyBind)>,
-    name: &str,
-    expected_arity: usize,
-    bindings: &[ParametricBinding],
-    build: F,
-) where
-    F: Fn(&[String]) -> Option<Action>,
-{
-    for binding in bindings {
-        match KeyBind::parse(&binding.combo) {
-            Ok(k) => match build(&binding.args) {
-                Some(action) => binds.push((action, k)),
-                None => warn!(
-                    "keybinds: skipping {} binding '{}': wrong args (got {}, expected {})",
-                    name,
-                    binding.combo,
-                    binding.args.len(),
-                    expected_arity,
-                ),
-            },
-            Err(e) => warn!("keybinds: skipping invalid keybind '{}': {}", binding.combo, e),
+/// The unrecognized-key warning used to point at
+/// `config/default_keybinds.json`, which lists nine of the keys the
+/// schema has: a user who misspelled anything outside that nine was
+/// sent to a file that would not contain the right spelling either.
+/// [`KeybindConfig::known_keys`] is the actual schema, so the report
+/// is built from it — a candidate when there is one, the recognized
+/// count when there is not.
+///
+/// Distance is Levenshtein over **grapheme clusters**, not bytes or
+/// `char`s: the key comes from a hand-edited file and may be
+/// anything at all (CODE_CONVENTIONS §1). The acceptance threshold
+/// is a third of the longer name, which admits `exit_modes` →
+/// `exit_mode` and `set_colour` → `set_color` while refusing
+/// `cancel_mode` → `exit_mode`; an invented key gets the count
+/// rather than a misleading guess.
+///
+/// Ties go to the lexicographically first candidate so the message
+/// is deterministic. Costs one `Vec<String>` per name plus an
+/// `O(n·m)` two-row grid per candidate, over ~135 candidates, on a
+/// config parsed once per launch.
+pub(super) fn nearest_known_key(key: &str, known: &[&'static str]) -> Option<&'static str> {
+    use baumhard::util::grapheme_chad::split_graphemes_owned;
+
+    let target = split_graphemes_owned(key);
+    let mut best: Option<(usize, &'static str)> = None;
+    for candidate in known {
+        let other = split_graphemes_owned(candidate);
+        let longer = target.len().max(other.len());
+        let distance = grapheme_levenshtein(&target, &other);
+        if distance * 3 > longer {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((best_distance, best_key)) => {
+                distance < best_distance || (distance == best_distance && *candidate < best_key)
+            }
+        };
+        if better {
+            best = Some((distance, candidate));
         }
     }
+    best.map(|(_, candidate)| candidate)
+}
+
+/// Levenshtein edit distance between two grapheme-cluster
+/// sequences. Two rows rather than a full grid — the caller only
+/// wants the number, and the longest key here is a few dozen
+/// clusters, so the allocation is what dominates either way.
+fn grapheme_levenshtein(a: &[String], b: &[String]) -> usize {
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current: Vec<usize> = vec![0; b.len() + 1];
+    for (i, ga) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, gb) in b.iter().enumerate() {
+            let substitute = previous[j] + usize::from(ga != gb);
+            current[j + 1] = substitute.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
 }

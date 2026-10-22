@@ -12,9 +12,10 @@ That means: no `cargo bench`, no `./bench.sh`, and no `./test.sh
 --bench`. There is no task in this repository that requires an agent to
 execute a benchmark, and they are expensive on shared hardware.
 
-`./test.sh` is the gate. It runs the full suite across both crates and
-then type-checks `wasm32-unknown-unknown`, so cross-platform drift fails
-the run.
+`./test.sh` is the gate. It runs the full suite across all four
+workspace members — `mandala`, `baumhard`, `mandala_derive`, `maptool` —
+then type-checks the benchmark targets and `wasm32-unknown-unknown`, so
+neither a drifted `do_*()` nor cross-platform drift can pass a green run.
 
 Three consequences worth spelling out, because each has been reached for
 in good faith:
@@ -22,9 +23,16 @@ in good faith:
 - **Changing benchmark code is fine; executing it is not.** Adding or
   moving a `benches/` entry — which `lib/baumhard/CONVENTIONS.md` §B3
   requires alongside a new primitive — is a static change. `cargo check
-  --benches` proves the target still compiles. That is sufficient, and
-  `./test.sh` runs it for you (`cargo check --workspace --benches`), so
-  a renamed `do_*()` fails the gate rather than waiting for a benchmark
+  --workspace --benches` proves the target still compiles. `--workspace`
+  is not optional: without it cargo selects only the root package, which
+  declares `autobenches = false` and owns no bench target, so the bare
+  form exits 0 on a bench file that does not build.
+  `test_no_bench_check_selects_a_package_that_owns_no_bench` holds the
+  flag to that spelling in every Markdown file, shell script, CI
+  workflow and Rust comment here — this file, `CLAUDE.md`, and
+  `test.sh`, where the command is run rather than described. That
+  check is sufficient, and `./test.sh` runs exactly it for you, so a
+  renamed `do_*()` fails the gate rather than waiting for a benchmark
   run nobody here is allowed to do.
 
 - **Do not make performance claims.** `lib/baumhard/CONVENTIONS.md` §B7

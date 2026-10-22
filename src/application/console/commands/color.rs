@@ -12,73 +12,121 @@
 //! picker modal — `color bg` picks a color for that axis on the
 //! current selection.
 
+use super::range_kv::TARGET_KEYS;
 use super::Command;
 use crate::application::color_picker::{ColorTarget, NodeColorAxis, SectionColorAxis};
-use crate::application::console::completion::{
-    kv_key_completions_with_hints, prefix_filter, Completion, CompletionContext, CompletionState,
-};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
+use crate::application::console::spec::descent::{descend, Stop};
+use crate::application::console::spec::{
+    bare_words, free_words, kvs, usage, Bare, Descent, Form, Grammar, Key, Slot, Subverb, Vocabulary, Word,
+};
 use crate::application::console::traits::{
     apply_kvs, ColorValue, HasBgColor, HasBorderColor, HasTextColor, Outcome,
 };
-use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
+use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::{SectionSel, SelectionState};
 
-pub const KEYS: &[&str] = &["bg", "text", "border", "section"];
 pub const VALUE_PRESETS: &[&str] = &["accent", "edge", "fg", "reset"];
+const PRESET_WORDS: &[Word] = &bare_words::<4>(VALUE_PRESETS);
+
+/// A color value: any `#hex` or `var(--name)`, plus the four preset
+/// names the theme resolves.
+const COLOR_VOCAB: Vocabulary = free_words("#hex|var(--name)", PRESET_WORDS);
+
+const ON_OFF: &[Word] = &[
+    Word::new("on", "open the picker as a persistent standalone palette"),
+    Word::new("off", "close any open picker"),
+];
+
+const KEYS: &[Key] = &[
+    Key::new("bg", "fill / background color", COLOR_VOCAB),
+    Key::new("text", "text / label color", COLOR_VOCAB),
+    Key::new("border", "frame / line color", COLOR_VOCAB),
+];
+
+/// The three axes are subverbs as well as keys: `color bg` opens the
+/// glyph wheel on that axis, `color bg=#fff` writes it directly. The
+/// two vocabularies are separate namespaces, so one word can be in
+/// both — and the popup at the first slot offers each shape once.
+const SUBVERBS: &[Subverb] = &[
+    Subverb::bare("bg", "picker", "pick a fill color on the glyph wheel").gated(),
+    Subverb::bare("text", "picker", "pick a text color on the glyph wheel").gated(),
+    Subverb::bare("border", "picker", "pick a frame color on the glyph wheel").gated(),
+    Subverb::bare("pick", "picker", "pick a color for the current selection").gated(),
+    Subverb::bare("picker", "picker", "open or close the standalone palette")
+        .taking(&[Form::slots(&[Slot::req(Vocabulary::Words(ON_OFF))])])
+        .gated(),
+];
+
+pub static GRAMMAR: Grammar = Grammar {
+    label: "color",
+    subverb_sets: &[SUBVERBS],
+    key_sets: &[KEYS, TARGET_KEYS],
+    bare: Some(Bare::new(
+        "composed",
+        &[Form::opt(&["bg", "text", "border", "section", "range"])],
+    )),
+};
 
 pub const COMMAND: Command = Command {
     name: "color",
     aliases: &[],
     summary: "Set bg/text/border color, or pick via the glyph wheel",
-    usage: "color bg=<color> text=<color> border=<color>   |   color bg|text|border|pick",
-    tags: &["color", "bg", "text", "border", "pick", "wheel"],
     applicable: always,
-    complete: complete_color,
+    grammar: &GRAMMAR,
+    synonyms: &["wheel"],
     execute: execute_color,
 };
 
-fn complete_color(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match &state.context {
-        CompletionContext::Token { index } => {
-            let mut out = kv_key_completions_with_hints(KEYS, state.partial, kv_hint);
-            // At token 0 the bare verbs — `pick` plus the axis
-            // positionals `bg` / `text` / `border` — also hand off
-            // to the glyph-wheel picker. Suggest them alongside the
-            // kv-key forms.
-            if *index == 0 {
-                out.extend(prefix_filter(&["pick", "picker"], state.partial));
+/// The five picker subverbs. `picker on|off` opens or closes the
+/// standalone palette; the other four resolve a target from the
+/// selection and hand off to the glyph wheel.
+fn execute_picker(
+    descent: &Descent,
+    args: &Args,
+    eff: &mut ConsoleEffects,
+    name: &'static str,
+) -> ExecResult {
+    if name == "picker" {
+        return match descent
+            .slot_value(args)
+            .get(0)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("on") => {
+                eff.side_effect = Some(super::super::ConsoleSideEffect::OpenColorPickerStandalone);
+                eff.close_console = true;
+                ExecResult::ok_empty()
             }
-            // `color picker` expects `on` / `off` as the next token.
-            if *index == 1 && matches!(state.tokens.first().map(String::as_str), Some("picker")) {
-                out.extend(prefix_filter(&["on", "off"], state.partial));
+            Some("off") => {
+                eff.side_effect = Some(super::super::ConsoleSideEffect::CloseColorPicker);
+                eff.close_console = true;
+                ExecResult::ok_empty()
             }
-            out
+            _ => ExecResult::err(usage::subverb_usage(
+                descent.level,
+                descent.subverb().unwrap_or(&SUBVERBS[4]),
+            )),
+        };
+    }
+    match picker_target_for(name, &eff.document().selection) {
+        PickerTargetOutcome::Open(target) => {
+            eff.side_effect = Some(super::super::ConsoleSideEffect::OpenColorPicker(target));
+            eff.close_console = true;
+            ExecResult::ok_empty()
         }
-        CompletionContext::KvValue { key } if KEYS.iter().any(|k| k == key) => {
-            prefix_filter(VALUE_PRESETS, state.partial)
-        }
-        _ => Vec::new(),
+        PickerTargetOutcome::NotApplicable(msg) => ExecResult::err(msg),
+        // The four axis subverbs are all `picker_target_for` knows;
+        // an `Unknown` here means the selection carries no target.
+        PickerTargetOutcome::Unknown => ExecResult::err(format!(
+            "color {}: nothing to pick for this selection",
+            descent.typed.unwrap_or(name)
+        )),
     }
 }
 
-fn kv_hint(key: &str) -> Option<&'static str> {
-    match key {
-        "bg" => Some("fill / background color"),
-        "text" => Some("text / label color"),
-        "border" => Some("frame / line color"),
-        "section" => Some("target section index inside a multi-section node"),
-        _ => None,
-    }
-}
-
-/// Outcome of resolving a positional `color` verb against the
-/// current selection. Distinguishes "open the picker on this
-/// target" from "the verb doesn't apply to this selection shape"
-/// (descriptive message) from "no selection / unknown verb" (fall
-/// through to the generic error). Lets `bg`/`border` on a section
-/// surface a clearer reason than the generic fallback.
 enum PickerTargetOutcome {
     Open(ColorTarget),
     NotApplicable(String),
@@ -173,17 +221,18 @@ fn picker_target_for(verb: &str, selection: &SelectionState) -> PickerTargetOutc
             None => PickerTargetOutcome::Unknown,
         },
         // SectionRange: route the picker to the targeted section
-        // AND plumb the sub-range so the commit fires through
-        // `set_section_text_color_range`.
+        // AND plumb the grapheme sub-range so the commit fires
+        // through `set_section_text_color_range`.
         SelectionState::SectionRange {
             sel: SectionSel { node_id, section_idx },
-            range,
+            grapheme_range,
+            ..
         } => match axis {
             Some(NodeColorAxis::Text) | None => PickerTargetOutcome::Open(ColorTarget::Section {
                 node_id: node_id.clone(),
                 section_idx: *section_idx,
                 axis: SectionColorAxis::Text,
-                range: Some(*range),
+                range: Some(*grapheme_range),
             }),
             Some(NodeColorAxis::Bg) => PickerTargetOutcome::NotApplicable(
                 "color bg: not applicable to a section (section-level chrome doesn't exist)".to_string(),
@@ -231,36 +280,21 @@ fn execute_color(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     //  - `color picker on` — open the picker as a persistent
     //    standalone palette (no target; commit applies to selection)
     //  - `color picker off` — close any open picker
-    if let Some(verb) = args.positional(0) {
-        if verb == "picker" {
-            match args.positional(1) {
-                Some("on") => {
-                    eff.side_effect = Some(super::super::ConsoleSideEffect::OpenColorPickerStandalone);
-                    eff.close_console = true;
-                    return ExecResult::ok_empty();
-                }
-                Some("off") => {
-                    eff.side_effect = Some(super::super::ConsoleSideEffect::CloseColorPicker);
-                    eff.close_console = true;
-                    return ExecResult::ok_empty();
-                }
-                _ => return ExecResult::err("usage: color picker on | color picker off"),
-            }
+    let descent = descend(&GRAMMAR, args.tokens());
+    let pairs = match kvs::read_strict(&descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
+    };
+    match descent.stop {
+        Stop::Matched(subverb) => return execute_picker(&descent, args, eff, subverb.name),
+        Stop::KvForm => return ExecResult::err(descent.quoting_hint(args)),
+        Stop::Unknown => {
+            return ExecResult::err(usage::unknown_subverb_message(
+                descent.level,
+                descent.typed.unwrap_or_default(),
+            ))
         }
-        match picker_target_for(verb, &eff.document.selection) {
-            PickerTargetOutcome::Open(target) => {
-                eff.side_effect = Some(super::super::ConsoleSideEffect::OpenColorPicker(target));
-                eff.close_console = true;
-                return ExecResult::ok_empty();
-            }
-            PickerTargetOutcome::NotApplicable(msg) => {
-                return ExecResult::err(msg);
-            }
-            PickerTargetOutcome::Unknown => {}
-        }
-        if matches!(verb, "pick" | "bg" | "text" | "border") {
-            return ExecResult::err(format!("color {}: nothing to pick for this selection", verb));
-        }
+        Stop::Bare => {}
     }
 
     // Split out optional `section=N` and `range=A..B` from the
@@ -273,41 +307,27 @@ fn execute_color(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     // `range` without `section` is a usage error: ranges target
     // grapheme indices inside one section's text, so the section
     // must be specified first.
-    let mut section_target: Option<usize> = None;
-    let mut range_target: Option<(usize, usize)> = None;
-    let mut color_kvs: Vec<(String, String)> = Vec::new();
-    for (k, v) in args.kvs() {
-        if k == "section" {
-            match super::range_kv::parse_section_kv("color", v) {
-                Ok(idx) => section_target = Some(idx),
-                Err(msg) => return ExecResult::err(msg),
-            }
-        } else if k == "range" {
-            match super::range_kv::parse_range_kv(v) {
-                Ok(pair) => range_target = Some(pair),
-                Err(msg) => return ExecResult::err(format!("color: range='{}' — {}", v, msg)),
-            }
-        } else {
-            color_kvs.push((k.to_string(), v.to_string()));
-        }
-    }
-    if color_kvs.is_empty() && section_target.is_none() {
-        return ExecResult::err("usage: color bg|text|border[=<color>]   |   color pick");
+    let target = match super::range_kv::extract_section_range_kvs(&pairs, "color") {
+        Ok(t) => t,
+        Err(msg) => return ExecResult::err(msg),
+    };
+    let color_kvs: Vec<(String, String)> = pairs
+        .iter()
+        .filter(|p| matches!(p.key.name, "bg" | "text" | "border"))
+        .map(|p| (p.key.name.to_string(), p.value.to_string()))
+        .collect();
+    if color_kvs.is_empty() && target.section.is_none() {
+        return ExecResult::err(usage::no_arguments_message(&GRAMMAR));
     }
     if color_kvs.is_empty() {
         return ExecResult::err("color: section=N requires at least one color axis (e.g. text=#ff0000)");
     }
-    if range_target.is_some() && section_target.is_none() {
-        return ExecResult::err(
-            "color: range=A..B requires section=N — ranges target grapheme indices inside one section",
-        );
+
+    if let Some(idx) = target.section {
+        return apply_section_colors(eff.document_mut(), idx, target.range, &color_kvs);
     }
 
-    if let Some(idx) = section_target {
-        return apply_section_colors(eff.document, idx, range_target, &color_kvs);
-    }
-
-    let report = apply_kvs(eff.document, &color_kvs, stage_color_axis);
+    let report = apply_kvs(eff.document_mut(), &color_kvs, stage_color_axis);
 
     finalize_report(report, "color")
 }
@@ -346,30 +366,18 @@ fn stage_color_axis(
 fn apply_section_colors(
     doc: &mut crate::application::document::MindMapDocument,
     section_idx: usize,
-    range: Option<(usize, usize)>,
+    range: Option<crate::application::document::GraphemeRange>,
     kvs: &[(String, String)],
 ) -> ExecResult {
     let node_id = match doc.selection.primary_node_id() {
         Some(id) => id.to_string(),
         None => return ExecResult::err("color: section=N requires a node or section selection"),
     };
-    // Surface a clear error when `range_start` is past the
-    // section's grapheme count — without this pre-flight the
-    // setter silently no-ops and the verb prints "color: no
-    // change", indistinguishable from "you set red on already-
-    // red text".
-    if let Some((rs, _re)) = range {
-        if let Some(node) = doc.mindmap.nodes.get(&node_id) {
-            if let Some(section) = node.sections.get(section_idx) {
-                let total = baumhard::util::grapheme_chad::count_grapheme_clusters(&section.text);
-                if rs >= total {
-                    return ExecResult::err(format!(
-                        "color: range_start={} is past the section's grapheme count ({})",
-                        rs, total
-                    ));
-                }
-            }
-        }
+    // Shared with `font`: without the pre-flight the setter
+    // silently no-ops and the verb prints "no change",
+    // indistinguishable from "you set red on already-red text".
+    if let Err(msg) = super::range_kv::preflight_range(doc, &node_id, section_idx, range, "color") {
+        return ExecResult::err(msg);
     }
     let mut messages = Vec::new();
     let mut any_applied = false;
@@ -383,37 +391,44 @@ fn apply_section_colors(
                         continue;
                     }
                 };
-                let resolved = color_value
-                    .as_model_string()
-                    .unwrap_or_else(|| "#ffffff".to_string());
-                let applied = match range {
-                    Some((rs, re)) => {
-                        let ok = doc.set_section_text_color_range(&node_id, section_idx, rs, re, resolved);
-                        if !ok {
-                            // Mirror the picker path's stale-range
-                            // diagnostic: the pre-flight `rs >= total`
-                            // check above already rejects ranges past
-                            // the section's grapheme count, so a
-                            // `false` here means either the node /
-                            // section was deleted concurrently or
-                            // `range_end` exceeds total. Surface so
-                            // it doesn't silently land as
-                            // "color: no change".
-                            log::warn!(
-                                "color verb on section {} of node {} \
-                                 range {}..{} produced no change \
-                                 (range may extend past the section's \
-                                 grapheme count or section was deleted)",
-                                section_idx,
-                                node_id,
-                                rs,
-                                re
-                            );
-                        }
-                        ok
-                    }
-                    None => doc.set_section_text_color(&node_id, section_idx, resolved),
+                // Routed through the very `TargetView::Section`
+                // arm the collapsed `SelectionState::Section`
+                // path uses, rather than re-deriving the same
+                // call. The copy that used to live here had
+                // drifted already: it resolved `reset` to a
+                // literal `#ffffff` and baked it onto the runs,
+                // where the trait arm hands the run tier its own
+                // "no color of my own" — the empty string.
+                let mut view = crate::application::console::traits::TargetView::Section {
+                    doc: &mut *doc,
+                    id: node_id.clone(),
+                    section_idx,
+                    range,
                 };
+                let applied = view.set_text_color(color_value) == Outcome::Applied;
+                if !applied {
+                    if let Some(r) = range {
+                        // Mirror the picker path's stale-range
+                        // diagnostic: the pre-flight `rs >= total`
+                        // check above already rejects ranges past
+                        // the section's grapheme count, so no
+                        // change here means either the node /
+                        // section was deleted concurrently or
+                        // `range_end` exceeds total. Surface so
+                        // it doesn't silently land as
+                        // "color: no change".
+                        log::warn!(
+                            "color verb on section {} of node {} \
+                             range {}..{} produced no change \
+                             (range may extend past the section's \
+                             grapheme count or section was deleted)",
+                            section_idx,
+                            node_id,
+                            r.start(),
+                            r.end()
+                        );
+                    }
+                }
                 if applied {
                     any_applied = true;
                 }
@@ -424,12 +439,14 @@ fn apply_section_colors(
                     k
                 ));
             }
-            other => messages.push(format!("unknown key '{}'", other)),
+            // Unreachable: the engine refused every key this form
+            // does not read before the loop ran (§9 degrade).
+            other => log::error!("color: engine admitted unread key '{other}'"),
         }
     }
     if any_applied && messages.is_empty() {
         let scope = match range {
-            Some((rs, re)) => format!("section {} range {}..{}", section_idx, rs, re),
+            Some(r) => format!("section {} range {}..{}", section_idx, r.start(), r.end()),
             None => format!("section {}", section_idx),
         };
         return ExecResult::ok_msg(format!("color applied to {}", scope));
@@ -467,21 +484,51 @@ pub(crate) fn apply_color_axis_to_selection(
     report.any_applied
 }
 
-/// Surface a NotApplicable outcome on the parametric Action path
-/// where the dispatcher's scrollback messages would otherwise
-/// vanish. Action arms (keybind / palette / macro) have no
-/// scrollback to pipe per-pair outcomes into; without this hook
-/// a `SetColor { axis: Bg }` triggered against a `Section`
-/// selection (where the `HasBgColor` arm returns NotApplicable
-/// per the Tier-2A trait split) would silently no-op with no
-/// signal in the log either. Verb path keeps full per-pair
-/// reporting via `finalize_report` and ignores this hook.
+/// Surface a silent no-op on the parametric Action path where the
+/// dispatcher's scrollback messages would otherwise vanish. Action
+/// arms (keybind / palette / macro) have no scrollback to pipe
+/// per-pair outcomes into; without this hook a `SetColor { axis:
+/// Bg }` triggered against a `Section` selection (where the
+/// `HasBgColor` arm returns NotApplicable per the Tier-2A trait
+/// split) would silently no-op with no signal in the log either.
+/// Verb path keeps full per-pair reporting via `finalize_report`
+/// and ignores this hook.
+///
+/// Two outcomes reach here and they are not the same condition, so
+/// they do not take the same level (CODE_CONVENTIONS §9):
+///
+/// - **NotApplicable** is transient — the axis is fine, the
+///   selection is the wrong kind, and the same binding works on the
+///   next selection. `info!`, which is compiled out of release,
+///   because a stray keypress against the wrong selection is not a
+///   defect and must not accumulate in a user's stderr.
+/// - **Invalid** is permanent: the *value* the binding carries is
+///   one the parser rejects, so the binding cannot ever apply, to
+///   any selection. That is a defect in a config file the user
+///   owns and cannot see from inside the app — `warn!`, which
+///   survives into release where they are.
+///
+/// Before this split, an `Invalid` outcome matched neither the
+/// "not applicable" substring nor anything else, so a keybinding
+/// carrying an unparseable color was the quietest failure on the
+/// path: no scrollback, no log, no change.
 fn log_not_applicable_if_silent(
     report: &crate::application::console::traits::DispatchReport,
     verb: &str,
     axis: &str,
 ) {
-    if !report.any_applied && report.messages.iter().any(|m| m.contains("not applicable")) {
+    if report.any_applied {
+        return;
+    }
+    if !report.invalid.is_empty() {
+        log::warn!(
+            "{} {}: value rejected, so this binding cannot apply to any selection \
+             (Action path; no scrollback): {}",
+            verb,
+            axis,
+            report.invalid.join("; "),
+        );
+    } else if report.messages.iter().any(|m| m.contains("not applicable")) {
         log::info!(
             "{} {}: not applicable to current selection (Action path; no scrollback). \
              Dispatcher messages: {}",
@@ -517,6 +564,85 @@ mod tests {
     use crate::application::console::parser::{parse, ParseResult};
     use crate::application::document::tests_common::{first_testament_node_id, load_test_doc};
 
+    /// The popup rows for `line` with the cursor at its end.
+    fn popup(line: &str, doc: &crate::application::document::MindMapDocument) -> Vec<String> {
+        let ctx = crate::application::console::ConsoleContext::from_document(doc);
+        crate::application::console::completion::complete(line, line.len(), &ctx)
+            .into_iter()
+            .map(|c| c.text)
+            .collect()
+    }
+
+    /// `color picker` accepts `on` and `off` and rejects every kv
+    /// pair. The popup used to offer the kv keys and neither of the
+    /// two words, because its guard asked `tokens.first()` — the
+    /// verb name — whether it was `picker`.
+    #[test]
+    fn test_color_picker_completion_offers_on_and_off_only() {
+        let doc = load_test_doc();
+        assert_eq!(popup("color picker ", &doc), vec!["on", "off"]);
+        assert_eq!(popup("color picker o", &doc), vec!["on", "off"]);
+    }
+
+    /// `section=` takes an index, not a color name.
+    #[test]
+    fn test_color_section_value_completion_offers_section_indices() {
+        let (mut doc, id) = crate::application::document::tests_common::pinned_two_section_node();
+        doc.selection = SelectionState::Single(id);
+        assert_eq!(popup("color section=", &doc), vec!["0", "1"]);
+        assert_eq!(popup("color bg=", &doc), VALUE_PRESETS.to_vec());
+    }
+
+    /// `color range=A..B` reached `execute_color` and the verb's own
+    /// error text without ever being offered by a completer, exactly
+    /// as it had on `font` — accepted, named in the rejection the
+    /// user gets for omitting `section=`, and discoverable nowhere.
+    /// `section=` was the mirror gap: parsed, and absent from the
+    /// usage line.
+    ///
+    /// Both are structural now. The key is one row of the level's
+    /// declaration, and `spec::tests` holds every level's keys
+    /// against the forms that print them in both directions, over
+    /// the whole registry — so what used to be this verb's private
+    /// assertion is an invariant. What stays here is the popup at
+    /// the two slots, which the declaration does not by itself
+    /// prove reaches the user.
+    #[test]
+    fn test_color_completion_offers_the_range_key() {
+        let doc = load_test_doc();
+        assert!(popup("color ", &doc).iter().any(|t| t == "range="));
+        assert_eq!(popup("color ra", &doc), vec!["range="]);
+        // …and `help color` names it, from the same declaration.
+        assert!(
+            COMMAND.key_lines().iter().any(|l| l.starts_with("range=")),
+            "`help color` must publish the key: {:?}",
+            COMMAND.key_lines()
+        );
+    }
+
+    /// `color range=A..B` without `section=` is a usage error, and
+    /// the message names the key the popup now offers — the two
+    /// halves the drift had apart.
+    #[test]
+    fn test_color_range_without_section_is_rejected_by_name() {
+        let (mut doc, id) = crate::application::document::tests_common::pinned_two_section_node();
+        doc.selection = SelectionState::Single(id);
+        use crate::application::console::tests::fixtures::run;
+        match run("color range=0..2 text=accent", &mut doc) {
+            ExecResult::Err(m) => assert!(m.contains("range=A..B requires section=N"), "{}", m),
+            other => panic!("expected Err, got {:?}", other),
+        }
+        match run("color section=0 range=0..2 text=accent", &mut doc) {
+            ExecResult::Ok(m) => assert!(m.contains("range 0..2"), "{}", m),
+            other => panic!("expected Ok, got {:?}", other),
+        }
+    }
+
+    /// Read back through the palette cascade rather than off
+    /// `style`: every testament node is themed, so its fill comes
+    /// from its palette group and a write that landed in `style`
+    /// would report success while the node kept painting the
+    /// palette color (`format/palettes.md`).
     #[test]
     fn apply_color_axis_writes_bg_to_node() {
         let mut doc = load_test_doc();
@@ -524,8 +650,8 @@ mod tests {
         doc.selection = SelectionState::Single(id.clone());
         let changed = apply_color_axis_to_selection(&mut doc, "bg", "#fafafa");
         assert!(changed);
-        let style = &doc.mindmap.nodes.get(&id).unwrap().style;
-        assert_eq!(style.background_color, "#fafafa");
+        let node = doc.mindmap.nodes.get(&id).unwrap();
+        assert_eq!(doc.mindmap.node_background_color(node), "#fafafa");
     }
 
     #[test]
@@ -629,7 +755,7 @@ mod tests {
                     italic: false,
                     underline: false,
                     font: "LiberationSans".into(),
-                    size_pt: 14,
+                    size_pt: 14.0,
                     color: "#aaaaaa".into(),
                     hyperlink: None,
                 }];
@@ -659,7 +785,7 @@ mod tests {
             "#aaaaaa",
             ["#aaaaaa", "#aaaaaa"],
             "LiberationSans",
-            14,
+            14.0,
         );
         (doc, id)
     }
@@ -715,7 +841,7 @@ mod tests {
             "#aaaaaa",
             ["#aaaaaa", "#abcdef"],
             "LiberationSans",
-            14,
+            14.0,
         );
         doc.selection = SelectionState::Single(id.clone());
         assert_exec_ok(run("color text=#00ff00 section=1", &mut doc));
@@ -895,14 +1021,15 @@ mod tests {
     fn picker_target_for_section_range_carries_range() {
         use crate::application::color_picker::{ColorTarget, SectionColorAxis};
         use crate::application::console::tests::fixtures::assert_exec_ok;
-        use crate::application::document::SectionSel;
+        use crate::application::document::{GraphemeRange, SectionSel, SectionSpan};
         let (mut doc, id) = doc_with_two_sections();
         doc.selection = SelectionState::SectionRange {
             sel: SectionSel {
                 node_id: id.clone(),
                 section_idx: 1,
             },
-            range: (3, 7),
+            section_span: SectionSpan::single(1),
+            grapheme_range: GraphemeRange::new(3, 7),
         };
         let (cmd, toks) = match parse("color text") {
             ParseResult::Ok { cmd, args } => (cmd, args),
@@ -920,7 +1047,7 @@ mod tests {
                 assert_eq!(node_id, id);
                 assert_eq!(section_idx, 1);
                 assert_eq!(axis, SectionColorAxis::Text);
-                assert_eq!(range, Some((3, 7)));
+                assert_eq!(range, Some(GraphemeRange::new(3, 7)));
             }
             other => panic!("expected ColorTarget::Section/Text with range, got {:?}", other),
         }
@@ -953,5 +1080,127 @@ mod tests {
             "no picker should open for bg axis on a section selection"
         );
         assert_exec_err_contains(result, "not applicable");
+    }
+
+    /// `color text=reset section=K` unpins the section's runs
+    /// instead of baking a literal white onto them.
+    ///
+    /// A run's color is the *most* specific tier in the cascade, so
+    /// a literal written here survives every retheme — which is the
+    /// opposite of what "reset" promises. The run tier's own
+    /// spelling for "no color of my own" is the empty string, and
+    /// that is what a reset has to produce.
+    #[test]
+    fn color_text_section_reset_unpins_the_runs() {
+        use crate::application::console::tests::fixtures::{assert_exec_ok, run};
+
+        let (mut doc, id) = doc_with_two_sections();
+        doc.selection = SelectionState::Single(id.clone());
+        assert_exec_ok(run("color text=reset section=1", &mut doc));
+        let node = doc.mindmap.nodes.get(&id).unwrap();
+        assert!(
+            node.sections[1].text_runs.iter().all(|r| r.color.is_empty()),
+            "reset must leave the runs deferring, got {:?}",
+            node.sections[1].text_runs
+        );
+        assert!(
+            node.sections[0].text_runs.iter().all(|r| r.color == "#aaaaaa"),
+            "the sibling section is not part of the gesture"
+        );
+    }
+
+    /// `color bg=reset` / `border=reset` / `text=reset` on a themed
+    /// node, end to end through the verb.
+    ///
+    /// The node has to come back onto its palette. Before the
+    /// override tier existed the reset literals landed in `style`,
+    /// which the palette shadows, so the gesture was a no-op nobody
+    /// noticed; landing them in the override tier instead would
+    /// have made it a permanent exception with no verb to lift it.
+    #[test]
+    fn color_reset_on_a_themed_node_hands_it_back_to_the_palette() {
+        use crate::application::console::tests::fixtures::{assert_exec_ok, run};
+        use crate::application::document::tests_common::theme_node_with_probe_palette;
+        use baumhard::mindmap::model::ColorGroup;
+
+        let mut doc = load_test_doc();
+        let id = first_testament_node_id(&doc);
+        let group = theme_node_with_probe_palette(
+            &mut doc,
+            &id,
+            "verb-reset-probe",
+            ColorGroup {
+                background: "#a9decb".into(),
+                frame: "#30b082".into(),
+                text: "#0f0f0f".into(),
+                title: String::new(),
+            },
+        );
+        doc.selection = SelectionState::Single(id.clone());
+        assert_exec_ok(run("color bg=#111111 border=#222222 text=#333333", &mut doc));
+        assert_exec_ok(run("color bg=reset border=reset text=reset", &mut doc));
+
+        let node = doc.mindmap.nodes.get(&id).unwrap();
+        assert!(
+            node.color_schema
+                .as_ref()
+                .expect("still themed")
+                .overrides
+                .is_empty(),
+            "every channel must be back to having no opinion"
+        );
+        assert_eq!(doc.mindmap.node_background_color(node), group.background);
+        assert_eq!(doc.mindmap.node_frame_color(node), group.frame);
+        assert_eq!(doc.mindmap.node_text_color(node), group.text);
+    }
+
+    /// The parametric path reports an unusable *value* at `warn!`
+    /// and a wrong *selection* at `info!`, which the release cap
+    /// compiles out.
+    ///
+    /// The distinction is the point: a keybinding carrying
+    /// `bg=zzz-not-a-color` can never apply, to any selection, and
+    /// the user cannot see why from inside the app; a `bg` press
+    /// against a section selection works again on the next node.
+    /// Before the `invalid` field on `DispatchReport` existed, the
+    /// first case matched no substring the hook looked for and was
+    /// the quietest failure on the path — no scrollback, no log, no
+    /// change.
+    ///
+    /// Fails when: the `warn!` arm goes or is downgraded (the
+    /// recorder keeps `warn!` and above, so a lower level
+    /// disappears), or when the not-applicable case is raised to
+    /// `warn!` (the control block finds a line, and every stray
+    /// keypress against the wrong selection would reach a release
+    /// build's stderr).
+    #[test]
+    fn test_parametric_color_warns_only_for_a_value_that_can_never_apply() {
+        baumhard::util::test_logger::install();
+
+        let mut doc = load_test_doc();
+        let id = first_testament_node_id(&doc);
+        doc.selection = SelectionState::Single(id.clone());
+        assert!(!super::apply_color_axis_to_selection(
+            &mut doc,
+            "bg",
+            "zzz-not-a-color-9f31"
+        ));
+        let logged = baumhard::util::test_logger::lines_containing("zzz-not-a-color-9f31");
+        assert!(
+            logged.iter().any(|l| l.starts_with("WARN ")),
+            "an unparseable value must be reported at warn level, logged: {logged:?}"
+        );
+
+        // Control: a perfectly good color against a selection the
+        // axis does not reach. `bg` on a section is the
+        // NotApplicable case the hook was written for.
+        let mut doc = load_test_doc();
+        doc.selection = SelectionState::Section(crate::application::document::SectionSel::new(&id, 0));
+        assert!(!super::apply_color_axis_to_selection(&mut doc, "bg", "#b2c3d4"));
+        let logged = baumhard::util::test_logger::lines_containing("#b2c3d4");
+        assert!(
+            logged.is_empty(),
+            "a wrong-selection press is transient and must not warn: {logged:?}"
+        );
     }
 }

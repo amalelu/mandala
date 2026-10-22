@@ -15,11 +15,11 @@ autobenches = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rand = "0.10.1"
+rand = "0.10.3"
 serde.workspace = true
 serde_json.workspace = true
 slab = "0.4.12"
-lazy_static = "1.5.0"
+lazy_static = "1.5.1"
 # `release_max_level_warn` is what keeps baumhard's §9 degrade paths
 # (unknown font id, UTF-8 conversion failure, corrupt-region drop)
 # diagnosable from a user report while the chatty walker
@@ -30,14 +30,33 @@ lazy_static = "1.5.0"
 log.workspace = true
 indextree.workspace = true
 glam.workspace = true
-cosmic-text = "0.18.2"
-tinyvec = "1.11.0"
-unicode-segmentation = "1.13.2"
+cosmic-text = "0.19.0"
+# The lock behind `font::fonts::FONT_SYSTEM`. Chosen over
+# `std::sync::RwLock` for one capability std lacks: a *timed* write
+# acquire that queues fairly (`try_write_for`) instead of a
+# `try_write` + sleep poll, which is unfair and starved a waiter past
+# its ceiling under parallel tests. It was already in the lockfile
+# through wgpu, on both targets. On `wasm32-unknown-unknown` without
+# atomics its parker panics, so a *contended* acquire traps there;
+# `fonts.rs` catches every same-thread cause of contention first, and
+# the browser has no second thread to cause another. The uncontended
+# path never parks and never reads a clock, which is the only path
+# the browser takes — `tests/wasm_font_lock.rs` runs that claim.
+parking_lot = "0.13.0"
+tinyvec = "1.13.3"
+unicode-segmentation = "1.13.3"
 rustc-hash.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
-ordered-float = {version = "5.3.0", features = ["serde"]}
+ordered-float = {version = "5.5.0", features = ["serde"]}
 derivative = "2.2.0"
+# The loader's unknown-key capture. serde reports a key no field
+# matches by handing its value to `deserialize_ignored_any`, and
+# nothing in `serde` itself says *where* that happened; this wraps a
+# deserializer to answer that. `mindmap::unknown_keys` is the only
+# consumer, and the only crate member that loads `.mindmap.json` is
+# this one — so it stays out of `[workspace.dependencies]` per §13.
+serde_ignored = "0.1.14"
 
 # `env_logger` is load-bearing, not a leftover — and it is the native
 # half of a matched pair with `console_log` below. `util::log::init()`
@@ -62,8 +81,8 @@ derivative = "2.2.0"
 # wasm32 leg, and cargo unions features per target, so the browser
 # build's `log` is now `release_max_level_warn` alone where it used to
 # be `release_max_level_warn,std`. That is survivable today only
-# because `console_log 1.0.0` installs a `static LOGGER` through
-# `log::set_logger(&LOGGER)` (`console_log-1.0.0/src/lib.rs:215`)
+# because `console_log 1.1.0` installs a `static LOGGER` through
+# `log::set_logger(&LOGGER)` (`console_log-1.1.0/src/lib.rs:222`)
 # rather than `log::set_boxed_logger`, which is the API `log`'s
 # `std`/`alloc` features gate. A wasm arm that reached for
 # `set_boxed_logger`, or a replacement for `console_log` that boxes its
@@ -77,10 +96,10 @@ derivative = "2.2.0"
 # `generate_stress_map` uses it and the wasm32 gate builds that binary
 # on both legs.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-env_logger = "0.11.10"
+env_logger = "0.11.11"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-console_log = "1.0.0"
+console_log = "1.1.0"
 console_error_panic_hook = "0.1.7"
 
 [build-dependencies]
@@ -105,6 +124,19 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 # does not mean compiling against less — see
 # `lib/mandala_derive/Cargo.toml`.
 syn = { workspace = true, features = ["full"] }
+# `util::source_scan` excises `#[cfg(test)]` items from a file's text
+# and has to leave the surviving lines *at their own line numbers*, so
+# a guard reporting an offender can say `file:line`. That needs the
+# span of the item syn parsed, and a span carries a line only when
+# proc-macro2 was built with `span-locations` — without it every
+# `Span::start()` answers line 0 and the excision would blank the
+# wrong rows in silence.
+#
+# Additive on the shared entry, like `syn`'s `full` above, and landing
+# on the target-graph node for the same resolver-2 reason: the derive
+# macros the workspace expands go through a different `proc-macro2`
+# and do not pay for this.
+proc-macro2 = { workspace = true, features = ["span-locations"] }
 
 [[bench]]
 name = "test_bench"

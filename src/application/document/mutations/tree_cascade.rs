@@ -129,8 +129,10 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
     // dropped, allowing the mutable model update.
     for (id, (x, y)) in planned {
         if let Some(node) = doc.mindmap.nodes.get_mut(&id) {
-            node.position.x = x;
-            node.position.y = y;
+            // Clamped: a cascade computes a position from its
+            // parent's, so in-bound inputs can produce an
+            // out-of-bound result, and the loader rejects those.
+            node.set_position_clamped(x, y);
         }
     }
 }
@@ -139,6 +141,7 @@ pub fn apply(doc: &mut MindMapDocument, target_id: &str) {
 mod tests {
     use super::*;
     use crate::application::document::MindMapDocument;
+    use baumhard::util::geometry::almost_equal_f64;
 
     /// Pinned testament fixture. Node `"1"` has four direct children;
     /// reuses the same pin as the flower_layout tests so a fixture
@@ -214,9 +217,9 @@ mod tests {
             .find(|id| doc.mindmap.children_of(id).is_empty())
             .unwrap()
             .clone();
-        let before = doc.mindmap.nodes.get(&leaf).unwrap().position.clone();
+        let before = doc.mindmap.nodes.get(&leaf).unwrap().position;
         apply(&mut doc, &leaf);
-        let after = doc.mindmap.nodes.get(&leaf).unwrap().position.clone();
+        let after = doc.mindmap.nodes.get(&leaf).unwrap().position;
         assert_eq!(before.x, after.x);
         assert_eq!(before.y, after.y);
     }
@@ -274,7 +277,7 @@ mod tests {
 
         let any_moved = baseline.iter().any(|(id, x0, y0)| {
             let n = doc.mindmap.nodes.get(id).unwrap();
-            (n.position.x - x0).abs() > 1e-6 || (n.position.y - y0).abs() > 1e-6
+            !almost_equal_f64(n.position.x, *x0) || !almost_equal_f64(n.position.y, *y0)
         });
         assert!(any_moved, "tree-cascade must move at least one descendant");
 
@@ -282,7 +285,7 @@ mod tests {
         for (id, x0, y0) in &baseline {
             let n = doc.mindmap.nodes.get(id).unwrap();
             assert!(
-                (n.position.x - x0).abs() < 1e-6 && (n.position.y - y0).abs() < 1e-6,
+                almost_equal_f64(n.position.x, *x0) && almost_equal_f64(n.position.y, *y0),
                 "descendant {id} did not restore: ({}, {}) vs baseline ({x0}, {y0})",
                 n.position.x,
                 n.position.y,

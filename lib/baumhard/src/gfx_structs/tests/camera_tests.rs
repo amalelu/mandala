@@ -8,7 +8,7 @@
 //! round-trip, zoom-at-cursor invariant, pan, fit-to-bounds (including
 //! degenerate inputs), and `CameraMutation` dispatch.
 //!
-//! Follows the `do_*()` / `test_*()` split from §T2.2: every public
+//! Follows the `do_*()` / `test_*()` split from §T2.2: every `do_*`
 //! body is benchmarkable from `benches/test_bench.rs`.
 
 use glam::Vec2;

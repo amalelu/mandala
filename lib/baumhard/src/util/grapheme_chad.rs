@@ -7,6 +7,50 @@
 //! rather than indexing a `String` by byte offset — the latter
 //! splits a 👨‍👩‍👧 ZWJ sequence on the first edit and the rest of the
 //! pipeline silently corrupts.
+//!
+//! # The line model
+//!
+//! Several of these helpers answer *where does line `n` begin and
+//! end*, and callers pair them: [`count_number_lines`] bounds the
+//! loop that [`find_nth_line_grapheme_range`] indexes, and
+//! [`line_bounds_at`] reports the same span from a cursor sitting
+//! inside it. They therefore have to mean the same thing by "line",
+//! and this is what they mean:
+//!
+//! - **A line terminator is a grapheme cluster ending in `\n`.**
+//!   UAX #29 fuses `\r\n` into one cluster, so a CRLF is a single
+//!   terminator and its CR belongs to the terminator rather than to
+//!   the line in front of it. A CR *not* followed by an LF
+//!   terminates nothing and stays in the line as ordinary content —
+//!   line 0 of `"a\r\r\nb"` is `"a\r"`.
+//! - **A terminator ends a line; it does not start one.** A buffer
+//!   ending in a terminator therefore has an empty final line:
+//!   `"abc\n"` is two lines and line 1 is the empty span at the end
+//!   of the buffer. The empty string is one empty line.
+//! - **Every line the count counts is addressable, and only those.**
+//!   `find_nth_line_grapheme_range(s, n).is_some()` is exactly
+//!   `n < count_number_lines(s)`, so `0..count_number_lines(s)` is a
+//!   loop whose every index resolves (issue #16).
+//!
+//! The crate-private `slice_to_newline` is that same model expressed
+//! in byte offsets instead of cluster indices — it is what
+//! [`replace_graphemes_until_newline`] writes through, and the one
+//! member that has to exclude the CRLF's CR by hand. Each function's
+//! own doc carries the detail and the costs; the crate's
+//! `do_line_model_is_coherent` test holds all four to this.
+//!
+//! [`count_number_lines`]: crate::util::grapheme_chad::count_number_lines
+//! [`find_nth_line_grapheme_range`]: crate::util::grapheme_chad::find_nth_line_grapheme_range
+//! [`line_bounds_at`]: crate::util::grapheme_chad::line_bounds_at
+//! [`replace_graphemes_until_newline`]: crate::util::grapheme_chad::replace_graphemes_until_newline
+
+// The four link targets above are spelled out in full rather than
+// left to shorthand resolution. `util/mod.rs` carries an outer `///`
+// on this module's `pub mod` line, and rustdoc merges that fragment
+// with this header and resolves the whole of it in `util`'s scope,
+// where these names are not visible. Reference-style definitions
+// render as nothing, so the header above reads as if they were not
+// there.
 
 use log::error;
 use unicode_segmentation::UnicodeSegmentation;
@@ -16,7 +60,9 @@ use unicode_segmentation::UnicodeSegmentation;
 ///
 /// The terminator is a cluster ending in `\n` — the same rule
 /// [`line_bounds_at`] and [`find_nth_line_grapheme_range`] apply, and
-/// this helper is the third member of that family: it is what
+/// this helper is the third of the three that answer *where does the
+/// line end* (distinct from the four-helper line model, which adds
+/// [`count_number_lines`]): it is what
 /// [`replace_graphemes_until_newline`] uses to decide how much of a
 /// line it may overwrite. Under UAX #29 `\r\n` is a single cluster, so
 /// cutting at the raw `\n` byte would leave the CR inside the returned
@@ -168,11 +214,9 @@ pub struct LineReplacement {
 /// `at`-consistency `debug_assert`. On top of that: one bounded `find_byte_index_of_grapheme`
 /// walk for the write position, one `count_grapheme_clusters` of the
 /// line tail, one `count_number_lines` byte scan over `source`, and one
-/// `replace_substring`, which itself allocates a fresh `Vec<u8>` copy
-/// of the whole target and re-validates it as UTF-8 — a known hot-path
-/// allocation tracked alongside the rest of the "no-alloc text edit"
-/// work. Every term is O(target length); the function was already in
-/// that class before the measurement was added.
+/// crate-private `replace_substring`, which splices in place. Every
+/// term is O(target length); the function was already in that class
+/// before the measurement was added.
 pub fn replace_graphemes_until_newline(target: &mut String, g_index: usize, source: &str) -> LineReplacement {
     let insert_num_graphemes = count_grapheme_clusters(source);
     // `count_number_lines` is "newlines + 1", so the count of `\n`
@@ -272,21 +316,127 @@ pub fn find_byte_index_of_grapheme(s: &str, index: usize) -> Option<usize> {
     None
 }
 
-fn replace_substring(s: &mut String, i: usize, n: usize, source: &str) {
-    let mut bytes = s.as_bytes().to_vec();
-    let source_bytes = source.as_bytes();
+/// Resolve a whole *table* of grapheme-cluster indices to byte
+/// offsets in one left-to-right walk.
+///
+/// Each entry of the result answers the same question
+/// [`find_byte_index_of_grapheme`] does for a single index:
+/// `Some(byte_offset)` when a cluster exists at that index, `None`
+/// when the index is at or past the end of `s`.
+///
+/// **Why this exists.** Converting a run table — text runs, color /
+/// font regions — one boundary at a time restarts the grapheme walk
+/// per boundary, so the conversion costs O(len × boundaries). That
+/// is quadratic whenever the run table scales with the text, which
+/// a `.mindmap.json` is free to make it do: a section carrying N
+/// clusters may legally carry N non-overlapping runs over them.
+/// This pays for the walk once instead.
+///
+/// `ascending` is expected sorted non-decreasing, which is what the
+/// format's run ordering already guarantees
+/// (`format/text-runs.md`, enforced at load by
+/// `mindmap::model::validate`). An out-of-order index is still
+/// answered correctly — it falls back to an independent walk for
+/// that entry — so a caller that breaks the expectation gets a slow
+/// answer rather than a wrong one.
+///
+/// Cost: O(len(s) + ascending.len()) for sorted input, plus one
+/// `Vec` of the returned offsets. An out-of-order entry adds one
+/// O(len(s)) walk for itself.
+pub fn byte_indices_of_graphemes(s: &str, ascending: &[usize]) -> Vec<Option<usize>> {
+    let mut out = Vec::with_capacity(ascending.len());
+    let mut clusters = s.graphemes(true).peekable();
+    let mut index = 0usize;
+    let mut byte_index = 0usize;
 
-    bytes.drain(i..n);
-    bytes.splice(i..i, source_bytes.iter().cloned());
-
-    // Invalid UTF-8 after the splice would be a caller-level bug
-    // (passed a byte offset mid-codepoint); log and leave `s` alone
-    // rather than panic inside the text-edit hot path.
-    if let Ok(modified_string) = String::from_utf8(bytes) {
-        *s = modified_string;
-    } else {
-        error!("Failed to convert bytes to UTF-8 String.");
+    for &target in ascending {
+        if target < index {
+            out.push(find_byte_index_of_grapheme(s, target));
+            continue;
+        }
+        while index < target {
+            match clusters.next() {
+                Some(cluster) => {
+                    byte_index += cluster.len();
+                    index += 1;
+                }
+                None => break,
+            }
+        }
+        // `peek` rather than position alone: an index exactly at the
+        // cluster count has a byte offset but no cluster living
+        // there, and the single-index helper reports that as `None`.
+        if index == target && clusters.peek().is_some() {
+            out.push(Some(byte_index));
+        } else {
+            out.push(None);
+        }
     }
+    out
+}
+
+/// Replace the bytes `i..n` of `s` with `source`, in place.
+///
+/// `i` and `n` are **byte** offsets. The contract is that both land
+/// on a UTF-8 character boundary of `s`, with `i <= n <= s.len()`.
+///
+/// **The two production call sites satisfy it by construction** —
+/// the two branches of [`replace_graphemes_until_newline`], in this
+/// module. `i` comes from [`find_byte_index_of_grapheme`] (a
+/// cumulative sum of cluster lengths, and a cluster boundary is
+/// always a character boundary) or from `s.len()`; `n` is either
+/// another such cluster offset or the end of `slice_to_newline`'s
+/// borrowed subslice of `s`, which is a character boundary because it
+/// is the end of a `&str`. `s` is not mutated between computing them
+/// and arriving here, and `i <= n` holds because cluster offsets rise
+/// with cluster index.
+///
+/// **That is an argument about two callers, not about this
+/// function.** It is `pub(crate)`, so the precondition is not
+/// enclosed by this module: the crate's own tests reach it, and four
+/// of their call sites pass out-of-contract offsets *on purpose*,
+/// because driving the degrade is what they exist to do. Any future
+/// in-crate caller reaches it on the same terms. The guard below is
+/// therefore the contract's enforcement rather than a formality
+/// about today's two production callers, and the argument above is
+/// what says those two never reach it.
+///
+/// **Out of contract it degrades rather than panics.**
+/// `String::replace_range` has exactly three panic conditions — a
+/// start off a character boundary, an end off one (which subsumes an
+/// end past the length, since `is_char_boundary` is false there), and
+/// a start after the end — and the check below covers all three. This
+/// is the per-keystroke edit path, where CODE_CONVENTIONS §9 does not
+/// allow a panic, so a bad triple logs and leaves `s` untouched
+/// instead.
+///
+/// That check is **sharper** than the `String::from_utf8` it
+/// replaces, not a weaker stand-in for it. The old body copied `s`
+/// into a `Vec<u8>`, spliced the bytes, and re-validated the result
+/// — a check that runs after the damage and that a mid-character cut
+/// can pass: draining bytes `1..3` of `"éé"` leaves `[C3 A9]`, which
+/// is valid UTF-8 and is the wrong string. `is_char_boundary`
+/// refuses that same call before `s` is touched.
+/// `do_replace_substring_refuses_a_mid_character_range` pins both
+/// halves of that comparison.
+///
+/// Cost: two O(1) boundary probes and one `String::replace_range`,
+/// which shifts the tail in place and grows the buffer only when
+/// `source` is longer than the range it replaces. No copy of `s`, no
+/// revalidation.
+///
+/// `pub(crate)` rather than private so the out-of-contract
+/// regression test can drive the degrade.
+pub(crate) fn replace_substring(s: &mut String, i: usize, n: usize, source: &str) {
+    if i > n || !s.is_char_boundary(i) || !s.is_char_boundary(n) {
+        error!(
+            "grapheme_chad: replace_substring got byte range {i}..{n}, which is not a \
+             character-boundary range of a {}-byte buffer; leaving it unedited",
+            s.len()
+        );
+        return;
+    }
+    s.replace_range(i..n, source);
 }
 
 /// Grapheme-aware analogue of `String::split_off`. Splits `original`
@@ -295,22 +445,20 @@ fn replace_substring(s: &mut String, i: usize, n: usize, source: &str) {
 /// exceeds the grapheme count, returns an empty `String` and leaves
 /// `original` unchanged.
 ///
-/// Cost: O(n) grapheme walk + two `concat` calls (the implementation
-/// collects through a `Vec<&str>` and rebuilds both halves). Allocates
-/// the new prefix and the returned suffix; the original buffer is
-/// reassigned.
+/// Cost: one O(n) grapheme walk to find the split offset — short-
+/// circuiting at cluster `at` — then one `String::split_off`. That is
+/// a single allocation, for the returned suffix; `original` keeps its
+/// own buffer and truncates in place. The implementation this
+/// replaced collected every cluster into a `Vec<&str>` and rebuilt
+/// *both* halves with `concat()`, so it allocated three times and
+/// reassigned `original` to a fresh buffer.
 pub fn split_off_graphemes(original: &mut String, at: usize) -> String {
-    let graphemes = original.graphemes(true).collect::<Vec<&str>>();
-
-    if at >= graphemes.len() {
-        return original.split_off(original.len());
+    match find_byte_index_of_grapheme(original, at) {
+        Some(byte_index) => original.split_off(byte_index),
+        // `at` is at or past the cluster count, so there is no
+        // cluster to split at and nothing to hand back.
+        None => String::new(),
     }
-
-    let (left, right) = graphemes.split_at(at);
-    let right_str = right.concat();
-
-    *original = left.concat();
-    right_str
 }
 
 /// Grapheme-cluster index of the first cluster in `s` that carries any
@@ -338,8 +486,17 @@ pub fn first_non_whitespace_grapheme(s: &str) -> Option<usize> {
 }
 
 /// Number of newline-separated lines in `s`. The trailing line counts
-/// even when `s` does not end in `\n`, so an empty string yields 1.
-/// O(n) byte scan; no allocation.
+/// even when `s` does not end in `\n`, so an empty string yields 1 and
+/// `"abc\n"` yields 2 — the second line being the empty one after the
+/// terminator.
+///
+/// That trailing line is addressable:
+/// [`find_nth_line_grapheme_range`] resolves every index in
+/// `0..count_number_lines(s)` and nothing outside it, so this count is
+/// a valid bound for a line-addressing loop. It was not always — see
+/// that function's doc for what the two disagreed about.
+///
+/// Cost: O(n) byte scan; no allocation.
 pub fn count_number_lines(s: &str) -> usize {
     s.as_bytes().iter().filter(|&&c| c == b'\n').count() + 1
 }
@@ -367,6 +524,16 @@ pub fn count_number_lines(s: &str) -> usize {
 /// begin and end" (CONVENTIONS §B3); the editor's Home / End /
 /// up-line / down-line motions all route through it.
 ///
+/// The line it reports is the same line
+/// [`find_nth_line_grapheme_range`] addresses by index, including the
+/// empty one a trailing terminator leaves behind: for every `i <
+/// count_number_lines(s)` and every cursor inside that line's bounds,
+/// the pair returned here equals the range returned there. `"abc\n"`
+/// with the cursor at 4 is `(4, 4)`, the same span line 1 has. These
+/// functions and the byte-level `slice_to_newline` are one line
+/// model — see the module header — checked as one by
+/// `do_line_model_is_coherent` in the crate's tests.
+///
 /// # Costs
 ///
 /// One O(n) grapheme walk that stops at the line's terminator — so
@@ -391,8 +558,29 @@ pub fn line_bounds_at(s: &str, cursor: usize) -> (usize, usize) {
 
 /// Grapheme-cluster span of the `n`-th newline-separated line in `s`,
 /// returned as a half-open `(start_grapheme, end_grapheme)` range.
-/// `n = 0` is the first line. Returns `None` if `s` is empty or `n`
-/// is past the last line.
+/// `n = 0` is the first line.
+///
+/// **Every line [`count_number_lines`] counts is addressable here**,
+/// and only those: `find_nth_line_grapheme_range(s, n).is_some()` is
+/// exactly `n < count_number_lines(s)`, for every `s` and every `n`.
+/// A caller may therefore iterate `0..count_number_lines(s)` and rely
+/// on each index resolving. The two used to disagree about the last
+/// line of every newline-terminated string, and about the empty
+/// string (issue #16 problem B): `count_number_lines` counts a
+/// trailing empty line — `"abc\n"` is two lines, `""` is one — while
+/// this finder answered `None` for it, so a `0..count` loop hit a
+/// guaranteed `None` on its final iteration and a cursor parked on
+/// the empty last line of a text area had no line to sit on. That
+/// trailing line now answers with the empty range at the end of the
+/// buffer: `"abc\n"` line 1 is `Some((4, 4))`, `""` line 0 is
+/// `Some((0, 0))`. An empty range is the honest span of a line with
+/// nothing on it, and the `("\n", 0) -> Some((0, 0))` fixture had
+/// already set that precedent for the *leading* empty line.
+///
+/// `None` therefore means one thing only: `n` is past the last line,
+/// i.e. the row does not exist. It never means "the row exists but is
+/// empty" — a caller that wants *that* distinction compares the two
+/// bounds, which costs it nothing.
 ///
 /// A "line terminator" is any cluster ending in `\n` — the same rule
 /// [`line_bounds_at`] applies, and for the same reason: UAX #29 fuses
@@ -408,34 +596,37 @@ pub fn line_bounds_at(s: &str, cursor: usize) -> (usize, usize) {
 /// [`line_bounds_at`], and the crate-private `slice_to_newline` that
 /// [`replace_graphemes_until_newline`] writes through.
 ///
-/// Cost: O(n) grapheme walk plus a final `s.graphemes(true).count()`
-/// when the last line is requested.
+/// # Costs
+///
+/// One O(n) grapheme walk that stops at the requested line's
+/// terminator — so O(distance to the end of line `n`), degrading to
+/// the whole buffer only for the last line. No allocation. The walk
+/// carries its own running cluster count, so the last-line case no
+/// longer pays a second `s.graphemes(true).count()` pass on top of
+/// it.
 pub fn find_nth_line_grapheme_range(s: &str, n: usize) -> Option<(usize, usize)> {
-    if s.is_empty() {
-        return None;
-    }
-    let mut line_head = 0;
-    let mut last_line_start = 0;
-    let mut new_line: bool = true;
+    let mut line_start = 0usize;
+    let mut line_index = 0usize;
+    let mut total = 0usize;
     for (idx, graph) in s.graphemes(true).enumerate() {
-        if new_line {
-            last_line_start = idx;
-            new_line = false;
-        }
+        total = idx + 1;
         if graph.ends_with('\n') {
-            if line_head == n {
+            if line_index == n {
                 // We're at the end of the requested line: emit the
-                // half-open range [last_line_start, idx).
-                return Some((last_line_start, idx));
+                // half-open range [line_start, idx).
+                return Some((line_start, idx));
             }
-            new_line = true;
-            line_head += 1;
+            line_index += 1;
+            line_start = idx + 1;
         }
     }
-    if line_head < n || (line_head == n && new_line) {
-        return None;
-    }
-    Some((last_line_start, s.graphemes(true).count()))
+    // Whatever follows the last terminator is the final line, and it
+    // exists whether or not any cluster landed on it — that is the
+    // line `count_number_lines`'s `+ 1` counts. An `s` with no
+    // terminator at all reaches here with `line_index == 0`, which is
+    // why the empty string answers `Some((0, 0))` for line 0 without
+    // a special case of its own.
+    (line_index == n).then_some((line_start, total))
 }
 
 /// Append `n` newline characters to `s`. Convenience wrapper around
@@ -569,6 +760,37 @@ pub fn take_graphemes(s: &str, n: usize) -> (&str, bool) {
     (&s[..end], iter.next().is_some())
 }
 
+/// The longest prefix of `s` that is at most `max_bytes` long and
+/// ends on a grapheme-cluster boundary, with whether anything was cut.
+///
+/// The byte-budget sibling of [`take_graphemes`] (a cluster count) and
+/// [`truncate_to_display_width`] (a cell count). Use it where the
+/// limit is storage or wire size rather than what a reader sees. A
+/// diagnostic bounded so a reply frame cannot overflow is the caller
+/// it was written for. A cluster that would straddle the budget is
+/// left out whole, so a ZWJ emoji or a base plus its combining marks
+/// is never split. The prefix can therefore come out shorter than
+/// `max_bytes`, and is empty when the first cluster alone exceeds it.
+///
+/// # Costs
+///
+/// Free when `s` already fits: one length comparison, no walk.
+/// Otherwise an O(prefix) grapheme walk that stops at the budget. No
+/// allocation; the prefix borrows from `s`.
+pub fn truncate_to_byte_budget(s: &str, max_bytes: usize) -> (&str, bool) {
+    if s.len() <= max_bytes {
+        return (s, false);
+    }
+    let mut end = 0usize;
+    for g in s.graphemes(true) {
+        if end + g.len() > max_bytes {
+            break;
+        }
+        end += g.len();
+    }
+    (&s[..end], true)
+}
+
 /// Split `s` into its grapheme clusters, each owned as a `String`.
 ///
 /// Exists for the cluster-vector layouts that must outlive the source
@@ -688,6 +910,180 @@ pub fn truncate_to_display_width(s: &str, max_width: usize) -> &str {
         byte_end += g.len();
     }
     &s[..byte_end]
+}
+
+/// Break `s` into lines no wider than `max_width` display cells,
+/// preferring a break at a whitespace run and never splitting a
+/// grapheme cluster.
+///
+/// [`truncate_to_display_width`]'s counterpart: that one clips the
+/// overflow away, this one folds it onto the next line. Both measure
+/// in the same monospace cells [`grapheme_display_width`] counts, so
+/// a caller rendering into a proportional font — the load-failure
+/// placard in [`crate::mindmap::placard`] is the one in-tree example
+/// — is using a column count as an approximation of a pixel width,
+/// deliberately, because the alternative costs a `FONT_SYSTEM`
+/// acquisition per candidate break.
+///
+/// Contract, in the order a caller trips over it:
+///
+/// - **Hard line breaks in `s` are preserved.** Input is split on
+///   `str::lines` first and each line wrapped independently, so
+///   `""` yields no lines at all (matching `"".lines()`) and a blank
+///   line inside `s` yields an empty `String` that keeps the
+///   paragraph gap.
+/// - **Leading whitespace survives; trailing whitespace does not.**
+///   Indentation is content, so the first wrapped line keeps the
+///   spaces it started with. The run that justified a break is
+///   consumed by the break rather than dangling off the end or
+///   heading the next line, and every emitted line is right-trimmed —
+///   which is also what keeps a run sitting on the right margin from
+///   pushing the line past `max_width`.
+/// - **Indentation at least as wide as `max_width` is consumed by
+///   the break its own width forces**, not emitted as a blank first
+///   line. `("        x", 4)` is `["x"]`, not `["", "x"]`. This
+///   follows from the rule above — the run that justifies a break is
+///   consumed by it — and from the next one: an empty `String` in
+///   the output means a paragraph gap in the input, so emitting one
+///   for indentation would invent a gap that is not there.
+/// - **A word wider than `max_width` is split mid-word** at the cell
+///   boundary, because the alternative is a line that silently
+///   ignores the width it was given. Long paths and serde messages
+///   are the reason this is not an error case.
+/// - **A single cluster wider than `max_width` still gets its own
+///   line**, over-wide, rather than being dropped: this function
+///   never loses input. `max_width == 0` is not representable and is
+///   clamped to 1 for the same reason.
+///
+/// Cost: one pass over the graphemes of `s` (widths accumulate as it
+/// goes, so a break never rescans), one `Vec` of per-grapheme
+/// bookkeeping sized to the longest hard line, and one `String` per
+/// emitted line. Cold-path shaped — the callers are error placards
+/// and console reflow, not the frame loop.
+pub fn wrap_to_display_width(s: &str, max_width: usize) -> Vec<String> {
+    let max_width = max_width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut scratch: Vec<WrapCell> = Vec::new();
+    for hard_line in s.lines() {
+        wrap_one_line(hard_line, max_width, &mut scratch, &mut out);
+    }
+    out
+}
+
+/// One grapheme of a line being wrapped: the byte range it occupies
+/// in the line, the display width of the line up to and including it,
+/// and whether it can serve as a break point.
+struct WrapCell {
+    byte_start: usize,
+    byte_end: usize,
+    cumulative_width: usize,
+    is_whitespace: bool,
+}
+
+/// Wrap a single hard line (guaranteed newline-free) into `out`.
+/// `scratch` is reused across lines so the per-grapheme bookkeeping
+/// is allocated once per [`wrap_to_display_width`] call rather than
+/// once per line.
+fn wrap_one_line(line: &str, max_width: usize, scratch: &mut Vec<WrapCell>, out: &mut Vec<String>) {
+    scratch.clear();
+    let mut width = 0usize;
+    for (byte_start, g) in line.grapheme_indices(true) {
+        width += g.chars().next().map_or(0, scalar_display_width);
+        scratch.push(WrapCell {
+            byte_start,
+            byte_end: byte_start + g.len(),
+            cumulative_width: width,
+            is_whitespace: !grapheme_is_not_whitespace(g),
+        });
+    }
+    if scratch.is_empty() {
+        // A blank line is a paragraph gap, not nothing.
+        out.push(String::new());
+        return;
+    }
+
+    let mut start = 0usize;
+    // Display width consumed by everything before `start`, so the
+    // width of the current line through cell `i` is one subtraction.
+    let mut consumed = 0usize;
+    // The most recent *completed* whitespace run beginning after
+    // `start`, as (first cell, one past last cell) — the break the
+    // wrapper prefers. `open_run` is the run currently being scanned.
+    let mut break_run: Option<(usize, usize)> = None;
+    let mut open_run: Option<usize> = None;
+
+    let mut i = 0usize;
+    while i < scratch.len() {
+        if scratch[i].is_whitespace {
+            // Whitespace never overflows a line: a run at the right
+            // margin is trimmed off when the line is emitted, so
+            // letting it "fit" is what keeps `"word  "` from
+            // producing a second, blank line.
+            open_run.get_or_insert(i);
+            i += 1;
+            continue;
+        }
+        if let Some(run_start) = open_run.take() {
+            if run_start > start {
+                break_run = Some((run_start, i));
+            }
+        }
+
+        if scratch[i].cumulative_width - consumed > max_width && i > start {
+            // Cell `i` does not fit. Break at the last whitespace run
+            // when one lies strictly inside the line so far;
+            // otherwise split the word at `i`. `i > start` guarantees
+            // both cuts leave at least one cell behind, so the loop
+            // always makes progress.
+            let (cut, next_start) = match break_run {
+                Some((run_start, run_end)) if run_start > start && run_end <= i => (run_start, run_end),
+                _ => (i, i),
+            };
+            push_wrapped_segment(line, scratch[start].byte_start, scratch[cut - 1].byte_end, out);
+            consumed = scratch[next_start - 1].cumulative_width;
+            start = next_start;
+            break_run = None;
+            // `i` is re-examined against the fresh line rather than
+            // advanced past: when the break was a word split it is
+            // the first cell of the next line.
+            continue;
+        }
+        i += 1;
+    }
+    let line_end = scratch[scratch.len() - 1].byte_end;
+    push_trimmed(line, scratch[start].byte_start, line_end, out);
+}
+
+/// Emit `line[from..to]` with trailing whitespace removed. The right
+/// margin is where a wrap discards whitespace; the left margin is
+/// where it preserves it, so only the end is trimmed.
+///
+/// Used for the *last* segment of a hard line, which is emitted
+/// whether or not it has content: a blank input line is a paragraph
+/// gap and has to survive as one.
+fn push_trimmed(line: &str, from: usize, to: usize, out: &mut Vec<String>) {
+    out.push(line[from..to].trim_end().to_string());
+}
+
+/// [`push_trimmed`] for a segment cut off by a *break*, where an
+/// all-whitespace result is dropped rather than emitted.
+///
+/// The only way to reach one is indentation at least as wide as the
+/// column: `("        x", 4)` breaks before the `x` with eight
+/// spaces behind it. Emitting `""` there would claim a paragraph gap
+/// the input does not contain — the one meaning an empty `String`
+/// carries in this function's output — and the caller that noticed
+/// was the load-failure placard, whose contract says a blank line
+/// separates its parts.
+///
+/// No content can be lost: the segment is dropped only when it
+/// trims to nothing, which means it held nothing but the whitespace
+/// the break consumed.
+fn push_wrapped_segment(line: &str, from: usize, to: usize, out: &mut Vec<String>) {
+    let text = line[from..to].trim_end();
+    if !text.is_empty() {
+        out.push(text.to_string());
+    }
 }
 
 /// Display width of a single scalar. Exposed for tests; call sites

@@ -2,13 +2,17 @@
 
 //! Section-bounds invariants. The `MindNode` docstring promises
 //! `maptool verify` flags out-of-bounds sections; this module
-//! delivers on that promise. Checks per
-//! [`baumhard::mindmap::model::MindSection`]:
+//! delivers on that promise.
 //!
-//! - `offset.{x,y}` finite and non-negative,
-//! - `size.{width,height}` (when set) finite and strictly positive,
-//! - `offset + size` (when size set) inside the parent node's
-//!   `size` AABB.
+//! Scoped to what the numeric sweep does **not** already report.
+//! A section's own shape — finite, positive, not an obvious typo —
+//! is load-blocking and comes from `verify::numeric` via the shared
+//! `validate::section_extent_violations`. What is left here is the
+//! part that is genuinely `verify`'s: fitting inside the parent
+//! (`format/schema.md` says a section hanging past its node still
+//! renders), the per-node section cap, and channel collisions.
+//! Reporting either half twice is the failure this split exists to
+//! prevent.
 //!
 //! Violations are emitted with the parent node's id as location
 //! and the offending section index inlined into the message, so
@@ -23,12 +27,16 @@ const CATEGORY: &str = "sections";
 pub fn check(map: &MindMap) -> Vec<Violation> {
     let mut out = Vec::new();
 
-    for (_loc, node) in map.node_locations() {
-        out.extend(
-            validate::node_size_violations(node.size)
-                .into_iter()
-                .map(|message| Violation::node(CATEGORY, node, message)),
-        );
+    for node in map.nodes.values() {
+        // Load-blocking, and it had no counterpart here at all: the
+        // loader refuses a node with no sections, and `verify` — whose
+        // contract is to diagnose exactly the maps the editor refuses —
+        // reported such a map as `valid`, exit 0. Every offender is
+        // listed rather than the loader's first, because a user fixing
+        // a map wants the list.
+        if let Some(message) = validate::zero_section_node(node) {
+            out.push(Violation::node(CATEGORY, node, message));
+        }
         if let Err(message) = validate::section_count(node) {
             out.push(Violation::node(CATEGORY, node, message));
         }
@@ -39,7 +47,7 @@ pub fn check(map: &MindMap) -> Vec<Violation> {
         );
         for (s_idx, section) in node.sections.iter().enumerate() {
             out.extend(
-                validate::section_aabb_violations(node.size, s_idx, section.offset, section.size)
+                validate::section_containment_violations(node.size, s_idx, section.offset, section.size)
                     .into_iter()
                     .map(|message| Violation::node(CATEGORY, node, message)),
             );
@@ -52,6 +60,13 @@ pub fn check(map: &MindMap) -> Vec<Violation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // These assert on what `maptool verify` actually prints, so they
+    // run the whole pipeline rather than this module alone. A
+    // section's own shape moved to `verify::numeric` (via the shared
+    // `validate::section_extent_violations`) when the duplicate
+    // reporting was removed; the user-visible behavior did not
+    // change, and pinning it at the pipeline is what proves that.
     use crate::verify::test_helpers::node;
     use baumhard::mindmap::model::{MindSection, Position, Size, MAX_SECTIONS_PER_NODE};
 
@@ -72,7 +87,7 @@ mod tests {
         let mut map = MindMap::new_blank("t");
         let n = node("0", None);
         map.nodes.insert("0".into(), n);
-        assert!(check(&map).is_empty());
+        assert!(crate::verify::verify(&map).is_empty());
     }
 
     #[test]
@@ -87,7 +102,7 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        assert!(check(&map).is_empty());
+        assert!(crate::verify::verify(&map).is_empty());
     }
 
     #[test]
@@ -102,7 +117,7 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        assert!(check(&map).is_empty());
+        assert!(crate::verify::verify(&map).is_empty());
     }
 
     #[test]
@@ -111,10 +126,8 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(Position { x: -1.0, y: 0.0 }, None);
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
-        assert!(v
-            .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("offset.x is negative")));
+        let v = crate::verify::verify(&map);
+        assert!(v.iter().any(|x| x.message.contains("offset.x is negative")));
     }
 
     #[test]
@@ -123,10 +136,8 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(Position { x: 0.0, y: -2.0 }, None);
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
-        assert!(v
-            .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("offset.y is negative")));
+        let v = crate::verify::verify(&map);
+        assert!(v.iter().any(|x| x.message.contains("offset.y is negative")));
     }
 
     #[test]
@@ -135,10 +146,8 @@ mod tests {
         let mut n = node("0", None);
         n.sections[0] = section(Position { x: f64::NAN, y: 0.0 }, None);
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
-        assert!(v
-            .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("non-finite")));
+        let v = crate::verify::verify(&map);
+        assert!(v.iter().any(|x| x.message.contains("non-finite")));
     }
 
     #[test]
@@ -153,10 +162,8 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
-        assert!(v
-            .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("size.width is not positive")));
+        let v = crate::verify::verify(&map);
+        assert!(v.iter().any(|x| x.message.contains("size.width is not positive")));
     }
 
     #[test]
@@ -171,10 +178,10 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         assert!(v
             .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("size.height is not positive")));
+            .any(|x| x.message.contains("size.height is not positive")));
     }
 
     #[test]
@@ -189,10 +196,8 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
-        assert!(v
-            .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("non-finite")));
+        let v = crate::verify::verify(&map);
+        assert!(v.iter().any(|x| x.message.contains("non-finite")));
     }
 
     #[test]
@@ -207,10 +212,8 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
-        assert!(v
-            .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("past node right edge")));
+        let v = crate::verify::verify(&map);
+        assert!(v.iter().any(|x| x.message.contains("past node right edge")));
     }
 
     #[test]
@@ -225,10 +228,8 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
-        assert!(v
-            .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("past node bottom edge")));
+        let v = crate::verify::verify(&map);
+        assert!(v.iter().any(|x| x.message.contains("past node bottom edge")));
     }
 
     #[test]
@@ -240,7 +241,7 @@ mod tests {
             section(Position { x: -3.0, y: 0.0 }, None),
         ];
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         let off = v
             .iter()
             .find(|x| x.message.contains("offset.x is negative"))
@@ -266,7 +267,7 @@ mod tests {
         n.sections[0] = section(Position { x: 0.0, y: 0.0 }, None);
         map.nodes.insert("0".into(), n);
         assert!(
-            check(&map).is_empty(),
+            crate::verify::verify(&map).is_empty(),
             "fill-parent at (0,0) is the canonical shape"
         );
     }
@@ -279,7 +280,7 @@ mod tests {
         // Offset (5, 0) + effective size (100, 40) = right 105 > 100.
         n.sections[0] = section(Position { x: 5.0, y: 0.0 }, None);
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         assert!(
             v.iter()
                 .any(|x| x.message.contains("extends past node right edge")),
@@ -294,10 +295,9 @@ mod tests {
         let mut n = node("0", None);
         n.size.width = f64::NAN;
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         assert!(
-            v.iter()
-                .any(|x| x.category == CATEGORY && x.message.contains("node.size has non-finite")),
+            v.iter().any(|x| x.message.contains("node.size has non-finite")),
             "expected non-finite-node-size violation, got {:?}",
             v
         );
@@ -309,10 +309,10 @@ mod tests {
         let mut n = node("0", None);
         n.size.width = 0.0;
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         assert!(v
             .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("node.size.width is not positive")));
+            .any(|x| x.message.contains("node.size.width is not positive")));
     }
 
     #[test]
@@ -325,10 +325,10 @@ mod tests {
         s1.channel = Some(2);
         n.sections = vec![s0, s1];
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         assert!(
             v.iter()
-                .any(|x| x.category == CATEGORY && x.message.contains("channel 2 shared by sections")),
+                .any(|x| x.message.contains("channel 2 shared by sections")),
             "expected channel-collision violation, got {:?}",
             v
         );
@@ -347,10 +347,10 @@ mod tests {
         s1.channel = Some(0);
         n.sections = vec![s0, s1];
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         assert!(v
             .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("channel 0 shared by sections")));
+            .any(|x| x.message.contains("channel 0 shared by sections")));
     }
 
     #[test]
@@ -365,10 +365,8 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
-        assert!(v
-            .iter()
-            .any(|x| x.category == CATEGORY && x.message.contains("over 100× the node's width")));
+        let v = crate::verify::verify(&map);
+        assert!(v.iter().any(|x| x.message.contains("over 100× the node's width")));
     }
 
     #[test]
@@ -386,7 +384,7 @@ mod tests {
             }),
         );
         map.nodes.insert("0".into(), n);
-        assert!(check(&map).is_empty());
+        assert!(crate::verify::verify(&map).is_empty());
     }
 
     #[test]
@@ -399,7 +397,7 @@ mod tests {
         s1.channel = Some(2);
         n.sections = vec![s0, s1];
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         let collision = v
             .iter()
             .find(|x| x.message.contains("channel 2 shared by sections"))
@@ -413,7 +411,7 @@ mod tests {
         let mut n = node("0", None);
         n.size.width = 1e30;
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         assert!(v
             .iter()
             .any(|x| x.message.contains("exceeds the 1000000 ceiling")));
@@ -428,7 +426,55 @@ mod tests {
                 .push(MindSection::new_default(String::new(), Vec::new()));
         }
         map.nodes.insert("0".into(), n);
-        let v = check(&map);
+        let v = crate::verify::verify(&map);
         assert!(v.iter().any(|x| x.message.contains("exceeds cap 1024")));
+    }
+
+    /// **The rule the tool answered "valid" for.**
+    ///
+    /// The loader refuses a node with no sections. `verify` had no
+    /// counterpart, so a map with `"sections": []` was reported valid,
+    /// exit 0, while the app declined to open it — from the tool whose
+    /// documented contract is "diagnose exactly the maps the editor
+    /// refuses". The divergence only became reachable when `verify`
+    /// moved from the strict door to `parse_for_inspection`; before
+    /// that the load itself failed first and hid it.
+    ///
+    /// Driven through `crate::verify::verify` rather than this
+    /// module's `check`, because the registry test next door proves a
+    /// row exists and this has to prove the row is wired to something
+    /// that runs.
+    #[test]
+    fn test_a_node_with_no_sections_is_reported_and_not_called_valid() {
+        let mut map = MindMap::new_blank("t");
+        let mut node = crate::verify::test_helpers::node("0", None);
+        node.sections.clear();
+        map.nodes.insert("0".into(), node);
+
+        let found = crate::verify::verify(&map);
+        assert!(
+            found
+                .iter()
+                .any(|v| v.category == "sections" && v.message.contains("zero sections")),
+            "a node with no sections must be reported: {found:?}"
+        );
+        assert!(
+            found.iter().any(|v| v.message.contains("zero sections")
+                && matches!(v.severity, crate::verify::Severity::Error)),
+            "and as an error, so `maptool verify` exits nonzero rather than printing `valid`"
+        );
+
+        // The negative control: the same map with a section is clean on
+        // this rule, so the assertion above cannot be passing because
+        // `verify` reports everything.
+        let mut map = MindMap::new_blank("t");
+        map.nodes
+            .insert("0".into(), crate::verify::test_helpers::node("0", None));
+        assert!(
+            !crate::verify::verify(&map)
+                .iter()
+                .any(|v| v.message.contains("zero sections")),
+            "an ordinary node must not be flagged"
+        );
     }
 }

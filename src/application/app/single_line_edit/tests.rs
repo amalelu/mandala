@@ -8,7 +8,9 @@
 
 use super::*;
 use crate::application::app::dispatch::apply_label_edit_action_to_buffer;
-use crate::application::document::{EdgeLabelSel, EdgeRef, PortalLabelSel, SectionSel, SelectionState};
+use crate::application::document::{
+    EdgeLabelSel, EdgeRef, GraphemeRange, PortalLabelSel, SectionSel, SectionSpan, SelectionState,
+};
 use crate::application::keybinds::Action;
 use crate::application::platform::input::{Key, SmolStr};
 
@@ -70,7 +72,8 @@ fn test_resolve_single_line_target_declines_non_edge_selections() {
         SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 1)]),
         SelectionState::SectionRange {
             sel: SectionSel::new("a", 0),
-            range: (0, 2),
+            section_span: SectionSpan::single(0),
+            grapheme_range: GraphemeRange::new(0, 2),
         },
         SelectionState::Edge(EdgeRef::new("a", "b", "cross_link")),
     ] {
@@ -849,5 +852,116 @@ mod oracle {
                 r#"All closed value=- preview=- undo=0"#,
             ]
         );
+    }
+
+    // ── Keystroke resolution, modifiers included ─────────────
+    //
+    // `handle_single_line_edit_key` needs a live `Renderer`, so
+    // these drive its renderer-free half, `resolve_edit_input`,
+    // into the same lifecycle core the shell feeds, with the key
+    // name derived by `key_to_name` as the keyboard handler does. They pin that
+    // the modifier state reaches the `LabelEdit` resolver: the
+    // shell used to take three loose bools and now reads one
+    // `&Modifiers`, and a swapped or dropped modifier there is
+    // invisible to every test that hands the core an `EditInput`
+    // directly.
+
+    use super::super::editor::resolve_edit_input;
+    use crate::application::keybinds::{key_to_name, KeybindConfig, ResolvedKeybinds};
+    use crate::application::platform::input::Modifiers;
+
+    /// Default keybinds with `LabelEditCursorHome` moved to
+    /// `Ctrl+A`, so one key means an Action with Ctrl held and a
+    /// literal character without it.
+    fn ctrl_a_is_home() -> ResolvedKeybinds {
+        KeybindConfig {
+            label_edit_cursor_home: vec!["Ctrl+A".into()],
+            ..KeybindConfig::default()
+        }
+        .resolve()
+    }
+
+    /// Resolve one keystroke the way the shell does, then run it
+    /// through the core; returns the trace line for that step.
+    fn press(
+        kind: TargetKind,
+        doc: &mut MindMapDocument,
+        editor: &mut SingleLineEditor,
+        keybinds: &ResolvedKeybinds,
+        logical: &Key,
+        modifiers: Modifiers,
+    ) -> String {
+        let input = resolve_edit_input(&key_to_name(logical), logical, &modifiers, keybinds);
+        let refresh = editor.handle_input_for_test(input, doc);
+        render(
+            refresh,
+            editor.buffer_and_cursor(),
+            model_value(kind, doc),
+            preview(kind, doc),
+            doc.undo_stack.len(),
+        )
+    }
+
+    #[test]
+    fn test_resolve_edit_input_maps_a_bound_key_to_its_action() {
+        let keybinds = KeybindConfig::default().resolve();
+        let arrow = Key::Named(crate::application::platform::input::NamedKey::ArrowLeft);
+        let input = resolve_edit_input(&key_to_name(&arrow), &arrow, &Modifiers::empty(), &keybinds);
+        assert!(
+            matches!(input, EditInput::Action(Action::LabelEditCursorLeft)),
+            "ArrowLeft is LabelEditCursorLeft by default, got {input:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_edit_input_passes_an_unbound_key_through_literally() {
+        let keybinds = KeybindConfig::default().resolve();
+        let a = key("a");
+        let input = resolve_edit_input(&key_to_name(&a), &a, &Modifiers::empty(), &keybinds);
+        assert!(
+            matches!(input, EditInput::Key(Key::Character(c)) if c == "a"),
+            "an unbound printable key must reach the core as itself, got {input:?}"
+        );
+    }
+
+    /// The Ctrl state decides between the Action and the literal.
+    /// Fails if the shell stops forwarding Ctrl (the key would
+    /// insert "a" both times) or forwards it when it is not held
+    /// (the plain press would jump the caret home).
+    #[test]
+    fn test_keystroke_ctrl_state_reaches_the_label_edit_resolver() {
+        for kind in [TargetKind::EdgeLabel, TargetKind::PortalText] {
+            let keybinds = ctrl_a_is_home();
+            let mut doc = fixture_doc(kind);
+            let mut editor = SingleLineEditor::Closed;
+            editor.open_for_test(target(kind), false, &mut doc);
+            let a = key("a");
+            assert_eq!(
+                press(kind, &mut doc, &mut editor, &keybinds, &a, Modifiers::empty()),
+                r#"Preview open[hia]@3 value="hi" preview="hia|" undo=0"#,
+                "{kind:?}: a plain `a` is a literal insert"
+            );
+            assert_eq!(
+                press(kind, &mut doc, &mut editor, &keybinds, &a, Modifiers::CONTROL),
+                r#"Preview open[hia]@0 value="hi" preview="|hia" undo=0"#,
+                "{kind:?}: Ctrl+A is LabelEditCursorHome under this config"
+            );
+        }
+    }
+
+    /// Shift and Alt reach the resolver too: neither is part of the
+    /// `Ctrl+A` bind, so holding either alongside Ctrl must stop it
+    /// matching. Fails if the shell drops Shift or Alt on the way in.
+    #[test]
+    fn test_keystroke_shift_and_alt_reach_the_label_edit_resolver() {
+        let keybinds = ctrl_a_is_home();
+        let a = key("a");
+        for extra in [Modifiers::SHIFT, Modifiers::ALT] {
+            let input = resolve_edit_input(&key_to_name(&a), &a, &(Modifiers::CONTROL | extra), &keybinds);
+            assert!(
+                !matches!(input, EditInput::Action(Action::LabelEditCursorHome)),
+                "Ctrl+{extra:?}+A must not match a bare Ctrl+A bind, got {input:?}"
+            );
+        }
     }
 }

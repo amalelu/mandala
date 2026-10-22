@@ -171,7 +171,9 @@ mod tests {
         // is the default 0. Even with `now_ms` past the threshold,
         // abort must not fire — otherwise a slow first frame
         // (large map load) would kill the process at startup.
-        assert!(!should_abort(/*now_ms*/ 1_000_000, /*last*/ 0, /*parked*/ false, /*thr*/ 100));
+        assert!(!should_abort(
+            /*now_ms*/ 1_000_000, /*last*/ 0, /*parked*/ false, /*thr*/ 100
+        ));
     }
 
     #[test]
@@ -179,21 +181,29 @@ mod tests {
         // The headline behaviour: under `ControlFlow::Wait` the
         // main thread legitimately idles. With `parked=true`, no
         // amount of silence triggers a hang verdict.
-        assert!(!should_abort(/*now*/ 1_000_000, /*last*/ 100, /*parked*/ true, /*thr*/ 100));
+        assert!(!should_abort(
+            /*now*/ 1_000_000, /*last*/ 100, /*parked*/ true, /*thr*/ 100
+        ));
         // Sanity: same numbers but unparked DO trip the threshold.
-        assert!(should_abort(/*now*/ 1_000_000, /*last*/ 100, /*parked*/ false, /*thr*/ 100));
+        assert!(should_abort(
+            /*now*/ 1_000_000, /*last*/ 100, /*parked*/ false, /*thr*/ 100
+        ));
     }
 
     #[test]
     fn unparked_silence_within_threshold_is_alive() {
         // Activity 50ms ago with a 100ms threshold: not yet a hang.
-        assert!(!should_abort(/*now*/ 150, /*last*/ 100, /*parked*/ false, /*thr*/ 100));
+        assert!(!should_abort(
+            /*now*/ 150, /*last*/ 100, /*parked*/ false, /*thr*/ 100
+        ));
     }
 
     #[test]
     fn unparked_silence_past_threshold_aborts() {
         // Activity 200ms ago with a 100ms threshold: hang verdict.
-        assert!(should_abort(/*now*/ 300, /*last*/ 100, /*parked*/ false, /*thr*/ 100));
+        assert!(should_abort(
+            /*now*/ 300, /*last*/ 100, /*parked*/ false, /*thr*/ 100
+        ));
     }
 
     #[test]
@@ -202,6 +212,8 @@ mod tests {
         // because both come from the same monotonic epoch, but
         // worth pinning), `saturating_sub` returns 0 and the
         // result is "no abort" rather than a wraparound abort.
-        assert!(!should_abort(/*now*/ 50, /*last*/ 100, /*parked*/ false, /*thr*/ 100));
+        assert!(!should_abort(
+            /*now*/ 50, /*last*/ 100, /*parked*/ false, /*thr*/ 100
+        ));
     }
 }

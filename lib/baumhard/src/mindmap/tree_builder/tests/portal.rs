@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Portal tree builder tests — marker emission, fold filtering, selection highlight, ascending channels, mutator round-trip, identity sequence. Edges with `display_mode = "portal"` drive the portal pass.
+//! Portal tree builder tests — marker emission, fold filtering, selection highlight, ascending channels, mutator round-trip, structural signature. The signatures' own coverage lives in [`super::canvas_signature`]. Edges with `display_mode = "portal"` drive the portal pass.
 
 use super::super::*;
 use super::fixtures::*;
@@ -228,12 +228,17 @@ fn portal_mutator_round_trip_matches_full_rebuild() {
     }
 }
 
-/// Folding a node drops its outgoing portal-mode edges from
-/// `portal_identity_sequence` so the dispatcher in
-/// `update_portal_tree` takes the full-rebuild path instead of the
-/// in-place mutator path (the mutator assumes a fixed slot count).
+/// Folding a node drops its outgoing portal-mode edges from the
+/// pair sequence `portal_structure_signature` hashes, so the
+/// dispatcher in `update_portal_tree` takes the full-rebuild path
+/// instead of the in-place mutator path (the mutator assumes a
+/// fixed slot count).
+///
+/// The visible pair keys are asserted beside the signature on
+/// purpose: a `u64` that moved says nothing about *which* pair
+/// left.
 #[test]
-fn portal_identity_sequence_drops_folded_pairs() {
+fn test_portal_structure_signature_drops_folded_pairs() {
     let mut map = synthetic_map(
         vec![
             synthetic_node("a", None, 0.0, 0.0),
@@ -257,12 +262,13 @@ fn portal_identity_sequence_drops_folded_pairs() {
         &map.fold_hidden_set(),
     );
     assert_eq!(
-        portal_identity_sequence(&pairs_before),
+        visible_pair_keys(&pairs_before),
         vec![
             EdgeKey::new("a", "b", "cross_link"),
             EdgeKey::new("b", "child", "cross_link"),
         ]
     );
+    let before = portal_structure_signature(&pairs_before);
 
     map.nodes.get_mut("parent").unwrap().folded = true;
     let pairs_after = portal_pair_data(
@@ -276,9 +282,19 @@ fn portal_identity_sequence_drops_folded_pairs() {
         &map.fold_hidden_set(),
     );
     assert_eq!(
-        portal_identity_sequence(&pairs_after),
+        visible_pair_keys(&pairs_after),
         vec![EdgeKey::new("a", "b", "cross_link")]
     );
+    let after = portal_structure_signature(&pairs_after);
+    assert_ne!(before, after);
+}
+
+/// The `EdgeKey`s of the visible portal pairs, in tree-insertion
+/// order — what [`portal_structure_signature`] folds into its
+/// hash, spelled out so a failing assertion names an edge instead
+/// of a `u64`.
+fn visible_pair_keys(pairs: &[PortalPairData]) -> Vec<EdgeKey> {
+    pairs.iter().map(|p| p.identity.clone()).collect()
 }
 
 /// A portal glyph containing a ZWJ (zero-width joiner) sequence —

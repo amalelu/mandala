@@ -11,7 +11,7 @@ use super::capabilities::{
 use super::color_value::ColorValue;
 use super::outcome::{ClipboardContent, Outcome};
 use crate::application::document::defaults::default_text_run;
-use crate::application::document::{EdgeRef, MindMapDocument, SectionPayload, SelectionState};
+use crate::application::document::{EdgeRef, GraphemeRange, MindMapDocument, SectionPayload, SelectionState};
 
 /// A mutable view into one selected component, holding the doc ref
 /// plus enough identity to find the component each time. Built fresh
@@ -36,19 +36,17 @@ pub enum TargetView<'a> {
         doc: &'a mut MindMapDocument,
         id: String,
         section_idx: usize,
-        /// Optional sub-range `[start, end)` over the section's
-        /// grapheme indices. `Some(range)` routes per-section
-        /// style dispatch (color text, font size, font family)
-        /// to the range-aware setter; clipboard ops fall back
-        /// to whole-section semantics (range-aware paste is
-        /// deferred to N4-D). `None` = whole-section, the
-        /// pre-N4-C semantic.
-        range: Option<(usize, usize)>,
+        /// Optional sub-range over the section's grapheme
+        /// clusters. `Some(range)` routes per-section style
+        /// dispatch (color text, font family) and clipboard
+        /// cut / paste to the range-aware setter; `None` =
+        /// whole-section.
+        range: Option<GraphemeRange>,
     },
     /// Line-mode edge body target. Color operations write the
     /// edge's `color` / `glyph_connection.color`; clipboard
     /// copy/paste/cut target the resolved **edge color** hex
-    /// (the user's mental model of "copy this edge's colour").
+    /// (the user's mental model of "copy this edge's color").
     Edge {
         doc: &'a mut MindMapDocument,
         er: EdgeRef,
@@ -77,7 +75,7 @@ pub enum TargetView<'a> {
     /// One endpoint's portal **text** on a portal-mode edge —
     /// the adjacent glyph area. Routes color writes to
     /// `PortalEndpointState.text_color` (independent from the
-    /// icon) so a coloured badge can host a differently-coloured
+    /// icon) so a colored badge can host a differently-colored
     /// annotation. Clipboard operates on the resolved text
     /// color hex.
     PortalText {
@@ -85,32 +83,6 @@ pub enum TargetView<'a> {
         er: EdgeRef,
         endpoint_node_id: String,
     },
-}
-
-impl<'a> TargetView<'a> {
-    /// One-word label, used in per-target error messages.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            TargetView::Node { .. } => "node",
-            TargetView::Section { .. } => "section",
-            TargetView::Edge { .. } => "edge",
-            TargetView::EdgeLabel { .. } => "edge label",
-            TargetView::PortalLabel { .. } => "portal label",
-            TargetView::PortalText { .. } => "portal text",
-        }
-    }
-}
-
-/// Encode a ColorValue as the string the model field wants. `Reset`
-/// resolves to `default` — each caller has its own "natural default"
-/// string.
-fn color_as_string(c: &ColorValue, default: &str) -> String {
-    match c {
-        ColorValue::Reset => default.to_string(),
-        _ => c
-            .as_model_string()
-            .expect("non-reset ColorValue always encodes to a string"),
-    }
 }
 
 /// Apply a color-override write to whichever edge-adjacent
@@ -126,9 +98,7 @@ fn color_as_string(c: &ColorValue, default: &str) -> String {
 fn write_edge_adjacent_color(view: &mut TargetView, override_str: Option<&str>) -> Outcome {
     match view {
         TargetView::Edge { doc, er } => Outcome::applied(doc.set_edge_color(er, override_str)),
-        TargetView::EdgeLabel { doc, er } => {
-            Outcome::applied(doc.set_edge_label_color(er, override_str))
-        }
+        TargetView::EdgeLabel { doc, er } => Outcome::applied(doc.set_edge_label_color(er, override_str)),
         TargetView::PortalLabel {
             doc,
             er,
@@ -159,10 +129,19 @@ fn paste_edge_adjacent_color(view: &mut TargetView, content: &str) -> Outcome {
     write_edge_adjacent_color(view, Some(trimmed))
 }
 
-/// Encode a ColorValue for the edge color path, where `None` means
-/// "clear the override". Edges don't have a separate default string
-/// — reset means fall back to resolved config.
-fn edge_color_as_override(c: &ColorValue) -> Option<String> {
+/// Encode a [`ColorValue`] for every setter whose "no color of my
+/// own" is spelled `None` — the four edge-adjacent channels and,
+/// since the palette cascade gave a themed node an override tier
+/// to clear, the three node channels too.
+///
+/// `Reset` is documented on [`ColorValue`] as *clear any local
+/// override*, and this is the only encoding that keeps that
+/// promise. Resolving it to a literal instead was inert while the
+/// node setters wrote `style` — a tier the palette shadows — and
+/// stopped being inert the moment they started writing
+/// `color_schema.overrides`, where a literal pins the node off its
+/// palette with no verb left to unpin it.
+fn color_as_override(c: &ColorValue) -> Option<String> {
     match c {
         ColorValue::Reset => None,
         _ => Some(
@@ -175,9 +154,12 @@ fn edge_color_as_override(c: &ColorValue) -> Option<String> {
 impl<'a> HasBgColor for TargetView<'a> {
     fn set_bg_color(&mut self, c: ColorValue) -> Outcome {
         match self {
-            // Background fill is node-level chrome.
+            // Background fill is node-level chrome. `Reset`
+            // arrives as `None` and clears — palette group on a
+            // themed node, `DEFAULT_NODE_BACKGROUND_COLOR` on an
+            // unthemed one.
             TargetView::Node { doc, id } => {
-                Outcome::applied(doc.set_node_bg_color(id, color_as_string(&c, "#141414")))
+                Outcome::applied(doc.set_node_bg_color(id, color_as_override(&c).as_deref()))
             }
             // Sections have no bg-fill chrome by spec
             // (`format/sections.md`). Matches `commands/color.rs`
@@ -205,12 +187,25 @@ impl<'a> HasTextColor for TargetView<'a> {
             // Whole-node `text` color rewrites the node's default
             // and every section's matching runs.
             TargetView::Node { doc, id } => {
-                Outcome::applied(doc.set_node_text_color(id, color_as_string(&c, "#ffffff")))
+                Outcome::applied(doc.set_node_text_color(id, color_as_override(&c).as_deref()))
             }
-            TargetView::Section { doc, id, section_idx, range } => {
-                let color_str = color_as_string(&c, "#ffffff");
+            // A run's own "no color of my own" is the empty
+            // string, not a `None` — that is the model spelling
+            // the whole cascade rests on
+            // ([`DEFAULT_RUN_COLOR`](crate::application::document::defaults::DEFAULT_RUN_COLOR)),
+            // so `Reset` unpins the graphemes rather than baking a
+            // literal white onto the most specific tier there is.
+            TargetView::Section {
+                doc,
+                id,
+                section_idx,
+                range,
+            } => {
+                let color_str = color_as_override(&c).unwrap_or_default();
                 let applied = match range {
-                    Some((rs, re)) => doc.set_section_text_color_range(id, *section_idx, *rs, *re, color_str),
+                    Some(r) => {
+                        doc.set_section_text_color_range(id, *section_idx, r.start(), r.end(), color_str)
+                    }
                     None => doc.set_section_text_color(id, *section_idx, color_str),
                 };
                 Outcome::applied(applied)
@@ -223,7 +218,7 @@ impl<'a> HasTextColor for TargetView<'a> {
             | TargetView::EdgeLabel { .. }
             | TargetView::PortalLabel { .. }
             | TargetView::PortalText { .. } => {
-                write_edge_adjacent_color(self, edge_color_as_override(&c).as_deref())
+                write_edge_adjacent_color(self, color_as_override(&c).as_deref())
             }
         }
     }
@@ -232,9 +227,10 @@ impl<'a> HasTextColor for TargetView<'a> {
 impl<'a> HasBorderColor for TargetView<'a> {
     fn set_border_color(&mut self, c: ColorValue) -> Outcome {
         match self {
-            // Frame/border is node-level chrome.
+            // Frame/border is node-level chrome. `Reset` clears,
+            // as on the fill channel.
             TargetView::Node { doc, id } => {
-                Outcome::applied(doc.set_node_border_color(id, color_as_string(&c, "#ffffff")))
+                Outcome::applied(doc.set_node_border_color(id, color_as_override(&c).as_deref()))
             }
             // Sections have no frame/border chrome by spec
             // (`format/sections.md`).
@@ -249,7 +245,7 @@ impl<'a> HasBorderColor for TargetView<'a> {
             | TargetView::EdgeLabel { .. }
             | TargetView::PortalLabel { .. }
             | TargetView::PortalText { .. } => {
-                write_edge_adjacent_color(self, edge_color_as_override(&c).as_deref())
+                write_edge_adjacent_color(self, color_as_override(&c).as_deref())
             }
         }
     }
@@ -260,7 +256,7 @@ impl<'a> AcceptsWheelColor for TargetView<'a> {
         match self {
             // Node default: background fill.
             TargetView::Node { .. } => self.set_bg_color(c),
-            // Section: text is the only colour axis a section has
+            // Section: text is the only color axis a section has
             // (no bg/border chrome — see `HasBgColor`/`HasBorderColor`
             // arms above), so the undirected wheel commit routes
             // through `set_text_color` → `set_section_text_color`.
@@ -286,9 +282,16 @@ impl<'a> AcceptsFontFamily for TargetView<'a> {
             // Section: per-section font family override, leaves
             // sibling sections' runs alone. With a `range` set,
             // routes to the range-aware setter instead.
-            TargetView::Section { doc, id, section_idx, range } => {
+            TargetView::Section {
+                doc,
+                id,
+                section_idx,
+                range,
+            } => {
                 let applied = match range {
-                    Some((rs, re)) => doc.set_section_font_family_range(id, *section_idx, *rs, *re, family),
+                    Some(r) => {
+                        doc.set_section_font_family_range(id, *section_idx, r.start(), r.end(), family)
+                    }
                     None => doc.set_section_font_family(id, *section_idx, family),
                 };
                 Outcome::applied(applied)
@@ -340,11 +343,14 @@ impl<'a> HandlesCopy for TargetView<'a> {
             // Section: structured payload (`text` to OS clipboard,
             // `payload` to in-process buffer). Empty text still
             // emits `Section` because chrome may carry information.
-            // Range-aware copy: when `range` is set, we fall
-            // back to whole-section copy. The semantic is
-            // safe for copy (non-destructive) but Cut+Paste below
-            // explicitly reject the range to prevent surprise.
-            TargetView::Section { doc, id, section_idx, .. } => match doc
+            // Copy deliberately ignores a grapheme `range` and
+            // takes the whole section — non-destructive, so the
+            // coarser scope is safe — while Cut and Paste below
+            // are range-aware and route to `cut_section_range` /
+            // `paste_section_range` when a range is present.
+            TargetView::Section {
+                doc, id, section_idx, ..
+            } => match doc
                 .mindmap
                 .nodes
                 .get(id)
@@ -372,8 +378,8 @@ impl<'a> HandlesCopy for TargetView<'a> {
                 None => ClipboardContent::NotApplicable,
             },
             // Edge copy = the resolved edge color hex. User-facing
-            // spec: clipboard copy on an edge copies its colour
-            // (changed from the prior label-text behaviour — edge
+            // spec: clipboard copy on an edge copies its color
+            // (changed from the prior label-text behavior — edge
             // label text is edited through the inline modal, which
             // handles its own OS-clipboard surface).
             TargetView::Edge { doc, er } => match doc.resolve_edge_color(er) {
@@ -423,9 +429,14 @@ impl<'a> HandlesPaste for TargetView<'a> {
             // Whole-section: structured payload via the in-process
             // buffer when its snapshot matches the untrimmed
             // probe; falls back to plain-text template inheritance.
-            TargetView::Section { doc, id, section_idx, range } => {
-                if let Some((rs, re)) = *range {
-                    return paste_section_range(doc, id, *section_idx, rs, re, content);
+            TargetView::Section {
+                doc,
+                id,
+                section_idx,
+                range,
+            } => {
+                if let Some(r) = *range {
+                    return paste_section_range(doc, id, *section_idx, r.start(), r.end(), content);
                 }
                 let section_count = doc
                     .mindmap
@@ -458,7 +469,7 @@ impl<'a> HandlesPaste for TargetView<'a> {
             TargetView::Edge { .. }
             | TargetView::EdgeLabel { .. }
             | TargetView::PortalLabel { .. }
-            | TargetView::PortalText { .. } => paste_edge_adjacent_color(self, &content),
+            | TargetView::PortalText { .. } => paste_edge_adjacent_color(self, content),
         }
     }
 }
@@ -473,9 +484,14 @@ impl<'a> HandlesCut for TargetView<'a> {
             // section dissolved." Range-aware cut removes only the
             // in-range graphemes, returns them as plain text, and
             // shifts later runs left.
-            TargetView::Section { doc, id, section_idx, range } => {
-                if let Some((rs, re)) = *range {
-                    return cut_section_range(doc, id, *section_idx, rs, re);
+            TargetView::Section {
+                doc,
+                id,
+                section_idx,
+                range,
+            } => {
+                if let Some(r) = *range {
+                    return cut_section_range(doc, id, *section_idx, r.start(), r.end());
                 }
                 let (text, payload) = match doc
                     .mindmap
@@ -488,8 +504,8 @@ impl<'a> HandlesCut for TargetView<'a> {
                 };
                 let cleared = SectionPayload {
                     text_runs: Vec::new(),
-                    offset: payload.offset.clone(),
-                    size: payload.size.clone(),
+                    offset: payload.offset,
+                    size: payload.size,
                     channel: payload.channel,
                     trigger_bindings: payload.trigger_bindings.clone(),
                 };
@@ -592,11 +608,6 @@ fn is_valid_color_literal(s: &str) -> bool {
         || baumhard::util::color::is_var_ref(s)
 }
 
-fn read_edge_label(doc: &MindMapDocument, er: &EdgeRef) -> Option<String> {
-    let idx = doc.edge_index(er)?;
-    doc.mindmap.edges.get(idx).and_then(|e| e.label.clone())
-}
-
 /// Snapshot the selection into a list of target identities the
 /// dispatcher can iterate over. Returns owned strings / refs so the
 /// caller can build a fresh `TargetView` per iteration (aliasing-
@@ -610,12 +621,12 @@ pub enum TargetId {
     Section {
         node_id: String,
         section_idx: usize,
-        /// Optional sub-range `[start, end)` over the section's
-        /// grapheme indices — emitted when `selection_targets`
-        /// fans `SelectionState::SectionRange` out. The trait
+        /// Optional sub-range over the section's grapheme
+        /// clusters — emitted when `selection_targets` fans
+        /// `SelectionState::SectionRange` out. The trait
         /// dispatcher's `TargetView::Section { range, .. }`
         /// arm consults it.
-        range: Option<(usize, usize)>,
+        range: Option<GraphemeRange>,
     },
     Edge(EdgeRef),
     EdgeLabel(EdgeRef),
@@ -635,7 +646,7 @@ pub fn selection_targets(sel: &SelectionState) -> Vec<TargetId> {
         SelectionState::Single(id) => vec![TargetId::Node(id.clone())],
         SelectionState::Multi(ids) => ids.iter().cloned().map(TargetId::Node).collect(),
         // A section selection routes to a dedicated `Section`
-        // target. Per-trait behaviour at the dispatch site:
+        // target. Per-trait behavior at the dispatch site:
         // clipboard copy / cut / paste land on the section's
         // `text`; color (text axis) and font (size + family) write
         // per-section through the matching `set_section_*`
@@ -648,7 +659,7 @@ pub fn selection_targets(sel: &SelectionState) -> Vec<TargetId> {
             range: None,
         }],
         // Multi-section fans out to one `Section` target per
-        // entry — every per-section verb (colour text axis,
+        // entry — every per-section verb (color text axis,
         // font size / family, clipboard text) applies to each.
         SelectionState::MultiSection(secs) => secs
             .iter()
@@ -660,12 +671,17 @@ pub fn selection_targets(sel: &SelectionState) -> Vec<TargetId> {
             .collect(),
         // SectionRange routes through the same `Section`
         // target so per-section verbs reuse one dispatch arm;
-        // the carried range threads to range-aware setters
-        // inside the dispatcher.
-        SelectionState::SectionRange { sel, range } => vec![TargetId::Section {
+        // the carried grapheme range threads to range-aware
+        // setters inside the dispatcher. The section span is a
+        // fan-out concern for the border / style consumers, not
+        // a per-target one — this dispatch targets the anchor
+        // section the grapheme range lives in.
+        SelectionState::SectionRange {
+            sel, grapheme_range, ..
+        } => vec![TargetId::Section {
             node_id: sel.node_id.clone(),
             section_idx: sel.section_idx,
-            range: Some(*range),
+            range: Some(*grapheme_range),
         }],
         SelectionState::Edge(er) => vec![TargetId::Edge(er.clone())],
         SelectionState::EdgeLabel(s) => vec![TargetId::EdgeLabel(s.edge_ref.clone())],
@@ -685,7 +701,11 @@ pub fn selection_targets(sel: &SelectionState) -> Vec<TargetId> {
 pub fn view_for<'a>(doc: &'a mut MindMapDocument, id: &TargetId) -> TargetView<'a> {
     match id {
         TargetId::Node(nid) => TargetView::Node { doc, id: nid.clone() },
-        TargetId::Section { node_id, section_idx, range } => TargetView::Section {
+        TargetId::Section {
+            node_id,
+            section_idx,
+            range,
+        } => TargetView::Section {
             doc,
             id: node_id.clone(),
             section_idx: *section_idx,
@@ -738,10 +758,10 @@ fn cut_section_range(
     if range_start >= clamped_end {
         return ClipboardContent::Empty;
     }
-    let byte_start = grapheme_chad::find_byte_index_of_grapheme(&section.text, range_start)
-        .unwrap_or(section.text.len());
-    let byte_end = grapheme_chad::find_byte_index_of_grapheme(&section.text, clamped_end)
-        .unwrap_or(section.text.len());
+    let byte_start =
+        grapheme_chad::find_byte_index_of_grapheme(&section.text, range_start).unwrap_or(section.text.len());
+    let byte_end =
+        grapheme_chad::find_byte_index_of_grapheme(&section.text, clamped_end).unwrap_or(section.text.len());
     let cut_text = section.text[byte_start..byte_end].to_string();
     let mut new_text = String::with_capacity(section.text.len() - (byte_end - byte_start));
     new_text.push_str(&section.text[..byte_start]);
@@ -751,10 +771,7 @@ fn cut_section_range(
         .text_runs
         .first()
         .cloned()
-        .unwrap_or_else(|| baumhard::mindmap::model::TextRun {
-            color: node.style.text_color.clone(),
-            ..default_text_run(0)
-        });
+        .unwrap_or_else(|| default_text_run(0));
     baumhard::mindmap::model::text_run_ops::splice_range(
         &mut new_runs,
         range_start,
@@ -764,8 +781,8 @@ fn cut_section_range(
     );
     let payload = SectionPayload {
         text_runs: new_runs,
-        offset: section.offset.clone(),
-        size: section.size.clone(),
+        offset: section.offset,
+        size: section.size,
         channel: section.channel,
         trigger_bindings: section.trigger_bindings.clone(),
     };
@@ -798,13 +815,11 @@ fn paste_section_range(
     if range_start > clamped_end {
         return Outcome::NotApplicable;
     }
-    let byte_start = grapheme_chad::find_byte_index_of_grapheme(&section.text, range_start)
-        .unwrap_or(section.text.len());
-    let byte_end = grapheme_chad::find_byte_index_of_grapheme(&section.text, clamped_end)
-        .unwrap_or(section.text.len());
-    let mut new_text = String::with_capacity(
-        section.text.len() - (byte_end - byte_start) + content.len(),
-    );
+    let byte_start =
+        grapheme_chad::find_byte_index_of_grapheme(&section.text, range_start).unwrap_or(section.text.len());
+    let byte_end =
+        grapheme_chad::find_byte_index_of_grapheme(&section.text, clamped_end).unwrap_or(section.text.len());
+    let mut new_text = String::with_capacity(section.text.len() - (byte_end - byte_start) + content.len());
     new_text.push_str(&section.text[..byte_start]);
     new_text.push_str(content);
     new_text.push_str(&section.text[byte_end..]);
@@ -816,29 +831,24 @@ fn paste_section_range(
     // section's first run for boundary cases (insertion at a
     // gap), and to a hardcoded default when the section has no
     // runs.
-    let template = baumhard::mindmap::model::text_run_ops::find_run_containing(
-        &section.text_runs,
-        range_start,
-    )
-    .or_else(|| {
-        // At a run boundary `find_run_containing` returns None;
-        // prefer the run ending at the boundary (left neighbour)
-        // since the user is conceptually typing "after" it.
-        if range_start == 0 {
-            None
-        } else {
-            baumhard::mindmap::model::text_run_ops::find_run_containing(
-                &section.text_runs,
-                range_start - 1,
-            )
-        }
-    })
-    .map(|idx| section.text_runs[idx].clone())
-    .or_else(|| section.text_runs.first().cloned())
-    .unwrap_or_else(|| baumhard::mindmap::model::TextRun {
-        color: node.style.text_color.clone(),
-        ..default_text_run(0)
-    });
+    let template =
+        baumhard::mindmap::model::text_run_ops::find_run_containing(&section.text_runs, range_start)
+            .or_else(|| {
+                // At a run boundary `find_run_containing` returns None;
+                // prefer the run ending at the boundary (left neighbour)
+                // since the user is conceptually typing "after" it.
+                if range_start == 0 {
+                    None
+                } else {
+                    baumhard::mindmap::model::text_run_ops::find_run_containing(
+                        &section.text_runs,
+                        range_start - 1,
+                    )
+                }
+            })
+            .map(|idx| section.text_runs[idx].clone())
+            .or_else(|| section.text_runs.first().cloned())
+            .unwrap_or_else(|| default_text_run(0));
     baumhard::mindmap::model::text_run_ops::splice_range(
         &mut new_runs,
         range_start,
@@ -848,8 +858,8 @@ fn paste_section_range(
     );
     let payload = SectionPayload {
         text_runs: new_runs,
-        offset: section.offset.clone(),
-        size: section.size.clone(),
+        offset: section.offset,
+        size: section.size,
         channel: section.channel,
         trigger_bindings: section.trigger_bindings.clone(),
     };

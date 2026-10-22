@@ -35,7 +35,6 @@ use super::zoom_visibility::ZoomVisibility;
 #[strum_discriminants(doc = "Payload-free tag for [`GlyphAreaCommand`], derived by strum. Keys")]
 #[strum_discriminants(doc = "the `HashSet`/`HashMap` look-ups where a caller needs to know")]
 #[strum_discriminants(doc = "*which* command was scheduled but not its parameters.")]
-#[serde(deny_unknown_fields)]
 pub enum GlyphAreaCommand {
     /// Remove `n` grapheme clusters from the front of the text.
     PopFront(usize),

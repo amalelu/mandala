@@ -94,19 +94,6 @@ pub(in crate::application::app) struct DrainContext<'a> {
     pub interaction_mode: &'a super::InteractionMode,
 }
 
-impl DrainContext<'_> {
-    /// The renderer-free slice a release commit body works against.
-    /// Reborrows, so the caller keeps the full context for the
-    /// decree that follows.
-    pub(in crate::application::app) fn release_commit(&mut self) -> ReleaseCommit<'_> {
-        ReleaseCommit {
-            document: &mut *self.document,
-            mindmap_tree: &mut *self.mindmap_tree,
-            scene_cache: &mut *self.scene_cache,
-        }
-    }
-}
-
 /// The mutually-exclusive throttled drag variants. Only one can be
 /// active at any instant, which is why they live behind the same
 /// `DragState::Throttled` tag. Picker hover, which coexists with
@@ -204,13 +191,16 @@ pub(in crate::application::app) trait ThrottledInteraction {
     /// to fold new input into a single subsequent drain.
     fn drain(&mut self, ctx: DrainContext<'_>);
 
-    /// End-of-interaction cleanup. Called from
-    /// `super::event_mouse_click` on drag release (and
-    /// the picker-close path for the hover variant) before the
-    /// owning enum transitions away. The default resets only the
-    /// throttle — pending state is expected to be empty already
-    /// or about to be discarded with `self`, so explicit pending
-    /// clearing is left to the few implementors that need it.
+    /// End-of-interaction cleanup: resets the throttle and leaves
+    /// pending state alone.
+    ///
+    /// Test-gated. No release path calls it — the owning
+    /// `ThrottledDrag` is dropped whole, taking the throttle with
+    /// it — so the only consumers are the per-implementor tests that
+    /// pin "reset touches the throttle and nothing else". That
+    /// contract is worth keeping stated for the day an interaction
+    /// outlives one drag.
+    #[cfg(test)]
     fn reset(&mut self) {
         self.throttle().reset();
     }

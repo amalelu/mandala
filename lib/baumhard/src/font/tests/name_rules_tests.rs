@@ -488,7 +488,11 @@ pub fn do_select_font_variants_keeps_same_container_faces_of_one_family() {
         candidate("family-font/Family-Bold.ttf", None),
         candidate("family-font/Family-Regular.ttf", None),
     ]);
-    assert_eq!(selection.fonts.len(), 2, "two same-container faces must both survive");
+    assert_eq!(
+        selection.fonts.len(),
+        2,
+        "two same-container faces must both survive"
+    );
     assert_eq!(selection.fonts[0].variant, "Family");
     assert_eq!(selection.fonts[0].relative_path, "family-font/Family-Bold.ttf");
     assert_eq!(selection.fonts[1].variant, "Family2");
@@ -510,9 +514,16 @@ pub fn do_select_font_variants_collapses_one_face_in_two_containers() {
         candidate("regal-font/Regal.otf", Some("Regal")),
         candidate("regal-font/Regal.ttf", Some("Regal")),
     ]);
-    assert_eq!(selection.fonts.len(), 1, "one face in two containers is one variant");
+    assert_eq!(
+        selection.fonts.len(),
+        1,
+        "one face in two containers is one variant"
+    );
     assert_eq!(selection.fonts[0].relative_path, "regal-font/Regal.ttf");
-    assert!(selection.warnings.is_empty(), "container dedup is not a collision");
+    assert!(
+        selection.warnings.is_empty(),
+        "container dedup is not a collision"
+    );
 }
 
 #[test]
@@ -535,7 +546,10 @@ fn test_select_font_variants_keeps_distinct_styles_of_one_family() {
 /// collapses, which is the distinction the pass turns on.
 pub fn do_select_font_variants_keeps_distinct_styles_of_one_family() {
     let selection = select_font_variants(vec![
-        candidate("noto-font/NotoSerifTibetan-Bold.ttf", Some("Noto Serif Tibetan Bold")),
+        candidate(
+            "noto-font/NotoSerifTibetan-Bold.ttf",
+            Some("Noto Serif Tibetan Bold"),
+        ),
         candidate(
             "noto-font/NotoSerifTibetan-Regular.ttf",
             Some("Noto Serif Tibetan Regular"),
@@ -662,11 +676,11 @@ fn test_no_variant_is_a_rust_keyword() {
 /// generated source.
 pub fn do_no_variant_is_a_rust_keyword() {
     const KEYWORDS: [&str; 51] = [
-        "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
-        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
-        "return", "Self", "self", "static", "struct", "super", "trait", "true", "type", "unsafe",
-        "use", "where", "while", "async", "await", "abstract", "become", "box", "do", "final",
-        "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+        "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for",
+        "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "Self",
+        "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while",
+        "async", "await", "abstract", "become", "box", "do", "final", "macro", "override", "priv", "try",
+        "typeof", "unsized", "virtual", "yield",
     ];
     for (app_font, _) in crate::font::fonts::FONT_DATA.iter() {
         let name = format!("{app_font:?}");

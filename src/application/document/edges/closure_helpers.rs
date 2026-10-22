@@ -10,9 +10,8 @@ use baumhard::mindmap::model::{
     Canvas, EdgeLabelConfig, GlyphConnectionConfig, MindEdge, PortalEndpointState,
 };
 
-/// Free-fn body of
-/// [`super::super::MindMapDocument::ensure_glyph_connection`].
-/// Reachable from closures passed into
+/// Fork-on-first-edit for the connection style, callable from
+/// closures passed into
 /// [`super::super::MindMapDocument::mutate_edge`] without having
 /// to capture `Self`. Forks the canvas-default connection style
 /// onto the edge on first edit; subsequent edits reuse the
@@ -30,9 +29,8 @@ pub(super) fn ensure_glyph_connection_inline<'a>(
     edge.glyph_connection.as_mut().expect("just installed")
 }
 
-/// Free-fn body of
-/// [`super::super::MindMapDocument::ensure_label_config`].
-/// Reachable from closures passed into
+/// Fork-on-first-edit for the label config, callable from closures
+/// passed into
 /// [`super::super::MindMapDocument::mutate_edge`]. Forks a default
 /// [`EdgeLabelConfig`] onto the edge on first label edit;
 /// subsequent edits reuse it. Mirrors

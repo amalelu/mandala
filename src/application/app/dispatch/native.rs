@@ -63,6 +63,107 @@ fn quote_console_arg(s: &str) -> String {
     escaped
 }
 
+/// What [`Action::PanCanvas`] does with the drag state it finds.
+///
+/// Pure so the arm is pinnable at `DragState` level — the arm itself
+/// takes an `InputHandlerContext`, i.e. a live wgpu device, which
+/// TEST_CONVENTIONS §T8 keeps out of the harness. Same shape, and
+/// for the same reason, as `event_mouse_click::route_middle_button`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanCanvasRoute {
+    /// Nothing is in flight that a pan would destroy — enter
+    /// `DragState::Panning` for the duration of the gesture.
+    Arm,
+    /// Another gesture owns the drag state and owes the model a
+    /// commit. Leave it exactly as it is, and do nothing else.
+    Refuse,
+}
+
+/// Route one `Action::PanCanvas` dispatch against the drag state it
+/// finds.
+///
+/// The guard belongs on the Action rather than on any one of the
+/// gestures that reach it (CODE_CONVENTIONS §3), because `PanCanvas`
+/// has three entry points and only one of them was ever guarded:
+/// `MouseGesture::MiddleClick` (routed through
+/// `event_mouse_click::route_middle_button`),
+/// `MouseGesture::LeftDrag` (which only runs from
+/// `DragState::Pending`), and **any keyboard binding or macro step
+/// naming `pan_canvas`** — `keybinds::config` declares it
+/// user-bindable, `event_keyboard` dispatches with no drag-state
+/// check, and `SourceTier::allows_action` does not gate it, so every
+/// tier reaches it. Pre-fix that third route overwrote
+/// `DragState::Throttled(..)` with `Panning` exactly the way the
+/// middle button used to: the abandoned drag's
+/// `commit_on_release_core` never ran, so the tree kept the dragged
+/// offsets until the next model rebuild snapped them back, with no
+/// undo entry to recover from. Same class as #37 item 5, one
+/// dispatch surface over.
+///
+/// `Pending` is not in the refused class and must not be: the
+/// `LeftDrag` threshold cross dispatches `PanCanvas` *from*
+/// `Pending`, so refusing there would leave the left button unable
+/// to pan at all.
+fn route_pan_canvas(drag_state: &DragState) -> PanCanvasRoute {
+    if drag_state.would_abandon_gesture() {
+        PanCanvasRoute::Refuse
+    } else {
+        PanCanvasRoute::Arm
+    }
+}
+
+/// End a rubber band that is live when a target-picker mode
+/// (`Reparent` / `Connect`) takes the pointer.
+///
+/// The two modes swallow both halves of the left button —
+/// `handle_mouse_input` consumes the release as "choose target" and
+/// never reaches the `mem::replace` that ends a `SelectingRect`, and
+/// `handle_cursor_moved` returns before the drag-state ladder — so a
+/// band entered mid-gesture would otherwise sit frozen on the canvas
+/// for the whole picker session, and its covered set would be painted
+/// by every hover rebuild the mode runs.
+///
+/// Only `SelectingRect` is ended. The other states a picker mode can
+/// interrupt are not this function's call: `Throttled(..)` owes the
+/// model a commit that its own release still performs, and dropping
+/// it here would be the silent loss #37 item 5 is about.
+///
+/// The shell around [`take_rubber_band_for_target_picker`], which is
+/// the whole of it except dropping the overlay rectangle —
+/// `&mut Renderer` is a live wgpu device, which TEST_CONVENTIONS §T8
+/// keeps out of the harness.
+fn end_target_picker_rubber_band(
+    drag_state: &mut DragState,
+    document: &mut Option<crate::application::document::MindMapDocument>,
+    renderer: &mut crate::application::renderer::Renderer,
+) {
+    if take_rubber_band_for_target_picker(drag_state, document) {
+        renderer.clear_overlay_buffers();
+    }
+}
+
+/// The renderer-free half of [`end_target_picker_rubber_band`]:
+/// drop the drag state and the covered set it authorized, and report
+/// whether there was one.
+///
+/// The per-frame drain would end the covered set on its own next
+/// frame — that is where the invariant lives, not here — but a mode
+/// entry rebuilds immediately, and that rebuild would paint the
+/// abandoned set once on its way out.
+fn take_rubber_band_for_target_picker(
+    drag_state: &mut DragState,
+    document: &mut Option<crate::application::document::MindMapDocument>,
+) -> bool {
+    if !matches!(drag_state, DragState::SelectingRect { .. }) {
+        return false;
+    }
+    *drag_state = DragState::None;
+    document
+        .as_mut()
+        .and_then(crate::application::document::MindMapDocument::take_rect_select_preview);
+    true
+}
+
 /// Run an `Action` against the live application context. The body of
 /// every Document-level action lives here; handlers (`event_keyboard`,
 /// `event_mouse_click`, the macro runtime via `dispatch_macro`)
@@ -185,6 +286,16 @@ pub(in crate::application::app) fn dispatch_action(
         | Action::ConsoleScrollPageDown
         | Action::ConsoleScrollEnd
         | Action::ConsoleScrollHome => {
+            // Every Console* body edits the open modal. With the
+            // console closed there is nothing for one to act on (the
+            // keyboard only reaches here while it is open), so a macro
+            // step or an IPC `act.action` sending one reports that
+            // nothing ran, as the hitless `DoubleClickActivate` does,
+            // rather than claiming a keystroke into a modal that is
+            // not there.
+            if !ctx.console_state.is_open() {
+                return DispatchOutcome::Unhandled;
+            }
             super::super::console_input::dispatch_console_action(&action, ctx);
             DispatchOutcome::Handled
         }
@@ -279,17 +390,27 @@ pub(in crate::application::app) fn dispatch_action(
             DispatchOutcome::Handled
         }
         Action::EnterReparentMode => {
-            if let Some(doc) = ctx.document.as_ref() {
-                let sel: Vec<String> = doc
-                    .selection
-                    .selected_ids()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                if !sel.is_empty() {
-                    *ctx.interaction_mode = InteractionMode::Reparent { sources: sel };
-                    *ctx.hovered_node = None;
-                    *ctx.last_click = None;
+            // `sel` is collected out of the borrow rather than held
+            // across the block: `end_target_picker_rubber_band` takes
+            // `&mut Option<MindMapDocument>`, and the rebuild below
+            // re-resolves the document afterwards.
+            let sel: Vec<String> = ctx
+                .document
+                .as_ref()
+                .map(|doc| {
+                    doc.selection
+                        .selected_ids()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !sel.is_empty() {
+                *ctx.interaction_mode = InteractionMode::Reparent { sources: sel };
+                *ctx.hovered_node = None;
+                *ctx.last_click = None;
+                end_target_picker_rubber_band(ctx.drag_state, ctx.document, ctx.renderer);
+                if let Some(doc) = ctx.document.as_ref() {
                     rebuild_all_with_mode(
                         doc,
                         ctx.interaction_mode,
@@ -304,13 +425,16 @@ pub(in crate::application::app) fn dispatch_action(
             DispatchOutcome::Handled
         }
         Action::EnterConnectMode => {
-            if let Some(doc) = ctx.document.as_ref() {
-                if let SelectionState::Single(source) = &doc.selection {
-                    *ctx.interaction_mode = InteractionMode::Connect {
-                        source: source.clone(),
-                    };
-                    *ctx.hovered_node = None;
-                    *ctx.last_click = None;
+            let source = match ctx.document.as_ref().map(|doc| &doc.selection) {
+                Some(SelectionState::Single(source)) => Some(source.clone()),
+                _ => None,
+            };
+            if let Some(source) = source {
+                *ctx.interaction_mode = InteractionMode::Connect { source };
+                *ctx.hovered_node = None;
+                *ctx.last_click = None;
+                end_target_picker_rubber_band(ctx.drag_state, ctx.document, ctx.renderer);
+                if let Some(doc) = ctx.document.as_ref() {
                     rebuild_all_with_mode(
                         doc,
                         ctx.interaction_mode,
@@ -417,12 +541,10 @@ pub(in crate::application::app) fn dispatch_action(
             open_editor_for_edge_selection(clean, ctx);
             DispatchOutcome::Handled
         }
-        Action::SaveDocument => {
-            if let Some(doc) = ctx.document.as_mut() {
-                save_document_to_bound_path(doc, ctx.console_state);
-            }
-            DispatchOutcome::Handled
-        }
+        Action::SaveDocument => match ctx.document.as_mut().map(save_document_to_bound_path) {
+            Some(true) => DispatchOutcome::Handled,
+            Some(false) | None => DispatchOutcome::Unhandled,
+        },
 
         // ── Mouse-gesture Actions ──────────────────────────────
         Action::DoubleClickActivate => {
@@ -472,14 +594,24 @@ pub(in crate::application::app) fn dispatch_action(
                 (Some(_), None) => DispatchOutcome::Unhandled,
             }
         }
-        Action::PanCanvas => {
+        Action::PanCanvas => match route_pan_canvas(ctx.drag_state) {
             // Continuous gesture: enter pan mode for the duration of
-            // the press. The mouse-release handler unconditionally
-            // resets `drag_state` to `None`, so this arm only needs
-            // to handle the press side.
-            *ctx.drag_state = DragState::Panning;
-            DispatchOutcome::Handled
-        }
+            // the press. Both release paths that can end it — the
+            // left button's `DragState::Panning | DragState::None`
+            // arm and `route_middle_button`'s `Clear` — reset
+            // `drag_state` to `None`, so this arm only needs to
+            // handle the press side.
+            PanCanvasRoute::Arm => {
+                *ctx.drag_state = DragState::Panning;
+                DispatchOutcome::Handled
+            }
+            // Nothing ran, and the caller — the native macro loop
+            // reads this for `any_ran` — is told so.
+            PanCanvasRoute::Refuse => {
+                log::debug!("dispatch: PanCanvas ignored (uncommitted gesture in flight); state stays put");
+                DispatchOutcome::Unhandled
+            }
+        },
         // ── Console-verb Actions ───────────────────────────────
         Action::OpenColorPicker => {
             // Mirror `color picker on`: open the standalone palette.
@@ -540,13 +672,8 @@ pub(in crate::application::app) fn dispatch_action(
             if let Some(doc) = ctx.document.as_mut() {
                 close_single_line_edit(
                     matches!(action, Action::LabelEditCommit),
-                    doc,
-                    ctx.interaction_mode,
                     ctx.single_line_edit_state,
-                    ctx.mindmap_tree,
-                    ctx.app_scene,
-                    ctx.renderer,
-                    ctx.scene_cache,
+                    &mut super::cross_dispatch::rebuild_ctx!(ctx, doc),
                 );
             }
             DispatchOutcome::Handled
@@ -591,12 +718,7 @@ pub(in crate::application::app) fn dispatch_action(
                 super::super::single_line_edit::apply_single_line_edit_action(
                     action,
                     ctx.single_line_edit_state,
-                    doc,
-                    ctx.interaction_mode,
-                    ctx.mindmap_tree,
-                    ctx.app_scene,
-                    ctx.renderer,
-                    ctx.scene_cache,
+                    &mut super::cross_dispatch::rebuild_ctx!(ctx, doc),
                 );
             }
             DispatchOutcome::Handled
@@ -616,30 +738,32 @@ pub(in crate::application::app) fn dispatch_action(
                 Action::SaveDocumentAs(_) => "save",
                 Action::NewDocumentAt(_) => "new",
                 _ => {
-                    log::error!("fs-variant fan-out missed inner-match variant: {:?}", action,);
+                    log::error!(
+                        "dispatch: fs-variant fan-out missed inner-match variant: {:?}",
+                        action,
+                    );
                     return DispatchOutcome::Handled;
                 }
             };
             let line = format!("{} {}", verb, quote_console_arg(path));
-            if let Some(doc) = ctx.document.as_mut() {
-                crate::application::app::console_input::exec::execute_console_line(
-                    &line,
-                    ctx.console_state,
-                    ctx.single_line_edit_state,
-                    ctx.color_picker_state,
-                    ctx.text_edit_state,
-                    doc,
-                    ctx.interaction_mode,
-                    ctx.mindmap_tree,
-                    ctx.app_scene,
-                    ctx.renderer,
-                    ctx.scene_cache,
-                    ctx.macros,
-                );
-            } else {
-                log::warn!("{}: no document loaded; skipping '{}'", verb, line);
+            // The Action applied only if its line did: a missing file
+            // or an unwritable path is `Unhandled`, so a caller that
+            // reads the outcome (a macro's `any_ran`, an IPC reply)
+            // is not told the map was opened or saved when it was not.
+            match crate::application::app::console_input::exec::execute_console_line(ctx, &line) {
+                Some(run) => {
+                    crate::application::app::console_input::exec::log_console_line(&line, &run.outcome);
+                    if run.outcome.applied() {
+                        DispatchOutcome::Handled
+                    } else {
+                        DispatchOutcome::Unhandled
+                    }
+                }
+                None => {
+                    log::warn!("dispatch: {}: no document loaded; skipping '{}'", verb, line);
+                    DispatchOutcome::Unhandled
+                }
             }
-            DispatchOutcome::Handled
         }
 
         // ── Color-picker modal Actions (NativeOnly) ─────────────
@@ -665,7 +789,7 @@ pub(in crate::application::app) fn dispatch_action(
                 // The guard just proved `Some`; a mismatch means
                 // `picker_op_for` is not a pure function any more.
                 // Fail safe per CODE_CONVENTIONS §9.
-                log::error!("picker arm guard/body disagreement on {:?}", a);
+                log::error!("dispatch: picker arm guard/body disagreement on {:?}", a);
                 return DispatchOutcome::Unhandled;
             };
             dispatch_picker_op(op, ctx)
@@ -676,7 +800,7 @@ pub(in crate::application::app) fn dispatch_action(
         // respective modal handlers. Falling through to `Unhandled`
         // lets the keyboard handler's contextual resolution own them.
         _ => {
-            log::debug!("dispatch_action: {:?} not handled at Document context", action);
+            log::debug!("dispatch: {:?} not handled at Document context", action);
             DispatchOutcome::Unhandled
         }
     }
@@ -706,9 +830,7 @@ fn open_editor_for_edge_selection(clean: bool, ctx: &mut InputHandlerContext<'_>
         return;
     };
     let Some(target) = resolve_single_line_target(&doc.selection) else {
-        log::debug!(
-            "open_editor_for_edge_selection: selection is not an edge label / portal endpoint; no-op"
-        );
+        log::debug!("dispatch: edit-selection: selection is not an edge label / portal endpoint; no-op");
         return;
     };
     open_single_line_edit(
@@ -738,12 +860,12 @@ fn dispatch_picker_op(op: PickerOp, ctx: &mut InputHandlerContext<'_>) -> Dispat
         standalone,
         ctx.document.is_some(),
     ) {
-        log::debug!("picker action {:?} declined: {:?}", op, reason);
+        log::debug!("dispatch: picker action {:?} declined: {:?}", op, reason);
         return DispatchOutcome::Unhandled;
     }
     // `picker_decline_reason` just proved the document is present.
     let Some(doc) = ctx.document.as_mut() else {
-        log::error!("picker arm: decline check and document borrow disagree");
+        log::error!("dispatch: picker arm: decline check and document borrow disagree");
         return DispatchOutcome::Unhandled;
     };
     match op {
@@ -789,7 +911,10 @@ fn dispatch_picker_op(op: PickerOp, ctx: &mut InputHandlerContext<'_>) -> Dispat
             // the nudge, so the op did not take effect — report
             // that rather than a blanket `Handled`.
             if !apply_picker_nudge(nudge, ctx.color_picker_state, doc, ctx.picker_hover) {
-                log::debug!("picker nudge {:?} did not apply; reporting Unhandled", nudge);
+                log::debug!(
+                    "dispatch: picker nudge {:?} did not apply; reporting Unhandled",
+                    nudge
+                );
                 return DispatchOutcome::Unhandled;
             }
         }
@@ -834,11 +959,15 @@ pub(in crate::application::app) fn apply_label_edit_action_to_buffer(
                 *cursor = delete_before_cursor(buffer, *cursor);
             }
         }
-        Action::LabelEditDeleteForward => {
-            if *cursor < grapheme_chad::count_grapheme_clusters(buffer) {
-                *cursor = delete_at_cursor(buffer, *cursor);
-            }
+        Action::LabelEditDeleteForward if *cursor < grapheme_chad::count_grapheme_clusters(buffer) => {
+            *cursor = delete_at_cursor(buffer, *cursor);
         }
+        // At the end of the buffer delete-forward is a no-op, and it
+        // says so in its own arm rather than falling through to the
+        // catch-all, so an arm added above `_` later cannot receive it.
+        // The guard above is clippy's `collapsible_match` form (the
+        // nested `if` the siblings use trips it on the last arm only).
+        Action::LabelEditDeleteForward => {}
         _ => {}
     }
     *cursor != before || buffer.len() != len_before
@@ -872,6 +1001,19 @@ pub(in crate::application::app) fn dispatch_macro(macro_id: &str, ctx: &mut Inpu
     super::macro_core::dispatch_macro(macro_id, &mut target)
 }
 
+/// Run an anonymous step sequence through the same gated step loop
+/// [`dispatch_macro`] runs a registered macro through, as a macro
+/// from tier `source`. `label` names the sequence in diagnostics.
+pub(in crate::application::app) fn run_macro_steps(
+    label: &str,
+    steps: &[crate::application::macros::MacroStep],
+    source: crate::application::source_tier::SourceTier,
+    ctx: &mut InputHandlerContext<'_>,
+) -> bool {
+    let mut target = NativeMacroDispatchTarget { ctx };
+    super::macro_core::run_macro_steps(label, steps, source, &mut target)
+}
+
 /// Native impl of [`super::macro_core::MacroDispatchTarget`].
 /// Wraps `&mut InputHandlerContext` and forwards each operation to
 /// the existing native helpers (`dispatch_action`,
@@ -900,7 +1042,7 @@ impl<'a, 'b> super::macro_core::MacroDispatchTarget for NativeMacroDispatchTarge
             .as_ref()
             .and_then(|d| d.mutation_registry.get(id).cloned());
         let Some(cm) = cm else {
-            log::warn!("macro step: unknown custom-mutation id '{}'", id);
+            log::warn!("macros: CustomMutation step: unknown custom-mutation id '{}'", id);
             return false;
         };
         let Some(doc) = self.ctx.document.as_mut() else {
@@ -930,31 +1072,24 @@ impl<'a, 'b> super::macro_core::MacroDispatchTarget for NativeMacroDispatchTarge
     }
 
     fn execute_console_line(&mut self, line: &str) -> bool {
-        // `execute_console_line` requires a loaded document (takes
-        // `&mut MindMapDocument`, not `Option`). Macros fired before
-        // any document is loaded silently skip and return false so
-        // the macro's `any_ran` doesn't bump on the no-op path —
-        // matches pre-Track-B behavior where the warn arm left
-        // `any_ran` unchanged.
-        let Some(doc) = self.ctx.document.as_mut() else {
-            log::warn!("macro step ConsoleLine: no document loaded; skipping '{}'", line,);
-            return false;
-        };
-        crate::application::app::console_input::exec::execute_console_line(
-            line,
-            self.ctx.console_state,
-            self.ctx.single_line_edit_state,
-            self.ctx.color_picker_state,
-            self.ctx.text_edit_state,
-            doc,
-            self.ctx.interaction_mode,
-            self.ctx.mindmap_tree,
-            self.ctx.app_scene,
-            self.ctx.renderer,
-            self.ctx.scene_cache,
-            self.ctx.macros,
-        );
-        true
+        // Every verb runs against a document, so a macro fired before
+        // one loads soft-skips. A line that ran but failed (an unknown
+        // verb, a verb error) did not apply either. Neither bumps the
+        // macro's `any_ran`, so a keystroke whose macro did nothing
+        // still falls through to the custom-mutation tier.
+        match crate::application::app::console_input::exec::execute_console_line(self.ctx, line) {
+            Some(run) => {
+                crate::application::app::console_input::exec::log_console_line(line, &run.outcome);
+                run.outcome.applied()
+            }
+            None => {
+                log::warn!(
+                    "macros: ConsoleLine step: no document loaded; skipping '{}'",
+                    line
+                );
+                false
+            }
+        }
     }
 
     fn current_selection_node_id(&self) -> Option<String> {
@@ -1008,7 +1143,7 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
     };
 
     let Some(h) = hit else {
-        log::debug!("FastResizeStart: no DispatchHit; skipping");
+        log::debug!("dispatch: FastResizeStart: no DispatchHit; skipping");
         return;
     };
     // Snapshot press-time hit out of PendingRight. If the state
@@ -1021,19 +1156,19 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
             ..
         } => (hit_node.clone(), *hit_section_idx),
         _ => {
-            log::debug!("FastResizeStart: drag_state isn't PendingRight; skipping");
+            log::debug!("dispatch: FastResizeStart: drag_state isn't PendingRight; skipping");
             return;
         }
     };
     let Some(node_id) = hit_node else {
         // Empty-canvas right-press — no fast-resize target.
-        log::debug!("FastResizeStart: press landed on empty canvas; skipping");
+        log::debug!("dispatch: FastResizeStart: press landed on empty canvas; skipping");
         *ctx.drag_state = DragState::None;
         return;
     };
 
     let Some(doc) = ctx.document.as_mut() else {
-        log::debug!("FastResizeStart: no document; skipping");
+        log::debug!("dispatch: FastResizeStart: no document; skipping");
         *ctx.drag_state = DragState::None;
         return;
     };
@@ -1042,13 +1177,16 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
     // target (whole-node hit, including single-section nodes).
     if let Some(section_idx) = hit_section_idx {
         let Some(node) = doc.mindmap.nodes.get(&node_id) else {
-            log::debug!("FastResizeStart: node '{}' not found; skipping", node_id);
+            log::debug!(
+                "dispatch: FastResizeStart: node '{}' not found; skipping",
+                node_id
+            );
             *ctx.drag_state = DragState::None;
             return;
         };
         let Some(section) = node.sections.get(section_idx) else {
             log::debug!(
-                "FastResizeStart: section[{}] not found on '{}'; skipping",
+                "dispatch: FastResizeStart: section[{}] not found on '{}'; skipping",
                 section_idx,
                 node_id
             );
@@ -1058,7 +1196,7 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
         let Some(start_size) = section.size else {
             // fill-parent section — no AABB to anchor against.
             log::info!(
-                "FastResizeStart: section[{}] of '{}' is fill-parent (size=None); cannot fast-resize",
+                "dispatch: FastResizeStart: section[{}] of '{}' is fill-parent (size=None); cannot fast-resize",
                 section_idx,
                 node_id
             );
@@ -1085,7 +1223,10 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
         )));
     } else {
         let Some(node) = doc.mindmap.nodes.get(&node_id) else {
-            log::debug!("FastResizeStart: node '{}' not found; skipping", node_id);
+            log::debug!(
+                "dispatch: FastResizeStart: node '{}' not found; skipping",
+                node_id
+            );
             *ctx.drag_state = DragState::None;
             return;
         };
@@ -1107,28 +1248,191 @@ fn apply_fast_resize_start(ctx: &mut InputHandlerContext<'_>, hit: Option<&Dispa
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::application::app::throttled_interaction::moving_node::MovingNodeInteraction;
+    use crate::application::app::throttled_interaction::node_resize::NodeResizeInteraction;
+    use crate::application::app::throttled_interaction::ThrottledDrag;
+    use baumhard::mindmap::model::{Position, Size};
+    use baumhard::mindmap::tree_builder::ResizeHandleSide;
+    use std::collections::HashSet;
+
     // Most dispatch arms touch the renderer (wgpu) which is forbidden
-    // in tests per `TEST_CONVENTIONS.md §T8`. Per-arm pure helpers
-    // would be tested here; for now the whole funnel is exercised
-    // manually via `./run.sh` and through end-to-end integration on
-    // top of the keybind tests in `keybinds/tests.rs` (which exercise
-    // the resolver, not the dispatch bodies).
-    //
-    // When adding new arms whose bodies factor cleanly into a pure
-    // helper, add the helper test here.
+    // in tests per `TEST_CONVENTIONS.md §T8`. Arms whose bodies factor
+    // cleanly into a pure helper are tested through that helper —
+    // `route_pan_canvas` below is the first; the rest of the funnel is
+    // exercised manually via `./run.sh` and through end-to-end
+    // integration on top of the keybind tests in `keybinds/tests.rs`
+    // (which exercise the resolver, not the dispatch bodies).
+
+    /// A right-started fast-resize, mid-gesture: the model write and
+    /// the undo entry it owes happen only in
+    /// `commit_on_release_core`.
+    fn fast_resize_drag() -> DragState {
+        DragState::throttled(ThrottledDrag::NodeResize(NodeResizeInteraction::new(
+            "n0".to_string(),
+            ResizeHandleSide::SE,
+            Position { x: 0.0, y: 0.0 },
+            Size {
+                width: 100.0,
+                height: 50.0,
+            },
+            true,
+        )))
+    }
+
+    /// A left-started move-node drag, mid-gesture.
+    fn moving_node_drag() -> DragState {
+        DragState::throttled(ThrottledDrag::MovingNode(MovingNodeInteraction::new(
+            vec!["n0".to_string()],
+            false,
+            HashSet::new(),
+        )))
+    }
+
+    /// **A `pan_canvas` dispatch mid-drag must not destroy the drag.**
+    /// The middle-button route was guarded at the route in #37 item 5;
+    /// this is the same silent loss reached through the *Action*,
+    /// which every keyboard binding and every macro tier can name.
+    ///
+    /// Fails on the pre-fix arm, which wrote `DragState::Panning`
+    /// unconditionally — i.e. on `fn route_pan_canvas(_) ->
+    /// PanCanvasRoute { PanCanvasRoute::Arm }`.
     #[test]
-    fn dispatch_action_module_compiles() {
-        // Smoke test: the module's public surface is reachable.
-        // Replaced by per-arm tests in later phases.
+    fn test_pan_canvas_mid_drag_leaves_the_throttled_drag_intact() {
+        assert_eq!(
+            route_pan_canvas(&fast_resize_drag()),
+            PanCanvasRoute::Refuse,
+            "a keyboard-bound pan must not replace a right-started fast-resize: \
+             its release-commit has not run, so the model write and the undo \
+             entry go with it"
+        );
+        assert_eq!(
+            route_pan_canvas(&moving_node_drag()),
+            PanCanvasRoute::Refuse,
+            "nor any other throttled drag"
+        );
+        assert_eq!(
+            route_pan_canvas(&DragState::PendingRight {
+                start_pos: (0.0, 0.0),
+                start_canvas: glam::Vec2::ZERO,
+                hit_node: None,
+                hit_section_idx: None,
+            }),
+            PanCanvasRoute::Refuse,
+            "nor a right press whose RightClick / FastResizeStart has not fired"
+        );
+    }
+
+    /// The other half of the same guard — without these rows the fix
+    /// could be "answer `Refuse` always", which would leave the canvas
+    /// unable to pan at all.
+    ///
+    /// `Pending` is the load-bearing row: the `LeftDrag` threshold
+    /// cross dispatches `PanCanvas` *from* `Pending`, so a guard as
+    /// broad as the right-button press's `!matches!(.., None)` would
+    /// break the default left-drag pan.
+    #[test]
+    fn test_pan_canvas_still_arms_from_every_state_that_owes_the_model_nothing() {
+        for drag in [
+            DragState::None,
+            DragState::Panning,
+            DragState::SelectingRect {
+                start_canvas: glam::Vec2::ZERO,
+                current_canvas: glam::Vec2::new(10.0, 10.0),
+            },
+            DragState::Pending(Box::new(crate::application::app::PendingPress {
+                start_pos: (0.0, 0.0),
+                hit_node: None,
+                hit_section_idx: None,
+                hit_edge_handle: None,
+                hit_portal_label: None,
+                hit_edge_label: None,
+                hit_section_resize_handle: None,
+                hit_node_resize_handle: None,
+            })),
+        ] {
+            assert_eq!(
+                route_pan_canvas(&drag),
+                PanCanvasRoute::Arm,
+                "PanCanvas must still arm from {:?}",
+                std::mem::discriminant(&drag)
+            );
+        }
+    }
+
+    /// **A target-picker mode takes the pointer, so it has to take
+    /// the rubber band with it.** `Reparent` / `Connect` swallow both
+    /// halves of the left button and `handle_cursor_moved` returns
+    /// before the drag-state ladder, so a band live at mode entry
+    /// would sit frozen for the whole picker session — and its
+    /// covered set would be painted by every hover rebuild the mode
+    /// runs, because `highlight_entries_for` is what all of them
+    /// read.
+    ///
+    /// Fails on the pre-fix shape, which is this function not
+    /// existing: the mode entries wrote `interaction_mode` and
+    /// rebuilt, and touched neither the drag state nor the set.
+    #[test]
+    fn test_entering_a_target_picker_mode_ends_a_live_rubber_band() {
+        let mut doc = crate::application::document::tests_common::load_test_doc();
+        doc.selection = SelectionState::Single("the-real-selection".to_string());
+        doc.set_rect_select_preview(vec!["stale-preview".to_string()]);
+        let mut document = Some(doc);
+        let mut drag_state = DragState::SelectingRect {
+            start_canvas: glam::Vec2::ZERO,
+            current_canvas: glam::Vec2::new(10.0, 10.0),
+        };
+
+        assert!(take_rubber_band_for_target_picker(&mut drag_state, &mut document));
+
+        assert!(
+            matches!(drag_state, DragState::None),
+            "the gesture the mode interrupted must not stay live"
+        );
+        let ids: Vec<&str> = crate::application::app::scene_rebuild::highlight_entries_for(
+            document.as_ref().expect("fixture document"),
+        )
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect();
+        assert_eq!(
+            ids,
+            vec!["the-real-selection"],
+            "the mode's own hover rebuilds must not paint the abandoned set"
+        );
+    }
+
+    /// The complement: every other state is left alone. `Throttled`
+    /// is the row that matters — it owes the model a write and an
+    /// undo entry that only its own release performs, so ending it
+    /// here would be the silent loss this issue opened with.
+    #[test]
+    fn test_entering_a_target_picker_mode_leaves_every_other_gesture_alone() {
+        for mut drag in [
+            fast_resize_drag(),
+            moving_node_drag(),
+            DragState::Panning,
+            DragState::None,
+        ] {
+            let before = std::mem::discriminant(&drag);
+            let mut document = None;
+            assert!(!take_rubber_band_for_target_picker(&mut drag, &mut document));
+            assert_eq!(
+                std::mem::discriminant(&drag),
+                before,
+                "a picker mode must not end {:?}",
+                before
+            );
+        }
     }
 
     #[test]
-    fn quote_console_arg_wraps_plain_path_in_double_quotes() {
+    fn test_quote_console_arg_wraps_plain_path_in_double_quotes() {
         assert_eq!(super::quote_console_arg("/tmp/x.json"), "\"/tmp/x.json\"");
     }
 
     #[test]
-    fn quote_console_arg_handles_paths_with_spaces() {
+    fn test_quote_console_arg_handles_paths_with_spaces() {
         // Embedded whitespace is the whole reason quoting exists —
         // the tokenizer would otherwise split the path into multiple
         // positionals.
@@ -1139,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_console_arg_escapes_embedded_double_quotes() {
+    fn test_quote_console_arg_escapes_embedded_double_quotes() {
         // A literal `"` inside the path becomes `\"` so the
         // tokenizer doesn't terminate the quoted token early.
         assert_eq!(
@@ -1149,7 +1453,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_console_arg_escapes_backslashes_for_windows_paths() {
+    fn test_quote_console_arg_escapes_backslashes_for_windows_paths() {
         // Windows path: every `\` becomes `\\` so the tokenizer
         // doesn't consume the next char as part of an escape, and
         // a path ending in `\` doesn't unterminate the quote.
@@ -1160,7 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_console_arg_handles_path_ending_in_backslash() {
+    fn test_quote_console_arg_handles_path_ending_in_backslash() {
         // Pre-fix this would produce `"C:\\foo\"` — an unterminated
         // quoted token. With the backslash escape it produces
         // `"C:\\foo\\"` which round-trips cleanly.

@@ -20,7 +20,11 @@ it. The Rust-side implementation lives under `src/application/ipc/`
 > is the contract its owning issue implements against; the `describe`
 > command must stay byte-honest against this document at every merge.
 > Sections whose owning issue has not merged yet are contract, not
-> yet running code.
+> yet running code. **Running today**: the Unix transport, framing,
+> envelope, `hello` / `connection_rejected` / `shutdown`, and the
+> bootstrap commands `describe` and `ping` (IPC-02, #62); the command
+> registry, reply `warnings`, and the `act` family — `act.action`,
+> `act.console`, `act.macro` (IPC-03, #63).
 
 ## Transport
 
@@ -35,7 +39,9 @@ mandala maps/testament.mindmap.json --ipc /run/user/1000/mandala.sock
 
 - `--ipc <path>` / `--ipc=<path>` — listen on a Unix domain socket
   (`SOCK_STREAM`) at `<path>`. No flag, no socket, no IPC threads —
-  the interactive app pays zero cost when IPC is off.
+  the interactive app pays zero cost when IPC is off. A flag with no
+  path (`--ipc` last on the line, or `--ipc=`) is a startup error,
+  not an IPC-less launch.
 - The listener starts before the event loop takes over (alongside
   `FreezeWatchdog::spawn()` in `run_native.rs::run`) and lives for
   the process lifetime.
@@ -62,15 +68,32 @@ mandala maps/testament.mindmap.json --ipc /run/user/1000/mandala.sock
 
 The socket is as security-sensitive as `~/.config/mandala/macros.json`
 (see [Trust model](#trust-model)). The server creates it with
-owner-only permissions (`0600`, in a directory the user owns). The
-`0600` mode protects the socket's *bytes*, but the socket's *name*
-is only as trustworthy as its parent directory — a directory another
-user can write to lets them unlink or replace the path while Mandala
-runs. So the server refuses to bind when the parent directory is
-writable by anyone but the owner (group- **or** world-writable)
-without the sticky bit — one mechanically checkable predicate
-covering both. A sticky-bit shared directory (e.g. `/tmp`) is
-accepted but second-best; the recommended location is
+owner-only permissions (`0600`, in a directory the user owns). It
+is bound inside a fresh private (`0700`) staging directory, made
+`0600` there, and only then hard-linked to its real name — so there
+is no instant at which another user can reach it, and the link
+refuses an existing path, so the final step can never replace
+anything. A parent directory that does not exist yet is created,
+owner-only (`0700`). The `0600` mode protects the socket's *bytes*,
+but the socket's *name* is only as trustworthy as the directories
+above it — whoever can rename or unlink an entry in any of them can
+swap the path for one of their own while Mandala runs. So the server
+refuses to bind unless **every directory on the path** is owned by
+the user or by root, and is writable by nobody but its owner (group- **or**
+world-writable fails) unless it has the sticky bit — one
+mechanically checkable predicate per directory. The owner clause is
+not redundant with the sticky bit: a sticky directory's *owner* can
+still unlink or rename what is in it. "Every directory on the path"
+is judged the way the kernel resolves the path the client will
+connect through — component by component from `/`, following each
+symbolic link where it stands — so it covers each directory that
+*holds* a symlink on the path as well as every directory the link's
+target leads through, chains included (a symlink in a directory
+another user can write is a name they can re-point). Checking only
+the canonical path would miss exactly the link holders. A path
+longer than the platform's socket-path limit (107 bytes on Linux,
+103 elsewhere) is refused up front, naming it. A root-owned sticky directory
+(e.g. `/tmp`) is accepted but second-best; the recommended location is
 `$XDG_RUNTIME_DIR` (already `0700` on every mainstream distro).
 Never a TCP port: filesystem permissions are the access-control
 mechanism.
@@ -106,6 +129,14 @@ Exactly **one client** is served at a time.
   main thread to cancel that generation's pending waits and reset its
   subscriptions — so a departed controller's late `timeout` reply can
   never land on its successor (design: `work_plans/LLM_IPC.md` §D2).
+  The departure is noticed by the controller's reader a moment after
+  the socket closes; a client that connects inside that moment is
+  refused `busy` like any other, and retries.
+- **A half-close ends the requests, not the replies.** A client that
+  closes its write half after sending (`printf … | nc -N -U`) still
+  receives a reply to every request it sent before the close: the
+  disconnect is ordered behind them. The server closes the
+  connection once those replies are written.
 
 Attach-after-launch and re-attach are first-class: the intended
 workflow is a human launching (or already running) the app and an
@@ -130,10 +161,9 @@ max-message limits. "Same protocol" means the same envelope and
 commands, not the same framing bytes.
 
 IPC-02 ships the Unix transport; the named-pipe adapter is a
-self-contained follow-up inside the same transport module, **owned
-by IPC-02 (#62)**: it lands there if a Windows environment is
-available when IPC-02 does, and otherwise filing the tracked
-follow-up issue is part of IPC-02's acceptance. Until it lands,
+self-contained follow-up inside the same transport module. IPC-02
+(#62) landed without a Windows environment to build it in, so the
+adapter is tracked as #169. Until it lands,
 `--ipc` on a Windows build fails at startup with a message pointing
 at this section (honest fail-fast per §9/§10 — no silent no-op of a
 user-requested feature).
@@ -152,8 +182,11 @@ gap by nature, not a design gap.
 
 - **NDJSON**: one JSON object per line, `\n`-terminated, UTF-8. A
   frame must not contain a raw newline (JSON string escapes cover
-  every payload). No pretty-printing on the wire.
-- Empty lines are ignored.
+  every payload). No pretty-printing on the wire. A trailing `\r`
+  is tolerated (it is JSON whitespace), and a final line the client
+  closes the connection without terminating is still read as a line.
+- Empty (or whitespace-only) lines are ignored — but still counted
+  by `data.line` below, which indexes every line the client sent.
 - **Inbound line cap: 1 MiB.** A longer line is consumed and
   discarded up to its terminating newline and answered with a
   `parse_error` reply (`"id": null`). The stream stays usable.
@@ -287,9 +320,12 @@ On accept, before reading anything, the server greets:
 
 All `hello` fields except `map` are process-static
 (`protocol`/`app`/`version`/`pid`); `map` is live app state
-(`MindMapDocument.file_path`). The state-free boundary threads do
+(`MindMapDocument.file_path` — the file the document is bound to, so
+it follows a load, a `new` and a save-as, and is `null` while no file
+is bound). The state-free boundary threads do
 not read it directly — the main thread publishes the current path
-into a shared snapshot (an `Arc` swapped on document load), which
+into a shared snapshot (an `Arc` swapped whenever the bound path
+changes), which
 the acceptor reads when composing the greeting, preserving the "I/O
 threads never touch app state" invariant (§D2).
 
@@ -353,7 +389,7 @@ additions are non-breaking):
 | `unsupported` | Command exists but not on this platform/build (e.g. future Windows gaps). |
 | `busy` | A single-instance command was already pending when another was issued — today, a second `clock.wait` while one is in flight (waits are exclusive per controller). Distinct from the connection-level `connection_rejected` event. |
 | `overloaded` | Request queue full (1024 pending); resend after draining replies. |
-| `reply_too_large` | Serialized reply exceeded 8 MiB; `data.hint` names the file-sidecar parameter. |
+| `reply_too_large` | Serialized reply exceeded 8 MiB; `data.bytes` is its size, and `data.hint` names the file-sidecar parameter when the command has one. |
 | `no_document` | Command needs a loaded document and none is. |
 | `not_found` | A referenced entity (node id, macro id, mutation id) does not exist. |
 | `console_error` | The console rejected the `act.console` line (unknown verb) or the verb reported an error; `message` is the console's own text. |
@@ -362,11 +398,12 @@ additions are non-breaking):
 
 ### Warnings — per-command diagnostics
 
-Release builds compile out all `log` output
-(`release_max_level_off`; decision gate #45), so **replies are the
-diagnostic channel**: anything a command path would `log::warn!`
-about, and any §9 degrade the command can observe, is *also* pushed
-into the reply's `warnings` array. This is the one warning-carrying
+Release builds keep `warn!` and `error!` (`release_max_level_warn`;
+#45 chose that), but they reach the app's stderr, and an agent
+attached over the socket does not read that stream. **Replies are the
+diagnostic channel the agent does see.** Every `warn!` / `error!` a
+command's execution emits is *also* carried in the reply's `warnings`
+array, in the log line's own words. This is the one warning-carrying
 convention for the whole surface:
 
 ```jsonc
@@ -374,24 +411,60 @@ convention for the whole surface:
  "result": {"ran": true},
  "warnings": [
    {"code": "macro_gate_rejected",
-    "message": "macro 'inline-x' (source Inline): ConsoleLine step rejected; remaining steps aborted"}
+    "message": "macros: macro 'tidy' (source Map): ConsoleLine step rejected — only User-tier macros may run console verbs; aborting remaining steps"}
  ]}
 ```
 
 - `warnings` is an array of `{"code", "message"}` (same stability
-  rules as error codes), omitted when empty.
-- Every command handler receives a warning sink in its execution
-  context; the dual-emit rule is *log and push, same site, same
-  text*. Where a degrade happens below a seam that cannot report it
-  upward, extending that seam to return or sink the diagnostic is
-  sanctioned §2 integration work, not scope creep — implementing
-  issues own the completeness of their own commands' warnings.
+  rules as error codes), omitted when empty. A failed command carries
+  its warnings too: the diagnostics that explain a failure are the
+  ones an agent most needs.
+- **How a warning gets there: the execution window.** The registry
+  runs every command handler inside a capture window
+  (`baumhard::util::log::capture`). The logger the app installs
+  offers each record to the window open on the main thread, so
+  every `warn!` / `error!` emitted while the command executes lands
+  in its reply. That covers the dispatch arms, document setters,
+  console verbs and Baumhard primitives it reaches. *Log and push,
+  same site, same text* therefore holds by construction: the log
+  line is the warning, emitted once, and a `warn!` added anywhere
+  later is reported with no further work. `RUST_LOG` decides what is
+  printed to stderr, not what a reply carries. A narrow filter does
+  not hide a degrade from the agent.
+- **Codes.** A log site that wants a machine-branchable identity
+  attaches it as the record's `code` key-value
+  (`log::warn!(code = GATE_REJECTED_CODE; "macros: …")`), and the
+  warning carries that code. Every other record is classified by its
+  level. A degrade that happens below a seam *without* logging is
+  not seen by the window. Making it log, or giving its site a code,
+  is sanctioned §2 integration work, and implementing issues own the
+  completeness of their own commands' warnings.
+- One reply carries at most 64 captured records (the first ones,
+  since the first warning is usually the cause), each message at most
+  4096 bytes (a longer one is cut on a grapheme boundary and says how
+  much was elided). Any records beyond that are counted in a closing
+  `warnings_truncated` entry. The bound is on bytes, not just records,
+  because a message can echo arbitrary input, such as a failed console
+  line. Without it, an oversized reply would be replaced whole by
+  `reply_too_large`, and the command's result would be lost with it.
 - Degrades *outside* any command's execution window (a font drop
   during an ordinary interactive frame) are not retroactively
-  attached to replies. Streaming those is the `log_line` event
-  class, which exists **only if** #45 resolves to Option A
-  (`release_max_level_warn`) — parked there, deliberately not
-  designed here.
+  attached to replies. Streaming those would be a `log_line` event
+  class. #45 settled on `release_max_level_warn`, so such a class is
+  now possible; whether to ship it is IPC-14's call, and it is
+  deliberately not designed here.
+
+Warning code registry (additions are non-breaking, like error codes):
+
+| warning code | meaning |
+|---|---|
+| `log_warn` | A `warn!` the command's execution emitted with no code of its own. `message` is the log line. |
+| `log_error` | An `error!` the command's execution emitted with no code of its own. `message` is the log line. |
+| `warnings_truncated` | The command emitted more diagnostics than one reply carries (64); `message` says how many were left out. |
+| `macro_gate_rejected` | A macro step was refused by its tier's privilege gate, and the rest of the macro aborted (`format/macros.md` "Privilege model"). |
+| `save_unbound` | `SaveDocument` found no file path bound to the document, so nothing was written. `SaveDocumentAs` (or `act.console` with `save <path>`) binds one. |
+| `save_failed` | `SaveDocument` could not write the bound file; `message` carries the I/O error. |
+| `console_error` | A console line run by something other than `act.console` failed: a file-path `Action`'s line, or a macro `ConsoleLine` step. Matches the `act.console` error code, so a console failure is branchable however the line was reached. `message` is the console's own text. |
 
 ### Large payloads
 
@@ -451,7 +524,11 @@ rules:
   Actions just because IPC pulled the trigger. IPC is a User-tier
   *initiator*, never a privilege *escalator* — the fail-closed gate
   in `dispatch_macro` (`src/application/app/dispatch/macro_core.rs`)
-  is untouched by this protocol.
+  is untouched by this protocol. An anonymous step list sent as
+  `act.macro`'s `steps` runs through that same gated loop
+  (`run_macro_steps`) at the `User` tier. Privilege attaches to
+  where instructions were authored, and the IPC client authored
+  those steps, exactly as it authors an `act.console` line.
 - Provenance is a logging concern, not a privilege concern: IPC
   dispatch sites attribute their origin in diagnostics (and, once
   IPC-14 lands, in events), which covers auditability without a
@@ -487,16 +564,27 @@ The full architecture is CODE_CONVENTIONS §3 (amended by IPC-01) and
   is discarded by construction when the controller leaves — nothing
   crosses to the successor).
 - **Backpressure is asymmetric by frame kind.** *Replies* are
-  contractual: if the outbound queue holds **256** undelivered
-  frames the client is declared dead and the connection dropped
-  (reconnect and resubscribe). *Unsolicited events* the client
-  never paced itself against (`camera_changed`, `animation_*`, …)
-  are instead **coalesced/dropped-oldest by revision** under
-  pressure rather than triggering teardown — an agent that pauses to
-  think for a few seconds while an animation emits a flood of events
-  must not have its live connection torn down. So a slow-reading
-  client loses *stale events*, not its session; only a client not
-  draining *replies* is killed. (IPC-14 owns the coalescing rule;
+  contractual, and are never dropped while the connection lives:
+  when **256** replies wait in the outbound queue, the server
+  **pauses executing that controller's requests** until the writer
+  has made room, then resumes where it stopped. A pipelining client
+  that reads its replies therefore never loses one, however far
+  ahead it sends (up to the request-queue cap below). A client that
+  has stopped reading is detected at the socket instead: once a
+  write makes **no progress for 10 seconds** — the kernel's socket
+  buffer full of output the client has not read — the client is
+  declared dead and the connection dropped (reconnect and
+  resubscribe). The reader's own replies (`parse_error`,
+  `overloaded`, …) wait for room too, which stops it reading:
+  pressure lands on the client that is not draining, never on the
+  app. *Unsolicited events* the client never paced itself against
+  (`camera_changed`, `animation_*`, …) are instead
+  **coalesced/dropped-oldest by revision** under pressure rather
+  than pausing anything — an agent that pauses to think for a few
+  seconds while an animation emits a flood of events must not have
+  its session stalled or torn down. So a slow-reading client loses
+  *stale events*, not its session; only a client that stops reading
+  *replies* altogether is dropped. (IPC-14 owns the coalescing rule;
   the event carries a `revision`, so "keep the newest per class" is
   well-defined.)
 - More than **1024 queued unexecuted requests** answers further
@@ -510,45 +598,76 @@ The full architecture is CODE_CONVENTIONS §3 (amended by IPC-01) and
 ## Command registry and `describe`
 
 Commands live in **one module per family** under
-`src/application/ipc/commands/<family>.rs`, assembled into a single
-registry table in `src/application/ipc/registry.rs` — one line per
-family, mirroring the console's `COMMANDS` slice
-(`src/application/console/commands/mod.rs`). Family PRs (IPC-04
-through IPC-14) therefore land in parallel without conflicts
-(CODE_CONVENTIONS §6): each adds its own module plus one registrar
-line.
+`src/application/ipc/commands/<family>.rs`. Each module exports one
+`Family` value, and `commands/mod.rs`'s `FAMILIES` table lists them,
+one line per family. That table mirrors the console's `COMMANDS`
+slice (`src/application/console/commands/mod.rs`). The registry in
+`src/application/ipc/registry.rs` dispatches against it and renders
+`describe` from it. Family PRs (IPC-04 through IPC-14) therefore land
+in parallel without conflicts (CODE_CONVENTIONS §6): each adds its
+own module plus one registrar line.
 
 **Reaching the funnels across a module boundary.** The seams a
-command invokes — `dispatch_action`, `dispatch_macro`,
-`execute_console_line`, and `InitState` / `input_context()` — are
+command invokes are `dispatch_action`, `dispatch_macro`,
+`execute_console_line`, and `InitState` / `input_context()`. They are
 `pub(in crate::application::app)`, but `crate::application::ipc` is a
-*sibling* of `app`, so they are not directly visible from a command
-handler. Command handlers therefore run against an **app-side
-execution context** (an `&mut dyn` target that holds `&mut
-InitState` and exposes exactly the operations commands need),
-implemented inside `app` and passed into the `ipc` handlers — the
-same indirection `dispatch_macro` already uses via
-`MacroDispatchTarget` (`app/dispatch/macro_core.rs`), which is why
-native and WASM share one macro loop. This keeps the funnels private
-and the `ipc` modules free of `app` internals; wiring that trait is
-IPC-03's job. (Widening the seams to `pub(in crate::application)`
-instead is an acceptable equivalent, but the trait shim is the
-§2/§7-aligned choice and matches the existing precedent.)
+*sibling* of `app`, so a command handler cannot see them directly.
+Command handlers therefore run against an **app-side execution
+context**: the `CommandTarget` trait (`ipc/target.rs`). Its native
+implementation, `IpcCommandTarget` (`app/ipc_target.rs`), wraps the
+same `InputHandlerContext` a winit input handler receives. Each
+method is one funnel and nothing else. This is the indirection
+`dispatch_macro` already uses through `MacroDispatchTarget`
+(`app/dispatch/macro_core.rs`). It keeps the funnels private and the
+`ipc` modules free of `app` internals. A handler reaches the app
+through `drive()` (`&mut`) or `observe()` (`&`), so a read-only
+command cannot mutate it. Whether a command changed pixels is
+answered by the target from each funnel's own outcome
+(`CommandTarget::changed_view`): a handled Action, a ran macro step,
+a console line that rebuilt the scene, had a side effect or closed
+the console. The event loop requests a redraw only then, as a winit
+handler does after a mutating input. A refused action, a failed or
+read-only console line, or a macro whose steps all skipped costs no
+frame.
+
+Before the window exists, which on native is also before the
+document does, there is no app to reach, and a command that needs
+one answers `no_document`.
 
 Registration is **self-describing by construction**: a command's
 registry entry carries its name, summary, parameter descriptors
 (name / type / required / doc) and result descriptors, and the
-constructor requires them — a command without documentation does not
-compile. The same constructor rejects a parameter named `id` or
-`cmd` (the [reserved-word rule](#request)), so an envelope collision
-is a compile error, never a wire ambiguity. `describe` renders the
-table:
+constructor requires them. A command without documentation does not
+compile. Parameter descriptors are built by a `const fn` that rejects
+a parameter named `id` or `cmd` (the [reserved-word rule](#request)).
+Every descriptor lives in a `const`, so an envelope collision is a
+compile error, never a wire ambiguity.
+
+The registry validates a request against its descriptors before the
+handler runs. An unknown parameter, a missing required one, or one
+of the wrong JSON type is `invalid_params` naming it in `data.param`.
+`null` counts as mistyped, not omitted. Cross-parameter rules
+("exactly one of") and value rules (an enum word, a range) are the
+handler's to check. Every handler validates its whole request before
+it touches the app, so a refused request has no side effects.
+`describe` renders the table:
 
 ### `describe`
 
-Params: `command` (string, optional — describe just this one command
-instead of the whole table; named `command`, not `cmd`, per the
-reserved-word rule).
+Params: `command` (string, optional). It describes just this one
+command instead of the whole table, and is named `command`, not
+`cmd`, per the reserved-word rule. A `command` that names no
+registered command is `invalid_params` with `data.param: "command"`.
+
+Result: `protocol` (the integer `hello` carries), `app` (always
+`"mandala"`), `version` (the Cargo package version), `commands` (one
+entry per registered command, in name order: `name`, `family`,
+`summary`, `params`, `result`), and `events` (the event catalog, one
+`name` and `doc` per class).
+
+The two unnamespaced bootstrap commands report `"family":
+"bootstrap"`. Until IPC-14 lands, the `events` array lists the three
+transport-level classes, the only ones this build can send.
 
 ```jsonc
 {"id": 1, "cmd": "describe", "command": "clock.step"}
@@ -588,16 +707,20 @@ one entry for space.
 
 The type vocabulary is deliberately small: `string`, `integer`,
 `number`, `boolean`, `object`, `array`. Enum-valued strings document
-their values in `doc`. This is agent-discovery metadata, not a JSON
+their values in `doc`. A parameter whose wire form is an existing
+serde representation with more than one shape reports its words
+joined with `|`. `act.action`'s `action` is `string|object`: a string
+for a unit `Action` variant, an object for a payload variant. This is
+agent-discovery metadata, not a JSON
 Schema dialect — `format/ipc.md` remains the authoritative reference,
 and the two are kept byte-honest by tests as described under
 [Handshake and versioning](#handshake-and-versioning).
 
 ### `ping`
 
-Params: none. Result: `{"now_ms": <number>}` (the app's `now_ms()`
-clock — virtual time when `clock.set_mode virtual` is active).
-Liveness probe; also the cheapest way to read the clock.
+Params: none. Result: `now_ms` (number), the app's `now_ms()` clock.
+That is virtual time when `clock.set_mode virtual` is active. `ping`
+is the liveness probe, and also the cheapest way to read the clock.
 
 ## Command families
 
@@ -611,7 +734,7 @@ PR that implements them.
 
 | family | module (`src/application/ipc/commands/`) | owner | commands |
 |---|---|---|---|
-| *(bootstrap)* | `meta.rs` | IPC-03 | `describe`, `ping` |
+| *(bootstrap)* | `meta.rs` | IPC-02; registry by IPC-03 | `describe`, `ping` |
 | `act` | `act.rs` | IPC-03 | `act.action`, `act.console`, `act.macro` |
 | `query` | `query.rs` | IPC-04 | `query.document`, `query.selection`, `query.camera`, `query.mode`, `query.editors`, `query.animations`, `query.undo` |
 | `scene` | `scene.rs` | IPC-05 | `scene.dump`, `scene.hit_test`, `scene.find_text` |
@@ -623,52 +746,120 @@ PR that implements them.
 ## `act` — dispatch bridge (IPC-03)
 
 The §2 rule made wire-visible: these commands **reach the existing
-funnels**, never a parallel control path. Everything they do is
-undoable, gated, and behaviorally identical to the same operation
-performed by hand.
+funnels**, never a parallel control path. Each one drives the app
+through a single funnel, the same one a key binding, the console
+prompt or a bound macro reaches. So everything they do is undoable,
+gated, and behaviorally identical to the same operation performed by
+hand. **Undo fidelity follows from that, and nothing else adds to
+it.** `act.action` with `"DeleteSelection"` pushes the undo entry the
+Delete key pushes, and a following `"Undo"` (or Ctrl+Z) restores
+exactly what it would after a keyboard delete.
 
-- **`act.action`** — params: `action` (the serde JSON of an
-  `Action` variant — the same externally-tagged representation
-  macro `Action` steps deserialize through: a string for unit
-  variants — `"Undo"` — and a `{"Variant": payload}` object for
-  payload-carrying variants; `format/macros.md`'s examples show
-  only the string form). Routes through `dispatch_action`. Result:
-  `{"outcome": "handled" | "unhandled"}` (`unhandled` = the action
-  didn't apply in the current context, e.g. a `Console*` action with
-  the console closed — same semantics as `DispatchOutcome`).
-- **`act.console`** — params: `line` (string). Runs a console verb
-  through the same parse → execute → drain-effects path the console
-  modal uses, **without** opening the modal. Result:
-  `{"output": ["<line>", …]}` carrying the verb's result lines; an
-  unknown verb at the parse layer or a verb-reported failure is
-  `ok:false`, code `console_error`, with the console's own message;
-  a blank line is `ok:true` with empty `output`.
+All three need the app. Before its window, and with it its document,
+exists, they answer `no_document`. Each validates its whole request
+first, so a refused request (`invalid_params`) has no side effects.
+The event loop requests a redraw after one only when it reports a
+change of view (see [Command registry](#command-registry-and-describe)).
+A failed console line run by an Action or a macro step is reported as
+a `console_error` warning.
 
-  **Result path (IPC-03 seam, pinned so it isn't improvised).**
-  Today `execute_console_line` returns `()` and pushes verb output
-  into a live `ConsoleState` scrollback (`push_scrollback_*`), which
-  only exists when the modal is `Open`. IPC must **not** fabricate a
-  fake open modal to scrape it. Instead IPC-03 captures the typed
-  `ExecResult` the command already produces — `(cmd.execute)(&args,
-  &mut effects)` returns `ExecResult::{Ok, Err, Lines}` at
-  `console_input/exec.rs` before it is folded into scrollback — by
-  extracting the parse-and-execute core to return that value (the
-  modal path keeps its scrollback rendering; IPC reads the result
-  directly). Mapping: `Ok`/`Lines` → `output`; the parser's
-  `Unknown` and a verb `Err` → `console_error`. Threading the
-  result out instead of through the UI is sanctioned §2 seam work,
-  not a parallel path. **The extracted core still runs the full
-  side-effect drain** — `ConsoleSideEffect::ReplaceDocument` (the
-  document swap for `open` / `new`), `rebuild_all`, and any modal
-  handoff — because "behaviorally identical to a human typing it"
-  (§2) requires those effects, not just the return value. Only the
-  scrollback rendering is dropped.
-- **`act.macro`** — params: `macro_id` (string — named `macro_id`,
-  not `id`, per the [reserved-word rule](#request)). Routes through
-  `dispatch_macro` under the macro's own loader-pinned tier (see
-  [Trust model](#trust-model)). Unknown macro is `not_found`. Result:
-  `{"ran": <bool>}` (the dispatcher's any-step-executed flag);
-  privilege-gate aborts surface as `macro_gate_rejected` warnings.
+### `act.action`
+
+Dispatch one `Action` through `dispatch_action`, exactly as a key
+binding fires it.
+
+| param | type | required | meaning |
+|---|---|---|---|
+| `action` | string\|object | yes | The `Action`, in the externally tagged form macro `Action` steps deserialize through: a string for a unit variant (`"Undo"`), and a `{"Variant": payload}` object for a payload variant (`{"OpenDocument": "/path/m.mindmap.json"}`). An unknown variant or a mistyped payload is `invalid_params`, naming what serde expected. |
+| `x`, `y` | number | no, together | A pointer position. With it, the cursor stands there for this dispatch only (afterwards it is back where the user's real pointer is, so their next wheel or key acts where they point, not where the agent did), and the dispatch carries what the canonical click hit test (`compute_click_hit`, the one mouse presses use) finds under it, as a mouse handler's `DispatchHit` does. Pointer-driven arms then behave as under a real pointer: `DoubleClickActivate` routes on the hit, and `ZoomIn` / `ZoomOut` / `CreateOrphanNode` use the position. Without it they use the current cursor, and `DoubleClickActivate` reports `unhandled`. One without the other is `invalid_params`. |
+| `space` | string | no | The coordinate space of `x`/`y`: `"canvas"` (default) or `"surface"` ([Coordinate spaces](#coordinate-spaces)). Only valid with `x`/`y`. |
+
+Result: `outcome` (string), `"handled"` or `"unhandled"`: the
+funnel's `DispatchOutcome`. `unhandled` means the action did not
+apply in the current context. A `Console*` action with the console
+closed is one: every `Console*` body edits the open modal, so with
+none open it reports that nothing ran. So is a file Action whose
+line failed (`OpenDocument` of a missing file, `SaveDocumentAs` to an
+unwritable path) and a `SaveDocument` that wrote nothing. Each of
+those also carries a warning saying why: `console_error` for the
+file-path Actions, `save_unbound` or `save_failed` for `SaveDocument`.
+Treat an unrecognized value as `"unhandled"`.
+
+```jsonc
+{"id": 1, "cmd": "act.action", "action": "ZoomIn"}
+{"id": 1, "ok": true, "result": {"outcome": "handled"}}
+{"id": 2, "cmd": "act.action", "action": "DoubleClickActivate", "x": 412, "y": 96, "space": "surface"}
+```
+
+`act.action` dispatches at the `User` tier (see
+[Trust model](#trust-model)), so destructive, clipboard and file
+Actions pass, as they do for a human at the keyboard. It applies the
+Action and nothing around it. The keyboard handler's modal steals,
+its context resolution and its macro / custom-mutation fall-through
+are the *key's* machinery, not the Action's. Driving those is
+`input.key`'s job (IPC-06).
+
+### `act.console`
+
+Run one console line through the console's own parse → execute →
+side-effect drain, **without** opening the console.
+
+| param | type | required | meaning |
+|---|---|---|---|
+| `line` | string | yes | The line, as typed at the prompt (`"section show"`, `"open maps/a.mindmap.json"`). |
+
+Result: `output` (array of strings), the verb's output lines, one
+element per line. It is empty for a blank line and for a verb that
+succeeds silently. A line whose head names no verb, and a verb that
+reports a failure, is `ok:false` with code `console_error` and the
+console's own message (`"unknown command: frobnicate"`).
+
+**Result path.** `execute_console_line` returns what the verb
+produced (`LineOutcome`: blank, unknown, or the verb's
+`ExecResult`) instead of writing it into the scrollback. Each caller
+renders it. **The scrollback is the prompt's own transcript**: only
+the console prompt prints an outcome there. Every other caller
+`warn!`s a failure: a key-bound file Action, a macro `ConsoleLine`
+step, `SaveDocument`, and every IPC command. Under IPC that warning is
+also the reply's warning, and `act.console` returns the outcome
+itself. So nothing an agent sends writes lines into a console the
+user has open, or leaves its overlay stale. No fake open modal is
+built to scrape. **The full
+side-effect drain still runs**: `ConsoleSideEffect::ReplaceDocument`
+(the document swap for `open` / `new`), `rebuild_all`, and any modal
+handoff, because "behaviorally identical to a human typing it" (§2)
+requires those effects, not just the return value. What IPC skips is
+the human's half: an open console's scrollback and the command
+history are left alone, by `act.console` and by the `act.action` /
+`act.macro` paths that run console lines or save.
+
+### `act.macro`
+
+Run a macro through the macro dispatcher's gated step loop, the one
+body that runs macro steps.
+
+| param | type | required | meaning |
+|---|---|---|---|
+| `macro_id` | string | one of | Run the registered macro with this id (named `macro_id`, not `id`, per the [reserved-word rule](#request)). It runs under the tier its loader pinned (see [Trust model](#trust-model)). An id registered in no tier is `not_found`. |
+| `steps` | array | one of | Run these steps, an anonymous macro in the on-disk step form of `format/macros.md`: `{"kind": "Action", "action": …}`, `{"kind": "CustomMutation", "id": …, "target"?: …}`, `{"kind": "ConsoleLine", "line": …}`. They run at the `User` tier: the IPC client authored them, and IPC executes as `User`. A list that does not parse is `invalid_params` naming `steps`. |
+
+Exactly one of `macro_id` / `steps`: neither, or both, is
+`invalid_params`.
+
+Result: `ran` (boolean), the dispatcher's any-step-executed flag. A
+step that did not apply does not count: an unhandled Action, a
+skipped custom mutation, or a `ConsoleLine` that failed (also
+reported as a `console_error` warning). A privilege-gate abort is not
+an error. The steps before it ran, so
+the reply is `ok:true` and carries a `macro_gate_rejected` warning
+naming the refused step.
+
+```jsonc
+{"id": 3, "cmd": "act.macro", "steps": [
+  {"kind": "Action", "action": "ZoomFit"},
+  {"kind": "ConsoleLine", "line": "fps on"}]}
+{"id": 3, "ok": true, "result": {"ran": true}}
+```
 
 ## `query` — application state (IPC-04)
 
@@ -1004,8 +1195,10 @@ refused connection, not the controller), `document_changed`,
 `selection_changed`,
 `camera_changed`, `mode_changed`, `animation_started`,
 `animation_completed`. IPC-14 owns the class list and payloads and
-appends them here; a `log_line` class is possible **only** under
-issue #45's Option A and is parked pending that decision. Tree-level
+appends them here. A `log_line` class streaming degrades from
+outside any command's window is possible now that #45 kept `warn!`
+and `error!` in release builds. Whether to ship one is IPC-14's call
+(see [Warnings](#warnings--per-command-diagnostics)). Tree-level
 (Baumhard `EventSubscriber`) events are out of scope until the #43
 reshape lands; app-funnel events above do not depend on it.
 

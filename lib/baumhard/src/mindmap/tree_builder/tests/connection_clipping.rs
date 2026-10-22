@@ -119,6 +119,57 @@ fn test_scene_caps_survive_for_unframed_endpoints() {
     );
 }
 
+/// A degenerate edge samples to one point, and both caps land on it.
+///
+/// The one-sample case used to be covered by a unit test over
+/// `CachedConnection::cap_positions`, a method that had no production
+/// caller and was deleted. This covers the reachable half of what it
+/// asserted, through the pass that actually reads the ends: a zero-
+/// length path produces a single sample, and `first()` and `last()`
+/// are then the same point, so neither cap is dropped and neither
+/// wanders.
+#[test]
+fn test_scene_caps_share_the_single_sample_of_a_degenerate_edge() {
+    use crate::mindmap::model::GlyphConnectionConfig;
+    // Both anchors resolve to the same node-edge midpoint, so the path
+    // has no length and the sampler emits exactly one point.
+    let mut edge = synthetic_edge("a", "b", "right", "right");
+    edge.glyph_connection = Some(GlyphConnectionConfig {
+        body: "\u{00B7}".into(),
+        cap_start: Some("S".into()),
+        cap_end: Some("E".into()),
+        font: None,
+        font_size_pt: 12.0,
+        color: None,
+        spacing: 0.0,
+        ..GlyphConnectionConfig::default()
+    });
+    let map = synthetic_map(
+        vec![
+            sized_node("a", 100.0, 100.0, 40.0, 40.0, false),
+            sized_node("b", 100.0, 100.0, 40.0, 40.0, false),
+        ],
+        vec![edge],
+    );
+
+    let scene = project(&map, 1.0);
+    let conn = &scene.connection_elements[0];
+    assert_eq!(
+        conn.glyph_positions.len(),
+        1,
+        "precondition: a zero-length path samples to exactly one point, got {:?}",
+        conn.glyph_positions
+    );
+    let (start_glyph, start_pos) = conn.cap_start.as_ref().expect("start cap survives");
+    let (end_glyph, end_pos) = conn.cap_end.as_ref().expect("end cap survives");
+    assert_eq!((start_glyph.as_str(), end_glyph.as_str()), ("S", "E"));
+    assert_eq!(
+        start_pos, end_pos,
+        "with one sample, both ends of the array are that sample"
+    );
+    assert_eq!(*start_pos, conn.glyph_positions[0]);
+}
+
 #[test]
 fn test_scene_caps_clipped_for_framed_endpoints() {
     // A→B connection where the target B has a visible frame. The

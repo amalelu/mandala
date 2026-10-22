@@ -23,12 +23,29 @@ pub fn mindmap_to_markdown(map: &MindMap) -> String {
     out
 }
 
-fn emit_level(index: &ChildIndex, nodes: &[&MindNode], depth: usize, out: &mut String) {
-    for node in nodes {
+/// Emit `nodes` and everything under them, deepest heading level
+/// growing with `depth`.
+///
+/// **Iterative**, for the same reason every `parent_id` walk in
+/// baumhard is: a linear chain of N nodes is a legal acyclic tree
+/// that the loader *accepts*, so arbitrary depth arrives through the
+/// ordinary strict door `export` already uses — no inspection path
+/// required. Recursing over it exhausts the stack and aborts the
+/// process.
+///
+/// Pending entries are pushed reversed so the first sibling is
+/// emitted first, preserving document order.
+fn emit_level<'a>(index: &ChildIndex<'a>, nodes: &[&'a MindNode], depth: usize, out: &mut String) {
+    let mut pending: Vec<(&'a MindNode, usize)> = Vec::new();
+    push_reversed(&mut pending, nodes, depth);
+
+    while let Some((node, depth)) = pending.pop() {
         let children = index.children_of(&node.id);
         let text = node.display_text();
         if text.trim().is_empty() {
-            emit_level(index, children, depth, out);
+            // A textless node contributes no heading, so its
+            // children take its level rather than one below it.
+            push_reversed(&mut pending, children, depth);
             continue;
         }
         let mut lines = text.lines();
@@ -44,7 +61,15 @@ fn emit_level(index: &ChildIndex, nodes: &[&MindNode], depth: usize, out: &mut S
             out.push('\n');
         }
         out.push('\n');
-        emit_level(index, children, depth + 1, out);
+        push_reversed(&mut pending, children, depth + 1);
+    }
+}
+
+/// Queue `nodes` at `depth` so a LIFO pop yields them in document
+/// order.
+fn push_reversed<'a>(pending: &mut Vec<(&'a MindNode, usize)>, nodes: &[&'a MindNode], depth: usize) {
+    for node in nodes.iter().rev() {
+        pending.push((node, depth));
     }
 }
 
@@ -114,20 +139,14 @@ mod tests {
         MindMap {
             version: "1.0".to_string(),
             name: "test".to_string(),
-            canvas: Canvas {
-                background_color: "#000000".to_string(),
-                default_border: None,
-                default_connection: None,
-                default_section_frame_border: None,
-                default_focused_section_frame_border: None,
-                theme_variables: HashMap::new(),
-                theme_variants: HashMap::new(),
-            },
+            canvas: Canvas::default(),
             palettes: HashMap::new(),
             nodes: map_nodes,
             edges: Vec::new(),
             custom_mutations: Vec::new(),
             macros: Vec::new(),
+            unknown_keys: Default::default(),
+            skipped_constructs: Default::default(),
         }
     }
 
@@ -188,7 +207,7 @@ mod tests {
             italic: true,
             underline: true,
             font: "HIDDEN_FONT_NAME".to_string(),
-            size_pt: 42,
+            size_pt: 42.0,
             color: "#ff0000".to_string(),
             hyperlink: Some("HIDDEN_URL".to_string()),
         }];
@@ -221,5 +240,46 @@ mod tests {
         let mid = out.find("## Mid\n").expect("mid");
         let late = out.find("## Late\n").expect("late");
         assert!(early < mid && mid < late, "out: {out}");
+    }
+
+    /// **Export must survive the maps the editor refuses.**
+    ///
+    /// A linear `parent_id` chain is a legal acyclic tree, so its
+    /// depth is bounded only by the file. While this walk recursed,
+    /// such a chain exhausted the stack and aborted the process —
+    /// and `export` is exactly the verb you reach for when a map is
+    /// suspect, so it is the last place that should die on one.
+    ///
+    /// The walk runs on a 256 KiB stack so a few thousand nodes is
+    /// enough to prove it: recursion blows a stack that small long
+    /// before the chain ends, while the iterative form keeps its
+    /// frontier on the heap.
+    #[test]
+    fn test_export_survives_a_deep_chain_on_a_small_stack() {
+        const DEPTH: usize = 6_000;
+
+        let mut nodes = Vec::with_capacity(DEPTH);
+        for i in 0..DEPTH {
+            let parent = if i == 0 { None } else { Some(format!("n{}", i - 1)) };
+            nodes.push(make_node(
+                &format!("n{i}"),
+                parent.as_deref(),
+                &format!("node {i}"),
+            ));
+        }
+        let map = make_map(nodes);
+
+        let markdown = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || mindmap_to_markdown(&map))
+            .expect("spawn the small-stack exporter")
+            .join()
+            .expect("the export walk must not exhaust a 256 KiB stack");
+
+        assert!(markdown.contains("node 0"), "the root must be exported");
+        assert!(
+            markdown.contains(&format!("node {}", DEPTH - 1)),
+            "the deepest node must be exported too"
+        );
     }
 }

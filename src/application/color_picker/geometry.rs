@@ -11,16 +11,9 @@ use super::hit::PickerHit;
 /// Pre-render geometry pushed from the app to the renderer. Plain data,
 /// no rendering primitives — mirrors `PaletteOverlayGeometry`.
 pub struct ColorPickerOverlayGeometry {
-    /// Static label ("edge" / "portal" / "node") — held as a
-    /// `&'static str` so the picker render path doesn't allocate a
-    /// fresh `String` per rebuild. Empty string `""` signals
-    /// Standalone mode: the builder renders a generic "palette"
-    /// title instead of "࿕ {label} color".
-    pub target_label: &'static str,
     pub hue_deg: f32,
     pub sat: f32,
     pub val: f32,
-    pub preview_hex: String,
     /// Whether the hex readout should render this frame. `true`
     /// when the cursor is inside the backdrop; `false` otherwise.
     /// The readout appears only when the user is actively engaging
@@ -62,7 +55,7 @@ pub struct ColorPickerOverlayGeometry {
     /// [`baumhard::font::fonts::InkBounds::y_offset_from_box_center`]
     /// at the picker's `1.5` line-height multiplier.
     ///
-    /// One entry per arm cell (8 per arm, excluding the centre
+    /// One entry per arm cell (8 per arm, excluding the center
     /// slot which renders the preview glyph instead).
     pub arm_top_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
     pub arm_bottom_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
@@ -87,7 +80,7 @@ pub struct ColorPickerOverlayGeometry {
     /// shorter side; values >1 grow the widget, <1 shrink it.
     /// Mutated by the right-mouse-button drag-to-resize gesture in
     /// app.rs; stored alongside `center_override` on
-    /// `ColorPickerState::Open` and reset to 1.0 on each new open.
+    /// `OpenPicker` and reset to 1.0 on each new open.
     pub size_scale: f32,
     /// Wheel center override in screen-space pixels, set by the drag
     /// handler. When `None`, the layout centers the wheel at
@@ -102,14 +95,4 @@ pub struct ColorPickerOverlayGeometry {
     /// `handle_color_picker_mouse_move` so only a change triggers a
     /// rebuild.
     pub hovered_hit: Option<PickerHit>,
-    /// Standalone-mode selection hint — `Some("section 1 of 0.1")`
-    /// or `Some("node 0.1")` etc. when the document carries a
-    /// selection at picker-build time, `None` otherwise.
-    /// Contextual mode leaves this `None` because the picker title
-    /// already shows the bound target's label
-    /// (`color_picker/targets.rs::PickerHandle::label`). Without
-    /// this, a Standalone wheel commit on a `SelectionState::Section`
-    /// gives the user no signal that the write lands per-section vs
-    /// whole-node.
-    pub selection_hint: Option<String>,
 }

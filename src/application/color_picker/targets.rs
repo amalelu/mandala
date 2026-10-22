@@ -10,7 +10,7 @@
 
 use baumhard::util::color::{hex_to_hsv_safe, resolve_var};
 
-use crate::application::document::{EdgeRef, MindMapDocument};
+use crate::application::document::{EdgeRef, GraphemeRange, MindMapDocument};
 
 /// Which visual axis on a node the picker should write to when the
 /// target is a node. Edges don't need this — they have one color
@@ -23,7 +23,7 @@ pub enum NodeColorAxis {
 }
 
 /// Which visual axis on a section the picker should write to. Today
-/// sections only have a text colour axis (no bg/border chrome by
+/// sections only have a text color axis (no bg/border chrome by
 /// spec — see `format/sections.md` and the `HasBgColor` /
 /// `HasBorderColor` trait arms in `console/traits/view.rs`).
 /// Single-variant on purpose so adding `Bg` / `Border` later (only
@@ -54,15 +54,15 @@ pub enum ColorTarget {
         section_idx: usize,
         axis: SectionColorAxis,
         /// Optional sub-range over the section's grapheme
-        /// indices. Set when the active selection is
+        /// clusters. Set when the active selection is
         /// `SelectionState::SectionRange`; unset for whole-section
         /// `Section`. The picker's commit path routes through
         /// `set_section_text_color_range` when present.
-        range: Option<(usize, usize)>,
+        range: Option<GraphemeRange>,
     },
 }
 
-/// Resolved handle carried inside `ColorPickerState::Open`. For
+/// Resolved handle carried inside `OpenPicker::mode`. For
 /// edges it indexes into the live `Vec`; for nodes it carries the
 /// id + axis directly. One enum instead of `kind + target_index` +
 /// a parallel optional id field.
@@ -77,7 +77,7 @@ pub enum PickerHandle {
     /// resolve step verifies the node and the section index still
     /// exist; the index is captured at open time and held until
     /// commit (mirrors the Edge variant's stale-index defensive
-    /// pattern). `range` carries the sub-range from a
+    /// pattern). `range` carries the grapheme sub-range from a
     /// `SelectionState::SectionRange` selection at open time;
     /// the commit routes through `set_section_text_color_range`
     /// when present.
@@ -85,51 +85,8 @@ pub enum PickerHandle {
         node_id: String,
         section_idx: usize,
         axis: SectionColorAxis,
-        range: Option<(usize, usize)>,
+        range: Option<GraphemeRange>,
     },
-}
-
-impl PickerHandle {
-    /// Short label for the picker title bar. Portal-mode edges and
-    /// line-mode edges both read as "edge" here — the display mode
-    /// is already visible in the canvas, so repeating it in the
-    /// picker chrome would be noise.
-    pub fn label(&self) -> &'static str {
-        match self {
-            PickerHandle::Edge(_) => "edge",
-            PickerHandle::Node { .. } => "node",
-            PickerHandle::Section { .. } => "section",
-        }
-    }
-
-    pub fn kind(&self) -> TargetKind {
-        match self {
-            PickerHandle::Edge(_) => TargetKind::Edge,
-            PickerHandle::Node { .. } => TargetKind::Node,
-            PickerHandle::Section { .. } => TargetKind::Section,
-        }
-    }
-}
-
-/// Coarse target kind for legacy call-sites that only need to
-/// distinguish edges / nodes / sections without caring about the
-/// concrete id or axis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetKind {
-    Edge,
-    Node,
-    Section,
-}
-
-impl TargetKind {
-    /// Short label for the picker title bar.
-    pub fn label(&self) -> &'static str {
-        match self {
-            TargetKind::Edge => "edge",
-            TargetKind::Node => "node",
-            TargetKind::Section => "section",
-        }
-    }
 }
 
 impl ColorTarget {
@@ -179,10 +136,33 @@ impl ColorTarget {
     }
 }
 
+/// One node axis read through the palette cascade — the same
+/// funnel the renderer projects from, so the picker seeds on the
+/// color the node is actually drawn in.
+fn node_axis_color<'a>(
+    doc: &'a MindMapDocument,
+    node: &'a baumhard::mindmap::model::MindNode,
+    axis: NodeColorAxis,
+) -> &'a str {
+    match axis {
+        NodeColorAxis::Bg => doc.mindmap.node_background_color(node),
+        NodeColorAxis::Text => doc.mindmap.node_text_color(node),
+        NodeColorAxis::Border => doc.mindmap.node_frame_color(node),
+    }
+}
+
 /// Read the current color string for a handle. Used to seed picker
 /// HSV at open time and to read the effective color for the
 /// preview after a chip action. Returns `None` if the index / id
 /// no longer resolves.
+///
+/// **Effective**, not authored: every node / section arm reads
+/// through the palette cascade
+/// (`MindMap::node_background_color` and its three siblings)
+/// rather than off `node.style`. On a themed node those differ —
+/// `style` is the tier the palette shadows — and seeding the
+/// picker from `style` opens the wheel on a color the node is not
+/// drawn in, so the user's first hover is a jump.
 pub fn current_color_at(doc: &MindMapDocument, handle: &PickerHandle) -> Option<String> {
     match handle {
         PickerHandle::Edge(index) => {
@@ -196,11 +176,7 @@ pub fn current_color_at(doc: &MindMapDocument, handle: &PickerHandle) -> Option<
         }
         PickerHandle::Node { id, axis } => {
             let n = doc.mindmap.nodes.get(id)?;
-            Some(match axis {
-                NodeColorAxis::Bg => n.style.background_color.clone(),
-                NodeColorAxis::Text => n.style.text_color.clone(),
-                NodeColorAxis::Border => n.style.frame_color.clone(),
-            })
+            Some(node_axis_color(doc, n, *axis).to_string())
         }
         PickerHandle::Section {
             node_id,
@@ -212,52 +188,45 @@ pub fn current_color_at(doc: &MindMapDocument, handle: &PickerHandle) -> Option<
             let section = n.sections.get(*section_idx)?;
             let resolved = match axis {
                 SectionColorAxis::Text => match range {
-                    Some((rs, re)) => {
+                    Some(r) => {
+                        let (rs, re) = (r.start(), r.end());
                         let in_range =
-                            baumhard::mindmap::model::text_run_ops::slice(
-                                &section.text_runs,
-                                *rs,
-                                *re,
-                            );
+                            baumhard::mindmap::model::text_run_ops::slice(&section.text_runs, rs, re);
                         // Coverage check: the in-range slice must
                         // span the entire `[rs, re)` with no gaps
                         // for "unanimous" to be meaningful — a
                         // partially-covered range mixes the
-                        // covered run's colour with the gap's
+                        // covered run's color with the gap's
                         // node-default fall-through, so the
-                        // user's effective colour in the range
+                        // user's effective color in the range
                         // is *not* unanimous. Without this
                         // check, a single in-range run would
                         // pass the trivial `iter().all` and
-                        // seed the picker with the wrong colour.
-                        let fully_covered = in_range
-                            .first()
-                            .is_some_and(|first| first.start == *rs)
-                            && in_range.last().is_some_and(|last| last.end == *re)
-                            && in_range
-                                .windows(2)
-                                .all(|w| w[0].end == w[1].start);
+                        // seed the picker with the wrong color.
+                        let fully_covered = in_range.first().is_some_and(|first| first.start == rs)
+                            && in_range.last().is_some_and(|last| last.end == re)
+                            && in_range.windows(2).all(|w| w[0].end == w[1].start);
                         let unanimous = fully_covered
                             && in_range
                                 .first()
-                                .is_some_and(|first| {
-                                    in_range.iter().all(|r| r.color == first.color)
-                                });
+                                .is_some_and(|first| in_range.iter().all(|r| r.color == first.color));
                         if unanimous {
                             in_range
                                 .first()
+                                .filter(|r| !r.color.is_empty())
                                 .map(|r| r.color.clone())
-                                .unwrap_or_else(|| n.style.text_color.clone())
+                                .unwrap_or_else(|| doc.mindmap.node_text_color(n).to_string())
                         } else {
-                            n.style.text_color.clone()
+                            doc.mindmap.node_text_color(n).to_string()
                         }
                     }
                     None => section
                         .text_runs
                         .first()
                         .filter(|first| section.text_runs.iter().all(|r| r.color == first.color))
+                        .filter(|first| !first.color.is_empty())
                         .map(|r| r.color.clone())
-                        .unwrap_or_else(|| n.style.text_color.clone()),
+                        .unwrap_or_else(|| doc.mindmap.node_text_color(n).to_string()),
                 },
             };
             Some(resolved)

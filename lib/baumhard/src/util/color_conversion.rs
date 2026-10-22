@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use super::color::{FloatRgba, ALPHA_IDX};
+use super::color::{Color, FloatRgba, ALPHA_IDX, VAL_MAX};
 
 /// Convert `[f32; 4]` RGBA (each component in `[0, 1]`) to `[u8; 4]`
 /// by scaling to 255 and rounding. Clamped by the `as u8` cast (values
@@ -28,7 +28,10 @@ pub fn convert_f32_to_u8(color: &[f32; 4]) -> [u8; 4] {
 /// the inverse of [`convert_f32_to_u8`]. Single source of truth so
 /// every byte→float quantisation in the project lands on the same
 /// `c as f32 / 255.0` arithmetic.
-pub fn convert_u8_to_f32(color: &[u8; 4]) -> [f32; 4] {
+///
+/// `const` so a compile-time [`Color`] constant can be read in the
+/// float form the renderer wants without a second literal.
+pub const fn convert_u8_to_f32(color: &[u8; 4]) -> [f32; 4] {
     [
         color[0] as f32 / 255.0,
         color[1] as f32 / 255.0,
@@ -64,7 +67,7 @@ pub fn parse_var_name(raw: &str) -> Option<&str> {
         return None;
     }
     let inner = trimmed["var(".len()..trimmed.len() - 1].trim();
-    if inner.len() <= 2 || !inner.starts_with("--") || inner.contains(|c: char| c == '(' || c == ')') {
+    if inner.len() <= 2 || !inner.starts_with("--") || inner.contains(['(', ')']) {
         return None;
     }
     Some(inner)
@@ -83,48 +86,104 @@ pub fn is_valid_hex_color(raw: &str) -> bool {
     hex_to_rgba(raw).is_some()
 }
 
+/// One hex digit as its numeric value, or `None` for anything that
+/// is not `[0-9a-fA-F]`. Shared by the single parser below; `const`
+/// so the whole parse can run at compile time.
+const fn nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parse a hex color literal into a [`Color`], returning `None` on
+/// any parse failure. Accepts 3, 4, 6, or 8 hex chars with any
+/// number of leading `#`. **This is the project's only hex-color
+/// parser** — [`hex_to_rgba`] is this function plus a byte→float
+/// conversion, and every other hex entry point in the crate
+/// ([`hex_to_rgba_safe`], [`is_valid_hex_color`], [`from_hex`],
+/// [`hex_to_hsv_safe`], [`hex_with_alpha_scaled`],
+/// [`crate::font::hex::hex_to_cosmic_color`]) is downstream of that.
+///
+/// That list is six names because a seventh went missing from it the
+/// day it was written — `is_valid_hex_color` — so the claim is now
+/// **derived rather than enumerated**:
+/// `test_every_hex_entry_point_is_downstream_of_the_one_parser` reads
+/// both modules' production code, collects every `pub` function whose
+/// name says it takes a hex string, and requires each to reach this
+/// one. A new entry point that parses hex itself fails that test; a
+/// stale sentence here cannot hide it.
+///
+/// `const`, which is the point: a palette constant can be *written*
+/// in the notation designers and `.mindmap.json` both speak and
+/// still be a compile-time `Color`, with a typo failing the build
+/// rather than resolving to a fallback at run time. `Color`'s `rgba`
+/// field is `pub` so such constants can also be written as struct
+/// literals; this is the spelling that does not make a reader
+/// convert hex in their head.
+///
+/// **Cost.** O(len) over the input, at most eight iterations; no
+/// heap, no allocation, and nothing at all at run time when the
+/// caller is a `const`.
+pub const fn hex_to_color(color: &str) -> Option<Color> {
+    let bytes = color.as_bytes();
+    // Leading `#`s are stripped rather than counted: the previous
+    // spelling was `trim_start_matches('#')`, which accepts any
+    // number of them, and a parser that suddenly rejected `##fff`
+    // would be a silent format change.
+    let mut start = 0;
+    while start < bytes.len() && bytes[start] == b'#' {
+        start += 1;
+    }
+    let length = bytes.len() - start;
+    if length != 3 && length != 4 && length != 6 && length != 8 {
+        return None;
+    }
+
+    // Alpha defaults to opaque; the 4- and 8-char forms overwrite it.
+    let mut rgba = [0u8, 0, 0, VAL_MAX];
+    if length == 3 || length == 4 {
+        let mut i = 0;
+        while i < length {
+            let n = match nibble(bytes[start + i]) {
+                Some(n) => n,
+                None => return None,
+            };
+            rgba[i] = (n << 4) | n;
+            i += 1;
+        }
+    } else {
+        let mut i = 0;
+        while i < length / 2 {
+            let hi = match nibble(bytes[start + i * 2]) {
+                Some(n) => n,
+                None => return None,
+            };
+            let lo = match nibble(bytes[start + i * 2 + 1]) {
+                Some(n) => n,
+                None => return None,
+            };
+            rgba[i] = (hi << 4) | lo;
+            i += 1;
+        }
+    }
+    Some(Color { rgba })
+}
+
 /// Parse a hex color string into an `[f32; 4]` RGBA quad, returning
 /// `None` on any parse failure. Accepts 3, 4, 6, or 8 hex chars
 /// with an optional leading `#`. The fallible cousin of
 /// [`hex_to_rgba_safe`]; reach for this when the caller wants to
 /// reject malformed strings rather than substitute a default.
+///
+/// Derived from [`hex_to_color`] rather than parsing again, so the
+/// float and byte readings of a hex literal cannot disagree.
+///
+/// **Cost.** [`hex_to_color`]'s walk plus four divisions; no heap.
 pub fn hex_to_rgba(color: &str) -> Option<[f32; 4]> {
-    let color = color.trim_start_matches('#');
-    let length = color.len();
-    if length != 3 && length != 4 && length != 6 && length != 8 {
-        return None;
-    }
-
-    fn nibble(b: u8) -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(b - b'a' + 10),
-            b'A'..=b'F' => Some(b - b'A' + 10),
-            _ => None,
-        }
-    }
-
-    let bytes = color.as_bytes();
-    let mut rgba = [0.0f32; 4];
-    if length == 3 || length == 4 {
-        for i in 0..length {
-            let n = nibble(bytes[i])?;
-            rgba[i] = ((n << 4) | n) as f32 / 255.0;
-        }
-        if length == 3 {
-            rgba[3] = 1.0;
-        }
-    } else {
-        for i in 0..(length / 2) {
-            let hi = nibble(bytes[i * 2])?;
-            let lo = nibble(bytes[i * 2 + 1])?;
-            rgba[i] = ((hi << 4) | lo) as f32 / 255.0;
-        }
-        if length == 6 {
-            rgba[3] = 1.0;
-        }
-    }
-    Some(rgba)
+    hex_to_color(color).map(|c| c.to_float())
 }
 
 /// Parse a hex color string into an `[f32; 4]` RGBA quad, returning

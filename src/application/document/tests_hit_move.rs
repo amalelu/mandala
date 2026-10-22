@@ -8,8 +8,9 @@ use super::tests_common::{load_test_doc, load_test_tree, TestNudgeMutation};
 use super::*;
 
 use baumhard::mindmap::animation::{AnimationTiming, Easing};
-use baumhard::mindmap::tree_builder::INACTIVE_NODE_ALPHA_MULTIPLIER;
 use baumhard::mindmap::custom_mutation::{CustomMutation as CM, TargetScope as TS};
+use baumhard::mindmap::tree_builder::INACTIVE_NODE_ALPHA_MULTIPLIER;
+use baumhard::util::geometry::{aabb_center, almost_equal_f64};
 use glam::Vec2;
 
 #[test]
@@ -18,9 +19,9 @@ fn test_hit_test_direct_hit() {
     // "Lord God" node (id: 0) — get its position from the tree
     let node_id = tree.arena_id_for("0").unwrap();
     let area = tree.tree.arena.get(node_id).unwrap().get().glyph_area().unwrap();
-    let center = Vec2::new(
-        area.position.x.0 + area.render_bounds.x.0 / 2.0,
-        area.position.y.0 + area.render_bounds.y.0 / 2.0,
+    let center = aabb_center(
+        Vec2::new(area.position.x.0, area.position.y.0),
+        Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
     );
     let result = hit_test(center, &mut tree);
     assert_eq!(result, Some("0".to_string()));
@@ -35,9 +36,9 @@ fn test_hit_test_target_single_section_collapses_to_node() {
     let mut tree = load_test_tree();
     let node_id = tree.arena_id_for("0").unwrap();
     let area = tree.tree.arena.get(node_id).unwrap().get().glyph_area().unwrap();
-    let center = Vec2::new(
-        area.position.x.0 + area.render_bounds.x.0 / 2.0,
-        area.position.y.0 + area.render_bounds.y.0 / 2.0,
+    let center = aabb_center(
+        Vec2::new(area.position.x.0, area.position.y.0),
+        Vec2::new(area.render_bounds.x.0, area.render_bounds.y.0),
     );
     match hit_test_target(center, &mut tree) {
         Some(HitTarget::NodeContainer { node_id }) => {
@@ -76,9 +77,9 @@ fn test_hit_test_returns_smallest_on_overlap() {
             .find_map(|(mind_id, nid)| {
                 let a = tree.tree.arena.get(nid)?.get().glyph_area()?;
                 let child_size = a.render_bounds.x.0 * a.render_bounds.y.0;
-                let child_center = Vec2::new(
-                    a.position.x.0 + a.render_bounds.x.0 / 2.0,
-                    a.position.y.0 + a.render_bounds.y.0 / 2.0,
+                let child_center = aabb_center(
+                    Vec2::new(a.position.x.0, a.position.y.0),
+                    Vec2::new(a.render_bounds.x.0, a.render_bounds.y.0),
                 );
                 if child_size < parent_size && point_in_node_aabb(child_center, parent_id_str, &tree) {
                     Some((mind_id.to_string(), child_center))
@@ -229,7 +230,10 @@ fn test_selection_highlight_wins_over_dimming_when_applied_after() {
         .expect("fixture must have more than one node");
 
     apply_inactive_node_dimming(&mut tree, Some("0"));
-    apply_tree_highlights(&mut tree, std::iter::once((other.as_str(), None, HIGHLIGHT_COLOR)));
+    apply_tree_highlights(
+        &mut tree,
+        std::iter::once((other.as_str(), None, HIGHLIGHT_COLOR)),
+    );
 
     let section_id = tree.section_arena_id(&other, 0).unwrap();
     let color = tree
@@ -245,7 +249,10 @@ fn test_selection_highlight_wins_over_dimming_when_applied_after() {
         .color
         .unwrap();
     assert!((color[0] - HIGHLIGHT_COLOR[0]).abs() < 0.01);
-    assert!((color[3] - HIGHLIGHT_COLOR[3]).abs() < 0.01, "highlight alpha survives the dim");
+    assert!(
+        (color[3] - HIGHLIGHT_COLOR[3]).abs() < 0.01,
+        "highlight alpha survives the dim"
+    );
 }
 
 #[test]
@@ -454,13 +461,13 @@ fn test_start_animation_records_instance_without_committing() {
 
     // Model untouched at start.
     let pos_now = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
-    assert!((pos_now - orig_x).abs() < 1e-6);
+    assert!(almost_equal_f64(pos_now, orig_x));
 
     // From / to snapshots reflect the nudge (test mutation is
     // NudgeRight(10.0)).
     let inst = &doc.active_animations[0];
-    assert!((inst.from_node.position.x - orig_x).abs() < 1e-6);
-    assert!((inst.to_node.position.x - orig_x - 10.0).abs() < 1e-6);
+    assert!(almost_equal_f64(inst.from_node.position.x, orig_x));
+    assert!(almost_equal_f64(inst.to_node.position.x, orig_x + 10.0));
 }
 
 /// `tick_animations` at the linear midpoint writes the mean of
@@ -880,8 +887,12 @@ fn test_apply_section_resize_to_tree_writes_position_and_bounds() {
     let mut tree = doc.build_tree();
     let new_pos = Vec2::new(100.0, 50.0);
     let new_size = Vec2::new(40.0, 20.0);
-    apply_section_resize_to_tree(&mut tree, &id, 1, new_pos, new_size);
+    let written = apply_section_resize_to_tree(&mut tree, &id, 1, new_pos, new_size);
     let arena_id = tree.section_arena_id(&id, 1).unwrap();
+    // The returned id is what the resize drain re-shapes; if it
+    // named anything but the section it just wrote, the drag would
+    // refresh the wrong element and leave this one stale on screen.
+    assert_eq!(written, Some(arena_id));
     let area = tree
         .tree
         .arena
@@ -912,7 +923,12 @@ fn test_apply_section_resize_to_tree_unknown_section_no_op() {
         .and_then(|n| n.get().glyph_area())
         .map(|a| (a.position.x.0, a.position.y.0))
         .unwrap();
-    apply_section_resize_to_tree(&mut tree, &id, 99, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
+    let written =
+        apply_section_resize_to_tree(&mut tree, &id, 99, Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
+    assert_eq!(
+        written, None,
+        "a write that did not happen must not name an element to re-shape"
+    );
     let area_after = tree
         .tree
         .arena
@@ -1153,7 +1169,7 @@ fn test_hit_test_ellipse_center_hits() {
     let mut tree = load_test_tree();
     set_node_shape_ellipse(&mut tree, "0");
     let (pos, bounds) = node_bounds(&tree, "0");
-    let center = pos + bounds * 0.5;
+    let center = aabb_center(pos, bounds);
     assert_eq!(hit_test(center, &mut tree), Some("0".to_string()));
 }
 
@@ -1178,7 +1194,7 @@ fn test_point_in_node_aabb_is_shape_aware() {
     let mut tree = load_test_tree();
     set_node_shape_ellipse(&mut tree, "0");
     let (pos, bounds) = node_bounds(&tree, "0");
-    let center = pos + bounds * 0.5;
+    let center = aabb_center(pos, bounds);
     let near_corner = pos + Vec2::new(0.5, 0.5);
     assert!(
         point_in_node_aabb(center, "0", &tree),
@@ -1213,7 +1229,7 @@ fn test_rect_select_still_catches_ellipse_through_center() {
     let (pos, bounds) = node_bounds(&tree, "0");
     // Selection rect crossing the center of the ellipse must
     // still register a hit.
-    let center = pos + bounds * 0.5;
+    let center = aabb_center(pos, bounds);
     let hits = rect_select(center - Vec2::new(5.0, 5.0), center + Vec2::new(5.0, 5.0), &tree);
     assert!(
         hits.contains(&"0".to_string()),
@@ -1469,16 +1485,9 @@ fn test_hit_test_node_resize_handle_lands_on_se_corner() {
 fn test_hit_test_node_resize_handle_misses_outside_tolerance() {
     use crate::application::document::hit_test_node_resize_handle;
     use crate::application::document::tests_common::pinned_two_section_node;
-    use glam::Vec2;
 
     let (doc, id) = pinned_two_section_node();
-    let node = &doc.mindmap.nodes[&id];
-    let np = &node.position;
-    let nw = &node.size;
-    let center = Vec2::new(
-        np.x as f32 + nw.width as f32 * 0.5,
-        np.y as f32 + nw.height as f32 * 0.5,
-    );
+    let center = doc.mindmap.nodes[&id].center_vec2();
     assert!(
         hit_test_node_resize_handle(&doc.mindmap, center, &id, 4.0).is_none(),
         "center of node must not hit any handle"
@@ -1534,8 +1543,14 @@ fn test_apply_node_resize_to_tree_writes_position_and_bounds() {
     let mut tree = doc.build_tree();
     let new_pos = Vec2::new(500.0, 200.0);
     let new_size = Vec2::new(150.0, 70.0);
-    apply_node_resize_to_tree(&mut tree, &id, new_pos, new_size, Vec2::ZERO);
+    let mut patches = Vec::new();
+    let written = apply_node_resize_to_tree(&mut tree, &id, new_pos, new_size, Vec2::ZERO, &mut patches);
     let arena_id = tree.arena_id_for(&id).unwrap();
+    assert_eq!(written, Some(arena_id));
+    assert!(
+        patches.is_empty(),
+        "a zero position delta moves no section, so nothing needs a position patch"
+    );
     let area = tree
         .tree
         .arena
@@ -1583,7 +1598,8 @@ fn test_apply_node_resize_to_tree_shifts_sections_but_not_child_nodes() {
     let new_pos = Vec2::new(500.0, 200.0);
     let new_size = Vec2::new(150.0, 70.0);
     let position_delta = Vec2::new(50.0, 25.0);
-    apply_node_resize_to_tree(&mut tree, &id, new_pos, new_size, position_delta);
+    let mut patches = Vec::new();
+    apply_node_resize_to_tree(&mut tree, &id, new_pos, new_size, position_delta, &mut patches);
 
     // Child mind-node should be untouched — even when it's not
     // a descendant of `id`, the helper should never have walked
@@ -1613,6 +1629,150 @@ fn test_apply_node_resize_to_tree_shifts_sections_but_not_child_nodes() {
     assert!((resized_pos.1 - 200.0).abs() < 0.001);
 }
 
+/// The node-resize drag no longer re-shapes the whole arena per
+/// frame: it re-shapes the container this call returns and patches
+/// the positions this call reports. That split is only safe while
+/// those two outputs *between them name every element the call
+/// touched* — and the two halves fail differently. An element moved
+/// but unreported keeps a stale buffer position for the rest of the
+/// drag; an element whose *shaping* inputs changed (bounds, text,
+/// styled runs) but which is only reported as a patch keeps a stale
+/// buffer, full stop, because `patch_drag_positions` rewrites a
+/// position and shapes nothing. Neither is visible to any pixel
+/// assertion in this repo (§T8).
+///
+/// So this walks the whole arena and snapshots every element's whole
+/// `GlyphArea`, then asserts both halves across the call:
+///
+/// - the set of elements whose area changed at all is exactly
+///   `{container} ∪ patched`, so nothing is touched unreported;
+/// - every *patched* element changed its `position` and **nothing
+///   else**, so a position patch is a sufficient refresh for it.
+///
+/// A future edit that shifts one more element without emitting its
+/// patch fails the first; one that reshapes an element it only
+/// patches fails the second.
+#[test]
+fn test_node_resize_reports_every_element_it_moved() {
+    use crate::application::document::apply_node_resize_to_tree;
+    use crate::application::document::tests_common::pinned_two_section_node;
+    use baumhard::gfx_structs::area::GlyphArea;
+    use glam::Vec2;
+    use std::collections::{HashMap, HashSet};
+
+    let (doc, id) = pinned_two_section_node();
+    let mut tree = doc.build_tree();
+
+    // Every input the renderer's shaper reads off an element is its
+    // `GlyphArea` (see `shape_one_element_into_buffers`), so the
+    // whole area is the snapshot. Compared through derived `Debug`
+    // rather than `PartialEq`: the latter is deliberately blind to a
+    // region recolor, which is exactly the class of silent reshape
+    // this is here to catch.
+    let described = |area: &GlyphArea| format!("{area:?}");
+    let areas = |tree: &baumhard::mindmap::tree_builder::MindMapTree| {
+        let mut out: HashMap<usize, GlyphArea> = HashMap::new();
+        for arena_id in tree.tree.root().descendants(&tree.tree.arena) {
+            let Some(element) = tree.tree.arena.get(arena_id).map(|n| n.get()) else {
+                continue;
+            };
+            if let Some(area) = element.glyph_area() {
+                out.insert(element.unique_id(), area.clone());
+            }
+        }
+        out
+    };
+    let positions = |tree: &baumhard::mindmap::tree_builder::MindMapTree| {
+        areas(tree)
+            .into_iter()
+            .map(|(uid, area)| (uid, (area.position.x.0, area.position.y.0)))
+            .collect::<HashMap<usize, (f32, f32)>>()
+    };
+
+    let before_areas = areas(&tree);
+    let container_uid = tree
+        .tree
+        .arena
+        .get(tree.arena_id_for(&id).unwrap())
+        .map(|n| n.get().unique_id())
+        .unwrap();
+
+    let mut patches = Vec::new();
+    let written = apply_node_resize_to_tree(
+        &mut tree,
+        &id,
+        Vec2::new(500.0, 200.0),
+        Vec2::new(150.0, 70.0),
+        Vec2::new(50.0, 25.0),
+        &mut patches,
+    );
+    assert_eq!(written, Some(tree.arena_id_for(&id).unwrap()));
+
+    let after_areas = areas(&tree);
+    let after = positions(&tree);
+    // Union both key sets rather than walking `after_areas` alone, so an
+    // element the call *removed* counts as touched. Resize removes nothing
+    // today; the union is here so the next edit that does cannot slip past.
+    let touched: HashSet<usize> = before_areas
+        .keys()
+        .chain(after_areas.keys())
+        .copied()
+        .filter(|uid| before_areas.get(uid).map(described) != after_areas.get(uid).map(described))
+        .collect();
+    let patched: HashSet<usize> = patches.iter().map(|(uid, _)| *uid).collect();
+
+    assert!(
+        !patched.is_empty(),
+        "the fixture must have sections to move, or this test proves nothing"
+    );
+    assert!(
+        !touched.contains(&container_uid) || touched.len() > 1,
+        "the fixture must touch more than the container, or this test proves nothing"
+    );
+
+    let mut reported = patched.clone();
+    reported.insert(container_uid);
+    assert_eq!(
+        touched, reported,
+        "every element the resize wrote to must be either the returned container \
+         or a reported patch — an unreported write leaves a stale buffer"
+    );
+
+    // The reported position has to be the one actually written, not
+    // merely the right element: the caller writes it straight into
+    // the buffer without re-reading the arena.
+    for (uid, pos) in &patches {
+        assert_eq!(
+            after.get(uid),
+            Some(pos),
+            "patch for {uid} names the wrong position"
+        );
+    }
+
+    // The reshape half. `patch_drag_positions` moves an existing
+    // buffer and shapes nothing, so a patched element must have
+    // changed its position and nothing else: rewinding the position
+    // to its pre-call value has to make the whole area identical
+    // again. An element that also grew, re-wrapped or restyled needs
+    // a `reshape_buffer_for`, not a patch, and lands here.
+    for uid in &patched {
+        let before_area = before_areas
+            .get(uid)
+            .expect("patched element existed before the call");
+        let mut rewound = after_areas
+            .get(uid)
+            .expect("patched element still exists")
+            .clone();
+        rewound.set_position((before_area.position.x.0, before_area.position.y.0));
+        assert_eq!(
+            described(&rewound),
+            described(before_area),
+            "element {uid} is reported as a position patch, but the resize changed more than its \
+             position — a patch cannot refresh that, only a re-shape can"
+        );
+    }
+}
+
 #[test]
 fn test_apply_node_resize_to_tree_unknown_node_no_op() {
     use crate::application::document::apply_node_resize_to_tree;
@@ -1621,8 +1781,190 @@ fn test_apply_node_resize_to_tree_unknown_node_no_op() {
 
     let (doc, _id) = pinned_two_section_node();
     let mut tree = doc.build_tree();
-    // No panic; tree untouched.
-    apply_node_resize_to_tree(&mut tree, "nope", Vec2::ZERO, Vec2::new(10.0, 10.0), Vec2::ZERO);
+    // No panic; tree untouched. A stale entry left in `patches`
+    // would make the caller patch a buffer this call never moved,
+    // so the clear-on-entry contract is asserted with a non-empty
+    // input rather than a fresh `Vec`.
+    let mut patches = vec![(usize::MAX, (1.0, 2.0))];
+    let written = apply_node_resize_to_tree(
+        &mut tree,
+        "nope",
+        Vec2::ZERO,
+        Vec2::new(10.0, 10.0),
+        Vec2::ZERO,
+        &mut patches,
+    );
+    assert_eq!(written, None);
+    assert!(patches.is_empty());
+}
+
+/// A long `parent_id` chain is legal and acyclic, so the loader
+/// accepts it and the scene tree inherits its depth.
+/// `walk_drag_subtree` used to recurse over that depth, so opening
+/// such a map and dragging a node killed the process with `SIGABRT`
+/// — not a panic, so nothing could catch, log, or degrade it.
+///
+/// This is the same class the loader-side walkers were converted
+/// for, on the one walker that conversion missed. It sits on the far
+/// side of both: the load and the scene build already succeed on
+/// this map because they are iterative, and the *drag* was what
+/// died — which is exactly what made it easy to miss.
+///
+/// The walk runs on a 256 KiB stack rather than a test thread's
+/// default couple of megabytes. That is what keeps this both fast
+/// and honest: 20,000 nodes is cheap to build, and any reintroduced
+/// recursion blows a stack that small long before the chain ends,
+/// while the iterative form is indifferent to it.
+///
+/// A failure here aborts the test binary rather than failing an
+/// assertion — that is what a stack overflow does, and it is
+/// precisely the outcome under test.
+#[test]
+fn test_deep_chain_drag_does_not_exhaust_the_stack() {
+    const DEPTH: usize = 20_000;
+    const SMALL_STACK: usize = 256 * 1024;
+
+    let nodes = (0..DEPTH)
+        .map(|i| {
+            let parent = if i == 0 {
+                "null".to_string()
+            } else {
+                format!("\"n{}\"", i - 1)
+            };
+            format!(
+                r##""n{i}": {{
+                    "id": "n{i}", "parent_id": {parent},
+                    "position": {{"x": 0, "y": 0}},
+                    "size": {{"width": 100, "height": 50}},
+                    "sections": [{{"text": "n"}}],
+                    "style": {{"background_color":"#000","frame_color":"#000",
+                              "text_color":"#fff","shape":"rectangle",
+                              "corner_radius_percent":0,"frame_thickness":0,
+                              "show_frame":false,"show_shadow":false}},
+                    "layout": {{"type":"map","direction":"auto","spacing":0}},
+                    "folded": false, "notes": ""
+                }}"##
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let json = format!(
+        r##"{{
+            "version": "1.0",
+            "name": "deep",
+            "canvas": {{"background_color": "#000"}},
+            "nodes": {{{nodes}}},
+            "edges": []
+        }}"##
+    );
+    let map = baumhard::mindmap::loader::load_from_str(&json).expect("a deep chain is acyclic and loads");
+
+    let moved = std::thread::Builder::new()
+        .stack_size(SMALL_STACK)
+        .spawn(move || {
+            let mut tree = baumhard::mindmap::tree_builder::build_mindmap_tree(&map);
+            let arena_nodes = tree.tree.arena.len();
+            // `include_descendants = true` is the whole point: it is
+            // what routes into `walk_drag_subtree` and inherits the
+            // chain's depth. The patch-collecting variant shares that
+            // body, so covering one covers both.
+            let mut patches = Vec::new();
+            apply_drag_delta_and_collect_patches(&mut tree, "n0", 1.0, 2.0, true, &mut patches);
+            (arena_nodes, patches.len())
+        })
+        .expect("spawn the small-stack drag")
+        .join()
+        .expect("the drag walk must not exhaust a 256 KiB stack");
+
+    let (arena_nodes, patched) = moved;
+    assert!(
+        arena_nodes >= DEPTH,
+        "the scene tree must carry every node: {arena_nodes} < {DEPTH}"
+    );
+    assert!(
+        patched >= DEPTH,
+        "dragging the root must move every descendant: {patched} < {DEPTH}"
+    );
+}
+
+/// The recursive form `walk_drag_subtree` replaced, kept as the
+/// oracle for the test below.
+///
+/// Deliberately recursive in a file whose subject is removing
+/// recursion: it is the specification the iterative rewrite has to
+/// match, and it is only ever called on the small fixture tree, so
+/// its depth is a handful of levels. Do not call it on a
+/// caller-supplied map.
+fn reference_recursive_walk(
+    arena: &mut indextree::Arena<baumhard::gfx_structs::element::GfxElement>,
+    node_id: indextree::NodeId,
+    dx: f32,
+    dy: f32,
+    mut patches: Option<&mut Vec<(usize, (f32, f32))>>,
+) {
+    if let Some(node) = arena.get_mut(node_id) {
+        let elem = node.get_mut();
+        if let Some(area) = elem.glyph_area_mut() {
+            area.move_position(dx, dy);
+            if let Some(p) = patches.as_deref_mut() {
+                let pos = elem.position();
+                p.push((elem.unique_id(), (pos.x, pos.y)));
+            }
+        }
+    }
+    let mut child = arena.get(node_id).and_then(|n| n.first_child());
+    while let Some(cid) = child {
+        child = arena.get(cid).and_then(|n| n.next_sibling());
+        reference_recursive_walk(arena, cid, dx, dy, patches.as_deref_mut());
+    }
+}
+
+/// The iterative drag walk must emit exactly the sequence the
+/// recursion emitted — not merely the same set.
+///
+/// Not because the renderer needs it: `patch_drag_positions` looks
+/// each patch up by `unique_id` in a map, so it is keyed and
+/// order-independent, and a reordered buffer would render
+/// identically. An earlier version of this comment claimed the
+/// consumer was positional, which was simply wrong.
+///
+/// The order is pinned because it is what makes the
+/// recursion→iteration rewrite *checkable*. "Same set" is a
+/// property a green suite already implies; "same sequence" is a
+/// statement about this walk against the one it replaced, and it is
+/// the only cheap evidence that the rewrite changed nothing. If a
+/// future change has a reason to reorder, this test is the place to
+/// argue it — not an obstacle, but a prompt.
+///
+/// Zero delta is included on purpose: it makes the test sensitive to
+/// visit order alone, with no positional arithmetic to mask a
+/// divergence.
+#[test]
+fn test_iterative_drag_matches_the_recursive_order() {
+    for (dx, dy) in [(1.0f32, 2.0f32), (-7.5, 0.25), (0.0, 0.0)] {
+        for id in ["0", "1", "2"] {
+            let mut iterative_tree = load_test_tree();
+            let mut reference_tree = load_test_tree();
+            let Some(root) = reference_tree.arena_id_for(id) else {
+                continue;
+            };
+
+            let mut got = Vec::new();
+            apply_drag_delta_and_collect_patches(&mut iterative_tree, id, dx, dy, true, &mut got);
+
+            let mut want = Vec::new();
+            reference_recursive_walk(&mut reference_tree.tree.arena, root, dx, dy, Some(&mut want));
+
+            assert_eq!(
+                got, want,
+                "patch sequence diverged for node {id} at delta ({dx}, {dy})"
+            );
+            assert!(
+                !got.is_empty(),
+                "node {id} must produce patches, or this proves nothing"
+            );
+        }
+    }
 }
 
 // --- Custom mutation registry & application tests ---

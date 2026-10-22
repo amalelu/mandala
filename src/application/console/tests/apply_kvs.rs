@@ -82,3 +82,75 @@ fn test_apply_kvs_invalid_is_reported_as_error_per_pair() {
     assert!(report.messages[0].contains("size"));
     assert!(report.messages[0].contains("not a number"));
 }
+
+/// `invalid` names the one failure class no substring of
+/// `messages` can identify: an [`Outcome::Invalid`] message is
+/// whatever the target wrote.
+///
+/// Fails when: `invalid` is filled from `messages` wholesale (the
+/// not-applicable, unknown-key, no-target and already-set rows all
+/// go red), or when the `Invalid` arm stops recording it (the
+/// first row goes red). Each row pins a *different* silent-no-op
+/// shape against the same field, which is what makes "only Invalid
+/// lands here" a claim rather than a coincidence.
+///
+/// The `not applicable` row is the control the caller actually
+/// depends on: `log_not_applicable_if_silent` reports it at
+/// `info!` and an invalid value at `warn!`, and it can only tell
+/// them apart if this field separates them.
+#[test]
+fn test_dispatch_report_records_only_invalid_values_in_invalid() {
+    let one_pair = || vec![("bg".to_string(), "#123".to_string())];
+
+    let mut doc = load_test_doc();
+    doc.selection = SelectionState::Single(first_node_id(&doc));
+    let report = apply_kvs(&mut doc, &one_pair(), |_v, _k, _val| {
+        Some(Outcome::Invalid("not a color I can parse".into()))
+    });
+    assert_eq!(report.invalid.len(), 1, "an Invalid outcome must be recorded");
+    assert!(
+        report.invalid[0].contains("not a color I can parse"),
+        "the target's own words are the diagnosis: {:?}",
+        report.invalid
+    );
+
+    let mut doc = load_test_doc();
+    doc.selection = SelectionState::Single(first_node_id(&doc));
+    let report = apply_kvs(&mut doc, &one_pair(), |_v, _k, _val| Some(Outcome::NotApplicable));
+    assert!(
+        report.invalid.is_empty(),
+        "a wrong-selection outcome is not an unusable value: {:?}",
+        report.invalid
+    );
+    assert!(
+        report.messages.iter().any(|m| m.contains("not applicable")),
+        "control: this row must actually produce the not-applicable message it stands for"
+    );
+
+    let mut doc = load_test_doc();
+    doc.selection = SelectionState::Single(first_node_id(&doc));
+    let report = apply_kvs(&mut doc, &one_pair(), |_v, _k, _val| Some(Outcome::Unchanged));
+    assert!(
+        report.invalid.is_empty(),
+        "already at the requested value is not a rejection: {:?}",
+        report.invalid
+    );
+
+    let mut doc = load_test_doc();
+    doc.selection = SelectionState::Single(first_node_id(&doc));
+    let report = apply_kvs(&mut doc, &one_pair(), |_v, _k, _val| None);
+    assert!(
+        report.invalid.is_empty(),
+        "an unknown key is a typo in the key, not an unusable value: {:?}",
+        report.invalid
+    );
+
+    let mut doc = load_test_doc();
+    doc.selection = SelectionState::None;
+    let report = apply_kvs(&mut doc, &one_pair(), |_v, _k, _val| Some(Outcome::Applied));
+    assert!(
+        report.invalid.is_empty(),
+        "having nothing selected is not an unusable value: {:?}",
+        report.invalid
+    );
+}

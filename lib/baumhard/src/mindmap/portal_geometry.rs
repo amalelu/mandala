@@ -34,6 +34,8 @@
 
 use glam::Vec2;
 
+use crate::util::geometry::aabb_center;
+
 /// Period of `border_t`: four sides, normalized to one unit each.
 /// Exposed so the drag path can wrap values into the canonical
 /// range (e.g. after a dragged label would otherwise leave it
@@ -116,7 +118,7 @@ pub fn border_outward_normal(t: f32) -> Vec2 {
 ///
 /// Cost: O(1).
 pub fn default_border_t(owner_pos: Vec2, owner_size: Vec2, partner_center: Vec2) -> f32 {
-    let owner_center = Vec2::new(owner_pos.x + owner_size.x * 0.5, owner_pos.y + owner_size.y * 0.5);
+    let owner_center = aabb_center(owner_pos, owner_size);
     let dir = partner_center - owner_center;
     if dir.length_squared() < f32::EPSILON {
         return 1.0;
@@ -378,7 +380,7 @@ mod tests {
     }
 
     /// `default_border_t` for an axis-aligned partner exits
-    /// through the centre of the corresponding side (not a
+    /// through the center of the corresponding side (not a
     /// corner), regardless of the owner's aspect ratio. Pin the
     /// invariant for a tall owner: north-facing partner exits at
     /// the top-side midpoint (`t = 0.5`), east-facing at the
@@ -414,8 +416,8 @@ mod tests {
     #[test]
     fn outward_normal_at_side_midpoints_is_cardinal() {
         assert_eq!(border_outward_normal(0.5), Vec2::new(0.0, -1.0)); // top → up
-        assert_eq!(border_outward_normal(1.5), Vec2::new(1.0, 0.0));  // right → right
-        assert_eq!(border_outward_normal(2.5), Vec2::new(0.0, 1.0));  // bottom → down
+        assert_eq!(border_outward_normal(1.5), Vec2::new(1.0, 0.0)); // right → right
+        assert_eq!(border_outward_normal(2.5), Vec2::new(0.0, 1.0)); // bottom → down
         assert_eq!(border_outward_normal(3.5), Vec2::new(-1.0, 0.0)); // left → left
     }
 }

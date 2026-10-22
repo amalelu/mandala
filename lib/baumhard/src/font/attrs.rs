@@ -35,9 +35,18 @@
 //!
 //! - `src/application/renderer/tree_walker.rs` — main
 //!   tree-to-buffer walker for nodes / connections / portals
-//!   (Baumhard tree path).
-//! - `lib/baumhard/src/mindmap/tree_builder/border.rs` — per-side
-//!   border runs for framed nodes.
+//!   (Baumhard tree path). Uses the
+//!   [`crate::font::attrs::RegionFamilies`] +
+//!   [`crate::font::attrs::rich_text_spans_into`] pair.
+//!
+//! [`crate::font::attrs::attrs_list_from_regions`] has no in-tree
+//! consumer today: it is the `Editor::insert_string` half of the
+//! bridge, kept as the named seam for the inline text editor
+//! (§B10). The list above
+//! used to claim `lib/baumhard/src/mindmap/tree_builder/border.rs`
+//! as a consumer of this module; that file imports nothing from
+//! `font::attrs`, so the claim is removed rather than carried
+//! forward (§B9 — a doc comment that lies is worse than none).
 
 use cosmic_text::{Attrs, AttrsList, Color, Family, FontSystem, Metrics, Style};
 use log::warn;
@@ -60,25 +69,35 @@ use crate::util::grapheme_chad;
 /// `text` is required because `AttrsList::add_span` expects byte
 /// ranges into the text it styles, while `Range` on the data layer
 /// carries grapheme-cluster indices (the unit baumhard's text
-/// primitives speak in — see `lib/baumhard/CONVENTIONS.md §B1` and
+/// primitives speak in — see `lib/baumhard/CONVENTIONS.md §B3` and
 /// `CONCEPTS.md`'s `Range` entry). The conversion goes through
-/// [`grapheme_chad::find_byte_index_of_grapheme`] so a region whose
-/// end lands on a ZWJ-emoji or combining-mark cluster boundary
-/// produces a UTF-8-valid byte range that matches the visual
-/// glyph.
+/// `region_byte_bounds` so a region whose end lands on a
+/// ZWJ-emoji or combining-mark cluster boundary produces a
+/// UTF-8-valid byte range that matches the visual glyph.
 ///
-/// Cost: O(n_regions) iteration plus one `font_system.db().face()`
-/// lookup per region with a font id, plus an O(n_text) walk per
-/// region for grapheme-to-byte conversion. The caller is expected
-/// to hold the `FONT_SYSTEM` write lock for the same scope it uses
-/// the returned list — that's how the renderer wires it today.
+/// Cost: O(n_text + n_regions) **when the regions are sorted**,
+/// which the format guarantees and the loader enforces; the whole
+/// run table is then converted in a single grapheme walk rather than
+/// one walk per boundary. An out-of-order region falls back to its
+/// own walk and costs O(n_text) for itself — correct, just not
+/// linear. Plus one `font_system.db().face()` lookup per region
+/// carrying a font id, and the three `Vec`s `region_byte_bounds`
+/// builds — the flattened boundary list and the resolved indices,
+/// each twice the region count, plus the returned pairs at the
+/// region count.
+///
+/// The caller is expected to hold the `FONT_SYSTEM` write lock for
+/// the same scope it uses the returned list — that's how the
+/// renderer wires it today.
 pub fn attrs_list_from_regions(
     text: &str,
     source: &ColorFontRegions,
     font_system: &mut FontSystem,
 ) -> AttrsList {
     let mut attr_list = AttrsList::new(&Attrs::new());
-    for region in &source.regions {
+    // One walk for the whole table — see `region_byte_bounds`.
+    let bounds = region_byte_bounds(text, source.regions.iter().map(|r| &r.range));
+    for (region, (start, end)) in source.regions.iter().zip(bounds) {
         let mut attrs = Attrs::new().style(Style::Normal);
 
         if let Some(color) = region.color {
@@ -94,15 +113,48 @@ pub fn attrs_list_from_regions(
             Some(ref name) => attrs.family(Family::Name(name.as_str())),
             None => attrs.family(Family::Monospace),
         };
-        let start =
-            grapheme_chad::find_byte_index_of_grapheme(text, region.range.start).unwrap_or(text.len());
-        let end = grapheme_chad::find_byte_index_of_grapheme(text, region.range.end).unwrap_or(text.len());
         if start >= end {
             continue;
         }
         attr_list.add_span(start..end, &attrs);
     }
     attr_list
+}
+
+/// Byte `(start, end)` for every region range, resolved in a single
+/// grapheme walk over `text`.
+///
+/// Grapheme-correct slicing is the contract: a `Range` carries
+/// grapheme-cluster indices (CONCEPTS.md, §B3 in
+/// `lib/baumhard/CONVENTIONS.md`, `format/text-runs.md`), so the
+/// conversion has to count clusters rather than bytes. Doing that
+/// per boundary restarts the walk each time, which is O(text ×
+/// regions) — quadratic on a section whose run table scales with
+/// its text, and reachable from any `.mindmap.json`. Both cosmic-text
+/// bridges route through here so neither can regress to the
+/// per-boundary form.
+///
+/// An index past the end resolves to `text.len()`, which the
+/// callers' `start >= end` guard then drops.
+///
+/// Cost: O(text + regions) and three `Vec`s — the flattened
+/// boundary list and the resolved indices, both `2 × regions`, plus
+/// the returned pairs at `regions`.
+fn region_byte_bounds<'r>(
+    text: &str,
+    ranges: impl Iterator<Item = &'r crate::core::primitives::Range>,
+) -> Vec<(usize, usize)> {
+    let flat: Vec<usize> = ranges.flat_map(|r| [r.start, r.end]).collect();
+    let resolved = grapheme_chad::byte_indices_of_graphemes(text, &flat);
+    resolved
+        .chunks(2)
+        .map(|pair| {
+            (
+                pair[0].unwrap_or(text.len()),
+                pair.get(1).copied().flatten().unwrap_or(text.len()),
+            )
+        })
+        .collect()
 }
 
 /// Look up the font-family name for a compiled font id. Returns
@@ -145,49 +197,70 @@ fn resolve_font_family(
     }
 }
 
-/// Pre-resolved family-name strings paired with the regions they came
-/// from. Built once per text area and reused across multiple shape
-/// passes — typically the renderer's main glyph pass + eight
-/// outline-halo stamps.
+/// A styled text run resolved down to everything cosmic-text needs
+/// except the metrics and the halo color: the text it styles, the
+/// borrowed regions, their family-name strings, and their byte
+/// ranges into that text.
 ///
-/// Caches both `source.all_regions()` (the borrowed-region slice) and
-/// the resolved family-name string per region. Reuse across halo
-/// passes avoids:
+/// Built once per text area and reused across multiple shape passes
+/// — typically the renderer's main glyph pass plus eight
+/// outline-halo stamps. Reuse across those passes avoids, per pass:
 /// - re-allocating the `Vec<&ColorFontRegion>` slice from
-///   `all_regions()` per pass.
-/// - re-running `font_system.db().face(...)` per region per pass.
+///   `all_regions()`.
+/// - re-running `font_system.db().face(...)` per region.
+/// - re-walking `text`'s grapheme boundaries to turn every region's
+///   cluster range into a byte range (`region_byte_bounds`).
 ///
-/// Lifetime `'r` ties to the source `ColorFontRegions` so the cached
-/// slice cannot outlive the regions it borrows from.
+/// The text is held rather than passed per call on purpose: the
+/// cached byte ranges are only meaningful against the string they
+/// were resolved from, so making the caller re-supply it would let
+/// a mismatched pair slice the wrong bytes.
+///
+/// Lifetime `'r` ties to both the source `ColorFontRegions` and the
+/// text, so neither the cached slice nor the byte ranges can outlive
+/// what they describe.
 pub struct RegionFamilies<'r> {
+    /// The text the regions style, and the string every emitted span
+    /// slices out of.
+    text: &'r str,
     /// Borrowed regions slice, allocated once at resolve time.
     regions: Vec<&'r ColorFontRegion>,
     /// Resolved family-name string per region; same indexing as
     /// `regions`. `None` means the region had no font pin, or the
     /// pin's lookup missed (logged via `log::warn!` at resolve time).
     names: Vec<Option<String>>,
+    /// Byte `(start, end)` into `text` per region; same indexing as
+    /// `regions`. Resolved in one grapheme walk at resolve time (see
+    /// `region_byte_bounds`) rather than once per shape pass.
+    bounds: Vec<(usize, usize)>,
 }
 
 impl<'r> RegionFamilies<'r> {
-    /// Resolve every region's family-name string and cache the
-    /// borrowed regions slice for downstream shape passes.
+    /// Resolve every region's family-name string and byte range
+    /// against `text`, and cache the borrowed regions slice, for
+    /// downstream shape passes.
     ///
     /// Empty input (`source.num_regions() == 0`) returns without
-    /// touching `font_system` and without allocating either inner
+    /// touching `font_system` and without allocating any inner
     /// `Vec` — the empty case is the common case for text without
     /// styled runs.
     ///
-    /// Cost: O(n_regions) plus one `font_system.db().face()` lookup
-    /// per region with a font id. Allocates one `Vec<&ColorFontRegion>`
-    /// (from `source.all_regions()`) and one `Vec<Option<String>>`.
-    /// The caller holds the `font_system` write guard for the
-    /// duration; downstream shape passes that consult the result need
-    /// their own access to the same guard scope.
-    pub fn resolve(source: &'r ColorFontRegions, font_system: &mut FontSystem) -> Self {
+    /// Cost: O(n_text + n_regions) — one grapheme walk over `text`
+    /// for the whole run table — plus one `font_system.db().face()`
+    /// lookup per region with a font id. Allocates one
+    /// `Vec<&ColorFontRegion>` (from `source.all_regions()`), one
+    /// `Vec<Option<String>>`, one `Vec<(usize, usize)>`, and the
+    /// three interior `Vec`s `region_byte_bounds` builds. The caller
+    /// holds the `font_system` write guard for the duration;
+    /// downstream shape passes that consult the result need their
+    /// own access to the same guard scope.
+    pub fn resolve(text: &'r str, source: &'r ColorFontRegions, font_system: &mut FontSystem) -> Self {
         if source.num_regions() == 0 {
             return Self {
+                text,
                 regions: Vec::new(),
                 names: Vec::new(),
+                bounds: Vec::new(),
             };
         }
         let regions = source.all_regions();
@@ -195,16 +268,29 @@ impl<'r> RegionFamilies<'r> {
             .iter()
             .map(|region| resolve_font_family(region.font.as_ref(), font_system))
             .collect();
-        Self { regions, names }
+        // One walk for the whole table — see `region_byte_bounds`.
+        let bounds = region_byte_bounds(text, regions.iter().map(|r| &r.range));
+        Self {
+            text,
+            regions,
+            names,
+            bounds,
+        }
     }
 }
 
-/// Build a `(text_slice, Attrs)` span list ready for
-/// `Buffer::set_rich_text` from `text` + a pre-resolved
-/// [`RegionFamilies`]. One span per region; spans whose `[start,
-/// end)` byte slice is empty (out-of-range or zero-width region)
-/// are dropped silently — the renderer must not hand cosmic-text
-/// zero-width spans.
+/// Fill `out` with the `(text_slice, Attrs)` span list ready for
+/// `Buffer::set_rich_text` from a pre-resolved [`RegionFamilies`].
+/// One span per region; spans whose `[start, end)` byte slice is
+/// empty (out-of-range or zero-width region) are dropped silently —
+/// the renderer must not hand cosmic-text zero-width spans.
+///
+/// `out` is cleared first, so a caller shaping the same run several
+/// times in a row (the main glyph plus its halo stamps) can hand the
+/// same `Vec` back and pay for its capacity once instead of once per
+/// stamp. That is why this, rather than
+/// [`rich_text_spans_from_regions`], is the shape the renderer's
+/// halo loop calls.
 ///
 /// `color_override = Some(c)` recolors **every** span to `c` — used
 /// by outline-halo passes to stamp the same glyphs in the halo
@@ -214,60 +300,71 @@ impl<'r> RegionFamilies<'r> {
 /// Each span carries `Metrics::new(scale, line_height)` so per-area
 /// metrics survive cosmic-text shaping. Empty input (the
 /// `RegionFamilies` was resolved from a `ColorFontRegions` with no
-/// regions) produces a single span over the whole `text` — the
+/// regions) produces a single span over the whole text — the
 /// data-model contract that "no regions" means "uniform default
 /// styling".
 ///
-/// Cost: O(n_regions) iteration over the cached slice; allocates the
-/// returned `Vec`. The returned `Attrs<'a>` borrow strings from
-/// `families`, so `families` must outlive the returned vector.
-pub fn rich_text_spans_from_regions<'a>(
-    text: &'a str,
+/// Cost: O(n_regions) iteration over the cached slice, no grapheme
+/// walk (the byte ranges were resolved once at
+/// [`RegionFamilies::resolve`] time) and no allocation beyond
+/// whatever growth `out` needs. The emitted `Attrs<'a>` borrow
+/// strings from `families`, so `families` must outlive `out`.
+pub fn rich_text_spans_into<'a>(
     families: &'a RegionFamilies<'a>,
     scale: f32,
     line_height: f32,
     color_override: Option<Color>,
-) -> Vec<(&'a str, Attrs<'a>)> {
+    out: &mut Vec<(&'a str, Attrs<'a>)>,
+) {
+    out.clear();
     let metrics = Metrics::new(scale, line_height);
     if families.regions.is_empty() {
         let mut attrs = Attrs::new().metrics(metrics);
         if let Some(c) = color_override {
             attrs = attrs.color(c);
         }
-        return vec![(text, attrs)];
+        out.push((families.text, attrs));
+        return;
     }
-    families
+    for ((region, family_name), &(start, end)) in families
         .regions
         .iter()
         .zip(families.names.iter())
-        .filter_map(|(region, family_name)| {
-            // Grapheme-correct slicing: `Range` carries grapheme-cluster
-            // indices per the data-layer contract (CONCEPTS.md, §B1
-            // in `lib/baumhard/CONVENTIONS.md`, and `format/text-runs.md`),
-            // so converting via `find_byte_index_of_grapheme` is the
-            // unit-correct path. A region that ends mid-grapheme would
-            // be a malformed input — by construction this never
-            // happens, since every fresh producer counts via
-            // `count_grapheme_clusters`.
-            let start =
-                grapheme_chad::find_byte_index_of_grapheme(text, region.range.start).unwrap_or(text.len());
-            let end =
-                grapheme_chad::find_byte_index_of_grapheme(text, region.range.end).unwrap_or(text.len());
-            if start >= end {
-                return None;
-            }
-            let slice = &text[start..end];
-            let mut attrs = Attrs::new().metrics(metrics);
-            let color = color_override.or_else(|| region.color.map(rgba_to_color));
-            if let Some(c) = color {
-                attrs = attrs.color(c);
-            }
-            if let Some(family) = family_name.as_deref() {
-                attrs = attrs.family(Family::Name(family));
-            }
-            Some((slice, attrs))
-        })
-        .collect()
+        .zip(families.bounds.iter())
+    {
+        if start >= end {
+            continue;
+        }
+        let slice = &families.text[start..end];
+        let mut attrs = Attrs::new().metrics(metrics);
+        let color = color_override.or_else(|| region.color.map(rgba_to_color));
+        if let Some(c) = color {
+            attrs = attrs.color(c);
+        }
+        if let Some(family) = family_name.as_deref() {
+            attrs = attrs.family(Family::Name(family));
+        }
+        out.push((slice, attrs));
+    }
+}
+
+/// [`rich_text_spans_into`] into a freshly allocated `Vec` — the
+/// convenience shape for callers that shape a run exactly once and
+/// have no buffer to reuse. Same span semantics; see that function
+/// for the contract.
+///
+/// Cost: as [`rich_text_spans_into`], plus one `Vec` allocation. A
+/// caller shaping the same run more than once should reuse a buffer
+/// through [`rich_text_spans_into`] instead.
+pub fn rich_text_spans_from_regions<'a>(
+    families: &'a RegionFamilies<'a>,
+    scale: f32,
+    line_height: f32,
+    color_override: Option<Color>,
+) -> Vec<(&'a str, Attrs<'a>)> {
+    let mut out = Vec::with_capacity(families.regions.len().max(1));
+    rich_text_spans_into(families, scale, line_height, color_override, &mut out);
+    out
 }
 
 /// Pack a `[f32; 4]` baumhard color into a cosmic-text `Color`.

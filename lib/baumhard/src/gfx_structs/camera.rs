@@ -212,4 +212,3 @@ impl Camera2D {
             && screen_pos.y < self.viewport_size.1 as f32
     }
 }
-

@@ -4,16 +4,24 @@
 //!
 //! Hardcoded defaults overlaid with JSON: desktop reads
 //! `--keybinds <path>` or `$XDG_CONFIG_HOME/mandala/keybinds.json`;
-//! WASM reads `?keybinds=<json>` or `localStorage["mandala_keybinds"]`.
+//! WASM reads `localStorage["mandala_keybinds"]` and nothing else.
+//! There is **no `?keybinds=` layer** — the query-param machinery
+//! exists in `crate::application::user_config::web_storage` and no
+//! loader reaches it, because a query param is owned by whoever
+//! composed the link rather than by the user; see
+//! `KeybindConfig::load_for_web` for the full argument.
 //! Failures log and skip the layer — the app never crashes for a bad
 //! keybinds file. Partial configs work via serde's `default`
-//! attribute.
+//! attribute, but only per *key*: a key whose value has the wrong
+//! shape fails the whole parse and costs the user that entire layer
+//! (issue #129).
 
 mod action;
 mod bind;
 mod config;
 mod context;
 mod resolved;
+mod surface;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod platform_desktop;
@@ -52,11 +60,11 @@ pub(crate) use action::MIXED_BRANCH_ACTIONS;
 #[allow(unused_imports)]
 pub use bind::{key_to_name, normalize_key_name, KeyBind, MouseGesture};
 pub use config::KeybindConfig;
+pub use context::InputContext;
+pub use resolved::ResolvedKeybinds;
 // `ParametricBinding` is consumed by tests and by users authoring
 // `keybinds.json` files (the JSON schema is the public surface);
 // no in-binary native consumer pulls it in via `mandala::application::keybinds::ParametricBinding`,
 // hence the lint exemption.
 #[allow(unused_imports)]
-pub use config::ParametricBinding;
-pub use context::InputContext;
-pub use resolved::ResolvedKeybinds;
+pub use surface::ParametricBinding;

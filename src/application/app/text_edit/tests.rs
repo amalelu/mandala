@@ -472,6 +472,99 @@ fn make_open_state(buffer: &str, cursor: usize) -> TextEditState {
     }
 }
 
+// -----------------------------------------------------------------
+// `take_open_session` — the close step commit and cancel share.
+// Renderer-free, so the mode lift both closers inherit is pinned
+// here rather than through either renderer-bound closer.
+// -----------------------------------------------------------------
+
+fn node_edit_on(id: &str) -> crate::application::app::InteractionMode {
+    crate::application::app::InteractionMode::NodeEdit {
+        node_id: id.to_string(),
+    }
+}
+
+#[test]
+fn test_take_open_session_closes_the_editor_and_returns_its_fields() {
+    let mut state = make_open_state("hello", 3);
+    if let TextEditState::Open { selection_anchor, .. } = &mut state {
+        *selection_anchor = Some(1);
+    }
+    let mut mode = crate::application::app::InteractionMode::Default;
+    let session = super::editor::take_open_session(&mut state, &mut mode).expect("the editor was open");
+    assert!(
+        matches!(state, TextEditState::Closed),
+        "the state must be Closed afterwards"
+    );
+    assert_eq!(session.node_id, "n-test");
+    assert_eq!(session.section_idx, 0);
+    assert_eq!(session.buffer, "hello");
+    assert_eq!(session.cursor_grapheme_pos, 3);
+    assert_eq!(session.selection_anchor, Some(1));
+    assert_eq!(session.original_text, "");
+}
+
+#[test]
+fn test_take_open_session_on_a_closed_editor_is_a_no_op() {
+    let mut state = TextEditState::Closed;
+    let mut mode = node_edit_on("n-test");
+    assert!(super::editor::take_open_session(&mut state, &mut mode).is_none());
+    assert_eq!(
+        mode,
+        node_edit_on("n-test"),
+        "closing nothing must not touch the mode"
+    );
+}
+
+/// The single-section short-circuit opens NodeEdit and the editor
+/// in one step, so closing must leave NodeEdit too — on commit and
+/// on cancel alike, which is why the lift lives in the shared step.
+#[test]
+fn test_take_open_session_exits_node_edit_when_the_open_asked_for_it() {
+    let mut state = make_open_state("x", 1);
+    if let TextEditState::Open {
+        exit_to_default_on_close,
+        ..
+    } = &mut state
+    {
+        *exit_to_default_on_close = true;
+    }
+    let mut mode = node_edit_on("n-test");
+    super::editor::take_open_session(&mut state, &mut mode).expect("the editor was open");
+    assert_eq!(mode, crate::application::app::InteractionMode::Default);
+}
+
+/// A multi-section open keeps NodeEdit so the user can pick another
+/// section; and the lift never invents a mode change outside
+/// NodeEdit.
+#[test]
+fn test_take_open_session_keeps_the_mode_otherwise() {
+    let mut state = make_open_state("x", 1);
+    let mut mode = node_edit_on("n-test");
+    super::editor::take_open_session(&mut state, &mut mode).expect("the editor was open");
+    assert_eq!(
+        mode,
+        node_edit_on("n-test"),
+        "exit_to_default_on_close = false keeps NodeEdit"
+    );
+
+    let mut state = make_open_state("x", 1);
+    if let TextEditState::Open {
+        exit_to_default_on_close,
+        ..
+    } = &mut state
+    {
+        *exit_to_default_on_close = true;
+    }
+    let mut mode = crate::application::app::InteractionMode::Default;
+    super::editor::take_open_session(&mut state, &mut mode).expect("the editor was open");
+    assert_eq!(
+        mode,
+        crate::application::app::InteractionMode::Default,
+        "outside NodeEdit the flag changes nothing"
+    );
+}
+
 fn cursor_of(state: &TextEditState) -> usize {
     match state {
         TextEditState::Open {
@@ -666,7 +759,7 @@ fn test_insert_at_cursor_after_zwj_emoji_family() {
 fn test_delete_before_cursor_removes_whole_zwj_family() {
     let zwj = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
     let combined = format!("{zwj}A");
-    let mut s = String::from(combined);
+    let mut s = combined;
     let new_cursor = delete_before_cursor(&mut s, 1);
     assert_eq!(s, "A", "ZWJ family must be deleted as one cluster");
     assert_eq!(new_cursor, 0);
@@ -780,40 +873,54 @@ fn test_shift_home_seeds_anchor_at_line_start() {
     assert_eq!(anchor, Some(4));
 }
 
-// ── Editor close → SectionRange lift (N4-C.b.2) ──────────────────
+// ── Editor close → SectionRange lift (N4-C.b.2 / #47 part C) ─────
 
 /// `lift_anchor_to_section_range` lifts the editor's
-/// shift-select pair into a `Section(SectionSel)` selection
-/// when the anchor differs from the cursor — the function name
-/// is historical; today it discards the grapheme range because
-/// every `SectionRange` consumer interprets the field as
-/// section indices, so writing grapheme positions silently
-/// broke downstream fan-out (`border preview`, structural
-/// cleanup, `commit_border_preview`'s `Sections` target). The
-/// post-commit selection lands at the section the user was
-/// editing — the right anchor for follow-up per-section verbs.
+/// shift-select pair into `SelectionState::SectionRange` when the
+/// anchor differs from the cursor, carrying both meanings in
+/// their own typed fields: the anchor section as a single-section
+/// span, and the swept graphemes as the half-open range. (The
+/// lift used to demote to `Section` and discard the graphemes,
+/// because the old variant's one `range` field was read as
+/// section indices downstream — the confusion #47 part C closed
+/// by splitting the fields.)
 #[test]
-fn test_lift_anchor_lifts_to_section_when_anchor_below_cursor() {
+fn test_lift_anchor_lifts_to_section_range_when_anchor_below_cursor() {
     use super::editor::lift_anchor_to_section_range;
-    use crate::application::document::SelectionState;
-    let lifted =
-        lift_anchor_to_section_range(Some(3), 7, "node-1", 2).expect("anchor != cursor → lift");
+    use crate::application::document::{GraphemeRange, SectionSpan, SelectionState};
+    let lifted = lift_anchor_to_section_range(Some(3), 7, "node-1", 2).expect("anchor != cursor → lift");
     match lifted {
-        SelectionState::Section(sel) => {
+        SelectionState::SectionRange {
+            sel,
+            section_span,
+            grapheme_range,
+        } => {
             assert_eq!(sel.node_id, "node-1");
             assert_eq!(sel.section_idx, 2);
+            assert_eq!(
+                section_span,
+                SectionSpan::single(2),
+                "a grapheme selection lives inside exactly the anchor section"
+            );
+            assert_eq!(grapheme_range, GraphemeRange::new(3, 7));
         }
-        other => panic!("expected Section, got {:?}", other),
+        other => panic!("expected SectionRange, got {:?}", other),
     }
 }
 
+/// Sweeping backwards (anchor past the cursor) lifts the same
+/// normalized range — `[3, 7)` whichever side the anchor is on.
 #[test]
-fn test_lift_anchor_lifts_to_section_when_anchor_above_cursor() {
+fn test_lift_anchor_lifts_normalized_range_when_anchor_above_cursor() {
     use super::editor::lift_anchor_to_section_range;
     use crate::application::document::SelectionState;
-    let lifted =
-        lift_anchor_to_section_range(Some(7), 3, "node-1", 2).expect("anchor != cursor → lift");
-    assert!(matches!(lifted, SelectionState::Section(_)));
+    let lifted = lift_anchor_to_section_range(Some(7), 3, "node-1", 2).expect("anchor != cursor → lift");
+    match lifted {
+        SelectionState::SectionRange { grapheme_range, .. } => {
+            assert_eq!((grapheme_range.start(), grapheme_range.end()), (3, 7));
+        }
+        other => panic!("expected SectionRange, got {:?}", other),
+    }
 }
 
 /// `lift_anchor_to_section_range` returns `None` when the
@@ -850,18 +957,11 @@ fn test_literal_char_typing_clears_anchor() {
     let mut s = open_editor_state("abcdef", 3);
     // Seed an anchor by pretending the user shift-selected
     // forward by one grapheme.
-    if let TextEditState::Open {
-        selection_anchor, ..
-    } = &mut s
-    {
+    if let TextEditState::Open { selection_anchor, .. } = &mut s {
         *selection_anchor = Some(2);
     }
     // Now type a literal `x`.
-    let changed = apply_literal_char_insert(
-        None,
-        &Key::Character("x".into()),
-        &mut s,
-    );
+    let changed = apply_literal_char_insert(None, &Key::Character("x".into()), &mut s);
     assert!(changed);
     let (_, anchor) = cursor_and_anchor(&s);
     assert_eq!(anchor, None, "literal-char typing must clear anchor");
@@ -874,10 +974,7 @@ fn test_literal_enter_clears_anchor() {
     use super::editor::apply_literal_char_insert;
     use crate::application::platform::input::Key;
     let mut s = open_editor_state("abcdef", 3);
-    if let TextEditState::Open {
-        selection_anchor, ..
-    } = &mut s
-    {
+    if let TextEditState::Open { selection_anchor, .. } = &mut s {
         *selection_anchor = Some(2);
     }
     let changed = apply_literal_char_insert(
@@ -897,10 +994,7 @@ fn test_literal_tab_clears_anchor() {
     use super::editor::apply_literal_char_insert;
     use crate::application::platform::input::Key;
     let mut s = open_editor_state("abcdef", 3);
-    if let TextEditState::Open {
-        selection_anchor, ..
-    } = &mut s
-    {
+    if let TextEditState::Open { selection_anchor, .. } = &mut s {
         *selection_anchor = Some(2);
     }
     let changed = apply_literal_char_insert(
@@ -911,4 +1005,105 @@ fn test_literal_tab_clears_anchor() {
     assert!(changed);
     let (_, anchor) = cursor_and_anchor(&s);
     assert_eq!(anchor, None, "literal-Tab must clear anchor");
+}
+
+// ── SectionRange produced and consumed end-to-end (#47 part C) ───
+
+/// **The variant, produced by its real producer and read by both
+/// consumer classes.** The editor's shift-select lift emits
+/// `SelectionState::SectionRange`; the grapheme class (the console
+/// trait dispatcher's range-aware text-color write) must touch
+/// exactly the swept graphemes of the anchor section, and the span
+/// class (the border preview's selection-coverage check) must
+/// expand the same selection to exactly the anchor section's
+/// `(node, idx)` pair.
+///
+/// The negative controls are the crossing bug itself: had the two
+/// meanings still shared one field, the lift's `(1, 3)` graphemes
+/// would read as "sections 1..=3" on the span side — so the test
+/// asserts a preview on `(node, 1)` reads as *not* covered — and
+/// the color write would land whole-section — so the test asserts
+/// the graphemes outside `[1, 3)` keep their prior color.
+#[test]
+fn test_lifted_section_range_reaches_both_consumer_classes() {
+    use super::editor::lift_anchor_to_section_range;
+    use crate::application::console::traits::{selection_targets, view_for, HasTextColor, Outcome, TargetId};
+    use crate::application::document::tests_common::load_test_doc;
+    use crate::application::document::{BorderConfigEdits, BorderPreviewTarget, OptionEdit};
+
+    let mut doc = load_test_doc();
+    // Node "0" carries "Lord God" (8 graphemes) in one run, so a
+    // [1, 3) sweep has text on both sides of it — without that,
+    // the outside-the-range control could not fail.
+    let node_id = "0".to_string();
+    let pre_color = doc.mindmap.nodes[&node_id].sections[0].text_runs[0].color.clone();
+    assert!(
+        !pre_color.is_empty() && pre_color != "#abcdef",
+        "the fixture run must carry its own color distinct from the write, \
+         or the controls below prove nothing"
+    );
+
+    // The producer: shift-select from grapheme 1 to 3, committed.
+    doc.selection = lift_anchor_to_section_range(Some(1), 3, &node_id, 0).expect("a real sweep must lift");
+
+    // Grapheme class: the fan-out targets the anchor section with
+    // the swept range attached…
+    let targets = selection_targets(&doc.selection);
+    assert_eq!(targets.len(), 1);
+    assert!(
+        matches!(
+            &targets[0],
+            TargetId::Section { node_id: n, section_idx: 0, range: Some(r) }
+                if n == &node_id && (r.start(), r.end()) == (1, 3)
+        ),
+        "the dispatcher must see the anchor section carrying the grapheme range"
+    );
+    // …and the write through the dispatcher recolors exactly those
+    // graphemes.
+    for tid in &targets {
+        let mut view = view_for(&mut doc, tid);
+        assert!(matches!(
+            view.set_text_color(crate::application::console::traits::ColorValue::Hex(
+                "#abcdef".into()
+            )),
+            Outcome::Applied
+        ));
+    }
+    let runs = &doc.mindmap.nodes[&node_id].sections[0].text_runs;
+    assert_eq!(
+        runs.len(),
+        3,
+        "the write must carve [0,1) [1,3) [3,8) out of one run"
+    );
+    assert_eq!((runs[1].start, runs[1].end), (1, 3));
+    assert_eq!(runs[1].color, "#abcdef");
+    assert_eq!(
+        (runs[0].color.as_str(), runs[2].color.as_str()),
+        (pre_color.as_str(), pre_color.as_str()),
+        "graphemes outside the swept range must keep their color — a whole-section \
+         write here is the old single-field misread"
+    );
+
+    // Span class: the same selection expands to exactly the anchor
+    // section for the border preview's coverage check.
+    let edits = BorderConfigEdits {
+        preset: OptionEdit::Set("heavy".into()),
+        ..Default::default()
+    };
+    let _ = doc.set_border_preview(
+        BorderPreviewTarget::Sections(vec![(node_id.clone(), 0)]),
+        edits.clone(),
+    );
+    assert!(
+        doc.border_preview_covers_live_selection(),
+        "the span side must expand the lifted selection to its anchor section"
+    );
+    // Control — the crossing shape: were the grapheme pair (1, 3)
+    // read as section indices, section 1 would be covered.
+    let _ = doc.set_border_preview(BorderPreviewTarget::Sections(vec![(node_id.clone(), 1)]), edits);
+    assert!(
+        !doc.border_preview_covers_live_selection(),
+        "a section the span does not name must read as drift, even though the \
+         grapheme range contains its index"
+    );
 }

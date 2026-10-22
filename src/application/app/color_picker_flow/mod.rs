@@ -25,18 +25,18 @@ mod mouse;
 mod open;
 mod rebuild;
 
-pub(in crate::application::app) use click::{end_color_picker_gesture, handle_color_picker_click, PickerClick};
+pub(in crate::application::app) use click::{
+    end_color_picker_gesture, handle_color_picker_click, PickerClick,
+};
 // Picker lifecycle terminals. Re-exported because the
 // `dispatch_action` picker arm — not this module — owns the
 // commit / cancel bodies now (CODE_CONVENTIONS §3: user-named
 // effects belong in the funnel).
 pub(in crate::application::app) use commit::{
-    cancel_color_picker, close_color_picker_standalone, commit_color_picker,
-    commit_color_picker_to_selection,
+    cancel_color_picker, close_color_picker_standalone, commit_color_picker, commit_color_picker_to_selection,
 };
 pub(in crate::application::app) use key::{
-    apply_picker_nudge, handle_color_picker_clipboard_key, picker_decline_reason, picker_op_for,
-    PickerOp,
+    apply_picker_nudge, handle_color_picker_clipboard_key, picker_decline_reason, picker_op_for, PickerOp,
 };
 pub(in crate::application::app) use mouse::handle_color_picker_mouse_move;
 pub(in crate::application::app) use open::{open_color_picker_contextual, open_color_picker_standalone};

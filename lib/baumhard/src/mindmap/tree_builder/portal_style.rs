@@ -36,6 +36,7 @@ use crate::mindmap::model::{
 use crate::mindmap::portal_geometry::{border_outward_normal, border_point_at, default_border_t};
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::util::color::resolve_var;
+use crate::util::geometry::aabb_center;
 use crate::util::grapheme_chad::count_grapheme_clusters;
 
 /// Default portal marker font size when no `glyph_connection`
@@ -103,7 +104,8 @@ pub struct ResolvedPortalTextStyle {
 
 /// Resolve the per-endpoint portal marker style. Merges the color
 /// cascade (preview > whole-edge-select > per-label-select >
-/// per-endpoint override > edge-level override > edge.color),
+/// per-endpoint override > edge-level override > source-node
+/// palette stroke > edge.color),
 /// picks a visible glyph, and produces a **canvas-space**
 /// font size already compensated for camera zoom the same way
 /// line-mode connections do (see
@@ -118,11 +120,15 @@ pub struct ResolvedPortalTextStyle {
 ///
 /// `raw_color_override` is the preview / selection hex already
 /// resolved by the caller; `None` means "no transient override".
+/// `themed` is the palette tier of the edge color cascade —
+/// resolve it with
+/// [`MindMap::edge_theme_stroke_color`](crate::mindmap::model::MindMap::edge_theme_stroke_color).
 pub fn resolve_portal_endpoint_style(
     edge: &MindEdge,
     endpoint_state: Option<&PortalEndpointState>,
     canvas: &Canvas,
     raw_color_override: Option<&str>,
+    themed: Option<&str>,
     camera_zoom: f32,
 ) -> ResolvedPortalStyle {
     let cfg = GlyphConnectionConfig::resolved_for(edge, canvas);
@@ -141,7 +147,11 @@ pub fn resolve_portal_endpoint_style(
     // inlined so we can substitute the portal default when there's
     // no per-edge glyph_connection config.
     let z = camera_zoom.max(f32::EPSILON);
-    let target_screen = (base_font_size * z).clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
+    let target_screen = crate::font::fonts::clamp_to_font_window(
+        base_font_size * z,
+        cfg.min_font_size_pt,
+        cfg.max_font_size_pt,
+    );
     let font_size_pt = target_screen / z;
 
     // Glyph fallback. The line-body default (middle dot) renders
@@ -164,7 +174,7 @@ pub fn resolve_portal_endpoint_style(
     // visible; the committed cascade below them is
     // `MindEdge::portal_endpoint_color`'s.
     let raw_color: &str =
-        raw_color_override.unwrap_or_else(|| edge.portal_endpoint_color(canvas, endpoint_state));
+        raw_color_override.unwrap_or_else(|| edge.portal_endpoint_color(canvas, endpoint_state, themed));
 
     ResolvedPortalStyle {
         glyph,
@@ -226,7 +236,7 @@ pub fn resolve_portal_endpoint_text_style(
         .and_then(|s| s.text_max_font_size_pt)
         .unwrap_or(cfg.max_font_size_pt);
     let z = camera_zoom.max(f32::EPSILON);
-    let target_screen = (base_font_size * z).clamp(min, max);
+    let target_screen = crate::font::fonts::clamp_to_font_window(base_font_size * z, min, max);
     let font_size_pt = target_screen / z;
 
     // Text color: transient overrides first, then the per-endpoint
@@ -377,10 +387,7 @@ pub(crate) fn layout_portal_text(
     // 50pt badge still sits at a consistent distance from the badge.
     let padding = icon_font_size_pt * PORTAL_TEXT_PADDING_FRAC;
     // Icon center as the anchor for text placement.
-    let icon_center = Vec2::new(
-        icon.top_left.x + icon.bounds.x * 0.5,
-        icon.top_left.y + icon.bounds.y * 0.5,
-    );
+    let icon_center = aabb_center(icon.top_left, icon.bounds);
     // Distance along the outward normal needed to keep the text
     // AABB entirely outside the icon AABB. Both AABBs are world-
     // axis-aligned; their half-extent along an arbitrary normal is

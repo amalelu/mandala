@@ -25,6 +25,7 @@ use crate::core::primitives::Applicable;
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::GfxMutator;
 use crate::gfx_structs::tree::{MutatorTree, Tree};
+use crate::util::geometry::aabb_contains;
 use glam::Vec2;
 use indextree::NodeId;
 use slab::Slab;
@@ -99,8 +100,7 @@ impl SceneEntry {
         let Some((min, max)) = self.tree.descendants_aabb() else {
             return false;
         };
-        let local = point - self.offset;
-        local.x >= min.x && local.x <= max.x && local.y >= min.y && local.y <= max.y
+        aabb_contains(point - self.offset, min, max)
     }
 }
 

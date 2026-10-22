@@ -3,7 +3,7 @@
 //! Tests for [`crate::gfx_structs::scene::Scene`] and its tree hit-test
 //! helpers.
 //!
-//! Follows the `do_*()` / `test_*()` split from §B7 — every public
+//! Follows the `do_*()` / `test_*()` split from §T2.2: every `do_*`
 //! body is benchmarkable from `benches/test_bench.rs`.
 
 use glam::Vec2;

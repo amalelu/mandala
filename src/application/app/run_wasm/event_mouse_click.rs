@@ -12,8 +12,8 @@
 //! - **Released** ([`super::WasmApp::handle_mouse_released`]): consumes the pending
 //!   click — click-outside on an open editor commits the edit via
 //!   the funnel, otherwise the pending tag becomes a fresh
-//!   `SelectionState` and the scene is rebuilt through
-//!   `rebuild_after_selection_change`.
+//!   `SelectionState` and the scene is rebuilt at the tier
+//!   `RebuildTier::for_click` names.
 //!
 //! Mirrors the native shape at `event_mouse_click.rs`; the WASM
 //! variant has no console / color-picker / drag-state intercepts so
@@ -25,8 +25,9 @@ use crate::application::platform::input::ElementState;
 
 use super::PendingClick;
 use crate::application::app::click_triggers::fire_onclick_triggers;
+use crate::application::app::dispatch::cross_dispatch::RebuildContext;
 use crate::application::app::dispatch::DispatchOutcome;
-use crate::application::app::scene_rebuild::rebuild_after_selection_change;
+use crate::application::app::scene_rebuild::RebuildTier;
 use crate::application::app::{
     compute_click_hit, dispatch, is_double_click, now_ms, ClickHitParts, LastClick,
 };
@@ -53,8 +54,7 @@ impl super::WasmApp {
     ///
     /// `DragState::PendingRight` and the `Action::FastResizeStart`
     /// gesture pipeline are `cfg(not(target_arch = "wasm32"))` —
-    /// the throttled-drag machinery doesn't exist on WASM yet
-    /// (pending §6.6 touch parity / `TwoFingerDrag`). What this
+    /// the throttled-drag machinery doesn't exist on WASM yet. What this
     /// shim *does* do is prevent the right-button event from being
     /// silently dropped, and surface a one-time warn so a user
     /// who tries Ctrl+RightDrag on WASM sees evidence in the
@@ -67,13 +67,11 @@ impl super::WasmApp {
     pub(super) fn handle_right_button(&mut self, state: ElementState) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static WARNED: AtomicBool = AtomicBool::new(false);
-        if state == ElementState::Released
-            && !WARNED.swap(true, Ordering::Relaxed)
-        {
+        if state == ElementState::Released && !WARNED.swap(true, Ordering::Relaxed) {
             log::warn!(
                 "right-button gesture on WASM is currently a no-op \
-                 (Action::FastResizeStart is NativeOnly until §6.6 \
-                 touch parity ships TwoFingerDrag); browser context \
+                 (Action::FastResizeStart is NativeOnly until the \
+                 browser gains a drag-state machine); browser context \
                  menu suppressed via canvas oncontextmenu, \
                  Shift+RightClick bypasses the suppression"
             );
@@ -325,24 +323,50 @@ impl super::WasmApp {
             PendingClick::Section { node_id, section_idx } => (Some(node_id.clone()), Some(*section_idx)),
             _ => (None, None),
         };
-        if let Some(id) = trigger_node_id.as_ref() {
-            fire_onclick_triggers(
+        let triggers_fired = match trigger_node_id.as_ref() {
+            Some(id) => fire_onclick_triggers(
                 &mut input.document,
                 &mut input.mindmap_tree,
                 &mut input.scene_cache,
                 id,
                 trigger_section_idx,
-                baumhard::mindmap::custom_mutation::PlatformContext::Web,
+                crate::application::app::PLATFORM_CONTEXT,
                 now_ms() as u64,
-            );
-        }
+            ),
+            None => false,
+        };
+
+        // The last rung of the hit ladder, and the one the press
+        // could not capture: a connection path is a curve, not an
+        // AABB, so `compute_click_hit` never resolves one and
+        // `PendingClick::Empty` means "nothing with a box under the
+        // pointer", not "nothing at all". Native's click router has
+        // always run it and this one never did, so a browser user
+        // could not select an edge by clicking it — while the touch
+        // tap, which runs the same shared rung, could. Resolved at
+        // release against the release position, exactly as native's
+        // `handle_click` does.
+        let empty_hit_selection = if matches!(pending, PendingClick::Empty) {
+            let renderer_borrow = self.renderer.borrow();
+            renderer_borrow.as_ref().map(|renderer| {
+                let canvas_pos =
+                    renderer.screen_to_canvas(input.cursor_pos.0 as f32, input.cursor_pos.1 as f32);
+                dispatch::edge_under_pointer(
+                    canvas_pos,
+                    &input.document.mindmap,
+                    dispatch::CanvasPerPixel::of(renderer),
+                )
+            })
+        } else {
+            None
+        };
 
         // Plain selection click. Snapshot the previous
-        // selection so `rebuild_after_selection_change`
-        // can pick between `rebuild_all` (needed when
-        // either side is a node selection — tree
-        // highlights must be applied or cleared) and the
-        // cheaper `rebuild_scene_only` (edge-adjacent →
+        // selection so `RebuildTier::for_click` can pick
+        // between `rebuild_all` (needed when either side is
+        // a node selection — tree highlights must be
+        // applied or cleared) and the cheaper
+        // `rebuild_scene_only` (edge-adjacent →
         // edge-adjacent transitions).
         let prev_selection = input.document.selection.clone();
         input.document.selection = match pending {
@@ -372,19 +396,33 @@ impl super::WasmApp {
                 );
                 SelectionState::EdgeLabel(EdgeLabelSel::new(er))
             }
-            _ => SelectionState::None,
+            // `Empty` carries whatever the edge rung above found,
+            // or `None`. `PendingClick::None` cannot reach here —
+            // the function returned on it — so the fallback is the
+            // unreachable arm rather than the empty-canvas one.
+            PendingClick::Empty => empty_hit_selection.unwrap_or(SelectionState::None),
+            PendingClick::None => SelectionState::None,
         };
+        // The selection delta is only the whole story when no
+        // trigger fired. This arm used to run
+        // `rebuild_after_selection_change` regardless, so a click
+        // whose `OnClick` mutation swapped the theme while the
+        // selection stayed edge-adjacent got a scene-only rebuild
+        // and left every node's text buffer painted in the old
+        // palette. Native forced `rebuild_all` for every click and
+        // so never had the hole; `RebuildTier::for_click` is now
+        // the one rule both targets read (CODE_CONVENTIONS §4).
+        let tier = RebuildTier::for_click(triggers_fired, &prev_selection, &input.document.selection);
         let mut renderer_borrow = self.renderer.borrow_mut();
         if let Some(renderer) = renderer_borrow.as_mut() {
-            rebuild_after_selection_change(
-                &prev_selection,
-                &input.document,
-                &input.interaction_mode,
-                &mut input.mindmap_tree,
-                &mut input.app_scene,
+            tier.execute(&mut RebuildContext {
+                document: &mut input.document,
+                mindmap_tree: &mut input.mindmap_tree,
+                app_scene: &mut input.app_scene,
                 renderer,
-                &mut input.scene_cache,
-            );
+                scene_cache: &mut input.scene_cache,
+                interaction_mode: &mut input.interaction_mode,
+            });
         }
     }
 }

@@ -21,7 +21,8 @@
 //! the head of the loop.
 
 use crate::application::keybinds::Action;
-use crate::application::macros::MacroRegistry;
+use crate::application::macros::{MacroRegistry, GATE_REJECTED_CODE};
+use crate::application::source_tier::SourceTier;
 
 use super::cross_dispatch::DispatchOutcome;
 
@@ -84,17 +85,12 @@ pub(in crate::application::app) trait MacroDispatchTarget {
 /// semantics native callers rely on for "macro keybind was
 /// handled").
 ///
-/// **Privilege gating** runs per-step. A non-User tier's first
-/// destructive Action or any ConsoleLine step **fail-closed
-/// aborts** the remaining steps so a hostile pattern like
-/// `[BenignAction, RejectedAction, SaveDocument]` can't smuggle
-/// post-rejected destructive steps past the gate.
+/// Looks the macro up, then runs its steps through
+/// [`run_macro_steps`] under the tier its loader pinned.
 pub(in crate::application::app) fn dispatch_macro<T: MacroDispatchTarget>(
     macro_id: &str,
     target: &mut T,
 ) -> bool {
-    use crate::application::macros::{MacroStep, MacroTarget};
-
     let (mac, source) = match target.registry().get_with_source(macro_id) {
         Some((m, s)) => (m.clone(), s),
         None => {
@@ -102,9 +98,38 @@ pub(in crate::application::app) fn dispatch_macro<T: MacroDispatchTarget>(
             return false;
         }
     };
+    run_macro_steps(macro_id, &mac.steps, source, target)
+}
+
+/// The gated step loop: run `steps` against `target` as a macro from
+/// tier `source`. Returns `true` iff at least one step actually
+/// executed. `label` names the macro in diagnostics: the registered
+/// id, or a description of where an anonymous sequence came from.
+///
+/// This is the only body that runs macro steps, whether the macro
+/// was looked up by id ([`dispatch_macro`]) or arrived anonymously
+/// (the IPC `act.macro` command's `steps`, at the `User` tier
+/// `format/ipc.md` §Trust model assigns IPC). The privilege gate
+/// lives here and nowhere else, so no caller can reach the steps
+/// around it.
+///
+/// **Privilege gating** runs per-step. A non-User tier's first
+/// destructive Action or any ConsoleLine step **fail-closed
+/// aborts** the remaining steps so a hostile pattern like
+/// `[BenignAction, RejectedAction, SaveDocument]` can't smuggle
+/// post-rejected destructive steps past the gate. Both rejections
+/// are logged under [`GATE_REJECTED_CODE`], so a caller collecting
+/// diagnostics can tell the abort from an ordinary degrade.
+pub(in crate::application::app) fn run_macro_steps<T: MacroDispatchTarget>(
+    label: &str,
+    steps: &[crate::application::macros::MacroStep],
+    source: SourceTier,
+    target: &mut T,
+) -> bool {
+    use crate::application::macros::{MacroStep, MacroTarget};
 
     let mut any_ran = false;
-    for step in &mac.steps {
+    for step in steps {
         match step {
             MacroStep::Action { action } => {
                 // Privilege gate symmetric with `ConsoleLine` below.
@@ -115,10 +140,11 @@ pub(in crate::application::app) fn dispatch_macro<T: MacroDispatchTarget>(
                 // sneak its outer steps past the gate.
                 if !source.allows_action(action) {
                     log::warn!(
-                        "macro '{}' (source {:?}): Action {:?} rejected — \
+                        code = GATE_REJECTED_CODE;
+                        "macros: macro '{}' (source {:?}): Action {:?} rejected — \
                          tier may not invoke destructive / I/O Actions; \
                          aborting remaining steps",
-                        macro_id,
+                        label,
                         source,
                         action,
                     );
@@ -144,14 +170,19 @@ pub(in crate::application::app) fn dispatch_macro<T: MacroDispatchTarget>(
                         if target.has_node(s) {
                             Some(s.clone())
                         } else {
-                            log::warn!("macro step CustomMutation: node id '{}' not found", s,);
+                            log::warn!(
+                                "macros: macro '{}' step CustomMutation: node id '{}' not found",
+                                label,
+                                s
+                            );
                             continue;
                         }
                     }
                 };
                 let Some(nid) = nid_opt else {
                     log::debug!(
-                        "macro step CustomMutation: no resolvable target; skipping id={}",
+                        "macros: macro '{}' step CustomMutation: no resolvable target; skipping id={}",
+                        label,
                         id,
                     );
                     continue;
@@ -177,10 +208,11 @@ pub(in crate::application::app) fn dispatch_macro<T: MacroDispatchTarget>(
                     // ConsoleLine(rejected), SaveDocument]` would
                     // persist the post-delete state without consent).
                     log::warn!(
-                        "macro '{}' (source {:?}): ConsoleLine step rejected — \
+                        code = GATE_REJECTED_CODE;
+                        "macros: macro '{}' (source {:?}): ConsoleLine step rejected — \
                          only User-tier macros may run console verbs; \
                          aborting remaining steps",
-                        macro_id,
+                        label,
                         source,
                     );
                     return any_ran;
@@ -271,6 +303,82 @@ mod tests {
             name: String::new(),
             description: String::new(),
             steps,
+        }
+    }
+
+    /// The anonymous-sequence entry runs the same gated loop as a
+    /// registered macro. At `User`, the tier IPC's `act.macro steps`
+    /// pins, every step kind runs; at any other tier the same gate
+    /// fires. Nothing about arriving without a registry entry
+    /// changes what a step may do.
+    #[test]
+    fn test_run_macro_steps_gates_an_anonymous_sequence_by_the_tier_it_is_given() {
+        let steps = vec![
+            MacroStep::Action { action: Action::Undo },
+            MacroStep::ConsoleLine {
+                line: "fps on".into(),
+            },
+            MacroStep::Action {
+                action: Action::DeleteSelection,
+            },
+        ];
+        let mut user = MockTarget::new(MacroRegistry::new());
+        assert!(run_macro_steps(
+            "(ipc steps)",
+            &steps,
+            SourceTier::User,
+            &mut user
+        ));
+        assert_eq!(
+            user.calls,
+            vec![
+                "action:Undo".to_string(),
+                "console:fps on".to_string(),
+                "action:DeleteSelection".to_string(),
+            ],
+            "User tier runs every step, the registry never consulted"
+        );
+        let mut map = MockTarget::new(MacroRegistry::new());
+        assert!(run_macro_steps("(ipc steps)", &steps, SourceTier::Map, &mut map));
+        assert_eq!(
+            map.calls,
+            vec!["action:Undo".to_string()],
+            "the gate is the same gate"
+        );
+    }
+
+    /// A gate rejection is logged under `GATE_REJECTED_CODE`, which is
+    /// how a caller collecting diagnostics (the IPC reply's
+    /// `warnings`) tells the fail-closed abort from an ordinary
+    /// degrade. Both rejection sites carry it.
+    #[test]
+    fn test_a_gate_rejection_is_logged_with_its_code() {
+        use baumhard::util::log::capture::capture;
+
+        baumhard::util::test_logger::install();
+        for (label, step) in [
+            (
+                "gate-code-action-3f1a",
+                MacroStep::Action {
+                    action: Action::SaveDocument,
+                },
+            ),
+            (
+                "gate-code-console-3f1a",
+                MacroStep::ConsoleLine { line: "save".into() },
+            ),
+        ] {
+            let mut t = MockTarget::new(MacroRegistry::new());
+            let (ran, captured) = capture(|| run_macro_steps(label, &[step], SourceTier::Inline, &mut t));
+            assert!(!ran);
+            assert!(t.calls.is_empty());
+            let rejection = captured
+                .records
+                .iter()
+                .find(|r| r.message.contains(label))
+                .unwrap_or_else(|| panic!("{label}: the rejection must be logged; saw {captured:?}"));
+            assert_eq!(rejection.code.as_deref(), Some(GATE_REJECTED_CODE), "{label}");
+            assert_eq!(rejection.level, log::Level::Warn);
         }
     }
 
@@ -593,9 +701,7 @@ mod tests {
             "a2",
             vec![
                 MacroStep::Action { action: Action::Undo },
-                MacroStep::Action {
-                    action: Action::Cut,
-                },
+                MacroStep::Action { action: Action::Cut },
                 MacroStep::Action { action: Action::Undo },
             ],
         );

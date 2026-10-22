@@ -22,81 +22,71 @@
 use baumhard::util::geometry::is_positive_finite;
 
 use super::Command;
-use crate::application::console::completion::{
-    kv_key_completions, prefix_filter, Completion, CompletionContext, CompletionState,
-};
+use crate::application::console::completion::{prefix_filter, Completion};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
+use crate::application::console::spec::descent::{descend, Stop};
+use crate::application::console::spec::{kvs, usage, Bare, Form, Grammar, Key, Subverb, Vocabulary, Word};
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 use crate::application::document::{MindMapDocument, OptionEdit, SelectionState};
 
-pub const KEYS: &[&str] = &["min", "max"];
-pub const VERBS: &[&str] = &["clear"];
-/// Preset zoom levels surfaced in completion. The camera clamps
-/// to `[0.05, 5.0]` so values outside that range are accepted
-/// but will never match a real camera zoom.
-pub const VALUE_PRESETS: &[&str] = &["unset", "0.25", "0.5", "1.0", "1.5", "2.0", "3.0", "5.0"];
+/// Zoom levels the popup suggests. The camera clamps to
+/// `[0.05, 5.0]`, so values outside that range are accepted but
+/// will never match a real camera zoom.
+///
+/// These are *suggestions*, not a vocabulary: any positive float is
+/// legal, which is why the usage line prints `<zoom|unset>` rather
+/// than this list. [`Vocabulary::Rows`] is the shape that says so.
+pub const VALUE_PRESETS: &[&str] = &["0.25", "0.5", "1.0", "1.5", "2.0", "3.0", "5.0"];
+
+const UNSET: &[Word] = &[Word::new("unset", "remove the bound")];
+
+fn zoom_rows(_ctx: &ConsoleContext, partial: &str) -> Vec<Completion> {
+    prefix_filter(VALUE_PRESETS, partial)
+}
+
+const ZOOM_VOCAB: Vocabulary = Vocabulary::Rows {
+    placeholder: "zoom",
+    rows: zoom_rows,
+    sentinels: UNSET,
+};
+
+const KEYS: &[Key] = &[
+    Key::new("min", "lower inclusive zoom bound (or `unset`)", ZOOM_VOCAB),
+    Key::new("max", "upper inclusive zoom bound (or `unset`)", ZOOM_VOCAB),
+];
+
+const SUBVERBS: &[Subverb] = &[Subverb::bare(
+    "clear",
+    "reset",
+    "drop both bounds so the selection always renders",
+)];
+
+pub static GRAMMAR: Grammar = Grammar {
+    label: "zoom",
+    subverb_sets: &[SUBVERBS],
+    key_sets: &[KEYS],
+    bare: Some(Bare::new("bounds", &[Form::opt(&["min", "max"])])),
+};
 
 pub const COMMAND: Command = Command {
     name: "zoom",
     aliases: &["visibility"],
     summary: "Gate the selection's rendering on camera zoom level",
-    usage: "zoom [min=<zoom|unset>] [max=<zoom|unset>]   |   zoom clear",
-    tags: &[
-        "zoom",
+    applicable: always,
+    grammar: &GRAMMAR,
+    synonyms: &[
         "visibility",
         "presence",
         "render",
-        "min",
-        "max",
         "clamp",
         "unset",
-        "clear",
         "layer",
         "lod",
     ],
-    applicable: always,
-    complete: complete_zoom,
     execute: execute_zoom,
 };
 
-fn complete_zoom(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match &state.context {
-        CompletionContext::Token { index: 0 } => {
-            // Position 0: either a verb (`clear`) or a kv key.
-            let mut out = prefix_filter(VERBS, state.partial);
-            for k in KEYS {
-                if k.starts_with(state.partial) {
-                    out.push(Completion {
-                        text: format!("{}=", k),
-                        display: format!("{}=", k),
-                        hint: Some(
-                            match *k {
-                                "min" => "lower inclusive zoom bound (or `unset`)",
-                                "max" => "upper inclusive zoom bound (or `unset`)",
-                                _ => "zoom bound",
-                            }
-                            .into(),
-                        ),
-                        font_family: None,
-                    });
-                }
-            }
-            out
-        }
-        CompletionContext::Token { .. } => kv_key_completions(KEYS, state.partial),
-        CompletionContext::KvValue { key } if KEYS.contains(&key.as_str()) => {
-            prefix_filter(VALUE_PRESETS, state.partial)
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// Parse a kv value into a [`OptionEdit::Set`] or
-/// [`OptionEdit::Clear`]. `unset` or empty string → Clear;
-/// anything else must parse as a positive finite `f32`. Returns
-/// an `ExecResult::Err` for malformed values so the console
-/// surfaces a clear error instead of a silent no-op.
 fn parse_bound(key: &str, value: &str) -> Result<OptionEdit<f32>, ExecResult> {
     if value.is_empty() || value.eq_ignore_ascii_case("unset") {
         return Ok(OptionEdit::Clear);
@@ -116,35 +106,41 @@ fn parse_bound(key: &str, value: &str) -> Result<OptionEdit<f32>, ExecResult> {
 
 fn execute_zoom(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     // Positional `clear` verb: treat as `min=unset max=unset`.
-    let (min_edit, max_edit) = match args.positional(0) {
-        Some("clear") => (OptionEdit::Clear, OptionEdit::Clear),
-        Some(other) => {
-            return ExecResult::err(format!(
-                "unknown verb '{other}' — usage: zoom [min=<zoom|unset>] [max=<zoom|unset>]   |   zoom clear"
-            ))
-        }
-        None => {
+    // Case-insensitive console-wide — see `commands/mod.rs`
+    // § Casing.
+    let descent = descend(&GRAMMAR, args.tokens());
+    let pairs = match kvs::read_strict(&descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
+    };
+    let (min_edit, max_edit) = match descent.stop {
+        // `clear` is `min=unset max=unset` under one word.
+        Stop::Matched(_) => (OptionEdit::Clear, OptionEdit::Clear),
+        Stop::Bare => {
+            if pairs.is_empty() {
+                return ExecResult::err(usage::no_arguments_message(&GRAMMAR));
+            }
             let mut min = OptionEdit::Keep;
             let mut max = OptionEdit::Keep;
-            let mut saw_any = false;
-            for (k, v) in args.kvs() {
-                saw_any = true;
-                match k {
-                    "min" => match parse_bound("min", v) {
-                        Ok(e) => min = e,
-                        Err(err) => return err,
-                    },
-                    "max" => match parse_bound("max", v) {
-                        Ok(e) => max = e,
-                        Err(err) => return err,
-                    },
-                    other => return ExecResult::err(format!("unknown key '{other}'")),
+            for pair in &pairs {
+                let edit = match parse_bound(pair.key.name, pair.value) {
+                    Ok(e) => e,
+                    Err(err) => return err,
+                };
+                match pair.key.name {
+                    "min" => min = edit,
+                    // Only `min` and `max` are readable here; the
+                    // engine refused everything else by name.
+                    _ => max = edit,
                 }
             }
-            if !saw_any {
-                return ExecResult::err("usage: zoom [min=<zoom|unset>] [max=<zoom|unset>]   |   zoom clear");
-            }
             (min, max)
+        }
+        Stop::Unknown | Stop::KvForm => {
+            return ExecResult::err(usage::unknown_subverb_message(
+                descent.level,
+                descent.typed.unwrap_or_default(),
+            ))
         }
     };
 
@@ -161,7 +157,7 @@ fn execute_zoom(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
         }
     }
 
-    let doc = &mut eff.document;
+    let doc = eff.document_mut();
 
     // Multi takes a count for the "applied to N node(s)" message,
     // so it stays inline here (the bool-returning core can't
@@ -248,9 +244,7 @@ pub(crate) fn apply_zoom_to_selection(
         // Zoom-bounds are node-level; section selection routes
         // through to the owning node.
         SelectionState::Section(s) => doc.set_node_zoom_visibility(&s.node_id, min, max),
-        SelectionState::SectionRange { sel, .. } => {
-            doc.set_node_zoom_visibility(&sel.node_id, min, max)
-        }
+        SelectionState::SectionRange { sel, .. } => doc.set_node_zoom_visibility(&sel.node_id, min, max),
         SelectionState::Multi(ids) => {
             let mut changed = false;
             for id in &ids {
@@ -265,7 +259,7 @@ pub(crate) fn apply_zoom_to_selection(
             let ids = doc.selection.dedup_owning_node_ids();
             let mut changed = false;
             for id in &ids {
-                changed |= doc.set_node_zoom_visibility(id, min.clone(), max.clone());
+                changed |= doc.set_node_zoom_visibility(id, min, max);
             }
             changed
         }

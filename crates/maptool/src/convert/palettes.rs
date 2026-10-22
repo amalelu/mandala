@@ -79,19 +79,43 @@ fn inject_palettes(root: &mut Value, palettes: &HashMap<String, Value>) {
     }
 }
 
+/// Read a legacy `level` as the non-negative depth the current model
+/// requires (`ColorSchema.level: usize`).
+///
+/// The legacy field was a signed integer and the model's was too, so
+/// nothing upstream ever had to mean it. A negative depth is not a
+/// depth — it is corruption or a hand edit — and emitting one now
+/// produces a file `maptool convert` itself cannot load back. Floor it
+/// at 0, which is the schema root, and say so: the conversion still
+/// succeeds and the author learns which node to look at. A missing or
+/// non-integer field defaults to 0 silently, as it always has.
+fn nonnegative_level(raw: Option<&Value>, node_id: &str) -> u64 {
+    match raw.and_then(Value::as_i64) {
+        Some(level) if level < 0 => {
+            eprintln!(
+                "convert: node {node_id} carries a negative color_schema.level ({level}); \
+                 flooring to 0 — depth below the schema root has no meaning"
+            );
+            0
+        }
+        Some(level) => level as u64,
+        None => 0,
+    }
+}
+
 /// Simplify each node's color_schema: keep palette (as key), level,
 /// starts_at_root, connections_colored. Drop groups, theme_id, variant.
 fn simplify_node_schemas(root: &mut Value) {
     let Some(nodes) = super::nodes_obj_mut(root) else { return };
 
-    for node in nodes.values_mut() {
+    for (node_id, node) in nodes.iter_mut() {
         let schema = match node.get("color_schema") {
             Some(Value::Object(obj)) => obj.clone(),
             _ => continue,
         };
 
         let key = palette_key(&schema);
-        let level = schema.get("level").cloned().unwrap_or(json!(0));
+        let level = json!(nonnegative_level(schema.get("level"), node_id));
         let starts_at_root = schema.get("starts_at_root").cloned().unwrap_or(json!(true));
         let connections_colored = schema.get("connections_colored").cloned().unwrap_or(json!(true));
 
@@ -105,5 +129,69 @@ fn simplify_node_schemas(root: &mut Value) {
         if let Some(obj) = node.as_object_mut() {
             obj.insert("color_schema".to_string(), simplified);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hoist_palettes;
+    use serde_json::{json, Value};
+
+    fn legacy_map_with_level(level: Value) -> Value {
+        json!({
+            "version": "1.0",
+            "name": "t",
+            "canvas": {"background_color": "#000"},
+            "nodes": {
+                "0": {
+                    "color_schema": {
+                        "palette": "coral",
+                        "variant": 2,
+                        "level": level,
+                        "starts_at_root": true,
+                        "connections_colored": true,
+                        "groups": [
+                            {"background": "#a9decb", "frame": "#30b082", "text": "#000000", "title": "#000000"}
+                        ]
+                    }
+                }
+            },
+            "edges": []
+        })
+    }
+
+    fn converted_level(level: Value) -> i64 {
+        let mut root = legacy_map_with_level(level);
+        hoist_palettes(&mut root);
+        root["nodes"]["0"]["color_schema"]["level"]
+            .as_i64()
+            .expect("level must survive as an integer")
+    }
+
+    #[test]
+    fn test_hoist_palettes_keeps_a_nonnegative_level() {
+        assert_eq!(converted_level(json!(0)), 0);
+        assert_eq!(converted_level(json!(4)), 4);
+    }
+
+    /// `ColorSchema.level` is a `usize` in the model, so a converted
+    /// file carrying a negative depth would not load back — and a
+    /// converter whose output its own loader refuses is worse than
+    /// one that says what it changed.
+    #[test]
+    fn test_hoist_palettes_floors_a_negative_level_to_the_schema_root() {
+        assert_eq!(converted_level(json!(-1)), 0);
+        assert_eq!(converted_level(json!(-9000)), 0);
+    }
+
+    #[test]
+    fn test_hoist_palettes_defaults_a_missing_level_to_zero() {
+        let mut root = legacy_map_with_level(json!(3));
+        root["nodes"]["0"]["color_schema"]
+            .as_object_mut()
+            .unwrap()
+            .remove("level");
+        hoist_palettes(&mut root);
+        assert_eq!(root["nodes"]["0"]["color_schema"]["level"], json!(0));
     }
 }

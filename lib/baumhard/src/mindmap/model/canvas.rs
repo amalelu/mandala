@@ -16,8 +16,9 @@ use super::{GlyphBorderConfig, GlyphConnectionConfig};
 /// [`super::MindMap`]. Plain data; no runtime cost beyond the
 /// `HashMap` / `String` allocations serde performs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Canvas {
+    /// Whole-canvas fill color as `#RRGGBB` or `var(--name)`,
+    /// resolved against [`Self::theme_variables`] at render time.
     pub background_color: String,
     /// Default border style applied to all nodes unless overridden per-node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,4 +55,26 @@ pub struct Canvas {
     /// activated — these are authoring state, not the live theme.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub theme_variants: HashMap<String, HashMap<String, String>>,
+}
+
+/// The canvas a map has until somebody styles it: the fixture-standard
+/// `#000000` background, no default border / connection / section-frame
+/// styles, empty theme tables. `MindMap::new_blank` installs exactly
+/// this; construction sites that want a different background write it
+/// over the rest via struct-update syntax
+/// (`Canvas { background_color: …, ..Canvas::default() }`).
+///
+/// Cost: one `String` allocation and two empty `HashMap`s.
+impl Default for Canvas {
+    fn default() -> Self {
+        Canvas {
+            background_color: "#000000".to_string(),
+            default_border: None,
+            default_connection: None,
+            default_section_frame_border: None,
+            default_focused_section_frame_border: None,
+            theme_variables: HashMap::new(),
+            theme_variants: HashMap::new(),
+        }
+    }
 }

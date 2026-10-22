@@ -42,6 +42,13 @@ pub mod desktop;
 
 pub mod layered;
 
+/// The shared `XDG_CONFIG_HOME` / `HOME` override harness. One
+/// module rather than a helper per test module, because the lock it
+/// holds only serializes callers that take *the same* lock — see the
+/// module header.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub mod test_env;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod xdg;
 

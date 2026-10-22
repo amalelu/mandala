@@ -55,7 +55,7 @@ fn portals_arr_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
 /// reports a count.
 ///
 /// The write goes through
-/// [`write_atomic`](baumhard::mindmap::loader::write_atomic) — a
+/// [`write_atomic`] — a
 /// sibling staging file plus a rename — which is what lets callers
 /// pass the same path for input and output: the read has already
 /// completed, and the original file is never opened for writing, so

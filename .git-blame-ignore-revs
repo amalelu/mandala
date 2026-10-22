@@ -1,0 +1,15 @@
+# Commits that are purely mechanical formatting, listed so `git blame`
+# attributes a line to the change that wrote it rather than the sweep
+# that rewrapped it. GitHub's blame view reads this file automatically;
+# locally it is a one-time opt-in:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only commits that contain nothing but formatter output belong here.
+# The April 2026 predecessor (290b9e34, "Phase A: codify rustfmt
+# config + apply cargo fmt --all") is deliberately not listed: it
+# mixed the config's creation with the reformat, and hiding it from
+# blame would hide the config's origin.
+
+# cargo fmt --all over 83 files (#130, PR #139)
+d3872dbe211145aab39b61f9b2c0225c01373161

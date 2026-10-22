@@ -107,7 +107,7 @@ pub(super) fn area_rect(area: &crate::gfx_structs::area::GlyphArea) -> (glam::Ve
 /// "click right on this thing" probe.
 pub(super) fn area_center(area: &crate::gfx_structs::area::GlyphArea) -> glam::Vec2 {
     let (pos, extent) = area_rect(area);
-    pos + extent * 0.5
+    crate::util::geometry::aabb_center(pos, extent)
 }
 
 /// The `(icon, text)` `GlyphArea` pair under endpoint `endpoint_idx`
@@ -190,6 +190,10 @@ pub(super) struct ProjectedRoles {
     /// Clip boxes (`top_left`, `size`) the connection pass filtered
     /// samples against.
     pub node_aabbs: Vec<(glam::Vec2, glam::Vec2)>,
+    /// How many distinct `ConnectionPath`s the two connection passes
+    /// built between them — [`super::super::EdgePathCache::built`] on
+    /// the memo they shared.
+    pub paths_built: usize,
 }
 
 /// Run every per-role pass against `map`, in the order
@@ -229,6 +233,11 @@ pub(super) fn project_with_cache(
         &hidden,
     );
     let node_aabbs = node_clip_aabbs(map, offsets, border, &hidden);
+    // One memo across both passes, exactly as `CanvasFrame` owns one
+    // across its `update_*` methods — a fixture that gave each pass
+    // its own would report the sharing as absent whether or not it
+    // worked.
+    let mut paths = super::super::EdgePathCache::new(map, offsets);
     let (connection_elements, edge_handles) = build_connection_elements(
         map,
         offsets,
@@ -236,6 +245,7 @@ pub(super) fn project_with_cache(
         selection.edge,
         edge_color,
         cache,
+        &mut paths,
         camera_zoom,
         &hidden,
     );
@@ -245,17 +255,19 @@ pub(super) fn project_with_cache(
         .or_else(|| selection.edge.map(|(f, t, ty)| EdgeKey::new(f, t, ty)));
     let connection_label_elements = build_label_elements(
         map,
-        offsets,
         selection.label_edit,
         edge_color,
         highlight_key.as_ref(),
+        &mut paths,
         camera_zoom,
         &hidden,
     );
+    let paths_built = paths.built();
     ProjectedRoles {
         connection_elements,
         edge_handles,
         connection_label_elements,
+        paths_built,
         border_nodes: border_node_data(
             map,
             offsets,

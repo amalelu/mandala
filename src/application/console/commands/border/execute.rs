@@ -13,101 +13,94 @@ use baumhard::mindmap::border::PaletteField;
 use baumhard::mindmap::border_pattern::SidePattern;
 
 use crate::application::console::parser::Args;
+use crate::application::console::spec::descent::{descend, Stop};
+use crate::application::console::spec::{kvs, usage, Descent};
 use crate::application::console::traits::ColorValue;
 use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::{
     BorderConfigEdits, BorderEditOutcome, BorderSide, MindMapDocument, OptionEdit, SelectionState,
 };
 
+use super::finish::BorderEdit;
+use super::grammar::BORDER;
 use super::positional::{positional_subverb_to_edits, BorderSurface};
 use super::show::execute_border_show;
 
 pub fn execute_border(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    if let Some(verb) = args.positional(0) {
-        // Discriminate "user typed positional subverb" from "user
-        // typed kv form with an unquoted multi-word value". When
-        // the first raw token is a kv (e.g. `palette=My`) and the
-        // first positional comes later, the user clearly meant the
-        // kv form — `args.positional(0)` happening to match a
-        // subverb name (e.g. "Palette") is coincidental and should
-        // route to the quoting-hint branch below, not the
-        // positional dispatcher.
-        let first_token_is_positional = args.tokens().first().map(|t| !t.contains('=')).unwrap_or(false);
-        // C14: case-insensitive subverb match — same posture as
-        // `border preview` already uses, and as `canvas …` and
-        // top-level command lookup. Without normalizing here,
-        // `border Show` falls through to the unknown-subverb arm.
-        match verb.to_ascii_lowercase().as_str() {
-            // Bare-positional subverbs reject trailing arguments so
-            // `border on preset=heavy` doesn't silently drop the kv.
-            "on" => return reject_extras(args, "on", &[]).unwrap_or_else(|| apply_set_visible(eff, true)),
-            "off" => return reject_extras(args, "off", &[]).unwrap_or_else(|| apply_set_visible(eff, false)),
-            "toggle" => {
-                return reject_extras(args, "toggle", &[]).unwrap_or_else(|| apply_toggle_visible(eff))
-            }
-            "show" => return execute_border_show(args, eff),
-            "reset" => return reject_extras(args, "reset", &[]).unwrap_or_else(|| apply_reset(eff)),
-            "preview" => return super::preview::execute_border_preview(args, eff),
-            // Positional subverbs. Each pulls the next positional
-            // as the value and routes through `apply_edits`. The
-            // kv form (`border preset=heavy`) still works as the
-            // keybind-friendly alias. Gated on
-            // `first_token_is_positional` so an unquoted `palette=My
-            // Palette` typo falls to the quoting-hint branch
-            // rather than dispatching `apply_palette_positional`
-            // with the wrong value.
-            "preset" | "color" | "padding" | "palette" | "font" | "side" | "corner"
-                if first_token_is_positional =>
-            {
-                return apply_positional(verb, args, eff);
-            }
-            other if !other.contains('=') => {
-                // A bare positional alongside a recognized kv almost
-                // always means the user typed an unquoted multi-word
-                // value (`border palette=My Palette` → tokens are
-                // `["palette=My", "Palette"]` because the tokenizer
-                // splits on whitespace). Hint at quoting rather than
-                // the generic "unknown subverb" message — the latter
-                // is technically correct but unhelpful.
-                if args.kvs().next().is_some() {
-                    return ExecResult::err(format!(
-                        "border: unexpected positional '{}' alongside a kv pair — \
-                         did you mean to quote a multi-word value? \
-                         e.g. `border palette=\"{}\"`",
-                        verb, verb
-                    ));
-                }
-                return ExecResult::err(unknown_subverb_message(verb));
-            }
-            _ => {}
-        }
+    let descent = descend(&BORDER, args.tokens());
+    // `preview` is the one subverb with a level of its own; the
+    // descent already stepped into it, so the staging surface owns
+    // everything past this point.
+    if descent.parent_name(0) == Some("preview") {
+        return super::preview::execute_border_preview(&descent, args, eff);
     }
+    match descent.stop {
+        Stop::Matched(subverb) => match subverb.name {
+            "on" => bare_subverb(&descent, args, eff, true, apply_set_visible),
+            "off" => bare_subverb(&descent, args, eff, false, apply_set_visible),
+            "toggle" => bare_subverb(&descent, args, eff, (), |eff, ()| apply_toggle_visible(eff)),
+            "reset" => bare_subverb(&descent, args, eff, (), |eff, ()| apply_reset(eff)),
+            "show" => execute_border_show(&descent, args, eff),
+            _ => apply_positional(&descent, args, eff),
+        },
+        // A bare positional at a slot a kv already made kv-form
+        // almost always means an unquoted multi-word value
+        // (`border palette=My Palette` tokenizes as
+        // `["palette=My", "Palette"]`). Hint at quoting rather than
+        // at the subverb the second token coincidentally spells.
+        Stop::KvForm => ExecResult::err(descent.quoting_hint(args)),
+        Stop::Unknown => ExecResult::err(usage::unknown_subverb_message(
+            descent.level,
+            descent.typed.unwrap_or_default(),
+        )),
+        Stop::Bare => apply_composed(&descent, args, eff),
+    }
+}
 
-    // kv form: collect every recognized key, parse + validate
-    // before any mutation. An unknown key aborts with a
-    // pointer-style error.
+/// The composed kv form: collect every key the level declares,
+/// parse and validate before any mutation.
+fn apply_composed(descent: &Descent, args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
+    let pairs = match kvs::read_strict(descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
+    };
+    if pairs.is_empty() {
+        return ExecResult::err(usage::no_arguments_message(&BORDER));
+    }
     let mut edits = BorderConfigEdits::default();
-    let mut saw_any = false;
-    for (k, v) in args.kvs() {
-        saw_any = true;
-        if let Err(e) = stage_kv(&mut edits, k, v) {
+    for pair in &pairs {
+        if let Err(e) = stage_kv(&mut edits, pair.key.name, pair.value) {
             return ExecResult::err(e);
         }
-    }
-    if !saw_any {
-        return ExecResult::err("usage: border on|off|show|reset | border <key>=<value> …");
     }
     apply_edits(eff, edits)
 }
 
+/// A subverb that takes no arguments: refuse anything on the line
+/// past its own name, then run. The refusal is the engine's, so
+/// `border on preset=heavy` names the key it will not read instead
+/// of dropping it.
+fn bare_subverb<T>(
+    descent: &Descent,
+    args: &Args,
+    eff: &mut ConsoleEffects,
+    payload: T,
+    run: fn(&mut ConsoleEffects, T) -> ExecResult,
+) -> ExecResult {
+    match kvs::read_strict(descent, args) {
+        Ok(_) => run(eff, payload),
+        Err(msg) => ExecResult::err(msg),
+    }
+}
+
 fn apply_set_visible(eff: &mut ConsoleEffects, on: bool) -> ExecResult {
-    let ids = match nodes_in_selection(&eff.document.selection, "border") {
+    let ids = match nodes_in_selection(&eff.document().selection, "border") {
         Ok(ids) => ids,
         Err(e) => return e,
     };
     let mut changed = 0usize;
     for id in &ids {
-        if eff.document.set_node_border_visible(id, on) {
+        if eff.document_mut().set_node_border_visible(id, on) {
             changed += 1;
         }
     }
@@ -119,53 +112,6 @@ fn apply_set_visible(eff: &mut ConsoleEffects, on: bool) -> ExecResult {
         if on { "on" } else { "off" },
         changed
     ))
-}
-
-/// `border <typo>` — multi-line error grouping subverbs by
-/// kind. API/UX I7: the prior single-line ~155-char enum
-/// wrapped mid-quote-list on 80-col terminals. The grouped
-/// shape is also load-bearing as a discoverability surface
-/// when the user has clearly misspelled a verb.
-fn unknown_subverb_message(verb: &str) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("border: unknown subverb '{}'\n", verb));
-    out.push_str("  visibility: on | off | toggle | reset\n");
-    out.push_str("  readout:    show [side=…] [verbose]\n");
-    out.push_str("  per-field:  preset | color | padding | palette | font\n");
-    out.push_str("  glyphs:     side <which> <pattern|reset> | corner <which> <glyph|reset>\n");
-    out.push_str("  staged:     preview <kv>=… | preview commit | preview cancel\n");
-    out.push_str("  composed:   <key>=<value> [<key>=<value> …]");
-    out
-}
-
-/// `Some(err)` when the subverb received any unexpected kv or
-/// extra positional, otherwise `None`. Lets bare-positional
-/// subverbs (`on`/`off`/`toggle`/`reset`) reject typos that
-/// would otherwise silently drop arguments.
-fn reject_extras(args: &Args, subverb: &'static str, expected_kvs: &[&'static str]) -> Option<ExecResult> {
-    let extra_kvs: Vec<&str> = args
-        .kvs()
-        .filter(|(k, _)| !expected_kvs.contains(k))
-        .map(|(k, _)| k)
-        .collect();
-    let extra_positionals: Vec<&str> = args.positionals().skip(1).collect();
-    if extra_kvs.is_empty() && extra_positionals.is_empty() {
-        return None;
-    }
-    let mut bits = Vec::new();
-    if !extra_kvs.is_empty() {
-        bits.push(format!("kvs: {}", extra_kvs.join(", ")));
-    }
-    if !extra_positionals.is_empty() {
-        bits.push(format!("extras: {}", extra_positionals.join(" ")));
-    }
-    Some(ExecResult::err(format!(
-        "border {}: takes no arguments — got {}. \
-         For composed edits use the kv form (`border preset=heavy padding=8`) \
-         or stage with `border preview …`.",
-        subverb,
-        bits.join("; ")
-    )))
 }
 
 fn apply_reset(eff: &mut ConsoleEffects) -> ExecResult {
@@ -295,7 +241,7 @@ fn apply_toggle_visible(eff: &mut ConsoleEffects) -> ExecResult {
         toggled,
         now_on,
         now_off,
-    } = match toggle_border_visible_on_selection(eff.document) {
+    } = match toggle_border_visible_on_selection(eff.document_mut()) {
         Ok(report) => report,
         Err(e) => return e,
     };
@@ -321,20 +267,18 @@ fn apply_toggle_visible(eff: &mut ConsoleEffects) -> ExecResult {
 /// [`super::positional::positional_subverb_to_edits`], which the
 /// `canvas …` verbs share; this wrapper only supplies the
 /// per-node surface and renders the outcome.
-fn apply_positional(verb: &str, args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    let staged = match positional_subverb_to_edits(
-        verb,
-        args,
-        /* verb_pos */ 0,
-        BorderSurface::Selection,
-        eff.document,
-    ) {
+fn apply_positional(descent: &Descent, args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
+    let staged = match positional_subverb_to_edits(descent, args, BorderSurface::Selection, eff.document()) {
         Ok(Some(staged)) => staged,
         // Unreachable through `execute_border`'s dispatch (which
-        // only routes the seven known subverbs here), but the
-        // shared parser is honest about unknown verbs and so is
-        // this arm.
-        Ok(None) => return ExecResult::err(unknown_subverb_message(verb)),
+        // only routes matched subverbs here), but the shared parser
+        // is honest about unknown verbs and so is this arm.
+        Ok(None) => {
+            return ExecResult::err(usage::unknown_subverb_message(
+                descent.level,
+                descent.typed.unwrap_or_default(),
+            ))
+        }
         Err(msg) => return ExecResult::err(msg),
     };
     let outcome = apply_edits(eff, staged.edits);
@@ -363,7 +307,7 @@ pub(crate) fn prepend_line(result: ExecResult, header: String) -> ExecResult {
 }
 
 fn apply_edits(eff: &mut ConsoleEffects, edits: BorderConfigEdits) -> ExecResult {
-    let ids = match nodes_in_selection(&eff.document.selection, "border") {
+    let ids = match nodes_in_selection(&eff.document().selection, "border") {
         Ok(ids) => ids,
         Err(e) => return e,
     };
@@ -380,52 +324,28 @@ fn apply_edits(eff: &mut ConsoleEffects, edits: BorderConfigEdits) -> ExecResult
     ) && !edits_has_glyph_field(&edits);
     let mut changed = 0usize;
     let mut auto_promoted: Option<String> = None;
+    let mut rejected: Vec<String> = Vec::new();
     for id in &ids {
-        let outcome: BorderEditOutcome = eff.document.set_node_border_config(id, edits.clone());
+        let outcome: BorderEditOutcome = eff.document_mut().set_node_border_config(id, edits.clone());
         if outcome.changed {
             changed += 1;
         }
         if outcome.preset_auto_promoted && auto_promoted.is_none() {
             auto_promoted = outcome.requested_preset.clone();
         }
-    }
-    let mut lines: Vec<String> = Vec::new();
-    if changed == 0 {
-        // A `preset=custom`-only edit on a node that already records
-        // `preset: custom` is a no-op at the data-model level, but
-        // the user still benefits from the same orientation message
-        // as the changed-path branch. Emit it instead of the bare
-        // "no change" line so the input doesn't feel ignored.
-        if bare_custom {
-            lines.push("border: preset=custom set; no glyph fields were given".into());
-            lines.push(custom_preset_hint("border"));
-            return ExecResult::lines(lines);
+        if rejected.is_empty() {
+            rejected = outcome.rejected;
         }
-        return ExecResult::ok_msg("border: no change");
     }
-    // Surface auto-promotion exactly once per command invocation,
-    // not once per affected node — the same edit applies to every
-    // selected node so the message would be redundant. Only the
-    // first promoted node's `requested_preset` is reported; every
-    // other node received the same edit struct, so the value is
-    // necessarily the same.
-    lines.push(format!("border applied to {} node(s)", changed));
-    if let Some(name) = auto_promoted {
-        lines.push(format!(
-            "note: preset='{}' auto-promoted to 'custom' \
-             (a side or corner glyph was set; non-custom presets \
-             ignore the per-node glyph override)",
-            name
-        ));
+    BorderEdit {
+        label: "border",
+        scope: "node",
+        headline: (changed > 0).then(|| format!("border applied to {} node(s)", changed)),
+        rejected,
+        auto_promoted,
+        bare_custom,
     }
-    if bare_custom {
-        lines.push(custom_preset_hint("border"));
-    }
-    if lines.len() == 1 {
-        ExecResult::ok_msg(lines.into_iter().next().expect("len==1"))
-    } else {
-        ExecResult::lines(lines)
-    }
+    .finish()
 }
 
 /// Mutation core: apply a single `field=value` edit to every node
@@ -437,9 +357,29 @@ fn apply_edits(eff: &mut ConsoleEffects, edits: BorderConfigEdits) -> ExecResult
 ///
 /// Returns `true` when at least one node actually changed; `false`
 /// when no node selection exists, the field/value pair fails to
-/// stage, or every selected node was already at the requested
-/// value. The Action arm uses the bool to decide whether to trigger
-/// a scene rebuild.
+/// stage, the setter refuses the edit, or every selected node was
+/// already at the requested value. The Action arm uses the bool to
+/// decide whether to trigger a scene rebuild.
+///
+/// **Every `false` that is not "already at that value" says why.**
+/// There is no scrollback on this path — the caller is a keybind,
+/// a palette press or a macro step — so a returned `false` is the
+/// whole of what the user sees, and a binding that can never work
+/// is indistinguishable from one that has nothing to do. The two
+/// kinds of `false` take different levels, per CODE_CONVENTIONS §9:
+///
+/// - **`warn!` for the permanent ones.** A `field=value` the
+///   staging parser rejects, and an edit the setter refuses, are
+///   properties of the binding and the value, not of the moment.
+///   The binding is dead until the config changes, and `warn!`
+///   survives into release, where the user who has to change it is.
+///   The parser's and the setter's own messages are carried through
+///   — they are the diagnosis, and this function used to discard
+///   them.
+/// - **`debug!` for the transient one.** "Nothing selected" is
+///   answered by selecting something. It is also the state a stray
+///   keypress lands in, so a `warn!` would flood a release build's
+///   stderr with a condition that is not a defect.
 #[must_use = "the bool gates the scene rebuild — drop it explicitly with `let _ = …` if you don't care"]
 pub(crate) fn apply_border_field_to_selection(
     doc: &mut crate::application::document::MindMapDocument,
@@ -447,16 +387,39 @@ pub(crate) fn apply_border_field_to_selection(
     value: &str,
 ) -> bool {
     let mut edits = BorderConfigEdits::default();
-    if stage_kv(&mut edits, field, value).is_err() {
+    if let Err(why) = stage_kv(&mut edits, field, value) {
+        log::warn!(
+            "border: binding sets {}={:?}, which is not a valid border edit: {} \
+             (no scrollback on the keybind path; this binding cannot apply)",
+            field,
+            value,
+            why
+        );
         return false;
     }
     let ids = match nodes_in_selection(&doc.selection, "border") {
         Ok(ids) => ids,
-        Err(_) => return false,
+        Err(_) => {
+            log::debug!(
+                "border: {}={:?} has no node in the current selection to apply to",
+                field,
+                value
+            );
+            return false;
+        }
     };
     let mut changed = false;
     for id in &ids {
         let outcome = doc.set_node_border_config(id, edits.clone());
+        if !outcome.rejected.is_empty() {
+            log::warn!(
+                "border: node {:?} refused {}={:?}: {}",
+                id,
+                field,
+                value,
+                outcome.rejected.join("; ")
+            );
+        }
         if outcome.changed {
             changed = true;
         }
@@ -494,25 +457,6 @@ pub(crate) fn custom_preset_hint(verb_label: &str) -> String {
          See `format/border-patterns.md` for the side-pattern grammar.",
         verb_label
     )
-}
-
-/// Per-key hint string for the shared `border` kv vocabulary.
-/// `border …`, `section frame …`, and `canvas …` all surface the
-/// same hints in completion popups; this is the single source of
-/// truth.
-pub(crate) fn kv_hint(key: &str) -> Option<&'static str> {
-    match key {
-        "preset" => Some("light | heavy | double | rounded | custom"),
-        "font" => Some("font family for border glyphs (use `font list` for names)"),
-        "size" => Some("border glyph size in points"),
-        "color" => Some("#hex, var(--name), preset, or 'reset'"),
-        "palette" => Some("palette name to cycle per-glyph colors, or 'off'"),
-        "field" => Some("frame | background | text | title"),
-        "padding" => Some("border-to-content padding in pixels"),
-        "top" | "bottom" | "left" | "right" => Some("side pattern: `prefix(fill)suffix` or atomic"),
-        "tl" | "tr" | "bl" | "br" => Some("single corner glyph (escapes apply)"),
-        _ => None,
-    }
 }
 
 /// Resolve the selection into a list of node ids — borders
@@ -598,7 +542,14 @@ fn stage_preset(edits: &mut BorderConfigEdits, value: &str) -> Result<(), String
 }
 
 fn stage_font(edits: &mut BorderConfigEdits, value: &str) -> Result<(), String> {
-    if value == "off" || value.is_empty() {
+    // `eq_ignore_ascii_case`, as `stage_palette` and `stage_field`
+    // read their own `off` — three sibling sentinels on one verb had
+    // no business obeying two rules, and the exact compare answered
+    // `border font OFF` with "font 'OFF' is not a loaded font" while
+    // `border palette OFF` cleared. A loaded family named `off` is
+    // unreachable either way; the sentinel is documented in this
+    // subverb's usage line and a family is not.
+    if value.eq_ignore_ascii_case("off") || value.is_empty() {
         edits.font = OptionEdit::Clear;
         return Ok(());
     }
@@ -654,10 +605,13 @@ fn stage_field(edits: &mut BorderConfigEdits, value: &str) -> Result<(), String>
         "background" => PaletteField::Background,
         "text" => PaletteField::Text,
         "title" => PaletteField::Title,
-        other => {
+        _ => {
+            // Echo `value`, not the lowercased copy: the user reads
+            // this back looking for their own typo. Its sibling
+            // `stage_preset` nine lines up already does.
             return Err(format!(
                 "field '{}' unknown; pick one of {}",
-                other,
+                value,
                 super::FIELDS.join(" | ")
             ));
         }

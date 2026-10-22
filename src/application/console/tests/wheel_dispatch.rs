@@ -24,10 +24,10 @@ fn wheel_color_on_node_paints_background() {
         view.apply_wheel_color(ColorValue::Hex("#112233".into()))
     };
     assert_eq!(outcome, Outcome::Applied);
-    assert_eq!(
-        doc.mindmap.nodes.get(&nid).unwrap().style.background_color,
-        "#112233"
-    );
+    // Through the cascade — a themed node's fill is not
+    // `style.background_color`.
+    let node = doc.mindmap.nodes.get(&nid).unwrap();
+    assert_eq!(doc.mindmap.node_background_color(node), "#112233");
 }
 
 /// An edge under the wheel takes its color on the **single edge
@@ -102,9 +102,10 @@ fn wheel_color_section_writes_through_text_color() {
         "#aaaaaa",
         ["#aaaaaa", "#aaaaaa"],
         "LiberationSans",
-        14,
+        14.0,
     );
-    let tid = TargetId::Section { range: None,
+    let tid = TargetId::Section {
+        range: None,
         node_id: nid.clone(),
         section_idx: 1,
     };

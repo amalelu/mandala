@@ -92,9 +92,10 @@ pub fn load_desktop_layered<T>(
 mod tests {
     // The XDG layer's own coverage — it winning when no explicit path
     // is given, and losing to one when it is — lives in `xdg.rs`'s
-    // test module, which owns the `ENV_LOCK` / `with_env` harness that
-    // makes overriding `XDG_CONFIG_HOME` safe under the multi-threaded
-    // test runner. A second harness here would race that one.
+    // test module, beside the path resolution it is about. The
+    // `XDG_CONFIG_HOME` override both modules need comes from
+    // `super::test_env`: one harness for the whole suite, because a
+    // second mutex would serialize only its own callers.
     use super::*;
 
     /// Accepts anything that is not `!`-prefixed, uppercased so the

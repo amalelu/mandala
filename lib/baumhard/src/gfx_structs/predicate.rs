@@ -135,8 +135,7 @@ impl Comparator {
 /// Costs: `test()` is O(n) in `fields.len()`, but typical predicates
 /// carry one or two fields so the cost is effectively O(1). No
 /// allocation on the test path.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Predicate {
     /// The field/comparator pairs to evaluate against a candidate element.
     /// Evaluation stops at the first pair whose field matches the element's

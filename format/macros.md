@@ -6,7 +6,7 @@ keybind layer can fire as a single unit. A macro is a list of
 id in `keybinds.json` and pressing the key runs the whole sequence.
 
 Macros are a *user-authoring layer* on top of the existing dispatch
-funnel — they don't introduce new behaviours, just orchestrate
+funnel — they don't introduce new behaviors, just orchestrate
 existing ones (`Action`, `CustomMutation`, console verbs).
 
 This document is the on-disk format reference. For the Rust-side
@@ -127,15 +127,97 @@ action, no document loaded) keep the existing best-effort
 **IPC is not a tier.** Commands arriving over the `--ipc` socket
 ([`format/ipc.md`](./ipc.md)) execute at `User` posture — the user
 owns the flag exactly as they own this file. Macros fired *via* IPC
-(`act.macro`) keep their own loader-pinned tier: IPC initiates, it
-never escalates, and the fail-closed gates above run unchanged.
-Rationale: `work_plans/LLM_IPC.md` §D4.
+(`act.macro` with a `macro_id`) keep their own loader-pinned tier:
+IPC initiates, it never escalates, and the fail-closed gates above
+run unchanged. An anonymous step list sent as `act.macro`'s `steps`
+was authored by the IPC client, so it runs at `User`. It runs
+through the same gated step loop, not a second one. A gate
+rejection is logged under the code `macro_gate_rejected`, which an
+IPC reply carries as a warning. Rationale: `work_plans/LLM_IPC.md`
+§D4.
+
+### The load-time trust boundary
+
+The privilege gates above answer "what may a map *do*". They are
+only half the question, because a map does not need a capability to
+kill the editor — it only needs a number the renderer trusts. Every
+`f32` in the format ends up in something that is not defensive:
+cosmic-text asserts a line height is non-zero, `f32::clamp` panics
+on inverted bounds, and the border and connection builders size a
+`String` and a `Vec` from authored geometry. None of those degrade;
+an `assert!` inside the scene build and an allocator abort are not
+panics, so CODE_CONVENTIONS §9's "log and keep running" has nothing
+to run.
+
+So the numbers are screened once, at the door, by
+`lib/baumhard/src/mindmap/model/validate.rs`, which the loader runs
+as its last invariant. It **rejects rather than repairs** — the same
+posture the loader already took for structure — and the message
+names the part to fix. What it covers:
+
+- **Font metrics** — every `font_size_pt`, `size_pt`, and min/max
+  pair on borders, connections, labels, portals, and text runs must
+  be finite and within `[0.5, 4096]`pt. Zero is what aborts the
+  shaper; a sub-point size asks the border fitter for millions of
+  glyphs.
+- **Inverted clamps** — a `min > max` pair is refused, because the
+  size cascades hand one straight to `f32::clamp`.
+- **Geometry** — node sizes, positions, section offsets, and Bezier
+  control points must be finite and bounded. JSON has no `Infinity`
+  literal, but `1e39` does not fit an `f32` and arrives as one.
+- **Text runs** — sorted, non-overlapping, non-empty, inside the
+  section's text. These were always the model's assumption;
+  overlapping runs made the styled-span bridge re-emit the same
+  graphemes once per covering run.
+- **Identity** — a `nodes` key must equal its node's `id`. The two
+  spellings address different graphs (the cycle check walks keys,
+  `ChildIndex` walks `node.id`), and a mismatch let a self-loop past
+  the cycle rejection into a scene build that never terminates.
+- **Mutation timing** — `custom_mutations` and `inline_mutations`
+  are walked for their animation envelopes, since a map's own
+  mutation fires on a click and would otherwise deliver its numbers
+  one interaction after the checks. The *mutator payload* itself —
+  the `MutatorNode` AST, whose leaves can set a font scale directly
+  — is deliberately **not** screened here. It is defended the other
+  way, by clamping where the value lands (`GlyphArea`'s scale
+  setters and its delta path), because console verbs, macros and IPC
+  write the same fields without passing the loader at all. Screening
+  the AST as well would be a second wall, not the only one.
+- **File size** — `MAX_MAP_BYTES`, checked by `stat` before the read
+  commits to the allocation.
+
+Two structural defenses sit behind it. Every walker over `parent_id`
+depth is **iterative** — a linear chain is a legal acyclic tree, and
+recursing over one exhausted the stack and killed the process from
+`fold_hidden_set`, the scene build, the subtree-AABB pass, and the
+BVH hit-test. Three more sit outside `baumhard` and are held to the
+same rule: `walk_drag_subtree`
+(`src/application/document/hit_test.rs`), which died on the first
+*drag* over a deep map — after the load and the scene build had both
+survived, which is exactly what made it easy to miss;
+`arena_utils::clone_subtree`, which no shipping path reaches today
+but is `pub`, with the undo stack as its named consumer; and
+`maptool`'s legacy id assignment (`convert/ids.rs`), which walks a
+*legacy* file's parent chain during `convert --legacy` — a file from
+wherever the user got it, so the same depth argument applies to the
+migration tool as to the editor. And the
+font metric is **clamped where it lands**
+(`GlyphArea`'s scale setters), not only at the door, because console
+verbs, macros, and IPC write there without passing the loader at
+all.
+
+`maptool verify` deliberately does *not* inherit this door: it uses
+`loader::parse_for_inspection`, because the files worth asking about
+are exactly the ones the editor refuses, and "cannot load" is the
+one answer the user already has.
 
 ### Threat model
 
-Map and Inline tiers ship today; **opening any `.mindmap.json` from
-an untrusted source IS a privilege event**. Treat third-party
-mindmap files as code, not data:
+Map and Inline tiers ship today, and **a third-party
+`.mindmap.json` is still a privilege event** — a smaller one than it
+was, but the capability surface above is what decides that, not the
+numeric screening. Treat third-party mindmap files as code, not
+data:
 
 - A hostile mindmap can bind any non-destructive Action to a hotkey
   the user is likely to press (Enter, Tab, etc.).
@@ -145,6 +227,75 @@ mindmap files as code, not data:
   exfiltration).
 - A hostile mindmap CANNOT run console verbs, save the file, delete
   selection, or touch the clipboard — those are all gated above.
+- A hostile mindmap can no longer *crash* the editor with a number:
+  the cases that did — a zero font size, an inverted clamp, absurd
+  geometry, a deep `parent_id` chain, a key that disagreed with its
+  node's `id` — are refused at load or bounded where they land. See
+  the trust boundary above.
+
+**What is not yet closed**, so nobody reads the section above as a
+finished job:
+
+- The resource caps are mostly **per element**, and element count is
+  not capped. One border side cannot emit more than 100k glyphs, and a
+  map may carry a great many sides; the aggregate per frame is still
+  unbounded for everything except connection glyphs.
+  A frame budget is the real answer and exists only for that one axis.
+
+  Connection sampling *is* now bounded in aggregate:
+  `MAX_TOTAL_PATH_SAMPLES` (500k) is divided equally among the map's
+  edges, because the per-path cap alone let a 73 KB file with 200 edges
+  ask for 2 000 000 glyph areas — a 2 000 201-node arena and 1 642 MiB
+  resident, from a file smaller than any map in this repository. The
+  same file now reaches 500 000 samples and 416 MiB, and no document
+  can exceed that however many edges it declares.
+  `maps/testament.mindmap.json` (16 259 samples over 258 edges) and
+  `maps/stress_long_edges.mindmap.json` (46 290 over 124) are
+  unaffected — the budget is an order of magnitude above the heavier
+  of them.
+
+  **The share is equal per edge, not first-come**, so the outcome does
+  not depend on iteration order and no edge renders while a later one
+  vanishes. What degrades under a pathological map is glyph *density*
+  along every connection at once, which is the graceful form of this
+  failure. A map with a hundred thousand edges gets five glyphs each;
+  that is thin, and it is the trade against not opening at all.
+- **Edge hit-testing re-samples curved edges on every click.**
+  `hit_test_edge` walks each Bezier from scratch per canvas click
+  rather than reusing the samples the scene build already produced,
+  so a map full of long curved edges makes every click expensive.
+  The per-path cap bounds one edge; nothing bounds the sum, and the
+  fix is a cache or a spatial pre-filter rather than a smaller cap.
+- The `OnClick` trigger path consults no `SourceTier`. Today's two
+  `DocumentAction` variants are pure in-memory theme writes, so the
+  reachable damage is bounded — but the gate the privilege model
+  describes lives on the macro dispatcher only, and a new variant
+  would widen this silently. `DocumentAction`'s `#[non_exhaustive]`
+  is the reminder; an `allows_document_action` sibling to
+  `allows_action` is the fix.
+- `MAX_FONT_SIZE_PT` combined with the maximum camera zoom can still
+  ask the rasterizer for a very large glyph.
+- **The browser's `?map=` takes a whole URL, not a path.** The value
+  goes to `fetch` verbatim, so an absolute one loads a third-party
+  map cross-origin (the attacker's own server decides its CORS). The
+  content is screened like any other — the WASM path runs
+  `load_from_str` — but the *provenance* step is gone: there is no
+  file the user chose to open, only a link they clicked. Restricting
+  the parameter to a same-origin path is a product decision, not a
+  bug fix, which is why it is named here rather than changed.
+- **Map and Inline outrank User in the tier order.** That is
+  deliberate — a map should be able to specialize behavior for its
+  own content — but it means an opened map shadows the user's own
+  macro on an id collision, so a key bound in
+  `~/.config/mandala/macros.json` can do what the map chose instead.
+  The gates bound *what* that is (no console verbs, nothing
+  destructive), and the shadowing is reversible: closing the map
+  clears the Map tier and the user's entry re-emerges. Reversing the
+  order is a format-wide decision touching the six places the
+  SOURCE-OF-TRUTH comment above names.
+- A node's `sections` array is capped *after* serde has already
+  allocated it, so the cap bounds the model rather than the parse.
+  `MAX_MAP_BYTES` is what actually bounds the allocation today.
 
 If a future contributor adds a `DocumentAction` variant that
 performs file I/O, network access, or arbitrary content load, the
@@ -249,7 +400,7 @@ use (animation-aware via `cm.timing`, always invokes
 
 **User-tier-only.** Re-parse the given line through the console
 parser and run it as if typed. Lets macros leverage every
-parameterised verb (`border preset=triple`, `color bg=#fafafa`,
+parameterized verb (`border preset=triple`, `color bg=#fafafa`,
 etc.) without needing a bespoke step kind.
 
 ```json

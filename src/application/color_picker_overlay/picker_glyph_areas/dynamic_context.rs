@@ -10,16 +10,16 @@ use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use baumhard::core::primitives::ColorFontRegions;
-use baumhard::font::fonts::AppFont;
 use baumhard::font::color::{cosmic_color_from_rgba, cosmic_color_to_rgba};
+use baumhard::font::fonts::AppFont;
 use baumhard::gfx_structs::area::GlyphAreaField;
 use baumhard::util::color::{hsv_to_hex, hsv_to_rgb};
 use baumhard::util::grapheme_chad::count_grapheme_clusters;
 
 use crate::application::color_picker::{
     arm_bottom_font, hue_slot_to_degrees, sat_cell_to_value, sat_value_to_cell, val_cell_to_value,
-    val_value_to_cell, ColorPickerLayout, ColorPickerOverlayGeometry, PickerHit,
-    CROSSHAIR_CENTER_CELL, HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT,
+    val_value_to_cell, ColorPickerLayout, ColorPickerOverlayGeometry, PickerHit, CROSSHAIR_CENTER_CELL,
+    HUE_SLOT_COUNT, SAT_CELL_COUNT, VAL_CELL_COUNT,
 };
 use crate::application::color_picker_overlay::color::{
     highlight_hovered_cell_color, highlight_selected_cell_color,
@@ -176,7 +176,7 @@ pub(super) struct PickerDynamicContext<'a> {
     /// per-font-size scales (`font_size`, `ring_font_size`,
     /// `cell_font_size`, `preview_size`) the dynamic mutator's `scale`
     /// field reads. Borrowed because the layout lives on
-    /// `ColorPickerState::Open.layout` for the same frame.
+    /// `OpenPicker::layout` for the same frame.
     layout: &'a ColorPickerLayout,
     /// Preview color in cosmic form — reused by title/hint/hex/preview
     /// (when not commit-hovered).
@@ -422,11 +422,9 @@ mod tests {
 
     fn geom(hue_deg: f32, sat: f32, val: f32) -> ColorPickerOverlayGeometry {
         ColorPickerOverlayGeometry {
-            target_label: "edge",
             hue_deg,
             sat,
             val,
-            preview_hex: String::new(),
             hex_visible: false,
             max_cell_advance: 16.0,
             max_ring_advance: 24.0,
@@ -439,7 +437,6 @@ mod tests {
             arm_left_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
             arm_right_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
             preview_ink_offset: (0.0, 0.0),
-            selection_hint: None,
         }
     }
 

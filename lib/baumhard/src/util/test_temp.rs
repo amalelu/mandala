@@ -122,7 +122,10 @@ mod tests {
     fn test_temp_dir_name_carries_the_label_and_pid() {
         let dir = TempDir::new("labeled-probe");
         let name = dir.path().file_name().unwrap().to_string_lossy().to_string();
-        assert!(name.contains("labeled-probe"), "name must carry the label: {name}");
+        assert!(
+            name.contains("labeled-probe"),
+            "name must carry the label: {name}"
+        );
         assert!(
             name.contains(&std::process::id().to_string()),
             "name must carry the pid: {name}"

@@ -34,12 +34,10 @@
 pub(in crate::application::app) fn compute_picker_geometry(
     state: &mut crate::application::color_picker::ColorPickerState,
     surface_size: (f32, f32),
-    selection_hint: Option<String>,
 ) -> Option<(crate::application::color_picker::ColorPickerOverlayGeometry, bool)> {
     use crate::application::color_picker::{
-        compute_color_picker_layout, ColorPickerOverlayGeometry, ColorPickerState,
+        compute_color_picker_layout, ColorPickerOverlayGeometry, OpenPicker,
     };
-    use baumhard::util::color::hsv_to_hex;
 
     // Extract only the fields `compute_color_picker_layout` needs,
     // plus a copy of the backdrop tuple from the cached layout for
@@ -47,7 +45,6 @@ pub(in crate::application::app) fn compute_picker_geometry(
     // ~200 bytes cheaper than cloning the whole ColorPickerLayout
     // (with its fixed-size cell-position arrays) every hover.
     let (
-        target_label,
         hue_deg,
         sat,
         val,
@@ -64,10 +61,9 @@ pub(in crate::application::app) fn compute_picker_geometry(
         arm_left_ink_offsets,
         arm_right_ink_offsets,
         preview_ink_offset,
-    ) = match state {
-        ColorPickerState::Closed => return None,
-        ColorPickerState::Open {
-            mode,
+    ) = match state.as_open() {
+        None => return None,
+        Some(OpenPicker {
             hue_deg,
             sat,
             val,
@@ -86,13 +82,9 @@ pub(in crate::application::app) fn compute_picker_geometry(
             arm_right_ink_offsets,
             preview_ink_offset,
             ..
-        } => {
+        }) => {
             let (eff_hue, eff_sat, eff_val) = hover_preview.unwrap_or((*hue_deg, *sat, *val));
             (
-                match mode {
-                    crate::application::color_picker::PickerMode::Contextual { handle, .. } => handle.label(),
-                    crate::application::color_picker::PickerMode::Standalone => "",
-                },
                 eff_hue,
                 eff_sat,
                 eff_val,
@@ -133,11 +125,9 @@ pub(in crate::application::app) fn compute_picker_geometry(
     };
 
     let geometry = ColorPickerOverlayGeometry {
-        target_label,
         hue_deg,
         sat,
         val,
-        preview_hex: hsv_to_hex(hue_deg, sat, val),
         hex_visible,
         max_cell_advance,
         max_ring_advance,
@@ -150,7 +140,6 @@ pub(in crate::application::app) fn compute_picker_geometry(
         arm_left_ink_offsets,
         arm_right_ink_offsets,
         preview_ink_offset,
-        selection_hint,
     };
 
     // Cache the layout into the state so the mouse hit-test can use
@@ -160,8 +149,8 @@ pub(in crate::application::app) fn compute_picker_geometry(
     // center_override, ink-offset measurement update).
     let (surface_w, surface_h) = surface_size;
     let layout = compute_color_picker_layout(&geometry, surface_w, surface_h);
-    let layout_changed = if let ColorPickerState::Open { layout: cached, .. } = state {
-        let changed = cached.as_ref().map_or(true, |c| c != &layout);
+    let layout_changed = if let Some(OpenPicker { layout: cached, .. }) = state.as_open_mut() {
+        let changed = cached.as_ref() != Some(&layout);
         *cached = Some(layout);
         changed
     } else {

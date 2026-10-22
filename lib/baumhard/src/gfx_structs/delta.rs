@@ -59,7 +59,6 @@ pub trait DeltaField: Discriminated + Clone + Debug + PartialEq {
     serialize = "F: Serialize, <F as Discriminated>::Discriminant: Serialize",
     deserialize = "F: Deserialize<'de>, <F as Discriminated>::Discriminant: Deserialize<'de>"
 ))]
-#[serde(deny_unknown_fields)]
 pub struct Delta<F: DeltaField> {
     /// One entry per touched field kind, keyed by the field's tag.
     /// The [`DeltaField::OPERATION_KEY`] entry is a sibling of the

@@ -125,14 +125,6 @@ impl<'a> Args<'a> {
         Self { tokens }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.tokens.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.tokens.len()
-    }
-
     pub fn tokens(&self) -> &'a [String] {
         self.tokens
     }
@@ -154,18 +146,6 @@ impl<'a> Args<'a> {
     /// *first* `=`, so `color=var(--x)` yields `("color", "var(--x)")`.
     pub fn kvs(&self) -> impl Iterator<Item = (&str, &str)> {
         self.tokens.iter().filter_map(|t| split_kv(t))
-    }
-
-    /// Fetch the value for a given key; returns the last occurrence
-    /// if the key appears more than once in the token list.
-    pub fn kv(&self, key: &str) -> Option<&str> {
-        let mut last = None;
-        for (k, v) in self.kvs() {
-            if k == key {
-                last = Some(v);
-            }
-        }
-        last
     }
 }
 
@@ -296,21 +276,24 @@ mod tests {
     }
 
     #[test]
-    fn test_args_kv_splits_on_first_equals_only() {
-        // Value with `=` inside (e.g. a data-url) keeps its remaining
-        // equals intact. Relevant for `var(--x)` and future URL-ish
-        // values.
+    fn test_args_kvs_splits_on_first_equals_only() {
+        // A value carrying `=` inside (e.g. a data-url or a CSS
+        // `var()`) keeps its remaining equals intact.
         let toks: Vec<String> = vec!["color=var(--x)".into()];
         let args = Args::new(&toks);
-        assert_eq!(args.kv("color"), Some("var(--x)"));
+        assert_eq!(args.kvs().collect::<Vec<_>>(), vec![("color", "var(--x)")]);
     }
 
+    /// A repeated key yields both pairs in line order; picking the
+    /// last is the reader's job (`spec::kvs::value` does it, with
+    /// the shell intuition that the last one sticks).
     #[test]
-    fn test_args_kv_last_occurrence_wins() {
-        // Users repeating a key override earlier value — matches the
-        // shell-intuition "last one sticks".
+    fn test_args_kvs_keeps_every_occurrence_in_order() {
         let toks: Vec<String> = vec!["bg=#111".into(), "bg=#222".into()];
         let args = Args::new(&toks);
-        assert_eq!(args.kv("bg"), Some("#222"));
+        assert_eq!(
+            args.kvs().collect::<Vec<_>>(),
+            vec![("bg", "#111"), ("bg", "#222")]
+        );
     }
 }

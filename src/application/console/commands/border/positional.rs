@@ -22,6 +22,7 @@
 use baumhard::mindmap::border::{next_border_preset, preset_glyph_set};
 
 use crate::application::console::parser::Args;
+use crate::application::console::spec::{kvs, usage, Descent};
 use crate::application::document::{BorderConfigEdits, BorderSide, MindMapDocument, OptionEdit};
 
 use super::execute::{first_non_custom_preset, first_selection_preset, stage_kv};
@@ -130,44 +131,39 @@ pub(crate) struct PositionalEdits {
 /// Translate a positional border subverb into a staged
 /// [`BorderConfigEdits`] bundle.
 ///
-/// `verb_pos` is the index of the subverb token among the
-/// positionals, so the value sits at `verb_pos + 1` and a
-/// `side` / `corner` payload at `verb_pos + 2`. That's `0` for
-/// `border preset heavy`, `1` for `canvas border preset heavy`,
-/// and `2` for `canvas section-frame focused preset heavy`.
+/// `descent` names the level, the subverb and the positional slot
+/// it sat in, so the value reads at slot 0 of that subverb whether
+/// the surface is `border preset heavy`, `canvas border preset
+/// heavy` or `canvas section-frame focused preset heavy` — the
+/// three used to pass `verb_pos` as a hand-counted `0` / `1` / `2`.
+/// The `usage:` line each missing value reports is the very line
+/// `help` prints for that form, derived from the same declaration.
 ///
-/// Returns `Ok(None)` when `verb` isn't a positional subverb at
-/// all — the caller owns the "unknown subverb" message because
-/// each surface lists a different set of siblings. Errors are
-/// plain strings; the caller lifts them into its own
-/// `ExecResult::Err`.
+/// Returns `Ok(None)` when the descent matched no subverb at all —
+/// the caller owns the "unknown subverb" message because each
+/// surface lists a different set of siblings. Errors are plain
+/// strings; the caller lifts them into its own `ExecResult::Err`.
 pub(crate) fn positional_subverb_to_edits(
-    verb: &str,
+    descent: &Descent,
     args: &Args,
-    verb_pos: usize,
     surface: BorderSurface,
     doc: &MindMapDocument,
 ) -> Result<Option<PositionalEdits>, String> {
-    let label = surface.label();
+    let Some(subverb) = descent.subverb() else {
+        return Ok(None);
+    };
+    let verb_pos = descent.slot;
+    let usage_line = usage::subverb_usage(descent.level, subverb);
+    // The two refusals every form owes, asked once for all four
+    // surfaces: a kv this subverb does not read, and a positional
+    // past its declared slots. `border preset heavy color=#fff`
+    // dropped the color without a word until this line existed.
+    let pairs = kvs::read_strict(descent, args)?;
     let mut edits = BorderConfigEdits::default();
     let mut cycled_to: Option<String> = None;
-    match verb.to_ascii_lowercase().as_str() {
+    match subverb.name {
         "preset" => {
-            let value = required_value(
-                args,
-                verb_pos + 1,
-                format!(
-                    "usage: {} preset <light|heavy|double|rounded|custom|cycle>",
-                    label
-                ),
-            )?;
-            reject_extra_positional(
-                args,
-                verb_pos + 2,
-                &format!("{} preset {}", label, value),
-                label,
-                "preset=heavy padding=8",
-            )?;
+            let value = required_value(args, verb_pos + 1, usage_line)?;
             let name_lc = value.to_ascii_lowercase();
             if name_lc == "cycle" {
                 let target = surface.next_preset(doc);
@@ -185,60 +181,31 @@ pub(crate) fn positional_subverb_to_edits(
             }
         }
         "color" => {
-            let value = required_value(
-                args,
-                verb_pos + 1,
-                format!("usage: {} color <#hex|var(--name)|preset|reset>", label),
-            )?;
-            reject_extra_positional(
-                args,
-                verb_pos + 2,
-                &format!("{} color", label),
-                label,
-                "color=#fff padding=8",
-            )?;
+            let value = required_value(args, verb_pos + 1, usage_line)?;
             stage_kv(&mut edits, "color", value)?;
         }
         "padding" => {
-            let value = required_value(args, verb_pos + 1, format!("usage: {} padding <px>", label))?;
-            reject_extra_positional(
-                args,
-                verb_pos + 2,
-                &format!("{} padding", label),
-                label,
-                "padding=8 color=#fff",
-            )?;
+            let value = required_value(args, verb_pos + 1, usage_line)?;
             stage_kv(&mut edits, "padding", value)?;
         }
         "palette" => {
-            let value = required_value(
-                args,
-                verb_pos + 1,
-                format!(
-                    "usage: {} palette <name|off> [field=<frame|background|text|title>]",
-                    label
-                ),
-            )?;
+            let value = required_value(args, verb_pos + 1, usage_line)?;
             stage_kv(&mut edits, "palette", value)?;
             // The optional `field=` kv composes with the positional
             // palette name — `border palette coral field=text`.
-            if let Some((_, fv)) = args.kvs().find(|(k, _)| *k == "field") {
+            if let Some(fv) = kvs::value(&pairs, "field") {
                 stage_kv(&mut edits, "field", fv)?;
             }
         }
         "font" => {
-            let value = required_value(
-                args,
-                verb_pos + 1,
-                format!("usage: {} font <family|off> [size=<pt>]", label),
-            )?;
+            let value = required_value(args, verb_pos + 1, usage_line)?;
             stage_kv(&mut edits, "font", value)?;
-            if let Some((_, sv)) = args.kvs().find(|(k, _)| *k == "size") {
+            if let Some(sv) = kvs::value(&pairs, "size") {
                 stage_kv(&mut edits, "size", sv)?;
             }
         }
-        "side" => stage_side(args, verb_pos, surface, doc, &mut edits)?,
-        "corner" => stage_corner(args, verb_pos, surface, doc, &mut edits)?,
+        "side" => stage_side(args, verb_pos, usage_line, surface, doc, &mut edits)?,
+        "corner" => stage_corner(args, verb_pos, usage_line, surface, doc, &mut edits)?,
         _ => return Ok(None),
     }
     Ok(Some(PositionalEdits { edits, cycled_to }))
@@ -253,19 +220,13 @@ pub(crate) fn positional_subverb_to_edits(
 fn stage_side(
     args: &Args,
     verb_pos: usize,
+    usage_line: String,
     surface: BorderSurface,
     doc: &MindMapDocument,
     edits: &mut BorderConfigEdits,
 ) -> Result<(), String> {
     let label = surface.label();
-    let which = required_value(
-        args,
-        verb_pos + 1,
-        format!(
-            "usage: {} side <top|bottom|left|right|all> <pattern|reset>",
-            label
-        ),
-    )?;
+    let which = required_value(args, verb_pos + 1, usage_line)?;
     let pattern = required_value(
         args,
         verb_pos + 2,
@@ -311,16 +272,13 @@ fn stage_side(
 fn stage_corner(
     args: &Args,
     verb_pos: usize,
+    usage_line: String,
     surface: BorderSurface,
     doc: &MindMapDocument,
     edits: &mut BorderConfigEdits,
 ) -> Result<(), String> {
     let label = surface.label();
-    let which = required_value(
-        args,
-        verb_pos + 1,
-        format!("usage: {} corner <tl|tr|bl|br|all> <glyph|reset>", label),
-    )?;
+    let which = required_value(args, verb_pos + 1, usage_line)?;
     let glyph = required_value(
         args,
         verb_pos + 2,
@@ -397,28 +355,47 @@ fn required_value<'a>(args: &'a Args, index: usize, usage: String) -> Result<&'a
     args.positional(index).ok_or(usage)
 }
 
-/// Reject a stray positional past a single-value subverb, so
-/// `border padding 12 50` doesn't silently drop the `50`.
-///
-/// `subject` prefixes the message (`"canvas border padding"`);
-/// `label` is the surface the suggestions are written for; and
-/// `kv_example` is the subverb's **own** kv example, because a
-/// user who typed `padding` is better served by
-/// `padding=8 color=#fff` than by a generic `preset=…` line.
-fn reject_extra_positional(
-    args: &Args,
-    index: usize,
-    subject: &str,
-    label: &str,
-    kv_example: &str,
-) -> Result<(), String> {
-    match args.positional(index) {
-        Some(extra) => Err(format!(
-            "{}: unexpected extra positional '{}'. \
-             Compose multiple edits via the kv form \
-             (`{} {}`) or stage with `{} preview …`.",
-            subject, extra, label, kv_example, label
-        )),
-        None => Ok(()),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::console::spec::descent::descend;
+    use crate::application::document::tests_common::load_test_doc;
+
+    /// Every subverb the border grammar marks as positional is one
+    /// [`positional_subverb_to_edits`] actually parses, and a
+    /// subverb outside that set is not. The grammar table is what
+    /// both popups withhold at a kv-form slot and what all four
+    /// execute dispatchers gate, so a subverb added to the parser
+    /// and forgotten there would be silently unreachable from every
+    /// border popup — with every other test still green.
+    #[test]
+    fn test_every_positional_subverb_is_parsed() {
+        let doc = load_test_doc();
+        for subverb in super::super::grammar::POSITIONAL_SUBVERBS {
+            // No value token follows, so each recognized subverb
+            // answers with its own usage error — the one answer
+            // that is neither "not mine" nor a staged edit.
+            let tokens = vec![subverb.name.to_string()];
+            let args = Args::new(&tokens);
+            let descent = descend(&super::super::grammar::BORDER, &tokens);
+            assert!(
+                positional_subverb_to_edits(&descent, &args, BorderSurface::Selection, &doc).is_err(),
+                "'{}' is offered as a positional subverb but the parser does not claim it",
+                subverb.name
+            );
+        }
+        // `show` is a subverb of the same level that this parser
+        // deliberately does not claim — the caller routes it
+        // elsewhere, and the parser answers "not mine" rather than
+        // inventing an edit. The failing input is a `show` arm
+        // added here, which would make the readout stage a border
+        // edit instead of printing.
+        let tokens = vec!["show".to_string()];
+        let args = Args::new(&tokens);
+        let descent = descend(&super::super::grammar::BORDER, &tokens);
+        assert!(matches!(
+            positional_subverb_to_edits(&descent, &args, BorderSurface::Selection, &doc),
+            Ok(None)
+        ));
     }
 }

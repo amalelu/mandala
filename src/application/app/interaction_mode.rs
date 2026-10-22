@@ -31,26 +31,28 @@
 ///
 /// One of these is always active. Transitions go through `Action`
 /// dispatch — there is no path that flips a mode by side-effect.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub enum InteractionMode {
     /// Default canvas mode. Click selects, drag moves, no mode-gated chrome.
+    #[default]
     Default,
 
     /// User is choosing a new parent for `sources`. The next left-click on
     /// a node attaches them; left-click on empty canvas promotes them to
     /// root; Esc cancels. Direct migration from `AppMode::Reparent`.
-    Reparent {
-        sources: Vec<String>,
-    },
+    // Native-driver-only, with `Connect` below: both modes are
+    // entered from native-gated handlers, so nothing on wasm32
+    // constructs either.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Reparent { sources: Vec<String> },
 
     /// User is drawing a new cross_link edge from `source`. The next
     /// left-click on a target node creates the edge; left-click on empty
     /// canvas cancels. Esc also cancels. Direct migration from
     /// `AppMode::Connect`.
-    Connect {
-        source: String,
-    },
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Connect { source: String },
 
     /// Editing the contents of `node_id`. Section-area clicks select the
     /// hit section (per `SelectionState::Section`); section drags move
@@ -59,9 +61,7 @@ pub enum InteractionMode {
     /// Out-of-AABB click exits to `Default`.
     ///
     /// Wired in Batch 3 of the plan.
-    NodeEdit {
-        node_id: String,
-    },
+    NodeEdit { node_id: String },
 
     /// Resize anchors are visible on `target`. Anchor drag transitions
     /// `DragState` through the existing `Throttled(NodeResize)` /
@@ -69,9 +69,7 @@ pub enum InteractionMode {
     /// an anchor) exits to `Default`. Esc also exits.
     ///
     /// Wired in Batch 2 of the plan.
-    Resize {
-        target: ResizeTarget,
-    },
+    Resize { target: ResizeTarget },
 }
 
 /// What a `Resize` mode targets — a whole node or one section of one node.
@@ -81,29 +79,7 @@ pub enum ResizeTarget {
     Section { node_id: String, section_idx: usize },
 }
 
-impl Default for InteractionMode {
-    fn default() -> Self {
-        InteractionMode::Default
-    }
-}
-
 impl InteractionMode {
-    /// True when this mode wants to absorb the next left-click as a
-    /// mode-specific gesture rather than letting the standard click
-    /// router handle it.
-    ///
-    /// Reparent / Connect intercept their next click as a "choose
-    /// target" gesture. Resize / NodeEdit / Default do not intercept;
-    /// Resize relies on a separate handle-hit-test path
-    /// (`event_mouse_click.rs`) gated on `resize_handle_*()` rather
-    /// than on a click intercept.
-    pub fn intercepts_left_click(&self) -> bool {
-        matches!(
-            self,
-            InteractionMode::Reparent { .. } | InteractionMode::Connect { .. }
-        )
-    }
-
     /// True when a click on a section-area should produce
     /// `SelectionState::Section { node_id, section_idx }` rather than
     /// folding to `SelectionState::Single(node_id)`.
@@ -114,6 +90,8 @@ impl InteractionMode {
     /// Inside `NodeEdit { node_id }` for the matching node, clicks on
     /// section-areas resolve to `Section`. Consumed by Batch 3's
     /// rewrite of `app/click.rs`'s click-routing fork.
+    // Native-driver-only: consulted by the native click router.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn click_resolves_to_section(&self, hit_node: &str) -> bool {
         match self {
             InteractionMode::NodeEdit { node_id } => node_id == hit_node,
@@ -150,8 +128,13 @@ impl InteractionMode {
     /// modes that capture the next click as a "choose target" gesture.
     /// Used by handlers that previously matched on `AppMode::Reparent { .. } |
     /// AppMode::Connect { .. }` to update hover highlights.
+    // Native-driver-only: gates the native target-picker overlay.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn is_target_picker(&self) -> bool {
-        matches!(self, InteractionMode::Reparent { .. } | InteractionMode::Connect { .. })
+        matches!(
+            self,
+            InteractionMode::Reparent { .. } | InteractionMode::Connect { .. }
+        )
     }
 
     /// The active NodeEdit target, or `None` for any non-NodeEdit
@@ -174,9 +157,7 @@ impl InteractionMode {
     /// mode-driven chrome should this frame emit?" — every
     /// scene-rebuild call site reads through this method rather
     /// than reaching for the per-field predicates separately.
-    pub fn resize_handle_overrides(
-        &self,
-    ) -> baumhard::mindmap::tree_builder::InteractionModeOverrides<'_> {
+    pub fn resize_handle_overrides(&self) -> baumhard::mindmap::tree_builder::InteractionModeOverrides<'_> {
         baumhard::mindmap::tree_builder::InteractionModeOverrides {
             node: self.resize_handle_node(),
             section: self.resize_handle_section(),
@@ -203,10 +184,7 @@ pub enum ResizeTargetError {
     MultiTarget,
     /// Section selected, but `section.size == None` (fill-parent) —
     /// no own AABB to stretch.
-    SectionFillParent {
-        node_id: String,
-        section_idx: usize,
-    },
+    SectionFillParent { node_id: String, section_idx: usize },
     /// Edge / label / portal selection — not resizable surface.
     EdgeOrPortal,
 }
@@ -270,9 +248,8 @@ mod tests {
     }
 
     #[test]
-    fn default_mode_does_not_intercept_or_pick_targets() {
+    fn default_mode_picks_no_target_and_shows_no_handles() {
         let m = InteractionMode::Default;
-        assert!(!m.intercepts_left_click());
         assert!(!m.click_resolves_to_section("any"));
         assert_eq!(m.resize_handle_node(), None);
         assert_eq!(m.resize_handle_section(), None);
@@ -280,20 +257,18 @@ mod tests {
     }
 
     #[test]
-    fn reparent_intercepts_and_is_target_picker() {
+    fn reparent_is_target_picker() {
         let m = InteractionMode::Reparent {
             sources: vec!["0".into()],
         };
-        assert!(m.intercepts_left_click());
         assert!(m.is_target_picker());
         assert!(!m.click_resolves_to_section("0"));
         assert_eq!(m.resize_handle_node(), None);
     }
 
     #[test]
-    fn connect_intercepts_and_is_target_picker() {
+    fn connect_is_target_picker() {
         let m = InteractionMode::Connect { source: "0".into() };
-        assert!(m.intercepts_left_click());
         assert!(m.is_target_picker());
         assert!(!m.click_resolves_to_section("0"));
         assert_eq!(m.resize_handle_node(), None);
@@ -301,11 +276,12 @@ mod tests {
 
     #[test]
     fn node_edit_routes_clicks_to_section_for_matching_node_only() {
-        let m = InteractionMode::NodeEdit { node_id: "0.1".into() };
+        let m = InteractionMode::NodeEdit {
+            node_id: "0.1".into(),
+        };
         assert!(m.click_resolves_to_section("0.1"));
         assert!(!m.click_resolves_to_section("0"));
         assert!(!m.click_resolves_to_section("0.2"));
-        assert!(!m.intercepts_left_click());
         assert!(!m.is_target_picker());
         assert_eq!(m.resize_handle_node(), None);
         assert_eq!(m.resize_handle_section(), None);
@@ -337,7 +313,10 @@ mod tests {
     #[test]
     fn resize_target_node_and_section_are_distinct() {
         let n = ResizeTarget::Node("0".into());
-        let s = ResizeTarget::Section { node_id: "0".into(), section_idx: 0 };
+        let s = ResizeTarget::Section {
+            node_id: "0".into(),
+            section_idx: 0,
+        };
         assert_ne!(n, s);
     }
 }

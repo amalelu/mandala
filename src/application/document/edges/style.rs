@@ -68,8 +68,8 @@ impl MindMapDocument {
     /// Set (or clear, with `color = None`) the `label_config.color`
     /// override on a line-mode edge's label. Sibling of
     /// [`Self::set_edge_color`], which targets the edge body cascade;
-    /// this setter writes only the label channel so a coloured edge
-    /// can carry a differently-coloured label. Forks a fresh
+    /// this setter writes only the label channel so a colored edge
+    /// can carry a differently-colored label. Forks a fresh
     /// `EdgeLabelConfig` on the edge if one isn't already present.
     /// Rolls back an all-default `EdgeLabelConfig` when clearing the
     /// color would leave the struct entirely empty, matching the
@@ -100,8 +100,10 @@ impl MindMapDocument {
     }
 
     /// Read the resolved **edge body** color for copy-to-clipboard.
-    /// Walks the body cascade: `glyph_connection.color` →
-    /// `edge.color`, with `var(--name)` references expanded
+    /// Walks the body cascade: `glyph_connection.color` → the
+    /// source node's palette stroke (when its `color_schema` sets
+    /// `connections_colored`) → `edge.color`, with `var(--name)`
+    /// references expanded
     /// through the theme variable map. Returns `None` only when
     /// the edge itself is missing; a no-override edge still
     /// produces a concrete hex (`edge.color` is always present
@@ -112,7 +114,7 @@ impl MindMapDocument {
     /// touches one site.
     pub fn resolve_edge_color(&self, edge_ref: &EdgeRef) -> Option<String> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
-        Some(self.resolve_var_owned(edge.body_color(&self.mindmap.canvas)))
+        Some(self.resolve_var_owned(self.mindmap.edge_body_color(edge)))
     }
 
     /// Read the resolved edge-label color for copy-to-clipboard.
@@ -123,25 +125,27 @@ impl MindMapDocument {
     /// visually matches the edge unless explicitly detached.
     pub fn resolve_edge_label_color(&self, edge_ref: &EdgeRef) -> Option<String> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
-        Some(self.resolve_var_owned(edge.label_color(&self.mindmap.canvas)))
+        Some(self.resolve_var_owned(self.mindmap.edge_label_color(edge)))
     }
 
     /// Read the resolved portal-text color for copy-to-clipboard.
     /// Sibling of [`Self::resolve_portal_label_color`] targeting
     /// the text channel: cascade is `text_color` → icon color
     /// cascade (per-endpoint `color` → `glyph_connection.color` →
-    /// `edge.color`). Returns `None` only when the edge is
-    /// missing.
+    /// the source node's palette stroke → `edge.color`). Returns
+    /// `None` only when the edge is missing.
     pub fn resolve_portal_text_color(&self, edge_ref: &EdgeRef, endpoint_node_id: &str) -> Option<String> {
         let edge = self.mindmap.edges.iter().find(|e| edge_ref.matches(e))?;
         let state = baumhard::mindmap::model::portal_endpoint_state(edge, endpoint_node_id);
-        Some(self.resolve_var_owned(edge.portal_endpoint_text_color(&self.mindmap.canvas, state)))
+        Some(self.resolve_var_owned(self.mindmap.edge_portal_endpoint_text_color(edge, state)))
     }
 
     /// Expand `var(--name)` references in `raw` against the
     /// canvas theme map and own the result. The three
     /// `resolve_*_color` readers above all end in this same step;
-    /// the cascade itself lives on [`baumhard::mindmap::model::MindEdge`].
+    /// the cascade itself lives on [`baumhard::mindmap::model::MindEdge`],
+    /// reached through the [`MindMap`](baumhard::mindmap::model::MindMap)
+    /// wrappers that supply its palette tier.
     fn resolve_var_owned(&self, raw: &str) -> String {
         baumhard::util::color::resolve_var(raw, &self.mindmap.canvas.theme_variables).to_string()
     }
@@ -175,6 +179,14 @@ impl MindMapDocument {
     /// preserves the model's "bit-exact equality after
     /// round-trip" property. User-facing verbs should validate
     /// reasonable delta magnitudes upstream.
+    ///
+    /// Test-gated with its two absolute siblings below. The shipped
+    /// console path is `set_edge_font(size, min, max)`, which writes
+    /// the whole clamp triple in one `EditEdge` undo entry; these
+    /// three write `font_size_pt` alone. The clamp semantics they
+    /// pin are the same ones `set_edge_font` relies on, so the tests
+    /// stay.
+    #[cfg(test)]
     pub fn set_edge_font_size_step(&mut self, edge_ref: &EdgeRef, delta_pt: f32) -> bool {
         self.mutate_edge(edge_ref, |edge, canvas| {
             let cfg = ensure_glyph_connection_inline(edge, canvas);
@@ -183,39 +195,6 @@ impl MindMapDocument {
                 return false;
             }
             cfg.font_size_pt = new_val;
-            true
-        })
-    }
-
-    /// Set the connection's `font_size_pt` to an absolute value,
-    /// clamped into `[min_font_size_pt, max_font_size_pt]`. Returns
-    /// `true` if the clamped value differs from the current.
-    ///
-    /// Counterpart to [`Self::set_edge_font_size_step`] for the
-    /// console's `font size=<pt>` kv form, where callers have an
-    /// absolute target rather than a delta.
-    pub fn set_edge_font_size(&mut self, edge_ref: &EdgeRef, pt: f32) -> bool {
-        self.mutate_edge(edge_ref, |edge, canvas| {
-            let cfg = ensure_glyph_connection_inline(edge, canvas);
-            let new_val = pt.clamp(cfg.min_font_size_pt, cfg.max_font_size_pt);
-            if almost_equal(cfg.font_size_pt, new_val) {
-                return false;
-            }
-            cfg.font_size_pt = new_val;
-            true
-        })
-    }
-
-    /// Reset the connection's `font_size_pt` to the hardcoded default
-    /// (12.0). Returns `true` if the value actually changed.
-    pub fn reset_edge_font_size(&mut self, edge_ref: &EdgeRef) -> bool {
-        let default_size = GlyphConnectionConfig::default().font_size_pt;
-        self.mutate_edge(edge_ref, |edge, canvas| {
-            let cfg = ensure_glyph_connection_inline(edge, canvas);
-            if almost_equal(cfg.font_size_pt, default_size) {
-                return false;
-            }
-            cfg.font_size_pt = default_size;
             true
         })
     }
@@ -238,7 +217,7 @@ impl MindMapDocument {
     /// [`baumhard::mindmap::model::GlyphConnectionConfig::effective_font_size_pt`]'s
     /// `clamp` call (interactive-path invariant per §9). The
     /// console `font` command re-checks up-front so the user gets
-    /// a clear error message; this boundary check is defence in
+    /// a clear error message; this boundary check is defense in
     /// depth for any other caller.
     ///
     /// A single `EditEdge` undo entry covers the whole triple, so
@@ -416,9 +395,22 @@ impl MindMapDocument {
     /// Set the connection's glyph `spacing` (canvas units between
     /// adjacent body glyphs). Returns `true` if the value actually
     /// changed.
+    ///
+    /// The magnitude is clamped to `MAX_NODE_AXIS`, the bound the
+    /// loader enforces on `glyph_connection.spacing`. The console's
+    /// `spacing` verb filters only for finiteness, so `spacing 1e30`
+    /// used to report success and write a map that would not reopen.
+    /// A *negative* spacing is deliberately preserved — it tightens
+    /// the rail into overlapping glyphs, which is a real authoring
+    /// choice the loader accepts too.
     pub fn set_edge_spacing(&mut self, edge_ref: &EdgeRef, spacing: f32) -> bool {
         self.mutate_edge(edge_ref, |edge, canvas| {
             let cfg = ensure_glyph_connection_inline(edge, canvas);
+            let spacing = baumhard::mindmap::model::validate::clamp_to_bound(
+                spacing,
+                baumhard::mindmap::model::MAX_NODE_AXIS,
+                cfg.spacing,
+            );
             if almost_equal(cfg.spacing, spacing) {
                 return false;
             }

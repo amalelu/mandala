@@ -80,9 +80,15 @@ pub(super) fn resolve_font_triple(
     min: Option<f32>,
     max: Option<f32>,
 ) -> Option<FontTriple> {
-    let requested_min = min.filter(|v| is_positive_finite(*v));
-    let requested_max = max.filter(|v| is_positive_finite(*v));
-    let requested_size = size.filter(|v| is_positive_finite(*v));
+    // Clamped, not merely screened for positivity. The loader
+    // rejects a font size outside the shaper's domain, so a value
+    // that only had to be positive-and-finite here would let the
+    // editor author an edge it then refused to reopen — the
+    // console's own `parse_finite_pt` accepts 0.001 and 5000 alike.
+    let clamp = |v: f32| baumhard::font::fonts::clamp_font_metric(v, v);
+    let requested_min = min.filter(|v| is_positive_finite(*v)).map(clamp);
+    let requested_max = max.filter(|v| is_positive_finite(*v)).map(clamp);
+    let requested_size = size.filter(|v| is_positive_finite(*v)).map(clamp);
 
     let new_min = requested_min.or(current.min);
     let new_max = requested_max.or(current.max);

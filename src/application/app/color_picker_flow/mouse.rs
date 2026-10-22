@@ -39,8 +39,7 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
     picker_hover: &mut ColorPickerHoverInteraction,
 ) -> bool {
     use crate::application::color_picker::{
-        hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, ColorPickerState,
-        PickerHit,
+        hit_test_picker, hue_slot_to_degrees, sat_cell_to_value, val_cell_to_value, OpenPicker, PickerHit,
     };
 
     // Always record the cursor position on the state before hit-
@@ -50,7 +49,7 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
     // the hex readout can appear/disappear as the cursor crosses the
     // backdrop boundary.
     let cursor = (cursor_pos.0 as f32, cursor_pos.1 as f32);
-    if let ColorPickerState::Open { last_cursor_pos, .. } = state {
+    if let Some(OpenPicker { last_cursor_pos, .. }) = state.as_open_mut() {
         *last_cursor_pos = Some(cursor);
     }
 
@@ -58,12 +57,12 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
     // dragged or resized, every cursor move feeds the gesture
     // instead of hit-testing for hover. The two gestures are
     // mutually exclusive — `gesture` holds at most one variant.
-    if let ColorPickerState::Open {
+    if let Some(OpenPicker {
         gesture: Some(g),
         center_override,
         size_scale,
         ..
-    } = state
+    }) = state.as_open_mut()
     {
         match *g {
             crate::application::color_picker::PickerGesture::Move { grab_offset } => {
@@ -93,9 +92,9 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
         return true;
     }
 
-    let hit = if let ColorPickerState::Open {
+    let hit = if let Some(OpenPicker {
         layout: Some(layout), ..
-    } = state
+    }) = state.as_open_mut()
     {
         hit_test_picker(layout, cursor.0, cursor.1)
     } else {
@@ -125,14 +124,14 @@ pub(in crate::application::app) fn handle_color_picker_mouse_move(
     // wheel because cells are smaller (more boundary crossings
     // per visit).
     let mut state_changed = false;
-    if let ColorPickerState::Open {
+    if let Some(OpenPicker {
         hue_deg,
         sat,
         val,
         hovered_hit,
         hover_preview,
         ..
-    } = state
+    }) = state.as_open_mut()
     {
         // Track hover changes for hover-grow. Any change in the
         // hit region (e.g. moving from hue slot 3 to slot 4, or

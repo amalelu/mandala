@@ -15,7 +15,8 @@ use std::hash::{Hash, Hasher};
 /// Optional inclusive `[min, max]` window on `camera.zoom`. Each
 /// bound is independently optional: `None` = unbounded on that
 /// side. The default `{ min: None, max: None }` renders at every
-/// zoom. `Copy`; bench: `zoom_visibility_contains`.
+/// zoom. `Copy`; benched by the `zoom_visibility_*` entries in
+/// `benches/test_bench.rs`.
 ///
 /// # Example
 ///
@@ -25,8 +26,7 @@ use std::hash::{Hash, Hasher};
 /// assert!(only_zoomed_in.contains(2.0));
 /// assert!(!only_zoomed_in.contains(1.0));
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ZoomVisibility {
     /// Lower bound on `camera.zoom`; `None` = unbounded below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,12 +34,6 @@ pub struct ZoomVisibility {
     /// Upper bound on `camera.zoom`; `None` = unbounded above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f32>,
-}
-
-impl Default for ZoomVisibility {
-    fn default() -> Self {
-        ZoomVisibility { min: None, max: None }
-    }
 }
 
 /// Manual `Eq` — `f32` is only `PartialEq`. The finite-bound
@@ -80,7 +74,10 @@ impl ZoomVisibility {
     /// paths for the overwhelmingly common unbounded case
     /// (both bounds `None` → two predicted not-taken branches,
     /// no memory traffic). Well inside the §B7 hot-path
-    /// budget; `zoom_visibility_contains` bench pins it.
+    /// budget; the
+    /// `zoom_visibility_unbounded_contains_full_camera_range`
+    /// bench and its `zoom_visibility_*_band_*` / `_nan_zoom_*`
+    /// siblings pin it.
     ///
     /// # NaN handling
     ///

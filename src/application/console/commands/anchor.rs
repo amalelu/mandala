@@ -7,38 +7,46 @@
 //! and calls `set_edge_anchor` directly.
 
 use super::Command;
-use crate::application::console::completion::{
-    kv_key_completions, prefix_filter, Completion, CompletionContext, CompletionState,
-};
-use crate::application::console::helpers::{collect_kvs_or_usage, require_edge_or_portal, ApplyTally};
+use crate::application::console::helpers::{require_edge_or_portal, ApplyTally};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
-use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
+use crate::application::console::spec::descent::descend;
+use crate::application::console::spec::{bare_words, kvs, usage, Bare, Form, Grammar, Key, Vocabulary, Word};
+use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::MindMapDocument;
 
 pub const SIDES: &[&str] = &["auto", "top", "right", "bottom", "left"];
-pub const KEYS: &[&str] = &["from", "to"];
+const SIDE_WORDS: &[Word] = &bare_words::<5>(SIDES);
+
+const KEYS: &[Key] = &[
+    Key::new(
+        "from",
+        "which side of the source node the edge leaves",
+        Vocabulary::Words(SIDE_WORDS),
+    ),
+    Key::new(
+        "to",
+        "which side of the target node the edge arrives at",
+        Vocabulary::Words(SIDE_WORDS),
+    ),
+];
+
+pub static GRAMMAR: Grammar = Grammar {
+    label: "anchor",
+    subverb_sets: &[],
+    key_sets: &[KEYS],
+    bare: Some(Bare::new("composed", &[Form::opt(&["from", "to"])])),
+};
 
 pub const COMMAND: Command = Command {
     name: "anchor",
     aliases: &[],
     summary: "Set the from/to anchor side of the selected edge",
-    usage: "anchor from=<side> to=<side>   (side: auto|top|right|bottom|left)",
-    tags: &["edge", "anchor", "side"],
     applicable: edge_selected,
-    complete: complete_anchor,
+    grammar: &GRAMMAR,
+    synonyms: &["edge", "side"],
     execute: execute_anchor,
 };
-
-fn complete_anchor(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match &state.context {
-        CompletionContext::Token { .. } => kv_key_completions(KEYS, state.partial),
-        CompletionContext::KvValue { key } if KEYS.iter().any(|k| k == key) => {
-            prefix_filter(SIDES, state.partial)
-        }
-        _ => Vec::new(),
-    }
-}
 
 pub(crate) fn side_value(name: &str) -> Option<&str> {
     match name {
@@ -99,29 +107,27 @@ fn execute_anchor(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     if let Err(r) = require_edge_or_portal(eff) {
         return r;
     }
-    let kvs = match collect_kvs_or_usage(args, "usage: anchor from=<side> to=<side>") {
-        Ok(k) => k,
-        Err(r) => return r,
+    let descent = descend(&GRAMMAR, args.tokens());
+    let pairs = match kvs::read_strict(&descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
     };
+    if pairs.is_empty() {
+        return ExecResult::err(usage::no_arguments_message(&GRAMMAR));
+    }
 
     let mut tally = ApplyTally::new();
-    for (k, v) in kvs {
-        let is_from = match k.as_str() {
-            "from" => true,
-            "to" => false,
-            other => {
-                tally.note_error(format!("unknown key '{}'", other));
-                continue;
-            }
-        };
-        let Some(val) = side_value(&v) else {
+    for pair in &pairs {
+        let (k, v) = (pair.key.name, pair.value);
+        let is_from = k == "from";
+        let Some(val) = side_value(v) else {
             tally.note_error(format!("'{}': expected auto|top|right|bottom|left", v));
             continue;
         };
         // Route through the mutation core — same setter path the
         // parametric `Action::SetEdgeAnchor` uses. The verb keeps
         // the per-kv tally so each side reports its own outcome.
-        let changed = apply_anchor_slot_to_selection(eff.document, is_from, val);
+        let changed = apply_anchor_slot_to_selection(eff.document_mut(), is_from, val);
         tally.note(changed, || format!("{} already {}", k, v));
     }
     tally.finalize("anchor")

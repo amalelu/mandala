@@ -171,11 +171,8 @@ pub fn do_spatial_descend_deep_chain_delivers_to_leaf() {
 
     // Walk to deepest node.
     let mut node = tree.root;
-    loop {
-        match tree.arena.get(node).unwrap().first_child() {
-            Some(cid) => node = cid,
-            None => break,
-        }
+    while let Some(cid) = tree.arena.get(node).unwrap().first_child() {
+        node = cid;
     }
     tree.arena
         .get_mut(node)

@@ -22,7 +22,6 @@ use super::Canvas;
 /// O(1). Edges have no stable id; callers identify them by the
 /// `(from_id, to_id, edge_type)` triple.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MindEdge {
     /// Id of the source node.
     pub from_id: String,
@@ -42,6 +41,9 @@ pub struct MindEdge {
     /// False hides the edge without removing it from the model.
     pub visible: bool,
     /// Optional label text rendered along the connection path.
+    /// Omitted from the JSON when unset — an unlabeled edge does
+    /// not serialize `"label": null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// Per-edge label rendering overrides — position, color,
     /// font-size clamps. `None` means "inherit everything": the
@@ -158,10 +160,32 @@ impl MindEdge {
     /// This edge's **body** color, as authored — the raw string
     /// before `var(--name)` theme resolution.
     ///
-    /// Cascade: the `color` of the connection config
-    /// [`GlyphConnectionConfig::resolved_for`] selects
-    /// (`edge.glyph_connection` → `canvas.default_connection` →
-    /// hardcoded default) → `edge.color`.
+    /// Cascade, most-specific first:
+    /// `edge.glyph_connection.color` → `themed` →
+    /// `canvas.default_connection.color` → `edge.color`.
+    ///
+    /// `themed` is the palette tier: the stroke color the source
+    /// node's `color_schema` lends this edge when its
+    /// `connections_colored` flag is on. Resolve it with
+    /// [`MindMap::edge_theme_stroke_color`] first, or reach for
+    /// [`MindMap::edge_body_color`], which supplies it for you —
+    /// passing `None` by hand means "this edge has no theme", which
+    /// is a claim, not a default.
+    ///
+    /// It sits *below* the edge's own `glyph_connection.color`,
+    /// because naming a color on this edge is a deliberate choice a
+    /// theme must not overrule — and *above*
+    /// `canvas.default_connection.color`, because that one is
+    /// map-wide while a theme is per-node. Ordering it the other
+    /// way round lets a single `canvas connection color=#888888`
+    /// flatten every palette-derived stroke in the document, with
+    /// no per-edge recovery short of forking a `glyph_connection`
+    /// on each one. `edge.color` is last because it is never
+    /// absent — a tier under it could never win.
+    ///
+    /// [`MindMap`]: crate::mindmap::model::MindMap
+    /// [`MindMap::edge_theme_stroke_color`]: crate::mindmap::model::MindMap::edge_theme_stroke_color
+    /// [`MindMap::edge_body_color`]: crate::mindmap::model::MindMap::edge_body_color
     ///
     /// **Struct-level, not field-level.** Once an edge has forked
     /// a `glyph_connection` of its own, the canvas default drops
@@ -169,8 +193,10 @@ impl MindEdge {
     /// at `None` — the "computed style copy" rule the document
     /// mutation layer establishes when it forks. Resolving
     /// `color` field-by-field would silently re-attach a forked
-    /// edge to the canvas default. The hardcoded default's
-    /// `color` is `None`, so the chain bottoms out at
+    /// edge to the canvas default. That rule survives the theme
+    /// tier moving above the canvas default: the canvas tier is
+    /// still consulted only when this edge has no
+    /// `glyph_connection` at all. The chain bottoms out at
     /// `edge.color`, which the model always carries: the result
     /// is never empty and is always safe to hand to
     /// `resolve_var`.
@@ -180,31 +206,42 @@ impl MindEdge {
     /// Scene-builder connection emission and the document layer's
     /// clipboard resolver both read through here, so a future
     /// third tier is one edit. O(1), no allocation.
-    pub fn body_color<'a>(&'a self, canvas: &'a Canvas) -> &'a str {
-        self.glyph_connection
-            .as_ref()
-            .or(canvas.default_connection.as_ref())
-            .and_then(|cfg| cfg.color.as_deref())
-            .unwrap_or(self.color.as_str())
+    pub fn body_color<'a>(&'a self, canvas: &'a Canvas, themed: Option<&'a str>) -> &'a str {
+        // Forked: this edge's own config is the only config in the
+        // cascade, per the struct-level rule above. Unforked: the
+        // canvas default is the config tier — but it is map-wide,
+        // so it ranks *below* the per-node theme rather than with
+        // the edge's own color.
+        let (own, canvas_wide) = match self.glyph_connection.as_ref() {
+            Some(cfg) => (cfg.color.as_deref(), None),
+            None => (
+                None,
+                canvas
+                    .default_connection
+                    .as_ref()
+                    .and_then(|cfg| cfg.color.as_deref()),
+            ),
+        };
+        own.or(themed).or(canvas_wide).unwrap_or(self.color.as_str())
     }
 
     /// This edge's **label** color, as authored (line-mode
     /// edges). Cascade: `label_config.color` → the body cascade
-    /// ([`Self::body_color`]).
+    /// ([`Self::body_color`], `themed` and all).
     ///
     /// The label channel's own override wins; absent an override
     /// the label follows the edge body so the two stay visually
     /// consistent unless deliberately detached. O(1).
-    pub fn label_color<'a>(&'a self, canvas: &'a Canvas) -> &'a str {
+    pub fn label_color<'a>(&'a self, canvas: &'a Canvas, themed: Option<&'a str>) -> &'a str {
         self.label_config
             .as_ref()
             .and_then(|c| c.color.as_deref())
-            .unwrap_or_else(|| self.body_color(canvas))
+            .unwrap_or_else(|| self.body_color(canvas, themed))
     }
 
     /// One portal endpoint's **icon** color, as authored.
     /// Cascade: `endpoint.color` → the body cascade
-    /// ([`Self::body_color`]).
+    /// ([`Self::body_color`], `themed` and all).
     ///
     /// `endpoint` is the state for the side being drawn — resolve
     /// it with [`portal_endpoint_state`] first. `None` means the
@@ -214,10 +251,11 @@ impl MindEdge {
         &'a self,
         canvas: &'a Canvas,
         endpoint: Option<&'a PortalEndpointState>,
+        themed: Option<&'a str>,
     ) -> &'a str {
         endpoint
             .and_then(|s| s.color.as_deref())
-            .unwrap_or_else(|| self.body_color(canvas))
+            .unwrap_or_else(|| self.body_color(canvas, themed))
     }
 
     /// One portal endpoint's **text** color, as authored.
@@ -232,10 +270,11 @@ impl MindEdge {
         &'a self,
         canvas: &'a Canvas,
         endpoint: Option<&'a PortalEndpointState>,
+        themed: Option<&'a str>,
     ) -> &'a str {
         endpoint
             .and_then(|s| s.text_color.as_deref())
-            .unwrap_or_else(|| self.portal_endpoint_color(canvas, endpoint))
+            .unwrap_or_else(|| self.portal_endpoint_color(canvas, endpoint, themed))
     }
 }
 
@@ -248,7 +287,9 @@ impl MindEdge {
 ///
 /// Icon color cascade (highest-priority first):
 /// `PortalEndpointState.color` → `MindEdge.glyph_connection.color` →
-/// `MindEdge.color` → theme variable resolution. Mirrors the
+/// the source node's palette stroke → `canvas.default_connection.color`
+/// → `MindEdge.color` → theme
+/// variable resolution. Mirrors the
 /// edge-body color cascade so the two markers and the (absent)
 /// line stay visually consistent when the user recolors the whole
 /// edge.
@@ -266,7 +307,6 @@ impl MindEdge {
 /// direction of the partner endpoint, so the label always faces
 /// its counterpart until the user drags it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PortalEndpointState {
     /// Icon color override as `#RRGGBB` or `var(--name)`. `None` =
     /// inherit from the edge color cascade. Cleared by "cut" on
@@ -279,13 +319,14 @@ pub struct PortalEndpointState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_t: Option<f32>,
     /// Signed perpendicular slide in canvas units, along the border's
-    /// outward normal. Positive values push the portal label (icon
-    /// + adjacent text) further away from the owning node; negative
-    /// values pull it inward (up to the border). `None` = flush
-    /// against the default outset. Written by the portal-label drag
-    /// and by the `label perpendicular=` console verb alongside
-    /// [`Self::border_t`] so the label can sit where the user
-    /// dropped it, not just along a fixed offset from the border.
+    /// outward normal. Positive values push the portal label — the
+    /// icon and its adjacent text — further away from the owning
+    /// node; negative values pull it inward (up to the border).
+    /// `None` = flush against the default outset. Written by the
+    /// portal-label drag and by the `label perpendicular=` console
+    /// verb alongside [`Self::border_t`] so the label can sit where
+    /// the user dropped it, not just along a fixed offset from the
+    /// border.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perpendicular_offset: Option<f32>,
     /// Per-endpoint text label, rendered as a sibling glyph next
@@ -408,7 +449,6 @@ pub const PORTAL_GLYPH_PRESETS: &[&str] = &[
 /// Connections are composed of repeating body glyphs and optional end caps,
 /// laid out along the path from source to target.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GlyphConnectionConfig {
     /// The glyph(s) used for the body/middle of the connection, repeated to fill length.
     #[serde(default = "default_connection_body")]
@@ -501,7 +541,11 @@ impl GlyphConnectionConfig {
     /// failure mode at extreme zoom levels.
     pub fn effective_font_size_pt(&self, camera_zoom: f32) -> f32 {
         let z = camera_zoom.max(f32::EPSILON);
-        let target_screen = (self.font_size_pt * z).clamp(self.min_font_size_pt, self.max_font_size_pt);
+        let target_screen = crate::font::fonts::clamp_to_font_window(
+            self.font_size_pt * z,
+            self.min_font_size_pt,
+            self.max_font_size_pt,
+        );
         target_screen / z
     }
 
@@ -541,7 +585,6 @@ impl GlyphConnectionConfig {
 /// the two concepts share shape but not identity (line-mode has one
 /// label per edge; portal mode has one per endpoint).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EdgeLabelConfig {
     /// Tangential position on the connection path, `[0.0, 1.0]`.
     /// `0.0` is the from-anchor, `1.0` the to-anchor, `0.5` (or
@@ -647,7 +690,7 @@ impl EdgeLabelConfig {
             .and_then(|c| c.max_font_size_pt)
             .unwrap_or(body.max_font_size_pt);
         let z = camera_zoom.max(f32::EPSILON);
-        let target_screen = (base * z).clamp(min, max);
+        let target_screen = crate::font::fonts::clamp_to_font_window(base * z, min, max);
         target_screen / z
     }
 }
@@ -658,7 +701,6 @@ impl EdgeLabelConfig {
 /// `f64` fields keep parity with the JSON precision of the source
 /// format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ControlPoint {
     /// Canvas-space x coordinate.
     pub x: f64,

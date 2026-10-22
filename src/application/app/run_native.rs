@@ -18,6 +18,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 use super::color_picker_flow::rebuild_color_picker_overlay;
 use super::freeze_watchdog::FreezeWatchdog;
 use super::input_context::InputHandlerContext;
+use super::ipc_target::IpcCommandTarget;
 use super::run_native_init;
 use super::single_line_edit::SingleLineEditor;
 use super::text_edit::TextEditState;
@@ -28,6 +29,7 @@ use super::{
 use crate::application::common::RenderDecree;
 use crate::application::console::ConsoleState;
 use crate::application::document::MindMapDocument;
+use crate::application::ipc::{self, DrainOutcome, IpcServer, IpcWake};
 use crate::application::keybinds::ResolvedKeybinds;
 use crate::application::renderer::Renderer;
 
@@ -54,12 +56,32 @@ const FPS_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 /// short version: Mandala is single-threaded and a same-thread
 /// `std::sync::RwLock` re-entry deadlock would otherwise hang
 /// silently forever.
+///
+/// Starts the IPC listener beside it when `--ipc` was passed — before
+/// the event loop takes over, so a bad socket path fails the launch
+/// rather than the first client. The loop is built with [`IpcWake`]
+/// as its user event either way; without the flag no proxy exists and
+/// none is ever sent.
 pub(super) fn run(app: Application) {
-    let event_loop = EventLoop::new().expect("Could not create an EventLoop");
+    let event_loop: EventLoop<IpcWake> = EventLoop::with_user_event()
+        .build()
+        .expect("Could not create an EventLoop");
+    let options = app.into_options();
+    let ipc = options.ipc_socket.as_deref().map(|path| {
+        let proxy = event_loop.create_proxy();
+        // A send fails only once the loop has exited, when there is
+        // nothing left to wake.
+        let wake = move || {
+            let _ = proxy.send_event(IpcWake);
+        };
+        IpcServer::start(path, wake)
+            .expect("ipc: the `--ipc` listener could not start (format/ipc.md \"Socket, flag, lifecycle\")")
+    });
     let mut handler = NativeApp {
-        options: app.into_options(),
+        options,
         init: None,
         watchdog: FreezeWatchdog::spawn(),
+        ipc,
     };
     event_loop
         .run_app(&mut handler)
@@ -79,9 +101,32 @@ struct NativeApp {
     /// hangs mid-drain or mid-event produces a diagnostic abort
     /// after `freeze_watchdog::FREEZE_THRESHOLD`.
     watchdog: FreezeWatchdog,
+    /// The `--ipc` listener, when the flag was passed. Taken and shut
+    /// down in [`ApplicationHandler::exiting`].
+    ipc: Option<IpcServer>,
 }
 
-impl ApplicationHandler for NativeApp {
+/// Execute queued IPC requests on the main thread, with the same access
+/// an input handler has: each command gets an [`IpcCommandTarget`]
+/// over the same `InputHandlerContext` a winit handler is given.
+/// `init` is `None` before the window exists, and a command that
+/// needs the app then answers `no_document`. A free function over the
+/// one field, so `about_to_wait` can call it while it holds
+/// `InitState`.
+fn drain_ipc(server: &mut Option<IpcServer>, init: Option<&mut InitState>) -> DrainOutcome {
+    let Some(server) = server else {
+        return DrainOutcome::default();
+    };
+    match init {
+        Some(init) => server.drain(|request| {
+            let mut target = IpcCommandTarget::new(init.input_context());
+            ipc::execute(request, Some(&mut target))
+        }),
+        None => server.drain(|request| ipc::execute(request, None)),
+    }
+}
+
+impl ApplicationHandler<IpcWake> for NativeApp {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _: StartCause) {
         // ControlFlow is set authoritatively at the end of every
         // `about_to_wait` based on `InitState::needs_continuation`.
@@ -119,8 +164,18 @@ impl ApplicationHandler for NativeApp {
         }
     }
 
+    /// An IPC boundary thread has queued work. The wake's whole job is
+    /// to unpark the loop: winit runs `about_to_wait` after every
+    /// iteration that delivered events, and the queue is drained there,
+    /// once, in its place in the frame. Ticks the watchdog like every
+    /// other handler.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _: IpcWake) {
+        self.watchdog.unparked();
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.watchdog.unparked();
+        let ipc_outcome;
         if let Some(init) = self.init.as_mut() {
             // Pre-snapshot the continuation predicate: if the loop
             // was *entering* this iteration with continuous work
@@ -128,13 +183,19 @@ impl ApplicationHandler for NativeApp {
             // drain will do work that needs to land on screen.
             let was_continuing = init.needs_continuation();
             init.drain_inputs();
+            // After the input drain, so a command observes every input
+            // the user sent before it — throttled drag moves and zoom
+            // steps included — and its effects are ordered after them.
+            ipc_outcome = drain_ipc(&mut self.ipc, Some(init));
             let still_continuing = init.needs_continuation();
             // Request a redraw if work happened this iteration
             // (`was_continuing`) OR if more work is pending
             // (`still_continuing`). The OR catches the last
             // animation frame: pre=true, post=false, still need
-            // one redraw to land the final state.
-            if was_continuing || still_continuing {
+            // one redraw to land the final state. An IPC command that
+            // changed pixels needs one too, as a mutating input
+            // handler's `redraw_after` does.
+            if was_continuing || still_continuing || ipc_outcome.repaint {
                 init.window.request_redraw();
             }
             // Active → idle FPS transition: when the loop is about
@@ -178,12 +239,34 @@ impl ApplicationHandler for NativeApp {
             } else {
                 ControlFlow::Wait
             });
+            // After every handler of the iteration has run, so a load,
+            // a `new` or a save-as reaches the next client's `hello`.
+            if let Some(server) = self.ipc.as_mut() {
+                server.publish_map(init.document.as_ref().and_then(|doc| doc.file_path.as_deref()));
+            }
+        } else {
+            // Before the window exists there is no input to order
+            // against; requests that need no app state still answer.
+            ipc_outcome = drain_ipc(&mut self.ipc, None);
+        }
+        // A drain that ran out of budget keeps the loop iterating until
+        // the queue is empty.
+        if ipc_outcome.backlog {
+            event_loop.set_control_flow(ControlFlow::Poll);
         }
         // Mark parked AFTER setting ControlFlow so the watchdog
         // begins ignoring silence only once we've committed to
         // sleeping. If ControlFlow::Poll, the next about_to_wait
         // will call `unparked` again immediately.
         self.watchdog.parked();
+    }
+
+    /// Graceful exit: the client hears `shutdown`, and the socket file
+    /// is removed.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(server) = self.ipc.take() {
+            server.shutdown();
+        }
     }
 }
 
@@ -232,11 +315,10 @@ pub(super) struct InitState {
     /// queried at dispatch time via `keybinds.macro_for(...)`.
     pub(super) macros: crate::application::macros::MacroRegistry,
     /// Touch gesture state machine. Fed by `WindowEvent::Touch`
-    /// events (winit), emits `MouseGesture::LongPress` /
-    /// `TwoFingerDrag` when one of the supported gestures fires.
-    /// Cross-platform peer of WASM's `WasmInputState.touch_recognizer`.
-    /// See `SECTIONS_BORDERS_RESIZE_PLAN.md` §6.6 for the gesture
-    /// vocabulary and `app/touch_gesture.rs` for the state machine.
+    /// events (winit); emits a tap, a long-press, a one-finger pan
+    /// step or a two-finger pinch step. Cross-platform peer of WASM's
+    /// `WasmInputState.touch_recognizer`. See `app/touch_gesture.rs`
+    /// for the machine and CONCEPTS §5 for where each emission goes.
     pub(super) touch_recognizer: super::touch_gesture::TouchGestureRecognizer,
     /// Wall-clock at which the current tree-mutating drag began
     /// suppressing the animation tick — `Some(now_ms)` while a
@@ -283,13 +365,12 @@ impl InitState {
         }
     }
 
-    /// Translate a winit `Touch` event into a recognizer ingest +
-    /// tick + dispatch step. Returns true when the event drove
-    /// any state transition or dispatched a gesture (the caller
-    /// should request a redraw on true). Modifier state is fixed
-    /// at all-false — touch devices have no modifier keys; the
-    /// keybind table's `LongPress` / `TwoFingerDrag` bindings
-    /// don't carry Ctrl/Shift/Alt either.
+    /// Translate a winit `Touch` event into a recognizer step and
+    /// run it. Returns true when the event drove any state
+    /// transition or ran a gesture (the caller should request a
+    /// redraw on true). Modifier state is fixed at all-false —
+    /// touch devices have no modifier keys, and the keybind table's
+    /// `LongPress` binding doesn't carry Ctrl/Shift/Alt either.
     ///
     /// **Long-press timing wake-up gap**: `tick` is called only
     /// from the events themselves (not on a wall-clock timer),
@@ -297,42 +378,59 @@ impl InitState {
     /// between Started and Ended would miss the long-press
     /// emission. In practice touch hardware emits sub-pixel
     /// jitter `Moved` events constantly while a finger is down,
-    /// so the gap is theoretical. A future improvement would set
-    /// `ControlFlow::WaitUntil(started_at + LONG_PRESS_MS)` from
-    /// the recognizer's `OneFinger` state — deferred to keep
-    /// Batch 7's diff small.
+    /// so the gap is theoretical — and the recognizer refuses to
+    /// call such a hold a tap either way, on the elapsed time
+    /// rather than on the emission having happened. A future
+    /// improvement would set `ControlFlow::WaitUntil(started_at +
+    /// LONG_PRESS_MS)` from the recognizer's `OneFinger` state.
     pub(super) fn dispatch_touch_event(&mut self, touch: winit::event::Touch) -> bool {
         use super::touch_gesture::Phase;
         use web_time::Instant;
         // Phase translation, recognizer ingest + tick, and the
-        // gesture-to-Action lookup are `cross_dispatch::pointer`'s
-        // `drive_touch_event`; the browser runs the same body. Only
-        // the dispatch below is native's own — it goes through
-        // `dispatch_action` so `NativeOnly` gesture Actions
-        // (`EnterResizeMode`, `FastResizeStart`) reach their arms.
+        // routing of what it recognized are `cross_dispatch::pointer`'s
+        // `drive_touch_event`; the browser runs the same body, and so
+        // does `apply_touch_effect` below. What is native's own is the
+        // `Dispatch` arm — it goes through `dispatch_action` so a
+        // `NativeOnly` Action bound to a gesture (`EnterResizeMode`)
+        // reaches its arm.
         let phase = super::dispatch::touch_phase(touch.phase);
         let pos = (touch.location.x, touch.location.y);
-        if let Some(d) = super::dispatch::drive_touch_event(
+        // No gesture recognized — but the recognizer may have moved
+        // its internal state (e.g. Started → OneFinger). The caller
+        // still wants a redraw on Started/Moved so any
+        // cursor-following overlay updates.
+        let idle_redraw = matches!(phase, Phase::Started | Phase::Moved);
+        let Some(step) = super::dispatch::drive_touch_event(
             &mut self.touch_recognizer,
             &self.keybinds,
             phase,
             touch.id,
             pos,
             Instant::now(),
-        ) {
-            self.cursor_pos = d.cursor_pos;
-            if let Some(a) = d.action {
+        ) else {
+            return idle_redraw;
+        };
+        match step {
+            super::dispatch::TouchStep::Dispatch(d) => {
+                self.cursor_pos = d.cursor_pos;
+                let Some(a) = d.action else {
+                    return idle_redraw;
+                };
                 let mut ctx = self.input_context();
                 let _ = super::dispatch::dispatch_action(a, &mut ctx, None);
-                return true;
+                true
+            }
+            super::dispatch::TouchStep::Effect(effect) => {
+                let mut ctx = self.input_context();
+                let (mut core, _native) = ctx.split_borrow();
+                super::dispatch::apply_touch_effect(effect, &mut core);
+                // The camera-geometry reprojection a pinch owes is
+                // picked up by `drain_camera_geometry_rebuild` in the
+                // frame this redraw requests, under the same
+                // renderer-side dirty flag the wheel path uses.
+                true
             }
         }
-        // No gesture recognized — but the recognizer may have
-        // moved its internal state (e.g. Started → OneFinger).
-        // The caller still wants a redraw on Started/Moved so
-        // any cursor-following overlay (long-press preview,
-        // future gesture chrome) updates.
-        matches!(phase, Phase::Started | Phase::Moved)
     }
 
     /// Per-event dispatch. Most of the per-event work lives in
@@ -360,21 +458,18 @@ impl InitState {
                 self.renderer
                     .process_decree(RenderDecree::SetSurfaceSize(size.width, size.height));
                 // Glyph-wheel color picker caches its layout in
-                // ColorPickerState::Open { layout, .. }; the
+                // OpenPicker::layout; the
                 // cached values include the screen-space backdrop
                 // and per-glyph positions, so a resize would
                 // leave hit-tests aimed at the old geometry and
                 // the renderer's overlay buffers anchored at the
                 // pre-resize coordinates.
                 if self.color_picker_state.is_open() {
-                    if let Some(doc) = self.document.as_ref() {
-                        rebuild_color_picker_overlay(
-                            &mut self.color_picker_state,
-                            doc,
-                            &mut self.app_scene,
-                            &mut self.renderer,
-                        );
-                    }
+                    rebuild_color_picker_overlay(
+                        &mut self.color_picker_state,
+                        &mut self.app_scene,
+                        &mut self.renderer,
+                    );
                 }
                 redraw_after = true;
             }
@@ -635,20 +730,17 @@ impl InitState {
             picker_hover.clear_pending();
         }
 
-        if let DragState::SelectingRect {
-            start_canvas,
-            current_canvas,
-        } = &self.drag_state
-        {
-            drain_frame::drain_selecting_rect(
-                *start_canvas,
-                *current_canvas,
-                &self.document,
-                &self.interaction_mode,
-                &mut self.mindmap_tree,
-                &mut self.renderer,
-            );
-        }
+        // Unconditional, and takes the whole drag state: this drain
+        // holds the rubber band's on-screen state to the state that
+        // authorizes it, so the frames where no rubber band is live
+        // are exactly the frames it has to run on to notice that.
+        drain_frame::drain_rect_select(
+            &self.drag_state,
+            &mut self.document,
+            &self.interaction_mode,
+            &mut self.mindmap_tree,
+            &mut self.renderer,
+        );
 
         drain_frame::drain_camera_geometry_rebuild(
             is_moving_node,

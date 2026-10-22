@@ -51,10 +51,7 @@ pub(in crate::application::app) fn apply_edge_label_drag(
             return false;
         };
         let Some(to_node) = doc.mindmap.nodes.get(&edge.to_id) else {
-            log::debug!(
-                "edge label drag: to-endpoint {} disappeared mid-drag",
-                edge.to_id
-            );
+            log::debug!("edge label drag: to-endpoint {} disappeared mid-drag", edge.to_id);
             return false;
         };
         let from_pos = from_node.pos_vec2();

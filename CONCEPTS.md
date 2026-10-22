@@ -88,8 +88,8 @@ threads, no `tokio`, no `std::thread::spawn` in any interactive
 path. The one sanctioned exception running today is the native
 [`FreezeWatchdog`](#freezewatchdog) thread, which only *reads* an
 `AtomicU64` ping; CODE_CONVENTIONS §3 additionally sanctions the
-IPC boundary threads (design: `work_plans/LLM_IPC.md`; lands with
-IPC-02), which move protocol bytes and never touch app state. Lock
+[IPC boundary threads](#ipc-server-ipcserver), which run only under
+`--ipc`, move protocol values and never touch app state. Lock
 scopes stay trivial because of this.
 
 ### Model / view separation
@@ -420,10 +420,22 @@ extending the element's data fields.
 
 `lib/baumhard/src/core/primitives.rs`. Current
 variants: `Focused`, `Mutable`, `Anchored(AnchorBox)`,
-`MutationEvents`. `AnchorBox` holds up to four `Anchor` entries
-for layout-solver pinning. `MutationEvents` is reserved — it
-marks a node that should fire events on mutation (a seam for
-future reactive handlers).
+`MutationEvents`, `SectionRoot`. `AnchorBox` holds up to four
+`Anchor` entries for layout-solver pinning. `MutationEvents` is
+reserved — it marks a node that should fire events on mutation (a
+seam for future reactive handlers).
+
+`Anchored` and its `AnchorBox` / `Anchor` / `AnchorPoint` /
+`AnchorTarget` payload have no layout solver behind them yet, and
+nothing in either crate constructs one. They survive the #41
+dead-code sweep on format grounds rather than code grounds:
+`Flag` is `Serialize` / `Deserialize` and reachable from a
+`.mindmap.json` through the `GfxElementField::Flag(Flag)`
+predicate language, where
+[`format/mutations.md`](./format/mutations.md) publishes
+`Anchored(AnchorBox)` as an authorable variant. Removing the
+variant would change what an authored map round-trips, which is a
+format decision and not a cleanup.
 
 ### `Event`, `GlyphTreeEvent`, `GlyphTreeEventInstance`, `EventSubscriber`
 
@@ -623,14 +635,56 @@ A node's visual silhouette and its clickable
 silhouette must agree. `NodeShape` names the two today
 (rectangle, ellipse) and gives both pipelines one source of
 truth for "is this point inside?". Adding a new shape is
-three small changes: one enum variant, one WGSL shader `case`,
-one `contains_local` arm.
+four small changes: one enum variant, one `style_spellings`
+arm, one WGSL shader `case`, one `contains_local` arm. The
+`style_spellings` `match` is exhaustive over the variants, so
+the first change does not compile without the second.
 
 `lib/baumhard/src/gfx_structs/shape.rs`.
 `contains_local` does point-in-AABB or point-in-ellipse
 (normalized coordinates, `nx² + ny² ≤ 1`); degenerate bounds
 always return `false`. `intersects_local_aabb` supports
 rect-select with conservative approximation for ellipses.
+
+The format's shape vocabulary (`KNOWN_SHAPES`, published in
+`format/enums.md` and enforced by `maptool verify`) is wider
+than the variant set: `"hexagon"`, `"diamond"`,
+`"parallelogram"` and `"rounded_rectangle"` are canonical but
+have no shader case yet. `ShapeSpelling` is the pure
+classifier that separates those from a genuine typo —
+`Rendered` / `KnownNotYetRendered` / `Unrecognized` /
+`Unspecified` — and `is_author_error` / `is_quiet_fallback`
+are the two predicates it exposes for the reporting
+decision. Before it existed, every hexagon in the demo map
+warned on every load (issue #118).
+
+`ShapeReport` is the second half of the split: the *routing*
+as a value. `ShapeSpelling::report` composes the two
+predicates into `Some(UnknownSpelling)` /
+`Some(RectangleSubstituted)` / `None`, `ShapeReport::level`
+is the single definition of which `log::Level` each carries,
+and `from_style_string` does nothing but pick the literal
+macro per arm — literal because `log`'s release compile-out
+folds on a level the compiler can see, which a
+`log::log!(computed, …)` would defeat. The value being a
+value is what makes the decision ordinary testable data;
+what is left, arm-to-macro, is a fact about source text and
+`shape_tests.rs`'s `log_routing` reads it as one, holding
+`from_style_string`'s body to a whitelist rather than
+searching it for `log::` calls.
+
+`KNOWN_SHAPES` is restated five times across three files —
+three lists in `format/enums.md`, `LEGACY_SHAPE_ORDINALS` in
+`crates/maptool/src/convert/enums.rs`, and the `shape_type`
+ordinal table in `format/migration.md` — and each is pinned
+back by a test that reads the restatement. The first four
+derive their expectation from the constant directly; the
+ordinal table is pinned to `LEGACY_SHAPE_ORDINALS` instead,
+which is itself pinned to the constant, so the chain closes
+in two hops rather than one. Either way, widening the
+vocabulary is still one edit plus the copies the suite names
+for you. The table in `shape.rs`'s `KNOWN_SHAPES` doc is the
+index.
 
 Shape-aware borders (glyph-drawn frames that follow
 the ellipse outline, not just the AABB) wait on the
@@ -771,9 +825,11 @@ from `ColorFontRegions` to the two cosmic-text shaping API shapes.
 
 Every piece of text shaping in the project
 flows through these. `fonts::init()` is called once at startup;
-the `FONT_SYSTEM` `RwLock` is acquired through
-`acquire_font_system_write("site-name")` with a timeout-guarded
-write lock. `AppFont` is generated at build time by scanning
+the `FONT_SYSTEM` `RwLock` is private and is acquired through
+`acquire_font_system_write("site-name")` (or its `try_` / `_read`
+siblings). Re-acquiring on the same thread panics at once; a wait on
+another thread's hold is bounded and ends in a panic naming the
+holder, never a hang. `AppFont` is generated at build time by scanning
 `lib/baumhard/src/font/fonts/` — drop a font file in, recompile,
 and the variant appears.
 
@@ -795,10 +851,11 @@ shared private resolver, both live in `attrs.rs`:
 
 Unknown fonts log a `warn!` and drop to a monospace / no-pin
 fallback rather than aborting — interactive paths must not panic
-([`CODE_CONVENTIONS.md §9`](./CODE_CONVENTIONS.md)). The 5-second timeout on the write lock is a re-entrancy
-bug detector: the single-threaded app should never wait on this
-lock, so a timeout means the same thread is trying to acquire
-twice.
+([`CODE_CONVENTIONS.md §9`](./CODE_CONVENTIONS.md)). The lock tells
+its two failures apart rather than timing them: a thread
+re-acquiring what it already holds is refused at once from a
+thread-local record, and the 60-second timeout bounds only a wait on
+*another* thread's hold, which is a deadlock if it runs that long.
 
 ### `RegionParams`, `RegionIndexer`, `RegionError`
 
@@ -824,29 +881,36 @@ handles hit-testing today; when the region index is wired, region
 mutations must go through the mutator pipeline or the index will
 drift silently.
 
-### Animation primitives — `AnimationDef`, `AnimationInstance`, `Timeline`, `TimelineEvent`
+### Animation primitives — `AnimationTiming`, `Easing`, `Followup`
 
-An immutable animation blueprint (`AnimationDef`)
-and a per-playback state struct (`AnimationInstance`) driven by
-a `Timeline` of `TimelineEvent`s.
+The vocabulary for motion: a serializable timing
+envelope on a mutation, an easing curve, and a reserved slot for
+what happens after a run completes.
 
-Glyph animations need to define a sequence
-once and replay it many times at different speeds, phases, or
-counts without cloning the definition. `AnimationDef` is the
-shared blueprint (via `Rc`); `AnimationInstance` carries the
-live play state. The timeline is a list of events —
-`Mutator(id)`, `Interpolation { mutator, num_frames,
-duration }`, `WaitMillis(n)`, `Goto(idx)`, `Terminate` —
-processed by the animation driver one event at a time.
+A "grow font" that snaps is fine; one that
+animates reads better. Rather than a general scheduler, motion
+here rides on the mutation that causes it — an authored
+`CustomMutation` carries `timing`, and the runtime blends between
+a pre-mutation and a post-mutation snapshot instead of executing
+a separate program.
 
-`lib/baumhard/src/core/animation.rs`. A
-`TimelineBuilder` provides a fluent constructor. The
-`AnimationMutator` trait exists alongside `Mutator` so an
-animation step can interpolate rather than apply instantly.
+`lib/baumhard/src/mindmap/animation.rs` for the serializable
+half (`AnimationTiming`, `Easing`, `Followup`, and the `lerp_*`
+helpers); `src/application/document/types.rs` +
+`animations.rs` for the app-side per-playback record and tick,
+which live there because the snapshot type (`MindNode`) and the
+completion commit do. See [§4](#animation-timing) for the
+authoring surface and
+[`format/animation-roadmap.md`](./format/animation-roadmap.md)
+for what is wired versus dormant.
 
-This is today's vocabulary for motion; the
-`Followup` slot on mutation timing ([§4](#animation-timing))
-expects to extend it with loop/reverse/chain semantics.
+A second, generic vocabulary — `AnimationDef` / `AnimationInstance`
+/ `Timeline` / `TimelineEvent` in `core/animation.rs` — was
+deleted in #41. It had no implementers of its `Mutable` bound, no
+callers, and an `update` signature that took its instance by value
+and returned nothing, so it could not have driven a tick as
+written. The long-form scheduling it stood for is the `Followup`
+slot's job when that lands.
 
 ### Utilities — `grapheme_chad`, `color`, `geometry`
 
@@ -864,9 +928,11 @@ own take:
   `find_byte_index_of_grapheme`,
   `replace_graphemes_until_newline`, `split_off_graphemes`,
   `delete_back_unicode`, `delete_front_unicode`,
-  `find_nth_line_grapheme_range`, `count_number_lines`. Byte
-  slicing from user-facing counts lands mid-cluster on the
-  first emoji; always reach for these. See
+  `find_nth_line_grapheme_range`, `count_number_lines`, and the
+  display-width pair `truncate_to_display_width` (clip the
+  overflow) / `wrap_to_display_width` (fold it onto the next
+  line). Byte slicing from user-facing counts lands mid-cluster
+  on the first emoji; always reach for these. See
   [`CODE_CONVENTIONS.md §1`](./CODE_CONVENTIONS.md) and
   [`lib/baumhard/CONVENTIONS.md §B3`](./lib/baumhard/CONVENTIONS.md).
 - **`color`** — `FloatRgba = [f32; 4]` and `Rgba = [u8; 4]`
@@ -901,8 +967,9 @@ palettes, custom mutations.
 
 Everything a user can save and reload is here.
 The `MindMap` is a plain serializable struct — no derived state, no
-runtime caches. The loader deserializes it from JSON, rejecting any
-key no field claims ([closed objects](#closed-objects)); the
+runtime caches. The loader deserializes it from JSON and carries any
+key no field claims along untouched, so the save writes it back
+([preserved unknown keys](#preserved-unknown-keys)); the
 [canvas-role projection](#canvas-role-projection) and
 [tree builder](#tree-builder) turn it into renderable form;
 mutations transform it in place.
@@ -919,48 +986,162 @@ HashMap<String, Palette>`, and
 [`format/README.md`](./format/README.md) for a minimum-viable
 example.
 
-### Closed objects
+### Preserved unknown keys
 
-Every object in `.mindmap.json` is **closed**: a key no field claims
-is a load error, never a key the loader quietly ignores.
+Every object in `.mindmap.json` is **open**: a key no field claims
+neither fails the load nor disappears from the file. The loader warns
+once, carries the key on the map, and writes it back at the next save.
 
-The reason is on the save path, not the load path. Mandala is an
-editor — it loads the whole map, mutates it, and writes the whole
-model back — so a key dropped at load is a key **deleted from the
-file at the next save**, and for a hand-authored map that file was
-the only copy. A `log::warn!` nobody reads turns silent data loss
-into logged data loss; refusing the load is the only outcome that
-leaves the author holding what they wrote at the moment they find
-out. A typo (`"min_zoom_to_rendr"`) and a field that does not exist
-yet fail the same way, and the message names the part of the
-document that carries the key — `node "1.2"`, `edge[3]`,
-`palette "coral"` — rather than a byte offset.
+The reason is version skew, in both directions at once. A map authored
+by a newer build carries keys an older build has never heard of;
+refusing the document leaves the reader with an empty window, and
+Mandala is an editor — it loads the whole map, mutates it, and writes
+the whole model back — so ignoring the keys deletes them at the next
+save. Keeping them is what lets an older build open, edit and resave a
+newer map without destroying the newer features. A typo
+(`"min_zoom_to_rendr"`) is kept the same way, and named the same way,
+because a key you still have is a key you can still fix;
+[`maptool verify`](#maptool-cli) is where it becomes a nonzero exit.
+The warning names the part of the document that carries the key —
+`node "1.2"`, `edge[3]`, `palette "coral"` — rather than a byte
+offset.
 
-Mechanically it is `#[serde(deny_unknown_fields)]` on every type
-reachable from a load. That set is not written down anywhere: a
-hand-kept list of "types that must carry the attribute" is the twin
-surface `lib/baumhard/CONVENTIONS.md` §B4 warns about, so
-`lib/baumhard/src/util/serde_coverage.rs` walks baumhard's own
-sources with `syn` and
-`loader::tests::test_every_loadable_type_rejects_unknown_keys`
-fails until a newly reachable type opts in.
+Mechanically it is **not** a per-type `#[serde(flatten)]` catch-all,
+and could not be: `serde_json::Value` implements neither `Eq` nor
+`Hash`, and the graph reachable from a load is full of types that
+derive `Copy`, `Eq` or `Hash` (`Color`, `OrderedVec2`, `Position`,
+`Anchor`, `Range`, `GlyphMatrix`). A catch-all on only the types that
+can hold one would preserve keys in some places and drop them in
+others. Instead `mindmap::unknown_keys` wraps the one parse a load
+already pays for and records the route to every key serde handed to
+`deserialize_ignored_any` — which covers the whole graph, including
+types the source walk cannot see. What the model owes the mechanism is
+only that no type absorbs a key first: no `deny_unknown_fields`, no
+`flatten`, no `untagged` or `tag`. That set is not written down
+anywhere — a hand-kept list is the twin surface
+`lib/baumhard/CONVENTIONS.md` §B4 warns about — so
+`lib/baumhard/src/util/serde_coverage.rs` walks baumhard's own sources
+with `syn` and
+`loader::tests::test_no_loadable_type_can_swallow_an_unknown_key`
+fails the moment one appears.
 
-Closedness is about **keys, not meanings**. An `edge_type` the
-renderer does not know still loads — open vocabularies stay open —
-and semantic violations (an edge pointing at no node, a
-`color_schema` naming a palette that is not there) are
-[`maptool verify`](#maptool-cli)'s business, not the loader's. The
-interiors of `macros` / `inline_macros` are deliberately opaque.
-The IPC boundary made the same call for the same reason
-([`format/ipc.md`](./format/ipc.md): unknown parameters are rejected
-with `invalid_params`).
+**A derivation is a reading, and a reading can be wrong in a way the
+document it feeds is wrong in too.** The same walk produces the list
+of arrays `format/schema.md` publishes — the places a captured key's
+route stops naming a node by its id and starts naming an element by
+its index — and for a long time it produced that list by matching the
+token `Vec` and one spelling of `#[serde(rename …)]`. Three live
+arrays were missing as a result: `ColorFontRegions::regions` is a
+`BTreeSet`, and `MutationListSrc::Literal` and
+`GlyphModelField::GlyphLines` are newtype-variant payloads with no
+field name. The document said the same three things, because it was
+written by reading the walk, so nothing disagreed
+([#122](https://github.com/Svendsys/mandala/issues/122)).
 
+The walk now resolves a field's type through the index — a `type`
+alias, a newtype struct, any of the eleven container spellings serde
+writes as a growable array, and the bare slice `[T]` that `Cow<'a,
+[T]>` bottoms out on. Four of those eleven do not keep the order the
+file was written in at all: `HashSet` and `FxHashSet` iterate by hash,
+`BTreeSet` by the element, `BinaryHeap` by its heap. That is a
+*stronger* reason to publish them than a `Vec`, not a weaker one — a
+save re-sorts them, so an index into one can move without anybody
+having edited anything. The walk also reads every spelling serde
+accepts for a member name, including the `deserialize` arm of a
+list-form `rename`, a container `rename_all`, and the extra spellings
+an `alias` admits. But the fix that matters is that the
+walk is no longer the only witness.
+`lib/baumhard/src/util/serde_probe.rs` asks the **generated**
+`Deserialize` impls the same questions by handing them a
+`Deserializer` that answers every request with the emptiest value
+that satisfies it and records what was asked — no source text, no
+`syn`, no list, and `serde_derive`'s own expansion as the authority
+on both member names and array-ness.
+`unknown_keys::tests::test_the_derived_positional_arrays_survive_an_independent_derivation`
+and its member-name sibling fail when the two disagree. Neither is a
+replacement for the other: the probe cannot see a serialize-only
+proxy, and the walk cannot see through a generic instantiation. Their
+disagreement is the signal. Both see `#[serde(alias = "…")]` and both
+publish it — the derive writes a field's aliases into the same
+`FIELDS` list as its name and a variant's into `VARIANTS` — because a
+file may write any accepted spelling and a captured route is recorded
+against whichever it wrote.
+
+Openness is about **keys, not meanings**. An `edge_type` the renderer
+does not know still loads — open vocabularies stay open — and semantic
+violations (an edge pointing at no node, a `color_schema` naming a
+palette that is not there) are [`maptool verify`](#maptool-cli)'s
+business. The interiors of `macros` / `inline_macros` are deliberately
+opaque and are never reported. Three legacy spellings are the
+exception and still refuse the load: a top-level `portals`, per-node
+`text` / `text_runs`, and a non-array `sections` are names the current
+model means something else by, and each has a `maptool convert` verb.
+
+`lib/baumhard/src/mindmap/unknown_keys.rs`,
 `lib/baumhard/src/mindmap/loader.rs`,
-`lib/baumhard/src/util/serde_coverage.rs`. See
-[`format/schema.md`](./format/schema.md) §"Unknown keys are
-rejected" for the policy as authors read it, and
-[`format/validation.md`](./format/validation.md) for the split
-between what the loader checks and what `verify` checks.
+`lib/baumhard/src/util/serde_coverage.rs`,
+`lib/baumhard/src/util/serde_probe.rs`. See
+[`format/schema.md`](./format/schema.md) §"Unknown keys are kept" for
+the policy as authors read it, and
+[`format/validation.md`](./format/validation.md) for the split between
+what the loader reports and what `verify` fails on. Its severe
+counterpart is [skipped constructs](#skippedconstruct--skippedconstructs),
+below.
+
+### `SkippedConstruct` / `SkippedConstructs`
+
+One construct a load could not read at all, lifted out of the document
+so the rest of the map opens, and written back untouched at the next
+save. `SkippedConstructs` is the ordered collection of them, carried
+on `MindMap` beside `unknown_keys` and with the same `#[serde(skip)]`:
+they go back at their own routes, not into a side object.
+
+The problem is the acute form of the one
+[preserved unknown keys](#preserved-unknown-keys) solves. A key from a
+newer build is **inert** — nothing reads it, so ignoring it changes
+nothing about what the map does. A **variant** from a newer build is
+the opposite: it *is* the instruction. `{"mutator": {"Glow": …}}` used
+to make the whole document unloadable, so opening a newer map in an
+older build gave an empty window and the newer feature was one
+accidental save away from gone.
+
+**The unit is the whole construct**, never the part inside it that
+failed, and that is the load-bearing design decision. Dropping one
+`Mutation` out of a macro would leave a custom mutation that still
+appears in `mutation list`, still fires, and now does two of the three
+things it says it does — a silent partial behavior with nothing to
+see. So the unit is the nearest container whose absence reads *as*
+absence: a whole `custom_mutations[i]`, a whole node
+`inline_mutations[i]`, or a whole node-or-section
+`trigger_bindings[i]`. Nothing else is skippable — a node, an edge,
+the canvas or a palette this build cannot read still fails the load,
+because a map missing part of itself with no sign of which part is
+worse than no map.
+
+**Refused for any reason, not only an unknown variant.** Sorting
+serde's message into "from the future" and "a typo" would mean parsing
+that message — the twin surface `lib/baumhard/CONVENTIONS.md` §B4 is
+about — and it sorts on the wrong axis anyway: the load's question is
+"can I carry this out?", and the answer is no in both cases. So the
+load skips what it cannot read, warns saying what serde said and that
+nothing the construct describes will run, and `maptool verify` reports
+every one as an `unknown_variant` violation with a nonzero exit. The
+two questions — *can I open this?* and *is this file right?* — stay
+separate.
+
+Ordering matters at save: captured keys are spliced back **before**
+skipped constructs, because a key's positional route was resolved
+against the array with the constructs already lifted out. See
+`loader::to_json_value`.
+
+`lib/baumhard/src/mindmap/unknown_keys.rs` (the types),
+`lib/baumhard/src/mindmap/loader.rs`
+(`load_skipping_unreadable_constructs`,
+`excise_unreadable_constructs`),
+`crates/maptool/src/verify/unknown_keys.rs`
+(`check_skipped_constructs`). See
+[`format/schema.md`](./format/schema.md) §"Unknown keys are kept" and
+[`format/validation.md`](./format/validation.md) §"Unknown variants".
 
 ### `Canvas`
 
@@ -1007,7 +1188,7 @@ field reference in [`format/schema.md`](./format/schema.md). Author
 owns non-overlap of node AABBs; the model does no collision
 checking. The tree builder excludes folded subtrees from the
 display tree; the underlying data persists either way. The node
-container materialises as a chrome-only `GfxElement::GlyphArea`
+container materializes as a chrome-only `GfxElement::GlyphArea`
 in the runtime tree, with the section subtree appended as
 children — see [tree builder](#tree-builder).
 
@@ -1126,17 +1307,61 @@ whole map" into a single edit. Each palette is an array of
 it pulls from. Level-clamping (last group when out of range) makes
 deep subtrees degrade gracefully.
 
-`lib/baumhard/src/mindmap/model/palette.rs`. A node's binding
-lives in its optional `color_schema` field, a `ColorSchema`
-record with `palette: String` (the key into `map.palettes`),
-`level: usize` (which `ColorGroup` to pull from), and two
+`lib/baumhard/src/mindmap/model/palette.rs`, with the cascade
+itself in `model/theme.rs`. A node's binding lives in its
+optional `color_schema` field, a `ColorSchema` record with
+`palette: String` (the key into `map.palettes`),
+`level: usize` (which `ColorGroup` to pull from), two
 flags — `starts_at_root` (does level 0 apply to the schema
 root or to its children?) and `connections_colored` (do edges
-inherit the palette stroke color?). `resolve_theme_colors` on
-`MindMap` does the lookup; out-of-range `level` clamps to the
-last group rather than failing. Validation requires every
-referenced palette to exist with at least one group. Full
-reference: [`format/palettes.md`](./format/palettes.md).
+leaving this node inherit the palette stroke color?) — and
+`overrides`, a `ColorOverrides` record of four optional strings
+naming this node's own exceptions to the group.
+`resolve_theme_colors` on `MindMap` does the lookup;
+out-of-range `level` clamps to the last group rather than
+failing, and `starts_at_root: false` leaves the schema root
+itself unresolved so its own `style` stands. Validation
+requires every referenced palette to exist with at least one
+group.
+
+The cascade is **override first, palette second, `style`
+third**, and the
+projection passes read it through four sibling helpers —
+`node_background_color`, `node_frame_color`,
+`node_text_color`, `node_title_color` — plus
+`edge_theme_stroke_color`, which supplies the themed tier of
+[`MindEdge`](#mindedge)'s color cascade for an edge whose
+source node sets `connections_colored`. That helper reads
+`node_frame_theme_tier` — the same one the border ladder
+reads — so an `overrides.frame` reaches an edge exactly as it
+reaches the node's own frame, and an empty frame is a hole on
+both. Anything more specific
+than the node still wins: a `TextRun` naming its own color, a
+`border.color` override, a per-edge `glyph_connection.color`.
+
+The `overrides` tier is what makes the theme *editable per
+node*. A direct "make this one green" is more specific than an
+inherited theme and has to win, and it cannot land in `style`:
+`style` is the tier the palette shadows, and every migrated
+node carries baked `style` colors that are stale copies of its
+own theme, so a `style` write would report success and change
+nothing on screen. `set_node_bg_color` /
+`set_node_border_color` / `set_node_text_color` therefore write
+`color_schema.overrides` on a themed node and `style` on an
+unthemed one, through one shared
+`set_node_color_channel`; `UndoAction::EditNodeStyle` carries
+`before_color_schema` so undo puts the node back on its
+palette.
+
+A tier you can write is only half a tier: each of the three
+setters takes an `Option`, and `None` — what `color bg=reset`
+and the empty string on a non-fill channel both resolve to —
+*drops* the override so the group shows through again, rather
+than storing the authoring literal that would pin the node off
+its theme forever. On an unthemed node there is nothing below
+`style`, so the same `None` names the authoring default
+instead. Full reference:
+[`format/palettes.md`](./format/palettes.md).
 
 Animated palette transitions are the seam — the data
 shape is already mutation-friendly; the runtime would need to
@@ -1268,7 +1493,13 @@ Fields: `body: String` (default mid-dot `·`), `cap_start` /
 `cap_end: Option<String>`, `font: Option<String>`, `font_size_pt:
 f32`, `min_font_size_pt` / `max_font_size_pt: Option<f32>`,
 `color: Option<String>`. Color cascade priority (highest
-first): edge-label → `glyph_connection.color` → `edge.color`.
+first): edge-label → `glyph_connection.color` → the source
+node's frame tier (`overrides.frame`, else its palette group's
+`frame`) → `canvas.default_connection.color` → `edge.color`.
+The theme sits above the canvas default because it is per-node
+and the default is map-wide, and the frame tier is the one
+`MindMap::node_frame_theme_tier` also hands the node's border
+resolver, so a per-node frame override moves both.
 `effective_font_size_pt(zoom)` is the helper callers reach for
 to derive the clamped screen-space size.
 
@@ -1358,7 +1589,14 @@ points), `resolve_anchor_point` (auto / top / right / bottom /
 left), `point_at_t`, `tangent_at_t`, `closest_point_on_path`
 (uniform-t sampling + Newton refinement for cubics, direct
 projection for straight lines), `sample_path` (arc-length-uniform
-glyph placement), `distance_to_path`. Quadratics get promoted to
+glyph placement), `distance_to_path`, and the pair behind the edge hit-test —
+`distance_to_path_within`, which `hit_test_edge` calls, and
+`path_bounds`, which it calls in turn. `path_bounds` is the
+control polygon's AABB, which contains the curve by the Bezier
+convex-hull property *in real arithmetic*; the f32 escape from
+that box is what `distance_to_path_within`'s slack allows for, and
+it is the reason to reach for that function rather than to compare
+against the box by hand. Quadratics get promoted to
 cubic at build time, so the apply path is always one of two
 shapes.
 
@@ -1400,7 +1638,7 @@ walks the parent chain at O(depth) per call.
 
 Projects a `MindMap` into a Baumhard
 `Tree<GfxElement, GfxMutator>` mirroring the parent-child
-structure, with each `MindNode` materialising as a three-deep
+structure, with each `MindNode` materializing as a three-deep
 subtree (container + section-areas + section-models).
 
 Mutations need a `Tree` to walk against. The
@@ -1445,10 +1683,48 @@ follows the same **courier** shape:
 2. a *full-rebuild projection* (`build_*_tree`) and an *in-place
    projection* (`build_*_mutator_tree`) over that data.
 
+Which projection runs is decided by hashing the data pass's
+output, because any interaction re-runs every role: clicking an
+edge label reaches the border and portal passes too. Two
+questions, and roles that can answer both ask both. The
+*structural* signature (`border_structure_signature`,
+`portal_structure_signature`, `connection_identity_sequence`,
+`handle_identity_sequence`, …) covers only what fixes the tree's
+channel layout, and answers *can a mutator align against the
+registered arena at all?* — a color change must leave it alone,
+or a color-picker hover would reallocate the arena every frame,
+which is the cost the in-place path exists to avoid. The
+*content* signature (`border_content_signature`,
+`portal_content_signature`) covers every field either projection
+reads, and answers *is there anything left for that mutator to
+write?* On a content match the role does nothing: the registered
+tree already holds what a rebuild would produce. Completeness
+runs the opposite way for the two — a structural signature is a
+deliberate subset, a content signature that misses a field
+serves a stale frame, so each content hasher destructures its
+element type exhaustively and a new field fails to compile until
+it is accounted for. Section frames, which have no in-place
+projection, carry only the content signature
+(`section_frame_content_signature`); the connection, label and
+handle roles carry only the structural one and always apply
+their mutator.
+
+Those three still spell theirs `*_identity_sequence` and return
+a `Vec` the caller hashes through `hash_canvas_signature`, which
+is the older shape of the same idea; borders and portals were
+converted to stream into the hasher when their content
+signatures landed. The two spellings mean the same thing and the
+conversion of the remaining three is unclaimed work, not a
+distinction.
+
 Style is resolved exactly once, in the data pass; neither
-projection re-resolves it. `node_clip::node_clip_aabbs` is the one
-cross-role input — the connection sampler clips glyph samples
-against it, and it reads only the resolved border `font_size_pt`.
+projection re-resolves it. Two inputs cross role boundaries.
+`node_clip::node_clip_aabbs` is the one the connection sampler
+clips glyph samples against; it reads only the resolved border
+`font_size_pt`. [`EdgePathCache`](#edge-path-cache) is the other:
+the sampler, the selected edge's grab-handles and the label layout
+all want the same edge's `ConnectionPath`, and it is built once per
+edge per frame for whichever of them asks first.
 
 The application layer drives the sequence through
 `CanvasFrame` (`src/application/app/scene_rebuild.rs`), which owns
@@ -1490,6 +1766,55 @@ change. Otherwise the previous frame's samples are reused with a
 cheap `point_inside_any_node` clip filter.
 
 `lib/baumhard/src/mindmap/scene_cache.rs`.
+
+An entry holds the sampled geometry, the endpoints it was sampled at,
+and the `SampleParams` — effective font size, glyph spacing, per-path
+sample budget — it was sampled under. It holds nothing the frame
+*draws* with, and there is no exception: body glyph, cap glyphs, font
+family, font size and body color are all read from the live model on
+every path, so no styling edit can be served stale. The two reuse
+doors, `reusable` and `reusable_mut`, compare the whole
+`SampleParams`, so a font-size or spacing edit resamples without the
+mutating site having to remember `clear()`.
+
+What the caller still owes is geometry the params cannot see, and only
+that: an endpoint that moved in the model without appearing in the
+drag `offsets` map, an anchor or control-point edit, and a node
+resize. Nothing about color is on that list — neither a theme-variable
+edit nor a direct `edge.color` edit.
+
+`refill` is the cache's only writer, and it hands the sampler the
+buffer the entry already holds rather than a new one, so an edge that
+resamples while cached allocates nothing. A refill that fills nothing
+evicts, so an entry with no points — which the reuse doors would
+otherwise serve as an edge that draws nothing, forever — cannot
+exist.
+
+Liveness is a generation stamp rather than a per-frame set of keys:
+`begin_pass` opens a pass, every route that hands out or writes an
+entry stamps it, and `evict_unseen` drops what still carries an older
+stamp. Reaching an entry *is* marking it, so a route cannot draw an
+edge and then forget to record that it saw one.
+
+### Edge path cache
+
+A per-frame memo of `ConnectionPath`s, keyed by index into
+`map.edges` and filled on first ask.
+
+Three passes want the same edge's path in one rebuild: the
+connection sampler on a scene-cache miss, the label layout for
+every labeled edge, and the grab-handles for the selected edge.
+Each used to build its own.
+
+It is **lazy** rather than precomputed, which is the load-bearing
+half: an unlabeled, unselected edge that hits the scene cache asks
+for no path and none is built. It borrows the `MindMap` and the
+drag-offset map it resolves against, so a memo cannot outlive the
+inputs it is keyed on — nothing has to remember to invalidate it.
+`CanvasFrame` owns one per rebuild and threads it through both
+connection passes.
+
+`lib/baumhard/src/mindmap/tree_builder/edge_path.rs`.
 
 ### Trigger bindings
 
@@ -1731,8 +2056,14 @@ operates on).
 
 Defined in
 `lib/baumhard/src/mindmap/custom_mutation`. Today the variant is
-chosen at compile time (`Desktop` on native, `Web` on WASM); the
-`Touch` variant exists but no input path dispatches on it yet.
+chosen at compile time (`Desktop` on native, `Web` on WASM,
+through `app::PLATFORM_CONTEXT`); the `Touch` variant exists but
+no input path dispatches on it yet — including the tap path,
+which reports the build's platform like every other input.
+Relabeling a gesture would silently stop every `["Web"]`-gated
+trigger from firing under a finger in the browser, so which
+platform a build *is* stays a build fact until the authoring
+format decides otherwise (`format/mutations.md`).
 Embedded in `MutationApplicabilityGate.contexts:
 Vec<PlatformContext>` so a mutation can declare which platforms
 it applies to.
@@ -1767,10 +2098,12 @@ animation by hand. The dispatcher starts an `AnimationInstance`
 that ticks each frame, blends the in-flight state, and commits
 on completion.
 
-`lib/baumhard/src/mindmap/custom_mutation/timing.rs`. Fields:
+`lib/baumhard/src/mindmap/animation.rs` — reached as the `timing`
+field on `CustomMutation`. Fields:
 `duration_ms`, `delay_ms`, `easing` (`Linear` / `EaseIn` /
 `EaseOut` / `EaseInOut`), and a reserved `then` (`Followup`)
-slot.
+slot. The app-side `AnimationInstance` that ticks it lives in
+`src/application/document/types.rs`.
 
 `Followup::{Reverse, Chain, Loop}` is named but not
 yet wired. When it lands, mutations will compose into chains
@@ -1824,14 +2157,73 @@ to `InitState` and stay there for the lifetime of the run.
 everything substantive lives on `InitState`.
 
 `src/application/app/run_native.rs:48-130`.
-`InitState` carries `window: Arc<Window>`, an optional
-`document: Option<MindMapDocument>` (`None` before first file
-load), `drag_state`, `app_mode`, modal UI state (console, node
-text editor, single-line editor, color picker), `picker_hover`,
-and the resolved keybind table. The `input_context()` method at
-line 137 produces a borrowed view of these fields per-event so
-handlers can borrow disjoint subsets without lifetime
-contortions.
+`InitState` carries `window: Arc<Window>`, a
+`document: Option<MindMapDocument>`, `drag_state`, `app_mode`,
+modal UI state (console, node text editor, single-line editor,
+color picker), `picker_hover`, and the resolved keybind table. The
+`input_context()` method at line 137 produces a borrowed view of
+these fields per-event so handlers can borrow disjoint subsets
+without lifetime contortions.
+
+The `Option` on `document` is the interactive shell's shape, not
+startup's: init always produces a document, because a load that
+fails produces the [load-failure placard](#load-failure-placard)
+instead of nothing.
+
+### Load-failure placard
+
+The document a rejected map load is rendered as, so the loader's
+message reaches the canvas instead of only `stderr`.
+
+Startup is the surface most likely to be a user's first contact
+with the format, and it used to be the only one that swallowed a
+loader error — the console `open` verb puts the message in the
+overlay, `maptool` puts it on `stderr` and exits nonzero, and
+startup logged it and drew an empty canvas. Behind a double-click
+there is no terminal, so that log line did not exist for the person
+holding the file (#107).
+
+A placard is an ordinary one-node `MindMap`
+(`lib/baumhard/src/mindmap/placard.rs`) whose text is the headline,
+the path or URL that was asked for, the loader's message in full,
+and a line confirming nothing was written. Because it is a map, it
+reaches the screen through the same tree projection as any other
+document (§1 "Everything is glyphs") — no second pipeline, no
+renderer pass, and nothing that needs a GPU to test. The message is
+wrapped with `grapheme_chad::wrap_to_display_width`, so a path
+containing an emoji folds without shattering.
+
+"In full" has one bound, and it is not stylistic: a loader message
+is as long as the file makes it, because serde quotes an offending
+JSON string back verbatim. So the source and the message are each
+elided in the *middle* — both ends kept, a one-line notice between
+— past `PLACARD_HEAD_CLUSTERS + PLACARD_TAIL_CLUSTERS`. Nothing the
+loader realistically emits comes near that (the longest, a 400-node
+parent-cycle report, is 56 wrapped lines), and the budget is what
+keeps the placard a map the loader itself accepts: unbounded, a
+4 MB message asks for a node twice as tall as `MAX_NODE_AXIS`.
+
+`src/application/app/startup_load.rs` is the decision. Both init
+paths call `startup_load::adopt(startup_load::startup_surface(...))`
+and nothing else: `StartupSurface` has one arm per outcome, `adopt`
+is the only place the rejected arm is matched, and it is where the
+message reaches the log. That is what keeps the browser build and
+the desktop build reporting a bad map identically (§1
+"Cross-platform as first-class"); the browser build's earlier DOM
+overlay is gone, replaced by this. Adding a third outcome is a
+compile error in `adopt` rather than a silent return to the empty
+window.
+
+The placard is bound to no file path, which is load-bearing rather
+than incidental: `save` and `Ctrl+S` both refuse a document without
+one, so a reflexive save cannot write the placard over the file
+that failed to parse — a file that, being unparseable, is likely
+the only copy of what its author was hand-editing.
+
+The convention behind the choice is
+[`CODE_CONVENTIONS.md`](./CODE_CONVENTIONS.md) §9: `expect` is for a
+broken program precondition, and a user's malformed input is not
+one.
 
 ### Event loop and `drain_frame`
 
@@ -1881,7 +2273,10 @@ SelectionState`, `undo_stack: Vec<UndoAction>`,
 `active_animations`, `active_toggles`, `mutation_registry`,
 `mutation_handlers`, `mutation_sources`, `dirty: bool`,
 `label_edit_preview`, `portal_text_edit_preview`,
-`color_picker_preview`, `border_preview`. What it does **not**
+`color_picker_preview`, `border_preview`,
+`rect_select_preview` (the node ids a rubber-band rectangle
+currently covers — see [`DragState`](#dragstate)). What it does
+**not**
 own: the renderer, GPU resources, drag/mode state, modal editor
 state, keybinds — those are all on `InitState`.
 
@@ -1943,23 +2338,30 @@ to the right element.
   move` / `section resize` verbs target the single-section
   selected (or take an explicit `section=K` kv); `MultiSection`
   is fan-out-only at the trait dispatch layer.
-- `SectionRange { sel, range }` — one section with a sub-range
-  of its grapheme indices. Produced by the inline text editor's
-  shift-select anchor on close: when the user shifts-arrow /
-  shift-click inside a section, the editor lifts the (cursor,
-  anchor) pair into this variant's `range = (start, end)` and
-  per-section verbs route range-aware setters
-  (`set_section_text_color_range`, `set_section_font_size_range`,
-  `set_section_font_family_range`) through it. Accessors that
-  only care about the owning section (`selected_section`,
+- `SectionRange { sel, section_span, grapheme_range }` — one
+  anchor section plus the two range meanings a section-scoped
+  selection can carry, each in its own newtype so they can never
+  share a slot again (#47 part C): `section_span: SectionSpan` is
+  an inclusive span of **section indices** on the owning node
+  (what border / style verbs fan out over, and what
+  `cleanup_after_structural_mutation` clamps), and
+  `grapheme_range: GraphemeRange` is a half-open sub-range of the
+  anchor section's **grapheme clusters** (what the range-aware
+  setters `set_section_text_color_range`,
+  `set_section_font_size_range`, `set_section_font_family_range`
+  and the range-aware clipboard cut / paste consume). Produced by
+  the inline text editor's shift-select anchor on close: the
+  editor lifts the (anchor, cursor) pair into `grapheme_range`
+  with `section_span` covering just the anchor section. Accessors
+  that only care about the owning section (`selected_section`,
   `is_selected`, `selected_ids`) treat it identically to
-  `Section`. **Clipboard contract:** `Cut` and `Paste` return
-  `NotApplicable` rather than silently destroy out-of-range
-  graphemes — the action arm logs `log::warn!` to surface the
-  skip; `Copy` falls through to whole-section copy because it's
-  non-destructive. Range-aware clipboard is deferred to a future
-  tier. **Picker contract:** `ColorTarget::Section` and
-  `PickerHandle::Section` carry the sub-range, so commit calls
+  `Section`. **Clipboard contract:** `Cut` and `Paste` are
+  range-aware — cut removes the in-range graphemes and returns
+  them as text; paste splices into the range; `Copy` falls
+  through to whole-section copy because the structured payload's
+  geometry belongs to the whole section. **Picker contract:**
+  `ColorTarget::Section` and `PickerHandle::Section` carry the
+  grapheme sub-range, so commit calls
   `set_section_text_color_range` directly (bypassing the
   `MultiSection` fan-out — different sections' lengths make
   cross-section sub-range semantics incoherent).
@@ -2018,8 +2420,9 @@ the user is *doing right now*.
   target (a `ResizeTarget::Node(id)` or
   `ResizeTarget::Section { node_id, section_idx }`). Drag a
   handle to resize; Esc returns to `Default`. Triggered by `r`
-  keybind on a selectable AABB or by `mode resize`. Touch peer
-  shipped in Batch 7: `LongPress`.
+  keybind on a selectable AABB or by `mode resize`. Touch peer:
+  `LongPress` — deliberately native-only, see
+  `TouchGestureRecognizer` below.
 - `NodeEdit { node_id }` — chrome dims sibling nodes and frames
   the active node's sections in cyan. Click a section to lift
   it into a `Section` selection; Enter (or `section edit`)
@@ -2033,10 +2436,13 @@ platform (compiles + the field plumbs through `InitState` /
 (`EnterResizeMode`, `EnterNodeEdit{,Clean}`, `EnterSectionEdit`,
 `FastResizeStart`) are NativeOnly today because they depend on
 the cursor-driven modal-stealer + DragState machinery that's
-native-gated — the `LongPress` / `TwoFingerDrag` touch defaults
-shipped in Batch 7 dispatch the same NativeOnly Actions and
-therefore drop silently on WASM, an acknowledged limitation
-(see `SECTIONS_BORDERS_RESIZE_PLAN.md` "Open follow-ups").
+native-gated — the `LongPress` touch default dispatches the same
+NativeOnly `EnterResizeMode` and so reports `Unhandled` on WASM,
+where a one-shot warn names it rather than the gesture vanishing.
+That one is a deliberate posture, not a pending port; the rest of
+the touch vocabulary (tap, one-finger pan, pinch) reaches no
+`Action` at all and works on both targets. See
+`TouchGestureRecognizer` below.
 Modal-stealer cascades route keystrokes per active mode (the
 keybind resolver keys on `(InputContext, key)` and the modal
 stealer can intercept e.g. Esc before normal dispatch).
@@ -2072,10 +2478,254 @@ impose on every state — including the `None` that is live for all
 but a few seconds of a session. `PendingRight`, 64 bytes, is the
 widest variant left and stays unboxed.
 
-`src/application/app/mod.rs:358-411`.
-Native-only today. Hit priority on `Pending` is fixed: edge
-handle > portal label > edge label > node, so small grab-areas
-always win over larger AABBs.
+**`SelectingRect` splits its per-frame work in two, and only one
+half runs every frame.** The overlay rectangle tracks the pointer
+and is redrawn unconditionally. The covered-node preview is
+memoized: `drain_rect_select` hit-tests against the *installed*
+tree (a rubber-band drag mutates nothing, so its geometry is
+current) and repaints only when `set_rect_select_preview` reports
+the covered set actually moved. The set itself lives on
+`MindMapDocument` beside the other transient previews, so every
+rebuild path paints it — including the animation tick's, which
+runs after this drain in the same frame and used to wipe a preview
+stamped onto a tree the drain had built for itself. Before #37 the
+drain ran `doc.build_tree()` plus a full text-buffer rebuild on
+every frame of the gesture, under a comment calling it a
+"lightweight overlay redraw".
+
+**The variant is the authority; both artifacts are its
+projection.** Because the covered set is document state that every
+node-tree rebuild reads, a gesture that ended without it being
+dropped leaves the whole canvas painting a rectangle the user let
+go of — and `SelectingRect` has more ways out than the left-release
+arm that used to be the only one dropping it (a left press
+overwrote it with `Pending`, `Action::PanCanvas` with `Panning`,
+and a target-picker mode swallowed the release entirely). So the
+drain runs on *every* frame, not only the gesture's, and
+re-derives the overlay rectangle and the covered set from the drag
+state it finds; the two eager calls that remain (the release arm,
+the target-picker mode entries) exist only so the rebuild they run
+in the same breath does not paint the set one last time. Nothing
+has to enumerate the exits, so a new one cannot strand it.
+
+One consequence of hit-testing the installed tree is worth naming:
+the drain runs *before* the animation tick in the same frame, so a
+node an animation is advancing is hit-tested one tick behind where
+it is drawn. The window is a single frame and only opens while an
+animation and a rubber band are live at once; closing it would
+mean either ordering the animation tick first (which would make
+the rectangle lag the pointer) or going back to a per-frame arena
+build.
+
+`src/application/app/mod.rs`. Native-only today.
+
+**Hit priority, in the three parts it actually has.** The line
+that used to sit here read "edge handle > portal label > edge
+label > node, so small grab-areas always win over larger AABBs",
+and it was wrong in both clauses. What is true:
+
+- **Capture, at button-down.** One chain runs, `compute_click_hit`,
+  and it gives the *node* priority: a portal hit is resolved only
+  when no node was hit, an edge-label hit only when neither was.
+  `portal_label_drag_capture` then arms the portal drag on the
+  same condition. So a marker or a label sitting over a node
+  loses the press to the node — on the drag path and the click
+  path alike, because there is one chain and the drag reads its
+  answer. A larger AABB in front wins.
+- **Capture, outside that chain.** The press also runs three
+  handle hit-tests that never consult `hit_node`, each gated on
+  state instead: `hit_edge_handle` on the selection being
+  `SelectionState::Edge`, `hit_node_resize_handle` on
+  `InteractionMode::Resize { Node }`, and
+  `hit_section_resize_handle` on `Resize { Section }`. Handles
+  are what the mode or the selection *is for*, so a press near
+  one is read as aimed at it whatever the chain says.
+- **Promotion, at threshold-cross.** `event_cursor_moved.rs`
+  consumes the captured hits in the order edge-label →
+  portal-label → edge-handle → node-resize-handle →
+  section-resize-handle → section-move → node-move →
+  Shift-rect-select → pan. Over the label hits this order decides
+  nothing, since the capture rule above leaves at most one of them
+  and the node populated. What it does decide is **all three
+  handle families versus the node**: each is ranked ahead of
+  `hit_node`, and each was captured without asking about it.
+
+**Where a click and a drag on the same press name different
+things** follows from that: the click ladder has no rung for
+handles at all, so every hit in the second bullet is a target the
+drag path can reach and the click path cannot. Three ways in, one
+shape.
+
+It is reachable, not theoretical. `resize_handle_positions` puts
+the eight handles *on* the boundary of the box they resize and
+`nearest_handle_within` accepts anything inside
+`HANDLE_HIT_TOLERANCE_PX` of one, while `hit_test_target` returns
+`None` for a point `point_in_node_aabb` refuses — and that
+predicate is shape-aware. So a press a few pixels outside a
+corner, or exactly on the corner handle of an ellipse-shaped node
+(where the corner is outside the shape by construction), is empty
+canvas to the click ladder and a resize to the drag: hold still
+and the selection clears, move and the node resizes. Where the
+handle sits *over* a node instead, the same press selects that
+node on a click and drags the handle on a drag.
+
+That is the intended shape — a handle is a drag affordance, and a
+click through it falling back to selection is what makes the
+handle non-modal — not a divergence to repair.
+
+Issue #48 reported the *portal* case as such a divergence,
+reading the promotion order without the capture rule.
+`test_portal_label_drag_capture_is_gated_by_the_same_node_hit_the_click_ladder_uses`
+now holds the two paths together, and names the gate that had
+been an unpinnable inline `if` inside the press handler.
+
+**A press never clobbers a gesture already in flight.** All three
+press paths in `event_mouse_click.rs` check the drag state before
+writing it, at two widths:
+
+- **Right and middle** refuse whenever the state is anything but
+  `None` (`handle_right_button`'s inline guard;
+  `route_middle_button`'s `Keep`). Neither button has a re-arming
+  role to preserve — a right press arms `PendingRight` and a
+  middle press dispatches `MouseGesture::MiddleClick`, and both
+  are meaningful only from rest.
+- **Left** refuses on the narrower
+  `DragState::would_abandon_gesture` class — `PendingRight` and
+  `Throttled(..)` — because it *is* the arming press for
+  `Pending`, and a click after a release the window never
+  delivered has to re-arm rather than do nothing.
+
+The class is the point: `Throttled(..)` owes the model a write
+and an undo entry that only `commit_on_release_core` performs,
+so replacing it leaves the tree holding dragged offsets that the
+next model rebuild silently snaps back — position loss with
+nothing to undo. `Panning`, `SelectingRect` and `Pending` owe the
+model nothing and are re-derived from the next sample or press.
+
+**The same class guards the *Action*, not only the presses.**
+`Action::PanCanvas` is the one Action that writes a drag state
+from rest, and it has three entry points, not one:
+`MouseGesture::MiddleClick`, `MouseGesture::LeftDrag` (which only
+ever runs from `Pending`), and any keyboard binding or macro step
+naming `pan_canvas` — a first-class user-bindable entry that
+`event_keyboard` dispatches with no drag-state check and that
+`SourceTier::allows_action` does not gate. So the guard sits on
+the arm (`dispatch::native::route_pan_canvas`, pure and pinned at
+`DragState` level the way `route_middle_button` is), which closes
+all three at once. `Pending` stays outside the refused class
+precisely because the `LeftDrag` threshold cross dispatches
+`PanCanvas` from it.
+
+The release halves match, and the rule is the same one: **the
+button that started a gesture is the one that finalizes it.**
+`resolve_release` commits only on the owning button and answers
+`PutBack` for every other, which both dispatchers honor by
+restoring the drag state. A stray right-click cannot end a
+left-button drag, and — since the left press started being
+refused mid-gesture — a left release cannot end a right-started
+fast-resize either; the right release, which the user still owes
+because the button is down, commits it. Middle-click was the
+exception on both halves until #37 — it overwrote any state on
+press and forced `None` on release — and the right-button guard's
+comment named that overwrite as the posture it was rejecting.
+
+**One state is outside the rule, and knowingly.** `Panning` does
+not record which button armed it, and three things arm it (a
+middle press, the `LeftDrag` threshold cross, any keyboard or
+macro `pan_canvas`), so a middle release during a left-drag pan
+ends it and a left release ends a middle-started one. Nothing is
+at risk — `Panning` owes the model no write and no undo entry,
+which is exactly what puts it outside the class above — and
+closing it is a decision about `Action::PanCanvas`'s semantics
+rather than a guard: the variant would have to carry its origin,
+and a keyboard-armed pan has no button to name, so "momentary or
+modal" has to be answered first.
+
+### `TouchGestureRecognizer`
+
+The touch half of the pointer vocabulary, and `DragState`'s
+peer rather than its consumer: a plain-value state machine
+that turns raw `(phase, finger_id, position, now)` tuples into
+a typed `RecognizedGesture`.
+
+A finger is not a mouse, and winit's mouse synthesis
+does not cover a hold, a second finger, or a drag that never
+pressed a button. Without a recognizer the browser — the
+surface `run_wasm/mod.rs` calls the *primary* one this
+project targets — has no input path at all on a phone.
+`Idle ↔ OneFinger ↔ TwoFingers` with four emit points:
+
+- **`Tap`** on the lift of a finger that never left
+  `POINTER_DRAG_THRESHOLD_PX` and was down for less than
+  `LONG_PRESS_MS`.
+- **`LongPress`** from `tick(now)` — "held for 350 ms" is a
+  wall-clock transition, not an event — once per episode.
+- **`Pan { pos, delta }`** on every `Moved` from the threshold
+  crossing onward. The first emission carries the travel since
+  the finger *landed*, so summing an episode's deltas gives
+  the finger's net displacement and the threshold's slop is not
+  lost.
+- **`PinchStep { center, pan, scale }`** while two fingers are
+  down, whenever their midpoint or their separation has moved
+  past the threshold since the last emission. Both halves ride
+  every emission, because two fingers moving describe a
+  translation and a scale at once; a parallel two-finger drag
+  therefore reports steps whose `scale` multiplies to 1.0, and
+  a symmetric spread steps whose `pan` sums to zero.
+
+**No clock is read and no I/O happens inside it** — time is a
+parameter — which is what makes every rule above provable on a
+machine with no touchscreen (`TEST_CONVENTIONS §T9`). What
+cannot be proved that way is the layer below: that a real
+digitizer delivers the phases in the order the machine assumes.
+
+**Two routes out, and the split is the point.** `LongPress`
+resolves through `MouseGesture::LongPress` and the keybind
+table, exactly as a mouse gesture does — it is the only touch
+gesture that reaches the table. The other three carry no
+`Action` at all: they take the two carve-outs CODE_CONVENTIONS
+§3 already grants the mouse, the pre-funnel selection
+bookkeeping a single click runs and the per-frame camera delta
+a drag runs, through one cross-platform
+`dispatch::apply_touch_effect`. That is why tap, pan and pinch
+cannot be dead on one target: an `Action` can be `NativeOnly`,
+and a `RenderDecree` cannot.
+
+`Action::PanCanvas` is *not* on that path and could not have
+been. It does not move the camera — it arms `DragState::Panning`
+(`dispatch::native`'s `route_pan_canvas`), which is native-only,
+so dispatching it from the browser returns `Unhandled` and warns.
+
+`src/application/app/touch_gesture.rs` for the machine;
+`dispatch/cross_dispatch/pointer.rs` for `drive_touch_event`
+(recognize → route) and `apply_touch_effect` (run). Both
+runtimes call both: `run_native.rs::dispatch_touch_event` and
+`run_wasm/event_touch.rs`.
+
+**What is native-only, and what that costs.** `LongPress`
+ships bound to `EnterResizeMode`, which is `NativeOnly`, so on
+the browser it dispatches, returns `Unhandled` and fires a
+one-shot warn naming the remedy. That is deliberate rather than
+pending: long-press is the touch peer of the keyboard's `r`,
+and rebinding the browser's long-press to some unrelated
+Compatible Action would make one gesture mean two different
+things on two targets — a worse §4 outcome than a gesture that
+is honestly unavailable and says so. Its parity rides on
+`InteractionMode::Resize`'s chrome and handle-drag reaching the
+browser. `TwoFingerDrag` used to sit beside it, bound to
+`FastResizeStart` and equally dead there; two fingers now drive
+the camera instead, and the variant is gone rather than
+default-unbound, because a binding firing on the same event as
+the camera step would be a conflict rather than a choice.
+
+Two consequences of that deletion, neither fixed: a user whose
+only pointer is a touchscreen loses `FastResizeStart` (it ships
+bound to `Ctrl+RightDrag` alone, which needs a mouse), and an
+existing `keybinds.json` naming `"TwoFingerDrag"` is silently
+accepted and never matches, because `KeyBind::parse` takes any
+non-modifier word and cannot tell a retired gesture name from an
+ordinary key. `test_two_finger_drag_is_not_a_bindable_gesture`
+carries the reasoning.
 
 ### `ThrottledInteraction` and `ThrottledDrag`
 
@@ -2162,9 +2812,15 @@ in the crate: `event_cursor_moved`'s accumulate arm,
 `event_mouse_click`'s left-release arm and its right-release arm
 are each a single call through them.
 
-Touch gestures are the next obvious user — pinch
-zoom, two-finger pan, long-press selection — each a new
-`ThrottledDrag` variant with the same shape.
+Touch does **not** ride this ladder. Pinch-zoom, one-finger pan
+and tap-select ship as `TouchGestureRecognizer` emissions that
+reach the camera and the selection directly, because the
+recognizer already is the state machine `ThrottledDrag` would
+have supplied and the camera work is `CODE_CONVENTIONS §3`'s
+continuous-gesture carve-out. What would earn a variant here is
+a touch gesture that *mutates the document* per frame — dragging
+a node with a finger — and that wants the browser to have a
+drag-state machine first.
 
 ### `MutationFrequencyThrottle` (and `frame_throttle`)
 
@@ -2295,7 +2951,15 @@ the overlay role — fixed in screen space. The `AppScene`
 abstracts that split; rebuild dispatch
 (`InPlaceMutator` for small mutator-able changes,
 `FullRebuild` for structural changes) flows through the same
-seam for both roles.
+seam for both roles. Canvas roles that also record a *content*
+signature ask both questions through one entry point,
+`canvas_dispatch_with_content`, which returns a third outcome —
+do nothing, because the registered tree is already what a
+rebuild would produce. One function rather than two calls per
+role because the *order* is the design: structure first, content
+second, and swapping them still renders correctly while undoing
+the whole point (see
+[canvas-role projection](#canvas-role-projection)).
 
 `src/application/scene_host.rs:1-150`. Each
 role has named slots (`CanvasRole`, `OverlayRole`); each slot
@@ -2303,6 +2967,52 @@ has a corresponding `Tree<GfxElement, GfxMutator>` and a
 mutator registry. The same idiom drives both canvas-role
 rebuilds (in `scene_rebuild.rs`) and overlay-role rebuilds
 (console text changes, color picker re-layout).
+
+### Scene shape cache
+
+The rule that decides, per walked element, whether
+its cosmic-text buffers and background fill are re-shaped or
+reused — one mechanism serving both of
+[`AppScene`](#appscene-and-scene-host)'s sub-scenes.
+
+Rebuild dispatch stops at the arena. A mutator
+apply reaches every slot of a role by design, and every writer
+above it assigns every field whether or not the value moved, so
+"mutate, don't rebuild" bought a reused arena and then paid for a
+full re-shape of it anyway: a picker hover shaped all 59 overlay
+elements, a console keystroke all ~50 rows, and every one of the
+ten `flush_canvas_scene_buffers` call sites shaped every buffer of
+all eight canvas roles no matter which one it had re-projected.
+
+`src/application/renderer/scene_shape_cache.rs`.
+`refresh(scene, ids, shaped, kind)` walks the sub-scene in layer
+order and keeps, per walk position, a `ShapedSceneElement` holding
+the output *and a verbatim copy of every input it was shaped from*
+— tree id, `unique_id`, registered offset, and the `GlyphArea`.
+Nothing announces a change: the pass re-validates against the live
+tree, which is why a new writer of scene-tree state cannot make it
+stale by forgetting to notify anyone, and why the ten canvas call
+sites are answered as a class rather than one at a time.
+
+Two details are load-bearing. `GlyphArea`'s derived equality is
+blind to a region *recolor* — `ColorFontRegion`'s `Eq` is set
+identity by range — which is exactly what a picker hover changes,
+so the check adds `ColorFontRegions::same_content` on top of `==`.
+And each element's background fill lives inside that element's own
+entry rather than in a flat list, so a partial re-shape cannot
+disturb the index order the rect pipeline paints in; the mindmap's
+own keyed re-shape, whose fills *are* flat, needs
+`BackgroundRectSlot` to hold that line by bookkeeping instead
+(`renderer/tree_buffers.rs`).
+
+`ScenePassKind` is the whole difference between the two passes:
+the canvas keeps the walker's fills because they reach a draw
+pass, the overlay discards them because no screen-space rect
+pipeline exists yet. `refresh` takes a `&Scene` rather than a
+`&mut Renderer` so its granularity can be asserted without a live
+device (TEST_CONVENTIONS §T8) — the same reason
+[`RebuildTier`](#scene-rebuild-granularity) is a value rather than
+a statement.
 
 ### Scene rebuild granularity
 
@@ -2319,13 +3029,63 @@ is dispatched explicitly so the cheapest one runs.
 `src/application/app/scene_rebuild.rs`.
 Functions: `rebuild_all` (node tree + every canvas role),
 `rebuild_scene_only` (reuse the node tree, refresh every canvas
-role), and the per-role methods on
+role), `rebuild_selection_highlight` (node text buffers only — no
+canvas roles, no mode-status line: what a change to *which nodes
+are highlighted* actually needs), and the per-role methods on
 [`CanvasFrame`](#canvas-role-projection) —
 `update_connection_trees` (edges + their grab handles),
 `update_portal_tree`, `update_border_tree`,
 `update_connection_label_tree`, `update_section_frame_tree`, and
 the two resize-handle updaters — each callable on its own so a
 caller refreshes only what its interaction can change.
+
+**`RebuildTier` names the top two rather than running them.**
+`RebuildTier::{All, SceneOnly}` is the choice between the first
+two as a value, with `execute` as the only place either is
+actually called. The reason is the same one
+[`ReleaseRefresh`](#throttledinteraction-and-throttleddrag) has on
+the drag-release path: both tiers need `&mut Renderer`, so an
+interaction that *decides* a tier could not be tested at all
+while deciding and performing were one statement (TEST_CONVENTIONS
+§T8 keeps live wgpu out of the harness). Handing the decision back
+as a value is what lets a test ask which tier a given interaction
+picks.
+
+Two constructors carry the rules:
+
+- `for_selection_change(prev, new)` — `All` when either side is a
+  node-ish selection (`Single` / `Multi` / `Section` /
+  `MultiSection` / `SectionRange`), because section-area
+  highlights are stamped into the node tree's
+  `ColorFontRegions`; `SceneOnly` when both are edge-adjacent and
+  only the scene-level cascade moves.
+  `rebuild_after_selection_change` is this constructor plus
+  `execute`, and stays the one-liner for callers with nothing
+  else to weigh.
+- `for_click(triggers_fired, prev, new)` — the same, except a
+  fired `OnClick` trigger forces `All`, since a trigger's
+  document actions are unbounded (a theme switch repaints every
+  node). Both targets read this one function: native used to run
+  `rebuild_all` for every click outcome, and the browser used to
+  run the selection-delta tier even when a trigger had just
+  mutated the document, so §4's peers were wrong in opposite
+  directions.
+
+`highlight_entries_for(doc)` is the one mapping all four
+node-tree rebuild sites use for *which* nodes to tint: the
+rubber-band preview when one is live, `doc.selection` otherwise.
+The preview replaces rather than adds to the selection's entries,
+because the gesture's release writes `SelectionState::from_ids`
+over the selection outright — painting both would show a set that
+is about to be discarded.
+
+Interactions that decide a tier are split into a renderer-free
+core that returns one and a shell that runs it —
+`click::handle_click_core` / `click::handle_click`,
+`event_cursor_moved::arm_label_drag` /
+`event_cursor_moved::start_label_drag`. Both label promotions
+(edge-label and portal-label) go through the second pair, so they
+cannot pick different tiers again.
 
 ### Dirty flag
 
@@ -2387,12 +3147,12 @@ Mandala is single-threaded; an infinite
 loop, a same-thread `RwLock` re-entry, or a blocking GPU call
 would hang indefinitely with no actionable error. The watchdog
 turns a hang into a fast, diagnostic crash. It is the only
-sanctioned background thread running today — CODE_CONVENTIONS
-§3 additionally sanctions the IPC boundary threads that land with
-IPC-02 (`work_plans/LLM_IPC.md` §D2) — and the single-threaded
-invariant for the model/view pipeline is preserved because the
-watchdog only *reads* a shared `AtomicU64`, never touching app
-state.
+background thread of a default launch — CODE_CONVENTIONS §3
+additionally sanctions the [IPC boundary
+threads](#ipc-server-ipcserver), which exist only under `--ipc` —
+and the single-threaded invariant for the model/view pipeline is
+preserved because the watchdog only *reads* a shared `AtomicU64`,
+never touching app state.
 
 `src/application/app/freeze_watchdog.rs:38-134`. Main thread
 calls `tick()` at every event-loop boundary; watchdog reads
@@ -2400,6 +3160,53 @@ the atomic every second; if the gap exceeds `FREEZE_THRESHOLD`
 (10 seconds), prints diagnostics and aborts. Not present on
 WASM — browsers already provide an "unresponsive tab" dialog
 for free.
+
+### IPC server (`IpcServer`)
+
+The opt-in local socket an external process — an LLM agent, a test
+harness, `mandalactl` — drives the running app through, speaking
+newline-delimited JSON (`format/ipc.md`).
+
+The app's feedback loop for an agent: attach to an instance a human
+launched (or one the agent launched itself), send commands, read
+structured replies. Off unless `--ipc <path>` is passed; without the
+flag no socket exists and no thread runs.
+
+`src/application/ipc/`. Boundary threads own the socket — a
+persistent acceptor (one controller at a time; a second client is
+refused immediately), plus a reader and an outbound writer per
+controller — and exchange only protocol values with the main thread
+over one ordered `mpsc` queue in and a bounded one out. They wake the
+parked event loop through a winit user event (`IpcWake`), so an idle
+app answers without polling; `about_to_wait` drains the queue right
+after `drain_inputs` and executes every command on the main thread,
+with the same access an input handler has. Each connection
+carries a generation stamp, so nothing a departed controller sent can
+act after it left. A controller that falls behind on its replies is
+paused rather than dropped; one whose socket accepts nothing for ten
+seconds is dropped. The socket is created owner-only, refuses any
+directory on its path that another user could rename it out of, and
+replaces an existing path only when it is provably a stale socket of
+ours.
+
+Commands live in a registry (`ipc/registry.rs`), one module per family
+under `ipc/commands/`, and `describe` renders that same table, so the
+discovery surface cannot drift from the dispatch surface. Each command
+runs inside a log-capture window (`baumhard::util::log::capture`), so
+every `warn!` / `error!` it causes also reaches its reply's
+`warnings`. The `act` family is the dispatch bridge: `act.action`,
+`act.console` and `act.macro` reach `dispatch_action`, the console's
+`execute_console_line` and the macro dispatcher's gated step loop
+through `CommandTarget`, the app-side execution context. There is no
+parallel control path, so undo, gates and side effects match the
+keystroke each stands in for.
+
+**Vision:** the families after `act` (query, scene, input, capture,
+clock, events) each add one module and one line to the registry's
+family table.
+**Caveat:** Unix-only today — Windows fails `--ipc` at startup until
+the named-pipe adapter lands, and the browser has no socket at all
+(`CLAUDE.md` "Dual-target status").
 
 ### `now_ms()`
 
@@ -2451,7 +3258,11 @@ Some(&DispatchHit { click_hit, canvas_pos }))`.
    `MacroRegistry`, and `dispatch_macro`. Steps fan out to
    `dispatch_action`, `apply_keybind_custom_mutation`, or
    `execute_console_line` depending on `MacroStep` kind, so plugin
-   authors and macro recorders share one runtime path. **Unknown
+   authors and macro recorders share one runtime path. That path is
+   `run_macro_steps`, the gated step loop `dispatch_macro` calls
+   after its lookup. IPC's `act.macro` runs an anonymous step list
+   through it too, so there is one privilege gate however a macro
+   arrives. **Unknown
    macro id falls through** to the custom-mutation tier, so a
    typo'd or half-loaded macros file doesn't swallow the keystroke.
 3. `keybinds.custom_mutation_for(...)` — per-node custom mutations.
@@ -2486,7 +3297,10 @@ dispatch site at all.
 on empty canvas" gesture (default `PanCanvas`). The threshold
 cross dispatches whatever Action the gesture resolves to — no
 `PanCanvas` special-case in the handler — and the `PanCanvas` arm
-sets `DragState::Panning` for the press duration. The per-frame
+sets `DragState::Panning` for the press duration, unless the state
+it finds owes a commit (see the guard under
+[`DragState`](#dragstate); a `pan_canvas` binding on a plain key
+is why the guard is on the arm). The per-frame
 pan delta stays inline in `event_cursor_moved.rs` because
 per-cursor-move state is legitimately not a discrete-action
 concern; the threshold frame's first delta is gated on the
@@ -2691,15 +3505,18 @@ node's own `GfxElement` tree, so a node move or text rebuild
 doesn't re-emit the frames. The dedicated canvas role
 `CanvasRole::SectionFrames` registers its own
 `InPlaceMutator` slot; rebuild-or-skip dispatch keys on
-`section_frame_identity_sequence(elements) -> u64` which
-streams every identity-bearing field directly into a hasher
-(no intermediate Vec) so the signature comparison runs
-allocation-free per `Plan §7.4`.
+`section_frame_content_signature(elements) -> u64` which
+streams every field the projection reads directly into a
+hasher (no intermediate Vec) so the signature comparison runs
+allocation-free per `Plan §7.4`. This role needs only the one
+signature because it has no in-place mutator body to protect —
+see [canvas-role projection](#canvas-role-projection) for the
+two-signature shape borders and portals use instead.
 
 `lib/baumhard/src/mindmap/tree_builder/section_frame.rs` holds
 all three halves — the `SectionFrameElement` shape, the
 `build_section_frames` emission pass, and the tree builder +
-identity hasher. Three style cascades
+content hasher. Three style cascades
 feed the resolution: per-section `frame_border` →
 `canvas.default_section_frame_border` (or
 `default_focused_section_frame_border` for focused) →
@@ -2715,7 +3532,7 @@ styling, settings, and document operations.
 Power-user operations that don't have a
 keybind. The console covers the long tail: zoom-bound
 authoring, font-size clamps, palette swaps, mutation listing
-and application, FPS toggle. Tokenised shell-style
+and application, FPS toggle. Tokenized shell-style
 (whitespace-split, `"quoted"` preserves spaces, `key=value`
 first-class). Tab-completion is contextual and prefix-matched;
 scrollback shows command history with dimmed older lines.
@@ -2730,6 +3547,134 @@ for the frame; content is clipped via
 `grapheme_chad::truncate_to_display_width` so wide CJK
 characters never overflow.
 
+### `Grammar` — the declarative console verb spec
+
+**Every verb is one declaration, and one engine reads it.**
+`console::spec` holds `Grammar` / `Subverb` / `Key` / `Slot` /
+`Form` / `Vocabulary`, and `Command` carries a
+`&'static Grammar` and nothing else: the usage forms `help`
+prints, the `keys:` block under them, the search tags, the
+completion popup, the kv parse loop and every hint all derive
+from it. Adding a kv key is one table row — parse, complete,
+help and hint follow.
+
+A `Grammar` is a **level**, not a verb. `border` is one,
+`border preview` is another, `canvas section-frame focused` a
+third, each joined to its parent by a `&'static` reference on
+`Subverb::child`. `subverb_sets` and `key_sets` are slices *of
+slices*, so `canvas border` names border's fifteen keys and
+border's seven per-field subverbs rather than transcribing
+them; `section frame` names the same fifteen and adds its own
+`section=`.
+
+Four things the shape is load-bearing for:
+
+- **`Vocabulary` answers three questions from one
+  declaration** — the rows a popup offers, the `<…>` a usage
+  form prints, and the word list an error can quote back.
+  `Rows` covers both the document-derived vocabularies (a
+  map's palettes, a node's sections, the host's font families)
+  and the *suggestion* lists too open-ended to print: `zoom
+  min=` offers eight zoom levels and accepts any positive
+  float, so the popup gets the eight and the usage line gets
+  `<zoom|unset>`.
+- **A `Form` is (slots, keys), and a subverb may declare
+  several.** `section move` takes `dx=`/`dy=` *or* `x=`/`y=`;
+  `section resize` takes the `fill` literal *or* `w=`/`h=`.
+  `help` prints one line per form, and the popup offers the
+  union of the forms the line's positionals still admit —
+  which is what puts `fill` beside `w=` and `h=` at
+  `section resize <TAB>` and takes both away again at
+  `section resize fill <TAB>`.
+
+  The engine enforces the exclusion as far as the *slots*
+  express it, and no further. `fill` sits in a slot only one
+  form declares, so typing it rules the other form out and
+  `section resize fill w=99` is refused by name and pointed at
+  the shape that reads `w=`. `section move`'s two forms differ
+  only in their *keys*, so an empty positional list admits
+  both equally; deciding between them would mean letting
+  whichever key was typed first pick the form. That exclusion
+  stays a handwritten guard in `execute_move`, with a message
+  naming both shapes — one of the two bespoke semantics #27's
+  fix plan names as staying behind the table.
+- **No verb sees a raw token index.** `spec::descent` is the
+  only reader of token order. A handler asks
+  `descent.subverb()`, `descent.parent_name(0)` and
+  `descent.slot_value(args)`. Eight completion sites used to
+  do their lookahead with `tokens.get(N)` while the arms they
+  fed were keyed on the *positional* index, and the two
+  disagree the moment a kv pair sits earlier on the line. The
+  positional-vs-kv discriminator lives there too, declared on
+  the subverb (`Subverb::gated`) rather than re-asked at each
+  slot that emits the vocabulary.
+- **A kv the matched form does not read is refused by name.**
+  `kvs::read` asks per *form* — narrowed by the positionals
+  already on the line, per the bullet above — rather than per
+  level, and points the key at the form that does read it:
+  the level's composed form for `border preset heavy
+  color=#fff`, another shape of the same subverb for
+  `section resize fill w=99`. Before the declaration both
+  staged what they matched and discarded the rest without a
+  word, the first identically on four surfaces.
+
+What stays hand-written is value parsing and mutation: a `Key`
+declares its name, its sentence and its vocabulary, and what
+`padding=8` *means* is the verb's. Bespoke semantics —
+`section move`'s mutual exclusion, the `border side`
+non-custom-preset gate — are handwritten handlers *behind* the
+table.
+
+`console::spec`'s own tests hold the declaration against itself
+over the whole registry, in both directions: a form naming a
+key its level does not declare, and a key no form prints. The
+second is what would have caught `font range=`, `color range=`
+and `color section=` on the day each was written — each was
+parseable, named in its verb's own rejection, and documented
+nowhere.
+
+They also hold the *engine* against the declaration, over the
+same registry rather than a sample of it: for every form of
+every subverb at every level, the line that reaches it is built
+from the level's `label` and the form's own required slots,
+handed to the real completion engine, and checked for the keys
+that form names. Two more read the sources rather than the
+tables, because a verb can decline to consult them: no verb
+spells out a `usage:` line of its own (`label` did, two keys
+behind its grammar), and no hint names a value in a `|`
+alternation that the vocabulary beside it rejects
+(`border color`'s two hints said `preset`, which the slot
+refuses, and omitted `accent|edge|fg`, which it accepts).
+
+The differential oracle (`console::tests::oracle`) is what made
+the migration reviewable: `EXEC_CORPUS`, `COMPLETION_CORPUS`
+and `EXEC_PREFIX_CORPUS` pin execute outcomes and popup
+contents byte for byte, so a change that alters no pinned row
+is behavior-preserving by construction and a row that does move
+is a decision with a reason attached.
+
+**A command reaches the document through two different calls,
+and which one it picks is the rebuild signal.** `ConsoleEffects`
+hands out `document()` (shared) and `document_mut()`
+(exclusive); the second raises `document_mutated`, which
+`console_input/exec.rs` reads back in
+`console_line_needs_rebuild` to decide whether the line owes a
+`scene_cache.clear()` + `rebuild_all`. The other input is the
+command's `ConsoleSideEffect`: every variant counts except
+`SetFpsDisplay`, whose overlay is screen-space and shares no
+state with the scene tree. So `help`, `fps`, `mutation list`
+and any verb that fails after only reading no longer drop the
+connection cache and re-project the whole scene for output that
+never leaves the scrollback.
+
+The signal is the *borrow*, not the write. It over-reports — a
+`border reset` that turns out to be a no-op still counts — and
+that is the safe direction, since the cost is one rebuild
+against a canvas silently disagreeing with the model. It is
+also the version a new command cannot forget: there is no way
+to write to the document except through the call that raises
+it.
+
 Console parity on WASM is the obvious next step;
 the verb implementations are already cross-platform, only the
 modal shell is native-gated.
@@ -2738,8 +3683,7 @@ modal shell is native-gated.
 
 A three-layer pipeline: abstract `Action` enum →
 parsed `KeyBind` → resolved table; with cross-platform
-configuration via XDG (native) and `?keybinds=` /
-`localStorage` (WASM).
+configuration via XDG (native) and `localStorage` (WASM).
 
 Every keystroke that does *anything* maps to
 an `Action` first; the `Action` is then dispatched in the right
@@ -2751,7 +3695,7 @@ though the config-loading paths differ.
 `src/application/keybinds/`. The three
 layers:
 
-- `Action` enum (`action.rs`) — high-level intents:
+- `Action` enum (`action/mod.rs`) — high-level intents:
   `Undo`, `CreateOrphanNode`, `EnterReparentMode`,
   `EnterConnectMode`, `DeleteSelection`, `EditSelection`,
   `OpenConsole`, `Copy`, `Paste`, `Cut`, `ExitMode`, etc.
@@ -2764,13 +3708,45 @@ layers:
 belongs to; the event loop uses it to filter eligible actions
 based on which modal is open. Native config: hardcoded defaults
 + `$XDG_CONFIG_HOME/mandala/keybinds.json` + optional
-`--keybinds <path>` CLI override. WASM: same defaults + query
-param + `localStorage`. Partial configs merge via serde
+`--keybinds <path>` CLI override. WASM: same defaults +
+`localStorage["mandala_keybinds"]` — there is deliberately no
+`?keybinds=` layer, because a query param is owned by whoever
+composed the link rather than by the user (see
+`keybinds/platform_web.rs`). Partial configs merge via serde
 `default` attributes.
+
+**The config surface is declared once.** A bindable Action used
+to be written out three times — a `KeybindConfig` field, a
+`Default` entry, a `resolve()` row — and a field missing from
+`resolve()` compiled, leaving a binding that deserialized,
+round-tripped and did nothing. `keybinds/surface.rs`'s
+`keybind_surface!` collapses the three into one row per Action
+in `keybinds/config.rs`, generates the struct itself, and emits
+an `ActionKind → BindSurface` match that the loader's
+recognized-key set is built by walking. Because that match is
+exhaustive, an `Action` variant that appears in no section of
+the table — neither bound nor listed under `unbindable` with a
+reason — fails to compile. Unit variants take the string-list
+shape (`"undo": ["Ctrl+Z"]`) and payload variants the `args`
+shape; which one is not a choice, since each section only
+accepts the variant shape it is for. Unrecognized top-level keys
+in a user's file are warned about (`"keybinds: unrecognized key
+…"`, naming the nearest recognized key when there is one) and
+skipped rather than rejected — one stale *key* must not cost the
+user the rest of their bindings — and keys starting with `_` are
+treated as comments, which is how the shipped
+`config/default_keybinds.json` carries its instructions. That
+tolerance stops at the key: a *malformed value* under a
+recognized key fails the whole serde pass, and
+`user_config::layered::load_layered` answers a failed parse by
+skipping the layer, so it costs the user every binding in the
+file. The asymmetry is real rather than designed — the three
+user configs share the seam — and issue #129 tracks the
+per-field parsing that would close it.
 
 **Parametric Actions.** A subset of variants carries payload
 (`String` paths, `(field, value)` tuples, etc.) — these wrap
-parameterised console verbs so a user can bind e.g. `Ctrl+B` →
+parameterized console verbs so a user can bind e.g. `Ctrl+B` →
 `SetBorderField { field: "preset", value: "rounded" }` directly
 in `keybinds.json` without authoring a macro. Bindings use a
 sibling `ParametricBinding` shape:
@@ -2790,9 +3766,9 @@ sibling `ParametricBinding` shape:
   "set_zoom": [
     { "combo": "F12", "args": ["min", "0.5"] }
   ],
-  "clear_zoom": [
-    { "combo": "Shift+F12", "args": [] }
-  ]
+  // `clear_zoom` carries no payload, so it takes the plain
+  // string-list shape every unit Action takes.
+  "clear_zoom": ["Shift+F12"]
 }
 ```
 
@@ -2800,10 +3776,47 @@ Color / font / zoom carry the axis as the first arg (`bg|text|border`,
 `size|min|max`, `min|max` respectively) so a single binding-list
 covers the whole field group. The typed `ColorAxis` / `FontSlot` /
 `ZoomBound` enums on the Action variant make the dispatcher's
-match exhaustive without a fan-out guard.
+match exhaustive without a fan-out guard, and they reach the
+payload through `surface::ArgValue`: a `String` field takes the
+argument verbatim, a typed field goes through its strum `FromStr`,
+and a payload type with no `ArgValue` impl does not compile.
 
-Each variant documents its arg shape on the `Action` definition;
-wrong arg counts emit a warn-log and are skipped (never panic).
+Each variant names its arg shape in the table row that declares
+it — the payload field names there are both the arity and the
+list quoted back at the user when a binding's `args` array is
+the wrong length. **Their order is the positional `args`
+contract**, and the language does not enforce it on its own: the
+generated constructor is a struct expression, which does not
+care what order its fields are written in, so a row whose names
+are transposed would compile and hand the user's arguments to
+the wrong fields.
+
+Two mechanisms hold that line, pinning different halves of it.
+The build holds the *names*:
+`mandala_derive::PayloadFieldNames` publishes each variant's
+field names in declaration order into `action_payload_fields`,
+`surface::keybind_field_order_check!` compares the row's names
+against them under `const _: () = assert!(…)`, and a
+transposition is an `error[E0080]` naming the row. Two
+independent sources — the declaration and the table — so it is
+not a mirror agreeing with itself, and a brand-new row is
+covered with nothing written by hand. The tests hold the
+*values*: the sentinel table in `keybinds/tests.rs` carries the
+`Action` each row's args must produce, cannot omit a row, and
+drives the args end to end through the JSON, the `ArgValue`
+conversion and `resolve()` — which is where "`set_color`'s first
+arg has to be a real `ColorAxis`" lives, and which the const
+check, reading two lists of identifiers, cannot see.
+
+Tuple rows (`SetEdgeBodyGlyph(glyph)`) sit outside the const
+check by construction rather than by omission: their names are
+local bindings the table invents, and the pattern that binds
+them and the constructor that consumes them are the same macro
+repetition, so there is no second order to disagree with.
+
+Three skips are possible at resolve time and all three are
+logged, never panicked: an unparseable combo, the wrong number
+of args, and an arg that is not a valid value for its field.
 The dispatch arms call `pub(crate)` mutation cores extracted
 from each console verb, so the same setter path runs whether
 the user types the verb or fires the bound key — including

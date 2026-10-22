@@ -8,15 +8,16 @@
 
 use glam::Vec2;
 
+use baumhard::mindmap::connection;
 use baumhard::mindmap::model::{
-    portal_endpoint_state_mut, Canvas, EdgeLabelConfig, GlyphConnectionConfig, MindEdge, PortalEndpointState,
+    portal_endpoint_state_mut, Canvas, EdgeLabelConfig, MindEdge, PortalEndpointState,
 };
 use baumhard::mindmap::tree_builder;
+use baumhard::util::geometry::aabb_center;
 
 use super::super::types::EdgeRef;
 use super::super::undo_action::UndoAction;
 use super::super::MindMapDocument;
-use super::closure_helpers::ensure_glyph_connection_inline;
 
 impl MindMapDocument {
     pub fn remove_edge(&mut self, edge_ref: &EdgeRef) -> Option<(usize, MindEdge)> {
@@ -34,6 +35,9 @@ impl MindMapDocument {
     /// Computed from the live edge (so any in-progress drag is
     /// reflected), without consulting the scene cache. Bounded cost:
     /// one `build_connection_path` + up to five distance comparisons.
+    // Native-driver-only, with `commit_throttled_edge_drag`: edge
+    // handles are a native drag affordance.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn hit_test_edge_handle(
         &self,
         canvas_pos: Vec2,
@@ -49,8 +53,20 @@ impl MindMapDocument {
         let to_size = to_node.size_vec2();
 
         let edge_key = baumhard::mindmap::scene_cache::EdgeKey::from_edge(edge);
+        // A hit test is not a frame, so there is no shared
+        // `EdgePathCache` to read from: this one call builds its own
+        // path and drops it.
+        let path = connection::build_connection_path(
+            from_pos,
+            from_size,
+            &edge.anchor_from,
+            to_pos,
+            to_size,
+            &edge.anchor_to,
+            &edge.control_points,
+        );
         let handles =
-            tree_builder::build_edge_handles(edge, &edge_key, from_pos, from_size, to_pos, to_size);
+            tree_builder::build_edge_handles(edge, &edge_key, &path, from_pos, from_size, to_pos, to_size);
 
         let mut best: Option<(tree_builder::EdgeHandleKind, Vec2, f32)> = None;
         for h in handles {
@@ -216,7 +232,6 @@ impl MindMapDocument {
     /// a relative vector from the source node's center (matching
     /// the `control_points[0]` encoding the scene builder expects).
     pub fn curve_straight_edge(&mut self, edge_ref: &EdgeRef) -> bool {
-        use baumhard::mindmap::connection;
         use baumhard::mindmap::model::ControlPoint;
         let idx = match self.mindmap.edges.iter().position(|e| edge_ref.matches(e)) {
             Some(i) => i,
@@ -274,13 +289,19 @@ impl MindMapDocument {
         // curve without looking like a bug.
         let normal = connection::normal_at_t(&path, 0.5);
         let control_point_canvas = mid + normal * (length * 0.25);
-        let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
+        let from_center = aabb_center(from_pos, from_size);
         let offset = control_point_canvas - from_center;
 
         let before = self.mindmap.edges[idx].clone();
+        // Clamped: the offset is computed from two node centers plus
+        // a quarter of the distance between them, so two positions
+        // that are individually inside `MAX_CANVAS_COORD` can produce
+        // a control point outside it — and the loader bounds control
+        // points at that same ceiling, so an unclamped write here
+        // saves a map that will not reopen.
         self.mindmap.edges[idx].control_points.push(ControlPoint {
-            x: offset.x as f64,
-            y: offset.y as f64,
+            x: baumhard::mindmap::model::validate::clamp_canvas_coord(offset.x as f64),
+            y: baumhard::mindmap::model::validate::clamp_canvas_coord(offset.y as f64),
         });
         self.undo_stack.push(UndoAction::EditEdge { index: idx, before });
         self.dirty = true;
@@ -339,20 +360,6 @@ impl MindMapDocument {
     // to forked edges — mirroring how CSS "computed style" copies work.
     // ========================================================================
 
-    /// Ensure `edge.glyph_connection` is `Some(_)`, forking from the
-    /// canvas default (or the hardcoded default) on first edit. Returns
-    /// a mutable reference to the freshly-installed or previously-set
-    /// config so the caller can mutate a specific field.
-    ///
-    /// Must be called AFTER the `before` snapshot has been cloned so
-    /// the undo entry still carries the pre-fork `None`.
-    pub(super) fn ensure_glyph_connection<'a>(
-        edge: &'a mut MindEdge,
-        canvas: &Canvas,
-    ) -> &'a mut GlyphConnectionConfig {
-        ensure_glyph_connection_inline(edge, canvas)
-    }
-
     /// Run `mutate` against the edge selected by `edge_ref` with the
     /// before-snapshot, rollback-on-no-op, and `EditEdge` undo-push
     /// scaffolding handled here. The closure returns `true` to commit
@@ -373,7 +380,6 @@ impl MindMapDocument {
     /// which Rust's split-borrow rules allow under a single
     /// `&mut self` because both are direct field projections of
     /// `self.mindmap`. The closure can reach
-    /// [`Self::ensure_glyph_connection`] through the free
     /// [`super::closure_helpers::ensure_glyph_connection_inline`]
     /// without having to re-fetch `&mut self`.
     pub(in crate::application::document) fn mutate_edge<F>(&mut self, edge_ref: &EdgeRef, mutate: F) -> bool
@@ -412,6 +418,7 @@ impl MindMapDocument {
     /// previously open-coded with byte-identical
     /// `if let Some(idx) = doc.edge_index(&edge_ref) { ... push +
     /// dirty ... }` scaffolding.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn commit_throttled_edge_drag<F>(&mut self, edge_ref: &EdgeRef, original: MindEdge, changed: F)
     where
         F: FnOnce(&MindEdge, &MindEdge) -> bool,

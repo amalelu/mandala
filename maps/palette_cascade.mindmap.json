@@ -1,0 +1,331 @@
+{
+  "canvas": {
+    "background_color": "#000000"
+  },
+  "edges": [
+    {
+      "anchor_from": "auto",
+      "anchor_to": "auto",
+      "color": "#909090",
+      "control_points": [],
+      "from_id": "0",
+      "line_style": "solid",
+      "to_id": "0.0",
+      "type": "parent_child",
+      "visible": true,
+      "width": 4
+    },
+    {
+      "anchor_from": "auto",
+      "anchor_to": "auto",
+      "color": "#909090",
+      "control_points": [],
+      "from_id": "0.0",
+      "line_style": "solid",
+      "to_id": "0.0.0",
+      "type": "parent_child",
+      "visible": true,
+      "width": 4
+    },
+    {
+      "anchor_from": "auto",
+      "anchor_to": "auto",
+      "color": "#909090",
+      "control_points": [],
+      "from_id": "1",
+      "line_style": "solid",
+      "to_id": "1.0",
+      "type": "parent_child",
+      "visible": true,
+      "width": 4
+    },
+    {
+      "anchor_from": "auto",
+      "anchor_to": "auto",
+      "color": "#909090",
+      "control_points": [],
+      "from_id": "2",
+      "line_style": "solid",
+      "to_id": "0",
+      "type": "cross_link",
+      "visible": true,
+      "width": 4
+    }
+  ],
+  "name": "palette cascade",
+  "nodes": {
+    "0": {
+      "channel": 0,
+      "color_schema": {
+        "connections_colored": true,
+        "level": 0,
+        "palette": "cascade",
+        "starts_at_root": true
+      },
+      "folded": false,
+      "id": "0",
+      "layout": {
+        "direction": "auto",
+        "spacing": 50.0,
+        "type": "map"
+      },
+      "notes": "",
+      "parent_id": null,
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "sections": [
+        {
+          "text": "Themed root\nsecond line"
+        }
+      ],
+      "size": {
+        "height": 70.0,
+        "width": 220.0
+      },
+      "style": {
+        "background_color": "#111111",
+        "corner_radius_percent": 10.0,
+        "frame_color": "#222222",
+        "frame_thickness": 4.0,
+        "shape": "rectangle",
+        "show_frame": true,
+        "show_shadow": false,
+        "text_color": "#333333"
+      }
+    },
+    "0.0": {
+      "channel": 0,
+      "color_schema": {
+        "connections_colored": true,
+        "level": 1,
+        "palette": "cascade",
+        "starts_at_root": true
+      },
+      "folded": false,
+      "id": "0.0",
+      "layout": {
+        "direction": "auto",
+        "spacing": 50.0,
+        "type": "map"
+      },
+      "notes": "",
+      "parent_id": "0",
+      "position": {
+        "x": 400.0,
+        "y": 0.0
+      },
+      "sections": [
+        {
+          "text": "Run keeps its color",
+          "text_runs": [
+            {
+              "color": "#abcdef",
+              "end": 19,
+              "size_pt": 24.0,
+              "start": 0
+            }
+          ]
+        }
+      ],
+      "size": {
+        "height": 70.0,
+        "width": 220.0
+      },
+      "style": {
+        "background_color": "#111111",
+        "corner_radius_percent": 10.0,
+        "frame_color": "#222222",
+        "frame_thickness": 4.0,
+        "shape": "rectangle",
+        "show_frame": true,
+        "show_shadow": false,
+        "text_color": "#333333"
+      }
+    },
+    "0.0.0": {
+      "channel": 0,
+      "color_schema": {
+        "connections_colored": false,
+        "level": 9,
+        "palette": "cascade",
+        "starts_at_root": true
+      },
+      "folded": false,
+      "id": "0.0.0",
+      "layout": {
+        "direction": "auto",
+        "spacing": 50.0,
+        "type": "map"
+      },
+      "notes": "",
+      "parent_id": "0.0",
+      "position": {
+        "x": 800.0,
+        "y": 0.0
+      },
+      "sections": [
+        {
+          "text": "Clamped to the last group"
+        }
+      ],
+      "size": {
+        "height": 70.0,
+        "width": 220.0
+      },
+      "style": {
+        "background_color": "#111111",
+        "corner_radius_percent": 10.0,
+        "frame_color": "#222222",
+        "frame_thickness": 4.0,
+        "shape": "rectangle",
+        "show_frame": true,
+        "show_shadow": false,
+        "text_color": "#333333"
+      }
+    },
+    "1": {
+      "channel": 0,
+      "color_schema": {
+        "connections_colored": true,
+        "level": 0,
+        "palette": "cascade",
+        "starts_at_root": false
+      },
+      "folded": false,
+      "id": "1",
+      "layout": {
+        "direction": "auto",
+        "spacing": 50.0,
+        "type": "map"
+      },
+      "notes": "",
+      "parent_id": null,
+      "position": {
+        "x": 0.0,
+        "y": 200.0
+      },
+      "sections": [
+        {
+          "text": "Transparent schema root"
+        }
+      ],
+      "size": {
+        "height": 70.0,
+        "width": 220.0
+      },
+      "style": {
+        "background_color": "#111111",
+        "corner_radius_percent": 10.0,
+        "frame_color": "#222222",
+        "frame_thickness": 4.0,
+        "shape": "rectangle",
+        "show_frame": true,
+        "show_shadow": false,
+        "text_color": "#333333"
+      }
+    },
+    "1.0": {
+      "channel": 0,
+      "color_schema": {
+        "connections_colored": true,
+        "level": 1,
+        "palette": "cascade",
+        "starts_at_root": false
+      },
+      "folded": false,
+      "id": "1.0",
+      "layout": {
+        "direction": "auto",
+        "spacing": 50.0,
+        "type": "map"
+      },
+      "notes": "",
+      "parent_id": "1",
+      "position": {
+        "x": 400.0,
+        "y": 200.0
+      },
+      "sections": [
+        {
+          "text": "Child takes groups[0]"
+        }
+      ],
+      "size": {
+        "height": 70.0,
+        "width": 220.0
+      },
+      "style": {
+        "background_color": "#111111",
+        "corner_radius_percent": 10.0,
+        "frame_color": "#222222",
+        "frame_thickness": 4.0,
+        "shape": "rectangle",
+        "show_frame": true,
+        "show_shadow": false,
+        "text_color": "#333333"
+      }
+    },
+    "2": {
+      "channel": 0,
+      "folded": false,
+      "id": "2",
+      "layout": {
+        "direction": "auto",
+        "spacing": 50.0,
+        "type": "map"
+      },
+      "notes": "",
+      "parent_id": null,
+      "position": {
+        "x": 0.0,
+        "y": 400.0
+      },
+      "sections": [
+        {
+          "text": "Unthemed"
+        }
+      ],
+      "size": {
+        "height": 70.0,
+        "width": 220.0
+      },
+      "style": {
+        "background_color": "#111111",
+        "corner_radius_percent": 10.0,
+        "frame_color": "#222222",
+        "frame_thickness": 4.0,
+        "shape": "rectangle",
+        "show_frame": true,
+        "show_shadow": false,
+        "text_color": "#333333"
+      }
+    }
+  },
+  "palettes": {
+    "cascade": {
+      "groups": [
+        {
+          "background": "#a10000",
+          "frame": "#a20000",
+          "text": "#a30000",
+          "title": "#a40000"
+        },
+        {
+          "background": "#b10000",
+          "frame": "#b20000",
+          "text": "#b30000",
+          "title": "#b40000"
+        },
+        {
+          "background": "#c10000",
+          "frame": "#c20000",
+          "text": "#c30000",
+          "title": ""
+        }
+      ]
+    }
+  },
+  "version": "1.0"
+}

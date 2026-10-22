@@ -128,9 +128,11 @@ struct PortalPairIdentity {
 ///
 /// # Costs
 ///
-/// Construction is O(pairs) with two `String` clones per
-/// endpoint. [`Self::resolve`] is O(1): two parent hops in the
-/// arena plus one slice index.
+/// Construction is O(pairs) with **five** `String` clones per
+/// pair: an [`EdgeKey`] is three `String`s, and the two endpoint
+/// ids are one each. (This read "two per endpoint" for as long as
+/// nobody counted the `EdgeKey`.) [`Self::resolve`] is O(1): two
+/// parent hops in the arena plus one slice index.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PortalHitIndex {
     pairs: Vec<PortalPairIdentity>,
@@ -143,8 +145,9 @@ impl PortalHitIndex {
     ///
     /// # Costs
     ///
-    /// O(pairs); one allocation for the vector plus two `String`
-    /// clones per pair.
+    /// O(pairs); one allocation for the vector plus five `String`
+    /// clones per pair — the [`EdgeKey`]'s three and one per
+    /// endpoint id.
     pub fn from_pairs(pairs: &[PortalPairData]) -> Self {
         PortalHitIndex {
             pairs: pairs
@@ -184,14 +187,19 @@ impl PortalHitIndex {
     /// portal — nothing in the data can catch that, so the
     /// contract is that the index is stamped in the same call that
     /// registers or mutates the tree (see
-    /// `CanvasFrame::update_portal_tree`, which does both on both
-    /// §B2 arms).
+    /// `CanvasFrame::update_portal_tree`, which does both on every
+    /// arm that touches the tree). The arm that touches nothing is
+    /// not an exception: it runs only when
+    /// [`portal_content_signature`] matches, and the index is a
+    /// pure function of the same pair data that signature covers,
+    /// so re-stamping would write the value already there.
     ///
     /// # Costs
     ///
     /// O(1) — two `parent()` hops plus a slice index. No
-    /// allocation beyond the two `String` clones in the returned
-    /// [`PortalHit`].
+    /// allocation beyond the four `String` clones in the returned
+    /// [`PortalHit`]: the [`EdgeKey`]'s three plus the endpoint
+    /// id.
     pub fn resolve(&self, tree: &Tree<GfxElement, GfxMutator>, hit: NodeId) -> Option<PortalHit> {
         let leaf = tree.arena.get(hit)?;
         let part = match leaf.get().channel() {
@@ -216,9 +224,10 @@ impl PortalHitIndex {
 }
 
 /// Identity tuple for one portal-mode edge: the `EdgeKey` of the
-/// owning edge. Used to compare two consecutive [`portal_pair_data`]
-/// outputs and decide whether a registered portal tree's structure
-/// still matches — the prerequisite for the in-place
+/// owning edge. Folded by [`portal_structure_signature`] into the
+/// value two consecutive [`portal_pair_data`] outputs are compared
+/// on to decide whether a registered portal tree's structure still
+/// matches — the prerequisite for the in-place
 /// [`build_portal_mutator_tree`] path.
 pub type PortalIdentity = EdgeKey;
 
@@ -260,8 +269,10 @@ pub struct EndpointAreas {
 /// `pair_channel` is sequential by visible-portal index —
 /// stable across two calls **iff** their visible-portal
 /// sequences are identical (same identities in the same order).
-/// Callers detect drift by comparing identity slices and fall
-/// back to a full rebuild when they disagree.
+/// Callers detect drift through [`portal_structure_signature`]
+/// and fall back to a full rebuild when it moves; a second,
+/// finer [`portal_content_signature`] then decides whether the
+/// in-place update has anything left to write.
 #[derive(Clone, Debug)]
 pub struct PortalPairData {
     pub identity: PortalIdentity,
@@ -317,9 +328,8 @@ pub fn portal_pair_data(
         }
 
         let edge_key = EdgeKey::from_edge(edge);
-        let is_edge_selected = selected_edge.is_some_and(|(f, t, ty)| {
-            f == edge.from_id && t == edge.to_id && ty == edge.edge_type
-        });
+        let is_edge_selected = selected_edge
+            .is_some_and(|(f, t, ty)| f == edge.from_id && t == edge.to_id && ty == edge.edge_type);
         let preview_for_this_edge: Option<&str> = color_preview.and_then(|p| {
             if *p.edge_key == edge_key {
                 Some(p.color)
@@ -328,6 +338,10 @@ pub fn portal_pair_data(
             }
         });
 
+        // The palette tier of the edge color cascade, resolved once
+        // per edge rather than per endpoint — both markers of a pair
+        // take their color from the same source node.
+        let themed = map.edge_theme_stroke_color(edge);
         let make_endpoint = |owner: &MindNode, partner: &MindNode| -> EndpointAreas {
             let (ox, oy) = offsets.get(&owner.id).copied().unwrap_or((0.0, 0.0));
             let owner_pos = owner.pos_vec2() + Vec2::new(ox, oy);
@@ -352,6 +366,7 @@ pub fn portal_pair_data(
                 endpoint_state,
                 &map.canvas,
                 raw_color_override,
+                themed,
                 camera_zoom,
             );
             let text_style = resolve_portal_endpoint_text_style(
@@ -440,11 +455,107 @@ pub fn portal_pair_data(
     pairs
 }
 
-/// Identity sequence for a slice of [`PortalPairData`]. Compared
-/// element-wise against a cached sequence to decide whether the
-/// in-place [`build_portal_mutator_tree`] path is sound.
-pub fn portal_identity_sequence(pairs: &[PortalPairData]) -> Vec<PortalIdentity> {
-    pairs.iter().map(|p| p.identity.clone()).collect()
+/// Structural signature for a slice of [`PortalPairData`] — the
+/// `(identity, pair_channel)` sequence, hashed.
+///
+/// Two slices match iff the same portal-mode edges are visible, in
+/// the same order, under the same pair-void channels. That is what
+/// makes the in-place [`build_portal_mutator_tree`] path sound:
+/// its mutator aligns against the registered tree by channel, and
+/// [`PortalHitIndex`] indexes the same channels positionally, so a
+/// reordered pair sequence would name the wrong portal.
+///
+/// **Deliberately a subset of the fields.** A signature that moved
+/// whenever a marker's color or text did would push a color-picker
+/// hover and every keystroke of an inline portal-text edit down
+/// the full-rebuild arm, which is the arena reallocation the §B2
+/// mutator path exists to avoid. [`portal_content_signature`] asks
+/// the finer question second and carries the completeness
+/// obligation.
+///
+/// What the subset rests on: the per-pair sub-tree is a fixed
+/// shape — two endpoint voids at channels 1 and 2, each with an
+/// icon leaf and a text leaf — with no input that can vary it. The
+/// text leaf is emitted even for a text-less endpoint (at zero
+/// extent) precisely so this stays true.
+///
+/// # Costs
+///
+/// O(total edge-key bytes). No allocation: the fields stream into
+/// the hasher rather than materializing a `Vec<PortalIdentity>`
+/// (three `String` clones per pair) whose only consumer was the
+/// hash.
+pub fn portal_structure_signature(pairs: &[PortalPairData]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    pairs.len().hash(&mut h);
+    for pair in pairs {
+        let PortalPairData {
+            identity,
+            pair_channel,
+            ..
+        } = pair;
+        identity.hash(&mut h);
+        pair_channel.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Content signature for a slice of [`PortalPairData`] — every
+/// field the tree projection and [`PortalHitIndex`] read, hashed.
+///
+/// Answers the question the structural signature deliberately does
+/// not: *would rebuilding the portal tree from this slice produce
+/// anything different from what is registered?* When it says no,
+/// `CanvasFrame::update_portal_tree` skips building and applying
+/// the mutator, and skips re-stamping the hit index — so the
+/// completeness of this hash is load-bearing in the silent
+/// direction. A field that moves a marker but not this hash leaves
+/// a stale glyph on screen, or a click resolving to the wrong
+/// portal.
+///
+/// The endpoint areas go through
+/// [`GlyphArea::hash_content`](crate::gfx_structs::area::GlyphArea::hash_content)
+/// rather than their [`Hash`] impl, and that is the whole
+/// difference between this signature and a broken one: `Hash` on a
+/// `GlyphArea` runs through `ColorFontRegions`, whose element
+/// identity is the range alone, so a recolored marker hashes to
+/// the value it replaced. A portal color-picker hover changes
+/// exactly that and nothing else.
+///
+/// The body destructures [`PortalPairData`] and [`EndpointAreas`]
+/// exhaustively, so a new field on either does not compile until
+/// it is hashed here.
+///
+/// # Costs
+///
+/// O(total edge-key + marker-text bytes). No allocation.
+pub fn portal_content_signature(pairs: &[PortalPairData]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    pairs.len().hash(&mut h);
+    for pair in pairs {
+        let PortalPairData {
+            identity,
+            pair_channel,
+            endpoints,
+        } = pair;
+        identity.hash(&mut h);
+        pair_channel.hash(&mut h);
+        for endpoint in endpoints {
+            let EndpointAreas {
+                icon,
+                text,
+                endpoint_node_id,
+            } = endpoint;
+            icon.hash_content(&mut h);
+            text.hash_content(&mut h);
+            endpoint_node_id.as_str().hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 // Tree-shape channel constants — fixed by contract so the
@@ -483,35 +594,31 @@ pub fn build_portal_tree_from_pairs(pairs: &[PortalPairData]) -> PortalTree {
     let mut unique_id: usize = 1;
 
     for pair in pairs {
-        let pair_root = tree
-            .arena
-            .new_node(GfxElement::new_void_with_id(pair.pair_channel, unique_id));
+        let pair_root = tree.root.append_value(
+            GfxElement::new_void_with_id(pair.pair_channel, unique_id),
+            &mut tree.arena,
+        );
         unique_id += 1;
-        tree.root.append(pair_root, &mut tree.arena);
 
         for (endpoint_idx, ep) in pair.endpoints.iter().enumerate() {
             let endpoint_channel = endpoint_idx + 1;
-            let endpoint_void = tree
-                .arena
-                .new_node(GfxElement::new_void_with_id(endpoint_channel, unique_id));
+            let endpoint_void = pair_root.append_value(
+                GfxElement::new_void_with_id(endpoint_channel, unique_id),
+                &mut tree.arena,
+            );
             unique_id += 1;
-            pair_root.append(endpoint_void, &mut tree.arena);
 
-            let icon_leaf = tree.arena.new_node(GfxElement::new_area_non_indexed_with_id(
-                ep.icon.clone(),
-                ICON_SLOT,
-                unique_id,
-            ));
+            endpoint_void.append_value(
+                GfxElement::new_area_non_indexed_with_id(ep.icon.clone(), ICON_SLOT, unique_id),
+                &mut tree.arena,
+            );
             unique_id += 1;
-            endpoint_void.append(icon_leaf, &mut tree.arena);
 
-            let text_leaf = tree.arena.new_node(GfxElement::new_area_non_indexed_with_id(
-                ep.text.clone(),
-                TEXT_SLOT,
-                unique_id,
-            ));
+            endpoint_void.append_value(
+                GfxElement::new_area_non_indexed_with_id(ep.text.clone(), TEXT_SLOT, unique_id),
+                &mut tree.arena,
+            );
             unique_id += 1;
-            endpoint_void.append(text_leaf, &mut tree.arena);
         }
     }
 
@@ -567,20 +674,20 @@ pub fn build_portal_mutator_tree_from_pairs(pairs: &[PortalPairData]) -> PortalM
     let mut mt: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::new_void(0));
 
     for pair in pairs {
-        let pair_node = mt.arena.new_node(GfxMutator::new_void(pair.pair_channel));
-        mt.root.append(pair_node, &mut mt.arena);
+        let pair_node = mt
+            .root
+            .append_value(GfxMutator::new_void(pair.pair_channel), &mut mt.arena);
 
         for (endpoint_idx, ep) in pair.endpoints.iter().enumerate() {
             let endpoint_channel = endpoint_idx + 1;
-            let endpoint_void = mt.arena.new_node(GfxMutator::new_void(endpoint_channel));
-            pair_node.append(endpoint_void, &mut mt.arena);
+            let endpoint_void = pair_node.append_value(GfxMutator::new_void(endpoint_channel), &mut mt.arena);
 
             for (slot, area) in [(ICON_SLOT, &ep.icon), (TEXT_SLOT, &ep.text)] {
                 let delta = DeltaGlyphArea::full_assign_from(area);
-                let leaf = mt
-                    .arena
-                    .new_node(GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), slot));
-                endpoint_void.append(leaf, &mut mt.arena);
+                endpoint_void.append_value(
+                    GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), slot),
+                    &mut mt.arena,
+                );
             }
         }
     }

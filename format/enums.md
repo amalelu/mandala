@@ -47,12 +47,46 @@ authors reach for first.
 The remaining values (`"rounded_rectangle"`, `"diamond"`,
 `"parallelogram"`, `"hexagon"`) still round-trip but currently render
 as `"rectangle"` — adding one is a small change (one `NodeShape`
-variant, one WGSL `case`, one `contains_local` arm; see the header
-doc in `shape.rs`). An unknown spelling emits a `log::warn!` at
-load time and falls back to `"rectangle"`.
+variant, one `style_spellings` arm, one WGSL `case`, one
+`contains_local` arm; see the header doc in `shape.rs`).
+
+Falling back is **not** an error for any of the values listed above:
+they are canonical, `maptool verify` accepts them, and
+`maptool convert --legacy` emits them, so the runtime substitutes a
+rectangle at `log::trace!` and says nothing in release. A spelling
+that is *not* in the list — a typo, or a value from a newer build —
+falls back the same way but emits a `log::warn!` naming it. The
+classifier behind that split is `ShapeSpelling` in `shape.rs`, and the
+list it consults is the `KNOWN_SHAPES` constant there — the only list
+any parser reads. Adding a spelling to that constant makes it
+non-warning at load time and valid under `maptool verify` with no
+parser change.
+
+**Five restatements** of `KNOWN_SHAPES` exist, across three files, and
+none of them is trusted:
+
+| # | Restatement | Pinned by |
+| --- | --- | --- |
+| 1 | the fence above | `test_shape_format_doc_publishes_exactly_known_shapes` |
+| 2 | the live-shapes sentence | the same test |
+| 3 | the "remaining values" parenthesis | the same test |
+| 4 | `LEGACY_SHAPE_ORDINALS` in `crates/maptool/src/convert/enums.rs` | `legacy_shape_ordinals_are_canonical_spellings` |
+| 5 | the `shape_type` ordinal table in [migration.md](./migration.md#mimind-shape_type-ordinals) | `legacy_shape_ordinals_match_the_published_table`, against row 4 |
+
+Baumhard's `test_shape_format_doc_publishes_exactly_known_shapes`
+reads this section back off disk and checks rows 1–3 against the
+constant, deriving each expectation from the code rather than
+restating it; maptool's two tests do the same for the converter and
+for the published numbering. So a spelling added to `KNOWN_SHAPES` and
+not to this section fails the first test, and a rename that leaves the
+converter emitting the old spelling — which would make every converted
+node warn on load and `maptool verify` reject a file this repo's own
+tool just wrote — fails the second. Row 5 is pinned to row 4 rather
+than to the constant directly; since row 4 is pinned to the constant,
+the chain still closes.
 
 Today, `show_frame = true` only emits the glyph border when
-`shape == "rectangle"` — the four-run frame layout assumes an
+`shape == "rectangle"` — the eight-run frame layout assumes an
 axis-aligned box. Non-rectangular nodes drop the frame until a
 shape-aware border lands.
 

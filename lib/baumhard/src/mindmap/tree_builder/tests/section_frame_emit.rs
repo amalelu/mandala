@@ -705,3 +705,66 @@ fn test_border_preview_inactive_target_matches_baseline() {
         assert_eq!(a.focused, b.focused);
     }
 }
+
+/// The frames follow the active node's in-flight drag delta, and
+/// an absent entry means "not being dragged" — the state every
+/// non-drag rebuild is in.
+///
+/// `offsets` carries drag deltas only and is empty on every
+/// non-drag rebuild (`CanvasFrame::offsets`), so the missing-entry
+/// path is the steady state for a multi-section node in NodeEdit
+/// mode, not a broken invariant. It used to be treated as one and
+/// logged a `warn!` — which survives into release
+/// (CODE_CONVENTIONS §9) — on every such rebuild.
+///
+/// Fails when: the offset stops being added (the dragged rows
+/// collapse onto the undragged ones), or when the lookup stops
+/// being keyed on the active node (the third block moves frames
+/// for a delta belonging to a different node).
+///
+/// The undragged expectation is written out from the fixture's
+/// authored geometry rather than taken from another call, so the
+/// dragged rows are compared against a literal and not against the
+/// builder's own answer.
+#[test]
+fn test_section_frames_translate_by_the_active_nodes_drag_offset() {
+    let map = synthetic_map(vec![three_section_node(), other_node()], vec![]);
+    let hidden = map.fold_hidden_set();
+
+    // "active" is authored at (100, 200) with sections stacked at
+    // y-offsets 0 / 30 / 60.
+    let authored = [(100.0f32, 200.0f32), (100.0, 230.0), (100.0, 260.0)];
+
+    let undragged = build_section_frames(&map, &HashMap::new(), Some("active"), None, None, &hidden);
+    assert_eq!(undragged.len(), 3);
+    for (frame, expected) in undragged.iter().zip(authored) {
+        assert_eq!(
+            frame.position, expected,
+            "an empty offsets map is an undragged node: frames sit where the map says"
+        );
+    }
+
+    let mut dragging = HashMap::new();
+    dragging.insert("active".to_string(), (17.0f32, -23.0f32));
+    let dragged = build_section_frames(&map, &dragging, Some("active"), None, None, &hidden);
+    assert_eq!(dragged.len(), 3);
+    for (frame, (ax, ay)) in dragged.iter().zip(authored) {
+        assert_eq!(
+            frame.position,
+            (ax + 17.0, ay - 23.0),
+            "a frame must ride the active node's drag delta"
+        );
+    }
+
+    // Control: a delta for some *other* node is not this node's.
+    let mut elsewhere = HashMap::new();
+    elsewhere.insert("other".to_string(), (17.0f32, -23.0f32));
+    let unaffected = build_section_frames(&map, &elsewhere, Some("active"), None, None, &hidden);
+    assert_eq!(unaffected.len(), 3);
+    for (frame, expected) in unaffected.iter().zip(authored) {
+        assert_eq!(
+            frame.position, expected,
+            "the lookup is keyed on the active node; a populated map is not by itself a drag"
+        );
+    }
+}

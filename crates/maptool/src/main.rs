@@ -1,7 +1,25 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use baumhard::mindmap::loader::{load_from_file, save_to_file};
-use baumhard::mindmap::model::MindMap;
+// CODE_CONVENTIONS §9 closes with "Bare `unwrap()` outside tests is
+// a bug", and this is the half of that rule an editor can tell you
+// about while you type. `util::unwrap_posture` is the other half —
+// it reads the workspace's source text and fails every `./test.sh`
+// run; the lint fails only `./test.sh --lint`, a hard gate since
+// clippy's baseline reached zero, but one you have to ask for. Two
+// mechanisms rather than one because they disagree usefully: the lint sees
+// post-expansion code the text scan cannot read, and the scan sees
+// the `pub mod tests;` trees the lint has to be told about.
+//
+// The `cfg_attr` is what keeps the lint off test code. A
+// `#[cfg(test)] mod` does not exist in the build where the lint is
+// live, and in the build where it does exist the whole crate is
+// allowed — so `unwrap()` stays the right spelling in a test and a
+// bug everywhere else.
+#![warn(clippy::unwrap_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
+use baumhard::mindmap::loader::{load_from_file, parse_file_for_inspection, save_to_file};
+use baumhard::mindmap::model::{dewey_cmp, MindMap};
 use regex::{Regex, RegexBuilder};
 use std::fs;
 use std::io::Write;
@@ -252,7 +270,7 @@ fn run(args: &[String]) -> Result<(), CliError> {
             let map_path = args
                 .get(1)
                 .ok_or_else(|| CliError::Usage("verify: missing <map.json>".into()))?;
-            let map = load_map(map_path)?;
+            let map = load_map_for_inspection(map_path)?;
             let violations = verify::verify(&map);
             if violations.is_empty() {
                 println!("{}: valid", map_path);
@@ -276,9 +294,13 @@ fn run(args: &[String]) -> Result<(), CliError> {
                     eprintln!("{warnings} warning(s)",);
                     Ok(())
                 } else {
-                    eprintln!("{} violation(s)", violations.len());
+                    // The summary line lives on the error, not
+                    // here: `main` prints a `CliError::NotFound`'s
+                    // message to stderr, so an `eprintln!` of the
+                    // same count here printed it twice — once
+                    // without the file name and once with.
                     Err(CliError::NotFound(format!(
-                        "{} violation(s) in {}",
+                        "{} violation(s) in {} ({errors} error(s), {warnings} warning(s))",
                         violations.len(),
                         map_path
                     )))
@@ -295,6 +317,24 @@ fn run(args: &[String]) -> Result<(), CliError> {
 
 fn load_map(path: &str) -> Result<MindMap, CliError> {
     load_from_file(Path::new(path)).map_err(CliError::Io)
+}
+
+/// Load a map the way `verify` needs it: shape-checked, but without
+/// the loader's render-safety invariants.
+///
+/// `verify`'s entire job is to say *what is wrong with this file*,
+/// and the files most worth asking about are the ones the editor
+/// will not open — a parent cycle, a `nodes` key that disagrees with
+/// its node's `id`, geometry the scene build would choke on. Loading
+/// those through the strict door would replace a precise list of
+/// violations with a single "cannot load", which is the one answer
+/// the user already has.
+///
+/// Every other verb keeps [`load_map`]: `show`, `grep`, `apply` and
+/// `export` all consume the model as truth, so they want the same
+/// gate the editor has.
+fn load_map_for_inspection(path: &str) -> Result<MindMap, CliError> {
+    parse_file_for_inspection(Path::new(path)).map_err(CliError::Io)
 }
 
 /// Parsed positional args for `grep`.
@@ -360,10 +400,10 @@ fn grep_nodes<'a>(map: &'a MindMap, regex: &Regex) -> Vec<(&'a str, &'a str)> {
             }
         }
     }
-    out.sort_by(|(a, _), (b, _)| match (a.parse::<u64>(), b.parse::<u64>()) {
-        (Ok(x), Ok(y)) => x.cmp(&y),
-        _ => a.cmp(b),
-    });
+    // `dewey_cmp`, not a `u64` parse of the whole id: the parse
+    // fails on every dotted id and falls through to string order,
+    // which lists "0.10" before "0.2".
+    out.sort_by(|(a, _), (b, _)| dewey_cmp(a, b));
     out
 }
 
@@ -463,10 +503,9 @@ fn select_section_targets(map: &MindMap, regex: &Regex, target_notes: bool) -> V
             }
         }
     }
-    targets.sort_by(|a, b| match (a.0.parse::<u64>(), b.0.parse::<u64>()) {
-        (Ok(x), Ok(y)) => x.cmp(&y).then(a.1.cmp(&b.1)),
-        _ => a.0.cmp(&b.0).then(a.1.cmp(&b.1)),
-    });
+    // Same ordering as `grep`'s hit list — one comparator, so the
+    // two subcommands cannot disagree about where a node belongs.
+    targets.sort_by(|a, b| dewey_cmp(&a.0, &b.0).then(a.1.cmp(&b.1)));
     targets
 }
 
@@ -559,7 +598,9 @@ fn run_pipe(cmd: &str, cmd_args: &[String], input: &str) -> Result<String, CliEr
                 return Err(format!("`{cmd_name}`: write stdin: {e}"));
             }
         }
-        drop(stdin); // close the pipe so the child sees EOF
+        // No explicit `drop(stdin)`: the closure owns `stdin`, so it is
+        // closed as the closure returns — on this path and on the early
+        // `return Err` above — which is what lets the child see EOF.
         Ok(())
     });
     let output = child
@@ -660,6 +701,41 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "0");
         assert!(hits[0].1.contains("SENTINEL_ZXCVBNM_12345"));
+    }
+
+    /// `grep`'s hit list reads in Dewey order, which is not the
+    /// order `str::cmp` gives.
+    ///
+    /// Fails when: the sort goes back to parsing the whole id as a
+    /// `u64` — every dotted id fails that parse and falls through
+    /// to string order, which puts `"0.10"` ahead of `"0.2"` and
+    /// `"10"` ahead of `"2"`. Both pairs are in this fixture, so
+    /// either half of the regression is caught.
+    ///
+    /// The expectation is a literal, and the assertion beside it
+    /// states what plain string order would have produced — so a
+    /// sort that quietly became `str::cmp` fails here rather than
+    /// passing on a fixture where the two agree.
+    #[test]
+    fn grep_orders_hits_by_dewey_not_lexicographically() {
+        let mut map = MindMap::new_blank("ordering");
+        for id in ["0", "0.2", "0.10", "1", "2", "10"] {
+            let mut node = crate::verify::test_helpers::node(id, None);
+            node.sections[0].text = "MARK_ORDER".into();
+            map.nodes.insert(id.to_string(), node);
+        }
+
+        let hits = grep_nodes(&map, &rx("MARK_ORDER", false));
+        let ids: Vec<&str> = hits.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec!["0", "0.2", "0.10", "1", "2", "10"]);
+
+        let mut lexicographic = ids.clone();
+        lexicographic.sort_unstable();
+        assert_ne!(
+            ids, lexicographic,
+            "this fixture must be one string order gets wrong, or the assertion above \
+             proves nothing about the comparator"
+        );
     }
 
     #[test]
@@ -926,10 +1002,29 @@ mod tests {
         );
     }
 
+    /// **`verify` must diagnose exactly the maps the editor
+    /// refuses.** The fixture carries three violations, and one of
+    /// them — a `nodes` key that disagrees with its node's `id` — is
+    /// a load-blocking invariant, because the two spellings address
+    /// different graphs and the mismatch lets a self-loop past the
+    /// parent-cycle check.
+    ///
+    /// That makes the two halves of this test a pair: the strict
+    /// door rejects the file, and `verify` still enumerates what is
+    /// wrong with it. Routing `verify` through the strict loader
+    /// would trade a precise list of violations for a single "cannot
+    /// load" — the one answer the user already had.
     #[test]
     fn run_verify_flags_invalid_fixture() {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         p.push("tests/fixtures/invalid_sampler.mindmap.json");
+
+        assert!(
+            load_from_file(&p).is_err(),
+            "the fixture must be one the editor's loader refuses, or this test \
+             stops covering the inspection path"
+        );
+
         let args = as_strings(&["verify", p.to_str().unwrap()]);
         match run(&args) {
             Err(CliError::NotFound(msg)) => {

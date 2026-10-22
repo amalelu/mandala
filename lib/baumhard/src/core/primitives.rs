@@ -30,7 +30,6 @@ use crate::util::color::FloatRgba;
 /// range so two regions with the same bounds collide in the owning
 /// [`ColorFontRegions`] set regardless of color / font.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ColorFontRegion {
     /// Half-open grapheme-cluster span this region covers in the
     /// backing text. Sole key for `Eq` / `Ord` / `Hash` on the
@@ -108,6 +107,58 @@ impl ColorFontRegion {
             color: None,
         }
     }
+
+    /// Field-by-field equality, including the font and color pins
+    /// that `Eq` deliberately ignores.
+    ///
+    /// `PartialEq` on this type is *set identity*: two regions with
+    /// the same [`Range`] are the same region, whatever they are
+    /// painted, which is what lets the owning `BTreeSet` find a
+    /// stored region from a bare range. That makes `==` the wrong
+    /// question for anyone asking "would this render differently?"
+    /// — a recolored span compares equal to the one it replaced.
+    /// This is that question. The renderer's overlay re-shape cache
+    /// asks it on every frame of a color-picker hover, where the
+    /// only thing that changes is a cell's color inside an unchanged
+    /// range.
+    ///
+    /// Cost: three field compares, no allocation. The body
+    /// destructures `self`, so a field added to this struct will not
+    /// compile until it is accounted for here.
+    pub fn same_content(&self, other: &Self) -> bool {
+        let ColorFontRegion { range, font, color } = self;
+        *range == other.range && *font == other.font && *color == other.color
+    }
+
+    /// Hash every field, including the font and color pins that
+    /// [`Hash`] deliberately ignores.
+    ///
+    /// The hashing counterpart of [`Self::same_content`], and it
+    /// exists for the same reason the comparison does: the derived
+    /// `Hash` on this type hashes the [`Range`] alone, because it
+    /// has to agree with a `PartialEq` that is set identity. A
+    /// consumer summarising "would this render differently?" into
+    /// one integer therefore cannot use `Hash` — a recolored span
+    /// hashes to the value it replaced.
+    ///
+    /// Colors go in through `f32::to_bits`, which makes this a
+    /// strictly *finer* equivalence than [`Self::same_content`]'s
+    /// `==` rather than the same one: `==` calls `0.0` and `-0.0`
+    /// equal and calls a `NaN` unequal to itself, and bits do
+    /// neither. Finer is the safe direction for a reuse decision —
+    /// it can cost a redundant update, never a skipped one — and
+    /// neither value reaches a region from any resolver here, since
+    /// colors arrive from hex parsing and palette lookup.
+    ///
+    /// Cost: three field hashes, no allocation. The body
+    /// destructures `self`, so a field added to this struct will not
+    /// compile until it is accounted for here.
+    pub fn hash_content<H: Hasher>(&self, state: &mut H) {
+        let ColorFontRegion { range, font, color } = self;
+        range.hash(state);
+        font.hash(state);
+        color.map(|c| c.map(f32::to_bits)).hash(state);
+    }
 }
 
 /// Ordered set of [`ColorFontRegion`]s keyed on `Range`. Acts as the
@@ -115,7 +166,6 @@ impl ColorFontRegion {
 /// is a mutation primitive that keeps the set consistent under
 /// insertion / deletion of characters in the backing text.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Hash)]
-#[serde(deny_unknown_fields)]
 pub struct ColorFontRegions {
     /// Sorted set of styled spans, keyed on
     /// [`ColorFontRegion::range`]. Stored in a `BTreeSet` so range
@@ -151,6 +201,60 @@ impl ColorFontRegions {
     /// Number of regions currently stored.
     pub fn num_regions(&self) -> usize {
         self.regions.len()
+    }
+
+    /// Whether two tables would style their text identically —
+    /// same ranges, same font pins, same colors.
+    ///
+    /// The set-level counterpart to
+    /// [`ColorFontRegion::same_content`], and needed for the same
+    /// reason: `PartialEq` on this type reduces to `BTreeSet`
+    /// equality, whose element equality is range identity, so
+    /// `regions_a == regions_b` is true for two tables that paint
+    /// the same spans in different colors. Any consumer deciding
+    /// whether shaped output can be reused has to ask this one
+    /// instead.
+    ///
+    /// Cost: O(n_regions) — a length check then a paired walk over
+    /// two `BTreeSet`s, which iterate in `Range` order, so equal
+    /// tables line up positionally. No allocation.
+    pub fn same_content(&self, other: &Self) -> bool {
+        self.regions.len() == other.regions.len()
+            && self
+                .regions
+                .iter()
+                .zip(other.regions.iter())
+                .all(|(a, b)| a.same_content(b))
+    }
+
+    /// Hash the whole styling table — every range, font pin and
+    /// color — into `state`.
+    ///
+    /// The set-level counterpart to
+    /// [`ColorFontRegion::hash_content`], and the hashing
+    /// counterpart of [`Self::same_content`]. The derived `Hash` on
+    /// this type reduces to hashing the `BTreeSet`, whose element
+    /// hash is range identity, so two tables that paint the same
+    /// spans in different colors hash the same. A consumer folding
+    /// "would this render differently?" into a signature has to
+    /// call this one instead.
+    ///
+    /// The length is hashed first so `[a]` and `[a, b]` cannot
+    /// collide through prefix ambiguity.
+    ///
+    /// Cost: O(n_regions) — one pass over a `BTreeSet`, which
+    /// iterates in `Range` order, so tables that `same_content`
+    /// each other are walked in the same order. No allocation. The
+    /// body destructures `self`, so a field added to this struct
+    /// will not compile until it is accounted for here — the same
+    /// guarantee every other link in this hashing chain gives, and
+    /// the property the callers' completeness argument rests on.
+    pub fn hash_content<H: Hasher>(&self, state: &mut H) {
+        let ColorFontRegions { regions } = self;
+        regions.len().hash(state);
+        for region in regions {
+            region.hash_content(state);
+        }
     }
 
     /// Build a `ColorFontRegions` containing a single region that
@@ -558,8 +662,10 @@ impl ColorFontRegions {
     /// `Some(_)` fields in `region` (leaving the rest intact). If no
     /// match exists, the region is inserted as-is.
     pub fn set_or_insert(&mut self, region: &ColorFontRegion) {
-        if self.regions.contains(region) {
-            let mut new_region = *self.regions.get(region).unwrap();
+        // One lookup rather than a `contains` whose only use was to
+        // license the `get` that repeats it.
+        if let Some(existing) = self.regions.get(region) {
+            let mut new_region = *existing;
             if region.color.is_some() {
                 new_region.color = region.color;
             }
@@ -618,7 +724,6 @@ impl Default for ColorFontRegions {
     }
 }
 
-use crate::util::ordered_vec2::OrderedVec2;
 use strum_macros::{Display, EnumString};
 
 /// Selects the arithmetic used when a [`DeltaGlyphArea`](crate::gfx_structs::area::DeltaGlyphArea)
@@ -704,7 +809,6 @@ impl ApplyOperation {
 /// [`ColorFontRegion`] and any other span-of-chars payload in the
 /// core model. Totally ordered for `BTreeSet` storage.
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Range {
     /// Inclusive start index in grapheme clusters (not bytes, not
     /// chars). User-derived offsets land here.
@@ -932,7 +1036,6 @@ pub enum AnchorBox {
 /// world / …), the point on the target this element pins to, and the
 /// point on the element itself that meets it.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Anchor {
     target: AnchorTarget,
     self_point: AnchorPoint,
@@ -1009,7 +1112,6 @@ impl Default for Anchor {
 /// tree by `generation_offset` or `child_num`; `Window` / `Display` /
 /// `World` use global coordinate systems.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum AnchorTarget {
     /// Pin to an ancestor. `generation_offset == 0` is the
     /// immediate parent, `1` is the grandparent, and so on.
@@ -1056,19 +1158,4 @@ pub enum AnchorPoint {
     /// Geometric center of the rectangle, plus `i16` pixel offset.
     /// The default starting pin for new tree nodes.
     Center(i16),
-}
-
-/// Query a 2D position from an element.
-pub trait Positioned {
-    /// World-space top-left position in canvas pixels. O(1) on
-    /// every existing implementation — must not allocate or walk
-    /// children.
-    fn position(&self) -> OrderedVec2;
-}
-
-/// Query the bounding-box dimensions (width, height) of an element.
-pub trait Bounded {
-    /// Width / height in canvas pixels. O(1) on every existing
-    /// implementation — must not allocate or trigger a re-layout.
-    fn bounds(&self) -> OrderedVec2;
 }

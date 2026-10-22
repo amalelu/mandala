@@ -9,6 +9,15 @@
 //! calls `rebuild_overlay_scene_buffers` to refresh the shaped
 //! buffers. The choice is dispatched by structural-signature
 //! equality — see [`crate::application::scene_host::OverlayDispatch`].
+//!
+//! There is a second, finer granularity underneath this one, and the
+//! two are independent. This module's dispatch decides whether the
+//! *arena* is rebuilt; [`super::scene_shape_cache`] decides, per
+//! element, whether its *shaped buffers* are rebuilt. A mutator apply
+//! reaches every slot by design, so without the second decision the
+//! §B2 win — mutate, don't rebuild — stopped at the arena and the
+//! shaping cost of a full rebuild was paid anyway on every hover
+//! frame and every keystroke.
 
 use baumhard::font::fonts;
 
@@ -26,9 +35,10 @@ impl Renderer {
     /// glyph-rendered strip: sacred border, scrollback region,
     /// optional completion popup, and the prompt line with cursor.
     ///
-    /// Everything is positioned in screen coordinates (the render
-    /// pass draws `console_overlay_buffers` with `scale = 1.0`), so
-    /// the console stays a fixed size regardless of canvas zoom.
+    /// Everything is positioned in screen coordinates (the walk
+    /// lands in `overlay_scene_elements`, which the render pass
+    /// draws with `scale = 1.0`), so the console stays a fixed size
+    /// regardless of canvas zoom.
     pub fn rebuild_console_overlay_buffers(
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,
@@ -88,7 +98,7 @@ impl Renderer {
     /// Build the picker's overlay tree from `geometry`, register
     /// it under [`OverlayRole::ColorPicker`](crate::application::scene_host::OverlayRole),
     /// and walk the overlay sub-scene into
-    /// `overlay_scene_buffers`. `None` means the picker is closed
+    /// `overlay_scene_elements`. `None` means the picker is closed
     /// — drops the backdrop, unregisters the tree, refreshes
     /// overlay buffers so it disappears.
     ///
@@ -96,12 +106,13 @@ impl Renderer {
     /// the hover / chip-focus / commit / cancel paths in
     /// `app::rebuild_color_picker_overlay`.
     ///
-    /// **Performance note**: every invocation re-shapes every
-    /// glyph in the picker (~64 cells). The legacy split that
-    /// skipped re-shaping the static hue ring on hover is gone;
-    /// the planned `MutatorTree`-based hover path will mutate
-    /// only changed cell colors and the indicator's position
-    /// per §B1 of `lib/baumhard/CONVENTIONS.md`.
+    /// Open and close are the two events that genuinely rebuild the
+    /// arena, and so the two that shape every cell in it. The
+    /// per-frame hover / HSV / chip paths do not come through here
+    /// — they mutate the registered arena in place and re-shape
+    /// only the cells whose `GlyphArea` actually moved; see
+    /// [`Self::apply_color_picker_overlay_dynamic_mutator`] and
+    /// [`super::scene_shape_cache`].
     pub fn rebuild_color_picker_overlay_buffers(
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,
@@ -128,10 +139,12 @@ impl Renderer {
     /// instead — same arena, slimmer per-cell delta. Open / close
     /// still use [`Self::rebuild_color_picker_overlay_buffers`]
     /// because the arena needs to be created or torn down. Calls
-    /// `rebuild_overlay_scene_buffers` afterward to refresh the
-    /// shaped buffers — the cosmic-text shape pass is still
-    /// per-element, which is the §B1 perf gap in
-    /// `lib/baumhard/CONVENTIONS.md`.
+    /// `rebuild_overlay_scene_buffers` afterward, which re-shapes
+    /// the cells this mutator actually moved and leaves the rest of
+    /// the wheel's buffers as they are — see
+    /// [`super::scene_shape_cache`] for how it tells them apart.
+    /// A layout-phase mutator typically moves all of them, since a
+    /// resize or a reposition writes new positions everywhere.
     pub fn apply_color_picker_overlay_mutator(
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,
@@ -151,8 +164,14 @@ impl Renderer {
     ///
     /// This is the per-frame hot path for hover / HSV / chip-focus
     /// updates — the picker's element set, position, and bounds are
-    /// unchanged. Calls `rebuild_overlay_scene_buffers` afterward to
-    /// refresh the shaped buffers.
+    /// unchanged. Calls `rebuild_overlay_scene_buffers` afterward,
+    /// which re-shapes the cells whose `GlyphArea` this mutator
+    /// actually changed. The mutator writes every slot's fields
+    /// whether or not the value moved, so "what changed" is decided
+    /// downstream, by comparison against what each cell was last
+    /// shaped from ([`super::scene_shape_cache`]) — including the
+    /// per-region colors that a hover moves and `GlyphArea`'s own
+    /// `==` cannot see.
     pub fn apply_color_picker_overlay_dynamic_mutator(
         &mut self,
         app_scene: &mut crate::application::scene_host::AppScene,

@@ -21,7 +21,7 @@
 //!   to it does not resolve when the docs are built for
 //!   `wasm32-unknown-unknown`. `interaction_mode` is **not** in this
 //!   set — it moved to the core when the resize-handle gate and the
-//!   `close_text_edit` rebuild path started reading it on both
+//!   text editor's close path started reading it on both
 //!   targets.
 //!
 //! Native dispatchers pass `Some(&mut ext)`; WASM passes `None`.
@@ -92,6 +92,16 @@ pub(in crate::application::app) struct InputContextCore<'a> {
     pub cursor_pos: &'a mut (f64, f64),
     /// Modifier snapshot maintained by `ModifiersChanged` events.
     /// `&` (immutable) — no dispatch arm mutates modifiers.
+    ///
+    /// Carried, not yet read: the arms that want modifiers still run
+    /// against native's `InputHandlerContext`. What moves them onto
+    /// this bundle is Track A.3 in
+    /// `work_plans/WASM_CONVERGENCE.md` — lifting per-arm bodies
+    /// into `dispatch::cross_dispatch` — and that is the named
+    /// consumer for this field and [`Self::macros`] both. (Track C,
+    /// context-type unification, is what *created* this bundle; it
+    /// has already landed.)
+    #[allow(dead_code)]
     pub modifiers: &'a ModifiersState,
     /// Resolved user keybinds. `&` (immutable) — dispatch arms
     /// only call `&self` query methods (`has_any_binding_for` etc.).
@@ -99,11 +109,13 @@ pub(in crate::application::app) struct InputContextCore<'a> {
     /// Macro registry. App + User tiers loaded at startup; Map +
     /// Inline tiers refreshed by `loader::rebuild_document_macros`
     /// whenever a document loads. Cross-platform per Track B.
+    /// Carried, not yet read — see [`Self::modifiers`].
+    #[allow(dead_code)]
     pub macros: &'a mut MacroRegistry,
     /// High-level interaction mode (Default / Reparent / Connect /
     /// NodeEdit / Resize). Cross-platform — sits on the core because
     /// the resize-handle gate, the click router, and the
-    /// `close_text_edit` rebuild path all need to read it. Mutating
+    /// text editor's close path all need to read it. Mutating
     /// arms (Enter*Mode, Exit*Mode, ReparentToTarget, ConnectToTarget)
     /// take `&mut`; read paths (rebuild_all-callers, hit-test gates)
     /// take `&`. See `super::interaction_mode::InteractionMode`.
@@ -123,6 +135,17 @@ pub(in crate::application::app) struct InputContextCore<'a> {
 /// them is `drag_state`, which WASM substitutes for via
 /// `pending_click` on `WasmInputState`, kept outside the unified
 /// context — `pending_click` isn't a 1:1 mirror.
+///
+/// **Every field is carried, none is read yet.** `split_borrow`
+/// produces the bundle and `dispatch_action` threads it through, but
+/// the native-only arms still reach their state through
+/// `InputHandlerContext` directly; moving them across is Track A.3
+/// in `work_plans/WASM_CONVERGENCE.md` — lifting per-arm bodies into
+/// `dispatch::cross_dispatch` — which is the named consumer.
+/// The allow sits on the struct rather than on nine fields because
+/// the answer is the same for all nine and will stop being true for
+/// all nine at once.
+#[allow(dead_code)]
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) struct NativeContextExt<'a> {
     /// Current pointer / drag state machine.

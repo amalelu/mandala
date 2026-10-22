@@ -4,13 +4,12 @@
 //! Edge-specific; the concept doesn't generalize beyond edges.
 
 use super::Command;
-use crate::application::console::completion::{
-    kv_key_completions, prefix_filter, Completion, CompletionContext, CompletionState,
-};
 use crate::application::console::helpers::require_edge_or_portal;
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
-use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
+use crate::application::console::spec::descent::descend;
+use crate::application::console::spec::{kvs, usage, Bare, Form, Grammar, Key, Vocabulary, Word};
+use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::MindMapDocument;
 
 /// Body-glyph presets. Kept as `(name, glyph)` pairs so the command
@@ -23,29 +22,41 @@ pub const PRESETS: &[(&str, &str)] = &[
     ("chain", "\u{22EF}"),  // ⋯
 ];
 
-pub const KEYS: &[&str] = &["glyph"];
+/// The preset names, lifted out of [`PRESETS`] at const-fn time so
+/// the popup's vocabulary and the glyph table cannot come apart.
+const GLYPH_WORDS: &[Word] = &{
+    const N: usize = PRESETS.len();
+    let mut out = [Word::bare(""); N];
+    let mut i = 0;
+    while i < N {
+        out[i] = Word::bare(PRESETS[i].0);
+        i += 1;
+    }
+    out
+};
+
+const KEYS: &[Key] = &[Key::new(
+    "glyph",
+    "the repeated glyph the edge body is drawn from",
+    Vocabulary::Words(GLYPH_WORDS),
+)];
+
+pub static GRAMMAR: Grammar = Grammar {
+    label: "body",
+    subverb_sets: &[],
+    key_sets: &[KEYS],
+    bare: Some(Bare::new("composed", &[Form::keys(&["glyph"], &[])])),
+};
 
 pub const COMMAND: Command = Command {
     name: "body",
     aliases: &[],
     summary: "Set the body glyph of the selected edge",
-    usage: "body glyph=<dot|dash|double|wave|chain>",
-    tags: &["edge", "body", "glyph", "style"],
     applicable: edge_selected,
-    complete: complete_body,
+    grammar: &GRAMMAR,
+    synonyms: &["edge", "style"],
     execute: execute_body,
 };
-
-fn complete_body(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match &state.context {
-        CompletionContext::Token { .. } => kv_key_completions(KEYS, state.partial),
-        CompletionContext::KvValue { key } if key == "glyph" => {
-            let names: Vec<&str> = PRESETS.iter().map(|(n, _)| *n).collect();
-            prefix_filter(&names, state.partial)
-        }
-        _ => Vec::new(),
-    }
-}
 
 /// Resolve a preset glyph name (`dot|dash|double|wave|chain`) to
 /// its Unicode codepoint. Shared between completion, the verb
@@ -78,9 +89,14 @@ fn execute_body(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     if let Err(r) = require_edge_or_portal(eff) {
         return r;
     }
-    let name = match args.kv("glyph") {
+    let descent = descend(&GRAMMAR, args.tokens());
+    let pairs = match kvs::read_strict(&descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
+    };
+    let name = match kvs::value(&pairs, "glyph") {
         Some(n) => n.to_ascii_lowercase(),
-        None => return ExecResult::err("usage: body glyph=<dot|dash|double|wave|chain>"),
+        None => return ExecResult::err(usage::no_arguments_message(&GRAMMAR)),
     };
     if glyph_for_preset(&name).is_none() {
         return ExecResult::err(format!(
@@ -93,7 +109,7 @@ fn execute_body(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     // arm. The verb keeps the typed pre-validation (so a bad
     // preset surfaces as `Err`, not a silent no-op the way the
     // Action arm intentionally does).
-    if apply_body_glyph_to_selection(eff.document, &name) {
+    if apply_body_glyph_to_selection(eff.document_mut(), &name) {
         ExecResult::ok_msg(format!("body glyph set to {}", name))
     } else {
         ExecResult::ok_msg(format!("body glyph already {}", name))

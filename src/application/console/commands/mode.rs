@@ -31,46 +31,68 @@
 //! grammar.
 
 use super::Command;
-use crate::application::app::{resolve_resize_target, InteractionMode, ResizeTargetError};
 #[cfg(test)]
 use crate::application::app::ResizeTarget;
-use crate::application::console::completion::{prefix_filter, Completion, CompletionContext, CompletionState};
+use crate::application::app::{resolve_resize_target, InteractionMode, ResizeTargetError};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
-use crate::application::console::{ConsoleContext, ConsoleEffects, ConsoleSideEffect, ExecResult};
+use crate::application::console::spec::descent::{descend, Stop};
+use crate::application::console::spec::{kvs, usage, Grammar, Subverb};
+use crate::application::console::{ConsoleEffects, ConsoleSideEffect, ExecResult};
 use crate::application::document::SelectionState;
 
-const VERBS: &[&str] = &["default", "resize", "node-edit"];
+const SUBVERBS: &[Subverb] = &[
+    Subverb::bare("default", "modes", "leave the current mode and return to Default"),
+    Subverb::bare("resize", "modes", "enter Resize on the current selection"),
+    Subverb::bare(
+        "node-edit",
+        "modes",
+        "enter NodeEdit on the selection's owning node",
+    ),
+];
+
+pub static GRAMMAR: Grammar = Grammar {
+    label: "mode",
+    subverb_sets: &[SUBVERBS],
+    key_sets: &[],
+    bare: None,
+};
 
 pub const COMMAND: Command = Command {
     name: "mode",
     aliases: &[],
     summary: "Change the active interaction mode (default / resize / node-edit)",
-    usage: "mode default | mode resize | mode node-edit",
-    tags: &[
-        "mode", "resize", "interaction", "default", "exit",
-        "node-edit", "edit",
-    ],
     applicable: always,
-    complete: complete_mode,
+    grammar: &GRAMMAR,
+    synonyms: &["interaction", "exit", "edit"],
     execute: execute_mode,
 };
 
-fn complete_mode(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match &state.context {
-        CompletionContext::Token { index: 0 } => prefix_filter(VERBS, state.partial),
-        _ => Vec::new(),
-    }
-}
-
 fn execute_mode(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    match args.positional(0) {
-        Some("default") => {
+    // Subverb names are matched case-insensitively by the descent,
+    // console-wide (`commands/mod.rs` § Casing); the unknown-subverb
+    // message still echoes what the user typed.
+    let descent = descend(&GRAMMAR, args.tokens());
+    if let Err(msg) = kvs::read_strict(&descent, args) {
+        return ExecResult::err(msg);
+    }
+    let name = match descent.stop {
+        Stop::Matched(subverb) => subverb.name,
+        Stop::Bare => return ExecResult::err(usage::no_arguments_message(&GRAMMAR)),
+        _ => {
+            return ExecResult::err(usage::unknown_subverb_message(
+                descent.level,
+                descent.typed.unwrap_or_default(),
+            ))
+        }
+    };
+    match name {
+        "default" => {
             eff.side_effect = Some(ConsoleSideEffect::SetInteractionMode(InteractionMode::Default));
             eff.close_console = true;
             ExecResult::ok_msg("mode: returning to Default")
         }
-        Some("resize") => match resolve_resize_target(&eff.document.selection, &eff.document.mindmap) {
+        "resize" => match resolve_resize_target(&eff.document().selection, &eff.document().mindmap) {
             Ok(target) => {
                 eff.side_effect = Some(ConsoleSideEffect::SetInteractionMode(InteractionMode::Resize {
                     target,
@@ -80,21 +102,16 @@ fn execute_mode(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
             }
             Err(e) => ExecResult::err(format_resize_error(&e)),
         },
-        Some("node-edit") => match resolve_node_edit_target(&eff.document.selection) {
+        _ => match resolve_node_edit_target(&eff.document().selection) {
             Ok(node_id) => {
-                eff.side_effect = Some(ConsoleSideEffect::SetInteractionMode(
-                    InteractionMode::NodeEdit { node_id: node_id.clone() },
-                ));
+                eff.side_effect = Some(ConsoleSideEffect::SetInteractionMode(InteractionMode::NodeEdit {
+                    node_id: node_id.clone(),
+                }));
                 eff.close_console = true;
                 ExecResult::ok_msg(format!("entering node-edit mode on '{}'", node_id))
             }
             Err(msg) => ExecResult::err(msg),
         },
-        Some(other) => ExecResult::err(format!(
-            "mode: unknown subverb '{}'; use 'default', 'resize', or 'node-edit'",
-            other
-        )),
-        None => ExecResult::err("usage: mode default | mode resize | mode node-edit"),
     }
 }
 
@@ -106,12 +123,10 @@ fn resolve_node_edit_target(selection: &SelectionState) -> Result<String, String
     match selection.primary_node_id() {
         Some(id) => Ok(id.to_string()),
         None => match selection {
-            SelectionState::None => {
-                Err("mode node-edit: no selection; click a node first".into())
+            SelectionState::None => Err("mode node-edit: no selection; click a node first".into()),
+            SelectionState::Multi(_) | SelectionState::MultiSection(_) => {
+                Err("mode node-edit: multi-target selection — single-target only".into())
             }
-            SelectionState::Multi(_) | SelectionState::MultiSection(_) => Err(
-                "mode node-edit: multi-target selection — single-target only".into(),
-            ),
             _ => Err("mode node-edit: selection is not a node — try clicking on a node body".into()),
         },
     }
@@ -126,12 +141,8 @@ fn resolve_node_edit_target(selection: &SelectionState) -> Result<String, String
 /// truth while letting each consumer phrase its own user surface.
 fn format_resize_error(e: &ResizeTargetError) -> String {
     match e {
-        ResizeTargetError::NoSelection => {
-            "mode resize: no selection; click a node or section first".into()
-        }
-        ResizeTargetError::MultiTarget => {
-            "mode resize: multi-target selection — single-target only".into()
-        }
+        ResizeTargetError::NoSelection => "mode resize: no selection; click a node or section first".into(),
+        ResizeTargetError::MultiTarget => "mode resize: multi-target selection — single-target only".into(),
         ResizeTargetError::SectionFillParent { node_id, section_idx } => format!(
             "mode resize: section {}[{}] fills its parent — no AABB to stretch. \
              Pin a size first via `section resize w=<w> h=<h>`",
@@ -151,7 +162,7 @@ mod tests {
     use crate::application::console::Args;
     use crate::application::document::tests_common::load_test_doc;
     use crate::application::document::{
-        EdgeLabelSel, EdgeRef, PortalLabelSel, SectionSel, SelectionState,
+        EdgeLabelSel, EdgeRef, GraphemeRange, PortalLabelSel, SectionSel, SectionSpan, SelectionState,
     };
     use baumhard::mindmap::scene_cache::EdgeKey;
 
@@ -200,7 +211,13 @@ mod tests {
     #[test]
     fn test_mode_resize_with_single_node_selection_targets_node() {
         let mut doc = load_test_doc();
-        let id = doc.mindmap.nodes.keys().next().expect("test doc has nodes").clone();
+        let id = doc
+            .mindmap
+            .nodes
+            .keys()
+            .next()
+            .expect("test doc has nodes")
+            .clone();
         doc.selection = SelectionState::Single(id.clone());
         let (result, side, close) = run_mode("mode resize", &mut doc);
         assert!(matches!(result, ExecResult::Ok { .. }));
@@ -222,14 +239,22 @@ mod tests {
         use crate::application::document::tests_common::pinned_two_section_node;
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::SectionRange {
-            sel: SectionSel { node_id: id.clone(), section_idx: 1 },
-            range: (0, 1),
+            sel: SectionSel {
+                node_id: id.clone(),
+                section_idx: 1,
+            },
+            section_span: SectionSpan::single(1),
+            grapheme_range: GraphemeRange::new(0, 1),
         };
         let (result, side, _close) = run_mode("mode resize", &mut doc);
         assert!(matches!(result, ExecResult::Ok { .. }));
         match side {
             Some(ConsoleSideEffect::SetInteractionMode(InteractionMode::Resize {
-                target: ResizeTarget::Section { node_id: tid, section_idx },
+                target:
+                    ResizeTarget::Section {
+                        node_id: tid,
+                        section_idx,
+                    },
             })) => {
                 assert_eq!(tid, id);
                 assert_eq!(section_idx, 1);
@@ -264,8 +289,14 @@ mod tests {
         use crate::application::document::tests_common::pinned_two_section_node;
         let (mut doc, id) = pinned_two_section_node();
         doc.selection = SelectionState::MultiSection(vec![
-            SectionSel { node_id: id.clone(), section_idx: 0 },
-            SectionSel { node_id: id, section_idx: 1 },
+            SectionSel {
+                node_id: id.clone(),
+                section_idx: 0,
+            },
+            SectionSel {
+                node_id: id,
+                section_idx: 1,
+            },
         ]);
         let (result, _, _) = run_mode("mode resize", &mut doc);
         assert_err_contains(&result, "single-target only");
@@ -369,7 +400,13 @@ mod tests {
     #[test]
     fn test_mode_node_edit_with_single_node_emits_node_edit_side_effect() {
         let mut doc = load_test_doc();
-        let id = doc.mindmap.nodes.keys().next().expect("test doc has nodes").clone();
+        let id = doc
+            .mindmap
+            .nodes
+            .keys()
+            .next()
+            .expect("test doc has nodes")
+            .clone();
         doc.selection = SelectionState::Single(id.clone());
         let (result, side, close) = run_mode("mode node-edit", &mut doc);
         assert!(matches!(result, ExecResult::Ok { .. }));

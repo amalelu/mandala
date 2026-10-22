@@ -55,16 +55,11 @@ impl super::WasmApp {
             handle_text_edit_key(
                 &key_name,
                 &logical_key,
-                input.modifiers.control_key(),
-                input.modifiers.shift_key(),
-                input.modifiers.alt_key(),
+                &input.modifiers,
                 &self.keybinds,
                 &mut input.text_edit_state,
-                &mut input.document,
                 &mut input.mindmap_tree,
-                &mut input.app_scene,
                 renderer,
-                &mut input.scene_cache,
             );
             self.suppress_keys.set(input.text_edit_state.is_open());
             return;

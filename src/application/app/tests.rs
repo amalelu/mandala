@@ -446,13 +446,7 @@ mod click_hit_priority_tests {
     /// double-click compare and the editor open).
     #[test]
     fn click_hit_priority_node_carries_section_idx() {
-        let hit = click_hit_from_priority(
-            &Some("node-x".to_string()),
-            Some(2),
-            &None,
-            &None,
-            &None,
-        );
+        let hit = click_hit_from_priority(&Some("node-x".to_string()), Some(2), &None, &None, &None);
         assert_eq!(hit, ClickHit::Node("node-x".to_string(), Some(2)));
     }
 
@@ -474,13 +468,7 @@ mod click_hit_priority_tests {
 
     #[test]
     fn click_hit_priority_portal_icon_wins_over_edge_label() {
-        let hit = click_hit_from_priority(
-            &None,
-            None,
-            &None,
-            &Some((ek(), "n2".to_string())),
-            &Some(ek()),
-        );
+        let hit = click_hit_from_priority(&None, None, &None, &Some((ek(), "n2".to_string())), &Some(ek()));
         assert!(matches!(hit, ClickHit::PortalMarker { .. }));
     }
 
@@ -488,6 +476,121 @@ mod click_hit_priority_tests {
     fn click_hit_priority_edge_label_wins_when_alone() {
         let hit = click_hit_from_priority(&None, None, &None, &None, &Some(ek()));
         assert!(matches!(hit, ClickHit::EdgeLabel(_)));
+    }
+
+    /// **The click path and the drag path resolve a node under a
+    /// portal marker the same way**, because the press stores the
+    /// portal hit for the drag promotion only when the shared click
+    /// chain left `hit_node` empty.
+    ///
+    /// Fails when: the `hit_node.is_none()` gate in
+    /// `portal_label_drag_capture` goes. The drag promotion in
+    /// `event_cursor_moved.rs` lists portal-label above node, so
+    /// without the gate a press on a marker over a node would select
+    /// the node on a click and slide the marker on a drag — one
+    /// press, two targets, decided by whether the hand moved.
+    ///
+    /// Control, on this function: with no node the same marker *is*
+    /// captured, so "returns None" is not a capture that never
+    /// fires. The other half of the rule — that a press on the
+    /// portal's *text* reaches this function as `None` and so arms
+    /// nothing — is not expressible in these arguments and is
+    /// pinned against the real scene by
+    /// `test_a_portal_text_press_arms_no_drag_while_the_icon_does`.
+    #[test]
+    fn test_portal_label_drag_capture_is_gated_by_the_same_node_hit_the_click_ladder_uses() {
+        let icon = Some((ek(), "endpoint-1".to_string()));
+
+        assert!(
+            super::portal_label_drag_capture(&icon, Some("node-x")).is_none(),
+            "a node under the marker wins the press, so no portal drag is armed"
+        );
+        // ...and the click ladder agrees on the same inputs.
+        assert_eq!(
+            click_hit_from_priority(&Some("node-x".to_string()), None, &None, &icon, &None),
+            ClickHit::Node("node-x".to_string(), None),
+            "the two paths must name the same target for one press"
+        );
+
+        let armed = super::portal_label_drag_capture(&icon, None);
+        assert_eq!(
+            armed, icon,
+            "control: with no node hit the marker must arm the drag"
+        );
+    }
+
+    /// **Only the icon is a drag affordance.** A press on a portal
+    /// endpoint's *text* selects it and arms nothing; a press on the
+    /// icon beside it arms the slide-along-the-border drag.
+    ///
+    /// The split is made in `compute_click_hit`, which turns one
+    /// `portal_at` answer into `portal_text_hit` / `portal_icon_hit`
+    /// by the sub-part the hit names, and only the icon half is
+    /// handed to `portal_label_drag_capture`. So the claim is about
+    /// that fan-out, not about the capture function — whose
+    /// arguments cannot express it, since a text press reaches it as
+    /// a plain `None` that any `None` would satisfy.
+    ///
+    /// Fails when: the two arms of that `match hit.part` are
+    /// swapped, or the text arm starts filling the icon slot too —
+    /// either way a press on the text arms a drag that slides a
+    /// glyph the user pressed for its selection.
+    ///
+    /// Runs against the real portal tree (the same fixture
+    /// `scene_host`'s own hit-test tests use) rather than a
+    /// hand-built pair of `Option`s, because the sub-part is decided
+    /// by which leaf the BVH descent lands on — a fabricated hit
+    /// would be asserting on the fixture, not on the resolution.
+    /// The control is the icon row: both parts of one endpoint are
+    /// probed, so "no drag" cannot be a scene in which nothing is
+    /// hit at all.
+    #[test]
+    fn test_a_portal_text_press_arms_no_drag_while_the_icon_does() {
+        use crate::application::scene_host::tests::{
+            portal_fixture_map, portal_leaf_probes, register_portals,
+        };
+        use crate::application::scene_host::AppScene;
+        use baumhard::mindmap::tree_builder::PortalPart;
+
+        let map = portal_fixture_map();
+        let mut app = AppScene::new();
+        register_portals(&mut app, &map);
+        let probes = portal_leaf_probes(&app);
+
+        let point_on = |part: PortalPart| {
+            probes
+                .iter()
+                .find(|(_, hit)| hit.part == part)
+                .unwrap_or_else(|| panic!("the portal fixture must carry a clickable {part:?} leaf"))
+                .0
+        };
+
+        // No mindmap tree, so `hit_node` is empty on both presses —
+        // the node gate is the sibling test's subject and is held
+        // out of the way here.
+        let on_text = super::compute_click_hit(point_on(PortalPart::Text), None, &mut app);
+        assert!(
+            matches!(on_text.click_hit, ClickHit::PortalText { .. }),
+            "the text leaf must resolve as a text click: {:?}",
+            on_text.click_hit
+        );
+        assert!(
+            super::portal_label_drag_capture(&on_text.portal_icon_hit, on_text.hit_node.as_deref()).is_none(),
+            "a press on a portal's text must arm no drag — sliding text is not a gesture"
+        );
+
+        let on_icon = super::compute_click_hit(point_on(PortalPart::Icon), None, &mut app);
+        assert!(
+            matches!(on_icon.click_hit, ClickHit::PortalMarker { .. }),
+            "control: the icon leaf must resolve as a marker click: {:?}",
+            on_icon.click_hit
+        );
+        assert_eq!(
+            super::portal_label_drag_capture(&on_icon.portal_icon_hit, on_icon.hit_node.as_deref()),
+            on_icon.portal_icon_hit,
+            "control: the icon beside it must arm the drag, or this test proves only \
+             that the fixture is unreachable"
+        );
     }
 
     #[test]
@@ -650,5 +753,123 @@ mod native_only_warn_latch_tests {
     fn test_warn_unhandled_native_only_once_respects_a_pre_set_latch() {
         let latch = AtomicBool::new(true);
         assert!(!warn(&latch));
+    }
+}
+
+// -----------------------------------------------------------------
+// Drag-state abandonment guard
+// -----------------------------------------------------------------
+
+/// [`super::DragState::would_abandon_gesture`] — the class of states
+/// a freshly-armed gesture may not overwrite.
+///
+/// Lives here rather than beside either caller because both read it:
+/// the left-button press in `event_mouse_click` and the
+/// `Action::PanCanvas` arm in `dispatch::native`, which the keyboard
+/// and every macro tier reach as well as the middle button.
+mod abandonment_guard {
+    use super::*;
+    use crate::application::app::throttled_interaction::moving_node::MovingNodeInteraction;
+    use crate::application::app::throttled_interaction::node_resize::NodeResizeInteraction;
+    use crate::application::app::throttled_interaction::ThrottledDrag;
+    use baumhard::mindmap::model::{Position, Size};
+    use baumhard::mindmap::tree_builder::ResizeHandleSide;
+    use std::collections::HashSet;
+
+    /// A left-started move-node drag, mid-gesture: pending state
+    /// buffered, `commit_on_release_core` not yet run.
+    fn moving_node_drag() -> DragState {
+        DragState::throttled(ThrottledDrag::MovingNode(MovingNodeInteraction::new(
+            vec!["n0".to_string()],
+            false,
+            HashSet::new(),
+        )))
+    }
+
+    /// A right-started fast-resize, mid-gesture. `started_with_right`
+    /// is what makes this one reachable with the left button free.
+    fn fast_resize_drag() -> DragState {
+        DragState::throttled(ThrottledDrag::NodeResize(NodeResizeInteraction::new(
+            "n0".to_string(),
+            ResizeHandleSide::SE,
+            Position { x: 0.0, y: 0.0 },
+            Size {
+                width: 100.0,
+                height: 50.0,
+            },
+            true,
+        )))
+    }
+
+    /// The left button carries the same hole one button over: a
+    /// right-started fast-resize is in flight while the left button
+    /// is still free, so a left press reached
+    /// `DragState::Throttled(..)` and replaced it with `Pending` —
+    /// same silent loss, same missing undo entry.
+    ///
+    /// Fails when `would_abandon_gesture` drops its `Throttled` arm,
+    /// which is the pre-fix shape (the guard read
+    /// `matches!(.., DragState::PendingRight { .. })`).
+    #[test]
+    fn test_left_press_is_refused_while_a_right_started_fast_resize_is_in_flight() {
+        assert!(
+            fast_resize_drag().would_abandon_gesture(),
+            "a left press must not replace a right-started fast-resize"
+        );
+        assert!(
+            moving_node_drag().would_abandon_gesture(),
+            "nor any other throttled drag reachable with the left button free"
+        );
+        assert!(
+            DragState::PendingRight {
+                start_pos: (0.0, 0.0),
+                start_canvas: glam::Vec2::ZERO,
+                hit_node: None,
+                hit_section_idx: None,
+            }
+            .would_abandon_gesture(),
+            "the guard's original member stays in the class"
+        );
+    }
+
+    /// The complement, and the reason the guard is narrower than the
+    /// right button's `!matches!(.., None)`: these four states owe
+    /// the model nothing, and a left press has to keep re-arming from
+    /// them or a click after a release the window never delivered
+    /// would do nothing at all.
+    ///
+    /// `Pending` is the load-bearing row for `Action::PanCanvas`
+    /// rather than for the press: the `LeftDrag` threshold cross
+    /// dispatches `PanCanvas` *from* `Pending`, so a guard that
+    /// refused there would leave the left button unable to pan at
+    /// all.
+    ///
+    /// Fails if the guard is widened to the right button's spelling.
+    #[test]
+    fn test_left_press_still_rearms_from_every_state_that_owes_the_model_nothing() {
+        for drag in [
+            DragState::None,
+            DragState::Panning,
+            DragState::SelectingRect {
+                start_canvas: glam::Vec2::ZERO,
+                current_canvas: glam::Vec2::new(10.0, 10.0),
+            },
+            DragState::Pending(Box::new(PendingPress {
+                start_pos: (0.0, 0.0),
+                hit_node: None,
+                hit_section_idx: None,
+                hit_edge_handle: None,
+                hit_portal_label: None,
+                hit_edge_label: None,
+                hit_section_resize_handle: None,
+                hit_node_resize_handle: None,
+            })),
+        ] {
+            assert!(
+                !drag.would_abandon_gesture(),
+                "a left press must still re-arm from {:?}",
+                std::mem::discriminant(&drag)
+            );
+        }
     }
 }

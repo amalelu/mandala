@@ -78,6 +78,15 @@ impl SourceTier {
     }
 }
 
+/// The diagnostic code a privilege-gate rejection is logged under
+/// (`log::warn!(code = GATE_REJECTED_CODE; …)`), so a caller collecting
+/// diagnostics can tell "the gate refused a step and the rest of the
+/// macro aborted" from an ordinary degrade without parsing prose. The
+/// IPC reply's `warnings` array carries it as `macro_gate_rejected`
+/// (`format/ipc.md` §Warnings). A code is API there, so this string
+/// does not change without a protocol bump.
+pub const GATE_REJECTED_CODE: &str = "macro_gate_rejected";
+
 /// One step inside a macro. A macro is a sequence of these executed
 /// atomically. Each variant routes through one of the application's
 /// existing dispatch surfaces, so adding a new step kind is a matter
@@ -192,6 +201,14 @@ impl MacroRegistry {
     /// Look up the highest-tier macro for `id`. Walks the slot
     /// array from Inline → Map → User → App and returns the first
     /// non-None entry.
+    ///
+    /// Test-gated with [`Self::contains`] and [`Self::is_empty`]:
+    /// the dispatcher needs the tier alongside the
+    /// macro for its privilege gate, so it reaches for
+    /// [`Self::get_with_source`] and this tier-blind form has no
+    /// production caller. `len` stays ungated — the console's
+    /// `macro` readout counts registered ids.
+    #[cfg(test)]
     pub fn get(&self, id: &str) -> Option<&Macro> {
         let slots = self.macros.get(id)?;
         for i in (0..SourceTier::COUNT).rev() {
@@ -218,11 +235,13 @@ impl MacroRegistry {
         None
     }
 
-    /// Whether any tier slot holds an entry for `id`.
+    /// Whether any tier slot holds an entry for `id`. Test-gated —
+    /// see [`Self::get`].
+    #[cfg(test)]
     pub fn contains(&self, id: &str) -> bool {
         self.macros
             .get(id)
-            .map_or(false, |slots| slots.iter().any(Option::is_some))
+            .is_some_and(|slots| slots.iter().any(Option::is_some))
     }
 
     /// Number of distinct ids with at least one tier slot occupied.
@@ -234,18 +253,11 @@ impl MacroRegistry {
             .count()
     }
 
+    /// No id holds an entry at any tier. Test-gated — see
+    /// [`Self::get`].
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// Iterate registered macro ids. An id present at multiple
-    /// tiers appears once. HashMap iteration order is unspecified;
-    /// sort at the call site if a stable display is needed.
-    pub fn ids(&self) -> impl Iterator<Item = &str> {
-        self.macros
-            .iter()
-            .filter(|(_, slots)| slots.iter().any(Option::is_some))
-            .map(|(k, _)| k.as_str())
     }
 
     /// Clear the slot for `source` across every id. Lower-tier

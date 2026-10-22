@@ -30,7 +30,7 @@ use super::targets::PickerHandle;
 pub enum PickerMode {
     /// Target-bound picker. Commit writes to this handle and closes.
     /// `seed_var_ref` is `Some(raw)` when the target's pre-open
-    /// colour was a `var(--name)` reference, `None` for plain hex
+    /// color was a `var(--name)` reference, `None` for plain hex
     /// seeds; `seed_hsv` is the HSV the picker opened at. Together
     /// they let the commit preserve the variable reference when the
     /// user didn't move the wheel — without these, every contextual
@@ -109,113 +109,123 @@ pub enum PickerGesture {
 #[derive(Debug, Clone)]
 pub enum ColorPickerState {
     Closed,
-    Open {
-        /// Which of the two picker modes is active. Contextual carries
-        /// the bound target; Standalone has none.
-        mode: PickerMode,
-        /// Current preview hue in degrees, `[0, 360)`.
-        hue_deg: f32,
-        /// Current preview saturation, `[0, 1]`.
-        sat: f32,
-        /// Current preview value/lightness, `[0, 1]`.
-        val: f32,
-        /// Last cursor position seen by `handle_color_picker_mouse_move`,
-        /// in window-space pixels. `None` before the first mouse event
-        /// after open. Threaded into geometry so `compute_picker_geometry`
-        /// can toggle `hex_visible` based on "cursor inside backdrop".
-        last_cursor_pos: Option<(f32, f32)>,
-        /// Widest shaped advance across all 32 crosshair-arm glyphs at
-        /// base `font_size`. Measured once at picker-open via
-        /// cosmic-text in `open_color_picker`, cached here so every
-        /// subsequent `compute_picker_geometry` call can forward it to
-        /// the pure layout fn as the cell-spacing unit. Keeps the four
-        /// arms symmetric even when one script shapes wider than the
-        /// others.
-        max_cell_advance: f32,
-        /// Same, for the 24 hue ring glyphs at
-        /// `font_size * HUE_RING_FONT_SCALE`. Measured once at open.
-        max_ring_advance: f32,
-        /// Font size both `max_cell_advance` and `max_ring_advance`
-        /// were measured at — typically `spec.geometry.font_max`.
-        /// The layout fn divides the absolute advances by this to
-        /// recover dimensionless ratios that scale with whatever
-        /// font_size the canonical sizing formula picks.
-        measurement_font_size: f32,
-        /// Per-glyph ink-center-vs-em-box-center offsets
-        /// (dimensionless — pixels at `measurement_font_size`
-        /// divided by `measurement_font_size`), measured once at open
-        /// via `baumhard::font::fonts::measure_glyph_ink_bounds`.
-        /// Used by `compute_color_picker_layout` to re-anchor each
-        /// arm's cell position on the ink centre rather than the
-        /// em-box centre. One offset per arm cell (8 cells per arm,
-        /// excluding the centre slot) — every glyph in the picker has
-        /// distinct sidebearings and a distinct baseline-relative ink
-        /// extent, so a per-arm aggregate can't keep both axes flush.
-        arm_top_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
-        arm_bottom_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
-        arm_left_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
-        arm_right_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
-        /// Same, for the central preview glyph (Tibetan ࿕).
-        preview_ink_offset: (f32, f32),
-        /// Cached layout from the last rebuild. `None` between `Open`
-        /// construction and the first `rebuild_color_picker_overlay`
-        /// call (a narrow window — the rebuild is the very next line
-        /// in `open_color_picker`, but `Option` makes the invariant
-        /// explicit rather than relying on a placeholder).
-        layout: Option<ColorPickerLayout>,
-        /// Screen-space translation of the wheel center, applied by
-        /// `compute_color_picker_layout` in place of the default
-        /// `(screen_w/2, screen_h/2)`. Updated while a drag is active;
-        /// retained after drag-release so the wheel stays where the
-        /// user left it until the picker closes.
-        center_override: Option<(f32, f32)>,
-        /// User-controlled multiplier on the picker's size. 1.0 =
-        /// the spec's `target_frac` of the screen's shorter side.
-        /// Mutated by the right-mouse-button drag-to-resize gesture
-        /// in `app.rs`. Reset to 1.0 on each new picker open
-        /// (mirrors `center_override` lifecycle) so that opening
-        /// after a window resize gets the new screen-derived
-        /// default rather than persisting a stale scale.
-        size_scale: f32,
-        /// Active-gesture bookkeeping. `Some` while the user is
-        /// dragging the wheel (LMB-move or RMB-resize); `None` at
-        /// all other times. The two gestures are mutually exclusive
-        /// by construction — only one variant can be set at a time.
-        gesture: Option<PickerGesture>,
-        /// Which interactive element the cursor is currently over,
-        /// or `None` if it's over the backdrop or outside. Used by
-        /// the builder to apply the hover-grow scale to the matching
-        /// cell. Updated by `handle_color_picker_mouse_move` and
-        /// diffed against the previous value to avoid redundant
-        /// rebuilds.
-        hovered_hit: Option<PickerHit>,
-        /// HSV triple being previewed on hover. `Some` while the
-        /// cursor is over a hue/sat/val cell; `None` otherwise. The
-        /// rendering pipeline uses this for visual feedback; the real
-        /// `hue_deg`/`sat`/`val` only change on click or keyboard
-        /// nudge.
-        hover_preview: Option<(f32, f32, f32)>,
-        /// Pending error-flash animation request. Set when the user
-        /// attempts an action that can't complete (e.g. clicking the
-        /// center commit button in Standalone mode with no
-        /// selection). Today this is a plain boolean stub — the
-        /// animation system isn't wired yet, so the renderer ignores
-        /// it. When that lands, this becomes the hook point: flip it
-        /// on, the renderer reads and clears it, the tree gets a
-        /// red-tint mutation for ~250 ms. See [`request_error_flash`].
-        pending_error_flash: bool,
-        /// `(hue_deg, sat, val, hovered_hit)` of the last
-        /// dynamic-phase apply. On layout-stable frames, the
-        /// dispatcher compares the current geometry against this
-        /// snapshot and skips `apply_color_picker_overlay_dynamic_mutator`
-        /// when nothing observable has changed (a mouse move within
-        /// the same cell is the common case). `None` between picker
-        /// open and the first dynamic apply. Reset (`None`) after
-        /// every layout-phase apply because those rewrite the full
-        /// cell set and the next dynamic apply should target the
-        /// freshly-written state.
-        last_dynamic_apply: Option<PickerDynamicApplyKey>,
-    },
+    /// An open picker. **Boxed**: the payload is a kilobyte of cached
+    /// geometry, and an enum is as large as its largest variant, so held
+    /// inline it would make every `ColorPickerState` — the closed one
+    /// included — that big. The fields live on [`OpenPicker`]; read them
+    /// through [`ColorPickerState::as_open`] / [`ColorPickerState::as_open_mut`].
+    Open(Box<OpenPicker>),
+}
+
+/// Everything an open color picker carries. See [`ColorPickerState`]
+/// for how it is held, and for the lifecycle of the picker as a whole.
+#[derive(Debug, Clone)]
+pub struct OpenPicker {
+    /// Which of the two picker modes is active. Contextual carries
+    /// the bound target; Standalone has none.
+    pub mode: PickerMode,
+    /// Current preview hue in degrees, `[0, 360)`.
+    pub hue_deg: f32,
+    /// Current preview saturation, `[0, 1]`.
+    pub sat: f32,
+    /// Current preview value/lightness, `[0, 1]`.
+    pub val: f32,
+    /// Last cursor position seen by `handle_color_picker_mouse_move`,
+    /// in window-space pixels. `None` before the first mouse event
+    /// after open. Threaded into geometry so `compute_picker_geometry`
+    /// can toggle `hex_visible` based on "cursor inside backdrop".
+    pub last_cursor_pos: Option<(f32, f32)>,
+    /// Widest shaped advance across all 32 crosshair-arm glyphs at
+    /// base `font_size`. Measured once at picker-open via
+    /// cosmic-text in `open_color_picker`, cached here so every
+    /// subsequent `compute_picker_geometry` call can forward it to
+    /// the pure layout fn as the cell-spacing unit. Keeps the four
+    /// arms symmetric even when one script shapes wider than the
+    /// others.
+    pub max_cell_advance: f32,
+    /// Same, for the 24 hue ring glyphs at
+    /// `font_size * HUE_RING_FONT_SCALE`. Measured once at open.
+    pub max_ring_advance: f32,
+    /// Font size both `max_cell_advance` and `max_ring_advance`
+    /// were measured at — typically `spec.geometry.font_max`.
+    /// The layout fn divides the absolute advances by this to
+    /// recover dimensionless ratios that scale with whatever
+    /// font_size the canonical sizing formula picks.
+    pub measurement_font_size: f32,
+    /// Per-glyph ink-center-vs-em-box-center offsets
+    /// (dimensionless — pixels at `measurement_font_size`
+    /// divided by `measurement_font_size`), measured once at open
+    /// via `baumhard::font::fonts::measure_glyph_ink_bounds`.
+    /// Used by `compute_color_picker_layout` to re-anchor each
+    /// arm's cell position on the ink center rather than the
+    /// em-box center. One offset per arm cell (8 cells per arm,
+    /// excluding the center slot) — every glyph in the picker has
+    /// distinct sidebearings and a distinct baseline-relative ink
+    /// extent, so a per-arm aggregate can't keep both axes flush.
+    pub arm_top_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+    pub arm_bottom_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+    pub arm_left_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+    pub arm_right_ink_offsets: [(f32, f32); CROSSHAIR_CENTER_CELL],
+    /// Same, for the central preview glyph (Tibetan ࿕).
+    pub preview_ink_offset: (f32, f32),
+    /// Cached layout from the last rebuild. `None` between `Open`
+    /// construction and the first `rebuild_color_picker_overlay`
+    /// call (a narrow window — the rebuild is the very next line
+    /// in `open_color_picker`, but `Option` makes the invariant
+    /// explicit rather than relying on a placeholder).
+    pub layout: Option<ColorPickerLayout>,
+    /// Screen-space translation of the wheel center, applied by
+    /// `compute_color_picker_layout` in place of the default
+    /// `(screen_w/2, screen_h/2)`. Updated while a drag is active;
+    /// retained after drag-release so the wheel stays where the
+    /// user left it until the picker closes.
+    pub center_override: Option<(f32, f32)>,
+    /// User-controlled multiplier on the picker's size. 1.0 =
+    /// the spec's `target_frac` of the screen's shorter side.
+    /// Mutated by the right-mouse-button drag-to-resize gesture
+    /// in `app.rs`. Reset to 1.0 on each new picker open
+    /// (mirrors `center_override` lifecycle) so that opening
+    /// after a window resize gets the new screen-derived
+    /// default rather than persisting a stale scale.
+    pub size_scale: f32,
+    /// Active-gesture bookkeeping. `Some` while the user is
+    /// dragging the wheel (LMB-move or RMB-resize); `None` at
+    /// all other times. The two gestures are mutually exclusive
+    /// by construction — only one variant can be set at a time.
+    pub gesture: Option<PickerGesture>,
+    /// Which interactive element the cursor is currently over,
+    /// or `None` if it's over the backdrop or outside. Used by
+    /// the builder to apply the hover-grow scale to the matching
+    /// cell. Updated by `handle_color_picker_mouse_move` and
+    /// diffed against the previous value to avoid redundant
+    /// rebuilds.
+    pub hovered_hit: Option<PickerHit>,
+    /// HSV triple being previewed on hover. `Some` while the
+    /// cursor is over a hue/sat/val cell; `None` otherwise. The
+    /// rendering pipeline uses this for visual feedback; the real
+    /// `hue_deg`/`sat`/`val` only change on click or keyboard
+    /// nudge.
+    pub hover_preview: Option<(f32, f32, f32)>,
+    /// Pending error-flash animation request. Set when the user
+    /// attempts an action that can't complete (e.g. clicking the
+    /// center commit button in Standalone mode with no
+    /// selection). Today this is a plain boolean stub — the
+    /// animation system isn't wired yet, so the renderer ignores
+    /// it. When that lands, this becomes the hook point: flip it
+    /// on, the renderer reads and clears it, the tree gets a
+    /// red-tint mutation for ~250 ms. See [`request_error_flash`].
+    pub pending_error_flash: bool,
+    /// `(hue_deg, sat, val, hovered_hit)` of the last
+    /// dynamic-phase apply. On layout-stable frames, the
+    /// dispatcher compares the current geometry against this
+    /// snapshot and skips `apply_color_picker_overlay_dynamic_mutator`
+    /// when nothing observable has changed (a mouse move within
+    /// the same cell is the common case). `None` between picker
+    /// open and the first dynamic apply. Reset (`None`) after
+    /// every layout-phase apply because those rewrite the full
+    /// cell set and the next dynamic apply should target the
+    /// freshly-written state.
+    pub last_dynamic_apply: Option<PickerDynamicApplyKey>,
 }
 
 /// Snapshot of the picker state the dynamic phase writes against.
@@ -247,32 +257,36 @@ impl PartialEq for PickerDynamicApplyKey {
 impl Eq for PickerDynamicApplyKey {}
 
 impl ColorPickerState {
-    pub fn is_open(&self) -> bool {
-        matches!(self, ColorPickerState::Open { .. })
+    /// The open picker, or `None` when closed. Matching through this
+    /// keeps field patterns as they were before the payload was boxed:
+    /// `if let Some(OpenPicker { hue_deg, .. }) = state.as_open_mut()`.
+    pub fn as_open(&self) -> Option<&OpenPicker> {
+        match self {
+            ColorPickerState::Open(picker) => Some(picker),
+            ColorPickerState::Closed => None,
+        }
     }
 
-    /// The bound contextual handle if this picker is open in Contextual
-    /// mode. Returns `None` when the picker is closed OR when it's
-    /// open in Standalone mode (where commits target the document's
-    /// current selection instead of a pre-bound handle).
-    pub fn contextual_handle(&self) -> Option<&PickerHandle> {
+    /// Mutable form of [`ColorPickerState::as_open`].
+    pub fn as_open_mut(&mut self) -> Option<&mut OpenPicker> {
         match self {
-            ColorPickerState::Open {
-                mode: PickerMode::Contextual { handle, .. },
-                ..
-            } => Some(handle),
-            _ => None,
+            ColorPickerState::Open(picker) => Some(picker),
+            ColorPickerState::Closed => None,
         }
+    }
+
+    pub fn is_open(&self) -> bool {
+        matches!(self, ColorPickerState::Open(_))
     }
 
     /// True if the picker is open in Standalone mode.
     pub fn is_standalone(&self) -> bool {
         matches!(
-            self,
-            ColorPickerState::Open {
+            self.as_open(),
+            Some(OpenPicker {
                 mode: PickerMode::Standalone,
                 ..
-            }
+            })
         )
     }
 }
@@ -298,9 +312,9 @@ pub enum FlashKind {
 /// per-kind mutation recipes at that point; today every kind is the
 /// same no-op.
 pub fn request_error_flash(state: &mut ColorPickerState, _kind: FlashKind) {
-    if let ColorPickerState::Open {
+    if let Some(OpenPicker {
         pending_error_flash, ..
-    } = state
+    }) = state.as_open_mut()
     {
         *pending_error_flash = true;
     }

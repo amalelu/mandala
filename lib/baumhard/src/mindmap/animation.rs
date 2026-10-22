@@ -7,10 +7,17 @@
 //! instantly; each tick evaluates the easing curve and writes a
 //! blended snapshot the existing `rebuild_all` path repaints.
 //!
-//! This module deliberately replaces the dormant
-//! [`crate::core::animation`] skeleton. The dormant types are
-//! generic over a `Mutable` trait and don't fit Mandala's
-//! `MindMap` model + `MutatorTree` shape.
+//! This is the *only* animation vocabulary in the crate. A second,
+//! dormant one lived in `core/animation.rs` — a `Timeline` /
+//! `TimelineEvent` skeleton generic over a `Mutable` marker trait —
+//! and was deleted rather than kept as a seam: it had no
+//! implementers, no callers, and an API that could not work as
+//! written (its `update` took its instance by value and returned
+//! nothing, so no tick could observe an effect). What it was
+//! reaching for — long-form scheduling, loops, chained steps — is
+//! the [`Followup`](crate::mindmap::animation::Followup) slot below,
+//! on a shape that already carries the model this crate actually
+//! animates.
 //!
 //! # Architecture
 //!
@@ -47,7 +54,6 @@ use glam::Vec2;
 /// instant mutation into an animated transition. Serde-default
 /// throughout so old maps without timing fields still load.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AnimationTiming {
     /// How long the animation runs after `delay_ms` elapses.
     /// `0` means "instant" — the dispatcher should bypass the
@@ -73,12 +79,13 @@ pub struct AnimationTiming {
     /// loads, the animation runs once, nothing ever loops — is
     /// what the skip prevents.
     ///
-    /// Because the container denies unknown fields, `"then"` in
-    /// a map is now a **load error** rather than a key quietly
-    /// swallowed and then erased on the next save. The author
-    /// finds out the followup is unwired while they still have
-    /// the file they wrote. The gate lifts when
-    /// `tick_animations` gains the followup dispatch.
+    /// `"then"` in a map is therefore an unrecognized key like
+    /// any other: the loader warns about it naming the mutation
+    /// it sits in, and writes it back untouched at the next save
+    /// (see [`crate::mindmap::unknown_keys`]). The author finds
+    /// out the followup is unwired, and the map that asked for it
+    /// early still says so on the day `tick_animations` gains the
+    /// followup dispatch and the skip lifts.
     #[serde(skip)]
     pub then: Option<Followup>,
 }
@@ -268,10 +275,7 @@ mod tests {
             for step in 1..=100 {
                 let t = step as f32 / 100.0;
                 let v = easing.evaluate(t);
-                assert!(
-                    v >= prev - 1e-6,
-                    "{easing:?} dipped at t={t}: prev={prev}, v={v}"
-                );
+                assert!(v >= prev - 1e-6, "{easing:?} dipped at t={t}: prev={prev}, v={v}");
                 prev = v;
             }
         }
@@ -324,32 +328,31 @@ mod tests {
         assert!(!json.contains("then"));
     }
 
-    /// `Followup` variants are not reachable via the wire format,
-    /// and authoring one says so out loud. `"then"` used to be
-    /// swallowed in silence — the map loaded, the animation ran
-    /// once, nothing looped, and the key was gone from the file
-    /// after the next save. Denying unknown fields turns that into
-    /// a rejection while the author still has what they wrote.
+    /// `Followup` variants are not reachable via the wire format:
+    /// `then` is `#[serde(skip)]` until `tick_animations` grows the
+    /// followup dispatch, so an authored `"then"` reaches no field.
     ///
-    /// The gate itself is unchanged: no `.mindmap.json` can put a
-    /// `Followup` into the model. The gate lifts when
-    /// `tick_animations` gains the followup dispatch.
+    /// Nothing here denies it, and nothing needs to. `then` is an
+    /// unrecognized key like any other, which means the loader warns
+    /// about it naming the mutation it sits in and writes it back at
+    /// the next save — so the day the dispatch lands, a map that
+    /// asked for `"Loop"` early still says so. What this test pins is
+    /// the gate itself: no `.mindmap.json` can put a `Followup` into
+    /// the model, whatever it writes.
     #[test]
-    fn test_followup_is_rejected_rather_than_silently_dropped() {
+    fn test_an_authored_followup_reaches_no_field() {
         for authored in [
             r#"{"duration_ms": 200, "then": {"Reverse": {"hold_ms": 50}}}"#,
             r#"{"duration_ms": 200, "then": "Loop"}"#,
+            r#"{"duration_ms": 200}"#,
         ] {
-            let err = serde_json::from_str::<AnimationTiming>(authored)
-                .expect_err("an unwired `then` must not load silently");
+            let parsed: AnimationTiming =
+                serde_json::from_str(authored).expect("an unwired `then` must not fail the parse");
+            assert_eq!(parsed.duration_ms, 200);
             assert!(
-                err.to_string().contains("unknown field `then`"),
-                "the rejection must name the key the author wrote: {err}"
+                parsed.then.is_none(),
+                "`then` must stay unreachable from the wire: {authored}"
             );
         }
-        // And the field is still absent from every timing the
-        // loader can produce.
-        let parsed: AnimationTiming = serde_json::from_str(r#"{"duration_ms": 200}"#).unwrap();
-        assert!(parsed.then.is_none());
     }
 }

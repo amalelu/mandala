@@ -8,7 +8,7 @@
 //! element, and a field-bearing predicate matches or rejects based
 //! on the element's value.
 //!
-//! Follows the `do_*()` / `test_*()` split from §T2.2: every public
+//! Follows the `do_*()` / `test_*()` split from §T2.2: every `do_*`
 //! body is benchmarkable from `benches/test_bench.rs`.
 
 use glam::Vec2;
@@ -529,6 +529,10 @@ fn model_element_with(layer: usize, line_count: usize) -> GfxElement {
     GfxElement::new_model_non_indexed(model, 0, 0)
 }
 
+/// One row of [`PREDICATE_TRUTH_TABLE`]: how to build the element, the
+/// field and comparator to test it with, and whether it should match.
+type TruthRow = (fn() -> GfxElement, GfxElementField, Comparator, bool);
+
 lazy_static! {
     /// Regression truth table for predicate comparator semantics.
     ///
@@ -539,12 +543,7 @@ lazy_static! {
     /// GlyphLines, Scale) plus flags, and across both directions of each
     /// inequality. New rows should fail on the buggy implementation and
     /// pass once the convention is restored.
-    pub static ref PREDICATE_TRUTH_TABLE: Vec<(
-        fn() -> GfxElement,
-        GfxElementField,
-        Comparator,
-        bool,
-    )> = vec![
+    pub static ref PREDICATE_TRUTH_TABLE: Vec<TruthRow> = vec![
         // Channel: element value 5, reference 3 (element > reference).
         (
             || area_element_with_channel(5),
@@ -919,7 +918,7 @@ pub fn do_predicate_truth_table() {
     for (make_element, field, comparator, expected) in PREDICATE_TRUTH_TABLE.clone() {
         let element = make_element();
         let pred = Predicate {
-            fields: vec![(field.clone(), comparator.clone())],
+            fields: vec![(field.clone(), comparator)],
             always_match: false,
         };
         let result = pred.test(&element);

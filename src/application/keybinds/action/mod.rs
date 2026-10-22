@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! `Action` — the abstract user-action vocabulary the event loop
-//! dispatches on. New keyboard interactions go here, then add a
-//! matching `KeybindConfig` field + default + binding-string list.
+//! dispatches on. New keyboard interactions go here; the config side
+//! is one row in the `keybind_surface!` table in
+//! [`super::config`], and the build fails until you write it.
 
 use serde::{Deserialize, Serialize};
 use strum_macros::{EnumDiscriminants, EnumIter, EnumString, IntoStaticStr};
@@ -96,13 +97,25 @@ pub enum ZoomBound {
     Max,
 }
 
-/// High-level user actions that can be bound to keys. Add a new variant
-/// here when a new keyboard interaction is introduced, extend
-/// `KeybindConfig` with a matching field + default, and handle the variant
-/// in the event loop.
+/// High-level user actions that can be bound to keys. Add a new
+/// variant here when a new keyboard interaction is introduced, give
+/// it a row in the `keybind_surface!` table (which generates its
+/// `KeybindConfig` field, its default and its resolve row from that
+/// one row — or records why it has no key surface), and handle the
+/// variant in the event loop. Skipping the table row is a compile
+/// error, not a silently dead binding: see [`super::surface`].
 ///
 /// `Serialize` / `Deserialize` are derived so macros can carry actions
 /// in their JSON payload — see `crate::application::macros::MacroStep`.
+///
+/// `PayloadFieldNames` publishes each payload variant's field names,
+/// in the order written below, into `action_payload_fields`. The
+/// `keybind_surface!` table restates those names to define the
+/// positional `args` contract of a `keybinds.json` binding, and the
+/// two lists are compared at compile time — so the field order in
+/// this declaration is load-bearing, and reordering a variant's
+/// fields without reordering its table row is `error[E0080]` rather
+/// than a user's arguments arriving in the wrong slots.
 ///
 /// `#[non_exhaustive]` because new variants need to be reviewed
 /// against the macro privilege gate
@@ -132,6 +145,7 @@ pub enum ZoomBound {
     Deserialize,
     EnumDiscriminants,
     mandala_derive::ActionClassify,
+    mandala_derive::PayloadFieldNames,
 )]
 #[strum_discriminants(
     name(ActionKind),
@@ -333,8 +347,11 @@ pub enum Action {
     /// **WASM: NativeOnly** — the gesture relies on the
     /// `DragState` machinery in `event_mouse_click.rs` /
     /// `event_cursor_moved.rs` which is `cfg(not(target_arch =
-    /// "wasm32"))`. WASM gets fast-resize when the touch parity
-    /// batch (§6.6) lands the `TwoFingerDrag` synthetic gesture.
+    /// "wasm32"))`. It ships bound to `Ctrl+RightDrag` alone: the
+    /// `TwoFingerDrag` touch peer it used to carry is gone, because
+    /// two fingers on a canvas now drive the camera directly. WASM
+    /// gets fast-resize when the browser gains a drag-state
+    /// machine.
     ///
     /// Marked `destructive` so the macro privilege gate
     /// (`SourceTier::allows_action`) blocks System / Plugin /
@@ -691,13 +708,17 @@ pub enum Action {
     /// Mirror `border preset cycle` — advance the selected
     /// node(s)' border preset to the next entry in
     /// `BORDER_PRESETS`, wrapping at the end. No payload, so
-    /// bindable to a single key for one-press preset cycling.
+    /// bindable to a single key for one-press preset cycling, as
+    /// `cycle_border_preset`. This doc claimed that from the day
+    /// the variant landed and the config field did not exist until
+    /// #32 — the drift class the `keybind_surface!` table closes.
     #[action(context = Document, wasm = Compatible)]
     CycleBorderPreset,
     /// Mirror `border toggle` — flip `style.show_frame` per
-    /// selected node. No payload (each node toggled
-    /// independently); bindable to a single key for one-press
-    /// border-on/off cycling.   
+    /// selected node. No payload (each node is toggled
+    /// independently), so bindable to a single key for one-press
+    /// border-on/off cycling, as `toggle_border_visible`. Same
+    /// missing-field history as [`Action::CycleBorderPreset`].
     #[action(context = Document, wasm = Compatible)]
     ToggleBorderVisible,
     /// Stage a single-kv border preview against the live
@@ -828,41 +849,37 @@ pub enum Action {
     /// keybind-stability.
     #[action(context = Document, wasm = Compatible)]
     SetSectionSizeFillParent,
-    /// Mirror `section move x=<x> y=<y> [section=<idx>]` —
-    /// macro-only target (not bindable to a key today; no
-    /// `KeybindConfig` field). Pin the selected section's
-    /// `offset` to `(x, y)` (absolute setter, distinct from the
-    /// `dx` / `dy` delta form).   
+    /// Mirror `section move x=<x> y=<y> [section=<idx>]` — pin the
+    /// selected section's `offset` to `(x, y)`. The absolute
+    /// setter, distinct from the `dx` / `dy` delta form.
+    ///
+    /// Bindable as `set_section_offset_abs`. It was macro-only
+    /// until #32, for no reason its neighbours did not share: the
+    /// delta form had a config field and the absolute one did not.
     #[action(context = Document, wasm = Compatible)]
     SetSectionOffsetAbs { x: String, y: String },
-    /// Mirror `section text "<text>" [runs=preserve|clear]` —
-    /// macro-only target (not bindable to a key today; no
-    /// `KeybindConfig` field — the string-arg payload makes
-    /// keybinding awkward). `runs_mode = "preserve"` clips
-    /// existing runs to the new text length;  `"clear"`
-    /// collapses to a single run.Destructive.
+    /// Mirror `section text "<text>" [runs=preserve|clear]`.
+    /// `runs_mode = "preserve"` clips existing runs to the new text
+    /// length; `"clear"` collapses to a single run. Destructive.
     #[action(context = Document, wasm = Compatible, destructive)]
     SetSectionText { text: String, runs_mode: String },
-    /// Mirror `section add [at=<idx>] [text="<text>"]` —
-    /// macro-only target (not bindable to a key today; no
-    /// `KeybindConfig` field). `at = ""` → append; `"K"` →
-    /// insert at K. `text = ""` → empty section.    /// Destructive.
+    /// Mirror `section add [at=<idx>] [text="<text>"]`. `at = ""`
+    /// appends; `"K"` inserts at K. `text = ""` makes an empty
+    /// section. Destructive.
     #[action(context = Document, wasm = Compatible, destructive)]
     AddSection { at: String, text: String },
-    /// Mirror `section delete [section=<idx>]` — macro-only
-    /// target (not bindable to a key today; no `KeybindConfig`
-    /// field). Errors when the node has only one section (the
-    /// model invariant).Destructive.
+    /// Mirror `section delete [section=<idx>]`. Errors when the
+    /// node has only one section — the model invariant.
+    /// Destructive.
     #[action(context = Document, wasm = Compatible, destructive)]
     DeleteSection,
-    /// Mirror `section split at=<grapheme>` — macro-only target
-    /// (not bindable to a key today; no `KeybindConfig` field).
-    /// `"K"` → split at grapheme K; `at_grapheme = ""` is
-    /// **rejected** with a warn-log, matching the verb, which
-    /// requires `at=` because split-at-end-of-text silently
-    /// creates an empty suffix section nobody wants. Field name
-    /// disambiguates from `AddSection { at }`'s section-vector
-    /// index (different units).Destructive.
+    /// Mirror `section split at=<grapheme>`. `"K"` splits at
+    /// grapheme K; `at_grapheme = ""` is **rejected** with a
+    /// warn-log, matching the verb, which requires `at=` because
+    /// split-at-end-of-text silently creates an empty suffix
+    /// section nobody wants. The field name disambiguates from
+    /// `AddSection { at }`'s section-vector index (different
+    /// units). Destructive.
     #[action(context = Document, wasm = Compatible, destructive)]
     SplitSection { at_grapheme: String },
     /// Mirror `open <path>` — replace the current document with the
@@ -957,6 +974,11 @@ pub enum WasmCompatibility {
 /// Adding a member here obliges both consumers: the keybind test
 /// asserts its classification, and the lift's `debug_assert` fires in
 /// any test build if the member has no verdict arm.
+// Consumer is `run_wasm/`; the host build reaches this only from
+// `#[cfg(test)]`, so arm the lint on wasm32 and silence it here
+// rather than blanket-allowing on both targets — if the browser
+// caller goes away, wasm32 says so.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) const MIXED_BRANCH_ACTIONS: [(Action, WasmCompatibility); 4] = [
     // Native leftover: the `hovered_node` clear for the target-picker
     // overlay rebuild. Cross-platform slice: border-preview cancel,

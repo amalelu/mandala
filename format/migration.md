@@ -18,9 +18,11 @@ An earlier revision stored portals in a separate top-level
 `edges[]` array — portals are now edges with
 `display_mode = "portal"`. The current loader refuses to read a
 file that still carries a `portals` key at all — an empty array is
-still a key the format has no field for, and one that would
-disappear from the file at the next save (see
-[schema.md](./schema.md#unknown-keys-are-rejected)). Migrate with:
+still the old spelling, and the loader would otherwise keep it
+forever as a key nothing acts on. This is the deliberate exception to
+[keeping unknown keys](./schema.md#unknown-keys-are-kept): a key from
+the *past* that the current model means something else by is not a
+key from the future, and it has a one-command answer. Migrate with:
 
 ```
 maptool convert --portals <input.json> <output.json>
@@ -104,8 +106,8 @@ survived. A `portals` key that is not an array at all is dropped the
 same way, with the same kind of warning. (The loader rejects the
 `portals` **key**, whatever its shape — an empty array and a string
 are as unreadable to the current format as a populated one, and
-leaving either in place would only mean losing it silently at the
-next save.)
+keeping either would only mean carrying a dead spelling through every
+future save.)
 
 Both blocks above are read straight out of this file by
 `convert::portals::tests::test_documented_fold_matches_converter_output`,
@@ -190,13 +192,73 @@ path and move the result into place yourself.
    defined once; per-node `color_schema` becomes a lightweight reference.
    The `theme_id` and `variant` fields are dropped; `variant` != 2 gets
    folded into the palette name (`"coral"` + `variant: 3` becomes
-   `"coral-v3"`).
+   `"coral-v3"`). A negative `level` is floored to 0 with a message —
+   the model types it `usize`, so emitting one would produce a file
+   this tool could not read back.
+
+   **The hoisted palette is authoritative at render time.** The
+   converter leaves each node's `style` colors where it found them,
+   but they are now the *fallback*: a node carrying a `color_schema`
+   draws its fill, frame and text from the palette group
+   (see [palettes.md](./palettes.md)), and its `style` colors are what
+   it would use if the schema were removed. A converted map whose
+   `style` values were hand-edited away from the palette after
+   conversion will therefore render from the palette, not from the
+   edits. Three fixes, most specific first: move the edit into that
+   node's `color_schema.overrides`, which excepts one channel on one
+   node and is where `color bg=…`, the glyph-wheel picker and every
+   other interactive setter already write; edit the palette, when
+   what drifted was the theme rather than the one node; or drop the
+   `color_schema` from the nodes that were deliberately detached,
+   which returns them to their `style` colors wholesale.
 5. **Removes `index`** from each node (sibling order derives from the new
    Dewey ID).
 6. **Adds `channel: 0`** to each node (the default).
 7. **Folds node `text` / `text_runs` into `sections[0]`** — the same
    pass `convert --sections` runs, applied last so an already-cleaned
    tree converges on the post-section shape.
+
+### miMind `shape_type` ordinals
+
+Step 3 rewrites the integer `style.shape_type` as the named
+`style.shape`. The mapping is miMind's own Java enum order:
+
+| `shape_type` | `shape` |
+| --- | --- |
+| 0 | `rectangle` |
+| 1 | `rounded_rectangle` |
+| 2 | `ellipse` |
+| 3 | `diamond` |
+| 4 | `parallelogram` |
+| 5 | `hexagon` |
+
+Any other value — including a non-integer — converts to `rectangle`,
+ordinal 0, which is also the format default and the shape the runtime
+substitutes for anything it cannot draw.
+
+**This table is the contract, not a description of the code.**
+`LEGACY_SHAPE_ORDINALS` in `crates/maptool/src/convert/enums.rs` is an
+array indexed by the ordinal, so a row inserted in the middle would
+silently renumber every row below it and quietly change what old files
+convert to. `legacy_shape_ordinals_match_the_published_table` reads
+this table back off disk and fails when the two disagree — on row
+count, on any row's spelling, and on the numbering itself, which has
+to be each ordinal `0..n-1` exactly once, so a duplicated ordinal
+cannot quietly retire the row it displaced.
+`legacy_shape_ordinals_are_canonical_spellings` separately holds every
+spelling here to `KNOWN_SHAPES` in
+`lib/baumhard/src/gfx_structs/shape.rs` — the one list the runtime
+classifier and `maptool verify` both consult, so a spelling that
+drifted out of it would make `convert --legacy` write files
+`maptool verify` rejects. This table is restatement 5 of the five
+[enums.md](./enums.md#styleshape) counts; it is pinned to
+`LEGACY_SHAPE_ORDINALS`, which is pinned to `KNOWN_SHAPES`.
+
+The other five enums step 3 converts (`layout.type`,
+`layout.direction`, `line_style`, `anchor_from`, `anchor_to`) have no
+published ordinal table and no pin; their mappings live only in
+`convert/enums.rs`. Giving them the same treatment is a separate
+change.
 
 ## Known limitations
 
@@ -225,6 +287,14 @@ them. The format drift is too large to patch over with `#[serde(alias)]`
 and backward-compat struct fields — that approach bakes the legacy format
 into the runtime indefinitely. A dedicated migration tool keeps the
 runtime clean: it only ever reads the current format.
+
+That is not in tension with the loader keeping keys it does not
+recognize. The two rules answer different questions. An unrecognized
+key means *this build is older than the file* — there is nothing to
+migrate and nothing to decide, so the key rides along untouched. A
+legacy key means *the file is older than the format* — the name is
+taken, the migration exists, and preserving it would only carry a
+contradiction forward.
 
 The conversion is idempotent-safe for files that already look current
 (already-Dewey IDs survive unchanged, already-string enums pass through,

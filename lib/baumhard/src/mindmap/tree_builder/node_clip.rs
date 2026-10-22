@@ -15,7 +15,7 @@
 //! the visible frame itself is built by [`super::border`], which
 //! resolves the whole thing once. This pass needs a single `f32`,
 //! so it calls
-//! [`resolve_border_font_size_pt`](crate::mindmap::border::resolve_border_font_size_pt)
+//! [`resolve_border_font_size_pt`]
 //! rather than `resolve_border_style`: no glyph set, no side
 //! patterns, no palette, no color string, no allocation on any
 //! path where the node is not the target of a border preview.
@@ -83,7 +83,7 @@ pub(super) fn section_aabb(
 /// O(visible nodes), two `Option` derefs and an `f32` copy each.
 /// **No allocation on the steady-state path** beyond the returned
 /// `Vec` — the whole point of
-/// [`resolve_border_font_size_pt`](crate::mindmap::border::resolve_border_font_size_pt)
+/// [`resolve_border_font_size_pt`]
 /// over the full resolver. A `border_preview` that targets a node
 /// clones that one node's `GlyphBorderConfig` slot.
 pub fn node_clip_aabbs(

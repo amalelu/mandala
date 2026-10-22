@@ -79,6 +79,8 @@ mod freeze_watchdog;
 #[cfg(not(target_arch = "wasm32"))]
 mod input_context;
 mod interaction_mode;
+#[cfg(not(target_arch = "wasm32"))]
+mod ipc_target;
 // Cross-platform context-bundles for the unified `dispatch_action`
 // funnel. Track C from `WASM_CONVERGENCE.md` (final convergence step).
 mod input_context_core;
@@ -94,6 +96,10 @@ mod run_native_init;
 mod run_wasm;
 #[cfg(not(target_arch = "wasm32"))]
 mod single_line_edit;
+// Cross-platform: both init paths resolve the initial map load
+// through it, which is what keeps the two from surfacing a load
+// failure differently (CODE_CONVENTIONS §4).
+mod startup_load;
 #[cfg(not(target_arch = "wasm32"))]
 mod throttled_interaction;
 mod touch_gesture;
@@ -102,13 +108,11 @@ mod touch_gesture;
 // fields: the struct in `input_context.rs`, the
 // `InitState::input_context()` builder in `run_native.rs`, and
 // `dispatch_action`'s signature in `dispatch/native.rs`.
-use crate::application::common::{InputMode, WindowMode};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::application::document::EdgeRef;
 #[cfg(not(target_arch = "wasm32"))]
 use glam::Vec2;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use throttled_interaction::ThrottledDrag;
 
@@ -126,8 +130,37 @@ pub(crate) use crate::application::common::now_ms;
 /// Screen-space click tolerance (in pixels) for edge hit testing. Converted
 /// to canvas units via `Renderer::canvas_per_pixel()` so the click target
 /// stays visually stable across zoom levels.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Cross-platform: a connection path is the last rung of the tap's
+/// hit chain (`dispatch::cross_dispatch::pointer`'s tap body) on
+/// both targets, and a curve cannot be hit by the scene's
+/// bounding-volume descent — it needs a tolerance. The constant was
+/// native-gated for as long as native's click handler was its only
+/// reader.
 const EDGE_HIT_TOLERANCE_PX: f32 = 8.0;
+
+/// Which [`PlatformContext`](baumhard::mindmap::custom_mutation::PlatformContext)
+/// this build's input paths report when they fire a node's `OnClick`
+/// triggers, so an authored mutation gated on `["Desktop"]` or
+/// `["Web"]` fires where its author said it should.
+///
+/// Chosen at compile time, which is why it is a constant rather than
+/// a parameter — and why the `Touch` variant is *not* selected here
+/// even by the tap path. Which platform a build is remains a build
+/// fact; whether an individual gesture should re-label it is a
+/// question about the authoring format (`format/mutations.md`), not
+/// about the input vocabulary, and answering it "yes" would silently
+/// stop every `["Web"]`-gated trigger from firing under a finger in
+/// the browser.
+#[cfg(not(target_arch = "wasm32"))]
+const PLATFORM_CONTEXT: baumhard::mindmap::custom_mutation::PlatformContext =
+    baumhard::mindmap::custom_mutation::PlatformContext::Desktop;
+
+/// WASM peer of the native `PLATFORM_CONTEXT` above; see its doc for
+/// why the choice is a build fact.
+#[cfg(target_arch = "wasm32")]
+const PLATFORM_CONTEXT: baumhard::mindmap::custom_mutation::PlatformContext =
+    baumhard::mindmap::custom_mutation::PlatformContext::Web;
 
 /// Screen-space click tolerance (in pixels) for grab-handle hit
 /// testing — applies uniformly to edge handles and section / node
@@ -140,18 +173,47 @@ const EDGE_HIT_TOLERANCE_PX: f32 = 8.0;
 #[cfg(not(target_arch = "wasm32"))]
 const HANDLE_HIT_TOLERANCE_PX: f32 = 8.0;
 
-/// Minimum cursor travel (squared screen-pixel distance) before
-/// a `Pending` / `PendingRight` press promotes to its respective
-/// drag gesture. The 5px threshold (squared = 25.0) splits "this
+/// Minimum pointer travel (**physical** pixels) before a press stops
+/// reading as a click and starts reading as a drag. Splits "this
 /// was a click" from "this is a drag" — small enough that
 /// intentional drags engage immediately, large enough that
-/// trembling fingers don't accidentally start a drag-to-move
-/// from a click. Used by both threshold-cross arms in
-/// `event_cursor_moved.rs` (left-button `Pending` and right-
-/// button `PendingRight`); single source so a future tweak
-/// doesn't drift between the two arms.
-#[cfg(not(target_arch = "wasm32"))]
-const DRAG_THRESHOLD_SQ_PX: f64 = 25.0;
+/// trembling fingers don't accidentally start a drag-to-move from
+/// a click.
+///
+/// **One threshold for every pointer**, mouse and finger alike:
+/// the mouse arms in `event_cursor_moved.rs` (left-button
+/// `Pending` and right-button `PendingRight`) and both emit points
+/// of [`touch_gesture::TouchGestureRecognizer`] (the long-press
+/// cancel and the two-finger centroid step) compare against
+/// [`POINTER_DRAG_THRESHOLD_SQ_PX`] below. The touch recognizer
+/// used to carry its own `MOVE_THRESHOLD_PX = 4.0` under a comment
+/// claiming it mirrored this one at the same value; it did not,
+/// and a finger consequently promoted to a drag a pixel earlier
+/// than a mouse did.
+///
+/// **Physical, not logical**, and both readers say so because both
+/// paths feed the comparison winit's raw device coordinates:
+/// `handle_cursor_moved` stores `WindowEvent::CursorMoved`'s
+/// `PhysicalPosition` into `cursor_pos` unconverted, and
+/// `dispatch_touch_event` hands the recognizer `touch.location`, a
+/// `PhysicalPosition` too. There is no `scale_factor` call anywhere
+/// under `src/application` to convert either. Parity is unaffected —
+/// both pointers are measured with the same ruler, which is the
+/// property this constant exists for — but the *number* scales with
+/// the display: on a 2x screen 5 physical px is 2.5 logical px of
+/// slop, not 5. Making the budget display-independent means dividing
+/// through by `Window::scale_factor` at both readers, which is the
+/// open coordinate-space item in
+/// `work_plans/SECTIONS_BORDERS_RESIZE_PLAN.md` §"Touch coordinate-
+/// space drift" and is a behavior change on every HiDPI machine, so
+/// it is not folded in here.
+const POINTER_DRAG_THRESHOLD_PX: f64 = 5.0;
+
+/// [`POINTER_DRAG_THRESHOLD_PX`] squared — the form every
+/// comparison actually uses, so no pointer path pays a `sqrt` per
+/// motion event. Derived rather than written out so the two cannot
+/// drift.
+const POINTER_DRAG_THRESHOLD_SQ_PX: f64 = POINTER_DRAG_THRESHOLD_PX * POINTER_DRAG_THRESHOLD_PX;
 
 /// What a single click targeted. Used by [`LastClick`] + the
 /// double-click detector so a portal-marker double-click (navigate)
@@ -344,6 +406,11 @@ fn already_editing_same_target(
 /// workspace has no log-capture test facility, and installing one
 /// would be a process-global mock that §T10 rules out. Callers may
 /// ignore it.
+// Consumer is `run_wasm/`; the host build reaches this only from
+// `#[cfg(test)]`, so arm the lint on wasm32 and silence it here
+// rather than blanket-allowing on both targets — if the browser
+// caller goes away, wasm32 says so.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(super) fn warn_unhandled_native_only_once(
     warned: &std::sync::atomic::AtomicBool,
     gesture: &str,
@@ -500,6 +567,42 @@ fn click_hit_from_priority(
     }
 }
 
+/// The portal-icon hit a left press hands on to
+/// [`DragState::Pending`], given the node hit the same click chain
+/// resolved.
+///
+/// **This is why the click path and the drag path cannot disagree
+/// about a node under a portal marker.** They run one hit chain,
+/// not two: `compute_click_hit` gives the node priority, and a
+/// press stores the portal hit for the drag promotion only when
+/// that chain left `hit_node` empty. The promotion order in
+/// `event_cursor_moved.rs` does list portal-label above node — but
+/// over a set where at most one of them is populated, so what that
+/// listing resolves is the node against the three *handle* hits
+/// the press captures outside the chain (edge handle, node resize,
+/// section resize), each gated on a mode or a selection instead.
+///
+/// The rule was an inline `if hit_node.is_none()` guard inside the
+/// press handler, which needs a live event loop to reach and so
+/// could not be pinned (`TEST_CONVENTIONS §T9`). A July-2026
+/// review read the promotion order without it and reported the two
+/// paths as targeting different things on the same press; naming
+/// the rule is what makes that answerable rather than re-derivable.
+///
+/// Only the icon sub-part is a drag affordance — sliding a
+/// portal's text along the border is not a gesture — so a
+/// text-side hit yields `None` here regardless of the node.
+#[cfg(not(target_arch = "wasm32"))]
+fn portal_label_drag_capture(
+    portal_icon_hit: &Option<(baumhard::mindmap::scene_cache::EdgeKey, String)>,
+    hit_node: Option<&str>,
+) -> Option<(baumhard::mindmap::scene_cache::EdgeKey, String)> {
+    match portal_icon_hit {
+        Some((key, endpoint)) if hit_node.is_none() => Some((key.clone(), endpoint.clone())),
+        _ => None,
+    }
+}
+
 // Re-export the mode enum, the shared selection→target resolver,
 // and the resolver's typed error so the console layer can carry
 // `InteractionMode` inside `ConsoleSideEffect` and consumers across
@@ -588,9 +691,17 @@ struct PendingPress {
 /// `ThrottledDrag` + a struct + a trait impl; nothing about this
 /// enum needs to grow.
 ///
-/// `Panning` and `SelectingRect` are *not* throttled — panning is
-/// a camera-only decree (no mutation) and rect-select is a
-/// lightweight overlay redraw.
+/// `Panning` and `SelectingRect` are *not* throttled, for two
+/// different reasons. Panning is a camera-only decree with no
+/// mutation to defer. Rect-select's per-frame work is the overlay
+/// rectangle, which tracks the pointer and so must never be
+/// deferred; the expensive half — repainting the covered nodes'
+/// highlight — is gated on the covered *set* changing rather than
+/// on a frame counter, which skips the work outright on a frame
+/// that crosses no node boundary instead of postponing it. This
+/// sentence used to read "rect-select is a lightweight overlay
+/// redraw", which it was not: every drain ran a full
+/// `doc.build_tree()` and a cosmic-text buffer rebuild (#37).
 #[cfg(not(target_arch = "wasm32"))]
 enum DragState {
     /// No drag in progress.
@@ -650,8 +761,23 @@ enum DragState {
     /// tree or model mutation involved.
     Panning,
     /// Shift+drag on empty space: rubber-band selection rectangle.
-    /// Unthrottled — overlay rectangle plus preview highlight is
-    /// cheap enough to run every frame.
+    ///
+    /// Unthrottled: the overlay rectangle is redrawn every frame
+    /// because it tracks the pointer. The covered-node preview is
+    /// not free and is not run every frame — it is memoized on
+    /// `MindMapDocument::rect_select_preview` and repainted only
+    /// when the covered set changes. This comment used to claim the
+    /// preview was "cheap enough to run every frame"; it was a full
+    /// arena build plus a text-buffer rebuild (#37).
+    ///
+    /// **This variant is the authority for both.** The overlay
+    /// rectangle and the covered set are its projection, and
+    /// `drain_frame::drain_rect_select` re-derives them from it
+    /// every frame rather than trusting each exit from this state to
+    /// clean up after itself — which matters because the covered set
+    /// is document state *every* node-tree rebuild in the app reads,
+    /// and this variant has more ways out than the release arm that
+    /// used to be the only one dropping it.
     SelectingRect {
         /// Canvas-space corner where the drag started.
         start_canvas: Vec2,
@@ -680,6 +806,38 @@ impl DragState {
     /// `dispatch::native` — should each have to spell.
     fn throttled(drag: ThrottledDrag) -> Self {
         Self::Throttled(Box::new(drag))
+    }
+
+    /// True when overwriting this state with a freshly-armed
+    /// gesture would abandon one that nothing else will finish.
+    ///
+    /// Two states are in the class, and both fail silently:
+    ///
+    /// - `Throttled(..)` owes the model a write plus an undo entry,
+    ///   and `commit_on_release_core` is the only place either
+    ///   happens. Drop it and the tree keeps the dragged offsets
+    ///   until the next model rebuild snaps them back. Reachable
+    ///   from a *right*-started fast-resize, which is in flight
+    ///   while the left button is still free.
+    /// - `PendingRight` holds a user-named gesture (`RightClick` /
+    ///   `FastResizeStart`) that has not fired yet.
+    ///
+    /// `Pending` / `Panning` / `SelectingRect` are deliberately
+    /// outside it: none owes the model anything, and each is
+    /// re-derived from the next press or the next cursor sample.
+    /// Refusing a left press there would strand a click after a
+    /// release the window never delivered (focus loss mid-drag)
+    /// instead of re-arming from it, which is the behavior those
+    /// three have always had.
+    ///
+    /// It lives on the enum rather than beside any one caller
+    /// because it is a property of the state, and two dispatch
+    /// surfaces read it: the left-button press in
+    /// `event_mouse_click` and the `Action::PanCanvas` arm in
+    /// `dispatch::native`, which the keyboard and every macro tier
+    /// reach as well as the middle button.
+    fn would_abandon_gesture(&self) -> bool {
+        matches!(self, Self::PendingRight { .. } | Self::Throttled(_))
     }
 }
 
@@ -766,37 +924,17 @@ impl Application {
 /// per launch; never mutated post-construction.
 #[derive(Clone)]
 pub struct Options {
-    /// Hint to wgpu's adapter selection: prefer integrated /
-    /// low-power GPUs over discrete ones. Useful on laptops
-    /// where the discrete GPU would burn battery for a render
-    /// load Mandala can run on the iGPU.
-    pub launch_gpu_prefer_low_power: bool,
     /// `true` to short-circuit the event loop after the first
-    /// frame — used by smoke-tests / CI captures that just need
-    /// to verify a single render pass succeeds. The interactive
-    /// run never sets this.
+    /// frame, so a caller that only needs one render pass gets one.
+    ///
+    /// Written but never read. Kept as a named seam rather than
+    /// deleted: `work_plans/LLM_IPC.md` reserves it for **IPC-10**
+    /// (headless capture), whose termination condition is exactly
+    /// "settled on rendered, then exit". The consumer is the
+    /// `run_native` / `run_wasm` loop bodies, which will read it
+    /// where they currently read nothing.
+    #[allow(dead_code)]
     pub should_exit: bool,
-    /// Window startup mode (windowed / fullscreen / maximized);
-    /// see [`WindowMode`].
-    pub window_mode: WindowMode,
-    /// User-config UI-scale offset. The renderer scales every
-    /// glyph by `1.0 + ui_scale * UI_SCALE_STEP`; `0` is the
-    /// neutral default. Negative shrinks, positive grows.
-    pub ui_scale: i8,
-    /// Static title bar text. `&'static` because it's set at
-    /// compile time and never user-edited.
-    pub window_title_text: &'static str,
-    /// Input dispatch mode (direct vs. instruction-mapped).
-    /// See [`InputMode`].
-    pub input_mode: InputMode,
-    /// CPU core count detected at startup. Reserved for future
-    /// thread-pool sizing; today the app is single-threaded so
-    /// this is informational only.
-    pub avail_cores: usize,
-    /// `true` when wgpu requires the renderer to live on the
-    /// main thread (the macOS / wasm constraint). Set by
-    /// platform detection in `main.rs`.
-    pub render_must_be_main: bool,
     /// Path to the `.mindmap.json` file to load at startup.
     /// Native: filesystem path; WASM: a fetch-relative URL
     /// resolved against the page origin.
@@ -805,6 +943,11 @@ pub struct Options {
     /// defaults). The event loop resolves this into a `ResolvedKeybinds`
     /// at startup and dispatches keyboard events through it.
     pub keybind_config: crate::application::keybinds::KeybindConfig,
+    /// `--ipc <path>`: the Unix socket to serve the IPC protocol on
+    /// (`format/ipc.md`). `None` — the default — means no socket and
+    /// no IPC thread. Native-only: browsers cannot serve sockets.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub ipc_socket: Option<std::path::PathBuf>,
 }
 
 // Unit tests for pure helpers (cursor math, caret insertion,

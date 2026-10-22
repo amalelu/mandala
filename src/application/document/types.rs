@@ -11,8 +11,16 @@ use baumhard::mindmap::custom_mutation::CustomMutation;
 use baumhard::mindmap::model::{MindEdge, MindNode};
 use baumhard::mindmap::scene_cache::EdgeKey;
 
-/// Selection highlight color: bright cyan [R, G, B, A]
-pub const HIGHLIGHT_COLOR: [f32; 4] = [0.0, 0.9, 1.0, 1.0];
+/// Selection highlight color as float RGBA — the form
+/// `apply_tree_highlights` tints a selected node's regions with.
+///
+/// Derived from [`baumhard::mindmap::SELECTION_HIGHLIGHT`] rather
+/// than written out: this used to be `[0.0, 0.9, 1.0, 1.0]`, which
+/// is a *different* color from the `#00E5FF` baumhard emits into
+/// the tree — 0.9 quantises to 229.5, the hex to 229 — so a
+/// selected node and its selected edge were tinted with two cyans
+/// that happened to look alike.
+pub const HIGHLIGHT_COLOR: [f32; 4] = baumhard::mindmap::SELECTION_HIGHLIGHT.to_float();
 
 // `InteractionModeOverrides` lives in baumhard
 // (`baumhard::mindmap::tree_builder::InteractionModeOverrides`) — its
@@ -56,10 +64,15 @@ pub struct AnimationInstance {
     /// at start by applying the mutation to a scratch copy.
     pub to_node: MindNode,
     /// Wall-clock timestamp (ms) when the animation started.
+    // Native-driver-only: `tick_animations` is the reader and the
+    // browser has no per-frame drain wired to it (CLAUDE.md
+    // "Per-frame animation drain").
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub start_ms: u64,
     /// Timing envelope carved from `cm.timing` at construction.
     /// Stored directly (not as `Option`) so the per-frame tick
     /// loop projects without unwrap.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub timing: AnimationTiming,
     /// The `CustomMutation` driving the animation. Carries the
     /// id (for re-trigger detection) and the mutation list (for
@@ -78,16 +91,22 @@ impl AnimationInstance {
     /// The timing envelope. Stored directly on the instance —
     /// `start_animation` carves it from `cm.timing` so the
     /// per-frame tick loop never has to unwrap.
+    // Native-driver-only: read by `tick_animations`.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn timing(&self) -> &AnimationTiming {
         &self.timing
     }
 }
 
 /// Reparent-mode source color: orange, used for nodes currently being reparented.
+// Native-driver-only: `InteractionMode::Reparent` is entered from a
+// native-gated handler, so the browser never paints these tints.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const REPARENT_SOURCE_COLOR: [f32; 4] = [1.0, 0.55, 0.0, 1.0];
 
 /// Reparent-mode target color: green, used for the node currently hovered as
 /// a potential reparent target.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const REPARENT_TARGET_COLOR: [f32; 4] = [0.2, 1.0, 0.4, 1.0];
 
 /// Identifies an edge in the MindMap by its endpoints and type. Edges
@@ -185,19 +204,45 @@ pub enum SelectionState {
     /// invariant `len() >= 2` is upheld by [`Self::from_sections`];
     /// callers that may produce 0 / 1 entries should route
     /// through that constructor.
+    // Native-driver-only: produced by shift-click fan-out in the
+    // native click router.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     MultiSection(Vec<SectionSel>),
-    /// `range` is a `(lo, hi)` pair of **section indices** on
-    /// the owning node, `[lo, hi]` inclusive. Fanned out by
-    /// `border` / `style` verbs through
-    /// `border.rs::expand_section_pairs` and
-    /// `cross_dispatch/style.rs::commit_border_preview`. Clamped
-    /// by `cleanup_after_structural_mutation` on add/delete/split
-    /// against `sections.len()`. Per-section verbs see the
-    /// range and route to the range-aware setter; accessors that
-    /// only care about the owning section (`selected_section`,
-    /// `selected_ids`, `is_selected`) treat it identically to
-    /// [`Self::Section`].
-    SectionRange { sel: SectionSel, range: (usize, usize) },
+    /// One anchor section plus the two range meanings a
+    /// section-scoped selection can carry, each in its own
+    /// distinctly-typed field so they can never again share a slot
+    /// (issue #47 part C — the single `range` pair this variant
+    /// used to carry was read as section indices by one consumer
+    /// class and as grapheme offsets by the other).
+    ///
+    /// - [`SectionSpan`] (`section_span`) — inclusive **section
+    ///   indices** on the owning node. Fanned out by `border` /
+    ///   `style` verbs through
+    ///   `border.rs::live_selection_section_pairs` and the border
+    ///   preview's `Sections` target; clamped by
+    ///   `cleanup_after_structural_mutation` on add/delete/split
+    ///   against `sections.len()`.
+    /// - [`GraphemeRange`] (`grapheme_range`) — half-open
+    ///   **grapheme-cluster** sub-range inside the anchor section
+    ///   (`sel.section_idx`)'s text. Routed by per-section verbs to
+    ///   the range-aware setters (`set_section_text_color_range`,
+    ///   `set_section_font_size_range`,
+    ///   `set_section_font_family_range`), by the color picker
+    ///   through `ColorTarget::Section { range }`, and by the
+    ///   clipboard's range-aware cut / paste.
+    ///
+    /// Produced by the inline text editor's shift-select lift on
+    /// commit (`text_edit::editor::lift_anchor_to_section_range`):
+    /// the anchor section becomes `sel`, the span is that single
+    /// section, and the `(anchor, cursor)` pair becomes the
+    /// grapheme range. Accessors that only care about the owning
+    /// section (`selected_section`, `selected_ids`, `is_selected`)
+    /// treat the variant identically to [`Self::Section`].
+    SectionRange {
+        sel: SectionSel,
+        section_span: SectionSpan,
+        grapheme_range: GraphemeRange,
+    },
     Edge(EdgeRef),
     /// Line-mode label selection: the edge's text label sits
     /// along the connection path and is selected independently
@@ -229,11 +274,104 @@ impl SectionSel {
     /// Construct a section selection from owned strings + index.
     /// Mirrors [`EdgeRef::new`] — same idiomatic shape across
     /// every selection-bearing identity in the document layer.
+    /// Test-gated: production sites build the struct literally,
+    /// usually while destructuring something adjacent.
+    #[cfg(test)]
     pub fn new(node_id: impl Into<String>, section_idx: usize) -> Self {
         SectionSel {
             node_id: node_id.into(),
             section_idx,
         }
+    }
+}
+
+/// Inclusive span of **section indices** on one node — the
+/// "sections `lo` through `hi`" half of
+/// [`SelectionState::SectionRange`]. Not a grapheme range: the
+/// units are entries in `MindNode.sections`, and the distinct type
+/// is the point — a span can no longer be handed to a consumer
+/// expecting grapheme offsets ([`GraphemeRange`]), which is the
+/// crossing issue #47 existed to end.
+///
+/// `lo <= hi` holds by construction: [`Self::new`] normalizes the
+/// order and the fields are private so no other writer exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SectionSpan {
+    lo: usize,
+    hi: usize,
+}
+
+impl SectionSpan {
+    /// Span covering `a` and `b` inclusive, whichever order they
+    /// arrive in.
+    pub fn new(a: usize, b: usize) -> Self {
+        SectionSpan {
+            lo: a.min(b),
+            hi: a.max(b),
+        }
+    }
+
+    /// The one-section span — what the text editor's shift-select
+    /// lift emits, since a grapheme selection lives inside exactly
+    /// one section.
+    pub fn single(idx: usize) -> Self {
+        SectionSpan { lo: idx, hi: idx }
+    }
+
+    /// Smallest covered section index.
+    pub fn lo(&self) -> usize {
+        self.lo
+    }
+
+    /// Largest covered section index (inclusive).
+    pub fn hi(&self) -> usize {
+        self.hi
+    }
+
+    /// Every covered section index, ascending — the fan-out shape
+    /// the border / style consumers iterate.
+    pub fn indices(&self) -> std::ops::RangeInclusive<usize> {
+        self.lo..=self.hi
+    }
+}
+
+/// Half-open range of **grapheme clusters** inside one section's
+/// text — the "these characters" half of
+/// [`SelectionState::SectionRange`], always relative to the anchor
+/// section (`sel.section_idx`). Not a section span: the units are
+/// what the user sees as characters, matching baumhard's text
+/// primitives and `TextRun.start` / `end`, and the distinct type
+/// keeps it out of every consumer expecting section indices
+/// ([`SectionSpan`]).
+///
+/// `start <= end` holds by construction: [`Self::new`] normalizes
+/// the order (the editor's anchor may sit on either side of the
+/// cursor) and the fields are private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GraphemeRange {
+    start: usize,
+    end: usize,
+}
+
+impl GraphemeRange {
+    /// Range covering `[min(a, b), max(a, b))`, so an
+    /// `(anchor, cursor)` pair converts directly whichever way the
+    /// user swept the selection.
+    pub fn new(a: usize, b: usize) -> Self {
+        GraphemeRange {
+            start: a.min(b),
+            end: a.max(b),
+        }
+    }
+
+    /// First covered grapheme cluster (inclusive).
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    /// One past the last covered cluster (exclusive).
+    pub fn end(&self) -> usize {
+        self.end
     }
 }
 
@@ -282,6 +420,8 @@ impl SelectionState {
     /// Cost: O(n) with a transient `HashSet` of (node_id ref,
     /// section_idx) — bounded by the input length, which is
     /// in turn bounded by user authoring (typically ≤ 10).
+    // Native-driver-only: the constructor for the variant above.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn from_sections(secs: Vec<SectionSel>) -> Self {
         let mut seen: std::collections::HashSet<(String, usize)> =
             std::collections::HashSet::with_capacity(secs.len());
@@ -308,11 +448,26 @@ impl SelectionState {
         }
     }
 
+    /// Whether `node_id` is part of the current selection, at
+    /// node granularity — a section-bearing variant answers for
+    /// its owning node.
+    ///
+    /// Allocation-free on every variant. `Multi` compares
+    /// borrowed `&str`s rather than reaching for
+    /// `Vec::contains`, which needs a `&String` and so would
+    /// allocate a throwaway copy of `node_id` on every call. The
+    /// two call sites today are a press and an undo step, but
+    /// this is a `pub` accessor over the selection set and the
+    /// obvious next caller is a per-node loop, where the copy
+    /// would be per candidate.
+    ///
+    /// Cost: O(1) for the single-target variants, O(n) in the
+    /// selection size for `Multi` / `MultiSection`.
     pub fn is_selected(&self, node_id: &str) -> bool {
         match self {
             SelectionState::None => false,
             SelectionState::Single(id) => id == node_id,
-            SelectionState::Multi(ids) => ids.contains(&node_id.to_string()),
+            SelectionState::Multi(ids) => ids.iter().any(|id| id == node_id),
             SelectionState::Section(s) => s.node_id == node_id,
             SelectionState::MultiSection(secs) => secs.iter().any(|s| s.node_id == node_id),
             SelectionState::SectionRange { sel, .. } => sel.node_id == node_id,
@@ -390,13 +545,16 @@ impl SelectionState {
         }
     }
 
-    /// Sub-range carried by [`Self::SectionRange`], or `None`
-    /// for every other variant. Per-section verbs route
-    /// range-targeted setters through this when the user has
-    /// shift-selected a sub-range inside a section.
-    pub fn selected_range(&self) -> Option<(usize, usize)> {
+    /// Grapheme sub-range carried by [`Self::SectionRange`], or
+    /// `None` for every other variant — the shift-selected span
+    /// inside the anchor section. Test-gated: the live consumers
+    /// (font / color / clipboard range routing) match the variant
+    /// inline, usually alongside `sel`, so a per-field borrow has
+    /// no production caller.
+    #[cfg(test)]
+    pub fn selected_grapheme_range(&self) -> Option<GraphemeRange> {
         match self {
-            SelectionState::SectionRange { range, .. } => Some(*range),
+            SelectionState::SectionRange { grapheme_range, .. } => Some(*grapheme_range),
             _ => None,
         }
     }
@@ -411,8 +569,7 @@ impl SelectionState {
     /// variants return their natural single owner (or empty).
     pub fn dedup_owning_node_ids(&self) -> Vec<String> {
         let ids = self.selected_ids();
-        let mut seen: std::collections::HashSet<&str> =
-            std::collections::HashSet::with_capacity(ids.len());
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::with_capacity(ids.len());
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             if seen.insert(id) {
@@ -442,6 +599,15 @@ impl SelectionState {
     /// [`Self::selected_portal_label`] — label-target operations
     /// that specifically want the label (not the edge body)
     /// consult this accessor.
+    ///
+    /// Test-gated with its three siblings below. The live
+    /// label-target paths match the variant they need inline —
+    /// usually as one arm of a match that also handles the other
+    /// three — so a per-variant borrow has no caller. The
+    /// collapsing accessor next door,
+    /// [`Self::selected_edge_or_portal_edge`], is the one production
+    /// reaches for.
+    #[cfg(test)]
     pub fn selected_edge_label(&self) -> Option<&EdgeLabelSel> {
         match self {
             SelectionState::EdgeLabel(s) => Some(s),
@@ -453,7 +619,8 @@ impl SelectionState {
     /// selection (the portal **icon**), or `None` for any other
     /// variant. Complements `selected_edge` — the variants are
     /// mutually exclusive so at most one returns `Some` for any
-    /// given state.
+    /// given state. Test-gated — see [`Self::selected_edge_label`].
+    #[cfg(test)]
     pub fn selected_portal_label(&self) -> Option<&PortalLabelSel> {
         match self {
             SelectionState::PortalLabel(s) => Some(s),
@@ -466,7 +633,9 @@ impl SelectionState {
     /// `None` for any other variant. Distinct from
     /// [`Self::selected_portal_label`]: both use `PortalLabelSel`
     /// as the identity-carrying struct, but only one of them is
-    /// active at any moment (they're separate variants).
+    /// active at any moment (they're separate variants). Test-gated
+    /// — see [`Self::selected_edge_label`].
+    #[cfg(test)]
     pub fn selected_portal_text(&self) -> Option<&PortalLabelSel> {
         match self {
             SelectionState::PortalText(s) => Some(s),
@@ -500,7 +669,10 @@ impl SelectionState {
     /// non-portal selection. Useful for operations that target
     /// the whole portal endpoint (e.g. the `body glyph=` console
     /// verb applies to the icon regardless of whether the user
-    /// clicked icon or text).
+    /// clicked icon or text). Test-gated — see
+    /// [`Self::selected_edge_label`]; the verbs that want a portal
+    /// endpoint match both variants in one arm.
+    #[cfg(test)]
     pub fn selected_portal_endpoint(&self) -> Option<&PortalLabelSel> {
         match self {
             SelectionState::PortalLabel(s) | SelectionState::PortalText(s) => Some(s),

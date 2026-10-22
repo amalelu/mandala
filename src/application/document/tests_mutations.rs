@@ -7,6 +7,8 @@
 use super::tests_common::{first_testament_node_id, load_test_doc, TestNudgeMutation};
 use super::*;
 
+use baumhard::util::geometry::almost_equal_f64;
+
 use baumhard::mindmap::animation::{AnimationTiming, Easing};
 use baumhard::mindmap::custom_mutation::{
     CustomMutation as CM, DocumentAction, MutationBehavior as MB, PlatformContext as PC, TargetScope as TS,
@@ -391,7 +393,7 @@ fn test_apply_custom_mutation_sections_only_targets_section_areas() {
     use baumhard::mindmap::model::MindSection;
     let mut doc = load_test_doc();
     let nid = first_testament_node_id(&doc);
-    // Materialise a multi-section node so the SectionsOnly path
+    // Materialize a multi-section node so the SectionsOnly path
     // has more than one section to walk.
     {
         let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
@@ -481,7 +483,7 @@ fn test_sync_node_from_tree_writes_back_section_run_color() {
     let nid = first_testament_node_id(&doc);
     {
         let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
-        // Materialise a section with an explicit run carrying
+        // Materialize a section with an explicit run carrying
         // bold=true so we can verify the merge-with-prior path
         // preserves the field across the lossy round-trip.
         node.sections[0].text = "hello".into();
@@ -492,7 +494,7 @@ fn test_sync_node_from_tree_writes_back_section_run_color() {
             italic: false,
             underline: false,
             font: "LiberationSans".into(),
-            size_pt: 14,
+            size_pt: 14.0,
             color: "#ffffff".into(),
             hyperlink: None,
         }];
@@ -553,7 +555,7 @@ fn test_sync_node_from_tree_section_1_untouched_when_section_0_mutated() {
             italic: false,
             underline: false,
             font: "LiberationSans".into(),
-            size_pt: 14,
+            size_pt: 14.0,
             color: "#ffffff".into(),
             hyperlink: None,
         }];
@@ -566,7 +568,7 @@ fn test_sync_node_from_tree_section_1_untouched_when_section_0_mutated() {
             italic: true,
             underline: true,
             font: "LiberationSans".into(),
-            size_pt: 21,
+            size_pt: 21.0,
             color: "#abcdef".into(),
             hyperlink: Some("https://example.org".into()),
         }];
@@ -624,7 +626,7 @@ fn test_sync_node_from_tree_section_1_untouched_when_section_0_mutated() {
         .expect("section 1 must keep at least one run");
     assert!(s1_run.italic, "italic must survive on section 1");
     assert!(s1_run.underline, "underline must survive on section 1");
-    assert_eq!(s1_run.size_pt, 21, "size_pt must survive on section 1");
+    assert_eq!(s1_run.size_pt, 21.0, "size_pt must survive on section 1");
     assert_eq!(
         s1_run.hyperlink.as_deref(),
         Some("https://example.org"),
@@ -659,7 +661,7 @@ fn test_sync_node_from_tree_var_color_preserved_when_regions_untouched() {
             italic: false,
             underline: false,
             font: "LiberationSans".into(),
-            size_pt: 14,
+            size_pt: 14.0,
             // `var()` reference — not directly comparable on the
             // round-trip path; the selective gate must skip.
             color: "var(--accent)".into(),
@@ -729,6 +731,177 @@ fn test_sync_node_from_tree_section_offset_persists_after_rebuild() {
     assert!(
         (area.position.x.0 - expected).abs() < 1e-3,
         "post-rebuild section position should reflect persisted offset"
+    );
+}
+
+/// `section.size` is materialized when a `SectionsOnly` mutation
+/// actually resizes a section, and left alone when one does not.
+///
+/// Both halves matter, and they are why the writeback asks its
+/// question the way it does. `None` is the model's spelling for
+/// "fill the parent node", so a mutation that moves a section
+/// without resizing it must leave `None` in place — pinning
+/// `Some(node.size)` there would convert an inheriting section into
+/// a fixed one, and the next node resize would leave it behind. A
+/// mutation that does resize must pin the new bounds, or the change
+/// evaporates on the next rebuild-from-model.
+///
+/// The inputs that make each half fail are the two ways the
+/// condition can be got wrong: a writeback that never fires leaves
+/// the resized section at `None` (first half red), and one that
+/// fires unconditionally pins a size onto the translated section
+/// (second half red). The translate case uses the same nudge the
+/// offset-persistence test above does, so its section demonstrably
+/// *did* change — an inert mutation would satisfy the second half
+/// for the wrong reason.
+#[test]
+fn test_sync_node_from_tree_pins_section_size_only_on_a_real_resize() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::{scope, CustomMutation};
+
+    let sections_only = |id: &str, command: GlyphAreaCommand| CustomMutation {
+        id: id.into(),
+        name: id.into(),
+        description: String::new(),
+        contexts: vec![],
+        mutator: Some(scope::self_only(vec![Mutation::area_command(command)])),
+        target_scope: TS::SectionsOnly,
+        behavior: MB::Persistent,
+        predicate: None,
+        document_actions: vec![],
+        timing: None,
+    };
+
+    // A resize pins the new bounds.
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    doc.mindmap.nodes.get_mut(&nid).unwrap().sections[0].size = None;
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(
+        &sections_only("resize", GlyphAreaCommand::SetBounds(321.0, 123.0)),
+        &nid,
+        Some(&mut tree),
+    );
+    let pinned = doc.mindmap.nodes.get(&nid).unwrap().sections[0]
+        .size
+        .expect("a resized section must pin the bounds it was resized to");
+    assert!(
+        (pinned.width - 321.0).abs() < 1e-3 && (pinned.height - 123.0).abs() < 1e-3,
+        "pinned size {pinned:?} is not the size the mutation set"
+    );
+
+    // A translate leaves the fill-parent shape alone.
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    doc.mindmap.nodes.get_mut(&nid).unwrap().sections[0].size = None;
+    let before_offset_x = doc.mindmap.nodes.get(&nid).unwrap().sections[0].offset.x;
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(
+        &sections_only("translate", GlyphAreaCommand::NudgeRight(13.0)),
+        &nid,
+        Some(&mut tree),
+    );
+    let section = &doc.mindmap.nodes.get(&nid).unwrap().sections[0];
+    assert!(
+        (section.offset.x - before_offset_x - 13.0).abs() < 1e-3,
+        "the fixture must actually move the section, or the size assertion below proves nothing"
+    );
+    assert!(
+        section.size.is_none(),
+        "a translate must not pin a size onto a fill-parent section; got {:?}",
+        section.size
+    );
+}
+
+/// A fill-parent section survives a resize too small for the writeback
+/// to call one: a `SetBounds` that lands one f32 ULP off the node's own
+/// size keeps `size: None` and pushes no undo entry.
+///
+/// This is the half of the fill-parent rule the test above cannot see.
+/// Its translate arm moves the section by 13 px, which every spelling of
+/// the size condition agrees is not a resize — so it passes whether the
+/// condition carries the `f32::EPSILON` floor or compares exactly, and
+/// pins only the behavior both shapes share. The two spellings part
+/// company exactly where this test looks: a `1.0 × 1.0` node, whose ULP
+/// *is* `f32::EPSILON` (`ULP(x) == f32::EPSILON` for `x ∈ [1, 2)`), and a
+/// delta of one ULP on the width. An exact `!=` calls that a resize and
+/// materializes `Some(Size { width: 1.0000001192092896, .. })` onto a
+/// section whose author spelled it `None` on purpose; the floored
+/// comparison holds the `None`.
+///
+/// The input that makes it fail is therefore dropping the
+/// `.abs() > f32::EPSILON` floor from the `None` arm of `size_diverges`
+/// in `custom/sync.rs` and comparing `node_size` against `tree_size`
+/// exactly — the shape shipped at `69420181`. Planted, that body fails
+/// this test at its first assertion (`got Some(Size { width:
+/// 1.0000001192092896, height: 1.0 })`) and leaves the test above green,
+/// which is why that test could not stand in for this one.
+///
+/// Every ingredient is author-reachable: `validate.rs` puts no lower
+/// bound on `node.size` (finite, positive, `<= MAX_NODE_AXIS`), `None` is
+/// the documented fill-parent spelling for a section, and
+/// `format/sections.md` documents `SetBounds` under `SectionsOnly` as
+/// writing straight through this path.
+#[test]
+fn test_sync_node_from_tree_holds_fill_parent_none_at_a_sub_epsilon_resize() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::gfx_structs::mutator::Mutation;
+    use baumhard::mindmap::custom_mutation::{scope, CustomMutation};
+    use baumhard::mindmap::model::Size;
+
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.size = Size {
+            width: 1.0,
+            height: 1.0,
+        };
+        node.sections[0].size = None;
+    }
+
+    // 1.0 + one ULP. At this magnitude that step is exactly
+    // `f32::EPSILON`, which is the largest delta the floored
+    // comparison still calls "not a resize" — the boundary input.
+    let one_ulp_up = f32::from_bits(1.0f32.to_bits() + 1);
+    assert_eq!(
+        one_ulp_up - 1.0,
+        f32::EPSILON,
+        "the fixture's step must be exactly f32::EPSILON, or it probes the wrong boundary"
+    );
+
+    let undo_len_before = doc.undo_stack.len();
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(
+        &CustomMutation {
+            id: "sub-epsilon-resize".into(),
+            name: "sub-epsilon-resize".into(),
+            description: String::new(),
+            contexts: vec![],
+            mutator: Some(scope::self_only(vec![Mutation::area_command(
+                GlyphAreaCommand::SetBounds(one_ulp_up, 1.0),
+            )])),
+            target_scope: TS::SectionsOnly,
+            behavior: MB::Persistent,
+            predicate: None,
+            document_actions: vec![],
+            timing: None,
+        },
+        &nid,
+        Some(&mut tree),
+    );
+
+    let section = &doc.mindmap.nodes.get(&nid).unwrap().sections[0];
+    assert!(
+        section.size.is_none(),
+        "a sub-epsilon resize must not pin a size onto a fill-parent section; got {:?}",
+        section.size
+    );
+    assert_eq!(
+        doc.undo_stack.len(),
+        undo_len_before,
+        "a writeback that changed nothing must not push an undo entry"
     );
 }
 
@@ -1019,7 +1192,7 @@ fn test_sync_node_from_tree_selective_gate_preserves_unchanged_runs() {
             italic: true,
             underline: true,
             font: "LiberationSans".into(),
-            size_pt: 21, // Non-default so we can detect a stripped round-trip.
+            size_pt: 21.0, // Non-default so we can detect a stripped round-trip.
             color: "#abcdef".into(),
             hyperlink: Some("https://example.org".into()),
         }];
@@ -1035,7 +1208,7 @@ fn test_sync_node_from_tree_selective_gate_preserves_unchanged_runs() {
     let run = &doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs[0];
     assert!(run.italic, "italic must survive a position-only mutation");
     assert!(run.underline, "underline must survive a position-only mutation");
-    assert_eq!(run.size_pt, 21, "size_pt must survive a position-only mutation");
+    assert_eq!(run.size_pt, 21.0, "size_pt must survive a position-only mutation");
     assert_eq!(
         run.hyperlink.as_deref(),
         Some("https://example.org"),
@@ -1857,7 +2030,7 @@ fn test_tick_completion_live_tree_relative_no_double_apply() {
     assert!(doc.undo());
     let after_undo = doc.mindmap.nodes.get(&node_id).unwrap().position.x;
     assert!(
-        (after_undo - orig_x).abs() < 1e-6,
+        almost_equal_f64(after_undo, orig_x),
         "undo after an animated mutation must restore the exact pre-animation position; \
          got {after_undo}, expected {orig_x}",
     );
@@ -1924,7 +2097,7 @@ fn test_tick_completion_live_tree_absolute_lands_and_undo_restores() {
     assert!(doc.undo());
     let after = doc.mindmap.nodes.get(&node_id).unwrap().position;
     assert!(
-        (after.x - orig.x).abs() < 1e-6 && (after.y - orig.y).abs() < 1e-6,
+        almost_equal_f64(after.x, orig.x) && almost_equal_f64(after.y, orig.y),
         "undo of an animated absolute mutation must restore the pre-animation position; \
          got ({}, {}), expected ({}, {})",
         after.x,
@@ -2041,7 +2214,7 @@ fn test_tick_completion_no_tree_noop_pushes_no_undo() {
 
     let after = doc.mindmap.nodes.get(&node_id).unwrap().position;
     assert!(
-        (after.x - orig.x).abs() < 1e-9 && (after.y - orig.y).abs() < 1e-9,
+        almost_equal_f64(after.x, orig.x) && almost_equal_f64(after.y, orig.y),
         "no-tree absolute completion is inert (to == from); got ({}, {})",
         after.x,
         after.y,
@@ -2078,13 +2251,12 @@ fn make_font_scale_mutation(id: &str, cmd: baumhard::gfx_structs::area::GlyphAre
 
 /// Largest `size_pt` across section `idx`'s runs — mirrors the
 /// forward path's `scale = max(run.size_pt)` collapse.
-fn section_max_size_pt(doc: &MindMapDocument, node_id: &str, idx: usize) -> u32 {
+fn section_max_size_pt(doc: &MindMapDocument, node_id: &str, idx: usize) -> f32 {
     doc.mindmap.nodes.get(node_id).unwrap().sections[idx]
         .text_runs
         .iter()
         .map(|r| r.size_pt)
-        .max()
-        .unwrap_or(0)
+        .fold(0.0_f32, f32::max)
 }
 
 /// Tree-side font scale of section `idx`'s area.
@@ -2113,20 +2285,20 @@ fn test_grow_font_persists_survives_rebuild_and_undo_reverses() {
     let nid = first_testament_node_id(&doc);
 
     let size_before = section_max_size_pt(&doc, &nid, 0);
-    assert!(size_before > 0, "fixture node must have a run with a size");
+    assert!(size_before > 0.0, "fixture node must have a run with a size");
     let undo_len_before = doc.undo_stack.len();
 
     let cm = make_font_scale_mutation("grow-font-test", GlyphAreaCommand::GrowFont(2.0), TS::SelfOnly);
     let mut tree = doc.build_tree();
     // Tree-side scale starts at the model's largest run size.
-    assert!((section_tree_scale(&tree, &nid, 0) - size_before as f32).abs() < 1e-3);
+    assert!((section_tree_scale(&tree, &nid, 0) - size_before).abs() < 1e-3);
 
     doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
 
     // (1) Model changed: the run size grew by exactly 2pt.
     assert_eq!(
         section_max_size_pt(&doc, &nid, 0),
-        size_before + 2,
+        size_before + 2.0,
         "grow-font must write the +2pt back to the model run"
     );
     // (2) Exactly one undo entry, and dirty is set.
@@ -2140,7 +2312,7 @@ fn test_grow_font_persists_survives_rebuild_and_undo_reverses() {
     // (3) Survives rebuild_all's model→tree rebuild.
     let tree2 = doc.build_tree();
     assert!(
-        (section_tree_scale(&tree2, &nid, 0) - (size_before + 2) as f32).abs() < 1e-3,
+        (section_tree_scale(&tree2, &nid, 0) - (size_before + 2.0)).abs() < 1e-3,
         "grown font size must survive the rebuild-from-model"
     );
 
@@ -2177,7 +2349,7 @@ fn test_grow_font_preserves_relative_run_sizes() {
                 italic: false,
                 underline: false,
                 font: "LiberationSans".into(),
-                size_pt: 14,
+                size_pt: 14.0,
                 color: "#ffffff".into(),
                 hyperlink: None,
             },
@@ -2188,7 +2360,7 @@ fn test_grow_font_preserves_relative_run_sizes() {
                 italic: false,
                 underline: false,
                 font: "LiberationSans".into(),
-                size_pt: 40,
+                size_pt: 40.0,
                 color: "#ffffff".into(),
                 hyperlink: None,
             },
@@ -2199,8 +2371,8 @@ fn test_grow_font_preserves_relative_run_sizes() {
     doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
 
     let runs = &doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs;
-    assert_eq!(runs[0].size_pt, 17, "small run grows by the same +3 delta");
-    assert_eq!(runs[1].size_pt, 43, "large run grows by the same +3 delta");
+    assert_eq!(runs[0].size_pt, 17.0, "small run grows by the same +3 delta");
+    assert_eq!(runs[1].size_pt, 43.0, "large run grows by the same +3 delta");
 }
 
 /// `shrink-font` past the floor clamps `size_pt` to
@@ -2222,7 +2394,7 @@ fn test_shrink_font_clamps_to_minimum() {
             italic: false,
             underline: false,
             font: "LiberationSans".into(),
-            size_pt: 8,
+            size_pt: 8.0,
             color: "#ffffff".into(),
             hyperlink: None,
         }];
@@ -2238,16 +2410,76 @@ fn test_shrink_font_clamps_to_minimum() {
 
     assert_eq!(
         doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs[0].size_pt,
-        1,
+        1.0,
         "shrink past the floor clamps to 1pt, never 0"
     );
+}
+
+/// The other end of the same clamp, **end to end**: a `grow-font`
+/// delta large enough to leave the shaper's domain still produces a
+/// run the loader accepts, and the saved map reopens.
+///
+/// What this does *not* cover is `clamp_run_size_pt`'s own ceiling.
+/// The mutation path clamps at `GlyphArea`'s scale setters first, so
+/// the tree scale handed to the reverse converter is already inside
+/// the domain and the converter's ceiling never binds here — this
+/// test passes with that ceiling deleted. That guard is pinned
+/// directly by `test_clamp_run_size_pt_bounds_both_ends` instead.
+/// An earlier version of this docstring claimed the coverage it
+/// does not have.
+#[test]
+fn test_grow_font_clamps_to_maximum() {
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::mindmap::model::TextRun;
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.sections[0].text = "big".into();
+        node.sections[0].text_runs = vec![TextRun {
+            start: 0,
+            end: 3,
+            bold: false,
+            italic: false,
+            underline: false,
+            font: "LiberationSans".into(),
+            size_pt: 12.0,
+            color: "#ffffff".into(),
+            hyperlink: None,
+        }];
+    }
+    // Grow by far more than the ceiling allows.
+    let cm = make_font_scale_mutation("grow-font-test", GlyphAreaCommand::GrowFont(1.0e6), TS::SelfOnly);
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    let grown = doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs[0].size_pt;
+    assert_eq!(
+        grown,
+        baumhard::font::fonts::MAX_FONT_SIZE_PT,
+        "grow past the ceiling clamps to the shaper's maximum, got {grown}"
+    );
+
+    // And the clamped value is one the loader accepts — the point
+    // of the clamp, not a side effect of it.
+    let dir = baumhard::util::test_temp::TempDir::new("grow-font-ceiling");
+    let path = dir.join("grown.mindmap.json");
+    baumhard::mindmap::loader::save_to_file(&path, &doc.mindmap).expect("save must succeed");
+    baumhard::mindmap::loader::load_from_file(&path)
+        .expect("a grown run must still reload — otherwise the clamp did not do its job");
 }
 
 /// A `grow-font` mutation on a **runless** section synthesizes a
 /// single run to carry the new size — the change would otherwise
 /// have nowhere to live and evaporate on the next rebuild. The
-/// synthesized run spans the whole text and inherits the node's
-/// default text color so rendering is unchanged except for size.
+/// synthesized run spans the whole text and leaves `color` empty,
+/// which is the model's spelling for "take the node's text color",
+/// so rendering is unchanged except for size.
+///
+/// The node's `color_schema` is cleared first so `style.text_color`
+/// really is the effective default here; the themed half of that
+/// cascade is
+/// `test_grow_font_on_runless_section_of_themed_node_keeps_deferring`.
 #[test]
 fn test_grow_font_on_runless_section_synthesizes_run() {
     use baumhard::gfx_structs::area::GlyphAreaCommand;
@@ -2256,6 +2488,7 @@ fn test_grow_font_on_runless_section_synthesizes_run() {
     let nid = first_testament_node_id(&doc);
     {
         let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.color_schema = None;
         node.style.text_color = "#abcdef".into();
         // A section with text but no runs (size defaults to 14pt).
         node.sections
@@ -2273,15 +2506,225 @@ fn test_grow_font_on_runless_section_synthesizes_run() {
         "a run must be synthesized to hold the size"
     );
     let run = &section.text_runs[0];
-    assert_eq!(run.size_pt, 16, "synthesized run carries the grown size (14 + 2)");
+    assert_eq!(
+        run.size_pt, 16.0,
+        "synthesized run carries the grown size (14 + 2)"
+    );
     assert_eq!(run.start, 0);
     assert_eq!(
         run.end,
         baumhard::util::grapheme_chad::count_grapheme_clusters("runless")
     );
     assert_eq!(
-        run.color, "#abcdef",
-        "synthesized run inherits the node's default text color"
+        run.color, "",
+        "the synthesized run defers its color rather than baking one — a font-size \
+         mutation must not decide the section's color"
+    );
+    // ...and the deferral still resolves to the node's default, so
+    // nothing on screen moved but the size.
+    let node = doc.mindmap.nodes.get(&nid).unwrap();
+    assert_eq!(
+        doc.mindmap.node_text_rgba(node),
+        baumhard::util::color::hex_to_rgba_safe("#abcdef", [0.0, 0.0, 0.0, 1.0]),
+        "the empty color projects to style.text_color on an unthemed node"
+    );
+}
+
+/// The themed half of the previous test: when the node carries a
+/// `color_schema`, the effective default text color is the palette
+/// group's, not `style.text_color` — and the synthesized run must
+/// keep *deferring* to it rather than baking it in. Baking would
+/// render identically today and permanently convert a themed
+/// section into a hardcoded one: the next palette edit would move
+/// every sibling section and leave this one behind.
+#[test]
+fn test_grow_font_on_runless_section_of_themed_node_keeps_deferring() {
+    use super::tests_common::theme_node_with_probe_palette;
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::mindmap::model::{ColorGroup, MindSection};
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    theme_node_with_probe_palette(
+        &mut doc,
+        &nid,
+        "grow-probe",
+        ColorGroup {
+            background: "#101010".into(),
+            frame: "#202020".into(),
+            text: "#30ff30".into(),
+            title: String::new(),
+        },
+    );
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.style.text_color = "#abcdef".into();
+        node.sections
+            .push(MindSection::new_default("runless".into(), Vec::new()));
+    }
+    let runless_idx = doc.mindmap.nodes.get(&nid).unwrap().sections.len() - 1;
+    let cm = make_font_scale_mutation("grow-themed", GlyphAreaCommand::GrowFont(2.0), TS::SelfOnly);
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    let section = &doc.mindmap.nodes.get(&nid).unwrap().sections[runless_idx];
+    assert_eq!(section.text_runs.len(), 1, "a run must be synthesized");
+    assert_eq!(
+        section.text_runs[0].color, "",
+        "the model keeps the deferral — baking the palette hex here severs the cascade"
+    );
+    // The projection is where the palette color shows up, and it
+    // is the palette's, not `style.text_color`.
+    let node = doc.mindmap.nodes.get(&nid).unwrap();
+    assert_eq!(
+        doc.mindmap.node_text_rgba(node),
+        baumhard::util::color::hex_to_rgba_safe("#30ff30", [0.0, 0.0, 0.0, 1.0]),
+        "the deferral resolves through the palette, not style.text_color"
+    );
+
+    // And the palette really is still in charge: edit the group and
+    // the section follows, which is the property the bake destroys.
+    doc.mindmap
+        .palettes
+        .get_mut("grow-probe")
+        .expect("palette inserted above")
+        .groups[0]
+        .text = "#0000ff".into();
+    let node = doc.mindmap.nodes.get(&nid).unwrap();
+    assert_eq!(
+        doc.mindmap.node_text_rgba(node),
+        baumhard::util::color::hex_to_rgba_safe("#0000ff", [0.0, 0.0, 0.0, 1.0]),
+        "a palette edit must still reach a section a font mutation has touched"
+    );
+}
+
+/// F1's headline: a themed node whose section carries a run with
+/// an **empty** color reads as unchanged across an apply that
+/// moves nothing. Before the empty-color arm in
+/// `sync::model_regions_match`, the tree-side region (painted the
+/// palette hex) never matched the model's empty string, so every
+/// apply ran the lossy round trip, baked the hex into the run and
+/// pushed an undo entry for a no-op.
+#[test]
+fn test_no_op_mutation_leaves_a_colorless_run_on_a_themed_node_alone() {
+    use super::tests_common::theme_node_with_probe_palette;
+    use baumhard::gfx_structs::area::GlyphAreaCommand;
+    use baumhard::mindmap::model::{ColorGroup, TextRun};
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    theme_node_with_probe_palette(
+        &mut doc,
+        &nid,
+        "colorless-probe",
+        ColorGroup {
+            background: "#101010".into(),
+            frame: "#202020".into(),
+            text: "#30ff30".into(),
+            title: String::new(),
+        },
+    );
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        node.style.text_color = "#abcdef".into();
+        let section = node.sections.first_mut().expect("testament node 0 has a section");
+        section.text = "abcdef".into();
+        section.text_runs = vec![TextRun {
+            start: 0,
+            end: 6,
+            bold: false,
+            italic: false,
+            underline: false,
+            font: String::new(),
+            size_pt: 14.0,
+            color: String::new(),
+            hyperlink: None,
+        }];
+    }
+    let undo_depth_before = doc.undo_stack.len();
+    // `GrowFont(0.0)` is a mutation that moves nothing: it is the
+    // control that isolates the reverse gate from any real edit.
+    let cm = make_font_scale_mutation("no-op", GlyphAreaCommand::GrowFont(0.0), TS::SelfOnly);
+    let mut tree = doc.build_tree();
+    doc.apply_custom_mutation(&cm, &nid, Some(&mut tree));
+
+    let section = &doc.mindmap.nodes.get(&nid).unwrap().sections[0];
+    assert_eq!(
+        section.text_runs[0].color, "",
+        "a no-op apply must not bake the palette hex into a colorless run"
+    );
+    assert_eq!(
+        doc.undo_stack.len(),
+        undo_depth_before,
+        "a mutation that moved nothing must not push an undo entry"
+    );
+}
+
+/// The other direction of the same gate: a mutation that really
+/// does change the text still round-trips, and the colorless run
+/// *keeps* its deferral through it. This is the inline-editor and
+/// text-mutation path, which reaches `region_to_text_run` rather
+/// than the comparison gate.
+#[test]
+fn test_text_edit_keeps_a_colorless_run_deferring_on_a_themed_node() {
+    use super::tests_common::theme_node_with_probe_palette;
+    use baumhard::core::primitives::{ColorFontRegion, ColorFontRegions, Range};
+    use baumhard::mindmap::model::{ColorGroup, TextRun};
+    let mut doc = load_test_doc();
+    let nid = first_testament_node_id(&doc);
+    theme_node_with_probe_palette(
+        &mut doc,
+        &nid,
+        "editor-probe",
+        ColorGroup {
+            background: "#101010".into(),
+            frame: "#202020".into(),
+            text: "#30ff30".into(),
+            title: String::new(),
+        },
+    );
+    {
+        let node = doc.mindmap.nodes.get_mut(&nid).unwrap();
+        let section = node.sections.first_mut().expect("testament node 0 has a section");
+        section.text = "abcdef".into();
+        section.text_runs = vec![TextRun {
+            start: 0,
+            end: 6,
+            bold: false,
+            italic: false,
+            underline: false,
+            font: String::new(),
+            size_pt: 14.0,
+            color: String::new(),
+            hyperlink: None,
+        }];
+    }
+    // What the inline editor hands back after one keystroke: the
+    // same span, painted the color the forward path resolved.
+    let theme_rgba = {
+        let node = doc.mindmap.nodes.get(&nid).unwrap();
+        doc.mindmap.node_text_rgba(node)
+    };
+    let mut regions = ColorFontRegions::new_empty();
+    regions.submit_region(ColorFontRegion::new(Range::new(0, 7), None, Some(theme_rgba)));
+    assert!(doc.set_section_text_and_runs(&nid, 0, "abcdefg".into(), &regions));
+    let section = &doc.mindmap.nodes.get(&nid).unwrap().sections[0];
+    assert_eq!(section.text, "abcdefg");
+    assert_eq!(
+        section.text_runs[0].color, "",
+        "typing a character must not opt the run out of the palette"
+    );
+
+    // A genuine recolor through the same converter still lands.
+    let mut recolored = ColorFontRegions::new_empty();
+    recolored.submit_region(ColorFontRegion::new(
+        Range::new(0, 7),
+        None,
+        Some([1.0, 0.0, 0.0, 1.0]),
+    ));
+    assert!(doc.set_section_text_and_runs(&nid, 0, "abcdefg".into(), &recolored));
+    let section = &doc.mindmap.nodes.get(&nid).unwrap().sections[0];
+    assert_eq!(
+        section.text_runs[0].color, "#ff0000",
+        "a deliberate recolor is not swallowed by the deferral rule"
     );
 }
 
@@ -2554,7 +2997,7 @@ fn test_font_size_delta_ignores_run_dropped_by_round_trip() {
                 italic: false,
                 underline: false,
                 font: "LiberationSans".into(),
-                size_pt: 14,
+                size_pt: 14.0,
                 color: "#ffffff".into(),
                 hyperlink: None,
             },
@@ -2565,7 +3008,7 @@ fn test_font_size_delta_ignores_run_dropped_by_round_trip() {
                 italic: false,
                 underline: false,
                 font: "LiberationSans".into(),
-                size_pt: 40,
+                size_pt: 40.0,
                 color: "#ff0000".into(),
                 hyperlink: None,
             },
@@ -2593,7 +3036,7 @@ fn test_font_size_delta_ignores_run_dropped_by_round_trip() {
 
     let runs = &doc.mindmap.nodes.get(&nid).unwrap().sections[0].text_runs;
     assert!(
-        runs.iter().all(|r| r.size_pt == 14),
+        runs.iter().all(|r| r.size_pt == 14.0),
         "surviving run(s) must keep their authored 14pt, not inflate to the stale 40pt scale; got {:?}",
         runs.iter().map(|r| r.size_pt).collect::<Vec<_>>()
     );
@@ -2669,4 +3112,37 @@ fn test_active_toggles_replay_in_activation_order() {
         (x - 222.0).abs() < 1e-3,
         "ordered replay must apply move-a then move-b, leaving x at 222 (got {x})"
     );
+}
+
+/// **`clamp_run_size_pt`'s ceiling, pinned where it can actually
+/// bind.** The reverse converter is reachable with an out-of-domain
+/// scale in principle — a `grow-font` delta is unbounded and the
+/// `as u32` cast saturates rather than wrapping — but every path
+/// that reaches it today clamps at `GlyphArea`'s setters first, so
+/// no end-to-end test exercises the ceiling. Testing the function
+/// directly is what keeps the guard honest rather than incidental.
+#[test]
+fn test_clamp_run_size_pt_bounds_both_ends() {
+    use crate::application::document::custom::sync::{clamp_run_size_pt, MIN_TEXT_RUN_SIZE_PT};
+
+    let max = baumhard::font::fonts::MAX_FONT_SIZE_PT;
+
+    // Ordinary sizes pass through unchanged — fractional sizes are
+    // first-class now that `size_pt` is an `f32`, so nothing is
+    // truncated or rounded on the way through.
+    assert_eq!(clamp_run_size_pt(12.0), 12.0);
+    assert_eq!(clamp_run_size_pt(12.9), 12.9);
+
+    // The ceiling: the loader rejects anything above it.
+    assert_eq!(clamp_run_size_pt(1.0e6), max);
+    assert_eq!(clamp_run_size_pt(f32::INFINITY), max);
+
+    // The floor: a shrunk run must stay legible and re-growable
+    // rather than casting to an invisible 0.
+    assert_eq!(clamp_run_size_pt(0.0), MIN_TEXT_RUN_SIZE_PT);
+    assert_eq!(clamp_run_size_pt(-1.0e6), MIN_TEXT_RUN_SIZE_PT);
+    assert_eq!(clamp_run_size_pt(f32::NEG_INFINITY), MIN_TEXT_RUN_SIZE_PT);
+
+    // NaN has no nearest edge; the floor is the safe answer.
+    assert_eq!(clamp_run_size_pt(f32::NAN), MIN_TEXT_RUN_SIZE_PT);
 }

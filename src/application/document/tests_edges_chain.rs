@@ -64,7 +64,7 @@ fn synthetic_single_node_map(text: &str, w: f64, h: f64) -> MindMap {
         italic: false,
         underline: false,
         font: "LiberationSans".to_string(),
-        size_pt: 14,
+        size_pt: 14.0,
         color: "#ffffff".to_string(),
         hyperlink: None,
     }];
@@ -105,20 +105,14 @@ fn synthetic_single_node_map(text: &str, w: f64, h: f64) -> MindMap {
     MindMap {
         version: "1.0".to_string(),
         name: "test".to_string(),
-        canvas: Canvas {
-            background_color: "#000000".to_string(),
-            default_border: None,
-            default_connection: None,
-            default_section_frame_border: None,
-            default_focused_section_frame_border: None,
-            theme_variables: HashMap::new(),
-            theme_variants: HashMap::new(),
-        },
+        canvas: Canvas::default(),
         palettes: HashMap::new(),
         nodes,
         edges: Vec::new(),
         custom_mutations: Vec::new(),
         macros: Vec::new(),
+        unknown_keys: Default::default(),
+        skipped_constructs: Default::default(),
     }
 }
 
@@ -150,7 +144,8 @@ fn grow_node_sizes_to_fit_text_grows_undersized_boxes() {
         n.size.width
     );
     // Height grows by at least one line of text + pad_y (0.5 *
-    // 14 = 7) → ≥ one line height (14 * 1.2 ≈ 16.8) + 7 ≈ 23.8.
+    // 14 = 7) → ≥ one line height (14 * LINE_HEIGHT_FACTOR ≈ 16.8)
+    // + 7 ≈ 23.8.
     assert!(
         n.size.height >= 20.0,
         "expected height ≥ 20 (grow-only floor), got {}",
@@ -267,7 +262,7 @@ fn portal_edge_delete_and_undo_restore_index() {
 /// selection too — otherwise `SelectionState::Edge(er)` lingers
 /// pointing at an edge the map no longer contains, and scene
 /// builds + the color picker open against a dangling ref.
-/// Mirrors the long-standing `CreateNode` undo behaviour.
+/// Mirrors the long-standing `CreateNode` undo behavior.
 #[test]
 fn undo_create_edge_clears_matching_selection() {
     let mut doc = load_test_doc();
@@ -372,3 +367,54 @@ fn portal_edge_selection_uses_edge_variant() {
 // -----------------------------------------------------------------
 // Node text editing
 // -----------------------------------------------------------------
+
+/// The auto-size floor grows by exactly the line height the tree
+/// builder lays the section out at. Adding one line to a section
+/// must add one rendered line's worth of height and no other
+/// number — the padding and the scale are identical between the
+/// two fixtures, so their difference isolates the line height.
+///
+/// This is the drift the shared [`LINE_HEIGHT_FACTOR`] exists to
+/// prevent, and the reason it is worth a test rather than a
+/// comment: the measurement here and the layout in
+/// `tree_builder::node` used to spell `1.2` separately, so a
+/// baumhard change to 1.25 would have grown every auto-sized node
+/// half a line short of what it then drew, clipping the text the
+/// growth was for. The left side is a real cosmic-text measurement,
+/// not a second copy of the formula.
+///
+/// The input that makes it fail is a re-inlined factor on **this
+/// layer's** side — `document/mod.rs`'s `scale * LINE_HEIGHT_FACTOR`
+/// back at `1.25` — which reports "one extra line grew the floor by
+/// 17.5 where the tree builder draws 16.8", ten times the tolerance
+/// apart.
+///
+/// A re-inline on the *builder's* side leaves it green (verified):
+/// the auto-size floor measures through cosmic-text and derives its
+/// own expected line height from the shared factor, so it never reads
+/// what `tree_builder::node` laid the area out at. That half is
+/// `tree_builder::tests::section_text::test_section_area_is_laid_out_at_the_effective_scale`,
+/// which asserts against the emitted `GlyphArea` and reddens on
+/// exactly the input this one does not. The pair covers both layers;
+/// neither test covers both.
+#[test]
+fn test_auto_size_floor_grows_by_the_rendered_line_height() {
+    let one_line = synthetic_single_node_map("one line", 1.0, 1.0);
+    let two_lines = synthetic_single_node_map("one line\nand another", 1.0, 1.0);
+    let node_one = &one_line.nodes["n1"];
+    let node_two = &two_lines.nodes["n1"];
+
+    let (_, floor_one) = compute_one_node_text_floor(node_one);
+    let (_, floor_two) = compute_one_node_text_floor(node_two);
+
+    let line_height = f64::from(effective_section_scale(&node_one.sections[0]) * LINE_HEIGHT_FACTOR);
+    assert!(
+        line_height > 0.0,
+        "the fixture must have a scale to derive a line height from"
+    );
+    assert!(
+        (floor_two - floor_one - line_height).abs() < 1e-3,
+        "one extra line grew the floor by {} where the tree builder draws {line_height}",
+        floor_two - floor_one
+    );
+}

@@ -16,6 +16,7 @@ use glam::Vec2;
 use crate::mindmap::connection;
 use crate::mindmap::scene_cache::EdgeKey;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
+use crate::util::geometry::aabb_center;
 
 use super::HandleVisual;
 
@@ -112,10 +113,18 @@ impl HandleVisual for EdgeHandleElement {
     }
 }
 
-/// Build the grab-handle set for a single selected edge, given the
-/// current (offset-applied) positions and sizes of its endpoint
-/// nodes. Called once per scene build (for the selected edge only),
-/// so the cost is trivial and needs no cache.
+/// Build the grab-handle set for a single selected edge, given its
+/// path plus the current (offset-applied) positions and sizes of its
+/// endpoint nodes. Called once per scene build (for the selected
+/// edge only), so the emission itself needs no cache.
+///
+/// `path` is taken rather than built because the connection pass
+/// wants the same edge's path a few lines later on a cache miss and
+/// the label pass wants it again — one
+/// [`EdgePathCache`](super::edge_path::EdgePathCache) answers all three
+/// (#36 item 6). The endpoint rectangles stay separate arguments
+/// because the control-point handles sit at offsets from the node
+/// *centers*, which the path does not carry.
 ///
 /// Always emits AnchorFrom + AnchorTo. On top of that:
 /// - an edge with 0 control points gets a `Midpoint` handle
@@ -125,27 +134,19 @@ impl HandleVisual for EdgeHandleElement {
 pub fn build_edge_handles(
     edge: &crate::mindmap::model::MindEdge,
     edge_key: &EdgeKey,
+    path: &connection::ConnectionPath,
     from_pos: Vec2,
     from_size: Vec2,
     to_pos: Vec2,
     to_size: Vec2,
 ) -> Vec<EdgeHandleElement> {
-    let path = connection::build_connection_path(
-        from_pos,
-        from_size,
-        &edge.anchor_from,
-        to_pos,
-        to_size,
-        &edge.anchor_to,
-        &edge.control_points,
-    );
-    let (start, end) = match &path {
+    let (start, end) = match path {
         connection::ConnectionPath::Straight { start, end } => (*start, *end),
         connection::ConnectionPath::CubicBezier { start, end, .. } => (*start, *end),
     };
 
-    let from_center = Vec2::new(from_pos.x + from_size.x * 0.5, from_pos.y + from_size.y * 0.5);
-    let to_center = Vec2::new(to_pos.x + to_size.x * 0.5, to_pos.y + to_size.y * 0.5);
+    let from_center = aabb_center(from_pos, from_size);
+    let to_center = aabb_center(to_pos, to_size);
 
     let make = |kind: EdgeHandleKind, position: Vec2| {
         // The midpoint handle carries a distinct glyph so the

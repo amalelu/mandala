@@ -21,7 +21,7 @@ MindMap
 ```
 
 In the runtime [Baumhard tree](../CONCEPTS.md#tree-t-m), a `MindNode`
-materialises as a three-deep subtree:
+materializes as a three-deep subtree:
 
 - one **container** `GlyphArea` (chrome only — background, frame
   padding, shape, zoom window),
@@ -44,7 +44,7 @@ multiplicity is the only thing the renderer notices.
 | `text_runs` | array | `[]` | Per-grapheme run table — see [text-runs.md](./text-runs.md). Empty means "render in the section/node defaults". Non-empty means "only the covered ranges render", same coverage trap as the pre-section single-runs vector. |
 | `offset.x`, `offset.y` | number | `0.0` | Top-left of the section's AABB *relative to the owning node's `position`*, in canvas units. `(0, 0)` puts the section flush against the node's top-left. |
 | `size` | object\|null | `null` | Section AABB. `null` means "fill the parent node" — the typical migration-default shape, where every node has one section that occupies its whole AABB. An explicit `{width, height}` lets a section occupy only part of the parent node, leaving room for siblings. |
-| `channel` | integer\|null | `null` (falls through to section's index) | Mutation channel inside the parent node-area. `null` lets the tree builder substitute the section's index — a three-section node with no authored channels gets channels `[0, 1, 2]`. `Some(0)` is honoured even at idx > 0, so an author can deliberately collide with a sibling mind-node on channel 0 to broadcast. |
+| `channel` | integer\|null | `null` (falls through to section's index) | Mutation channel inside the parent node-area. `null` lets the tree builder substitute the section's index — a three-section node with no authored channels gets channels `[0, 1, 2]`. `Some(0)` is honored even at idx > 0, so an author can deliberately collide with a sibling mind-node on channel 0 to broadcast. |
 | `trigger_bindings` | array | `[]` | Per-section [`TriggerBinding`s](./mutations.md). The click dispatcher fires section-level bindings *before* the whole-node bindings on `MindNode.trigger_bindings` — a section-targeted override (e.g. a different `OnClick` mutation per stratum of a multi-section node) takes precedence over catch-all node bindings. |
 | `frame_border` | object\|null | `null` | Per-section override of the cyan-rectangle frame drawn around the section in NodeEdit mode. Same shape as `MindNode.style.border` (preset / font / size / color / palette / glyphs / padding). `null` falls through to `Canvas.default_section_frame_border` (or `default_focused_section_frame_border` for the actively-edited section). The console verb `section frame …` authors this field; see [border-patterns.md](./border-patterns.md) for the full grammar. |
 
@@ -97,15 +97,30 @@ sections the mutation didn't touch. Range-mutating mutations
 new range) inherit prior styling via dominant-overlap fallback
 when no exact-range prior matches.
 
-Documented round-trip limit: `var(--name)` colour references
-collapse to their resolved hex on the round trip — the tree-side
-`FloatRgba` carries no record of the variable. Authors who edit
-section colours through custom mutations and then save the model
-will see the variable replaced with a hex literal. The
-`set_section_text` / `set_section_text_color` /
+Documented round-trip limit: the tree side carries a resolved
+`FloatRgba` and no record of how the model spelled it, so the two
+spellings that are *not* a literal hex can only be recovered from
+the prior run — and each recovery has a case it reads the wrong
+way:
+
+- A `var(--name)` reference survives when the prior run covers the
+  region's exact range. A mutation that recolors such a run
+  without resizing it is swallowed; the run keeps the variable. A
+  mutation that resizes it loses the variable to a hex literal.
+- An **empty** color — the spelling for "take the node's text
+  color" — survives whenever the region still paints that color,
+  with no range test, because the commonest way one reaches the
+  converter is a keystroke in the inline editor and an exact-range
+  rule would bake the resolved hex on the first character typed.
+  The case it reads the wrong way is a deliberate recolor to
+  exactly the node's current text color: it comes back empty. The
+  pixels match; what is lost is "pin these graphemes so a retheme
+  cannot move them".
+
+The `set_section_text` / `set_section_text_color` /
 `set_section_font_size` / `set_section_font_family` document
-setters bypass the round trip and preserve `var(--name)`
-references verbatim.
+setters bypass the round trip entirely and preserve both
+spellings verbatim.
 
 ### Subverbs (Batch 5 redesign)
 
@@ -153,7 +168,7 @@ verb-rejected edit and a `verify` violation read identically.
 
 ### Effective size for AABB containment
 
-`Some(sz)` honours the explicit pin; `None` (fill-parent —
+`Some(sz)` honors the explicit pin; `None` (fill-parent —
 the migration default) falls back to `node.size` for the
 containment check. A `None`-sized section's effective AABB
 is therefore `(offset, node.size)`, so any non-zero `offset`
@@ -253,14 +268,14 @@ would have refused.
 
 ### Console axis applicability on a section selection
 
-Sections only have a **text** colour axis (`color text=…`). The
+Sections only have a **text** color axis (`color text=…`). The
 `bg=` and `border=` axes are node-level chrome and have no
 section-level field — running them against a `SelectionState::Section`
 returns `Outcome::NotApplicable` rather than collapsing to the
 owning node's `background_color` / `frame_color`. This applies
 both to the kv form (`color bg=#fff section=K`) and to the
 trait-dispatch form (`color bg=#fff` with the section already
-selected). The colour-picker modal follows the same rule:
+selected). The color-picker modal follows the same rule:
 opening the picker on `color bg` / `color border` against a
 section selection surfaces the NotApplicable message rather
 than opening the picker on the owning node's chrome axis.
@@ -268,22 +283,22 @@ than opening the picker on the owning node's chrome axis.
 The picker's read seed (`current_color_at` for a section handle)
 and the write predicate (`set_section_text_color`) are
 **cascade-symmetric**: if every run on the section shares one
-colour that is the section's effective colour and is the
+color that is the section's effective color and is the
 predicate the write rewrites against, otherwise both fall back
 to `node.style.text_color`. So a uniformly customized section
-opens the picker at its current colour and commits to a new
-colour, instead of the picker silently no-op'ing because the
+opens the picker at its current color and commits to a new
+color, instead of the picker silently no-op'ing because the
 runs no longer match the node default.
 
 `var(--name)` references on section runs survive the kv / trait
 write paths verbatim (see "Documented round-trip limit" above).
-The colour picker preserves them too, but only when the user
+The color picker preserves them too, but only when the user
 **doesn't move the wheel** from its open seed. Bit-exact equality
 on `(hue_deg, sat, val)` is the "did the user touch it?" signal:
 an open-and-close cycle with no interaction commits the original
 `var(--accent)` literal back; any cell click or keyboard nudge
-flips the commit to the new HSV's hex (the new colour was
-explicitly chosen, so honouring the old reference would silently
+flips the commit to the new HSV's hex (the new color was
+explicitly chosen, so honoring the old reference would silently
 discard it). Custom-mutation writes still collapse var refs to
 hex on round-trip (`FloatRgba` carries no record of the variable);
 that constraint is unchanged.
@@ -319,39 +334,50 @@ extends with shift+clicks.
 
 ### Section sub-range selection
 
-A section can also be selected with a grapheme-level sub-range
-via `SelectionState::SectionRange { sel, range: (start, end) }`.
-The half-open `[start, end)` range targets a contiguous run of
-graphemes inside one section's text; per-section verbs route to
-range-aware setters (`set_section_text_color_range`,
-`set_section_font_size_range`, `set_section_font_family_range`).
+A section can also be selected with a grapheme-level sub-range via
+`SelectionState::SectionRange { sel, section_span, grapheme_range }`.
+The variant carries its two range meanings in distinctly-typed
+fields (#47 part C — they used to share a single `range` pair that
+one consumer class read as section indices and the other as
+grapheme offsets):
 
-Two producers of `SectionRange`:
+- `section_span: SectionSpan` — an inclusive span of **section
+  indices** on the owning node; the border / style verbs fan out
+  over it, and structural-mutation cleanup clamps it against
+  `sections.len()`.
+- `grapheme_range: GraphemeRange` — a half-open range of
+  **grapheme clusters** inside the anchor section
+  (`sel.section_idx`)'s text; per-section verbs route it to the
+  range-aware setters (`set_section_text_color_range`,
+  `set_section_font_size_range`, `set_section_font_family_range`).
 
-- **Console verbs** with `range=A..B` kv:
-  `color text=#abc section=N range=2..7` /
+**Producers.**
+
+- **Editor shift-select anchor** — the one live producer: the
+  inline text editor's `Shift+Arrow*` / `Shift+Home` /
+  `Shift+End` keystrokes seed an anchor at the pre-action cursor
+  position; subsequent shift-cursor moves extend the cursor while
+  preserving the anchor. On commit, `lift_anchor_to_section_range`
+  promotes a non-empty `(anchor, cursor)` pair into the variant:
+  the anchor section as a single-section `section_span`, the
+  normalized pair as `grapheme_range`. Non-shift cursor moves and
+  any text edit (typing / delete) clear the anchor — range-aware
+  editing (typing-replaces-selection) is deferred.
+- **Console verbs** with `range=A..B` kv
+  (`color text=#abc section=N range=2..7` /
   `font size=14 section=N range=2..7` /
-  `font set <family> section=N range=2..7`. The verb path
-  bypasses the trait dispatcher and calls the range setter
-  directly; `range=A..B` requires `section=N` and rejects
-  empty / inverted / non-numeric input with a clear error.
-- **Editor shift-select anchor**: the inline text editor's
-  `Shift+Arrow*` / `Shift+Home` / `Shift+End` keystrokes seed an
-  anchor at the pre-action cursor position; subsequent shift-cursor
-  moves extend the cursor while preserving the anchor. On editor
-  close (commit or cancel), `lift_anchor_to_section_range` promotes
-  a non-empty `(anchor, cursor)` pair to
-  `SelectionState::SectionRange { range: (min, max) }`. Non-shift
-  cursor moves and any text edit (typing / delete) clear the anchor
-  — range-aware editing (typing-replaces-selection) is deferred.
+  `font set <family> section=N range=2..7`) apply the range to
+  the *setter call* and leave `SelectionState` untouched — the kv
+  never becomes a selection. On an active `SectionRange`
+  selection an explicit `range=` kv wins over the selection's own
+  grapheme range.
 
-**Clipboard contract.** `Cut` and `Paste` return
-`Outcome::NotApplicable` rather than silently destroy
-out-of-range graphemes; the action arm logs a `log::warn!`
-line surfacing the skip. `Copy` falls through to whole-section
-copy because it's non-destructive. Range-aware clipboard
-semantics (sub-range cut, splice-paste) are deferred to a
-future tier.
+**Clipboard contract.** `Cut` and `Paste` are range-aware: cut
+removes the in-range graphemes, returns them as plain text, and
+shifts later runs left; paste replaces the in-range graphemes
+with the clipboard text. `Copy` falls through to whole-section
+copy — the structured payload's geometry / channel / bindings
+belong to the whole section, not a sub-range.
 
 **Picker contract.** `color text` (no value) on a `SectionRange`
 selection opens the picker with the sub-range plumbed through
@@ -410,7 +436,7 @@ both authoring shapes.
 
 The `MindSection.channel` field is `Option<usize>` (post Tier-E):
 `None` falls through to the section's index, `Some(0)` is
-honoured even at idx > 0. Pre-`Option`, the bare `usize`
+honored even at idx > 0. Pre-`Option`, the bare `usize`
 silently overrode an author's explicit `channel: 0` on sections
 beyond the first.
 

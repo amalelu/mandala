@@ -7,11 +7,76 @@
     <style>
         * { margin: 0; padding: 0; }
         html, body { width: 100%; height: 100%; overflow: hidden; background: #141414; }
-        canvas { display: block; width: 100%; height: 100%; }
+        /*
+          `touch-action: none` is a prerequisite for the touch
+          vocabulary, not a style. Without it the user agent claims
+          a touch sequence for its own panning and pinch-zooming
+          before the app ever sees it: the browser fires
+          `pointercancel` and winit stops delivering
+          `WindowEvent::Touch`, so a one-finger pan scrolls the page
+          and a pinch zooms the document instead of the canvas.
+          Nothing else supplies it — neither this repo nor winit
+          0.30's web backend sets `touch-action` anywhere, and
+          winit's `preventDefault()` on pointer events does not
+          govern the behaviors `touch-action` governs.
+
+          `none` rather than `manipulation` or `pan-*`: those hand
+          part of the gesture back to the user agent, and this
+          canvas implements every one of them itself
+          (`app/touch_gesture.rs`). Nothing is lost — the page has
+          `overflow: hidden` and the canvas fills the viewport, so
+          there is nothing to scroll and no chrome underneath.
+
+          Deliberately NOT paired with `user-scalable=no` in the
+          viewport meta. Two reasons, and only the second is a claim
+          this repository can stand behind. **Whether it is obeyed at
+          all varies by browser and by the user's accessibility
+          settings** — it is widely reported to be ignored outright
+          by some engines and honored by others — so writing it would
+          rest the gesture on a suppression that is not guaranteed.
+          And **wherever it IS obeyed it takes pinch-to-magnify away
+          from users who need it**, which is a cost paid by exactly
+          the people least able to absorb it. The second reason
+          settles the decision on its own, which is why the first is
+          stated as varying rather than as a per-browser fact: no
+          browser runs in this session, so per-engine behavior is not
+          something this file can assert from here.
+
+          Same boundary applies to the rule above. `touch-action:
+          none` is what the standard says a canvas needs; whether a
+          given engine honors it for *page pinch-zoom* as well as for
+          scrolling is a browser fact nothing here can check, and
+          #158 owns confirming it on a device.
+
+          `test_the_browser_canvas_keeps_touch_gestures_from_the_user_agent`
+          holds this declaration.
+        */
+        canvas { display: block; width: 100%; height: 100%; touch-action: none; }
     </style>
 </head>
 <body>
     <link data-trunk rel="rust" href="../Cargo.toml" data-wasm-opt="z" />
-    <link data-trunk rel="copy-dir" href="../maps" />
+    <!--
+      The four loadable fixtures, named one by one rather than
+      `copy-dir ../maps`. The directory also holds
+      `testament.mind` — a 1 MB 7z miMind archive kept for the
+      `maptool convert --legacy` reference — and `docs/`, neither
+      of which any browser code can open, so `copy-dir` put a
+      megabyte of unreachable bytes in every bundle a phone
+      downloads (CODE_CONVENTIONS §4).
+
+      `data-target-path="maps"` reproduces the `dist/maps/` layout
+      `copy-dir` produced, which is what `?map=` and
+      `DEFAULT_MINDMAP` resolve against.
+
+      A new fixture has to be added here too:
+      `test_every_shipped_map_reaches_the_browser_bundle` reads
+      this file against `maps/` and fails naming the one that is
+      missing.
+    -->
+    <link data-trunk rel="copy-file" href="../maps/testament.mindmap.json" data-target-path="maps" />
+    <link data-trunk rel="copy-file" href="../maps/theme_demo.mindmap.json" data-target-path="maps" />
+    <link data-trunk rel="copy-file" href="../maps/palette_cascade.mindmap.json" data-target-path="maps" />
+    <link data-trunk rel="copy-file" href="../maps/stress_long_edges.mindmap.json" data-target-path="maps" />
 </body>
 </html>

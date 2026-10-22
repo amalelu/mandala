@@ -1,11 +1,11 @@
 {
-  "_comment": "Default Mandala keybindings. Copy this file to $XDG_CONFIG_HOME/mandala/keybinds.json (or $HOME/.config/mandala/keybinds.json) to override, or pass it explicitly with --keybinds <path>. On WASM, serialize a JSON object like this into the ?keybinds=<url-encoded-json> query param, or store it under localStorage['mandala_keybinds']. Missing fields fall back to the built-in defaults, so you only need to list the actions you want to change. Bindings are strings like 'Ctrl+Z', 'Shift+Alt+Delete', or 'Escape'. Modifier aliases: cmd/command/meta/super all mean Ctrl; option means Alt. Each action accepts a list, so you can bind multiple keys to the same action.",
+  "_comment": "Default Mandala keybindings. Copy this file to $XDG_CONFIG_HOME/mandala/keybinds.json (or $HOME/.config/mandala/keybinds.json) to override, or pass it explicitly with --keybinds <path>. On WASM, store a JSON object like this under localStorage['mandala_keybinds']. Missing fields fall back to the built-in defaults, so you only need to list the actions you want to change. Bindings are strings like 'Ctrl+Z', 'Shift+Alt+Delete', or 'Escape'. Modifier aliases: cmd/command/meta/super all mean Ctrl; option means Alt. Each action accepts a list, so you can bind multiple keys to the same action. Payload-carrying actions take objects instead: \"set_color\": [{ \"combo\": \"F1\", \"args\": [\"bg\", \"#fafafa\"] }]. An unrecognized top-level *key* is ignored with a warning on stderr rather than rejected, so one stale key never costs you the rest of the file; keys starting with '_' are treated as comments and never warn. A recognized key holding a *malformed value* is different and stricter: it fails the whole file, you get one warning naming it, and every other binding in the file falls back to the built-in default (issue #129).",
 
   "undo": ["Ctrl+Z", "Undo"],
   "enter_reparent_mode": ["Ctrl+P"],
   "enter_connect_mode": ["Ctrl+D"],
   "delete_selection": ["Delete"],
-  "cancel_mode": ["Escape"],
+  "exit_mode": ["Escape"],
   "create_orphan_node": ["Ctrl+N"],
   "orphan_selection": ["Ctrl+O"],
   "open_console": ["/"],

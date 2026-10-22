@@ -20,84 +20,76 @@
 //! through) or `cancel` (discards).
 
 use crate::application::console::parser::Args;
+use crate::application::console::spec::descent::Stop;
+use crate::application::console::spec::{kvs, usage, Descent};
 use crate::application::console::{ConsoleEffects, ExecResult};
-use crate::application::document::{
-    BorderConfigEdits, BorderEditOutcome, BorderPreviewTarget, OptionEdit,
-};
+use crate::application::document::{BorderConfigEdits, BorderEditOutcome, BorderPreviewTarget, OptionEdit};
 
-use super::execute::{custom_preset_hint, edits_has_glyph_field, stage_kv};
+use super::execute::{edits_has_glyph_field, stage_kv};
+use super::finish::BorderEdit;
 
-/// Entry point for the per-node `border preview …` verb. The
-/// args' positional(0) is `"preview"` (consumed by the parent
-/// `border` dispatch); positional(1) is `commit` / `cancel` /
-/// the first kv. Resolves the target from the live selection
-/// (every selected node id), stages edits via `stage_kv_for_preview`,
-/// and routes to `set_border_preview`.
-pub(crate) fn execute_border_preview(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    dispatch_border_preview(
-        args,
-        eff,
-        "border preview",
-        /* subverb_pos */ 1,
-        /* target_for_verb */ |sel| {
-            super::nodes_in_selection(sel, "border preview").map(BorderPreviewTarget::Nodes)
-        },
-    )
+/// Entry point for the per-node `border preview …` verb.
+///
+/// The descent has already stepped into the `border preview` level,
+/// so its `slot` is where the `commit` / `cancel` terminator sits
+/// and its `level.label` is the words every message here leads
+/// with. Both used to be hand-counted parameters — `subverb_pos`
+/// as a literal `1` / `2` / `3` per surface, and a `verb_label`
+/// string beside it.
+pub(crate) fn execute_border_preview(descent: &Descent, args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
+    dispatch_border_preview(descent, args, eff, |sel| {
+        super::nodes_in_selection(sel, "border preview").map(BorderPreviewTarget::Nodes)
+    })
 }
 
 /// Shared dispatch for the four border-preview verbs. Caller
 /// supplies a `target_for_verb` closure that resolves the live
-/// selection into a `BorderPreviewTarget`, plus a `verb_label`
-/// used in error / hint messages, plus the `subverb_pos` —
-/// which positional index holds the `commit` / `cancel` /
-/// first-kv token. `border preview …` puts it at index 1;
-/// `section frame preview …` puts it at index 2; `canvas border
-/// preview …` at index 2; `canvas section-frame [focused]
-/// preview …` at index 2 or 3.
+/// selection into a `BorderPreviewTarget`; everything else — which
+/// slot the terminator sits in, which words the messages lead with,
+/// which keys the staging form reads — comes off the descent.
 ///
-/// Generic over the four verbs so the per-verb file is the
-/// minimum unique surface (target resolver + label + offset).
+/// Generic over the four verbs so the per-verb file is the minimum
+/// unique surface: one target resolver.
 pub(crate) fn dispatch_border_preview<F>(
+    descent: &Descent,
     args: &Args,
     eff: &mut ConsoleEffects,
-    verb_label: &'static str,
-    subverb_pos: usize,
     target_for_verb: F,
 ) -> ExecResult
 where
-    F: FnOnce(
-        &crate::application::document::SelectionState,
-    ) -> Result<BorderPreviewTarget, ExecResult>,
+    F: FnOnce(&crate::application::document::SelectionState) -> Result<BorderPreviewTarget, ExecResult>,
 {
-    // Subverb dispatch: `commit` / `cancel` are case-insensitive
-    // terminators; everything else is the kv-form path.
-    if let Some(verb) = args.positional(subverb_pos) {
-        match verb.to_ascii_lowercase().as_str() {
-            "commit" => return commit_border_preview_verb(eff, verb_label),
-            "cancel" => return cancel_border_preview_verb(eff, verb_label),
-            other if !other.contains('=') => {
-                if args.kvs().next().is_some() {
-                    return ExecResult::err(format!(
-                        "{}: unexpected positional '{}' alongside a kv pair — \
-                         did you mean to quote a multi-word value?",
-                        verb_label, other
-                    ));
-                }
-                return ExecResult::err(format!(
-                    "{}: unknown subverb '{}'; use 'commit', 'cancel', or kv form",
-                    verb_label, other
-                ));
+    let level = descent.level;
+    match descent.stop {
+        Stop::Matched(subverb) => {
+            if let Err(msg) = kvs::read_strict(descent, args) {
+                return ExecResult::err(msg);
             }
-            _ => {}
+            return match subverb.name {
+                "commit" => commit_border_preview_verb(eff, level.label),
+                _ => cancel_border_preview_verb(eff, level.label),
+            };
         }
+        // Every rejection quotes what the user typed rather than the
+        // normalized copy the match ran on — echoing the normalized
+        // one answered `border preview NOPE` with `unknown subverb
+        // 'nope'`, a word the user never wrote.
+        Stop::Unknown => {
+            return ExecResult::err(usage::unknown_subverb_message(
+                level,
+                descent.typed.unwrap_or_default(),
+            ))
+        }
+        Stop::KvForm => return ExecResult::err(descent.quoting_hint(args)),
+        Stop::Bare => {}
     }
 
     // Kv-form: stage edits, resolve target, set preview.
-    let edits = match stage_kv_for_preview(args, verb_label) {
+    let edits = match stage_kv_for_preview(descent, args) {
         Ok(e) => e,
         Err(err) => return ExecResult::err(err),
     };
-    let target = match target_for_verb(&eff.document.selection) {
+    let target = match target_for_verb(&eff.document().selection) {
         Ok(t) => t,
         Err(e) => return e,
     };
@@ -107,38 +99,36 @@ where
         OptionEdit::Set(ref s) if s.eq_ignore_ascii_case("custom")
     ) && !edits_has_glyph_field(&edits);
 
-    let outcome: BorderEditOutcome = eff.document.set_border_preview(target, edits);
-    finish_preview(outcome, verb_label, bare_custom)
+    let outcome: BorderEditOutcome = eff.document_mut().set_border_preview(target, edits);
+    finish_preview(outcome, level.label, bare_custom)
 }
 
-/// Stage every recognised kv on `args` into a fresh
+/// Stage every kv the staging form reads into a fresh
 /// `BorderConfigEdits`, skipping the `section=K` kv (consumed by
 /// the per-section verb's target resolver, not a border field).
-/// Mirrors the kv-staging block at `border/execute.rs:86-96` and
-/// `section/frame.rs::execute_section_frame`'s loop — extracted
-/// here so the four preview verbs share the same parser. Returns
-/// the parser error with the verb's label prefixed (C13: tells
-/// the user *which* verb they were running when the parse
-/// failed; the prior shape returned the raw `stage_kv` message
-/// and confused users running the same kv vocabulary across
-/// four verbs).
-pub(crate) fn stage_kv_for_preview(args: &Args, verb_label: &str) -> Result<BorderConfigEdits, String> {
+/// One parser for all four preview verbs. The error carries the
+/// level's own label so a user running the same kv vocabulary
+/// across four surfaces knows which one answered.
+pub(crate) fn stage_kv_for_preview(descent: &Descent, args: &Args) -> Result<BorderConfigEdits, String> {
+    let label = descent.level.label;
+    let pairs = kvs::read_strict(descent, args).map_err(|e| format!("{}: {}", label, e))?;
     let mut edits = BorderConfigEdits::default();
     let mut saw_any = false;
-    for (k, v) in args.kvs() {
-        if k == "section" {
+    for pair in &pairs {
+        // `section=` targets the per-section surface's resolver
+        // rather than naming a border field, so the staging loop
+        // skips it while the level still declares it — which is
+        // what keeps it offered and documented.
+        if pair.key.name == "section" {
             continue;
         }
         saw_any = true;
-        if let Err(e) = stage_kv(&mut edits, k, v) {
-            return Err(format!("{}: {}", verb_label, e));
+        if let Err(e) = stage_kv(&mut edits, pair.key.name, pair.value) {
+            return Err(format!("{}: {}", label, e));
         }
     }
     if !saw_any {
-        return Err(format!(
-            "usage: {} <key>=<value> … | {} commit | {} cancel",
-            verb_label, verb_label, verb_label,
-        ));
+        return Err(usage::no_arguments_message(descent.level));
     }
     Ok(edits)
 }
@@ -146,40 +136,53 @@ pub(crate) fn stage_kv_for_preview(args: &Args, verb_label: &str) -> Result<Bord
 /// `border preview commit` — flush the preview through the
 /// matching committing setter and surface the merged outcome.
 /// Returns "no preview" when no preview is active.
-pub(crate) fn commit_border_preview_verb(
-    eff: &mut ConsoleEffects,
-    verb_label: &'static str,
-) -> ExecResult {
-    let Some(outcome) = eff.document.commit_border_preview() else {
+///
+/// The fifth caller of [`BorderEdit::finish`], and the last one to
+/// become one: it wrote the auto-promotion note, the `per-target`
+/// scope and the single-line-vs-`Lines` collapse out by hand, so the
+/// most-copied string in the family stayed written twice after the
+/// commit that unified the other four. Nothing pinned it — the
+/// branch needs an *active* preview, and every `EXEC_CORPUS` row runs
+/// on a fresh document — which is why the oracle's `EXEC_SEQ_CORPUS`
+/// exists.
+pub(crate) fn commit_border_preview_verb(eff: &mut ConsoleEffects, verb_label: &'static str) -> ExecResult {
+    let Some(outcome) = eff.document_mut().commit_border_preview() else {
         return ExecResult::ok_msg(format!("{}: no active preview", verb_label));
     };
-    let mut lines: Vec<String> = vec![format!("{} committed", verb_label)];
-    if outcome.preset_auto_promoted {
-        if let Some(name) = outcome.requested_preset.as_deref() {
-            lines.push(format!(
-                "note: preset='{}' auto-promoted to 'custom' \
-                 (a side or corner glyph was set; non-custom presets \
-                 ignore the per-target glyph override)",
-                name
-            ));
-        }
+    BorderEdit {
+        label: verb_label,
+        scope: "target",
+        // A committed preview is not a "no change" outcome any more
+        // than a staged one is: the write happened, and the line
+        // that staged it already reported what it was.
+        headline: Some(format!("{} committed", verb_label)),
+        // Empty in practice — `set_border_preview` refuses a
+        // violating glyph edit before it records the preview, so a
+        // stored one has nothing left for the committing setter to
+        // decline. Carried rather than dropped because
+        // `document::nodes::border::merge_outcome` folds it here for
+        // exactly this reader, and reporting success for a border the
+        // model does not have is the failure that fold exists to
+        // prevent.
+        rejected: outcome.rejected,
+        auto_promoted: outcome
+            .preset_auto_promoted
+            .then_some(outcome.requested_preset)
+            .flatten(),
+        // `preset=custom` with no glyph fields is a property of the
+        // line that carried the kv, and the staging line printed the
+        // hint for it. A commit has no kvs of its own.
+        bare_custom: false,
     }
-    if lines.len() == 1 {
-        ExecResult::ok_msg(lines.into_iter().next().expect("len==1"))
-    } else {
-        ExecResult::lines(lines)
-    }
+    .finish()
 }
 
 /// `border preview cancel` — discard the preview without writing
 /// anything. Returns a quiet "no preview" line when no preview
 /// was active (cancelling drift-cleared previews falls into the
 /// same branch).
-pub(crate) fn cancel_border_preview_verb(
-    eff: &mut ConsoleEffects,
-    verb_label: &'static str,
-) -> ExecResult {
-    let cleared = eff.document.cancel_border_preview();
+pub(crate) fn cancel_border_preview_verb(eff: &mut ConsoleEffects, verb_label: &'static str) -> ExecResult {
+    let cleared = eff.document_mut().cancel_border_preview();
     if cleared {
         ExecResult::ok_msg(format!("{} cancelled", verb_label))
     } else {
@@ -192,28 +195,23 @@ pub(crate) fn cancel_border_preview_verb(
 /// message; bare `preset=custom` (no glyph fields) gets the same
 /// hint the committing path emits.
 fn finish_preview(outcome: BorderEditOutcome, verb_label: &'static str, bare_custom: bool) -> ExecResult {
-    let mut lines: Vec<String> = vec![format!(
-        "{} active (commit / cancel to terminate)",
-        verb_label
-    )];
-    if outcome.preset_auto_promoted {
-        if let Some(name) = outcome.requested_preset.as_deref() {
-            lines.push(format!(
-                "note: preset='{}' auto-promoted to 'custom' \
-                 (a side or corner glyph was set; non-custom presets \
-                 ignore the per-target glyph override)",
-                name
-            ));
-        }
+    // `headline` is unconditionally `Some`: a staged preview is
+    // active whether or not the edit moved anything, so this verb
+    // has no "no change" outcome and cannot reach that arm of the
+    // shared tail. That is the one structural difference between
+    // the preview family and the three committing verbs.
+    BorderEdit {
+        label: verb_label,
+        scope: "target",
+        headline: Some(format!("{} active (commit / cancel to terminate)", verb_label)),
+        rejected: outcome.rejected,
+        auto_promoted: outcome
+            .preset_auto_promoted
+            .then_some(outcome.requested_preset)
+            .flatten(),
+        bare_custom,
     }
-    if bare_custom {
-        lines.push(custom_preset_hint(verb_label));
-    }
-    if lines.len() == 1 {
-        ExecResult::ok_msg(lines.into_iter().next().expect("len==1"))
-    } else {
-        ExecResult::lines(lines)
-    }
+    .finish()
 }
 
 #[cfg(test)]
@@ -241,7 +239,14 @@ mod tests {
         }
         assert!(doc.border_preview.is_some(), "preview slot populated");
         assert_eq!(
-            doc.mindmap.nodes.get(&nid).unwrap().style.border.as_ref().map(|c| c.preset.clone()),
+            doc.mindmap
+                .nodes
+                .get(&nid)
+                .unwrap()
+                .style
+                .border
+                .as_ref()
+                .map(|c| c.preset.clone()),
             before.style.border.as_ref().map(|c| c.preset.clone()),
             "model border slot is unchanged after preview-set"
         );
@@ -298,7 +303,14 @@ mod tests {
         assert_exec_ok_strict(run("border preview cancel", &mut doc));
         assert!(doc.border_preview.is_none(), "cancel clears the slot");
         assert_eq!(
-            doc.mindmap.nodes.get(&nid).unwrap().style.border.as_ref().map(|c| c.preset.clone()),
+            doc.mindmap
+                .nodes
+                .get(&nid)
+                .unwrap()
+                .style
+                .border
+                .as_ref()
+                .map(|c| c.preset.clone()),
             before_preset,
             "model unchanged after preview-then-cancel"
         );

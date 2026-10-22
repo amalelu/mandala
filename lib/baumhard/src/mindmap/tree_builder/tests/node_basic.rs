@@ -70,10 +70,7 @@ fn test_glyph_area_properties() {
         .glyph_area()
         .expect("section-area is a GlyphArea");
     assert_eq!(section_area.text, "Lord God");
-    assert_eq!(
-        section_area.scale.0,
-        lord_god.sections[0].text_runs[0].size_pt as f32
-    );
+    assert_eq!(section_area.scale.0, lord_god.sections[0].text_runs[0].size_pt);
 }
 
 #[test]
@@ -178,7 +175,7 @@ fn test_text_run_font_propagates_to_color_font_region() {
         italic: false,
         underline: false,
         font: family.clone(),
-        size_pt: 14,
+        size_pt: 14.0,
         color: "#ffffff".into(),
         hyperlink: None,
     }];
@@ -213,7 +210,7 @@ fn test_text_run_unknown_font_falls_back_to_none() {
         italic: false,
         underline: false,
         font: "DefinitelyNotAFontFamilyXYZ".into(),
-        size_pt: 14,
+        size_pt: 14.0,
         color: "#ffffff".into(),
         hyperlink: None,
     }];

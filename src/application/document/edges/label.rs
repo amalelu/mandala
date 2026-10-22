@@ -2,7 +2,7 @@
 
 //! Edge label text, position-along-curve, and perpendicular offset.
 
-use baumhard::mindmap::model::{EdgeLabelConfig, MindEdge};
+use baumhard::mindmap::model::EdgeLabelConfig;
 use baumhard::util::geometry::almost_equal;
 
 use super::super::types::EdgeRef;
@@ -33,7 +33,7 @@ impl MindMapDocument {
     /// are silently pulled back. Returns `true` if the clamped value
     /// actually differs from the current. Forks a fresh
     /// `EdgeLabelConfig` on the edge if one isn't already present
-    /// (mirrors `ensure_glyph_connection` on the body cascade).
+    /// (mirrors `ensure_glyph_connection_inline` on the body cascade).
     pub fn set_edge_label_position(&mut self, edge_ref: &EdgeRef, t: f32) -> bool {
         let clamped = t.clamp(0.0, 1.0);
         self.mutate_edge(edge_ref, |edge, _canvas| {
@@ -44,15 +44,6 @@ impl MindMapDocument {
             ensure_label_config_inline(edge).position_t = Some(clamped);
             true
         })
-    }
-
-    /// Return a mutable reference to `edge.label_config`, lazily
-    /// inserting a default [`EdgeLabelConfig`] when absent. Mirrors
-    /// [`Self::ensure_glyph_connection`] for the body cascade — the
-    /// first edit on an unstyled label forks a config onto the edge,
-    /// subsequent edits reuse it.
-    pub(super) fn ensure_label_config(edge: &mut MindEdge) -> &mut EdgeLabelConfig {
-        edge.label_config.get_or_insert_with(EdgeLabelConfig::default)
     }
 
     /// Set (or clear, with `offset = None`) the label's

@@ -6,7 +6,7 @@
 //! stress the renderer and to catch performance regressions — not a benchmark
 //! harness, just a file writer. Reading the generated file with
 //! `cargo run --release -- maps/stress.mindmap.json` and eyeballing the
-//! behaviour is the feedback loop. Output is deterministic per `--seed`.
+//! behavior is the feedback loop. Output is deterministic per `--seed`.
 //!
 //! # Topologies
 //!
@@ -47,11 +47,38 @@
 //!     --output maps/stress_star.mindmap.json
 //! ```
 
+// This file is a crate root of its own — cargo builds every
+// `src/bin/*.rs` as a separate binary crate — so the
+// `#![warn(clippy::unwrap_used)]` in `lib.rs` does not reach a line
+// written here, and it went uncovered until the attribute below.
+// Proven rather than assumed: with an `o.unwrap()` planted in this
+// file and the attribute removed, `cargo clippy -p baumhard --bins`
+// reports no "used unwrap() on an Option value" at all; with the
+// attribute, it reports it at the planted line.
+//
+// This comment used to add "and §9's 'every crate root carries it'
+// was false of exactly this one". Both halves have since been
+// falsified: §9 no longer says that, and it was never true of only
+// this file — `build.rs` is a crate root by the same argument and
+// was uncovered too, found by checking the written count against
+// `cargo metadata` rather than by reading the tree. §9 now states
+// the count as targets, six of seven, and names the exception.
+//
+// It matters more here than the file's own cleanliness suggests.
+// `util::unwrap_posture` reads source text, so a call whose name and
+// parentheses straddle a line break is the shape it has to widen for
+// deliberately; the lint reads the parsed program and never had that
+// problem. Leaving a root uncovered leaves a file where a
+// misspelled-across-lines panic has only one reader instead of two.
+#![warn(clippy::unwrap_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::process::ExitCode;
 
+use baumhard::mindmap::loader::to_json_value;
 use baumhard::mindmap::model::{
     Canvas, MindEdge, MindMap, MindNode, MindSection, NodeLayout, NodeStyle, Position, Size, TextRun,
 };
@@ -212,7 +239,7 @@ fn make_node(id: String, parent_id: Option<String>, x: f64, y: f64, depth: usize
         "#30b082", "#b03080", "#3080b0", "#b08030", "#8030b0", "#30b0b0", "#b03030",
     ];
     let frame_color = frame_palette[depth % frame_palette.len()].to_string();
-    let text = format!("{}", id);
+    let text = id.to_string();
     let text_runs = vec![TextRun {
         start: 0,
         end: count_grapheme_clusters(&text),
@@ -220,7 +247,7 @@ fn make_node(id: String, parent_id: Option<String>, x: f64, y: f64, depth: usize
         italic: false,
         underline: false,
         font: "LiberationSans".to_string(),
-        size_pt: 18,
+        size_pt: 18.0,
         color: "#ffffff".to_string(),
         hyperlink: None,
     }];
@@ -501,18 +528,15 @@ fn assemble_mindmap(name: &str, nodes: Vec<MindNode>, edges: Vec<MindEdge>) -> M
         name: name.to_string(),
         canvas: Canvas {
             background_color: "#0a0a0a".to_string(),
-            default_border: None,
-            default_connection: None,
-            default_section_frame_border: None,
-            default_focused_section_frame_border: None,
-            theme_variables: HashMap::new(),
-            theme_variants: HashMap::new(),
+            ..Canvas::default()
         },
         palettes: HashMap::new(),
         nodes: node_map,
         edges,
         custom_mutations: Vec::new(),
         macros: Vec::new(),
+        unknown_keys: Default::default(),
+        skipped_constructs: Default::default(),
     }
 }
 
@@ -539,7 +563,15 @@ fn run(cfg: Config) -> Result<(), String> {
     let node_count = nodes.len();
     let edge_count = edges.len();
     let map = assemble_mindmap(&name, nodes, edges);
-    let json = serde_json::to_string_pretty(&map).map_err(|e| format!("serialise mindmap: {}", e))?;
+    // Through the contract, not around it. `loader::to_json_value` is
+    // the map's on-disk form — `serde_json::to_value` alone drops the
+    // keys a load preserved — and a generator that writes a
+    // `.mindmap.json` any other way is a second answer to what the
+    // format is, whether or not this particular map has keys to lose.
+    // `loader::tests::test_every_mindmap_write_goes_through_the_contract`
+    // is what keeps the next one from appearing.
+    let value = to_json_value(&map)?;
+    let json = serde_json::to_string_pretty(&value).map_err(|e| format!("serialize mindmap: {}", e))?;
     fs::write(&cfg.output, json).map_err(|e| format!("write {}: {}", cfg.output, e))?;
     println!(
         "wrote {} ({} nodes, {} edges, seed 0x{:X})",
@@ -656,10 +688,10 @@ mod tests {
     }
 
     #[test]
-    fn test_generated_map_serialises_and_parses_back() {
+    fn test_generated_map_serializes_and_parses_back() {
         let (nodes, edges) = gen_balanced(3, 3);
         let map = assemble_mindmap("test", nodes, edges);
-        let json = serde_json::to_string(&map).unwrap();
+        let json = serde_json::to_string(&to_json_value(&map).unwrap()).unwrap();
         let parsed: MindMap = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.nodes.len(), 40);
         assert_eq!(parsed.edges.len(), 39);

@@ -242,8 +242,21 @@ pub fn rebuild_document_macros(
 /// SOURCE-OF-TRUTH list of places that must move together when the
 /// order changes — this function is now one place rather than two.
 ///
-/// `document` is `None` when no map loaded (native can start with no
-/// file); the two document-derived tiers are then simply absent.
+/// `document` is `None` when the caller has no document at all; the
+/// two document-derived tiers are then simply absent.
+///
+/// **No production caller passes `None` any more.** Startup always
+/// produces a document — a real map, or the load-failure placard from
+/// `app::startup_load` (a private module, so this is a code span
+/// rather than a link) — so both init sites pass `Some`. The
+/// parameter is kept `Option`
+/// because the console's document-replace path may yet need the
+/// document-less shape, and because collapsing it belongs with the
+/// wider `InitState.document: Option<_>` cleanup rather than here.
+/// Until then the `None` arm is exercised only by
+/// `test_build_macro_registry_includes_map_tier_when_a_document_is_given`,
+/// which needs it as the negative control proving the Map tier is
+/// what supplied the id.
 pub fn build_macro_registry(
     document: Option<&crate::application::document::MindMapDocument>,
 ) -> super::MacroRegistry {

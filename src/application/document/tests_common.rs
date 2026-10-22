@@ -64,8 +64,8 @@ pub(super) fn load_test_tree() -> MindMapTree {
 
 /// Pick the lexicographically smallest node id from the
 /// testament map. Deterministic across `cargo test` invocations
-/// regardless of `HashMap` seed (the natural `String` ordering
-/// + `min()` win is stable). Tests that want the well-known
+/// regardless of `HashMap` seed (the natural `String` ordering +
+/// `min()` win is stable). Tests that want the well-known
 /// root specifically should still index by `"0"` directly so
 /// the dependency on the testament shape is visible at the
 /// call site.
@@ -149,9 +149,15 @@ pub(in crate::application) fn doc_with_one_edge() -> (MindMapDocument, super::Ed
 
 /// Materialize `node_id` into a two-section node with one pinned
 /// text run per section. Sets the node's `style.text_color` to
-/// `text_color_default` so the cascade source the section color
-/// setter consults (and the color picker reads) resolves against
-/// a known anchor. Each section's single run carries the color
+/// `text_color_default` **and drops its `color_schema`** so the
+/// cascade source the section color setter consults (and the color
+/// picker reads) resolves against a known anchor. The schema has to
+/// go for that to be true: every node in `testament` is themed, and
+/// a themed node's text color comes from its palette group, which
+/// shadows `style.text_color` entirely (`format/palettes.md`).
+/// Callers wanting the *themed* cascade reach for
+/// [`make_two_section_node_with_pinned_runs_themed`] instead. Each
+/// section's single run carries the color
 /// at the matching index in `section_run_colors`; both share
 /// `font` and `size_pt`. The pre-existing first section's `text`
 /// field is preserved (only its runs are replaced).
@@ -166,12 +172,13 @@ pub(in crate::application) fn make_two_section_node_with_pinned_runs(
     text_color_default: &str,
     section_run_colors: [&str; 2],
     font: &str,
-    size_pt: u32,
+    size_pt: f32,
 ) {
     use baumhard::mindmap::model::{MindSection, TextRun};
     let node = doc.mindmap.nodes.get_mut(node_id).expect("node id exists in doc");
     node.sections
         .push(MindSection::new_default("second".into(), Vec::new()));
+    node.color_schema = None;
     node.style.text_color = text_color_default.into();
     for (i, section) in node.sections.iter_mut().enumerate() {
         section.text_runs.clear();
@@ -189,6 +196,77 @@ pub(in crate::application) fn make_two_section_node_with_pinned_runs(
     }
 }
 
+/// Bind `node_id` to a freshly-registered single-group palette
+/// called `palette_name`, and hand back the [`ColorGroup`] it now
+/// resolves to.
+///
+/// The one scaffold every "does this path read / write the themed
+/// tier?" test needs, and the shape three of them had already
+/// open-coded. `level: 0` + `starts_at_root` means the node itself
+/// takes `groups[0]`, so the returned group is exactly what
+/// `node_background_color` / `node_frame_color` / `node_text_color`
+/// answer with until somebody overrides a channel.
+///
+/// `style` is left alone: a caller that wants the migrated shape —
+/// stale `style` colors the palette shadows — sets them itself, and
+/// a caller that only cares about the palette does not have to.
+pub(in crate::application) fn theme_node_with_probe_palette(
+    doc: &mut MindMapDocument,
+    node_id: &str,
+    palette_name: &str,
+    group: baumhard::mindmap::model::ColorGroup,
+) -> baumhard::mindmap::model::ColorGroup {
+    use baumhard::mindmap::model::{ColorOverrides, ColorSchema, Palette};
+    doc.mindmap.palettes.insert(
+        palette_name.to_string(),
+        Palette {
+            groups: vec![group.clone()],
+        },
+    );
+    let node = doc.mindmap.nodes.get_mut(node_id).expect("node id exists in doc");
+    node.color_schema = Some(ColorSchema {
+        palette: palette_name.to_string(),
+        level: 0,
+        starts_at_root: true,
+        connections_colored: false,
+        overrides: ColorOverrides::default(),
+    });
+    group
+}
+
+/// The **themed** sibling of [`make_two_section_node_with_pinned_runs`]:
+/// the same two sections and pinned runs, but the node ends up bound
+/// to a palette instead of cut loose from one.
+///
+/// The unthemed helper exists because a determinate anchor needs
+/// `style.text_color` to be the live tier, and on a themed node it is
+/// not. That anchor is worth having, but it moved every one of its
+/// call sites onto the tier a per-node color write does *not* land in
+/// — so the paths that write `color_schema.overrides` had no fixture
+/// left. This is that fixture. `style.text_color` is still set to
+/// `text_color_default` and is still the stale shadowed copy, which
+/// is the migrated shape; the palette's `text` is what the node
+/// actually resolves to, and it is returned in the group.
+pub(in crate::application) fn make_two_section_node_with_pinned_runs_themed(
+    doc: &mut MindMapDocument,
+    node_id: &str,
+    text_color_default: &str,
+    section_run_colors: [&str; 2],
+    font: &str,
+    size_pt: f32,
+    group: baumhard::mindmap::model::ColorGroup,
+) -> baumhard::mindmap::model::ColorGroup {
+    make_two_section_node_with_pinned_runs(
+        doc,
+        node_id,
+        text_color_default,
+        section_run_colors,
+        font,
+        size_pt,
+    );
+    theme_node_with_probe_palette(doc, node_id, "two-section-probe", group)
+}
+
 /// Build a 200×100 testament-rooted node with two sections, the
 /// second pinned at offset (10,10) size 50×30 — the deterministic
 /// AABB-validation fixture every section-position/size test needs.
@@ -203,7 +281,7 @@ pub(in crate::application) fn pinned_two_section_node() -> (MindMapDocument, Str
         "#ffffff",
         ["#ffffff", "#ffffff"],
         "LiberationSans",
-        14,
+        14.0,
     );
     {
         let node = doc.mindmap.nodes.get_mut(&id).unwrap();
@@ -222,7 +300,7 @@ pub(in crate::application) fn pinned_two_section_node() -> (MindMapDocument, Str
 
 /// Pick the first visible edge and return its EdgeRef + a guaranteed
 /// on-path sample point. Used by hit-test edge tests.
-pub(super) fn pick_test_edge(doc: &MindMapDocument) -> (super::EdgeRef, glam::Vec2) {
+pub(crate) fn pick_test_edge(doc: &MindMapDocument) -> (super::EdgeRef, glam::Vec2) {
     let edge = doc
         .mindmap
         .edges
@@ -244,8 +322,12 @@ pub(super) fn pick_test_edge(doc: &MindMapDocument) -> (super::EdgeRef, glam::Ve
         &edge.anchor_to,
         &edge.control_points,
     );
-    let samples = baumhard::mindmap::connection::sample_path(&path, 4.0);
-    let midpoint = samples[samples.len() / 2].position;
+    let samples = baumhard::mindmap::connection::sample_path(
+        &path,
+        4.0,
+        baumhard::mindmap::connection::MAX_PATH_SAMPLES,
+    );
+    let midpoint = samples[samples.len() / 2];
     let edge_ref = super::EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type);
     (edge_ref, midpoint)
 }
@@ -361,6 +443,13 @@ impl TestNudgeMutation {
 /// role without standing up an `AppScene` and a `Renderer`, so
 /// [`project_roles`] runs the passes in `CanvasFrame::update_all`'s
 /// order against the same shared inputs and collects the results.
+/// Every role is collected whether or not a test reads it: the
+/// point of the fixture is that it runs the *same set of passes* in
+/// the same order as `CanvasFrame::update_all`, and a field dropped
+/// because today's tests ignore it would quietly drop its pass with
+/// it. Hence one allow on the struct rather than a shrinking field
+/// list.
+#[allow(dead_code)]
 pub(crate) struct ProjectedRoles {
     pub connection_elements: Vec<baumhard::mindmap::tree_builder::ConnectionElement>,
     pub edge_handles: Vec<baumhard::mindmap::tree_builder::EdgeHandleElement>,
@@ -388,6 +477,9 @@ pub(crate) fn project_roles(
     let mut cache = SceneConnectionCache::new();
     cache.ensure_zoom(camera_zoom);
     let node_aabbs = tb::node_clip_aabbs(&doc.mindmap, &offsets, overrides.border, &hidden);
+    // One memo across both connection passes, as `CanvasFrame` owns
+    // one across its `update_*` methods.
+    let mut paths = tb::EdgePathCache::new(&doc.mindmap, &offsets);
     let (connection_elements, edge_handles) = tb::build_connection_elements(
         &doc.mindmap,
         &offsets,
@@ -395,6 +487,7 @@ pub(crate) fn project_roles(
         overrides.selection.edge,
         overrides.edge_color,
         &mut cache,
+        &mut paths,
         camera_zoom,
         &hidden,
     );
@@ -408,10 +501,10 @@ pub(crate) fn project_roles(
         edge_handles,
         connection_label_elements: tb::build_label_elements(
             &doc.mindmap,
-            &offsets,
             overrides.selection.label_edit,
             overrides.edge_color,
             highlight_key.as_ref(),
+            &mut paths,
             camera_zoom,
             &hidden,
         ),

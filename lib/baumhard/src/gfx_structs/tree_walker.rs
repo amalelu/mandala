@@ -18,6 +18,7 @@ use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{GfxMutator, Instruction};
 use crate::gfx_structs::predicate::Predicate;
 use crate::gfx_structs::tree::{BranchChannel, MutatorTree, Tree};
+use crate::util::geometry::aabb_contains;
 use crate::util::ordered_vec2::OrderedVec2;
 use glam::Vec2;
 use indextree::{Arena, Node, NodeId};
@@ -148,7 +149,9 @@ fn process_instruction_node(
             // mutation application. The caller treats a no-op as
             // success.
             if mutator.first_child().is_none() {
-                warn!("RepeatWhile instruction node has no children, skipping branch");
+                warn!(
+                    "gfx_structs::tree_walker: RepeatWhile instruction node has no children, skipping branch"
+                );
                 return;
             }
             if target.first_child().is_none() {
@@ -166,7 +169,7 @@ fn process_instruction_node(
             // mutation chain executing — a malformed reserved
             // instruction shouldn't abort the whole walk.
             warn!(
-                "RotateWhile instruction not implemented in walker; \
+                "gfx_structs::tree_walker: RotateWhile instruction not implemented; \
                  this branch becomes a no-op (see format/mutators.md)"
             );
         }
@@ -387,11 +390,7 @@ fn zip_map_children(
     let mut option_target_child = get_target(&mut gfx_tree.arena, target_id).first_child();
 
     let mut paired: usize = 0;
-    loop {
-        let (mutator_child_id, target_child_id) = match (option_mutator_child, option_target_child) {
-            (Some(m), Some(t)) => (m, t),
-            _ => break,
-        };
+    while let (Some(mutator_child_id), Some(target_child_id)) = (option_mutator_child, option_target_child) {
         // Look up the next-siblings *before* the force-apply that
         // takes `&mut gfx_tree.arena`, so the read-only borrows end
         // cleanly.
@@ -496,7 +495,7 @@ pub fn repeat_while(
 ) {
     let condition_matches = {
         let target = get_target(&mut gfx_tree.arena, target_id).get_mut();
-        condition.test(&target)
+        condition.test(target)
     };
     if condition_matches {
         debug!(
@@ -538,16 +537,14 @@ fn apply_repeat_while_to_children(
 ) {
     let parent_node = get_target(&mut gfx_tree.arena, target_id);
     let mut head = parent_node.first_child();
-    loop {
-        if head.is_some() {
-            debug!("Found child, recursing down sub-tree");
-            let head_id = head.unwrap();
-            let current = get_target(&mut gfx_tree.arena, head_id);
-            head = current.next_sibling();
-            repeat_while(gfx_tree, mutator_tree, head_id, mutator_id, condition, terminator);
-        } else {
-            break;
-        }
+    // The sibling link is read *before* recursing, because the
+    // recursion may mutate the child it is handed and we still need
+    // somewhere to go next.
+    while let Some(head_id) = head {
+        debug!("Found child, recursing down sub-tree");
+        let current = get_target(&mut gfx_tree.arena, head_id);
+        head = current.next_sibling();
+        repeat_while(gfx_tree, mutator_tree, head_id, mutator_id, condition, terminator);
     }
 }
 
@@ -564,8 +561,8 @@ fn apply_repeat_while_to_children(
 /// # Algorithm
 ///
 /// 1. Ensure subtree AABBs are fresh.
-/// 2. Recursively descend from `target_id`: for each child, prune
-///    if its `subtree_aabb` does not contain the point.
+/// 2. Descend from `target_id` over an explicit stack: for each
+///    child, prune if its `subtree_aabb` does not contain the point.
 /// 3. Among all candidate nodes whose own AABB contains the point,
 ///    pick the smallest by area (innermost-first convention).
 /// 4. Apply the instruction's attached mutation to that node.
@@ -585,7 +582,7 @@ fn spatial_descend(
 
     // BVH descent to find the hit node.
     let mut best: Option<(NodeId, f32)> = None;
-    spatial_descend_recurse(&gfx_tree.arena, target_id, point_vec, &mut best);
+    spatial_descend_best(&gfx_tree.arena, target_id, point_vec, &mut best);
 
     // Apply the instruction's mutation to the hit node.
     let Some((hit_id, _)) = best else {
@@ -609,12 +606,12 @@ fn spatial_descend(
     }
 }
 
-/// Recursive BVH descent helper for [`spatial_descend`]. Read-only
-/// arena traversal that collects the best (smallest-area) hit.
+/// BVH descent helper for [`spatial_descend`]. Read-only arena
+/// traversal that collects the best (smallest-area) hit, with no
+/// slack and no shape refinement — the exact-hit case.
 ///
-/// Uses `first_child` / `next_sibling` iteration to avoid
-/// allocating a `Vec` on every recursive call (§B7).
-fn spatial_descend_recurse(
+/// Cost: [`bvh_find`]'s, which it forwards to unchanged.
+fn spatial_descend_best(
     arena: &Arena<GfxElement>,
     node_id: NodeId,
     point: Vec2,
@@ -635,11 +632,22 @@ fn spatial_descend_recurse(
 ///    hit, optionally refine via `area.shape.contains_local` so an
 ///    ellipse hit-tests against its actual shape rather than its
 ///    bounding rectangle.
-/// 3. Recurse into the child's children.
+/// 3. Descend into the child's children.
 ///
 /// Smallest-area wins on tie (so a smaller element stacked over a
-/// bigger one is the hit). Uses `first_child` / `next_sibling`
-/// iteration to avoid per-call `Vec` allocation (§B7).
+/// bigger one is the hit), and the *first* candidate of an equal
+/// area keeps the slot — which is why the descent order below is
+/// preserved exactly rather than merely being some depth-first
+/// order.
+///
+/// Cost: O(visited), plus one heap `Vec` holding the pending
+/// frontier — the sum of the unprocessed sibling rows along the
+/// current path — **one element for a linear chain**, since each
+/// node's only child replaces it, O(n) for a shallow wide tree, and
+/// O(depth x branching) in general. That allocation is a deliberate trade against §B7:
+/// the previous shape did not avoid the storage, it kept the same
+/// data on the call stack, where a `.mindmap.json` deep enough to
+/// exhaust it aborted the process instead of merely costing memory.
 pub(crate) fn bvh_find(
     arena: &Arena<GfxElement>,
     node_id: NodeId,
@@ -648,11 +656,22 @@ pub(crate) fn bvh_find(
     refine_with_shape: bool,
     best: &mut Option<(NodeId, f32)>,
 ) {
-    let mut child_opt = arena.get(node_id).and_then(|n| n.first_child());
+    // Pre-order DFS over an explicit stack rather than the call
+    // stack. This arena is the projection of a `.mindmap.json`,
+    // whose `parent_id` depth is untrusted and unbounded — a linear
+    // chain of N nodes is a legal acyclic tree — and every hit test
+    // in the app funnels through here, so recursing over that depth
+    // meant a hostile map aborted the process on a mouse move.
+    //
+    // Children are pushed reversed so the first sibling pops first
+    // and a node's own subtree is exhausted before the next
+    // sibling: the same order the recursive form visited in, which
+    // the tie-break below depends on (equal-area candidates keep
+    // the one found first).
+    let mut pending: Vec<NodeId> = Vec::new();
+    push_children_reversed(arena, node_id, &mut pending);
 
-    while let Some(child_id) = child_opt {
-        child_opt = arena.get(child_id).and_then(|n| n.next_sibling());
-
+    while let Some(child_id) = pending.pop() {
         let Some(node) = arena.get(child_id) else {
             continue;
         };
@@ -660,11 +679,8 @@ pub(crate) fn bvh_find(
 
         // 1. Prune: subtree AABB must contain (slack-inflated) point.
         if let Some((st_min, st_max)) = element.subtree_aabb() {
-            if point.x < st_min.x - slack
-                || point.x > st_max.x + slack
-                || point.y < st_min.y - slack
-                || point.y > st_max.y + slack
-            {
+            let slack_vec = Vec2::splat(slack);
+            if !aabb_contains(point, st_min - slack_vec, st_max + slack_vec) {
                 continue;
             }
         } else {
@@ -676,11 +692,9 @@ pub(crate) fn bvh_find(
             let pos = area.position.to_vec2();
             let bounds = area.render_bounds.to_vec2();
             if bounds.x > 0.0 && bounds.y > 0.0 {
-                let min_x = pos.x - slack;
-                let min_y = pos.y - slack;
-                let max_x = pos.x + bounds.x + slack;
-                let max_y = pos.y + bounds.y + slack;
-                if point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y {
+                let min = Vec2::new(pos.x - slack, pos.y - slack);
+                let max = Vec2::new(pos.x + bounds.x + slack, pos.y + bounds.y + slack);
+                if aabb_contains(point, min, max) {
                     let mut hit = true;
                     if refine_with_shape {
                         // Shift into the inflated local frame so
@@ -715,8 +729,8 @@ pub(crate) fn bvh_find(
                         // accepted set is exactly the closed AABB); for an
                         // ellipse the frame shifts by at most an ULP and
                         // stays inside the unchanged AABB.
-                        let local = Vec2::new(point.x - min_x, point.y - min_y);
-                        let inflated = Vec2::new(max_x - min_x, max_y - min_y);
+                        let local = point - min;
+                        let inflated = max - min;
                         hit = area.shape.contains_local(local, inflated);
                     }
                     if hit {
@@ -732,8 +746,25 @@ pub(crate) fn bvh_find(
             }
         }
 
-        // 3. Recurse (the subtree-AABB test above proved at least
+        // 3. Descend (the subtree-AABB test above proved at least
         //    one descendant may contain the point).
-        bvh_find(arena, child_id, point, slack, refine_with_shape, best);
+        push_children_reversed(arena, child_id, &mut pending);
     }
+}
+
+/// Append every child of `parent` to `pending` in reverse document
+/// order, so a LIFO pop yields them first-to-last.
+///
+/// Reversing in place over the slice just appended keeps this free
+/// of any allocation beyond `pending`'s own growth — the children
+/// are pushed once and flipped, never collected into a scratch
+/// vector (§B7).
+fn push_children_reversed(arena: &Arena<GfxElement>, parent: NodeId, pending: &mut Vec<NodeId>) {
+    let start = pending.len();
+    let mut child_opt = arena.get(parent).and_then(|n| n.first_child());
+    while let Some(child_id) = child_opt {
+        child_opt = arena.get(child_id).and_then(|n| n.next_sibling());
+        pending.push(child_id);
+    }
+    pending[start..].reverse();
 }

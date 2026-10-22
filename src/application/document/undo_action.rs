@@ -6,12 +6,17 @@
 //! variants.
 
 use super::types::SelectionState;
-use baumhard::mindmap::model::{Canvas, MindEdge, MindNode, MindSection, NodeStyle, Position, Size};
+use baumhard::mindmap::model::{
+    Canvas, ColorSchema, MindEdge, MindNode, MindSection, NodeStyle, Position, Size,
+};
 
 /// An undoable action that can be reversed.
 #[derive(Clone, Debug)]
 pub enum UndoAction {
     /// Stores original positions of moved nodes for restoration.
+    // Native-driver-only, with `CreateEdge`: pushed by the native
+    // drag-commit and edge-create paths.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     MoveNodes {
         original_positions: Vec<(String, Position)>,
     },
@@ -29,6 +34,7 @@ pub enum UndoAction {
     DeleteEdge { index: usize, edge: MindEdge },
     /// Edge created via connect mode (Ctrl+D). Reversed by removing the
     /// edge at `index` (assumes LIFO undo order so the index is still valid).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     CreateEdge { index: usize },
     /// Full in-place edit of an existing edge — control-point drag,
     /// anchor change, reset-to-straight via palette, etc. The `before`
@@ -65,10 +71,10 @@ pub enum UndoAction {
         before_selection: SelectionState,
     },
     /// A node's visual style was edited in place (bg / border / text
-    /// color / font size). Captures the pre-edit `NodeStyle` plus the
-    /// full `sections` snapshot — `set_node_text_color`,
+    /// color / font size). Captures the pre-edit `NodeStyle` and
+    /// `color_schema` plus the full `sections` snapshot — `set_node_text_color`,
     /// `set_node_font_size`, and `set_node_font_family` rewrite per-
-    /// run colours / sizes / fonts on top of the style change, and
+    /// run colors / sizes / fonts on top of the style change, and
     /// the section-resident runs need to come back wholesale on undo.
     /// Separate from `EditNodeText` because the round-trip contract
     /// is different (text is untouched here; only the section
@@ -76,6 +82,15 @@ pub enum UndoAction {
     EditNodeStyle {
         node_id: String,
         before_style: NodeStyle,
+        /// Pre-mutation `node.color_schema`. The three per-node
+        /// color setters write the node's own
+        /// [`ColorOverrides`](baumhard::mindmap::model::ColorOverrides)
+        /// when the node is themed — that is where the read path
+        /// looks, so it is where the write has to land — and the
+        /// override lives on the schema rather than in `NodeStyle`.
+        /// Without this field a `color bg=` on a themed node would
+        /// be unundoable.
+        before_color_schema: Option<ColorSchema>,
         before_sections: Vec<MindSection>,
         /// Pre-mutation `node.position`. Captured because some
         /// style setters (and the structural section mutators
@@ -111,10 +126,15 @@ pub enum UndoAction {
         before_max: Option<f32>,
     },
     /// Snapshot of the entire `Canvas` taken before a document action
-    /// (theme switch, etc.) mutated it. The canvas is small and cloning
-    /// the whole thing is cheaper than tracking field-level diffs, and
-    /// trivially correct.
-    CanvasSnapshot { canvas: Canvas },
+    /// (theme switch, etc.) mutated it. Cloning the whole thing is
+    /// cheaper than tracking field-level diffs, and trivially correct.
+    ///
+    /// **Boxed.** Held inline, the canvas alone sized this enum at over
+    /// a kilobyte (clippy's `large_enum_variant` measured 1216 bytes),
+    /// and the undo stack is a `Vec<UndoAction>`, so every entry — a
+    /// one-field zoom edit included — would occupy that much. Boxing
+    /// leaves the cost with the snapshots that actually need it.
+    CanvasSnapshot { canvas: Box<Canvas> },
     /// A node's AABB (`position` + `size`) was atomically rewritten
     /// — the release-commit of a node-resize drag, or the
     /// `node resize` console verb. Captures the pre-edit pair so

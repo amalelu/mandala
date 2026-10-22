@@ -55,10 +55,9 @@ icon along the border normal so the text extends away from the
 owning node (never back toward it).
 
 The icon and the text each carry their own color + size channels,
-and cascade independently: `text_color` → icon color cascade
-(`color` → `glyph_connection.color` → `edge.color`), and
-`text_font_size_pt` → `glyph_connection.font_size_pt`. The two
-channels let a coloured badge carry a differently-coloured
+and cascade independently: `text_color` → icon color cascade (see
+below), and `text_font_size_pt` → `glyph_connection.font_size_pt`.
+The two channels let a colored badge carry a differently-colored
 annotation beside it — parity with line-mode edge labels, which
 similarly detach from the edge body color.
 
@@ -72,7 +71,13 @@ Highest priority wins:
 
 1. `portal_from` / `portal_to.color` — per-endpoint override.
 2. `edge.glyph_connection.color` — edge-level override.
-3. `edge.color` — the edge's always-present base color.
+3. The source node's frame tier — its `overrides.frame`, else its
+   palette group's `frame` — when its `color_schema` sets
+   `connections_colored`; see [palettes.md](./palettes.md).
+4. `canvas.default_connection.color`, when the edge has not forked a
+   connection config of its own — map-wide, so it ranks below the
+   per-node theme above it.
+5. `edge.color` — the edge's always-present base color.
 
 The wheel color picker, `color` console verb, paste, and cut all
 route to the per-endpoint field when a portal label is selected,

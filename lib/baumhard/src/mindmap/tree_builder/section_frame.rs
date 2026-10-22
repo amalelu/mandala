@@ -23,9 +23,10 @@
 //! the border, and the single-section short-circuit bypasses
 //! NodeEdit anyway).
 //!
-//! The tree half emits one per-section Void parent and four
-//! `GlyphArea` runs (top, bottom, left, right) per element. The
-//! four-side run geometry comes from
+//! The tree half emits one per-section Void parent and the eight
+//! `GlyphArea` runs — four fill rails plus four corners — per
+//! element. The run geometry — four fill rails and four
+//! corners — comes from
 //! [`crate::mindmap::border::border_run_specs`] — the **same** path
 //! node borders use — so any preset, any per-side `SidePattern`,
 //! any per-corner glyph, any palette cycle that node borders
@@ -91,7 +92,7 @@ pub struct SectionFrameElement {
     /// corners, font, size, color, palette field. Mirrors
     /// [`super::BorderNodeData::border_style`]; consumers feed it
     /// to `crate::mindmap::border::border_run_specs` for the
-    /// four-side run geometry.
+    /// eight-run geometry.
     pub border_style: BorderStyle,
     /// Resolved per-cycle-position colors when the frame uses a
     /// `color_palette`; empty otherwise. Mirrors
@@ -149,25 +150,17 @@ pub fn build_section_frames(
         return Vec::new();
     }
 
-    // Missing-offset for the active node means the layout/scene-
-    // build invariant ("the active node has an offset entry") was
-    // broken upstream — every other emission path consults the
-    // same map and would also fall back to (0,0) silently. Log so
-    // the regression is visible without panicking; per
-    // `CODE_CONVENTIONS.md` §9 interactive paths must keep running.
-    let (ox, oy) = match offsets.get(active_id).copied() {
-        Some(v) => v,
-        None => {
-            log::warn!(
-                "build_section_frames: active node {:?} missing from `offsets` map; \
-                 falling back to (0, 0) — frames will render at the node's authored \
-                 position. This indicates the layout/scene-build pass didn't populate \
-                 the active node's offset.",
-                active_id
-            );
-            (0.0, 0.0)
-        }
-    };
+    // `offsets` holds in-flight *drag* deltas and is empty on
+    // every non-drag rebuild (`CanvasFrame::offsets`), so a
+    // missing entry is the ordinary case, not a broken invariant:
+    // NodeEdit mode on a multi-section node rebuilds constantly
+    // while nothing is being dragged. This asserted an invariant
+    // that does not exist and warned on every such rebuild —
+    // `warn!` survives into release (CODE_CONVENTIONS §9), so the
+    // message reached users' stderr at rebuild rate. Absent means
+    // undragged, which is what the other twelve consulting sites
+    // read it as.
+    let (ox, oy) = offsets.get(active_id).copied().unwrap_or((0.0, 0.0));
     let pos = node.pos_vec2();
     let size = node.size_vec2();
     // Active-node AABB sanity: NaN or non-positive size produces
@@ -320,7 +313,7 @@ fn resolve_section_frame_border_with_overrides(
     frame_color_fallback: &str,
 ) -> BorderStyle {
     if let Some(cfg) = section_slot {
-        return crate::mindmap::border::resolve_border_style(Some(cfg), None, frame_color_fallback);
+        return crate::mindmap::border::resolve_border_style(Some(cfg), None, None, frame_color_fallback);
     }
     let canvas_chosen = if focused {
         canvas_focused_default.or(canvas_unfocused_default)
@@ -328,27 +321,34 @@ fn resolve_section_frame_border_with_overrides(
         canvas_unfocused_default
     };
     if let Some(cfg) = canvas_chosen {
-        return crate::mindmap::border::resolve_border_style(Some(cfg), None, frame_color_fallback);
+        return crate::mindmap::border::resolve_border_style(Some(cfg), None, None, frame_color_fallback);
     }
     // Floor — same shape `resolve_section_frame_border` synthesizes.
     let floor = crate::mindmap::border::section_frame_floor_config(focused);
-    crate::mindmap::border::resolve_border_style(Some(floor), None, frame_color_fallback)
+    crate::mindmap::border::resolve_border_style(Some(floor), None, None, frame_color_fallback)
 }
 
-/// Compute a stable structural-signature seed for a section-frame
-/// element list. Hashed by `AppScene::set_canvas_signature` to
-/// short-circuit redundant rebuilds.
+/// Content signature for a section-frame element list — every
+/// field the tree projection reads, hashed. Compared by
+/// `CanvasFrame::update_section_frame_tree` to short-circuit
+/// redundant rebuilds.
 ///
-/// Identity captures every **input** to the rendered glyph runs:
-/// id triple (node_id, section_idx, focused), the resolved
-/// `BorderStyle` axes (preset corners + 4 side patterns + color +
-/// font + font_size + palette + palette_field), the position +
-/// bounds (so a node move while in NodeEdit re-registers the
-/// frames), and the resolved palette cycle (so an authored palette
-/// edit triggers a rebuild).
+/// Captures every **input** to the rendered glyph runs: the id
+/// triple (node_id, section_idx, focused), the resolved
+/// [`BorderStyle`] (through
+/// [`BorderStyle::hash_content`](crate::mindmap::border::BorderStyle::hash_content),
+/// which destructures it), the position + bounds (so a node move
+/// while in NodeEdit re-registers the frames), and the resolved
+/// palette cycle (so an authored palette edit triggers a rebuild).
 ///
-/// Pre-fix the function materialized a `Vec<SectionFrameIdentity>`
-/// whose only consumer was `hash_canvas_signature` — N×String
+/// Section frames have no in-place mutator path, so this one
+/// signature does both jobs the border and portal roles split
+/// between a structural and a content signature: it decides
+/// rebuild-or-skip outright.
+///
+/// Pre-fix the function materialized a `Vec` of per-frame
+/// identity structs (a type since deleted) whose only consumer
+/// was `hash_canvas_signature` — N×String
 /// clones + a 7-field clone-Vec per call, all thrown away after
 /// the hash compare. Combined with the `InPlaceMutator` early-
 /// return in `update_section_frame_tree`, the signature path runs
@@ -361,34 +361,35 @@ fn resolve_section_frame_border_with_overrides(
 /// Combined with the `InPlaceMutator` early-return in
 /// `update_section_frame_tree`, the completeness of this signature
 /// is load-bearing: a missed delta means the dispatch declares
-/// "no work needed" and the screen keeps stale glyphs.
-pub fn section_frame_identity_sequence(elements: &[SectionFrameElement]) -> u64 {
+/// "no work needed" and the screen keeps stale glyphs. The body
+/// destructures [`SectionFrameElement`], so a new field does not
+/// compile until it is hashed here.
+pub fn section_frame_content_signature(elements: &[SectionFrameElement]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     elements.len().hash(&mut h);
     for e in elements {
-        let bs = &e.border_style;
-        e.node_id.as_str().hash(&mut h);
-        e.section_idx.hash(&mut h);
-        e.focused.hash(&mut h);
-        e.position.0.to_bits().hash(&mut h);
-        e.position.1.to_bits().hash(&mut h);
-        e.size.0.to_bits().hash(&mut h);
-        e.size.1.to_bits().hash(&mut h);
-        bs.color.as_str().hash(&mut h);
-        bs.font_name.as_deref().hash(&mut h);
-        bs.font_size_pt.to_bits().hash(&mut h);
-        bs.color_palette.as_deref().hash(&mut h);
-        bs.palette_field.hash(&mut h);
-        bs.corners.hash(&mut h);
-        bs.side_patterns.hash(&mut h);
-        e.palette_cycle.len().hash(&mut h);
-        for cycle in &e.palette_cycle {
-            cycle[0].to_bits().hash(&mut h);
-            cycle[1].to_bits().hash(&mut h);
-            cycle[2].to_bits().hash(&mut h);
-            cycle[3].to_bits().hash(&mut h);
+        let SectionFrameElement {
+            node_id,
+            section_idx,
+            position,
+            size,
+            border_style,
+            palette_cycle,
+            focused,
+        } = e;
+        node_id.as_str().hash(&mut h);
+        section_idx.hash(&mut h);
+        focused.hash(&mut h);
+        position.0.to_bits().hash(&mut h);
+        position.1.to_bits().hash(&mut h);
+        size.0.to_bits().hash(&mut h);
+        size.1.to_bits().hash(&mut h);
+        border_style.hash_content(&mut h);
+        palette_cycle.len().hash(&mut h);
+        for cycle in palette_cycle {
+            cycle.map(f32::to_bits).hash(&mut h);
         }
     }
     h.finish()
@@ -397,8 +398,8 @@ pub fn section_frame_identity_sequence(elements: &[SectionFrameElement]) -> u64 
 /// Build a `Tree<GfxElement, GfxMutator>` from a slice of
 /// [`SectionFrameElement`]s. Each element's resolved
 /// [`crate::mindmap::border::BorderStyle`] is fed to
-/// [`crate::mindmap::border::border_run_specs`] for the four-side
-/// run geometry; the runs are appended via the same
+/// [`crate::mindmap::border::border_run_specs`] for the
+/// eight-run geometry; the runs are appended via the same
 /// `append_border_run` helper node borders use, so palette
 /// cycling, multi-cluster fills, custom corners, and any future
 /// border feature lights up on section frames automatically.
@@ -412,10 +413,10 @@ pub fn build_section_frame_tree(elements: &[SectionFrameElement]) -> Tree<GfxEle
     let mut unique_id: usize = 1;
     for (idx, frame) in elements.iter().enumerate() {
         let parent_channel = idx + 1;
-        let parent_id = tree
-            .arena
-            .new_node(GfxElement::new_void_with_id(parent_channel, unique_id));
-        tree.root.append(parent_id, &mut tree.arena);
+        let parent_id = tree.root.append_value(
+            GfxElement::new_void_with_id(parent_channel, unique_id),
+            &mut tree.arena,
+        );
         unique_id += 1;
 
         append_frame_runs(&mut tree, parent_id, frame, &mut unique_id);
@@ -423,7 +424,7 @@ pub fn build_section_frame_tree(elements: &[SectionFrameElement]) -> Tree<GfxEle
     tree
 }
 
-/// Layout the four-side glyph runs for one section frame and
+/// Layout the eight glyph runs for one section frame and
 /// append them under `parent_id`. Delegates to
 /// [`crate::mindmap::border::border_run_specs`] for the run
 /// geometry and to

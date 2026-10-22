@@ -37,11 +37,11 @@ pub fn do_region_params_non_divisor_target() {
     assert_eq!(params.read_region_size_x(), Ok(125));
     assert_eq!(params.read_target_region_factor(), Ok(7));
 
-    params.adapt(6, (1000, 1000));
+    assert_eq!(params.adapt(6, (1000, 1000)), Ok(()));
     assert_eq!(params.read_region_factor_x(), Ok(5));
     assert_eq!(params.read_region_size_x(), Ok(200));
 
-    params.adapt(13, (1000, 1000));
+    assert_eq!(params.adapt(13, (1000, 1000)), Ok(()));
     assert_eq!(params.read_region_factor_x(), Ok(10));
 }
 
@@ -207,9 +207,9 @@ fn test_region_params_exhaustive_4x4() {
 pub fn do_region_params_exhaustive_4x4() {
     let params = RegionParams::new(2, (4, 4));
     let expected = [[0, 0, 1, 1], [0, 0, 1, 1], [2, 2, 3, 3], [2, 2, 3, 3]];
-    for y in 0..4_usize {
-        for x in 0..4_usize {
-            assert_eq!(params.calculate_region_from_pixel((x, y)), Ok(expected[y][x]));
+    for (y, row) in expected.iter().enumerate() {
+        for (x, &want) in row.iter().enumerate() {
+            assert_eq!(params.calculate_region_from_pixel((x, y)), Ok(want));
         }
     }
 }
@@ -221,7 +221,7 @@ fn test_region_params_exhaustive_12x12() {
 
 pub fn do_region_params_exhaustive_12x12() {
     let params = RegionParams::new(3, (12, 12));
-    let mut hits = vec![0_usize; 9];
+    let mut hits = [0_usize; 9];
     for y in 0..12_usize {
         for x in 0..12_usize {
             let r = params.calculate_region_from_pixel((x, y)).unwrap();
@@ -243,7 +243,7 @@ fn test_region_params_adapt_changes_resolution() {
 
 pub fn do_region_params_adapt_changes_resolution() {
     let mut params = RegionParams::new(10, (1000, 1000));
-    params.adapt(5, (500, 500));
+    assert_eq!(params.adapt(5, (500, 500)), Ok(()));
     assert_eq!(params.read_current_resolution(), Ok((500, 500)));
     assert_eq!(params.calc_num_regions(), Ok(25));
 }
@@ -255,13 +255,13 @@ fn test_region_params_adapt_chained() {
 
 pub fn do_region_params_adapt_chained() {
     let mut params = RegionParams::new(10, (1000, 1000));
-    params.adapt(5, (500, 500));
+    assert_eq!(params.adapt(5, (500, 500)), Ok(()));
     assert_eq!(params.calc_num_regions(), Ok(25));
 
-    params.adapt(8, (800, 600));
+    assert_eq!(params.adapt(8, (800, 600)), Ok(()));
     assert_eq!(params.read_region_factor_x(), Ok(8));
 
-    params.adapt(3, (120, 90));
+    assert_eq!(params.adapt(3, (120, 90)), Ok(()));
     assert_eq!(params.read_region_size_x(), Ok(40));
     assert_eq!(params.read_region_size_y(), Ok(30));
     assert_eq!(params.calculate_region_from_pixel((119, 89)), Ok(8));
@@ -325,34 +325,60 @@ fn test_factor_square_of_prime() {
 // ── prime panics ──────────────────────────────────────────────────
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "!is_prime(resolution.0)")]
 fn test_prime_x() {
     RegionParams::new(10, (251, 1000));
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "!is_prime(resolution.1)")]
 fn test_prime_y() {
     RegionParams::new(10, (1000, 251));
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "!is_prime(dimensions.0)")]
 fn test_adapt_prime_x() {
     let mut p = RegionParams::new(7, (1000, 1000));
-    p.adapt(10, (241, 1000));
+    let _ = p.adapt(10, (241, 1000));
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "!is_prime(dimensions.1)")]
 fn test_adapt_prime_y() {
     let mut p = RegionParams::new(7, (1000, 1000));
-    p.adapt(10, (1000, 251));
+    let _ = p.adapt(10, (1000, 251));
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "!is_prime(dimensions.0)")]
 fn test_adapt_prime_both() {
     let mut p = RegionParams::new(7, (1000, 1000));
-    p.adapt(13, (241, 251));
+    let _ = p.adapt(13, (241, 251));
+}
+
+/// The prime guard holds for dimensions above `PRIME_CEILING` too.
+/// A 10,007-pixel canvas is exactly the case it exists to stop — a
+/// prime dimension has only 1 and itself as divisors, so the
+/// closest-divisor search collapses to the degenerate one-region
+/// grid — and until `is_prime` learned to answer above its sieve it
+/// sailed straight through, because the guard was told 10,007 was
+/// composite.
+///
+/// `expected` rather than a bare `#[should_panic]`, on these and on
+/// their sieved-band siblings above: the panic these are about is a
+/// *specific* assertion, and a bare form passes on any panic the
+/// constructor might grow later — including a divide-by-zero in the
+/// very divisor search the guard exists to protect.
+#[test]
+#[should_panic(expected = "!is_prime(resolution.0)")]
+fn test_prime_x_above_the_sieve_ceiling() {
+    RegionParams::new(10, (10_007, 1000));
+}
+
+#[test]
+#[should_panic(expected = "!is_prime(dimensions.1)")]
+fn test_adapt_prime_y_above_the_sieve_ceiling() {
+    let mut p = RegionParams::new(7, (1000, 1000));
+    let _ = p.adapt(10, (1000, 10_007));
 }

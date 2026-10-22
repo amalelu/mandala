@@ -90,4 +90,3 @@ pub fn read_section_clipboard(probe_text: &str) -> Option<SectionPayload> {
             .and_then(|entry| (entry.text == probe_text).then(|| entry.payload.clone()))
     })
 }
-

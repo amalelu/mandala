@@ -55,6 +55,7 @@ use crate::gfx_structs::area::GlyphArea;
 use crate::gfx_structs::tree::Tree;
 use crate::mindmap::model::{MindMap, PortalEndpointState};
 use crate::mindmap::scene_cache::EdgeKey;
+use crate::util::geometry::aabb_center;
 
 /// `PORTAL_OUTSET_FRAC` — how far a marker sits off the border, as
 /// a fraction of its font size. Mirrored from `portal_style` so the
@@ -449,7 +450,9 @@ fn test_connection_label_tree_hit_matches_a_linear_scan_over_the_same_rectangles
     // laid out by the real loader — swept against the oracle.
     let map = crate::mindmap::loader::load_from_file(&test_map_path()).expect("testament map loads");
     let hidden = map.fold_hidden_set();
-    let elements = build_label_elements(&map, &HashMap::new(), None, None, None, 1.0, &hidden);
+    let offsets = HashMap::new();
+    let mut paths = super::super::EdgePathCache::new(&map, &offsets);
+    let elements = build_label_elements(&map, None, None, None, &mut paths, 1.0, &hidden);
     assert!(
         elements.len() >= 10,
         "fixture should carry labels; got {}",
@@ -521,7 +524,9 @@ fn crossing_labels_map() -> MindMap {
 fn test_crossing_edge_labels_resolve_to_the_smaller_label() {
     let map = crossing_labels_map();
     let hidden = map.fold_hidden_set();
-    let elements = build_label_elements(&map, &HashMap::new(), None, None, None, 1.0, &hidden);
+    let offsets = HashMap::new();
+    let mut paths = super::super::EdgePathCache::new(&map, &offsets);
+    let elements = build_label_elements(&map, None, None, None, &mut paths, 1.0, &hidden);
     assert_eq!(elements.len(), 2);
 
     let mut labels = build_connection_label_tree(&elements);
@@ -546,9 +551,9 @@ fn test_crossing_edge_labels_resolve_to_the_smaller_label() {
     // Both labels are centered on the crossing point, so the
     // shorter one nests inside the longer one and wins there.
     let short = &elements[1];
-    let center = Vec2::new(
-        short.position.0 + short.bounds.0 * 0.5,
-        short.position.1 + short.bounds.1 * 0.5,
+    let center = aabb_center(
+        Vec2::new(short.position.0, short.position.1),
+        Vec2::new(short.bounds.0, short.bounds.1),
     );
     let node_id = labels
         .tree

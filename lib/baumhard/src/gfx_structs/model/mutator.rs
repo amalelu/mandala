@@ -5,7 +5,7 @@
 //! insert). Both implement
 //! [`Applicable`](crate::core::primitives::Applicable)`<GlyphModel>`
 //! and route through
-//! [`GlyphModel`](crate::gfx_structs::model::GlyphModel)'s internal
+//! [`GlyphModel`]'s internal
 //! `apply_operation` or its public methods.
 
 use super::component::GlyphComponent;
@@ -169,7 +169,6 @@ impl Applicable<GlyphModel> for DeltaGlyphModel {
 #[strum_discriminants(derive(Hash, Serialize, Deserialize, EnumIter, Display))]
 #[strum_discriminants(doc = "Payload-free tag for [`GlyphModelCommand`], derived by strum.")]
 #[strum_discriminants(doc = "Keyable in `HashMap`/`HashSet` for command-dispatch tables.")]
-#[serde(deny_unknown_fields)]
 pub enum GlyphModelCommand {
     /// Shift position left by the given pixels.
     NudgeLeft(f32),

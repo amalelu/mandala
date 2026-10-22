@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Section text / colour / font / runs / payload setters. Every
+//! Section text / color / font / runs / payload setters. Every
 //! setter in this file routes through the shared envelope in
 //! `undo_envelope.rs` — `mutate_section_with_style_undo` for the
 //! formatting-only edits, `mutate_section_with_text_undo` for the
@@ -41,6 +41,12 @@ impl MindMapDocument {
         if new_regions.all_regions().is_empty() {
             return self.set_section_text(node_id, section_idx, new_text);
         }
+        // The pixel value a colorless run is painted in, so the
+        // converter can tell "this run still defers to the node's
+        // text color" from "this run was deliberately recolored".
+        // Without it a single keystroke in the inline editor bakes
+        // every theme-following run on the node into a literal hex.
+        let theme_text_rgba = self.mindmap.node_text_rgba(node);
         let prior_runs: Vec<&TextRun> = section.text_runs.iter().collect();
         let new_runs: Vec<TextRun> = new_regions
             .all_regions()
@@ -51,7 +57,7 @@ impl MindMapDocument {
                     region.range.start,
                     region.range.end,
                 );
-                super::super::custom::sync::region_to_text_run(region, prior)
+                super::super::custom::sync::region_to_text_run(region, prior, theme_text_rgba)
             })
             .collect();
         self.mutate_section_with_text_undo(node_id, section_idx, NodeEditTail::Grow, move |s| {
@@ -155,18 +161,26 @@ impl MindMapDocument {
     }
 
     /// Rewrite every run on the section that matches the cascade
-    /// predicate (unanimous run colour, or the node's
-    /// `style.text_color` default) to `color`. Mixed-colour
-    /// sections preserve their non-predicate runs. The node's own
-    /// `style.text_color` is never touched.
+    /// predicate (unanimous run color, or the node's effective
+    /// text color) to `color`. Mixed-color sections preserve
+    /// their non-predicate runs. The node's own text color — its
+    /// palette override or its `style.text_color` — is never
+    /// touched: this setter is section-scoped, and its siblings
+    /// must keep following the node.
     pub fn set_section_text_color(&mut self, node_id: &str, section_idx: usize, color: String) -> bool {
-        // The predicate's fallback is the *node's*
-        // `style.text_color`, so this one reaches for the
-        // node-scoped envelope rather than the section wrapper.
+        // The predicate's fallback is the *node's* effective text
+        // color, so this one reaches for the node-scoped envelope
+        // rather than the section wrapper. Read through the
+        // cascade, not off `style`: on a themed node
+        // `style.text_color` is a value the palette shadows, and
+        // runs baked from the palette would never match it.
         // `NodeEditTail::None`: color never shifts a glyph
         // advance.
+        let Some(read_node) = self.mindmap.nodes.get(node_id) else {
+            return false;
+        };
+        let node_default = self.mindmap.node_text_color(read_node).to_string();
         self.mutate_node_with_style_undo(node_id, NodeEditTail::None, move |node| {
-            let node_default = node.style.text_color.clone();
             let section = node.sections.get_mut(section_idx)?;
             let predicate_color = section
                 .text_runs
@@ -198,18 +212,23 @@ impl MindMapDocument {
     /// `grow_one_node_to_fit_text` floor as the whole-node setter
     /// — sections share the node's AABB, so a larger run on one
     /// section can grow the node.
+    ///
+    /// A section carrying text but no runs gets one authored at
+    /// the requested size, which is what its range-targeted
+    /// sibling [`Self::set_section_font_size_range`] already did
+    /// through its gap-fill template.
     pub fn set_section_font_size(&mut self, node_id: &str, section_idx: usize, size_pt: f32) -> bool {
         if !size_pt.is_finite() {
             return false;
         }
-        let size_u = size_pt.round().max(1.0) as u32;
+        // Same clamp as the whole-node setter — bounded into the
+        // loader's run domain, fractional sizes kept as written.
+        let size = crate::application::document::custom::sync::clamp_run_size_pt(size_pt);
         self.mutate_section_with_style_undo(node_id, section_idx, NodeEditTail::Grow, move |s| {
-            if s.text_runs.iter().all(|r| r.size_pt == size_u) {
+            if section_runs_all_match(s, |r| r.size_pt == size) {
                 return false;
             }
-            for run in s.text_runs.iter_mut() {
-                run.size_pt = size_u;
-            }
+            write_every_section_run(s, |r| r.size_pt = size);
             true
         })
     }
@@ -220,6 +239,10 @@ impl MindMapDocument {
     /// section; `None` clears the pin. Triggers the same monotonic
     /// `grow_one_node_to_fit_text` re-measure as the whole-node
     /// setter — face changes can shift advance widths.
+    ///
+    /// A section carrying text but no runs gets one authored at
+    /// the requested family, on the same terms as
+    /// [`Self::set_section_font_size`].
     pub fn set_section_font_family(
         &mut self,
         node_id: &str,
@@ -228,12 +251,10 @@ impl MindMapDocument {
     ) -> bool {
         let target = family.unwrap_or("").to_string();
         self.mutate_section_with_style_undo(node_id, section_idx, NodeEditTail::Grow, move |s| {
-            if s.text_runs.iter().all(|r| r.font == target) {
+            if section_runs_all_match(s, |r| r.font == target) {
                 return false;
             }
-            for run in s.text_runs.iter_mut() {
-                run.font = target.clone();
-            }
+            write_every_section_run(s, |r| r.font = target.clone());
             true
         })
     }
@@ -243,14 +264,14 @@ impl MindMapDocument {
     // Range-aware mirrors of the uniform setters above; route
     // through `text_run_ops::mutate_in_range`.
 
-    /// Set the text colour on a sub-range of one section's text.
+    /// Set the text color on a sub-range of one section's text.
     /// Bounded sibling of [`Self::set_section_text_color`] — that
     /// setter rewrites every run uniformly, this one targets
     /// `[range_start, range_end)` graphemes only. Ranges that
     /// partially or wholly cross uncovered gaps fill the gap
     /// with a fresh run inheriting the section / node cascade
-    /// defaults plus the new colour, so the user's "make these
-    /// graphemes red" intent is honoured even where no run
+    /// defaults plus the new color, so the user's "make these
+    /// graphemes red" intent is honored even where no run
     /// exists today.
     ///
     /// `range_end` is clamped to the section's grapheme count;
@@ -266,7 +287,7 @@ impl MindMapDocument {
         range_end: usize,
         color: String,
     ) -> bool {
-        // Text colour doesn't affect glyph advance — no grow.
+        // Text color doesn't affect glyph advance — no grow.
         self.mutate_section_runs_in_range(
             node_id,
             section_idx,
@@ -291,14 +312,16 @@ impl MindMapDocument {
         if !size_pt.is_finite() {
             return false;
         }
-        let size_u = size_pt.round().max(1.0) as u32;
+        // Same clamp as the whole-node setter — bounded into the
+        // loader's run domain, fractional sizes kept as written.
+        let size = crate::application::document::custom::sync::clamp_run_size_pt(size_pt);
         self.mutate_section_runs_in_range(
             node_id,
             section_idx,
             range_start,
             range_end,
             NodeEditTail::Grow,
-            move |r| r.size_pt = size_u,
+            move |r| r.size_pt = size,
         )
     }
 
@@ -377,9 +400,13 @@ impl MindMapDocument {
     /// Range-setter pre-flight: clamps `range_end` to the
     /// section's grapheme count and builds the gap-fill
     /// template from the section's first run (cascade source)
-    /// or the authoring defaults recolored to the node's
-    /// `style.text_color` when the section has no runs. Caller
-    /// overwrites the one attribute it's setting.
+    /// or the authoring defaults when the section has no runs.
+    /// Caller overwrites the one attribute it's setting.
+    ///
+    /// The defaults leave `color` empty on purpose — a `bold` over
+    /// a range must not decide the color of the graphemes it
+    /// fills, and empty is the spelling that leaves the node's
+    /// text color (palette or `style`) in charge.
     fn clamp_range_and_build_template(
         &self,
         node_id: &str,
@@ -390,10 +417,11 @@ impl MindMapDocument {
         let section = node.sections.get(section_idx)?;
         let total = baumhard::util::grapheme_chad::count_grapheme_clusters(&section.text);
         let clamped_end = range_end.min(total);
-        let template = section.text_runs.first().cloned().unwrap_or_else(|| TextRun {
-            color: node.style.text_color.clone(),
-            ..default_text_run(0)
-        });
+        let template = section
+            .text_runs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| default_text_run(0));
         Some((clamped_end, template))
     }
 
@@ -442,6 +470,71 @@ impl MindMapDocument {
             clamp_runs_to_text(s);
             true
         })
+    }
+}
+
+/// Whether every run on `section` already satisfies `matches`, in
+/// the sense the uniform style setters need — i.e. whether
+/// [`write_every_section_run`] would find nothing to do.
+///
+/// **Not `text_runs.iter().all(..)`.** `all` on an empty iterator
+/// is vacuously true, so a section carrying text and no runs
+/// reported "already at the target value" and every uniform
+/// font-size / font-family setter silently returned `false` on
+/// it. A run-less section is a documented, loadable shape (see
+/// `MindSection::text_runs`: it renders at the cascade defaults),
+/// so this is a shape a real map can be in, not a
+/// can't-happen. The answer here is that such a section is
+/// *never* already at the target — writing one materializes a
+/// run — unless it has no text either, in which case there is
+/// genuinely nothing to style.
+pub(in crate::application::document) fn section_runs_all_match(
+    section: &baumhard::mindmap::model::MindSection,
+    matches: impl Fn(&TextRun) -> bool,
+) -> bool {
+    if section.text_runs.is_empty() {
+        return section.text.is_empty();
+    }
+    section.text_runs.iter().all(matches)
+}
+
+/// Apply `set` to every run of `section`, materializing a first
+/// run from the authoring defaults when the section carries text
+/// but no runs.
+///
+/// The template is [`default_text_run`], the same one the
+/// range-targeted setters fill their gaps from
+/// (`clamp_range_and_build_template`) — so `font size=20` over a
+/// section's whole text now lands the same run the equivalent
+/// `font size=20 range=0..n` already did. Before this, the range
+/// setter created the run and the uniform setter did nothing,
+/// which is the disagreement rather than the template's choice of
+/// defaults.
+///
+/// A section with no text is left alone: `text_run_ops` requires
+/// `start < end` and panics in debug builds on a degenerate run,
+/// so "author a run onto empty text" is not an available outcome.
+/// That guard carries live traffic rather than standing by for a
+/// future caller. The per-section setters do ask
+/// [`section_runs_all_match`] about this section first and stop
+/// here; the whole-node pair asks it about the *node* — `all` over
+/// its sections — and then writes every section, so one section
+/// that needs a run hands its textless siblings straight to this
+/// function.
+pub(in crate::application::document) fn write_every_section_run(
+    section: &mut baumhard::mindmap::model::MindSection,
+    set: impl Fn(&mut TextRun),
+) {
+    clamp_runs_to_text(section);
+    if section.text_runs.is_empty() {
+        let count = baumhard::util::grapheme_chad::count_grapheme_clusters(&section.text);
+        if count == 0 {
+            return;
+        }
+        section.text_runs.push(default_text_run(count));
+    }
+    for run in section.text_runs.iter_mut() {
+        set(run);
     }
 }
 

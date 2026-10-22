@@ -2,7 +2,9 @@
 
 //! Once-per-process device / surface setup.
 
-use wgpu::{Adapter, Device, Instance, Queue, Surface, SurfaceCapabilities, SurfaceConfiguration, TextureFormat};
+use wgpu::{
+    Adapter, Device, Instance, Queue, Surface, SurfaceCapabilities, SurfaceConfiguration, TextureFormat,
+};
 use winit::dpi::PhysicalSize;
 
 use super::Renderer;
@@ -16,6 +18,13 @@ impl Renderer {
         SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: texture_format,
+            // `Auto` is wgpu 30's default and reproduces the color
+            // space every earlier wgpu picked implicitly for the
+            // chosen format: sRGB for the sRGB format `Renderer::new`
+            // prefers, and the historical choice for its `formats[0]`
+            // fallback. The canvas renders as it did before the field
+            // existed.
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: surface_size.width,
             height: surface_size.height,
             present_mode: wgpu::PresentMode::Fifo,
@@ -53,7 +62,12 @@ impl Renderer {
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
+                compatible_surface: Some(surface),
+                // Limit bucketing is a fingerprinting defence for
+                // hosts that expose wgpu to untrusted content. This
+                // app runs only its own code, so it keeps the
+                // adapter's real limits, as before the option existed.
+                apply_limit_buckets: false,
             })
             .await
             .expect("Failed to find an appropriate adapter")

@@ -8,7 +8,9 @@
 //! pins the narrow-vs-wide semantics so a future refactor can't
 //! quietly make one variant report through another's accessor.
 
-use super::types::{EdgeLabelSel, EdgeRef, PortalLabelSel, SectionSel, SelectionState};
+use super::types::{
+    EdgeLabelSel, EdgeRef, GraphemeRange, PortalLabelSel, SectionSel, SectionSpan, SelectionState,
+};
 use baumhard::mindmap::scene_cache::EdgeKey;
 
 fn edge_ref() -> EdgeRef {
@@ -169,8 +171,15 @@ fn test_selection_state_is_selected() {
 
     let multi = SelectionState::Multi(vec!["123".to_string(), "456".to_string()]);
     assert!(multi.is_selected("123"));
+    // The second member too, so a scan that only reads the head
+    // of the list fails.
     assert!(multi.is_selected("456"));
     assert!(!multi.is_selected("789"));
+    // Near-misses, in both directions: whole-id equality, not a
+    // prefix or containment test. Dewey ids make these neighbors
+    // real — "1.2" and "1.23" are different nodes.
+    assert!(!multi.is_selected("12"));
+    assert!(!multi.is_selected("1234"));
 
     // Section selection counts as "this owning node is selected" —
     // every per-node consumer (highlight, drag, chrome) gets the
@@ -249,10 +258,7 @@ fn test_selection_state_from_sections_many_is_multisection_preserving_order() {
 
 #[test]
 fn test_multisection_is_selected_matches_any_section_node() {
-    let sel = SelectionState::MultiSection(vec![
-        SectionSel::new("a", 0),
-        SectionSel::new("b", 2),
-    ]);
+    let sel = SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 2)]);
     assert!(sel.is_selected("a"));
     assert!(sel.is_selected("b"));
     assert!(!sel.is_selected("c"));
@@ -275,10 +281,7 @@ fn test_multisection_selected_section_returns_none() {
     // `selected_section()` is the single-target accessor — it
     // returns None for MultiSection so verbs that need a single
     // section target route through `selected_sections()` instead.
-    let sel = SelectionState::MultiSection(vec![
-        SectionSel::new("a", 0),
-        SectionSel::new("a", 1),
-    ]);
+    let sel = SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("a", 1)]);
     assert!(sel.selected_section().is_none());
 }
 
@@ -358,7 +361,10 @@ fn test_from_sections_all_duplicates_collapses_to_section() {
 fn test_dedup_owning_node_ids_across_variants() {
     // Multi with duplicates — first-seen wins.
     let multi = SelectionState::Multi(vec!["a".into(), "a".into(), "b".into()]);
-    assert_eq!(multi.dedup_owning_node_ids(), vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(
+        multi.dedup_owning_node_ids(),
+        vec!["a".to_string(), "b".to_string()]
+    );
 
     // MultiSection with two sections of one node + one of
     // another — dedup'd to two unique node ids.
@@ -407,27 +413,94 @@ fn test_section_range_accessors_route_to_owning_section() {
     let target = SectionSel::new("a", 1);
     let sel = SelectionState::SectionRange {
         sel: target.clone(),
-        range: (3, 7),
+        section_span: SectionSpan::single(1),
+        grapheme_range: GraphemeRange::new(3, 7),
     };
     assert!(sel.is_selected("a"));
     assert!(!sel.is_selected("b"));
     assert_eq!(sel.selected_ids(), vec!["a"]);
     assert_eq!(sel.selected_sections(), &[target]);
     assert_eq!(sel.dedup_owning_node_ids(), vec!["a".to_string()]);
-    assert_eq!(sel.selected_range(), Some((3, 7)));
+    assert_eq!(sel.selected_grapheme_range(), Some(GraphemeRange::new(3, 7)));
     let s = sel.selected_section().expect("inner SectionSel");
     assert_eq!(s.node_id, "a");
     assert_eq!(s.section_idx, 1);
 }
 
 #[test]
-fn test_other_variants_selected_range_is_none() {
-    assert!(SelectionState::None.selected_range().is_none());
-    assert!(SelectionState::Single("a".into()).selected_range().is_none());
+fn test_other_variants_selected_grapheme_range_is_none() {
+    assert!(SelectionState::None.selected_grapheme_range().is_none());
+    assert!(SelectionState::Single("a".into())
+        .selected_grapheme_range()
+        .is_none());
     assert!(SelectionState::Section(SectionSel::new("a", 0))
-        .selected_range()
+        .selected_grapheme_range()
         .is_none());
-    assert!(SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 0)])
-        .selected_range()
-        .is_none());
+    assert!(
+        SelectionState::MultiSection(vec![SectionSel::new("a", 0), SectionSel::new("b", 0)])
+            .selected_grapheme_range()
+            .is_none()
+    );
+}
+
+// -----------------------------------------------------------------
+// Rubber-band preview memo
+// -----------------------------------------------------------------
+
+/// The memo that makes a rubber-band frame cheap: writing the same
+/// covered set twice reports `false` the second time, and `false` is
+/// what `drain_rect_select` returns on, before it would rebuild
+/// anything.
+///
+/// Fails on the input below if `set_rect_select_preview` stops
+/// comparing against what is already stored — which is the pre-#37
+/// shape, where the drain rebuilt the arena and the text buffers on
+/// every frame of the drag whether or not the rectangle had crossed
+/// a node.
+///
+/// The middle row is the control that keeps the first from being
+/// "answer `false` always": crossing a node boundary adds an id, and
+/// that has to come back `true` or the preview would freeze at
+/// whatever set it first covered.
+#[test]
+fn test_rect_select_preview_reports_a_repaint_only_when_the_covered_set_moves() {
+    let mut doc = super::tests_common::load_test_doc();
+    assert!(
+        doc.set_rect_select_preview(vec!["a".to_string(), "b".to_string()]),
+        "the first frame of a drag always has a set to install"
+    );
+    assert!(
+        !doc.set_rect_select_preview(vec!["a".to_string(), "b".to_string()]),
+        "a frame that slid the rectangle without crossing a node owes no repaint"
+    );
+    assert!(
+        doc.set_rect_select_preview(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+        "crossing into a third node must repaint"
+    );
+    assert!(
+        doc.set_rect_select_preview(vec!["a".to_string()]),
+        "and crossing back out of two must repaint too"
+    );
+}
+
+/// A rectangle that covers nothing is a real state — the user
+/// starts every drag there — and it is not the same state as "no
+/// drag in flight". `Some(vec![])` clears the pre-drag selection's
+/// highlight; `None` restores it.
+///
+/// Fails if the preview is ever stored as a bare `Vec` with empty
+/// standing in for absent, which would make the first frame of every
+/// drag repaint the old selection instead of clearing it.
+#[test]
+fn test_an_empty_rect_select_preview_is_distinct_from_no_preview() {
+    let mut doc = super::tests_common::load_test_doc();
+    assert!(doc.set_rect_select_preview(Vec::new()));
+    assert_eq!(doc.rect_select_preview.as_deref(), Some(&[][..]));
+    assert_eq!(doc.take_rect_select_preview(), Some(Vec::new()));
+    assert_eq!(doc.rect_select_preview, None);
+    assert_eq!(
+        doc.take_rect_select_preview(),
+        None,
+        "ending a gesture twice is a no-op, not a re-arm"
+    );
 }

@@ -2,6 +2,9 @@
 
 //! Tests for [`crate::gfx_structs::model::GlyphModel`] — line/matrix
 //! construction and component layout (§T1).
+//!
+//! Follows the `do_*()` / `test_*()` split from §T2.2: every `do_*`
+//! body is benchmarkable from `benches/test_bench.rs`.
 
 use crate::core::primitives::{Applicable, ApplyOperation, ColorFontRegion, ColorFontRegions, Range};
 use crate::font::fonts::AppFont;
@@ -11,15 +14,12 @@ use crate::gfx_structs::model::{
 use crate::util::color::Color;
 use crate::util::grapheme_chad::{count_grapheme_clusters, count_number_lines, find_byte_index_of_grapheme};
 
-/// The tests are written in a non-test-annotated function and then wrapped by an annotated test function
-/// So that they can be reused for benchmarking
-
 #[test]
 pub fn test_matrix_place_in_1() {
-    matrix_place_in_1();
+    do_matrix_place_in_1();
 }
 
-pub fn matrix_place_in_1() {
+pub fn do_matrix_place_in_1() {
     let mut matrix = GlyphMatrix::new();
     matrix.push(GlyphLine::new_with(GlyphComponent::text(
         "##########",
@@ -60,19 +60,19 @@ fn assert_matrix_place_in(my_string: &String, regions: &ColorFontRegions) {
     );
     assert_eq!(regions.num_regions(), 3);
     let first_region = regions.regions.first();
-    assert_eq!(first_region.is_some(), true);
+    assert!(first_region.is_some());
     let unwrapped_first_region = first_region.unwrap();
     assert_eq!(unwrapped_first_region.range, Range::new(20, 30));
     assert_eq!(unwrapped_first_region.color.unwrap(), Color::black().to_float());
     assert_eq!(unwrapped_first_region.font.unwrap(), AppFont::Evilz);
     let second_region = regions.get(Range::new(41, 51));
-    assert_eq!(second_region.is_some(), true);
+    assert!(second_region.is_some());
     let unwrapped_second_region = second_region.unwrap();
     assert_eq!(unwrapped_second_region.range, Range::new(41, 51));
     assert_eq!(unwrapped_second_region.color.unwrap(), Color::black().to_float());
     assert_eq!(unwrapped_second_region.font.unwrap(), AppFont::Evilz);
     let third_region = regions.get(Range::new(62, 72));
-    assert_eq!(third_region.is_some(), true);
+    assert!(third_region.is_some());
     let unwrapped_third_region = third_region.unwrap();
     assert_eq!(unwrapped_third_region.range, Range::new(62, 72));
     assert_eq!(unwrapped_third_region.color.unwrap(), Color::black().to_float());
@@ -81,10 +81,10 @@ fn assert_matrix_place_in(my_string: &String, regions: &ColorFontRegions) {
 
 #[test]
 pub fn test_matrix_place_in_2() {
-    matrix_place_in_2();
+    do_matrix_place_in_2();
 }
 
-pub fn matrix_place_in_2() {
+pub fn do_matrix_place_in_2() {
     let mut matrix_a = GlyphMatrix::new();
     matrix_a.push(GlyphLine::new_with(GlyphComponent::text(
         "##########",
@@ -184,10 +184,10 @@ pub fn matrix_place_in_2() {
 
 #[test]
 pub fn test_matrix_place_in_3() {
-    matrix_place_in_3();
+    do_matrix_place_in_3();
 }
 
-pub fn matrix_place_in_3() {
+pub fn do_matrix_place_in_3() {
     let mut matrix_a = GlyphMatrix::new();
     matrix_a.push(GlyphLine::new_with(GlyphComponent::text(
         "🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻",
@@ -291,7 +291,7 @@ pub fn matrix_place_in_3() {
 
 #[test]
 pub fn test_matrix_place_in_multiline_component() {
-    matrix_place_in_multiline_component();
+    do_matrix_place_in_multiline_component();
 }
 
 /// A `GlyphComponent`'s text is arbitrary and may itself contain
@@ -312,7 +312,7 @@ pub fn test_matrix_place_in_multiline_component() {
 /// any cluster ending in `\n` as a terminator the two disagree and
 /// every row after a CRLF-bearing one is looked up a line too far
 /// down, falls off the end, and is appended onto its predecessor.
-pub fn matrix_place_in_multiline_component() {
+pub fn do_matrix_place_in_multiline_component() {
     let mut matrix = GlyphMatrix::new();
     // Row 0 carries an author line break inside one component.
     matrix.push(GlyphLine::new_with(GlyphComponent::text(
@@ -681,7 +681,7 @@ pub fn matrix_place_in_multiline_component() {
 
 #[test]
 pub fn test_matrix_place_in_fusing_component() {
-    matrix_place_in_fusing_component();
+    do_matrix_place_in_fusing_component();
 }
 
 /// A component whose text begins with a cluster-extending scalar
@@ -691,7 +691,7 @@ pub fn test_matrix_place_in_fusing_component() {
 /// `place_in` — reachable in three lines, and unexercised by every
 /// other test in this file, all of whose components start on a
 /// non-combining scalar.
-pub fn matrix_place_in_fusing_component() {
+pub fn do_matrix_place_in_fusing_component() {
     let mut matrix = GlyphMatrix::new();
     let mut line = GlyphLine::new();
     line.push(GlyphComponent::text("ab", AppFont::Evilz, Color::black()));
@@ -810,10 +810,10 @@ pub fn matrix_place_in_fusing_component() {
 
 #[test]
 pub fn test_matrix_add_assign_2() {
-    matrix_add_assign_2();
+    do_matrix_add_assign_2();
 }
 
-pub fn matrix_add_assign_2() {
+pub fn do_matrix_add_assign_2() {
     let mut matrix = GlyphMatrix::new();
 
     matrix.push(GlyphLine::new_with(GlyphComponent::text(
@@ -933,10 +933,10 @@ pub fn matrix_add_assign_2() {
 
 #[test]
 pub fn test_matrix_add_assign_1() {
-    matrix_add_assign_1();
+    do_matrix_add_assign_1();
 }
 
-pub fn matrix_add_assign_1() {
+pub fn do_matrix_add_assign_1() {
     let mut matrix = create_default_matrix();
 
     let mut modifier_matrix = GlyphMatrix::new();
@@ -981,10 +981,10 @@ pub fn matrix_add_assign_1() {
 
 #[test]
 pub fn test_matrix_mul_assign_1() {
-    matrix_mul_assign_1();
+    do_matrix_mul_assign_1();
 }
 
-pub fn matrix_mul_assign_1() {
+pub fn do_matrix_mul_assign_1() {
     let mut matrix = create_default_matrix();
 
     let mut modifier_matrix = GlyphMatrix::new();
@@ -1086,16 +1086,16 @@ fn create_default_matrix() -> GlyphMatrix {
         Color::white(),
     )));
 
-    return matrix;
+    matrix
 }
 
 #[test]
 pub fn test_line_add_assign_1() {
-    line_add_assign_1();
+    do_line_add_assign_1();
 }
 
 // Pretty straight forward, simple test case
-pub fn line_add_assign_1() {
+pub fn do_line_add_assign_1() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::text(
         "##########",
@@ -1127,11 +1127,11 @@ pub fn line_add_assign_1() {
 
 #[test]
 pub fn test_line_add_assign_2() {
-    line_add_assign_2();
+    do_line_add_assign_2();
 }
 
 // Here we test the ability to ignore initial whitespace, while also respecting the indices
-pub fn line_add_assign_2() {
+pub fn do_line_add_assign_2() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::text(
         "##########",
@@ -1165,11 +1165,11 @@ pub fn line_add_assign_2() {
 
 #[test]
 pub fn test_line_add_assign_3() {
-    line_add_assign_3();
+    do_line_add_assign_3();
 }
 
 // Here we test the ability to handle emojis
-pub fn line_add_assign_3() {
+pub fn do_line_add_assign_3() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::text(
         "##########",
@@ -1203,10 +1203,10 @@ pub fn line_add_assign_3() {
 
 #[test]
 pub fn test_line_add_assign_4() {
-    line_add_assign_4();
+    do_line_add_assign_4();
 }
 
-pub fn line_add_assign_4() {
+pub fn do_line_add_assign_4() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::text(
         "##############################",
@@ -1229,10 +1229,10 @@ pub fn line_add_assign_4() {
 }
 #[test]
 pub fn test_component_of_index() {
-    component_of_index();
+    do_component_of_index();
 }
 
-pub fn component_of_index() {
+pub fn do_component_of_index() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(10)); //0
     glyph_line.push(GlyphComponent::space(10)); //1
@@ -1253,10 +1253,10 @@ pub fn component_of_index() {
 
 #[test]
 pub fn test_index_of_component() {
-    index_of_component();
+    do_index_of_component();
 }
 
-pub fn index_of_component() {
+pub fn do_index_of_component() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(10)); //0
     glyph_line.push(GlyphComponent::space(10)); //1
@@ -1271,10 +1271,10 @@ pub fn index_of_component() {
 
 #[test]
 pub fn test_expanding_insert_1() {
-    expanding_insert_1();
+    do_expanding_insert_1();
 }
 
-pub fn expanding_insert_1() {
+pub fn do_expanding_insert_1() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(10)); //0
     glyph_line.push(GlyphComponent::text("12", AppFont::AppleTea, Color::black())); //1
@@ -1297,10 +1297,10 @@ pub fn expanding_insert_1() {
 
 #[test]
 pub fn test_expanding_insert_2() {
-    expanding_insert_2();
+    do_expanding_insert_2();
 }
 
-pub fn expanding_insert_2() {
+pub fn do_expanding_insert_2() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(10)); //0
     glyph_line.push(GlyphComponent::text("12", AppFont::AppleTea, Color::black())); //1
@@ -1321,10 +1321,10 @@ pub fn expanding_insert_2() {
 
 #[test]
 pub fn test_expanding_insert_3() {
-    expanding_insert_3();
+    do_expanding_insert_3();
 }
 
-pub fn expanding_insert_3() {
+pub fn do_expanding_insert_3() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(10)); //0
     glyph_line.push(GlyphComponent::text("12", AppFont::AppleTea, Color::black())); //1
@@ -1346,27 +1346,27 @@ pub fn expanding_insert_3() {
 
 #[test]
 pub fn test_expanding_insert_4() {
-    expanding_insert_4();
+    do_expanding_insert_4();
 }
 
-pub fn expanding_insert_4() {
+pub fn do_expanding_insert_4() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.expanding_insert(0, &GlyphComponent::text("123", AppFont::African, Color::black()));
     assert_eq!(glyph_line.line.len(), 1);
-    assert_eq!(glyph_line.line.get(0).unwrap().text, "123");
+    assert_eq!(glyph_line.line.first().unwrap().text, "123");
 }
 
 #[test]
 pub fn test_expanding_insert_5() {
-    expanding_insert_5();
+    do_expanding_insert_5();
 }
 
-pub fn expanding_insert_5() {
+pub fn do_expanding_insert_5() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.expanding_insert(10, &GlyphComponent::text("123", AppFont::African, Color::black()));
     assert_eq!(glyph_line.line.len(), 2);
     assert_eq!(
-        glyph_line.line.get(0).unwrap().text,
+        glyph_line.line.first().unwrap().text,
         GlyphComponent::space(10).text
     );
     assert_eq!(glyph_line.line.get(1).unwrap().text, "123");
@@ -1374,16 +1374,16 @@ pub fn expanding_insert_5() {
 
 #[test]
 pub fn test_expanding_insert_6() {
-    expanding_insert_6();
+    do_expanding_insert_6();
 }
 
-pub fn expanding_insert_6() {
+pub fn do_expanding_insert_6() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(5));
     glyph_line.expanding_insert(10, &GlyphComponent::text("123", AppFont::African, Color::black()));
     assert_eq!(glyph_line.line.len(), 2);
     assert_eq!(
-        glyph_line.line.get(0).unwrap().text,
+        glyph_line.line.first().unwrap().text,
         GlyphComponent::space(10).text
     );
     assert_eq!(glyph_line.line.get(1).unwrap().text, "123");
@@ -1391,16 +1391,16 @@ pub fn expanding_insert_6() {
 
 #[test]
 pub fn test_expanding_insert_7() {
-    expanding_insert_7();
+    do_expanding_insert_7();
 }
 
-pub fn expanding_insert_7() {
+pub fn do_expanding_insert_7() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(10));
     glyph_line.expanding_insert(10, &GlyphComponent::text("123", AppFont::African, Color::black()));
     assert_eq!(glyph_line.line.len(), 2);
     assert_eq!(
-        glyph_line.line.get(0).unwrap().text,
+        glyph_line.line.first().unwrap().text,
         GlyphComponent::space(10).text
     );
     assert_eq!(glyph_line.line.get(1).unwrap().text, "123");
@@ -1408,10 +1408,10 @@ pub fn expanding_insert_7() {
 
 #[test]
 pub fn test_overriding_insert_1() {
-    overriding_insert_1();
+    do_overriding_insert_1();
 }
 
-pub fn overriding_insert_1() {
+pub fn do_overriding_insert_1() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(20)); //0
     glyph_line.push(GlyphComponent::space(20)); //1
@@ -1425,10 +1425,10 @@ pub fn overriding_insert_1() {
 }
 #[test]
 pub fn test_overriding_insert_2() {
-    overriding_insert_2();
+    do_overriding_insert_2();
 }
 
-pub fn overriding_insert_2() {
+pub fn do_overriding_insert_2() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(20)); //0
     glyph_line.push(GlyphComponent::space(20)); //1
@@ -1446,10 +1446,10 @@ pub fn overriding_insert_2() {
 
 #[test]
 pub fn test_overriding_insert_3() {
-    overriding_insert_3();
+    do_overriding_insert_3();
 }
 
-pub fn overriding_insert_3() {
+pub fn do_overriding_insert_3() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(20)); //0
     glyph_line.push(GlyphComponent::space(20)); //1
@@ -1465,10 +1465,10 @@ pub fn overriding_insert_3() {
 
 #[test]
 pub fn test_overriding_insert_4() {
-    overriding_insert_4();
+    do_overriding_insert_4();
 }
 
-pub fn overriding_insert_4() {
+pub fn do_overriding_insert_4() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(20)); //0
     glyph_line.push(GlyphComponent::space(20)); //1
@@ -1482,10 +1482,10 @@ pub fn overriding_insert_4() {
 
 #[test]
 pub fn test_overriding_insert_5() {
-    overriding_insert_5();
+    do_overriding_insert_5();
 }
 
-pub fn overriding_insert_5() {
+pub fn do_overriding_insert_5() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(20)); //0
     glyph_line.push(GlyphComponent::space(20)); //1
@@ -1500,10 +1500,10 @@ pub fn overriding_insert_5() {
 
 #[test]
 pub fn test_overriding_insert_6() {
-    overriding_insert_6();
+    do_overriding_insert_6();
 }
 
-pub fn overriding_insert_6() {
+pub fn do_overriding_insert_6() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(20)); //0
     glyph_line.push(GlyphComponent::space(20)); //1
@@ -1520,10 +1520,10 @@ pub fn overriding_insert_6() {
 
 #[test]
 pub fn test_overriding_insert_7() {
-    overriding_insert_7();
+    do_overriding_insert_7();
 }
 
-pub fn overriding_insert_7() {
+pub fn do_overriding_insert_7() {
     let mut glyph_line = GlyphLine::new();
     glyph_line.push(GlyphComponent::space(1)); //0
     glyph_line.push(GlyphComponent::space(1)); //1
@@ -1560,10 +1560,10 @@ pub fn overriding_insert_7() {
 
 #[test]
 pub fn test_overriding_insert_8() {
-    overriding_insert_8();
+    do_overriding_insert_8();
 }
 
-pub fn overriding_insert_8() {
+pub fn do_overriding_insert_8() {
     let mut glyph_line = GlyphLine::new();
 
     glyph_line.push(GlyphComponent::text(
@@ -1589,10 +1589,10 @@ pub fn overriding_insert_8() {
 
 #[test]
 pub fn test_overriding_insert_9() {
-    overriding_insert_9();
+    do_overriding_insert_9();
 }
 
-pub fn overriding_insert_9() {
+pub fn do_overriding_insert_9() {
     let mut glyph_line = GlyphLine::new();
 
     glyph_line.push(GlyphComponent::text(
@@ -1621,10 +1621,10 @@ pub fn overriding_insert_9() {
 
 #[test]
 pub fn test_overriding_insert_10() {
-    overriding_insert_10();
+    do_overriding_insert_10();
 }
 
-pub fn overriding_insert_10() {
+pub fn do_overriding_insert_10() {
     let mut glyph_line = GlyphLine::new();
 
     glyph_line.push(GlyphComponent::text(
@@ -1662,10 +1662,10 @@ pub fn overriding_insert_10() {
 
 #[test]
 pub fn test_overriding_insert_11() {
-    overriding_insert_11();
+    do_overriding_insert_11();
 }
 
-pub fn overriding_insert_11() {
+pub fn do_overriding_insert_11() {
     let mut glyph_line = GlyphLine::new();
 
     glyph_line.push(GlyphComponent::text(
@@ -1682,10 +1682,10 @@ pub fn overriding_insert_11() {
 
 #[test]
 pub fn test_overriding_insert_12() {
-    overriding_insert_12();
+    do_overriding_insert_12();
 }
 
-pub fn overriding_insert_12() {
+pub fn do_overriding_insert_12() {
     let mut glyph_line = GlyphLine::new();
 
     glyph_line.push(GlyphComponent::text(
@@ -1711,10 +1711,10 @@ pub fn overriding_insert_12() {
 
 #[test]
 pub fn test_overriding_insert_13() {
-    overriding_insert_13();
+    do_overriding_insert_13();
 }
 
-pub fn overriding_insert_13() {
+pub fn do_overriding_insert_13() {
     let mut glyph_line = GlyphLine::new();
 
     glyph_line.push(GlyphComponent::text(
@@ -2116,7 +2116,7 @@ pub fn do_component_add_assign_appends_text() {
 
 /// `GlyphModelCommand::Rotate` swings the model's position around a
 /// displaced pivot. Uses the geometry epsilon rather than bit
-/// equality — the trig is `f32`, so `model_block_commands` can only
+/// equality — the trig is `f32`, so `do_model_block_commands` can only
 /// assert the pivot-is-the-position fixed point exactly.
 #[test]
 pub fn test_model_rotate_moves_position_around_pivot() {
@@ -2395,7 +2395,7 @@ pub fn test_line_runs_paint_by_column_with_the_flag_off() {
 /// `self`. On `main` each row below either panics outright or
 /// resurrects text the insert should have covered:
 ///
-/// - `["ab","cd"] += ["W","XYZ"]` panicked in `index_of_component`.
+/// - `["ab","cd"] += ["W","XYZ"]` panicked in `do_index_of_component`.
 /// - `["ab","cd","ef"] += ["W","X"]` panicked likewise.
 /// - `["a","b","c","d","e","f"] += ["WX","YZ"]` produced `WXYZcef`,
 ///   with the overwritten `c` resurrected between them.

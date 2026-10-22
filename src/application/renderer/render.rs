@@ -99,7 +99,9 @@ impl Renderer {
         for rect in self
             .node_background_rects
             .iter()
-            .chain(self.canvas_scene_background_rects.iter())
+            .chain(super::scene_shape_cache::background_fills(
+                &self.canvas_scene_elements,
+            ))
         {
             if !rect.visible_at(&self.camera) {
                 continue;
@@ -284,7 +286,7 @@ impl Renderer {
             }
         }
         self.queue.submit(Some(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
         self.atlas.trim();
     }
 
@@ -301,12 +303,14 @@ impl Renderer {
     /// Shared between `render()` (steady-state) and `prewarm()`
     /// (one-shot at load) so the warm-up sees exactly the same
     /// glyph set the next real frame will draw.
-    /// Note: this performs disjoint mutable borrows of `text_renderer`
-    /// + `atlas` + `swash_cache` while holding immutable borrows of
-    /// the buffer-map fields; the borrow checker permits this within
-    /// a single `&mut self` body but would reject it across a method
-    /// boundary, which is why the prepare call lives in this method
-    /// rather than splitting into a `collect_text_areas` helper.
+    ///
+    /// Note: this performs disjoint mutable borrows of
+    /// `text_renderer`, `atlas` and `swash_cache` while holding
+    /// immutable borrows of the buffer-map fields; the borrow
+    /// checker permits this within a single `&mut self` body but
+    /// would reject it across a method boundary, which is why the
+    /// prepare call lives in this method rather than splitting into
+    /// a `collect_text_areas` helper.
     fn prepare_text_for_pass(&mut self) -> bool {
         let vp_w = self.config.width as i32;
         let vp_h = self.config.height as i32;
@@ -331,14 +335,16 @@ impl Renderer {
         // is still cheaper than `push` reallocations.
         let main_capacity = self.mindmap_buffers.values().map(|v| v.len()).sum::<usize>()
             + self.overlay_buffers.len()
-            + self.canvas_scene_buffers.len();
+            + super::scene_shape_cache::buffer_count(&self.canvas_scene_elements);
         let mut main_text_areas: Vec<TextArea> = Vec::with_capacity(main_capacity);
         main_text_areas.extend(
             self.mindmap_buffers
                 .values()
                 .flat_map(|v| v.iter())
                 .chain(self.overlay_buffers.iter())
-                .chain(self.canvas_scene_buffers.iter())
+                .chain(super::scene_shape_cache::text_buffers(
+                    &self.canvas_scene_elements,
+                ))
                 .filter_map(|tb| {
                     if !tb.visible_at(&self.camera) {
                         return None;
@@ -359,22 +365,18 @@ impl Renderer {
 
         // Palette overlay: screen-space text, drawn in its own
         // glyphon pass so the rect-pipeline backdrop can be
-        // interleaved between the main text and this one. The
-        // glyph-wheel color picker's glyph buffers flow through
-        // `overlay_scene_buffers` (populated by
-        // `rebuild_overlay_scene_buffers` from the picker's overlay
-        // tree in `AppScene`) — it's a mutually exclusive
-        // screen-space modal that shares this pass with the
-        // console.
-        let palette_capacity = self.console_overlay_buffers.len()
-            + self.overlay_scene_buffers.len()
+        // interleaved between the main text and this one. Both the
+        // console and the glyph-wheel color picker put their glyph
+        // buffers in `overlay_scene_elements` (populated by
+        // `rebuild_overlay_scene_buffers` from the respective
+        // overlay tree in `AppScene`) — they are mutually exclusive
+        // screen-space modals sharing this one pass.
+        let palette_capacity = super::scene_shape_cache::buffer_count(&self.overlay_scene_elements)
             + self.fps_overlay_buffers.len()
             + self.mode_status_overlay_buffers.len();
         let mut palette_text_areas: Vec<TextArea> = Vec::with_capacity(palette_capacity);
         palette_text_areas.extend(
-            self.console_overlay_buffers
-                .iter()
-                .chain(self.overlay_scene_buffers.iter())
+            super::scene_shape_cache::text_buffers(&self.overlay_scene_elements)
                 .chain(self.fps_overlay_buffers.iter())
                 .chain(self.mode_status_overlay_buffers.iter())
                 .map(|tb| TextArea {
@@ -396,7 +398,8 @@ impl Renderer {
         // would flood stderr at frame rate for no diagnostic gain.
         // `rebuild_mode_status_overlay_if_needed` takes the same
         // contention path silently for the same reason.
-        let Ok(mut font_system) = fonts::FONT_SYSTEM.try_write() else {
+        let Some(mut font_system) = fonts::try_acquire_font_system_write("render::prepare_text_for_pass")
+        else {
             log::debug!("renderer: font_system lock contended in prepare_text_for_pass, skipping");
             return false;
         };
@@ -414,9 +417,9 @@ impl Renderer {
         // first-class target under CODE_CONVENTIONS §4. Returning
         // `false` here makes the caller bail before
         // `get_current_texture()` / `present()`, so the skipped frame
-        // takes no vsync backpressure either: under
-        // `RedrawMode::NoLimit` with `ControlFlow::Poll` the loop
-        // spins at CPU rate during a drag or animation and an
+        // takes no vsync backpressure either: the loop is uncapped
+        // and runs under `ControlFlow::Poll`, so it spins at CPU rate
+        // during a drag or animation and an
         // unguarded `warn!` would write a line per spin. The flag
         // clears on the next successful prepare, so a transient fault
         // logs again if it returns.
@@ -497,9 +500,24 @@ impl Renderer {
     /// the panic and continuing means a degraded first frame
     /// instead of a dead app — the next real `process()` cycle
     /// retries from a known state.
+    ///
+    /// **Except when the panic took the font system with it.** A panic
+    /// raised while `prepare_text_for_pass` held the `FONT_SYSTEM`
+    /// guard leaves the lock poisoned, and no state is known after
+    /// that: every later acquire panics, so the first frame that
+    /// rebuilds anything would end the process with a message about
+    /// the poison instead of its cause. That panic is re-raised here
+    /// with its own payload, so the report names what actually failed.
     pub fn prewarm(&mut self) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render()));
-        if result.is_err() {
+        if let Err(payload) = result {
+            if fonts::font_system_poisoned() {
+                log::error!(
+                    "renderer.prewarm: first render panicked while holding the font system, \
+                     which leaves it unusable; re-raising the original panic"
+                );
+                std::panic::resume_unwind(payload);
+            }
             log::warn!(
                 "renderer.prewarm: first render panicked; continuing with cold pipelines. \
                  First user interaction may show a one-frame stutter."

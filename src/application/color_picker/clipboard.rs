@@ -8,29 +8,29 @@
 
 use baumhard::util::color::{hex_to_hsv_safe, hsv_to_hex};
 
-use super::state::ColorPickerState;
+use super::state::{ColorPickerState, OpenPicker};
 use crate::application::console::traits::{ClipboardContent, HandlesCopy, HandlesCut, HandlesPaste, Outcome};
 
 impl HandlesCopy for ColorPickerState {
     fn clipboard_copy(&self) -> ClipboardContent {
-        match self {
-            ColorPickerState::Open {
+        match self.as_open() {
+            Some(OpenPicker {
                 hue_deg, sat, val, ..
-            } => ClipboardContent::Text(hsv_to_hex(*hue_deg, *sat, *val)),
-            ColorPickerState::Closed => ClipboardContent::NotApplicable,
+            }) => ClipboardContent::Text(hsv_to_hex(*hue_deg, *sat, *val)),
+            None => ClipboardContent::NotApplicable,
         }
     }
 }
 
 impl HandlesPaste for ColorPickerState {
     fn clipboard_paste(&mut self, content: &str) -> Outcome {
-        let ColorPickerState::Open {
+        let Some(OpenPicker {
             hue_deg,
             sat,
             val,
             hover_preview,
             ..
-        } = self
+        }) = self.as_open_mut()
         else {
             return Outcome::NotApplicable;
         };

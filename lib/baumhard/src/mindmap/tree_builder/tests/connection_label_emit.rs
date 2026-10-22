@@ -4,7 +4,8 @@
 
 use super::fixtures::*;
 use crate::mindmap::model::{EdgeLabelConfig, GlyphConnectionConfig};
-use crate::util::geometry::almost_equal;
+use crate::util::geometry::{aabb_center, almost_equal};
+use glam::Vec2;
 
 #[test]
 fn test_label_element_emitted_for_edge_with_label() {
@@ -64,8 +65,15 @@ fn test_label_position_follows_label_config_position_t() {
 
     let pos_x = |s: &ProjectedRoles| {
         let e = &s.connection_label_elements[0];
-        // Return the center x (position + half width).
-        e.position.0 + e.bounds.0 * 0.5
+        // Center x of the label's AABB. Only the x axis is compared,
+        // but the center is the center — the whole point goes through
+        // the one helper so a grep for the knob finds no second
+        // spelling.
+        aabb_center(
+            Vec2::new(e.position.0, e.position.1),
+            Vec2::new(e.bounds.0, e.bounds.1),
+        )
+        .x
     };
     let x_start = pos_x(&scene_start);
     let x_end = pos_x(&scene_end);

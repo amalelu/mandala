@@ -37,9 +37,6 @@ pub const ACCENT_COLOR: Color = Color::rgba(0x7f, 0xc3, 0xa5, 0xff);
 
 // ---- glyph constants -------------------------------------------------
 
-/// Prompt glyph — the `❯` at the start of the input line.
-pub const PROMPT_GLYPH: &str = "\u{276F}";
-
 /// Cursor block — inserted into the input buffer at the cursor
 /// position.
 pub const CURSOR_GLYPH: &str = "\u{258C}";

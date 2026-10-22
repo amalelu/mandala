@@ -16,26 +16,34 @@
 
 use baumhard::core::primitives::ColorFontRegion;
 use baumhard::font::fonts::{app_font_by_family, family_name_of};
+use baumhard::mindmap::model::validate;
 use baumhard::mindmap::model::TextRun;
 use baumhard::mindmap::tree_builder::MindMapTree;
 use baumhard::util::color_conversion::{is_var_ref, rgba_to_hex};
 
+// The reverse converter's "this run has nothing to inherit from"
+// answer is the authoring layer's answer — one question, one
+// constant. It used to be a second `#ffffff` local to this file,
+// which kept saying white after the authoring default became the
+// empty string: a region with no color and no overlapping prior
+// run baked opaque white into the model and opted those graphemes
+// out of the palette for good, which is the exact defect the
+// authoring default was changed to avoid.
+use baumhard::mindmap::tree_builder::effective_section_scale;
+
+use super::super::defaults::DEFAULT_RUN_COLOR;
 use super::super::nodes::clamp_runs_to_text;
 use super::super::MindMapDocument;
-
-/// Default text-run color when neither the tree-side region nor
-/// a prior model run carries one. Matches the renderer's
-/// fall-through-to-`#ffffff` floor on a node with no explicit
-/// `style.text_color` override — the same white
-/// [`crate::application::document::defaults::DEFAULT_RUN_COLOR`]
-/// gives a freshly-authored run.
-pub(super) const DEFAULT_TEXT_RUN_COLOR: &str = "#ffffff";
 
 /// Default font-size the *renderer* uses when a section pins none,
 /// pinned to the forward path's
 /// [`baumhard::mindmap::tree_builder::DEFAULT_SECTION_FONT_SCALE`]
 /// so the reverse converter's delta arithmetic can never drift
-/// from the scale the forward converter actually wrote.
+/// from the scale the forward converter actually wrote. (The model
+/// re-exports the same number as
+/// `baumhard::mindmap::model::DEFAULT_TEXT_RUN_SIZE_PT` — the
+/// serde default a size-less run deserializes to — so all three
+/// readings are one constant by construction.)
 ///
 /// Deliberately **not**
 /// [`crate::application::document::defaults::DEFAULT_RUN_SIZE_PT`]
@@ -44,30 +52,46 @@ pub(super) const DEFAULT_TEXT_RUN_COLOR: &str = "#ffffff";
 /// being rendered at. Answering "what size is this section on
 /// screen right now?" with the authoring default would make every
 /// `grow-font` on a run-less section jump 10pt.
-///
-/// The `f32 → u32` narrowing is checked, not silent: model
-/// `size_pt` is integral, so a future fractional scale (`14.5`)
-/// is a real design question about how the reverse converter
-/// should round it, not something to truncate away. The `assert!`
-/// evaluates at compile time and fails the build instead.
-pub(super) const DEFAULT_TEXT_RUN_SIZE_PT: u32 = {
-    let scale = baumhard::mindmap::tree_builder::DEFAULT_SECTION_FONT_SCALE;
-    let truncated = scale as u32;
-    assert!(
-        truncated as f32 == scale,
-        "DEFAULT_SECTION_FONT_SCALE is not integral; decide how the reverse \
-         converter should round it rather than letting the cast truncate"
-    );
-    truncated
-};
+pub(super) const DEFAULT_TEXT_RUN_SIZE_PT: f32 = baumhard::mindmap::tree_builder::DEFAULT_SECTION_FONT_SCALE;
 
 /// Floor the reverse converter clamps `size_pt` to. A
 /// `shrink-font` mutation drives tree-side `scale` toward (and
-/// past) zero without a floor of its own; model `size_pt` is a
-/// `u32`, so a naive cast of a negative scale would saturate to 0
-/// and render invisible, un-regrowable text. Clamp to 1pt so a
-/// shrunk run stays legible and can be grown back.
-pub(super) const MIN_TEXT_RUN_SIZE_PT: u32 = 1;
+/// past) zero without a floor of its own; without one here a
+/// shrunk run would land at (or below) the loader's 0.5pt
+/// minimum and render invisible, un-regrowable text. Clamp to
+/// 1pt — deliberately above
+/// `baumhard::font::fonts::MIN_FONT_SIZE_PT` — so a shrunk run
+/// stays legible and can be grown back.
+pub(in crate::application::document) const MIN_TEXT_RUN_SIZE_PT: f32 = 1.0;
+
+/// Clamp a `size_pt` into the domain the loader would accept on the
+/// way back in.
+///
+/// **Every writer that takes a caller-supplied size goes through
+/// here.** (`section_structure` writes a hardcoded `12` when it
+/// synthesizes a run; that is a constant inside the domain, not an
+/// input.) The
+/// loader rejects a run whose `size_pt` is under the 0.5pt floor
+/// or past [`validate::MAX_FONT_SIZE_PT`], so any writer that can
+/// leave that range produces a model the editor itself would
+/// refuse to reopen. The reverse converter gets there in one
+/// click, since a `grow-font` mutation adds an unbounded delta;
+/// the console gets there in one line, since `parse_finite_pt`
+/// accepts any positive finite `f32` and `font size=5000` is an
+/// ordinary thing to type.
+///
+/// The floor and the ceiling are the same clamp. The floor is the
+/// older half — a shrunk run must stay legible and re-growable
+/// rather than shrinking into invisibility — and the ceiling is
+/// what keeps the file reopenable. `NaN` (never authored, but
+/// reachable from mutation arithmetic) lands on the floor.
+///
+pub(in crate::application::document) fn clamp_run_size_pt(size_pt: f32) -> f32 {
+    if size_pt.is_nan() {
+        return MIN_TEXT_RUN_SIZE_PT;
+    }
+    size_pt.clamp(MIN_TEXT_RUN_SIZE_PT, validate::MAX_FONT_SIZE_PT)
+}
 
 /// Push the tree-side font `scale` back onto a section's model
 /// runs — the reverse of the forward path's
@@ -79,7 +103,8 @@ pub(super) const MIN_TEXT_RUN_SIZE_PT: u32 = 1;
 ///
 /// The forward map is lossy: it takes the **largest** `size_pt`
 /// across a section's runs (or [`DEFAULT_TEXT_RUN_SIZE_PT`] when
-/// the section has none) and derives `line_height = scale * 1.2`.
+/// the section has none — this is `effective_section_scale`) and
+/// derives `line_height = scale * LINE_HEIGHT_FACTOR`.
 /// The reverse therefore has to answer "the max just moved from A
 /// to B — how do the individual runs move?". We distribute the
 /// change as a **delta** (`tree_scale - old_scale`) added to every
@@ -93,7 +118,8 @@ pub(super) const MIN_TEXT_RUN_SIZE_PT: u32 = 1;
 /// max-collapsing forward map.
 ///
 /// **Line-height** has no independent model home: the forward path
-/// unconditionally recomputes it as `scale * 1.2`, so persisting
+/// unconditionally recomputes it as `scale * LINE_HEIGHT_FACTOR`,
+/// so persisting
 /// `scale` is sufficient and the next rebuild reproduces the right
 /// line-height for free. A mutation that touches *only* line-height
 /// is surfaced at apply time by
@@ -101,9 +127,18 @@ pub(super) const MIN_TEXT_RUN_SIZE_PT: u32 = 1;
 ///
 /// **Runless sections** have nowhere to store a size, so the change
 /// would evaporate. To honor it we synthesize one run spanning the
-/// whole text carrying the new size and the section's effective
-/// default color (`default_color`) so rendering is unchanged
-/// except for the size.
+/// whole text carrying the new size and an **empty** `color`, so
+/// rendering is unchanged except for the size.
+///
+/// Empty rather than the section's currently-effective color, which
+/// is the whole point: an empty `color` is the model's spelling for
+/// "take the node's section-level text color", which is exactly
+/// what a run-less section was already doing. Baking the resolved
+/// value in instead would render identically *today* and convert a
+/// themed section into a hardcoded one — the next palette edit
+/// would move every sibling section and leave this one behind. A
+/// font-size mutation has no business deciding a section's color
+/// (`format/palettes.md`).
 ///
 /// `old_scale` is the section's effective scale **before** this
 /// sync ran — i.e. the value the forward path put in the tree,
@@ -122,16 +157,20 @@ fn sync_section_font_size(
     section: &mut baumhard::mindmap::model::MindSection,
     tree_scale: f32,
     old_scale: f32,
-    default_color: &str,
 ) -> bool {
     use baumhard::util::grapheme_chad::count_grapheme_clusters;
 
     let delta = tree_scale - old_scale;
-    // `size_pt` is an integer point size, so a sub-half-point delta
-    // rounds to no change on every run. Treat it as "scale
-    // untouched" so a position-only or color-only mutation doesn't
-    // churn run sizes (or spuriously report a change).
-    if delta.abs() < 0.5 {
+    // Exact-zero test, not an epsilon: `old_scale` is the model's
+    // own max-run size (or the runless default), and the forward
+    // builder copies exactly that value into the tree, so a
+    // mutation that didn't touch size hands back a `tree_scale`
+    // bit-identical to it and there is no float noise to absorb.
+    // Anything else is a real size change, and fractional deltas
+    // are first-class now that `size_pt` is an `f32` (a sub-half-
+    // point delta used to be dropped because the integer field
+    // rounded it to no change on every run).
+    if delta == 0.0 {
         return false;
     }
 
@@ -142,12 +181,7 @@ fn sync_section_font_size(
             // would be dropped by `clamp_runs_to_text` anyway.
             return false;
         }
-        let size_pt = tree_scale.round().max(MIN_TEXT_RUN_SIZE_PT as f32) as u32;
-        let color = if default_color.is_empty() {
-            DEFAULT_TEXT_RUN_COLOR.to_string()
-        } else {
-            default_color.to_string()
-        };
+        let size_pt = clamp_run_size_pt(tree_scale);
         section.text_runs.push(TextRun {
             start: 0,
             end,
@@ -156,7 +190,7 @@ fn sync_section_font_size(
             underline: false,
             font: String::new(),
             size_pt,
-            color,
+            color: String::new(),
             hyperlink: None,
         });
         return true;
@@ -164,9 +198,7 @@ fn sync_section_font_size(
 
     let mut changed = false;
     for run in section.text_runs.iter_mut() {
-        let new_size = (run.size_pt as f32 + delta)
-            .round()
-            .max(MIN_TEXT_RUN_SIZE_PT as f32) as u32;
+        let new_size = clamp_run_size_pt(run.size_pt + delta);
         if new_size != run.size_pt {
             run.size_pt = new_size;
             changed = true;
@@ -189,40 +221,94 @@ fn sync_section_font_size(
 /// just before each apply, so every region's range was an
 /// authored run before the mutation ran).
 ///
-/// Limitations:
+/// `theme_text_rgba` is the pixel value the forward path paints a
+/// *colorless* run in — [`baumhard::mindmap::model::MindMap::node_text_rgba`]
+/// for the node that owns the section. It is what lets a run that
+/// deferred to the theme survive the trip; see the
+/// `prior_deferred_color` short-circuit below.
+///
+/// Limitations, both of them a *recolor* the converter cannot see
+/// because the tree side keeps no record of what the model said:
 /// - `var(--name)` color references collapse to their resolved
 ///   hex on the round trip *unless* the prior run shares the
-///   region's range — see the `prior_var_color` short-circuit
-///   below.
+///   region's range — see the `prior_deferred_color`
+///   short-circuit below. A mutation that recolors a
+///   `var()`-bearing run without resizing it is swallowed; the
+///   run keeps the variable.
+/// - A recolor of a **colorless** run to exactly
+///   `theme_text_rgba` is likewise swallowed: the run stays
+///   colorless. Same pixels either way, and the deferral is the
+///   safer of the two readings — see the arm's own comment for
+///   why no range test can separate them here.
 /// - Unknown `AppFont` (corrupt tree state) falls through to
 ///   the empty string, matching the loader's tolerance for
 ///   missing-font runs.
 ///
 /// Visible to [`super::super::nodes`] so the editor commit path
 /// can reuse the converter through `set_section_text_and_runs`.
-pub(crate) fn region_to_text_run(region: &ColorFontRegion, prior: Option<&TextRun>) -> TextRun {
-    // Preserve `var(--name)` references when the prior run
-    // shares the region's range and carries one. Without theme-
-    // variables resolution at sync time we can't tell whether a
-    // mutation deliberately recolored the run away from the
-    // variable; trusting the prior keeps the variable reference
-    // verbatim across mutations that didn't touch the color.
-    // Same documented trade-off as the selective gate: a
-    // deliberate `SetRegionColor` on a `var()`-bearing run is
-    // silently swallowed here — the run keeps the variable.
-    let prior_var_color: Option<&str> = prior.and_then(|p| {
-        if is_var_ref(&p.color) && p.start == region.range.start && p.end == region.range.end {
-            Some(p.color.as_str())
-        } else {
-            None
+pub(crate) fn region_to_text_run(
+    region: &ColorFontRegion,
+    prior: Option<&TextRun>,
+    theme_text_rgba: baumhard::util::color::FloatRgba,
+) -> TextRun {
+    // Two model-side color spellings have no tree-side
+    // representation at all: a `var(--name)` reference and the
+    // empty string that defers to the node's section-level text
+    // color. Both reach the tree as a concrete rgba, so a naive
+    // reverse conversion replaces them with a literal hex and the
+    // authored indirection is gone for good — the variable stops
+    // tracking the canvas theme, the empty run stops tracking the
+    // palette. Recover both from the prior run when it shares the
+    // region's exact range.
+    //
+    // The two differ in how much evidence they can muster, and so
+    // in how strict they have to be.
+    //
+    // Resolving a `var()` here would need the canvas theme map the
+    // converter is not handed, so that arm has nothing to check
+    // against and simply trusts the prior — but only when the
+    // prior covers the region's *exact* range, since a resized
+    // span is no longer demonstrably the one that carried the
+    // variable. The documented trade-off stands: a mutation
+    // deliberately recoloring a `var()`-bearing run is silently
+    // swallowed.
+    //
+    // The empty-color arm has evidence the `var()` arm lacks —
+    // whether the region still paints `theme_text_rgba` — and so
+    // needs no range test at all. That matters: the commonest way
+    // a deferring run reaches this function is a keystroke in the
+    // inline editor, which extends `[0,6)` to `[0,7)`. An exact-
+    // range rule would bake the palette hex on the first character
+    // typed, which is the whole defect this arm exists to stop.
+    // A recolor that moves the region off the theme color lands as
+    // a literal hex, exactly as it should.
+    //
+    // A recolor to *exactly* the theme color does not, and cannot:
+    // the region carries a resolved rgba and nothing else, so
+    // "still deferring" and "deliberately pinned to the color the
+    // node happens to have" are the same four floats. This arm
+    // reads them as the first, and committing the palette's own
+    // text color onto a deferring run therefore comes back as the
+    // empty string. Pixels are identical; the lost intent is "pin
+    // these graphemes so a retheme cannot move them". It is the
+    // same shape as the `var()` arm's swallow, traded the same
+    // way, and the only thing that would distinguish the two cases
+    // is the exact-range test whose cost is baking on the first
+    // keystroke — much the commoner gesture, and destructive where
+    // this is merely lossy.
+    let prior_deferred_color: Option<&str> = prior.and_then(|p| {
+        if p.color.is_empty() {
+            return (region.color == Some(theme_text_rgba)).then_some("");
         }
+        let same_range = p.start == region.range.start && p.end == region.range.end;
+        (is_var_ref(&p.color) && same_range).then_some(p.color.as_str())
     });
-    let color = match (prior_var_color, region.color) {
-        (Some(var_color), _) => var_color.to_string(),
+    let color = match (prior_deferred_color, region.color) {
+        (Some(deferred), _) => deferred.to_string(),
         (None, Some(rgba)) => rgba_to_hex(rgba),
         (None, None) => prior
             .map(|p| p.color.clone())
-            .unwrap_or_else(|| DEFAULT_TEXT_RUN_COLOR.to_string()),
+            .unwrap_or_else(|| DEFAULT_RUN_COLOR.to_string()),
     };
     let font = match region.font.and_then(family_name_of) {
         Some(name) => name.to_string(),
@@ -371,6 +457,35 @@ impl MindMapDocument {
             section_snapshots.push(snapshot);
         }
 
+        // Everything the reverse comparison needs from the *map*
+        // rather than from the node alone, captured before the
+        // mutable borrow below takes `self.mindmap` exclusively.
+        //
+        // Both entries answer the same question — "what would the
+        // forward path have produced from the model as it stands?" —
+        // for the two places a section's colors come from something
+        // other than an explicitly-colored `TextRun`: the palette
+        // cascade, as the pixel value a colorless run is painted in
+        // (`MindMap::node_text_rgba`), and, for a run-less section,
+        // the default region table the tree builder synthesizes.
+        let Some(read_node) = self.mindmap.nodes.get(node_id) else {
+            return false;
+        };
+        let node_text_rgba = self.mindmap.node_text_rgba(read_node);
+        let projected_default_regions: Vec<Vec<ColorFontRegion>> = read_node
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(idx, section)| {
+                baumhard::mindmap::tree_builder::section_default_regions(
+                    &self.mindmap,
+                    read_node,
+                    section,
+                    idx,
+                )
+            })
+            .collect();
+
         let Some(model_node) = self.mindmap.nodes.get_mut(node_id) else {
             return false;
         };
@@ -385,20 +500,13 @@ impl MindMapDocument {
         let tree_px = new_pos.0 as f32;
         let tree_py = new_pos.1 as f32;
         if model_node.position.x as f32 != tree_px || model_node.position.y as f32 != tree_py {
-            model_node.position.x = new_pos.0;
-            model_node.position.y = new_pos.1;
+            model_node.set_position_clamped(new_pos.0, new_pos.1);
             changed = true;
         }
         let node_pos_x = tree_px;
         let node_pos_y = tree_py;
         let node_size_x = model_node.size.width as f32;
         let node_size_y = model_node.size.height as f32;
-        // Effective default color for a runless section, captured
-        // before the section loop takes `&mut section` — used to
-        // color a synthesized run when a font-size mutation lands
-        // on a section that carries no runs (see
-        // [`sync_section_font_size`]).
-        let node_text_color = model_node.style.text_color.clone();
 
         for (idx, snapshot) in section_snapshots.into_iter().enumerate() {
             let Some(snapshot) = snapshot else {
@@ -415,18 +523,7 @@ impl MindMapDocument {
             // runless section), and the correct baseline for the
             // font-size delta — recomputing it after the round-trip
             // would misread a run-dropping mutation as a size change.
-            let pre_round_trip_scale = {
-                let max = section
-                    .text_runs
-                    .iter()
-                    .map(|r| r.size_pt as f32)
-                    .fold(0.0_f32, f32::max);
-                if max > 0.0 {
-                    max
-                } else {
-                    DEFAULT_TEXT_RUN_SIZE_PT as f32
-                }
-            };
+            let pre_round_trip_scale = effective_section_scale(section);
 
             // Write `section.offset` back from the tree's section-
             // area position so a `SectionsOnly` translate mutation
@@ -450,35 +547,57 @@ impl MindMapDocument {
                 section.offset.y = (snapshot.tree_position.1 - node_pos_y) as f64;
                 changed = true;
             }
-            // Write `section.size` back when the model carries an
-            // explicit size. `None` size means "fill the parent
-            // node", which the tree resolves to the node's full
-            // render_bounds — *don't* eagerly materialize it as
-            // `Some(node.size)`, that would surprise authors who
-            // chose the inheriting shape. Materialize only when the
-            // tree's render_bounds diverges from the node's full
-            // size (i.e. the mutation explicitly resized the
-            // section, or the model already carried a Some).
-            let tree_size_diverges = (snapshot.tree_size.0 - node_size_x).abs() > f32::EPSILON
-                || (snapshot.tree_size.1 - node_size_y).abs() > f32::EPSILON;
-            if section.size.is_some() || tree_size_diverges {
-                // Project the model's current size to f32 (fill-parent
-                // `None` resolves to the node's size, exactly as the
-                // forward path does) and only rewrite when the tree's
-                // post-mutation bounds actually diverge — comparing the
-                // model `f64` against the tree `f32` directly would flag
-                // a phantom change for any non-`f32`-exact size.
-                let (cur_w, cur_h) = match section.size {
-                    Some(s) => (s.width as f32, s.height as f32),
-                    None => (node_size_x, node_size_y),
-                };
-                if cur_w != snapshot.tree_size.0 || cur_h != snapshot.tree_size.1 {
-                    section.size = Some(baumhard::mindmap::model::Size {
-                        width: snapshot.tree_size.0 as f64,
-                        height: snapshot.tree_size.1 as f64,
-                    });
-                    changed = true;
+            // Write `section.size` back when the tree's post-mutation
+            // bounds differ from what the model already says. `None`
+            // size means "fill the parent node", which the tree
+            // resolves to the node's full render_bounds — *don't*
+            // eagerly materialize it as `Some(node.size)`, that would
+            // surprise authors who chose the inheriting shape. So the
+            // `None` case compares against the node's own size, which
+            // is what the forward path drew, and only a mutation that
+            // actually resized the section pins one.
+            //
+            // Compare in f32 space, for the same reason the position
+            // writeback above does: the tree carries f32 and the model
+            // f64, so a raw f64 compare would flag a phantom change for
+            // any size that is not f32-exact.
+            //
+            // The two arms answer with different rulers, deliberately.
+            // An explicit `Some` is already a pinned size, so any
+            // f32-visible divergence from it is a real edit, and the
+            // exact `!=` is right — the same posture the position
+            // writeback above documents. A `None` is a *shape*, not a
+            // size, and demoting it to a fixed one is a one-way door for
+            // the author, so that arm holds the shape until the resize
+            // clears an absolute `f32::EPSILON` floor.
+            //
+            // The floor is not a restatement of `!=`. It can only ever
+            // differ from one when *both* operands are `<= 2.0`:
+            // `ULP(x) == f32::EPSILON` exactly on `[1, 2)` and doubles
+            // at every binade above, so any two distinct f32s that are
+            // both at 2.0 or above already differ by more than
+            // `f32::EPSILON`, and so does any pair straddling 2.0.
+            // (There is no band "below one ULP" for the floor to
+            // swallow — two distinct f32s cannot differ by less than
+            // one ULP.) Under 2.0 the two spellings genuinely part
+            // company, and that is reachable: `validate.rs` puts no
+            // lower bound on `node.size` beyond finite and positive,
+            // and `format/sections.md` documents `SetBounds` under
+            // `SectionsOnly` as writing through here. Pinned by
+            // `test_sync_node_from_tree_holds_fill_parent_none_at_a_sub_epsilon_resize`.
+            let size_diverges = match section.size {
+                Some(s) => s.width as f32 != snapshot.tree_size.0 || s.height as f32 != snapshot.tree_size.1,
+                None => {
+                    (snapshot.tree_size.0 - node_size_x).abs() > f32::EPSILON
+                        || (snapshot.tree_size.1 - node_size_y).abs() > f32::EPSILON
                 }
+            };
+            if size_diverges {
+                section.size = Some(baumhard::mindmap::model::Size {
+                    width: snapshot.tree_size.0 as f64,
+                    height: snapshot.tree_size.1 as f64,
+                });
+                changed = true;
             }
 
             // Selective gate: tree-side state matches the model
@@ -498,76 +617,125 @@ impl MindMapDocument {
             // from sections the mutation didn't touch. Build a
             // map keyed by `(start, end)` and compare each
             // tree-side region against the same-range prior.
-            let model_runs_by_range: rustc_hash::FxHashMap<(usize, usize), &TextRun> =
-                section.text_runs.iter().map(|r| ((r.start, r.end), r)).collect();
-            let model_regions_match = model_runs_by_range.len() == snapshot.regions.len()
-                && snapshot.regions.iter().all(|region| {
-                    let key = (region.range.start, region.range.end);
-                    let Some(run) = model_runs_by_range.get(&key) else {
-                        return false;
-                    };
-                    // Color comparison is **case-insensitive on
-                    // hex**: `rgba_to_hex` always emits lowercase,
-                    // but model-side `run.color` may have been
-                    // hand-authored as `#FFFFFF` or mixed case. A
-                    // byte-equal `==` would always-mismatch those
-                    // and trigger the lossy round-trip on every
-                    // apply_to_tree call.
-                    let region_color_hex = region.color.map(rgba_to_hex);
-                    let model_color_hex = if run.color.starts_with('#') {
-                        Some(run.color.clone())
-                    } else {
-                        None
-                    };
-                    let model_is_var = is_var_ref(&run.color);
-                    let colors_equal = match (region_color_hex.as_deref(), model_color_hex.as_deref()) {
-                        (Some(a), Some(b)) => str::eq_ignore_ascii_case(a, b),
-                        (None, None) => true,
-                        // `(Some(hex), None)` with the model carrying
-                        // a `var(--…)` reference: presume the
-                        // variable resolves to the tree-side hex
-                        // and treat as equal. Documented limit: a
-                        // custom mutation that *deliberately*
-                        // recolors a `var()`-bearing run is
-                        // silently swallowed; the run keeps the
-                        // variable.
-                        (Some(_), None) if model_is_var => true,
-                        _ => false,
-                    };
-                    if !colors_equal {
-                        return false;
-                    }
-                    // Font comparison **forward-projects the model**,
-                    // exactly like the position / offset / size
-                    // comparisons above: run the model's family
-                    // string through `app_font_by_family` (empty →
-                    // `None`, matching the forward path in
-                    // `tree_builder/node.rs::mindnode_section_area`)
-                    // and compare the resulting `Option<AppFont>`
-                    // against what the tree actually carries.
-                    //
-                    // Comparing the tree-side font back-projected to
-                    // a *name* against the model's raw string is
-                    // asymmetric and can never succeed for a family
-                    // the font database doesn't know: the forward
-                    // path maps an unresolvable family to `None`, so
-                    // `family_name_of(None)` yields `None` while the
-                    // model still holds the authored string. Every
-                    // section then reads as divergent on every apply
-                    // — the lossy text/regions round-trip runs
-                    // needlessly and `changed` comes back `true` for
-                    // a genuine no-op, resurrecting exactly the dead
-                    // undo entries P0-02 (#2) removed. The testament
-                    // map hits this on all 252 nodes: it authors
-                    // `"LiberationSans"` while the face registers
-                    // `"Liberation Sans"`.
-                    let model_font = if run.font.is_empty() {
-                        None
-                    } else {
-                        app_font_by_family(&run.font)
-                    };
-                    region.font == model_font
-                });
+            //
+            // **A run-less section is not a region-less section.**
+            // The forward path emits the node's color defaults as
+            // explicit regions for a section with no runs
+            // (`tree_builder::section_default_regions`), so comparing
+            // the tree's regions against an empty run list would
+            // report divergence on every apply and synthesize a
+            // phantom `TextRun` out of the default. Project the same
+            // defaults from the model and compare against those
+            // instead; a mutation that genuinely recolored the
+            // section still differs and still falls through to the
+            // round trip below.
+            let model_regions_match = if section.text_runs.is_empty() {
+                // The run-less arm: compare against the projected
+                // defaults, which the forward path derives with the
+                // same function. Both sides come out of
+                // `hex_to_rgba_safe` over the same authored string,
+                // so the `f32` channels are bit-identical and an
+                // exact compare is the right one here — no
+                // case-folding tier is needed, because neither side
+                // is a hand-authored string.
+                projected_default_regions.get(idx).is_some_and(|expected| {
+                    expected.len() == snapshot.regions.len()
+                        && expected
+                            .iter()
+                            .zip(snapshot.regions.iter())
+                            .all(|(a, b)| a.range == b.range && a.color == b.color && a.font == b.font)
+                })
+            } else {
+                let model_runs_by_range: rustc_hash::FxHashMap<(usize, usize), &TextRun> =
+                    section.text_runs.iter().map(|r| ((r.start, r.end), r)).collect();
+                model_runs_by_range.len() == snapshot.regions.len()
+                    && snapshot.regions.iter().all(|region| {
+                        let key = (region.range.start, region.range.end);
+                        let Some(run) = model_runs_by_range.get(&key) else {
+                            return false;
+                        };
+                        // Color comparison is **case-insensitive on
+                        // hex**: `rgba_to_hex` always emits lowercase,
+                        // but model-side `run.color` may have been
+                        // hand-authored as `#FFFFFF` or mixed case. A
+                        // byte-equal `==` would always-mismatch those
+                        // and trigger the lossy round-trip on every
+                        // apply_to_tree call.
+                        let region_color_hex = region.color.map(rgba_to_hex);
+                        let model_color_hex = if run.color.starts_with('#') {
+                            Some(run.color.clone())
+                        } else {
+                            None
+                        };
+                        let model_is_var = is_var_ref(&run.color);
+                        let colors_equal = match (region_color_hex.as_deref(), model_color_hex.as_deref()) {
+                            (Some(a), Some(b)) => str::eq_ignore_ascii_case(a, b),
+                            (None, None) => true,
+                            // `(Some(hex), None)` with the model carrying
+                            // a `var(--…)` reference: presume the
+                            // variable resolves to the tree-side hex
+                            // and treat as equal. Documented limit: a
+                            // custom mutation that *deliberately*
+                            // recolors a `var()`-bearing run is
+                            // silently swallowed; the run keeps the
+                            // variable.
+                            (Some(_), None) if model_is_var => true,
+                            // `(Some(hex), None)` with the model
+                            // carrying an **empty** color: the run
+                            // declined to name one and defers to the
+                            // node's section-level text color — the
+                            // palette group's `text` on a themed
+                            // node (`format/palettes.md`: "The theme
+                            // reaches text through runs that leave
+                            // `color` empty"). The forward path
+                            // paints such a run with exactly
+                            // `node_text_rgba`, so that — not a
+                            // literal hex the model never held — is
+                            // what the region has to be compared
+                            // against. Without this arm every
+                            // section holding a colorless run reads
+                            // as divergent on *every* apply, and the
+                            // round trip below bakes the palette hex
+                            // into the run, severing the cascade for
+                            // good on a mutation that moved nothing.
+                            (Some(_), None) if run.color.is_empty() => region.color == Some(node_text_rgba),
+                            _ => false,
+                        };
+                        if !colors_equal {
+                            return false;
+                        }
+                        // Font comparison **forward-projects the model**,
+                        // exactly like the position / offset / size
+                        // comparisons above: run the model's family
+                        // string through `app_font_by_family` (empty →
+                        // `None`, matching the forward path in
+                        // `tree_builder/node.rs::mindnode_section_area`)
+                        // and compare the resulting `Option<AppFont>`
+                        // against what the tree actually carries.
+                        //
+                        // Comparing the tree-side font back-projected to
+                        // a *name* against the model's raw string is
+                        // asymmetric and can never succeed for a family
+                        // the font database doesn't know: the forward
+                        // path maps an unresolvable family to `None`, so
+                        // `family_name_of(None)` yields `None` while the
+                        // model still holds the authored string. Every
+                        // section then reads as divergent on every apply
+                        // — the lossy text/regions round-trip runs
+                        // needlessly and `changed` comes back `true` for
+                        // a genuine no-op, resurrecting exactly the dead
+                        // undo entries P0-02 (#2) removed. The testament
+                        // map hits this on all 252 nodes: it authors
+                        // `"LiberationSans"` while the face registers
+                        // `"Liberation Sans"`.
+                        let model_font = if run.font.is_empty() {
+                            None
+                        } else {
+                            app_font_by_family(&run.font)
+                        };
+                        region.font == model_font
+                    })
+            };
             // Selective gate: only run the lossy text/regions
             // round-trip when the tree side diverged. Note this is
             // NOT a `continue` — the font-size sync below must run
@@ -593,7 +761,7 @@ impl MindMapDocument {
                     .map(|region| {
                         let prior =
                             exact_or_dominant_overlap(&prior_runs, region.range.start, region.range.end);
-                        region_to_text_run(region, prior)
+                        region_to_text_run(region, prior, node_text_rgba)
                     })
                     .collect();
 
@@ -613,12 +781,7 @@ impl MindMapDocument {
             // still persisted). Distributes the tree-side `scale`
             // delta across the section's runs; see
             // [`sync_section_font_size`].
-            if sync_section_font_size(
-                section,
-                snapshot.tree_scale,
-                pre_round_trip_scale,
-                &node_text_color,
-            ) {
+            if sync_section_font_size(section, snapshot.tree_scale, pre_round_trip_scale) {
                 changed = true;
             }
         }
@@ -628,11 +791,16 @@ impl MindMapDocument {
 
 #[cfg(test)]
 mod region_converter_tests {
-    use super::{
-        exact_or_dominant_overlap, region_to_text_run, DEFAULT_TEXT_RUN_COLOR, DEFAULT_TEXT_RUN_SIZE_PT,
-    };
+    use super::{exact_or_dominant_overlap, region_to_text_run, DEFAULT_RUN_COLOR, DEFAULT_TEXT_RUN_SIZE_PT};
     use baumhard::core::primitives::{ColorFontRegion, Range};
     use baumhard::mindmap::model::TextRun;
+
+    /// Stand-in for the owning node's effective text color as the
+    /// forward path paints it. Every channel is exactly
+    /// representable in `f32`, so the equality the converter does
+    /// against a region's color is decided by the test's intent
+    /// rather than by a rounding accident.
+    const THEME_TEXT_RGBA: baumhard::util::color::FloatRgba = [0.25, 0.5, 0.75, 1.0];
 
     fn run(start: usize, end: usize, color: &str, font: &str) -> TextRun {
         TextRun {
@@ -642,7 +810,7 @@ mod region_converter_tests {
             italic: false,
             underline: false,
             font: font.into(),
-            size_pt: 14,
+            size_pt: 14.0,
             color: color.into(),
             hyperlink: None,
         }
@@ -656,7 +824,7 @@ mod region_converter_tests {
             italic: true,
             underline: true,
             font: "LiberationSans".into(),
-            size_pt: 21,
+            size_pt: 21.0,
             color: "#aabbcc".into(),
             hyperlink: Some("https://example.org".into()),
         }
@@ -666,34 +834,41 @@ mod region_converter_tests {
     fn test_region_to_text_run_merges_with_prior() {
         let region = ColorFontRegion::new(Range::new(0, 5), None, Some([1.0, 0.0, 0.0, 1.0]));
         let prior = styled_run(0, 5);
-        let out = region_to_text_run(&region, Some(&prior));
+        let out = region_to_text_run(&region, Some(&prior), THEME_TEXT_RGBA);
         assert_eq!(out.start, 0);
         assert_eq!(out.end, 5);
         assert_eq!(out.color, "#ff0000");
         assert!(out.bold);
         assert!(out.italic);
         assert!(out.underline);
-        assert_eq!(out.size_pt, 21);
+        assert_eq!(out.size_pt, 21.0);
         assert_eq!(out.hyperlink.as_deref(), Some("https://example.org"));
     }
 
     #[test]
     fn test_region_to_text_run_falls_back_to_defaults_without_prior() {
         let region = ColorFontRegion::new(Range::new(0, 5), None, None);
-        let out = region_to_text_run(&region, None);
+        let out = region_to_text_run(&region, None, THEME_TEXT_RGBA);
         assert!(!out.bold);
         assert!(!out.italic);
         assert!(!out.underline);
         assert_eq!(out.size_pt, DEFAULT_TEXT_RUN_SIZE_PT);
         assert_eq!(out.hyperlink, None);
         assert_eq!(out.font, "");
-        assert_eq!(out.color, DEFAULT_TEXT_RUN_COLOR);
+        // Spelled out rather than compared to the constant: the
+        // point of the assertion is that a run with nothing to
+        // inherit from *defers*, and an assertion against the
+        // constant would follow the constant anywhere it went —
+        // including back to the `#ffffff` that baked white into
+        // the model and severed the graphemes from the palette.
+        assert_eq!(out.color, "", "a colorless region with no prior must defer");
+        assert_eq!(out.color, DEFAULT_RUN_COLOR, "and that is the authoring default");
     }
 
     #[test]
     fn test_region_to_text_run_uses_region_color_without_prior() {
         let region = ColorFontRegion::new(Range::new(0, 3), None, Some([0.0, 1.0, 0.0, 1.0]));
-        let out = region_to_text_run(&region, None);
+        let out = region_to_text_run(&region, None, THEME_TEXT_RGBA);
         assert_eq!(out.color, "#00ff00");
     }
 
@@ -704,7 +879,7 @@ mod region_converter_tests {
             color: "var(--accent)".into(),
             ..styled_run(0, 5)
         };
-        let out = region_to_text_run(&region, Some(&prior_with_var));
+        let out = region_to_text_run(&region, Some(&prior_with_var), THEME_TEXT_RGBA);
         assert_eq!(out.color, "var(--accent)");
     }
 
@@ -715,8 +890,86 @@ mod region_converter_tests {
             color: "var(--accent)".into(),
             ..styled_run(0, 5)
         };
-        let out = region_to_text_run(&region, Some(&prior_with_var));
+        let out = region_to_text_run(&region, Some(&prior_with_var), THEME_TEXT_RGBA);
         assert_eq!(out.color, "#ff0000");
+    }
+
+    /// A run that left `color` empty defers to the node's
+    /// section-level text color. The tree can only carry the
+    /// resolved pixel value, so the converter has to recognize it
+    /// and hand the deferral back — otherwise one round trip bakes
+    /// the palette hex into the model and the node stops tracking
+    /// its palette forever.
+    #[test]
+    fn test_region_to_text_run_keeps_empty_color_when_region_still_paints_the_theme() {
+        let region = ColorFontRegion::new(Range::new(0, 5), None, Some(THEME_TEXT_RGBA));
+        let prior_deferring = TextRun {
+            color: String::new(),
+            ..styled_run(0, 5)
+        };
+        let out = region_to_text_run(&region, Some(&prior_deferring), THEME_TEXT_RGBA);
+        assert_eq!(out.color, "");
+        // The rest of the merge is unaffected.
+        assert!(out.bold);
+        assert_eq!(out.size_pt, 21.0);
+    }
+
+    /// The other half of the same rule: a mutation that genuinely
+    /// recolored the run moves the region off the theme color, and
+    /// then the literal hex is the honest answer. This is what
+    /// separates the empty-color arm from the `var()` arm, which
+    /// cannot check and so always trusts the prior.
+    #[test]
+    fn test_region_to_text_run_bakes_empty_color_when_region_was_recolored() {
+        let region = ColorFontRegion::new(Range::new(0, 5), None, Some([1.0, 0.0, 0.0, 1.0]));
+        let prior_deferring = TextRun {
+            color: String::new(),
+            ..styled_run(0, 5)
+        };
+        let out = region_to_text_run(&region, Some(&prior_deferring), THEME_TEXT_RGBA);
+        assert_eq!(out.color, "#ff0000");
+    }
+
+    /// Unlike the `var()` arm, the deferral survives a range
+    /// change — the region's color is the evidence, not the range.
+    /// This is the inline-editor shape: one keystroke turns
+    /// `[0,5)` into `[0,6)`, and an exact-range rule would bake the
+    /// palette hex on the first character typed.
+    #[test]
+    fn test_region_to_text_run_keeps_empty_color_across_a_range_change() {
+        let region = ColorFontRegion::new(Range::new(0, 6), None, Some(THEME_TEXT_RGBA));
+        let prior_deferring = TextRun {
+            color: String::new(),
+            ..styled_run(0, 5)
+        };
+        let out = region_to_text_run(&region, Some(&prior_deferring), THEME_TEXT_RGBA);
+        assert_eq!(out.color, "");
+    }
+
+    /// The documented cost of the range-insensitivity above: a
+    /// recolor to *exactly* the node's current text color is
+    /// indistinguishable from still deferring, because the region
+    /// carries a resolved rgba and nothing else. The run comes back
+    /// colorless. Pixels are identical; the lost intent is "pin
+    /// these graphemes so a retheme cannot move them".
+    ///
+    /// Pinned rather than left implicit because the arm's comment
+    /// used to claim the opposite — that a recolor always lands as
+    /// a literal hex — which is true of every recolor except this
+    /// one.
+    #[test]
+    fn test_region_to_text_run_swallows_a_recolor_to_the_theme_color_itself() {
+        let region = ColorFontRegion::new(Range::new(0, 5), None, Some(THEME_TEXT_RGBA));
+        let prior_deferring = TextRun {
+            color: String::new(),
+            ..styled_run(0, 5)
+        };
+        let out = region_to_text_run(&region, Some(&prior_deferring), THEME_TEXT_RGBA);
+        assert_eq!(
+            out.color, "",
+            "a recolor onto the theme color is swallowed — the evidence to \
+             tell it apart from a deferral does not reach this function"
+        );
     }
 
     #[test]

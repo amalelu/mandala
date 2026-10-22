@@ -2,6 +2,9 @@
 
 //! Tests for [`crate::gfx_structs::tree_walker`] — RepeatWhile,
 //! channel alignment, and instruction processing (§T1).
+//!
+//! Follows the `do_*()` / `test_*()` split from §T2.2: every `do_*`
+//! body is benchmarkable from `benches/test_bench.rs`.
 
 use crate::font::fonts;
 use crate::gfx_structs::area::{GlyphAreaCommand, GlyphAreaField};
@@ -41,10 +44,10 @@ fn assert_pos(model: &Tree<GfxElement, GfxMutator>, id: NodeId, expected_x: f32,
 
 #[test]
 pub fn test_repeat_while_skip_while() {
-    repeat_while_skip_while();
+    do_repeat_while_skip_while();
 }
 
-pub fn repeat_while_skip_while() {
+pub fn do_repeat_while_skip_while() {
     // This is necessary to initialize lazy statics
     fonts::init();
 
@@ -156,10 +159,10 @@ pub fn repeat_while_skip_while() {
 
 #[test]
 pub fn test_macro_applies_all_mutations_in_order() {
-    macro_applies_all_mutations_in_order();
+    do_macro_applies_all_mutations_in_order();
 }
 
-pub fn macro_applies_all_mutations_in_order() {
+pub fn do_macro_applies_all_mutations_in_order() {
     fonts::init();
     // One Macro mutator, two mutations inside, one target. Both mutations
     // must reach the target — this is the observable contract of Macro.
@@ -185,10 +188,10 @@ pub fn macro_applies_all_mutations_in_order() {
 
 #[test]
 pub fn test_macro_with_empty_mutations_is_noop() {
-    macro_with_empty_mutations_is_noop();
+    do_macro_with_empty_mutations_is_noop();
 }
 
-pub fn macro_with_empty_mutations_is_noop() {
+pub fn do_macro_with_empty_mutations_is_noop() {
     fonts::init();
     // A Macro wrapping an empty Vec must not corrupt the target. Guards the
     // edge case of a caller that built up a Vec<Mutation> and flushed it
@@ -208,10 +211,10 @@ pub fn macro_with_empty_mutations_is_noop() {
 
 #[test]
 pub fn test_mutation_none_is_noop() {
-    mutation_none_is_noop();
+    do_mutation_none_is_noop();
 }
 
-pub fn mutation_none_is_noop() {
+pub fn do_mutation_none_is_noop() {
     fonts::init();
     // `Mutation::None` is the explicit "do nothing" mutation. Both
     // `apply_to_area` and `apply_to_model` must match it to their no-op
@@ -232,10 +235,10 @@ pub fn mutation_none_is_noop() {
 
 #[test]
 pub fn test_single_mutator_channel_filter_in_align_child_walks() {
-    single_mutator_channel_filter_in_align_child_walks();
+    do_single_mutator_channel_filter_in_align_child_walks();
 }
 
-pub fn single_mutator_channel_filter_in_align_child_walks() {
+pub fn do_single_mutator_channel_filter_in_align_child_walks() {
     fonts::init();
     // Three sibling targets on channels 0, 1, 2. A single mutator child on
     // channel 1 should match only the middle target. This exercises BOTH
@@ -264,10 +267,10 @@ pub fn single_mutator_channel_filter_in_align_child_walks() {
 
 #[test]
 pub fn test_direct_walk_at_mismatched_channels_is_noop() {
-    direct_walk_at_mismatched_channels_is_noop();
+    do_direct_walk_at_mismatched_channels_is_noop();
 }
 
-pub fn direct_walk_at_mismatched_channels_is_noop() {
+pub fn do_direct_walk_at_mismatched_channels_is_noop() {
     fonts::init();
     // Hits the `apply_if_matching_channel` else branch inside
     // `walk_tree_from` itself, which `align_child_walks` can never reach
@@ -288,10 +291,10 @@ pub fn direct_walk_at_mismatched_channels_is_noop() {
 
 #[test]
 pub fn test_deep_chain_walk_reaches_every_node() {
-    deep_chain_walk_reaches_every_node();
+    do_deep_chain_walk_reaches_every_node();
 }
 
-pub fn deep_chain_walk_reaches_every_node() {
+pub fn do_deep_chain_walk_reaches_every_node() {
     fonts::init();
     // Recursion-depth guard. Each walk level consumes two stack frames
     // (walk_tree_from + align_child_walks), so a DEPTH-node chain drives
@@ -331,10 +334,10 @@ pub fn deep_chain_walk_reaches_every_node() {
 
 #[test]
 pub fn test_wide_fan_out_applies_to_all_matching_siblings() {
-    wide_fan_out_applies_to_all_matching_siblings();
+    do_wide_fan_out_applies_to_all_matching_siblings();
 }
 
-pub fn wide_fan_out_applies_to_all_matching_siblings() {
+pub fn do_wide_fan_out_applies_to_all_matching_siblings() {
     fonts::init();
     // A root with WIDTH sibling children, all on channel 0, mutated by a
     // single matching mutator child. The align_child_walks inner loop
@@ -365,10 +368,10 @@ pub fn wide_fan_out_applies_to_all_matching_siblings() {
 
 #[test]
 pub fn test_applying_same_delta_twice_accumulates() {
-    applying_same_delta_twice_accumulates();
+    do_applying_same_delta_twice_accumulates();
 }
 
-pub fn applying_same_delta_twice_accumulates() {
+pub fn do_applying_same_delta_twice_accumulates() {
     fonts::init();
     // Delta-style mutations are NOT idempotent — they compose additively.
     // Pinning this down protects against a future "dedupe identical
@@ -393,10 +396,10 @@ pub fn applying_same_delta_twice_accumulates() {
 
 #[test]
 pub fn test_mutation_is_deterministic_across_tree_clones() {
-    mutation_is_deterministic_across_tree_clones();
+    do_mutation_is_deterministic_across_tree_clones();
 }
 
-pub fn mutation_is_deterministic_across_tree_clones() {
+pub fn do_mutation_is_deterministic_across_tree_clones() {
     fonts::init();
     // Apply the same mutator to two independent clones of the same tree.
     // Both copies must end up with byte-identical positions — the mutator
@@ -438,10 +441,10 @@ pub fn mutation_is_deterministic_across_tree_clones() {
 
 #[test]
 pub fn test_clone_preserves_unique_id_and_channel() {
-    clone_preserves_unique_id_and_channel();
+    do_clone_preserves_unique_id_and_channel();
 }
 
-pub fn clone_preserves_unique_id_and_channel() {
+pub fn do_clone_preserves_unique_id_and_channel() {
     fonts::init();
     // `GfxElement` has a hand-rolled Clone impl that routes through the
     // `_with_id` constructors. A refactor that swapped it for a derived
@@ -458,14 +461,14 @@ pub fn clone_preserves_unique_id_and_channel() {
 
 #[test]
 pub fn test_repeat_while_without_children_is_noop() {
-    repeat_while_without_children_is_noop();
+    do_repeat_while_without_children_is_noop();
 }
 
 /// Regression for the `expect("Trying to process an instruction
 /// node…")` removed in chunk 2: a `RepeatWhile` instruction node
 /// with no child mutators used to panic mid-walk. It now logs a
 /// warning and skips the branch, leaving the target tree unchanged.
-pub fn repeat_while_without_children_is_noop() {
+pub fn do_repeat_while_without_children_is_noop() {
     fonts::init();
     let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed_with(mk_area(0.0, 0.0, 0, 0));
     let root = model.root;
@@ -495,14 +498,14 @@ pub fn repeat_while_without_children_is_noop() {
 
 #[test]
 pub fn test_repeat_while_aligns_non_ascending_target_channels() {
-    repeat_while_aligns_non_ascending_target_channels();
+    do_repeat_while_aligns_non_ascending_target_channels();
 }
 
 /// Regression for P1-08: `compare_apply_repeat_while` walked siblings in raw
 /// arena order and dropped matches when the target row was not channel-
 /// ascending. Target children on channels `[2,0,1]` and a single ch-0 mutator
 /// must still match the ch-0 child.
-pub fn repeat_while_aligns_non_ascending_target_channels() {
+pub fn do_repeat_while_aligns_non_ascending_target_channels() {
     fonts::init();
 
     let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed_with(mk_area(0.0, 0.0, 0, 0));
@@ -542,14 +545,14 @@ pub fn repeat_while_aligns_non_ascending_target_channels() {
 
 #[test]
 pub fn test_repeat_while_merge_advance_does_not_drop_mutator_without_target() {
-    repeat_while_merge_advance_does_not_drop_mutator_without_target();
+    do_repeat_while_merge_advance_does_not_drop_mutator_without_target();
 }
 
 /// Regression for P1-08: the old advance rule advanced **both** cursors when
 /// `m_chan < t_chan`, so a mutator on channel 2 following a ch-1 mutator never
 /// reached a ch-2 target. Targets `[2,3]` vs mutators `[1,2]` must apply the
 /// ch-2 mutator to the ch-2 target.
-pub fn repeat_while_merge_advance_does_not_drop_mutator_without_target() {
+pub fn do_repeat_while_merge_advance_does_not_drop_mutator_without_target() {
     fonts::init();
 
     let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed_with(mk_area(0.0, 0.0, 0, 0));
@@ -587,14 +590,14 @@ pub fn repeat_while_merge_advance_does_not_drop_mutator_without_target() {
 
 #[test]
 pub fn test_default_terminator_resumes_over_non_ascending_after_mutators() {
-    default_terminator_resumes_over_non_ascending_after_mutators();
+    do_default_terminator_resumes_over_non_ascending_after_mutators();
 }
 
 /// Regression for P1-08: `DEFAULT_TERMINATOR` scanned after-mutations in arena
 /// order and broke on `next.channel() > t_chan`. When the after-mutations are
 /// [ch 2, ch 0, ch 1] and the failing target is ch 0, the terminator must skip
 /// the higher-channel entries and still find the ch-0 after-mutation.
-pub fn default_terminator_resumes_over_non_ascending_after_mutators() {
+pub fn do_default_terminator_resumes_over_non_ascending_after_mutators() {
     fonts::init();
 
     let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed_with(mk_area(0.0, 0.0, 0, 0));

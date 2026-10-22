@@ -1,10 +1,34 @@
 # Fonts
 
-Mandala bundles every font it ships with. There is no system-font
-fallback on either native or WASM — what's compiled in is what's
-available, on every target. This keeps native and browser visuals
-identical and lets the binary render any saved map without external
-assets.
+Mandala bundles every font it ships with, so the binary renders any
+saved map without external assets. The intent is that what's compiled
+in is *all* that is available, on every target: identical glyphs on
+native and in the browser (CODE_CONVENTIONS §4), and a map that looks
+the same wherever it is opened.
+
+**The native build does not yet honor that.**
+`baumhard::font::fonts`' `FONT_SYSTEM` is
+`RwLock::new(FontSystem::new())`, and cosmic-text's `FontSystem::new`
+indexes the host's fontconfig — so on native, `font list`,
+`font set <family>` and the completion popup all offer whatever the
+machine happens to have installed, attributed to `AppFont::Any`,
+alongside the compiled-in faces. The browser build has no fontconfig
+to index, so it really does see only what is compiled in. A map
+authored on a Linux desktop against a host family therefore renders
+in the monospace fallback in a browser, with a `warn!`, and nothing
+about the file says why.
+
+Closing the gap means constructing the `FontSystem` without the
+system sources. That is deliberately **not** done here: it changes
+what every existing map renders as on native — including
+`maps/testament.mindmap.json`, which pins families no compiled-in
+face provides — so it is a visual-regression decision with its own
+migration, not a line change. Until it is taken, read the paragraph
+above as: the compiled-in set is the *portable* set, and anything
+outside it is a native-only accident. New surfaces should assume the
+portable set; `baumhard::mindmap::placard` is the worked example, and
+its `PLACARD_FONT_FAMILY` doc comment explains why it pins nothing at
+all rather than naming a family that exists on one target.
 
 ## Where fonts are pinned in the data model
 

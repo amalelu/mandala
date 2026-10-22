@@ -3,14 +3,21 @@
 use lazy_static::lazy_static;
 
 use crate::util::grapheme_chad::{
-    count_grapheme_clusters, count_number_lines, delete_back_unicode, delete_front_unicode,
-    delete_grapheme_at, find_byte_index_of_grapheme, find_nth_line_grapheme_range,
+    byte_indices_of_graphemes, count_grapheme_clusters, count_number_lines, delete_back_unicode,
+    delete_front_unicode, delete_grapheme_at, find_byte_index_of_grapheme, find_nth_line_grapheme_range,
     first_non_whitespace_grapheme, grapheme_display_width, insert_new_lines, insert_spaces,
     insert_str_at_grapheme, insert_str_at_grapheme_counted, join_graphemes, line_bounds_at,
-    prev_word_boundary_ws, push_spaces, replace_graphemes_until_newline, scalar_display_width,
-    slice_to_newline, split_graphemes_owned, split_off_graphemes, take_graphemes, token_start_ws,
-    truncate_to_display_width, word_left, word_right, LineReplacement,
+    prev_word_boundary_ws, push_spaces, replace_graphemes_until_newline, replace_substring,
+    scalar_display_width, slice_to_newline, split_graphemes_owned, split_off_graphemes, take_graphemes,
+    token_start_ws, truncate_to_byte_budget, truncate_to_display_width, word_left, word_right,
+    wrap_to_display_width, LineReplacement,
 };
+use unicode_segmentation::UnicodeSegmentation;
+
+/// One case for [`NTH_LINE_GRAPHEME_INDICES_TEST`]: the text, the line
+/// number asked for, and the grapheme range that line occupies (`None`
+/// when the text has no such line).
+type NthLineCase = (&'static str, usize, Option<(usize, usize)>);
 
 lazy_static! {
     pub static ref SPLIT_GRAPHEMES_TEST: Vec<(&'static str, usize, &'static str, &'static str)> = vec![
@@ -84,15 +91,96 @@ lazy_static! {
         ("\nho\nhi\nhello", 4),
         ("\n🙏🏻\n🙏🏻🙏🏻\n🙏🏻🙏🏻🙏🏻\n🙏🏻\n🙏🏻\n\n\n\n\n\n\n\n🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻\n\n\n\n\n\n🙏🏻🙏🏻🙏🏻\n\n\n\n", 24),
         ("\nho\nhi\nhello🙏🏻🙏🏻🙏🏻\n\n\n🙏🏻\n\n\n🙏🏻\n\n\n🙏🏻\n\n\n\n\n🙏🏻\n\n\n\n🙏🏻\n\n", 24),
+        // A CRLF is one `\n` character and one grapheme cluster, so
+        // the byte scan here and the cluster walk in
+        // `find_nth_line_grapheme_range` have to reach the same
+        // number for the two to be usable together.
+        ("a\r\nb", 2),
+        ("a\r\nb\r\n", 3),
+        ("\r\n", 2),
+        // A lone CR terminates nothing.
+        ("a\rb", 1),
+        // A lone CR *immediately before* a CRLF: the byte scan here
+        // sees one `\n` and says two lines, and the cluster walk must
+        // agree even though the two CRs sit adjacent and only the
+        // second one is half of a terminator.
+        ("a\r\r\nb", 2),
+        ("x\r\r\ny\r\r\n", 3),
     ];
 
-    pub static ref NTH_LINE_GRAPHEME_INDICES_TEST: Vec<(&'static str, usize, Option<(usize, usize)>)> = vec![
+    /// Inputs for [`do_line_model_is_coherent`]: the strings on which
+    /// `count_number_lines`, `find_nth_line_grapheme_range`,
+    /// `line_bounds_at` and `slice_to_newline` have to describe the
+    /// same lines.
+    ///
+    /// The set is chosen to cover every way they used to come apart,
+    /// plus the ordinary shapes that must not regress: the empty
+    /// string, a bare terminator, both terminator flavors, terminated
+    /// and unterminated tails, runs of empty lines, a lone CR both
+    /// free-standing and pressed up against a CRLF, and multi-scalar
+    /// clusters on both sides of a break.
+    pub static ref LINE_MODEL_COHERENCE_TEST: Vec<&'static str> = vec![
+        "",
+        "\n",
+        "a",
+        "abc\n",
+        "a\nb",
+        "a\nb\n",
+        "a\r\nb",
+        "a\r\nb\r\n",
+        "\n\n",
+        "\n\n\n",
+        "a\n\n\nb",
+        "\r\n",
+        "\r\n\r\n",
+        "a\rb",
+        "a\rb\n",
+        // A lone CR at the very end is content, not a terminator: one
+        // line, and its text keeps the CR.
+        "a\r",
+        // A lone CR immediately before a CRLF — the one shape that
+        // separates a byte-level cut from a cluster-level one, since
+        // a scan that stopped at the `\n` byte and stepped back over
+        // *any* CR would eat the content one as well. Line 0 keeps
+        // its CR and the terminator keeps its own.
+        "a\r\r\nb",
+        "x\r\r\ny\r\r\n",
+        "AA\r\nBB",
+        "\nho\nhi\nhello",
+        "🙏🏻\n👨‍👩‍👧",
+        "e\u{301}\nx",
+        "a\n\u{301}b",
+        "🙏🏻\n👨‍👩‍👧\n",
+        "🙏🏻🙏🏻\r\n👨‍👩‍👧\r\n\r\n🇳🇴",
+        "  indented\n\ttabbed\n",
+        "a\u{3000}b\n\u{200B}\n",
+    ];
+
+    pub static ref NTH_LINE_GRAPHEME_INDICES_TEST: Vec<NthLineCase> = vec![
         ("\n", 0, Some((0, 0))),
-        ("", 0, None),
+        // The trailing empty line a terminator leaves behind is one
+        // of the lines `count_number_lines` counts, so it has to be
+        // addressable — it used to answer `None` and blow up the last
+        // iteration of every `0..count_number_lines(s)` loop (issue
+        // #16 problem B). Its span is the empty range at the end of
+        // the buffer, which is what the `("\n", 0)` row above already
+        // says about a *leading* empty line.
+        ("\n", 1, Some((1, 1))),
+        // `count_number_lines("") == 1`, so line 0 of the empty
+        // string exists and is empty. Same incoherence, one input
+        // further out: the issue does not name this case, and the
+        // count's documented "an empty string yields 1" is what
+        // decides it.
+        ("", 0, Some((0, 0))),
         ("a", 0, Some((0,1))),
-        ("a\n", 1, None),
+        ("a\n", 1, Some((2, 2))),
         ("a\n", 0, Some((0,1))),
+        // Past the last line is still `None`, and that is now the
+        // *only* thing `None` means.
         ("", 1, None),
+        ("a", 1, None),
+        ("a\n", 2, None),
+        ("\n", 2, None),
         ("Hello\nxxxxxxxxxxqqqqqqqqqqxxxxxxxxxxqqqqqqqqqq\n", 1, Some((6, 46))),
         ("\n🙏🏻\n🙏🏻\n", 2, Some((3, 4))),
         ("\n🙏🏻\n🙏🏻🙏🏻🙏🏻🙏🏻🙏🏻\n", 2, Some((3, 8))),
@@ -113,13 +201,55 @@ lazy_static! {
         ("AA\r\nBB", 1, Some((3, 5))),
         ("AA\r\nBB", 2, None),
         ("\r\n", 0, Some((0, 0))),
-        ("\r\n", 1, None),
+        // One cluster, two lines: the CRLF terminates line 0 and
+        // leaves an empty line 1 behind it, at cluster index 1.
+        ("\r\n", 1, Some((1, 1))),
+        ("\r\n", 2, None),
         ("\r\nx", 1, Some((1, 2))),
         ("a\r\n\r\nb", 1, Some((2, 2))),
         ("a\r\n\r\nb", 2, Some((3, 4))),
+        // A CRLF-terminated buffer has the same trailing empty line a
+        // LF-terminated one does, one cluster earlier because the
+        // pair is a single cluster.
+        ("a\r\nb\r\n", 0, Some((0, 1))),
+        ("a\r\nb\r\n", 1, Some((2, 3))),
+        ("a\r\nb\r\n", 2, Some((4, 4))),
+        ("a\r\nb\r\n", 3, None),
         // A lone CR is not a line terminator under UAX #29 and must
         // not split the line here either.
         ("a\rb", 0, Some((0, 3))),
+        // A lone CR immediately before a CRLF. `"a\r\r\nb"` is four
+        // clusters — `a`, `\r`, `\r\n`, `b` — because GB3 joins a CR
+        // to a *following* LF only, so the first CR stands alone and
+        // is content. Line 0 is the two clusters in front of the
+        // terminator and keeps that CR; a cut taken at the `\n` byte
+        // with a blanket "trim every trailing CR" lookbehind would
+        // report `Some((0, 1))` here and lose it. The implemented
+        // one-byte lookbehind steps back over the terminator's own
+        // CR only, and lands on the correct `Some((0, 2))`.
+        ("a\r\r\nb", 0, Some((0, 2))),
+        ("a\r\r\nb", 1, Some((3, 4))),
+        ("a\r\r\nb", 2, None),
+        // The same shape twice over, ending on a terminator so the
+        // trailing empty line is in the picture too.
+        ("x\r\r\ny\r\r\n", 0, Some((0, 2))),
+        ("x\r\r\ny\r\r\n", 1, Some((3, 5))),
+        ("x\r\r\ny\r\r\n", 2, Some((6, 6))),
+        ("x\r\r\ny\r\r\n", 3, None),
+        // Multi-scalar clusters straddling a terminator: the line
+        // bounds are cluster indices, so a ZWJ family and a skin-tone
+        // sequence each count as one and the ranges stay tight around
+        // them rather than around their scalars.
+        ("🙏🏻\n👨‍👩‍👧", 0, Some((0, 1))),
+        ("🙏🏻\n👨‍👩‍👧", 1, Some((2, 3))),
+        ("🙏🏻\n👨‍👩‍👧", 2, None),
+        ("e\u{301}\nx", 0, Some((0, 1))),
+        ("e\u{301}\nx", 1, Some((2, 3))),
+        // A combining mark immediately after a terminator does *not*
+        // fuse with it — `"\n\u{301}"` is two clusters — so line 1
+        // owns the mark rather than line 0 swallowing it.
+        ("a\n\u{301}b", 0, Some((0, 1))),
+        ("a\n\u{301}b", 1, Some((2, 4))),
     ];
 
     pub static ref REPLACE_GRAPHEMES_UNTIL_NEWLINE_TEST: Vec<(&'static str, usize, &'static str, &'static str)> = vec![
@@ -241,6 +371,16 @@ lazy_static! {
         ("abcde\r\nfg", 5, ""),
         // A lone CR is not a terminator and stays in the line.
         ("abc\rde", 0, "abc\rde"),
+        // A lone CR immediately before a CRLF. The lookbehind is one
+        // byte and steps back over the terminator's own CR only, so
+        // the content CR in front of it survives — this is the row
+        // that separates the implemented rule from a blanket
+        // "trim every trailing CR".
+        ("a\r\r\nb", 0, "a\r"),
+        // ...and starting at the content CR, that CR is all that is
+        // left of the line. (Byte 2 — between the two CRs — is a
+        // different offset with a different answer: `""`.)
+        ("a\r\r\nb", 1, "\r"),
         // Degenerate: a byte index that lands on the LF of a CRLF is
         // mid-cluster and outside the contract, but it must not
         // produce an inverted slice and panic.
@@ -281,7 +421,7 @@ pub fn test_find_byte_index_of_grapheme() {
 
 pub fn do_find_byte_index_of_grapheme() {
     for (string, graph_index, expected_byte_index) in INDEX_OF_GRAPHEME_TEST.clone() {
-        if expected_byte_index.is_some() && expected_byte_index.clone().unwrap() >= string.len() {
+        if expected_byte_index.is_some() && expected_byte_index.unwrap() >= string.len() {
             panic!("Expected byte index is out of bounds!! This is a test error.");
         }
         let result = find_byte_index_of_grapheme(string, graph_index);
@@ -298,7 +438,7 @@ pub fn do_replace_graphemes_until_newline() {
     for (source, idx, target, expected) in REPLACE_GRAPHEMES_UNTIL_NEWLINE_TEST.clone() {
         let mut result = target.to_string();
         let before = count_grapheme_clusters(&result);
-        let outcome = replace_graphemes_until_newline(&mut result, idx, &source);
+        let outcome = replace_graphemes_until_newline(&mut result, idx, source);
         assert_eq!(result, expected);
 
         // The four fields of `LineReplacement` are a contract, not
@@ -602,7 +742,139 @@ pub fn test_find_nth_line_grapheme_indices() {
 pub fn do_find_nth_line_grapheme_indices() {
     for (str, n, idx) in NTH_LINE_GRAPHEME_INDICES_TEST.clone() {
         let result = find_nth_line_grapheme_range(str, n);
-        assert_eq!(result, idx);
+        assert_eq!(result, idx, "find_nth_line_grapheme_range({str:?}, {n})");
+    }
+}
+
+#[test]
+pub fn test_line_model_is_coherent() {
+    do_line_model_is_coherent();
+}
+
+/// The four line helpers — `count_number_lines`,
+/// `find_nth_line_grapheme_range`, `line_bounds_at` and the
+/// byte-level `slice_to_newline` — are one line model, and this is
+/// the check that says so for every input in
+/// [`LINE_MODEL_COHERENCE_TEST`] rather than for the individual rows
+/// the other tables happen to carry.
+///
+/// The property issue #16 asks for is the first of the six:
+/// `(0..count_number_lines(s)).all(|i| find_nth_line_grapheme_range(s,
+/// i).is_some())`. On its own it is satisfiable by a finder that
+/// returns `Some((0, 0))` for everything, so the other five pin the
+/// answer down: the count is an exact bound and not merely a lower
+/// one, the ranges tile the buffer with exactly one terminator
+/// cluster between neighbors, no range escapes the buffer or contains
+/// a terminator, `slice_to_newline` cuts out the same text those
+/// bounds delimit, and [`line_bounds_at`] agrees with the finder from
+/// every cursor position inside each line.
+pub fn do_line_model_is_coherent() {
+    for s in LINE_MODEL_COHERENCE_TEST.clone() {
+        let count = count_number_lines(s);
+        let clusters = count_grapheme_clusters(s);
+
+        // 1. Every counted line is addressable — the acceptance
+        //    criterion of issue #16.
+        let mut ranges = Vec::with_capacity(count);
+        for i in 0..count {
+            let range = find_nth_line_grapheme_range(s, i)
+                .unwrap_or_else(|| panic!("line {i} of {s:?} is counted ({count} lines) but unaddressable"));
+            ranges.push(range);
+        }
+
+        // 2. ...and the count is an exact bound, not a lower one.
+        for past in [count, count + 1, count + 7] {
+            assert_eq!(
+                find_nth_line_grapheme_range(s, past),
+                None,
+                "line {past} of {s:?} is past the last of {count} and must not resolve"
+            );
+        }
+
+        // 3. The ranges tile the buffer: line 0 starts at 0, the last
+        //    line ends at the cluster count, and exactly one
+        //    terminator cluster sits between each pair of neighbors.
+        assert_eq!(ranges[0].0, 0, "line 0 of {s:?} must start at the buffer start");
+        assert_eq!(
+            ranges[count - 1].1,
+            clusters,
+            "the last line of {s:?} must end at the buffer end"
+        );
+        for i in 0..count {
+            let (start, end) = ranges[i];
+            assert!(start <= end, "line {i} of {s:?} is inverted: {start}..{end}");
+            assert!(
+                end <= clusters,
+                "line {i} of {s:?} ends past the buffer: {end} > {clusters}"
+            );
+            if i + 1 < count {
+                assert_eq!(
+                    ranges[i + 1].0,
+                    end + 1,
+                    "exactly one terminator cluster separates lines {i} and {} of {s:?}",
+                    i + 1
+                );
+            }
+        }
+
+        // 4. A line's own text carries no terminator, and the
+        //    byte-level member of the family cuts out the same text.
+        //
+        //    The CR of a CRLF cannot survive into a line
+        //    reconstructed the way this loop reconstructs one. The
+        //    bounds are *cluster* indices, so for every line but the
+        //    last `end` names the terminator cluster itself and that
+        //    cluster's CR is the first byte at `to`, never the last
+        //    byte before it. A trailing `\r` in `line` is therefore
+        //    always a lone CR that is genuine content — line 0 of
+        //    `"a\r\r\nb"` is `"a\r"` — so an assertion forbidding one
+        //    has no true positive available to it and fires only on
+        //    correct code. A line that did swallow its terminator is
+        //    caught by the `contains('\n')` clause above.
+        //
+        //    Where a CR *can* be kept is `slice_to_newline`, the
+        //    fourth member of this family: it searches for the `\n`
+        //    byte and steps back over a preceding CR by hand, so it
+        //    is the one member a byte-level cut breaks. Take its
+        //    lookbehind away and line 0 of `"AA\r\nBB"` slices to
+        //    `"AA\r"` here while the cluster-level finder still says
+        //    `"AA"` — that is the input this assertion fails on, and
+        //    the reason it replaces one that had none.
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            let from = find_byte_index_of_grapheme(s, start).unwrap_or(s.len());
+            let to = find_byte_index_of_grapheme(s, end).unwrap_or(s.len());
+            let line = &s[from..to];
+            assert!(
+                !line.contains('\n'),
+                "line {i} of {s:?} is {line:?}, which still holds a terminator"
+            );
+            assert_eq!(
+                slice_to_newline(s, from),
+                line,
+                "line {i} of {s:?} is {line:?} by cluster bounds, so `slice_to_newline` must cut out the same text"
+            );
+        }
+
+        // 5. `line_bounds_at` answers with the same line from every
+        //    cursor inside it, including a cursor parked on the empty
+        //    trailing line.
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            for cursor in start..=end {
+                assert_eq!(
+                    line_bounds_at(s, cursor),
+                    (start, end),
+                    "cursor {cursor} of {s:?} sits on line {i}, so its bounds must be that line's"
+                );
+            }
+        }
+
+        // 6. A cursor past the buffer belongs to the last line, which
+        //    for a `\n`-terminated buffer is the empty one.
+        assert_eq!(
+            line_bounds_at(s, clusters + 5),
+            ranges[count - 1],
+            "an out-of-range cursor in {s:?} belongs to the last line"
+        );
     }
 }
 
@@ -655,13 +927,19 @@ pub fn do_push_spaces() {
 
 #[test]
 pub fn test_count_number_of_lines() {
-    do_count_grapheme_clusters();
+    // This wrapper used to call `do_count_grapheme_clusters`, so
+    // `COUNT_LINES_TEST` was reachable from the benchmark harness and
+    // from nothing else — the whole table was unasserted, including
+    // the `("", 1)` row that decides the empty-string half of issue
+    // #16. `cargo test` cannot catch a wrapper pointed at the wrong
+    // body; only reading it can.
+    do_count_number_of_lines();
 }
 
 pub fn do_count_number_of_lines() {
     for (str, num_lines) in COUNT_LINES_TEST.clone() {
         let result = count_number_lines(str);
-        assert_eq!(result, num_lines);
+        assert_eq!(result, num_lines, "count_number_lines({str:?})");
     }
 }
 
@@ -826,6 +1104,42 @@ pub fn do_truncate_to_display_width() {
     // Combining marks: NFD "café" is 4 cells, e+́ folds into one cell.
     assert_eq!(truncate_to_display_width("cafe\u{0301}", 3), "caf");
     assert_eq!(truncate_to_display_width("cafe\u{0301}", 4), "cafe\u{0301}");
+}
+
+#[test]
+pub fn test_truncate_to_byte_budget() {
+    do_truncate_to_byte_budget();
+}
+
+/// [`truncate_to_byte_budget`] keeps whole clusters only: a cluster
+/// that would cross the budget is dropped entire, never cut.
+pub fn do_truncate_to_byte_budget() {
+    // Fits: returned whole, nothing cut, including exactly at budget.
+    assert_eq!(truncate_to_byte_budget("abc", 3), ("abc", false));
+    assert_eq!(truncate_to_byte_budget("abc", 100), ("abc", false));
+    assert_eq!(truncate_to_byte_budget("", 0), ("", false));
+    // ASCII: one byte per cluster.
+    assert_eq!(truncate_to_byte_budget("abcdef", 4), ("abcd", true));
+    assert_eq!(truncate_to_byte_budget("abcdef", 0), ("", true));
+    // A 4-byte scalar straddling the budget is left out whole.
+    assert_eq!(truncate_to_byte_budget("ab🍕c", 5), ("ab", true));
+    assert_eq!(truncate_to_byte_budget("ab🍕c", 6), ("ab🍕", true));
+    // A ZWJ family (25 bytes) is one cluster: all of it or none.
+    let family = "👨\u{200d}👩\u{200d}👧\u{200d}👦";
+    let text = format!("x{family}y");
+    assert_eq!(truncate_to_byte_budget(&text, 25), ("x", true));
+    assert_eq!(truncate_to_byte_budget(&text, 26), (&text[..26], true));
+    // A base plus its combining mark is never split.
+    assert_eq!(truncate_to_byte_budget("cafe\u{0301}!", 4), ("caf", true));
+    assert_eq!(
+        truncate_to_byte_budget("cafe\u{0301}!", 6),
+        ("cafe\u{0301}", true)
+    );
+    // Every answer is a prefix that ends on a char boundary.
+    for budget in 0..text.len() {
+        let (prefix, cut) = truncate_to_byte_budget(&text, budget);
+        assert!(prefix.len() <= budget && cut && text.starts_with(prefix));
+    }
 }
 
 #[test]
@@ -1611,5 +1925,559 @@ pub fn do_join_graphemes() {
             input
         );
         assert_eq!(joined.replace('\n', ""), input, "round-trip for {:?}", input);
+    }
+}
+
+#[test]
+pub fn test_wrap_to_display_width() {
+    do_wrap_to_display_width();
+}
+
+/// [`wrap_to_display_width`] is the reflow half of the display-width
+/// family — [`truncate_to_display_width`] clips the overflow away,
+/// this folds it onto the next line. The load-failure placard
+/// ([`crate::mindmap::placard`]) turns a loader message into node
+/// sections with it, so every clause of its contract is something a
+/// user can see on a rejected map: a mid-cluster split would shatter
+/// an emoji in a file path, a dropped over-wide cluster would
+/// silently edit the error message, and a word longer than the
+/// column would run off the placard instead of folding.
+pub fn do_wrap_to_display_width() {
+    // Nothing in, nothing out — `"".lines()` yields no lines, and
+    // the wrapper does not invent one.
+    assert!(wrap_to_display_width("", 10).is_empty());
+
+    // Fits: one line out, unchanged.
+    assert_eq!(wrap_to_display_width("hello", 10), vec!["hello"]);
+    assert_eq!(wrap_to_display_width("hello", 5), vec!["hello"]);
+
+    // Break at the space, and the space itself goes with the break.
+    assert_eq!(wrap_to_display_width("aaa bbb", 3), vec!["aaa", "bbb"]);
+    assert_eq!(wrap_to_display_width("aaa   bbb", 3), vec!["aaa", "bbb"]);
+    assert_eq!(
+        wrap_to_display_width("the quick brown fox", 10),
+        vec!["the quick", "brown fox"]
+    );
+
+    // Indentation is content and survives on the first line; the
+    // continuation is flush left.
+    assert_eq!(
+        wrap_to_display_width("  hello world", 7),
+        vec!["  hello", "world"]
+    );
+
+    // Trailing whitespace is trimmed rather than pushing the line
+    // over its width or spilling into a blank continuation.
+    assert_eq!(wrap_to_display_width("aaaa  ", 4), vec!["aaaa"]);
+    assert_eq!(wrap_to_display_width("ab  ", 10), vec!["ab"]);
+
+    // Hard newlines are paragraph structure, preserved verbatim —
+    // including the blank line between two paragraphs.
+    assert_eq!(wrap_to_display_width("one\n\ntwo", 10), vec!["one", "", "two"]);
+
+    // …and an empty `String` means *only* that. Indentation at
+    // least as wide as the column is consumed by the break its own
+    // width forces, rather than emitted as a blank first line that
+    // would read as a paragraph gap the input never had. The
+    // placard's contract is exactly that reading: its parts are
+    // separated by blank lines.
+    assert_eq!(wrap_to_display_width("        x", 4), vec!["x"]);
+    assert_eq!(wrap_to_display_width("    x", 4), vec!["x"]);
+    assert_eq!(wrap_to_display_width("        x y", 4), vec!["x y"]);
+    // A tab is one cell here, like every other non-East-Asian
+    // scalar, so it only forces a break in a one-cell column.
+    assert_eq!(wrap_to_display_width("\tx", 4), vec!["\tx"]);
+    assert_eq!(wrap_to_display_width("\tx", 1), vec!["x"]);
+    // Indentation *narrower* than the column is still content on the
+    // line it opens — the case above is the exception, not the rule.
+    assert_eq!(wrap_to_display_width("  x", 4), vec!["  x"]);
+    // A whitespace-only hard line is a gap and stays one: it is not
+    // reached through a break at all.
+    assert_eq!(wrap_to_display_width("   ", 4), vec![""]);
+    assert_eq!(wrap_to_display_width("a\n     \nb", 4), vec!["a", "", "b"]);
+
+    // A word wider than the column splits mid-word rather than
+    // running off the edge. Loader messages carry long paths.
+    assert_eq!(wrap_to_display_width("aaaaaaaa", 3), vec!["aaa", "aaa", "aa"]);
+    assert_eq!(wrap_to_display_width("  aaaaaaaa", 4), vec!["  aa", "aaaa", "aa"]);
+
+    // Clusters are never split. A ZWJ family, a flag, and a
+    // skin-toned emoji each stay whole across a break — each counts
+    // as one cell, since `scalar_display_width`'s wide table is
+    // East-Asian blocks only and deliberately does not claim emoji.
+    assert_eq!(wrap_to_display_width("👨‍👩‍👧🇺🇸🙏🏻", 2), vec!["👨‍👩‍👧🇺🇸", "🙏🏻"]);
+    // A combining acute rides with its base rather than starting a
+    // line of its own.
+    assert_eq!(wrap_to_display_width("e\u{0301}xy", 2), vec!["e\u{0301}x", "y"]);
+
+    // Wide (East-Asian) clusters count two cells each, so two of
+    // them fill a four-cell column and the third folds over.
+    assert_eq!(wrap_to_display_width("日本語", 4), vec!["日本", "語"]);
+
+    // A cluster wider than the whole column still gets a line — the
+    // wrapper never drops input, it only over-runs.
+    assert_eq!(wrap_to_display_width("日本", 1), vec!["日", "本"]);
+    // `max_width == 0` is not a representable column; it is clamped
+    // to one rather than looping or returning nothing.
+    assert_eq!(wrap_to_display_width("ab", 0), vec!["a", "b"]);
+
+    // Property: no emitted line exceeds the column unless it is a
+    // single indivisible cluster, and concatenating the output
+    // recovers every non-whitespace grapheme of the input in order.
+    for (input, width) in [
+        ("the quick brown fox jumps over the lazy dog", 7usize),
+        (
+            "Failed to parse mindmap JSON: expected value at line 1 column 1",
+            24,
+        ),
+        ("/home/user/maps/a-very-long-file-name.mindmap.json", 12),
+        ("👨‍👩‍👧 family 🇺🇸 flag 日本語 text", 6),
+        ("   leading and trailing   ", 5),
+        ("one\ntwo\n\nthree", 3),
+    ] {
+        let lines = wrap_to_display_width(input, width);
+        for line in &lines {
+            let cells = grapheme_display_width(line);
+            assert!(
+                cells <= width || count_grapheme_clusters(line) == 1,
+                "line {:?} is {} cells wide (limit {}) for input {:?}",
+                line,
+                cells,
+                width,
+                input
+            );
+        }
+        let rejoined = non_whitespace_graphemes(&lines.join(""));
+        let expected = non_whitespace_graphemes(input);
+        assert_eq!(rejoined, expected, "wrap lost or reordered text in {:?}", input);
+    }
+}
+
+/// Every grapheme of `s` that carries at least one non-whitespace
+/// scalar, concatenated. Wrapping rewrites whitespace by design, so
+/// the round-trip property in [`do_wrap_to_display_width`] is stated
+/// over what wrapping must *not* touch.
+fn non_whitespace_graphemes(s: &str) -> String {
+    split_graphemes_owned(s)
+        .into_iter()
+        .filter(|g| g.chars().any(|c| !c.is_whitespace()))
+        .collect()
+}
+
+#[test]
+fn test_byte_indices_of_graphemes() {
+    do_byte_indices_of_graphemes();
+}
+
+/// The batched grapheme→byte conversion must agree with the
+/// single-index helper on every index, including the surprising
+/// ones: multi-scalar clusters, an index exactly at the cluster
+/// count (which has a byte offset but no cluster living there), and
+/// an index past the end.
+pub fn do_byte_indices_of_graphemes() {
+    for text in ["", "abc", "abcd🍕1234", "🙏🏻👨‍👩‍👧🇺🇸", "e\u{0301}x", "a\r\nb"] {
+        let total = count_grapheme_clusters(text);
+        // Two past the end so the "no cluster here" boundary is
+        // covered from both sides.
+        let probes: Vec<usize> = (0..total + 2).collect();
+        let batched = byte_indices_of_graphemes(text, &probes);
+        assert_eq!(batched.len(), probes.len());
+        for (i, &probe) in probes.iter().enumerate() {
+            assert_eq!(
+                batched[i],
+                find_byte_index_of_grapheme(text, probe),
+                "index {probe} of {text:?} disagrees with the single-index helper"
+            );
+        }
+    }
+
+    // Out-of-order input still resolves correctly — the contract
+    // asks for ascending indices, but breaking it must cost speed,
+    // never correctness.
+    let text = "abcd🍕1234";
+    let scrambled = [6usize, 1, 4, 0, 8];
+    let batched = byte_indices_of_graphemes(text, &scrambled);
+    for (i, &probe) in scrambled.iter().enumerate() {
+        assert_eq!(batched[i], find_byte_index_of_grapheme(text, probe));
+    }
+
+    // A run table over the text resolves to the same byte slices a
+    // per-boundary walk would produce — the property the styled-span
+    // bridge depends on.
+    let bounds = byte_indices_of_graphemes(text, &[0, 4, 4, 5, 5, 9]);
+    let slices: Vec<&str> = bounds
+        .chunks(2)
+        .map(|p| &text[p[0].unwrap_or(text.len())..p[1].unwrap_or(text.len())])
+        .collect();
+    assert_eq!(slices, vec!["abcd", "🍕", "1234"]);
+}
+
+// ── The copy-free text edits ───────────────────────────────────────
+//
+// `replace_substring` and `split_off_graphemes` were rewritten to do
+// the same edits without copying the buffer. Behaviorally that is
+// nothing: both return exactly what they returned before, so every
+// existing table above passes unchanged either way. What the bodies
+// below add is *equivalence against the old implementations*, written
+// out here so the comparison is against the previous computation
+// rather than against the new one; and, for the part no runtime
+// assertion can see at all, a pin on the source text.
+
+/// A corpus of the strings that make byte-indexing wrong: combining
+/// marks, ZWJ family sequences, regional-indicator pairs, skin-tone
+/// modifiers, a CRLF, a lone CR, and plain ASCII to keep the easy
+/// case honest.
+const UGLY_CORPUS: &[&str] = &[
+    "",
+    "a",
+    "abcd",
+    "e\u{0301}f",         // e + combining acute
+    "a\u{0301}\u{0327}b", // two stacked marks
+    "🙏🏻ok",               // skin-tone modifier
+    "👨‍👩‍👧x",                // ZWJ family
+    "🇺🇸🇳🇴",               // two regional-indicator pairs
+    "🏳️‍🌈👩‍👧‍👦👯‍♂️",             // three ZWJ clusters in a row
+    "a\r\nb",             // CRLF is one cluster
+    "a\rb",               // lone CR is not a terminator
+    "héllo wörld",
+    "한국어 텍스트",
+    "x\u{200B}y", // zero-width space
+];
+
+/// The pre-change `replace_substring`: copy the whole buffer into a
+/// `Vec<u8>`, drain, splice, and re-validate as UTF-8. Written out
+/// rather than called so the assertions below compare the new body
+/// against the old computation and not against itself.
+///
+/// Returns whether the splice produced valid UTF-8, which is the one
+/// thing the old body decided that the new one decides earlier.
+fn reference_replace_substring(s: &mut String, i: usize, n: usize, source: &str) -> bool {
+    let mut bytes = s.as_bytes().to_vec();
+    bytes.drain(i..n);
+    bytes.splice(i..i, source.as_bytes().iter().cloned());
+    match String::from_utf8(bytes) {
+        Ok(modified) => {
+            *s = modified;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Every cluster-boundary byte offset of `s`, plus `s.len()`.
+fn cluster_boundaries(s: &str) -> Vec<usize> {
+    let mut out = vec![0usize];
+    let mut byte = 0usize;
+    for cluster in s.graphemes(true) {
+        byte += cluster.len();
+        out.push(byte);
+    }
+    out.dedup();
+    out
+}
+
+#[test]
+fn test_replace_substring_matches_the_byte_splice_reference() {
+    do_replace_substring_matches_the_byte_splice_reference();
+}
+
+/// In contract — `i` and `n` on cluster boundaries — the in-place
+/// splice produces exactly the string the copy-drain-splice-validate
+/// body produced, for every boundary pair of every corpus string
+/// against several replacement sources.
+///
+/// The input that makes this fail is any off-by-one in the range
+/// handed to `replace_range`, or a `source` inserted at the wrong
+/// end of it.
+pub fn do_replace_substring_matches_the_byte_splice_reference() {
+    const SOURCES: &[&str] = &["", "X", "🙏🏻", "one\ntwo", "e\u{0301}"];
+
+    let mut compared = 0usize;
+    let mut changed = 0usize;
+    for subject in UGLY_CORPUS {
+        let bounds = cluster_boundaries(subject);
+        for (bi, &i) in bounds.iter().enumerate() {
+            for &n in &bounds[bi..] {
+                for source in SOURCES {
+                    let mut actual = subject.to_string();
+                    replace_substring(&mut actual, i, n, source);
+
+                    let mut expected = subject.to_string();
+                    let valid = reference_replace_substring(&mut expected, i, n, source);
+                    assert!(
+                        valid,
+                        "the reference must produce UTF-8 for cluster-boundary offsets \
+                         ({i}..{n} of {subject:?})"
+                    );
+
+                    assert_eq!(
+                        actual, expected,
+                        "replace_substring({subject:?}, {i}, {n}, {source:?}) diverged from the \
+                         byte-splice reference"
+                    );
+                    compared += 1;
+                    if actual != *subject {
+                        changed += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 500, "the sweep must actually run; compared {compared}");
+    // A body that never edited anything would agree with a reference
+    // that never edited anything.
+    assert!(
+        changed > 300,
+        "the sweep must produce real edits; {changed} of {compared}"
+    );
+}
+
+#[test]
+fn test_replace_substring_refuses_a_mid_character_range() {
+    do_replace_substring_refuses_a_mid_character_range();
+}
+
+/// Out of contract, the in-place splice refuses and says so, where
+/// the body it replaced would silently write a **valid but wrong**
+/// string.
+///
+/// `"éé"` is `[C3 A9 C3 A9]`. Draining bytes `1..3` cuts the tail off
+/// the first character and the head off the second, and what is left
+/// — `[C3 A9]` — is perfectly good UTF-8. `String::from_utf8`
+/// therefore accepted it, so the check that was there to catch a
+/// mid-character offset did not catch this one. The reference below
+/// is that old body, and the test asserts it *succeeds*: that is the
+/// hole, demonstrated rather than asserted about.
+///
+/// `is_char_boundary` refuses the same call before `s` is touched,
+/// which is why swapping a runtime revalidation for a precondition
+/// is not a weakening here.
+///
+/// Plain corpus rather than a table: the interesting inputs are the
+/// mid-character offsets of a handful of multi-byte strings, and the
+/// list of them is the test.
+pub fn do_replace_substring_refuses_a_mid_character_range() {
+    // The hole in the old check, demonstrated.
+    let mut corrupted = "éé".to_string();
+    let accepted = reference_replace_substring(&mut corrupted, 1, 3, "");
+    assert!(
+        accepted,
+        "the pre-change body accepted this splice — that is what makes it a hole"
+    );
+    assert_eq!(
+        corrupted, "é",
+        "the pre-change body wrote a valid string that is not the intended edit"
+    );
+
+    // The same call, refused.
+    let mut guarded = "éé".to_string();
+    replace_substring(&mut guarded, 1, 3, "");
+    assert_eq!(guarded, "éé", "a mid-character range must leave the buffer alone");
+
+    // Every out-of-contract shape leaves the subject untouched.
+    //
+    // The contract is *character* boundaries, a finer grid than
+    // cluster boundaries — byte 6 of the subject below sits between
+    // the 🙏 and its skin-tone modifier, inside one cluster but
+    // between two characters, and `replace_substring` accepts it.
+    // Deciding otherwise is the caller's job (§B3) and this function
+    // is not where it could be decided.
+    //
+    // Enumerated rather than swept over every byte pair, because
+    // every refusal emits a line into the process-global recorder
+    // `test_logger` owns and that buffer is shared with every other
+    // test in the binary. The cases below are the shapes, not a
+    // sample of them: `i` mid-character, `n` mid-character, both,
+    // past the end, and inverted.
+    //
+    // "é🙏🏻ok" is [C3 A9][F0 9F 99 8F][F0 9F 8F BB][6F][6B] — 12
+    // bytes with character boundaries at 0, 2, 6, 10, 11, 12.
+    let subject = "é🙏🏻ok";
+    assert_eq!(
+        subject.len(),
+        12,
+        "the offsets below are written against this length"
+    );
+    const OUT_OF_CONTRACT: &[(usize, usize, &str)] = &[
+        (1, 6, "`i` splits the é"),
+        (0, 1, "`n` splits the é"),
+        (3, 10, "`i` splits the 🙏"),
+        (2, 4, "`n` splits the 🙏"),
+        (7, 9, "both split the skin-tone modifier"),
+        (1, 3, "both split, one character each"),
+        (0, 13, "`n` past the end"),
+        (13, 13, "`i` past the end"),
+        (12, 6, "inverted, both on boundaries"),
+        (10, 2, "inverted across a cluster"),
+    ];
+    let mut refused = 0usize;
+    for (i, n, why) in OUT_OF_CONTRACT {
+        let mut buffer = subject.to_string();
+        replace_substring(&mut buffer, *i, *n, "Z");
+        assert_eq!(
+            buffer, subject,
+            "out-of-contract range {i}..{n} ({why}) must leave {subject:?} unedited"
+        );
+        refused += 1;
+    }
+    assert_eq!(
+        refused,
+        OUT_OF_CONTRACT.len(),
+        "every listed case must have been driven"
+    );
+}
+
+/// CODE_CONVENTIONS §9's degrade is "log and keep running", so the
+/// line the refusal emits is part of the behavior rather than
+/// decoration — and until `test_logger` existed nothing could tell a
+/// `warn!`/`error!` that fires from one that was deleted.
+///
+/// Plain `#[test]` with its body inline, and the reason is §B8's
+/// class 2 read literally: criterion iterates what it is given, and
+/// `test_logger`'s recorder is process-global with a bounded buffer
+/// that refuses to answer once full. A benched iteration of this body
+/// would fill it and then panic inside `lines_containing` — a body
+/// that drives a panic under iteration, which is what that class is
+/// for. Its sibling `do_replace_substring_refuses_a_mid_character_range`
+/// carries the assertions that *can* be iterated.
+#[test]
+fn test_replace_substring_says_so_when_it_refuses() {
+    use crate::util::test_logger;
+
+    test_logger::install();
+    let mut buffer = "é".to_string();
+    // Byte 1 is inside the é, so this is refused.
+    replace_substring(&mut buffer, 1, 2, "Z");
+    assert_eq!(buffer, "é", "the refusal must leave the buffer alone");
+
+    // The needle is the area prefix plus the function name, which
+    // nothing else in the workspace emits.
+    let reported = test_logger::lines_containing("grapheme_chad: replace_substring got byte range");
+    assert!(!reported.is_empty(), "the refusal must say so through the logger");
+    assert!(
+        reported.iter().any(|line| line.contains("1..2")),
+        "the line must name the range it refused; got {reported:?}"
+    );
+}
+
+#[test]
+fn test_split_off_graphemes_matches_the_collect_and_concat_reference() {
+    do_split_off_graphemes_matches_the_collect_and_concat_reference();
+}
+
+/// The one-allocation split returns the same two halves the
+/// collect-and-concat body returned, at every cluster index of every
+/// corpus string and at three indices past the end.
+///
+/// The reference is the pre-change body, written out here. The input
+/// that makes this fail is a split taken at a byte offset that is not
+/// a cluster boundary — which is exactly what `String::split_off`
+/// would do if it were handed `at` directly instead of
+/// `find_byte_index_of_grapheme(original, at)`.
+pub fn do_split_off_graphemes_matches_the_collect_and_concat_reference() {
+    fn reference_split_off(original: &mut String, at: usize) -> String {
+        let graphemes = original.graphemes(true).collect::<Vec<&str>>();
+        if at >= graphemes.len() {
+            return original.split_off(original.len());
+        }
+        let (left, right) = graphemes.split_at(at);
+        let right_str = right.concat();
+        *original = left.concat();
+        right_str
+    }
+
+    let mut compared = 0usize;
+    let mut split_inside = 0usize;
+    for subject in UGLY_CORPUS {
+        let clusters = count_grapheme_clusters(subject);
+        for at in 0..clusters + 3 {
+            let mut actual_head = subject.to_string();
+            let actual_tail = split_off_graphemes(&mut actual_head, at);
+
+            let mut expected_head = subject.to_string();
+            let expected_tail = reference_split_off(&mut expected_head, at);
+
+            assert_eq!(
+                actual_head, expected_head,
+                "prefix diverged splitting {subject:?} at cluster {at}"
+            );
+            assert_eq!(
+                actual_tail, expected_tail,
+                "suffix diverged splitting {subject:?} at cluster {at}"
+            );
+            // The halves must still concatenate back to the original,
+            // which is the property a mid-cluster cut breaks.
+            assert_eq!(format!("{actual_head}{actual_tail}"), *subject);
+            compared += 1;
+            if at > 0 && at < clusters {
+                split_inside += 1;
+            }
+        }
+    }
+    assert!(compared > 80, "the sweep must actually run; compared {compared}");
+    // Splits at 0 and past the end agree trivially; the corpus has to
+    // reach the interior, where a multi-scalar cluster can be cut.
+    assert!(
+        split_inside >= 30,
+        "the sweep must split inside the strings; {split_inside} interior splits"
+    );
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_the_text_edit_primitives_carry_no_whole_buffer_copy() {
+    do_the_text_edit_primitives_carry_no_whole_buffer_copy();
+}
+
+/// The removals in this pair are invisible to every assertion above:
+/// both functions return exactly what they returned before. So the
+/// removal is pinned in the source text, scoped to the two bodies.
+///
+/// Each clause names what must now be there as well as what must not,
+/// so a scan resolving to something empty fails on the positive half
+/// rather than passing the negative one. What it cannot do is see an
+/// allocation introduced under a different spelling — it is a pin on
+/// the shape that was removed, not a proof that none remains.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn do_the_text_edit_primitives_carry_no_whole_buffer_copy() {
+    use crate::util::rust_source::{braced_block_after, production_code};
+
+    const FILE: &str = "lib/baumhard/src/util/grapheme_chad.rs";
+    let code = production_code(FILE);
+    assert!(
+        code.len() > 5_000,
+        "{FILE} must have read as real production code; got {} bytes",
+        code.len()
+    );
+
+    let body = |header: &str| -> &str {
+        let block = braced_block_after(&code, header)
+            .unwrap_or_else(|| panic!("`{header}` must still be declared with a body"));
+        assert!(block.len() > 60, "`{header}` resolved to an empty-looking body");
+        block
+    };
+
+    let replace = body("fn replace_substring(");
+    assert!(
+        replace.contains("replace_range("),
+        "`replace_substring` must splice in place: {replace}"
+    );
+    for banned in ["to_vec()", "from_utf8", "drain(", "splice("] {
+        assert!(
+            !replace.contains(banned),
+            "`replace_substring` must not copy the buffer (`{banned}`): {replace}"
+        );
+    }
+
+    let split = body("pub fn split_off_graphemes(");
+    assert!(
+        split.contains("split_off("),
+        "`split_off_graphemes` must hand the tail over through `String::split_off`: {split}"
+    );
+    for banned in ["concat()", "collect::<Vec"] {
+        assert!(
+            !split.contains(banned),
+            "`split_off_graphemes` must not rebuild both halves (`{banned}`): {split}"
+        );
     }
 }

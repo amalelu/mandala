@@ -5,55 +5,94 @@
 //! (tight / normal / wide) or a raw float in the preset's unit.
 
 use super::Command;
-use crate::application::console::completion::{
-    kv_key_completions, prefix_filter, Completion, CompletionContext, CompletionState,
-};
 use crate::application::console::helpers::require_edge_or_portal;
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
-use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
+use crate::application::console::spec::descent::descend;
+use crate::application::console::spec::{bare_words, free_words, kvs, usage, Bare, Form, Grammar, Key, Word};
+use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::MindMapDocument;
 
 pub const PRESETS: &[(&str, f32)] = &[("tight", 0.0), ("normal", 2.0), ("wide", 6.0)];
 pub const VALUE_PRESETS: &[&str] = &["tight", "normal", "wide"];
-pub const KEYS: &[&str] = &["value"];
+const PRESET_WORDS: &[Word] = &bare_words::<3>(VALUE_PRESETS);
+
+const KEYS: &[Key] = &[Key::new(
+    "value",
+    "glyph spacing: a preset or a float",
+    free_words("float", PRESET_WORDS),
+)];
+
+pub static GRAMMAR: Grammar = Grammar {
+    label: "spacing",
+    subverb_sets: &[],
+    key_sets: &[KEYS],
+    bare: Some(Bare::new("composed", &[Form::keys(&["value"], &[])])),
+};
 
 pub const COMMAND: Command = Command {
     name: "spacing",
     aliases: &[],
     summary: "Set the glyph spacing of the selected edge",
-    usage: "spacing value=<tight|normal|wide | <float>>",
-    tags: &["edge", "spacing", "tight", "wide"],
     applicable: edge_selected,
-    complete: complete_spacing,
+    grammar: &GRAMMAR,
+    synonyms: &["edge", "tight", "wide"],
     execute: execute_spacing,
 };
-
-fn complete_spacing(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match &state.context {
-        CompletionContext::Token { .. } => kv_key_completions(KEYS, state.partial),
-        CompletionContext::KvValue { key } if key == "value" => prefix_filter(VALUE_PRESETS, state.partial),
-        _ => Vec::new(),
-    }
-}
 
 fn execute_spacing(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     if let Err(r) = require_edge_or_portal(eff) {
         return r;
     }
-    let v = match args.kv("value") {
+    let descent = descend(&GRAMMAR, args.tokens());
+    let pairs = match kvs::read_strict(&descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
+    };
+    let v = match kvs::value(&pairs, "value") {
         Some(v) => v,
-        None => return ExecResult::err("usage: spacing value=<tight|normal|wide | <float>>"),
+        None => return ExecResult::err(usage::no_arguments_message(&GRAMMAR)),
     };
     if resolve_spacing_value(v).is_none() {
         return ExecResult::err(format!("'{}' must be a preset (tight|normal|wide) or a float", v));
     }
     // Route through the mutation core — same setter, single
     // source of truth with the parametric `Action::SetSpacing` arm.
-    if apply_spacing_to_selection(eff.document, v) {
-        ExecResult::ok_msg(format!("spacing set to {}", v))
+    let changed = apply_spacing_to_selection(eff.document_mut(), v);
+
+    // Report what was *stored*, not what was typed. `set_edge_spacing`
+    // clamps to the loader's bound, so echoing the request told the
+    // user `spacing set to 1e30` for a value stored as 1000000 — and
+    // then `spacing already 1e30` on a repeat, because the setter
+    // correctly reported no change. Two lies from one missing
+    // read-back.
+    let stored = stored_spacing(eff.document());
+    match (changed, stored) {
+        (_, None) => ExecResult::ok_msg(format!("spacing set to {}", v)),
+        (true, Some(stored)) => ExecResult::ok_msg(spacing_msg("spacing set to", v, stored)),
+        (false, Some(stored)) => ExecResult::ok_msg(spacing_msg("spacing already", v, stored)),
+    }
+}
+
+/// The spacing currently stored on the selected edge, if there is one.
+fn stored_spacing(doc: &MindMapDocument) -> Option<f32> {
+    let er = doc.selection.selected_edge_or_portal_edge()?;
+    let idx = doc.edge_index(&er)?;
+    doc.mindmap.edges[idx]
+        .glyph_connection
+        .as_ref()
+        .map(|c| c.spacing)
+}
+
+/// Phrase the result, naming the clamp only when it actually moved
+/// the value — an ordinary edit should not be cluttered with it.
+fn spacing_msg(lead: &str, requested: &str, stored: f32) -> String {
+    let asked = resolve_spacing_value(requested);
+    let was_clamped = asked.is_some_and(|a| (a - stored).abs() > f32::EPSILON);
+    if was_clamped {
+        format!("{lead} {stored} (clamped from {requested} to the bound the loader accepts)")
     } else {
-        ExecResult::ok_msg(format!("spacing already {}", v))
+        format!("{lead} {requested}")
     }
 }
 

@@ -24,17 +24,35 @@ pub fn assign_dewey_ids(nodes: &serde_json::Map<String, Value>) -> HashMap<Strin
     id_map
 }
 
+/// Iterative rather than recursive, for the same reason every walk
+/// over `parent_id` depth in this workspace is: the depth comes from
+/// the file, and `convert --legacy` runs on files from wherever the
+/// user got them. A legacy map with a long parent chain is legal and
+/// acyclic, so this inherits its depth — and a stack overflow is a
+/// `SIGABRT`, not a catchable error, so the conversion would kill
+/// the tool rather than report a bad input.
+///
+/// Children are pushed reversed so `pop()` yields them in the order
+/// `sorted_children_of` returns, which is what fixes the assigned
+/// Dewey indices. Reverse the visit order and every id changes.
 fn assign_children(
     nodes: &serde_json::Map<String, Value>,
     parent_old_id: &str,
     parent_new_id: &str,
     id_map: &mut HashMap<String, String>,
 ) {
-    let children = sorted_children_of(nodes, Some(parent_old_id));
-    for (i, child_old_id) in children.iter().enumerate() {
-        let child_new_id = format!("{}.{}", parent_new_id, i);
-        id_map.insert(child_old_id.clone(), child_new_id.clone());
-        assign_children(nodes, child_old_id, &child_new_id, id_map);
+    // (old id of the subtree root, the new id already assigned to it)
+    let mut frontier: Vec<(String, String)> = vec![(parent_old_id.to_string(), parent_new_id.to_string())];
+
+    while let Some((old_id, new_id)) = frontier.pop() {
+        let children = sorted_children_of(nodes, Some(&old_id));
+        let mark = frontier.len();
+        for (i, child_old_id) in children.iter().enumerate() {
+            let child_new_id = format!("{}.{}", new_id, i);
+            id_map.insert(child_old_id.clone(), child_new_id.clone());
+            frontier.push((child_old_id.clone(), child_new_id));
+        }
+        frontier[mark..].reverse();
     }
 }
 
@@ -121,5 +139,78 @@ fn rewrite_field(obj: &mut Value, field: &str, id_map: &HashMap<String, String>)
                 o.insert(field.to_string(), Value::String(new_val.clone()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod deep_chain_tests {
+    use super::assign_dewey_ids;
+    use serde_json::json;
+
+    /// **`convert --legacy` runs on files from wherever the user got
+    /// them.** A legacy map with a long parent chain is legal and
+    /// acyclic, so the id assignment inherits its depth. While this
+    /// walk recursed, a deep enough chain exhausted the stack and
+    /// killed the tool with `SIGABRT` — not an error it could report,
+    /// which is the whole difference between "this file is odd" and
+    /// "maptool died".
+    ///
+    /// Run on a 256 KiB stack, the same way the loader's deep-chain
+    /// test is: any reintroduced recursion blows a stack that small
+    /// long before the chain ends, while the iterative form is
+    /// indifferent to it.
+    ///
+    /// The depth matches the loader's test rather than exceeding it
+    /// because `sorted_children_of` rescans every node per parent —
+    /// the conversion is O(n²) in the node count, which is fine for
+    /// a one-shot migration and would make a larger fixture a
+    /// minute-long test for no extra coverage.
+    #[test]
+    fn test_deep_legacy_chain_does_not_exhaust_the_stack() {
+        const DEPTH: usize = 6_000;
+        const SMALL_STACK: usize = 256 * 1024;
+
+        let assigned = std::thread::Builder::new()
+            .stack_size(SMALL_STACK)
+            .spawn(|| {
+                let mut nodes = serde_json::Map::new();
+                for i in 0..DEPTH {
+                    let parent = if i == 0 {
+                        serde_json::Value::Null
+                    } else {
+                        json!(format!("n{}", i - 1))
+                    };
+                    nodes.insert(format!("n{i}"), json!({ "parent_id": parent, "index": 0 }));
+                }
+                assign_dewey_ids(&nodes).len()
+            })
+            .expect("spawn the small-stack conversion")
+            .join()
+            .expect("the id assignment must not exhaust a 256 KiB stack");
+
+        assert_eq!(assigned, DEPTH, "every node in the chain must get an id");
+    }
+
+    /// The iterative rewrite must assign the same ids the recursion
+    /// did. Dewey indices come from visit order, so a reversed walk
+    /// renames every node in the file.
+    #[test]
+    fn test_ids_follow_sorted_child_order() {
+        let nodes = serde_json::from_value(json!({
+            "root":  { "parent_id": null,   "index": 0 },
+            "a":     { "parent_id": "root", "index": 0 },
+            "b":     { "parent_id": "root", "index": 1 },
+            "a1":    { "parent_id": "a",    "index": 0 },
+            "a2":    { "parent_id": "a",    "index": 1 },
+            "b1":    { "parent_id": "b",    "index": 0 },
+        }))
+        .expect("fixture parses");
+        let map = assign_dewey_ids(&nodes);
+        assert_eq!(map.get("root").map(String::as_str), Some("0"));
+        assert_eq!(map.get("a").map(String::as_str), Some("0.0"));
+        assert_eq!(map.get("b").map(String::as_str), Some("0.1"));
+        assert_eq!(map.get("a1").map(String::as_str), Some("0.0.0"));
+        assert_eq!(map.get("a2").map(String::as_str), Some("0.0.1"));
+        assert_eq!(map.get("b1").map(String::as_str), Some("0.1.0"));
     }
 }

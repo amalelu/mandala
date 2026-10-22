@@ -21,7 +21,6 @@ use super::{scope, CustomMutation, DocumentAction, MutationBehavior, TargetScope
 /// `mutations` + `target_scope` pair. `mutator` takes precedence
 /// when both are present.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct CustomMutationIn {
     pub id: String,
     pub name: String,
@@ -83,6 +82,12 @@ impl From<CustomMutationIn> for CustomMutation {
     }
 }
 
+/// `true` when `behavior` still holds the default the reader's
+/// `#[serde(default)]` would restore, so the key carries nothing.
+fn behavior_is_default(behavior: &MutationBehavior) -> bool {
+    *behavior == MutationBehavior::default()
+}
+
 /// Canonical serialization shape — always writes the new `mutator`
 /// form, omits empty-default fields for a terse on-disk shape.
 #[derive(Serialize)]
@@ -96,6 +101,11 @@ pub(crate) struct CustomMutationOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mutator: Option<MutatorNode>,
     pub target_scope: TargetScope,
+    /// Omitted at its `Persistent` default — the reader's
+    /// `#[serde(default)]` restores it, and writing it out would
+    /// contradict the "omits empty-default fields" contract above
+    /// (it did, until #47).
+    #[serde(skip_serializing_if = "behavior_is_default")]
     pub behavior: MutationBehavior,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predicate: Option<Predicate>,

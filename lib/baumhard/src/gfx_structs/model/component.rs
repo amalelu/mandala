@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! `GlyphComponent` + `GlyphComponentField` — the leaf of the glyph
-//! model hierarchy: one contiguous run of text sharing a font and a
-//! color. A `GlyphLine` is a `Vec<GlyphComponent>`; a `GlyphMatrix`
-//! is a `Vec<GlyphLine>`; a `GlyphModel` wraps the matrix.
+//! `GlyphComponent` — the leaf of the glyph model hierarchy: one
+//! contiguous run of text sharing a font and a color. A `GlyphLine`
+//! is a `Vec<GlyphComponent>`; a `GlyphMatrix` is a
+//! `Vec<GlyphLine>`; a `GlyphModel` wraps the matrix.
+//!
+//! Field-level deltas against a component are expressed through
+//! [`GlyphModelField`],
+//! which is the model half of the two field vocabularies §B4
+//! recognizes. There is deliberately no third, component-level one.
 
 use crate::font::fonts::AppFont;
-use crate::util::color::{Color, FloatRgba};
+use crate::util::color::Color;
 use crate::util::grapheme_chad::{
     count_grapheme_clusters, delete_back_unicode, delete_front_unicode, first_non_whitespace_grapheme,
     split_off_graphemes,
@@ -15,25 +20,11 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::ops::{Add, AddAssign, MulAssign};
 
-/// Field-level delta vocabulary for [`GlyphComponent`]. Each variant
-/// carries the replacement (or addend) for one field; the mutator
-/// pipeline picks the variant to know *which* part to touch.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub enum GlyphComponentField {
-    /// New text run.
-    Text(String),
-    /// Font assignment.
-    Font(AppFont),
-    /// Color assignment.
-    Color(FloatRgba),
-}
-
 /// The leaf: one run of text rendered in a single font and color.
 /// Stacks into a [`crate::gfx_structs::model::GlyphLine`], which
 /// stacks into a [`crate::gfx_structs::model::GlyphMatrix`], which
 /// belongs to a [`crate::gfx_structs::model::GlyphModel`].
 #[derive(Serialize, Debug, Eq, PartialEq, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct GlyphComponent {
     /// The text run — may contain multi-byte / multi-grapheme clusters.
     pub text: String,

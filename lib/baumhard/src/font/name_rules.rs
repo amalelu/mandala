@@ -97,9 +97,12 @@ pub enum NameEncoding {
 pub fn decode_name_record(bytes: &[u8], encoding: NameEncoding) -> String {
     match encoding {
         NameEncoding::Utf16Be => {
+            // A trailing odd byte is dropped, as `chunks_exact(2)` did.
             let units = bytes
-                .chunks_exact(2)
-                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_be_bytes(*pair));
             char::decode_utf16(units)
                 .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
                 .collect()

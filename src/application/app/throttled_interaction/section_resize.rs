@@ -131,8 +131,23 @@ impl ThrottledInteraction for SectionResizeInteraction {
                     (new_size.width as f32).max(MIN_DRAG_SIZE_PX),
                     (new_size.height as f32).max(MIN_DRAG_SIZE_PX),
                 );
-                apply_section_resize_to_tree(tree, &self.node_id, self.section_idx, canvas_pos, canvas_size);
-                renderer.rebuild_buffers_from_tree(&tree.tree);
+                // One section-area's position and bounds are the
+                // whole of this frame's write, so one keyed reshape
+                // is the whole of the refresh it needs — including
+                // that element's background rect, which
+                // `reshape_buffer_for` re-collects. What this
+                // replaced, `rebuild_buffers_from_tree`, re-shaped
+                // every text buffer on the map per drained frame.
+                let section = apply_section_resize_to_tree(
+                    tree,
+                    &self.node_id,
+                    self.section_idx,
+                    canvas_pos,
+                    canvas_size,
+                );
+                if let Some(section) = section {
+                    renderer.reshape_buffer_for(section, &tree.tree);
+                }
                 let elements = build_section_resize_handles(
                     &self.node_id,
                     self.section_idx,

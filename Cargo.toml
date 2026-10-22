@@ -41,8 +41,8 @@ license = "MPL-2.0"
 # featureless here is about where the *declaration* lives, not about
 # what gets compiled.
 [workspace.dependencies]
-glam = { version = "0.32.1", features = ["serde"] }
-indextree = { version = "4.8.1", features = ["serde"] }
+glam = { version = "0.34.1", features = ["serde"] }
+indextree = { version = "4.9.2", features = ["serde"] }
 # `release_max_level_warn`: `warn!`/`error!` survive into release
 # builds so CODE_CONVENTIONS §9's "log and degrade" posture is real in
 # the binaries users run; `info!`/`debug!`/`trace!` still compile to
@@ -53,9 +53,9 @@ indextree = { version = "4.8.1", features = ["serde"] }
 # separately, and the reason a mismatch was survivable is that cargo
 # unions log's features across the workspace and log
 # `compile_error!`s on "multiple release_max_level_* features set"
-# (`log-0.4.29/src/lib.rs:376-394`) — a mixed workspace failed to
+# (`log-0.4.34/src/lib.rs:381-399`) — a mixed workspace failed to
 # build rather than resolving to something. Worth knowing what that
-# saved us from: `STATIC_MAX_LEVEL` (`lib.rs:1611`) matches its arms
+# saved us from: `STATIC_MAX_LEVEL` (`lib.rs:1646`) matches its arms
 # in declaration order, `off` first, so absent the guard a mixed
 # `off`/`warn` set would have silently resolved to `Off` and deleted
 # the channel. There is now nothing to mix — the feature is declared
@@ -65,17 +65,35 @@ indextree = { version = "4.8.1", features = ["serde"] }
 # that, and separately pins the `log` version the `compile_error!`
 # above was read in, so a bump has to re-verify the citation rather
 # than inherit it.
-log = { version = "0.4.29", features = ["release_max_level_warn"] }
-rustc-hash = "2.1.2"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+#
+# `kv`: lets a log site attach a stable diagnostic code beside its
+# message (`log::warn!(code = SOME_CODE; "area: …")`). Nothing is
+# printed differently: env_logger's own `kv` feature stays off. The
+# reader is `baumhard::util::log::capture`, which hands the code to the
+# IPC reply's `warnings` array (`format/ipc.md` §Warnings).
+log = { version = "0.4.34", features = ["release_max_level_warn", "kv"] }
+# Two members name it, so it lives here: `mandala_derive` writes a
+# proc macro with it, and baumhard's dev-dependency asks for
+# `span-locations` on top (see `lib/baumhard/Cargo.toml`).
+#
+# Featureless here for the same reason `syn` is. `span-locations`
+# makes proc-macro2 record a line and column for every token it
+# parses, which is not free — and under resolver 2 the ask lands on
+# the *target*-graph node baumhard's tests compile against, not the
+# proc-macro-graph node every derive in the workspace goes through.
+# Putting the feature in this table would move that cost onto every
+# derive macro expansion for the benefit of one test-only reader.
+proc-macro2 = "1.0.107"
+rustc-hash = "2.1.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 # Deliberately featureless here; see the `features` note above. `syn`
 # is one of the heaviest compile dependencies in the graph, so the
 # default-feature set is the one to inherit and `["full"]` the one to
 # ask for.
-syn = "2.0.117"
+syn = "3.0.9"
 
 # The profile `./build.sh --fat` selects, and the reason that flag
 # exists: `release` keeps `codegen-units = 16` and thin-local LTO so
@@ -123,9 +141,9 @@ rustc-hash.workspace = true
 # `::Color`, `::FontSystem`, ...). Leaving the crate out of this
 # manifest makes that containment compiler-enforced: a `use
 # cosmic_text::...` in `src/` no longer resolves.
-wgpu = { version = "29.0", features = ["webgl"] }
-bytemuck = "1.16"
-glyphon = "0.11.0"
+wgpu = { version = "30.0.1", features = ["webgl"] }
+bytemuck = "1.25.2"
+glyphon = "0.12.0"
 # Alternative: https://crates.io/crates/ab_glyph
 glam.workspace = true
 winit = "0.30.13"
@@ -155,15 +173,25 @@ web-time = "1.1.0"
 # cost. If a build script is ever added, declare its deps then.
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-num_cpus = "1.17.0"
-pollster = "0.4.0"
-arboard = "3.6.1"
+pollster = "1.0.1"
+arboard = "3.7.0"
+
+# The `--ipc` socket's lifecycle needs one POSIX call std does not
+# expose — `geteuid`, so the directories on the socket's path are only
+# trusted when this user or root owns them, and a stale socket is only
+# ever replaced when it is ours — and this crate has no `unsafe`.
+# `cfg(unix)` rather than the native table because Windows has no such
+# call and no Unix-socket transport. rustix 1.x already reaches the
+# native graph through the windowing stack, so the table adds a feature
+# to that copy rather than a second version of the crate.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", features = ["process"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2.118"
-wasm-bindgen-futures = "0.4.68"
-js-sys = "0.3.95"
-web-sys = { version = "0.3.95", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Storage", "Location", "Performance", "EventTarget", "KeyboardEvent", "Response"] }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Storage", "Location", "Performance", "EventTarget", "KeyboardEvent", "Response"] }
 # Load-bearing despite having no call site anywhere in `src/`, which
 # is exactly why it is worth a comment: this entry exists to turn a
 # *feature* on, and the next dead-dependency sweep will otherwise find
@@ -175,7 +203,7 @@ web-sys = { version = "0.3.95", features = ["Window", "Document", "Element", "Ht
 # `./test.sh` wasm32 gate). Cargo unions features across the
 # workspace, so declaring it in the crate that *is* the wasm binary
 # is what makes the browser build resolve.
-getrandom = { version = "0.4.2", features = ["wasm_js"] }
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
 
 # No `[dev-dependencies]`, and in particular no `criterion`: this
 # crate has no benchmark harness (TEST_CONVENTIONS §T2.3) and every

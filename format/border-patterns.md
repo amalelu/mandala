@@ -93,7 +93,7 @@ A multi-cluster fill works the same way:
 
 ## Escapes
 
-Three escape sequences are recognised everywhere:
+Three escape sequences are recognized everywhere:
 
 | Sequence | Meaning |
 |---|---|
@@ -131,10 +131,10 @@ static floor). Static parts are never split.
 ## Palette cycling
 
 When `GlyphBorderConfig.color_palette` is set, every cluster on
-the border picks its colour from the named palette's
+the border picks its color from the named palette's
 `groups[i % len][color_palette_field]`. The four sides chain into
 one continuous sweep around the rectangle in
-top → right → bottom → left order, so a coloured stripe wraps
+top → right → bottom → left order, so a colored stripe wraps
 naturally across the corners.
 
 `color_palette_field` selects which channel of each `ColorGroup`
@@ -187,7 +187,7 @@ subverb of the [`section`
 command](../src/application/console/commands/section/frame.rs):
 
 ```
-section frame show               # readout of the resolved config (cascade source labelled)
+section frame show               # readout of the resolved config (cascade source labeled)
 section frame reset              # drop the per-section override
 section frame preset=heavy color=#ff8800
 section frame top="###(*)###" tl="◆" tr="◆" bl="◆" br="◆"

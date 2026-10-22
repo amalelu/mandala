@@ -217,8 +217,8 @@ mod tests {
         }
     }
 
-    /// Total live picker cells = 24 hue + 16 sat + 16 val + 1 preview
-    /// + 1 hex = 58. Pins the element-count contract the mutator path
+    /// Total live picker cells = 24 hue + 16 sat + 16 val + 1 preview +
+    /// 1 hex = 58. Pins the element-count contract the mutator path
     /// relies on.
     #[test]
     fn spec_mutator_spec_total_live_cells_is_58() {

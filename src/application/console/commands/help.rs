@@ -10,28 +10,26 @@
 //! error color.
 
 use super::{command_by_name, Command, COMMANDS};
-use crate::application::console::completion::{Completion, CompletionState};
+use crate::application::console::completion::Completion;
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::always;
+use crate::application::console::spec::{Bare, Form, Grammar, Slot, Vocabulary, Word};
 use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
 
-pub const COMMAND: Command = Command {
-    name: "help",
-    aliases: &["?", "h"],
-    summary: "List commands or print usage for one",
-    usage: "help [command | all]",
-    tags: &["list", "usage", "commands"],
-    applicable: always,
-    complete: complete_help,
-    execute: execute_help,
-};
+/// `all` is not a command, which is why the registry walk below
+/// never reaches it — but `execute_help` dispatches on it, so it is
+/// declared as this slot's one sentinel and appears in the popup and
+/// in the usage line alike.
+const ALL: &[Word] = &[Word::new(
+    "all",
+    "include commands the current selection can't use",
+)];
 
-fn complete_help(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    // Only complete at position 1 (the command-name arg).
-    if state.cursor_token != 1 {
-        return Vec::new();
-    }
-    let partial = state.partial.to_ascii_lowercase();
+/// One row per registered command, each hinted with its summary.
+/// Not filtered by applicability: `help border` prints the border
+/// usage whatever is selected, so the popup offers every name.
+fn command_rows(_ctx: &ConsoleContext, partial: &str) -> Vec<Completion> {
+    let partial = partial.to_ascii_lowercase();
     COMMANDS
         .iter()
         .filter(|c| c.name.to_ascii_lowercase().starts_with(&partial))
@@ -44,66 +42,85 @@ fn complete_help(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completi
         .collect()
 }
 
+pub static GRAMMAR: Grammar = Grammar {
+    label: "help",
+    subverb_sets: &[],
+    key_sets: &[],
+    bare: Some(Bare::new(
+        "listing",
+        &[Form::slots(&[Slot::opt(Vocabulary::Rows {
+            placeholder: "command",
+            rows: command_rows,
+            sentinels: ALL,
+        })])],
+    )),
+};
+
+pub const COMMAND: Command = Command {
+    name: "help",
+    aliases: &["?", "h"],
+    summary: "List commands or print usage for one",
+    applicable: always,
+    grammar: &GRAMMAR,
+    synonyms: &["list", "usage", "commands"],
+    execute: execute_help,
+};
+
 fn execute_help(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
-    let ctx = ConsoleContext::from_document(eff.document);
+    let ctx = ConsoleContext::from_document(eff.document());
     match args.positional(0) {
-        Some("all") => help_listing(&ctx, true),
+        // `all` is the one argument that is not a command name, and
+        // it was the one matched exactly while `command_by_name`
+        // beside it is case-insensitive — so `help BORDER` printed
+        // the border usage and `help ALL` answered "unknown
+        // command: ALL". Same rule for both now (see
+        // `commands/mod.rs` § Casing).
+        Some(name) if name.eq_ignore_ascii_case("all") => help_listing(&ctx, true),
         Some(name) => help_for(name, &ctx),
         None => help_listing(&ctx, false),
     }
-}
-
-/// Split a usage string on the top-level verb-form separator
-/// ` | ` (space-pipe-space) — angle-bracket-aware so embedded
-/// alternation inside `<...>` survives. Existing usage strings
-/// like `spacing value=<tight|normal|wide | <float>>` and
-/// `mutation <list [--all] [filter] | apply <id> ...>` carry
-/// ` | ` inside `<...>` to mean "alternation among parameter
-/// values"; only the top-level (depth==0) separator marks form
-/// boundaries.
-fn split_usage_forms(usage: &str) -> Vec<&str> {
-    let bytes = usage.as_bytes();
-    let mut forms = Vec::new();
-    let mut depth: i32 = 0;
-    let mut start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'<' => depth += 1,
-            b'>' => depth = (depth - 1).max(0),
-            b' ' if depth == 0
-                && i + 2 < bytes.len()
-                && bytes[i + 1] == b'|'
-                && bytes[i + 2] == b' ' =>
-            {
-                forms.push(&usage[start..i]);
-                start = i + 3;
-                i += 3;
-                continue;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    forms.push(&usage[start..]);
-    forms
 }
 
 fn help_for(name: &str, _ctx: &ConsoleContext) -> ExecResult {
     match command_by_name(name) {
         Some(cmd) => {
             let mut lines = vec![format!("{} — {}", cmd.name, cmd.summary)];
-            let forms = split_usage_forms(cmd.usage);
-            if forms.len() == 1 {
-                lines.push(format!("usage: {}", forms[0]));
-            } else {
-                lines.push(format!("usage: {}", forms[0].trim()));
-                for form in forms.iter().skip(1) {
-                    lines.push(format!("       {}", form.trim()));
+            let forms = cmd.usage_forms();
+            match forms.split_first() {
+                Some((head, rest)) => {
+                    lines.push(format!("usage: {}", head));
+                    for form in rest {
+                        lines.push(format!("       {}", form));
+                    }
+                }
+                None => lines.push(format!("usage: {}", cmd.name)),
+            }
+            // The kv vocabulary, one line per key. A long composed
+            // form collapses to `<key>=<value> …` in the usage
+            // block above precisely because this block carries the
+            // detail; both derive from the one grammar, so a key
+            // added to a verb is documented here by the same edit
+            // that makes it parseable.
+            let keys = cmd.key_lines();
+            if let Some((head, rest)) = keys.split_first() {
+                lines.push(format!("keys:  {}", head));
+                for key in rest {
+                    lines.push(format!("       {}", key));
                 }
             }
             if !cmd.aliases.is_empty() {
                 lines.push(format!("aliases: {}", cmd.aliases.join(", ")));
+            }
+            // `tags` carries the search words a verb's name doesn't
+            // contain ("pick" under `color`). Twenty commands author
+            // them and nothing read the field until #41 found it
+            // dead; printing them here is what makes them
+            // discoverable rather than decorative. A migrated verb
+            // derives the whole list from its grammar, so a key
+            // added to the table is searchable by the same edit.
+            let tags = cmd.tag_list();
+            if !tags.is_empty() {
+                lines.push(format!("tags: {}", tags.join(", ")));
             }
             ExecResult::lines(lines)
         }
@@ -130,190 +147,128 @@ fn help_listing(ctx: &ConsoleContext, show_all: bool) -> ExecResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::console::parser::tokenize;
 
-    fn args_from(line: &str) -> Vec<String> {
-        tokenize(line)
-    }
-
+    /// `help` completes its one argument slot and no other — the
+    /// verb takes a single command name (or `all`), so a second
+    /// positional has no vocabulary to offer.
     #[test]
     fn test_complete_help_takes_one_arg() {
-        use crate::application::console::completion::CompletionContext;
-        let toks: Vec<String> = args_from("help a");
-        let state = CompletionState {
-            tokens: &toks,
-            cursor_token: 1,
-            partial: "a",
-            context: CompletionContext::Token { index: 0 },
-        };
-        assert_eq!(state.cursor_token, 1);
+        let doc = crate::application::document::tests_common::load_test_doc();
+        let ctx = crate::application::console::ConsoleContext::from_document(&doc);
+        let popup = |line: &str| crate::application::console::completion::complete(line, line.len(), &ctx);
+        assert!(!popup("help a").is_empty());
+        assert!(popup("help anchor a").is_empty());
     }
 
     #[test]
     fn test_help_summary_line_is_not_empty() {
         assert!(!COMMAND.summary.is_empty());
-        assert!(!COMMAND.usage.is_empty());
+        assert!(!COMMAND.usage_forms().is_empty());
     }
 
-    /// `help section` splits the multi-form usage string on the
-    /// top-level " | " separator so each form lands on its own
-    /// line. Pin specific expected forms — a regression that
-    /// dropped 9 of 11 forms would still pass a `>= 2` assertion.
+    /// `help <verb>` publishes the four blocks its output is made
+    /// of — the derived `usage:` forms, the derived `keys:` block,
+    /// `aliases:` and the derived `tags:` line — and omits the two
+    /// optional ones when the verb has nothing for them.
+    ///
+    /// The failing inputs are: a `usage_forms` that stops naming a
+    /// declared subverb, a `key_lines` that stops naming a declared
+    /// key, an alias list printed for a verb that has none, and a
+    /// tags line that loses either a structural word or a declared
+    /// synonym. All four used to be `&'static str` literals `help`
+    /// echoed, which is why `font range=` could be parseable and
+    /// undocumented at the same time.
     #[test]
-    fn test_help_for_section_splits_multi_form_usage_to_separate_lines() {
+    fn test_help_for_publishes_its_four_derived_blocks() {
         let doc = crate::application::document::tests_common::load_test_doc();
         let ctx = crate::application::console::ConsoleContext::from_document(&doc);
-        let result = help_for("section", &ctx);
-        let lines = match result {
-            crate::application::console::ExecResult::Lines(ls) => ls,
-            other => panic!("expected Lines, got {:?}", other),
+        let text_of = |name: &str| -> Vec<String> {
+            match help_for(name, &ctx) {
+                crate::application::console::ExecResult::Lines(ls) => {
+                    ls.into_iter().map(|l| l.text).collect()
+                }
+                other => panic!("expected Lines, got {:?}", other),
+            }
         };
-        let usage_lines: Vec<&str> = lines
+
+        // `help` has aliases and no keys: the alias line appears,
+        // the `keys:` block does not.
+        let help_lines = text_of("help");
+        assert!(
+            help_lines.iter().any(|l| l == "aliases: ?, h"),
+            "help's aliases must be published verbatim; got {:?}",
+            help_lines
+        );
+        assert!(
+            !help_lines.iter().any(|l| l.starts_with("keys:")),
+            "a verb with no keys must not emit an empty keys block; got {:?}",
+            help_lines
+        );
+
+        // `color` has keys and no aliases. Every key it declares
+        // gets a `keys:` line, and every one of its subverbs and
+        // keys — plus the one synonym the grammar does not contain
+        // — reaches the tags line.
+        let color_lines = text_of("color");
+        assert!(
+            !color_lines.iter().any(|l| l.starts_with("aliases:")),
+            "a verb with no aliases must not emit an empty aliases line; got {:?}",
+            color_lines
+        );
+        let blob = color_lines.join("\n");
+        for key in super::super::color::GRAMMAR.keys() {
+            assert!(
+                blob.contains(&format!("{}=", key.name)),
+                "`help color` must publish the key '{}': {blob}",
+                key.name
+            );
+        }
+        let tags = color_lines
             .iter()
-            .filter(|l| l.text.starts_with("usage:") || l.text.starts_with("       "))
-            .map(|l| l.text.as_str())
-            .collect();
-        for marker in &[
-            "section show",
-            "section move dx=",
-            "section move x=",
-            "section resize w=",
-            "section resize fill",
-            "section text",
-            "section edit",
-            "section add",
-            "section delete",
-            "section split",
-            "section frame",
+            .find(|l| l.starts_with("tags: "))
+            .expect("color publishes a tags line");
+        for word in [
+            "color", "bg", "text", "border", "pick", "picker", "section", "range", "wheel",
         ] {
             assert!(
-                usage_lines.iter().any(|l| l.contains(marker)),
-                "section help must surface form '{}' on its own line; got {:?}",
-                marker,
-                usage_lines
+                tags.contains(word),
+                "`help color`'s tags must carry '{word}': {tags}"
             );
         }
-        for line in &usage_lines {
-            assert!(
-                line.len() < 250,
-                "no usage line should be wall-of-text: {} chars: {}",
-                line.len(),
-                line
-            );
-        }
-    }
-
-    /// Top-level ` | ` is the form separator; ` | ` *inside*
-    /// `<...>` parameter brackets is alternation and must
-    /// survive. Pre-fix the splitter was greedy and broke
-    /// `help spacing` (`value=<tight|normal|wide | <float>>`)
-    /// and `help mutation` (`<list ... | apply ... | help ...>`)
-    /// into ungrammatical fragments.
-    #[test]
-    fn test_help_for_spacing_does_not_split_inside_angle_brackets() {
-        let doc = crate::application::document::tests_common::load_test_doc();
-        let ctx = crate::application::console::ConsoleContext::from_document(&doc);
-        let result = help_for("spacing", &ctx);
-        let lines = match result {
-            crate::application::console::ExecResult::Lines(ls) => ls,
-            other => panic!("expected Lines, got {:?}", other),
-        };
-        let usage_lines: Vec<&str> = lines
-            .iter()
-            .filter(|l| l.text.starts_with("usage:") || l.text.starts_with("       "))
-            .map(|l| l.text.as_str())
-            .collect();
-        assert_eq!(
-            usage_lines.len(),
-            1,
-            "spacing's single-form usage must stay on one line; got {:?}",
-            usage_lines
-        );
-        let line = usage_lines[0];
+        // `usage:` leads with the forms, one per line — the first
+        // under the `usage:` label, the rest indented under it.
         assert!(
-            line.contains("<tight|normal|wide | <float>>"),
-            "spacing's parameter alternation must survive intact; got '{}'",
-            line
+            color_lines.iter().any(|l| l == "usage: color bg"),
+            "the first derived form leads the usage block; got {color_lines:?}"
+        );
+        assert!(
+            color_lines.iter().any(|l| l == "       color pick"),
+            "every later form gets its own line; got {color_lines:?}"
         );
     }
 
+    /// `help all` is dispatched by `execute_help` and named in the
+    /// verb's own usage line, but the completer only ever walked
+    /// `COMMANDS` — and `all` is not a command, so the popup was
+    /// silent about the one argument `help` documents.
     #[test]
-    fn test_help_for_mutation_does_not_split_inside_angle_brackets() {
+    fn test_help_completion_offers_the_all_argument() {
         let doc = crate::application::document::tests_common::load_test_doc();
         let ctx = crate::application::console::ConsoleContext::from_document(&doc);
-        let result = help_for("mutation", &ctx);
-        let lines = match result {
-            crate::application::console::ExecResult::Lines(ls) => ls,
-            other => panic!("expected Lines, got {:?}", other),
+        let popup = |line: &str| -> Vec<String> {
+            crate::application::console::completion::complete(line, line.len(), &ctx)
+                .into_iter()
+                .map(|c| c.text)
+                .collect()
         };
-        let usage_lines: Vec<&str> = lines
-            .iter()
-            .filter(|l| l.text.starts_with("usage:") || l.text.starts_with("       "))
-            .map(|l| l.text.as_str())
-            .collect();
-        assert_eq!(
-            usage_lines.len(),
-            1,
-            "mutation's single-form usage must stay on one line; got {:?}",
-            usage_lines
-        );
-    }
-
-    /// Direct unit test for the splitter: depth-aware split on
-    /// top-level ` | ` only. Pin every interesting case so a
-    /// future contributor refactoring `split_usage_forms` can
-    /// see what the contract is at a glance.
-    #[test]
-    fn test_split_usage_forms_depth_aware() {
-        // Single form, no separator.
-        assert_eq!(split_usage_forms("foo"), vec!["foo"]);
-        // Top-level separator splits.
-        assert_eq!(split_usage_forms("a | b | c"), vec!["a", "b", "c"]);
-        // No-spaces pipes inside enums survive (existing behaviour).
-        assert_eq!(
-            split_usage_forms("cap from=<arrow|circle|none>"),
-            vec!["cap from=<arrow|circle|none>"]
-        );
-        // Spaces-around pipes INSIDE angle brackets survive (the
-        // bug fix).
-        assert_eq!(
-            split_usage_forms("spacing value=<tight|wide | <float>>"),
-            vec!["spacing value=<tight|wide | <float>>"]
-        );
-        // Mixed: one form with embedded ` | ` plus a top-level
-        // separator at depth 0.
-        assert_eq!(
-            split_usage_forms("a value=<x | y> | b"),
-            vec!["a value=<x | y>", "b"]
-        );
-    }
-
-    /// Single-form verbs (e.g. `cap`) keep their one-line
-    /// usage. The split shouldn't fire when there's no `|`
-    /// separator at the form level — value enums like
-    /// `<arrow|circle|diamond|none>` (no spaces around the
-    /// pipe) survive intact.
-    #[test]
-    fn test_help_for_single_form_keeps_one_usage_line() {
-        let doc = crate::application::document::tests_common::load_test_doc();
-        let ctx = crate::application::console::ConsoleContext::from_document(&doc);
-        let result = help_for("cap", &ctx);
-        let lines = match result {
-            crate::application::console::ExecResult::Lines(ls) => ls,
-            other => panic!("expected Lines, got {:?}", other),
-        };
-        let usage_count = lines
-            .iter()
-            .filter(|l| l.text.starts_with("usage:"))
-            .count();
-        let cont_count = lines
-            .iter()
-            .filter(|l| l.text.starts_with("       "))
-            .count();
-        assert_eq!(usage_count, 1);
-        assert_eq!(
-            cont_count, 0,
-            "single-form usage shouldn't produce continuation lines"
+        assert!(popup("help ").iter().any(|r| r == "all"));
+        assert_eq!(popup("help al"), vec!["all"]);
+        // The command names it sits among are untouched.
+        assert!(popup("help ").iter().any(|r| r == "color"));
+        assert!(
+            COMMAND.usage_forms().iter().any(|f| f.contains("all")),
+            "the derived usage line must name the sentinel: {:?}",
+            COMMAND.usage_forms()
         );
     }
 }

@@ -13,6 +13,14 @@
 //! init — `env_logger::init()` on native, `console_log::init_with_level`
 //! on WASM, plus the panic hook wiring on WASM. This module
 //! collapses both onto one [`crate::util::log::init`] call.
+//!
+//! On native the installed logger also feeds `capture`, which lets
+//! a caller collect the `warn!` / `error!` records one stretch of code
+//! emits. The IPC command executor uses it so a reply can carry the
+//! diagnostics its command produced.
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod capture;
 
 /// Initialize the global logger for whichever target this binary
 /// is built for. Native uses `env_logger` (reads `RUST_LOG`);
@@ -33,9 +41,16 @@
 /// `info!` out before the runtime filter ever sees it, so both
 /// targets ship the same warn/error channel (§4).
 ///
-/// Idempotent in the sense that calling twice is a programming
-/// error — both backends will panic on a second init. Should
-/// fire once at program start.
+/// On native, the `env_logger` backend is wrapped in
+/// `CapturingLogger`, so a `capture::capture` window on the
+/// calling thread sees every `warn!` / `error!` regardless of the
+/// `RUST_LOG` filter. The global max level is raised to at least
+/// `Warn` for the same reason. A narrower `RUST_LOG` still decides
+/// what reaches stderr, because the wrapper asks the inner logger
+/// before forwarding.
+///
+/// Calling this twice is a programming error, and both backends
+/// panic on a second init. It should run once at program start.
 pub fn init() {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -50,13 +65,47 @@ pub fn init() {
         if !rust_log_is_effective(std::env::var("RUST_LOG").ok().as_deref()) {
             builder.parse_filters(NATIVE_DEFAULT_FILTER);
         }
-        builder.init();
+        let inner = builder.build();
+        let max_level = inner.filter().max(log::LevelFilter::Warn);
+        log::set_boxed_logger(Box::new(CapturingLogger { inner }))
+            .expect("util::log::init: a logger is already installed; init runs once, at startup");
+        log::set_max_level(max_level);
     }
 
     #[cfg(target_arch = "wasm32")]
     {
         std::panic::set_hook(Box::new(console_error_panic_hook::hook));
         console_log::init_with_level(log::Level::Info).expect("failed to init logger");
+    }
+}
+
+/// The native logger: `env_logger`, with every record also offered
+/// to [`capture`].
+///
+/// The capture sees a record before the inner filter does. `RUST_LOG`
+/// decides what is printed, not what a capturing caller is told:
+/// `RUST_LOG=error` must not hide a degrade from an IPC reply whose
+/// reader never sees stderr.
+#[cfg(not(target_arch = "wasm32"))]
+struct CapturingLogger {
+    inner: env_logger::Logger,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl log::Log for CapturingLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.inner.enabled(metadata) || (metadata.level() <= log::Level::Warn && capture::active())
+    }
+
+    fn log(&self, record: &log::Record) {
+        capture::observe(record);
+        if self.inner.enabled(record.metadata()) {
+            self.inner.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
     }
 }
 
@@ -90,14 +139,14 @@ const POLICY_HEADING: &str = "## §9 Error handling";
 /// `log` versions in which the
 /// `compile_error!("multiple release_max_level_* features set")` guard
 /// the root manifest's comment leans on was *read*, not assumed —
-/// `log-0.4.29/src/lib.rs:376-394`.
+/// `log-0.4.34/src/lib.rs:381-399`.
 ///
-/// `[workspace.dependencies]` requests `"0.4.29"`, which is a caret
+/// `[workspace.dependencies]` requests `"0.4.34"`, which is a caret
 /// requirement, so `cargo update` can move the resolved version
 /// underneath that text without touching the manifest. Pinning the
 /// *lockfile* is therefore the only place the claim can be held.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-const VERIFIED_LOG_VERSIONS: &[&str] = &["0.4.29"];
+const VERIFIED_LOG_VERSIONS: &[&str] = &["0.4.34"];
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
@@ -207,7 +256,7 @@ mod tests {
     /// *dependency's source*, which nothing in this workspace would
     /// otherwise notice going stale.
     ///
-    /// Both manifests request `"0.4.29"`, a caret requirement, so
+    /// Both manifests request `"0.4.34"`, a caret requirement, so
     /// `cargo update` alone can move the resolved crate to a version
     /// whose guard nobody has read while the manifests, the comments
     /// and every other test stay green. This fails instead, and the

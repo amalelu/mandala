@@ -482,6 +482,10 @@ mod tests {
         // 5 multi-byte graphemes (Greek lowercase): each is 2 bytes.
         doc.set_section_text(&id, 0, "αβγδε".to_string());
         // Style the first two graphemes (αβ) as a single run.
+        //
+        // `font` is the empty string — `format/fonts.md`'s "clears
+        // the pin". These fixtures used to say `"Sans"`, which no
+        // family resolves, so they pinned a font that did not exist.
         {
             let node = doc.mindmap.nodes.get_mut(&id).unwrap();
             node.sections[0].text_runs = vec![TextRun {
@@ -490,8 +494,8 @@ mod tests {
                 bold: true,
                 italic: false,
                 underline: false,
-                font: "Sans".into(),
-                size_pt: 12,
+                font: String::new(),
+                size_pt: 12.0,
                 color: "#ff0000".into(),
                 hyperlink: None,
             }];
@@ -526,8 +530,8 @@ mod tests {
                 bold: false,
                 italic: true,
                 underline: false,
-                font: "Sans".into(),
-                size_pt: 12,
+                font: String::new(),
+                size_pt: 12.0,
                 color: "#00ff00".into(),
                 hyperlink: None,
             }];
@@ -691,8 +695,8 @@ mod tests {
                 bold: true,
                 italic: false,
                 underline: false,
-                font: "Sans".into(),
-                size_pt: 12,
+                font: String::new(),
+                size_pt: 12.0,
                 color: "#0000ff".into(),
                 hyperlink: None,
             }];
@@ -757,8 +761,10 @@ mod tests {
             });
 
         // Stage a section-targeted border preview.
-        let mut edits = BorderConfigEdits::default();
-        edits.preset = OptionEdit::Set("heavy".into());
+        let edits = BorderConfigEdits {
+            preset: OptionEdit::Set("heavy".into()),
+            ..Default::default()
+        };
         let _ = doc.set_border_preview(BorderPreviewTarget::Sections(vec![(id.clone(), 0)]), edits);
         assert!(doc.border_preview.is_some());
 

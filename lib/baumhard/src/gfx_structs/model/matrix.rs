@@ -25,7 +25,6 @@ use std::ops::{AddAssign, Index, IndexMut, MulAssign, SubAssign};
 /// matrix auto-expands with empty lines, so callers can write into
 /// arbitrary coordinates without pre-sizing.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GlyphMatrix {
     /// Ordered lines. Index 0 is the top-most visual line.
     pub matrix: Vec<GlyphLine>,
@@ -34,8 +33,13 @@ pub struct GlyphMatrix {
 impl Index<usize> for GlyphMatrix {
     type Output = GlyphLine;
 
+    /// Line access — panics on out-of-bounds, matching
+    /// [`Self::index_mut`] and `Vec::index`. Delegated to the
+    /// backing `Vec` so the panic names the index and the length;
+    /// use [`Self::ensure_line`] before indexing if the line might
+    /// not exist yet.
     fn index(&self, index: usize) -> &Self::Output {
-        self.matrix.get(index).unwrap()
+        &self.matrix[index]
     }
 }
 
@@ -195,6 +199,26 @@ impl GlyphMatrix {
     ///   reporting it exactly, is a question about the matrix cell
     ///   model and is not answered here.
     ///
+    /// **Precondition on the incoming `regions`: every span must
+    /// already describe `string`.** That is, each region satisfies
+    /// `start < end` and `end <= count_grapheme_clusters(string)`, and
+    /// no two cover the same cluster — the same "non-degenerate and
+    /// non-overlapping" precondition
+    /// [`ColorFontRegions::split_and_separate`](crate::core::primitives::ColorFontRegions::split_and_separate)
+    /// carries, plus the in-bounds half that only matters once a
+    /// *buffer* is in the picture. The requirement is on what this
+    /// call receives, not merely on what it emits: every shift and
+    /// split below is a rewrite of the existing set keyed on cluster
+    /// positions in `string`, so a region reaching past the end of the
+    /// buffer, or an empty `[k, k)` husk, is carried forward and moved
+    /// by rules that assume it points at text. Nothing here can detect
+    /// the violation and nothing repairs it; the spans simply come out
+    /// somewhere else than a caller reasoning from the buffer would
+    /// predict, and where they come out is not a contract. A caller
+    /// that built `regions` alongside `string` satisfies this by
+    /// construction — one merging a region table that outlived an edit
+    /// to the buffer does not.
+    ///
     /// Padding inserted for a non-zero x-offset is reported to
     /// `regions` too, so caller spans on the rows below survive it. It
     /// goes through `ColorFontRegions::split_and_separate`, which
@@ -264,11 +288,19 @@ impl GlyphMatrix {
                     graph_line_start_index = line_graph_range.0;
                     if target_line_len < offset.0 {
                         let pad = offset.0 - target_line_len;
-                        // The padding goes into the *middle* of the
-                        // buffer — every row but the last has text
-                        // after it — so the region table has to be
-                        // told, or every caller span below this row
-                        // stops pointing at its text.
+                        // The padding usually goes into the *middle*
+                        // of the buffer — every row but the last has
+                        // text after it — so the region table has to
+                        // be told, or every caller span below this row
+                        // stops pointing at its text. On the trailing
+                        // empty line of a `\n`-terminated buffer,
+                        // which this branch also serves now that
+                        // `find_nth_line_grapheme_range` addresses it
+                        // (issue #16), the insertion point is the end
+                        // of the buffer instead: no well-formed region
+                        // starts at or straddles it, so the call below
+                        // is a no-op there rather than a second
+                        // behavior to reason about.
                         // `split_and_separate` is the exact semantics:
                         // a span starting *at* the insertion point
                         // must move (`start >= idx`, which
@@ -291,10 +323,23 @@ impl GlyphMatrix {
                         regions.split_and_separate(Range::new(line_graph_range.1, line_graph_range.1 + pad));
                     }
                 } else {
-                    // Important that this is done before pushing spaces.
-                    // `push_spaces` appends past the end of the buffer,
-                    // so there is no text — and therefore no region —
-                    // after it to shift.
+                    // Unreachable while the line bookkeeping above is
+                    // right: `find_nth_line_grapheme_range` resolves
+                    // every index below `count_number_lines`, the
+                    // trailing empty line of a `\n`-terminated buffer
+                    // included (issue #16), and the `debug_assert`
+                    // above says `target_row` is such an index. `None`
+                    // now means only "row `target_row` does not
+                    // exist", which is a `have_lines` defect rather
+                    // than a shape of buffer — so this arm is the
+                    // release-build floor under that defect, painting
+                    // the row at the end of the buffer instead of
+                    // panicking on a slice in a composition path.
+                    //
+                    // Important that the index is taken before pushing
+                    // spaces. `push_spaces` appends past the end of the
+                    // buffer, so there is no text — and therefore no
+                    // region — after it to shift.
                     graph_line_start_index = count_grapheme_clusters(string);
                     push_spaces(string, offset.0);
                 }

@@ -247,17 +247,10 @@ fn try_type_to_edit(logical_key: &Key, key_name: &Option<String>, ctx: &mut Inpu
         handle_single_line_edit_key(
             key_name,
             logical_key,
-            ctx.modifiers.control_key(),
-            ctx.modifiers.shift_key(),
-            ctx.modifiers.alt_key(),
+            ctx.modifiers,
             ctx.keybinds,
             ctx.single_line_edit_state,
-            doc,
-            ctx.interaction_mode,
-            ctx.mindmap_tree,
-            ctx.app_scene,
-            ctx.renderer,
-            ctx.scene_cache,
+            &mut super::dispatch::cross_dispatch::rebuild_ctx!(ctx, doc),
         );
         return true;
     }

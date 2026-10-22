@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 baumhard = { path = "../../lib/baumhard" }
-regex = "1.12.3"
+regex = "1.13.1"
 serde_json.workspace = true
 
 [dev-dependencies]

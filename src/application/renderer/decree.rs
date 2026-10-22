@@ -7,7 +7,7 @@
 
 use glam::Vec2;
 
-use crate::application::common::{FpsDisplayMode, RedrawMode, RenderDecree};
+use crate::application::common::{FpsDisplayMode, RenderDecree};
 
 use super::Renderer;
 
@@ -39,15 +39,8 @@ impl Renderer {
             RenderDecree::StartRender => {
                 self.should_render = true;
             }
-            RenderDecree::StopRender => {
-                self.should_render = false;
-            }
-            RenderDecree::ReinitAdapter => {}
             RenderDecree::SetSurfaceSize(x, y) => {
                 self.update_surface_size(x, y);
-                if self.redraw_mode == RedrawMode::OnRequest {
-                    self.render();
-                }
             }
             RenderDecree::Terminate => {
                 self.run = false;

@@ -83,7 +83,6 @@ pub enum Instruction {
 /// Cost: one allocation for the boxed closure dispatch per subscriber;
 /// no arena walk.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct GlyphTreeEventInstance {
     /// The kind of event being delivered.
     pub event_type: GlyphTreeEvent,
@@ -114,7 +113,6 @@ impl GlyphTreeEventInstance {
 ///
 /// Cost: 8 bytes, `Copy`.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(deny_unknown_fields)]
 pub struct MouseEventData {
     /// Canvas-space X coordinate.
     pub x: OrderedFloat<f32>,

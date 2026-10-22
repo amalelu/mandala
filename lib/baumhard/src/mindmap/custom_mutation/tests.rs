@@ -46,6 +46,32 @@ fn test_empty_description_and_contexts_omitted_from_json() {
     assert!(!json.contains("\"contexts\""));
 }
 
+/// The serialization shape's "omits empty-default fields" contract
+/// covers `behavior` too (#47 part B): `Persistent` is what the
+/// reader's `#[serde(default)]` restores, so writing it out said
+/// nothing — and it was the one default the writer always wrote.
+/// The `Toggle` control pins the other direction, and the terse
+/// form reloads as `Persistent`.
+#[test]
+fn test_default_behavior_omitted_and_toggle_written() {
+    let cm = sample("bare");
+    let json = serde_json::to_string(&cm).unwrap();
+    assert!(
+        !json.contains("\"behavior\""),
+        "Persistent is the default and must be omitted: {json}"
+    );
+    let back: CustomMutation = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.behavior, MutationBehavior::Persistent);
+
+    let mut toggling = sample("toggler");
+    toggling.behavior = MutationBehavior::Toggle;
+    let json = serde_json::to_string(&toggling).unwrap();
+    assert!(
+        json.contains(r#""behavior":"Toggle""#),
+        "a non-default behavior must always be written: {json}"
+    );
+}
+
 #[test]
 fn test_legacy_json_with_mutations_and_scope_loads_into_new_shape() {
     // Pre-unification shape: `mutations` + `target_scope`, no
@@ -1002,7 +1028,8 @@ mod flat_mutations_tests {
     /// An **empty** `Void` child carries nothing, so nothing can be
     /// lost by keeping the root's payload. Declining here would kill
     /// a well-formed mutator to protect a payload that does not
-    /// exist. Contrast [`test_single_child_is_not_flat_extractable`].
+    /// exist. Contrast
+    /// [`test_single_child_is_not_flat_extractable_with_a_runtime_hole`].
     #[test]
     fn test_empty_void_child_does_not_decline_the_mutator() {
         let node = MutatorNode::Macro {

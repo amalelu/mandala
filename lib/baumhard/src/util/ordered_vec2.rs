@@ -19,7 +19,6 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 /// are component-wise; no NaN handling beyond what `OrderedFloat`
 /// provides.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OrderedVec2 {
     pub x: OrderedFloat<f32>,
     pub y: OrderedFloat<f32>,
@@ -40,10 +39,7 @@ impl OrderedVec2 {
     /// Construct from already-wrapped [`OrderedFloat`] components.
     /// O(1).
     pub fn new(x: OrderedFloat<f32>, y: OrderedFloat<f32>) -> Self {
-        OrderedVec2 {
-            x: OrderedFloat::from(x),
-            y: OrderedFloat::from(y),
-        }
+        OrderedVec2 { x, y }
     }
 
     /// Construct from raw `f32` components. O(1).

@@ -31,7 +31,7 @@ fn find_reparent_pair(doc: &MindMapDocument) -> (String, String) {
 fn test_apply_reparent_single_node_updates_parent_and_index() {
     let mut doc = load_test_doc();
     let (new_parent, source) = find_reparent_pair(&doc);
-    let undo = doc.apply_reparent(&[source.clone()], Some(&new_parent));
+    let undo = doc.apply_reparent(std::slice::from_ref(&source), Some(&new_parent));
     assert_eq!(undo.entries.len(), 1, "should have one undo entry");
 
     let node = doc.mindmap.nodes.get(&source).unwrap();
@@ -55,7 +55,7 @@ fn test_apply_reparent_updates_parent_child_edges() {
         .iter()
         .any(|e| e.edge_type == "parent_child" && e.to_id == source);
 
-    doc.apply_reparent(&[source.clone()], Some(&new_parent));
+    doc.apply_reparent(std::slice::from_ref(&source), Some(&new_parent));
 
     // After reparent: any parent_child edge pointing at source must have
     // from_id == new_parent. There should be at least one such edge if
@@ -101,7 +101,7 @@ fn test_apply_reparent_to_root_removes_edge() {
         "testament non-root node should have an incoming parent_child edge"
     );
 
-    doc.apply_reparent(&[source.clone()], None);
+    doc.apply_reparent(std::slice::from_ref(&source), None);
 
     // The parent_child edge should have been removed (promoted to root).
     let still_has_edge = doc
@@ -155,7 +155,7 @@ fn test_apply_reparent_to_root() {
         .map(|n| n.id.clone())
         .expect("testament should have at least one non-root node");
 
-    let undo = doc.apply_reparent(&[source.clone()], None);
+    let undo = doc.apply_reparent(std::slice::from_ref(&source), None);
     assert_eq!(undo.entries.len(), 1);
 
     let node = doc.mindmap.nodes.get(&source).unwrap();
@@ -184,7 +184,7 @@ fn test_apply_reparent_rejects_cycle() {
     let orig_parent = doc.mindmap.nodes.get(&grandparent).unwrap().parent_id.clone();
 
     // Try to reparent grandparent under grandchild — should be silently rejected
-    let undo = doc.apply_reparent(&[grandparent.clone()], Some(&grandchild));
+    let undo = doc.apply_reparent(std::slice::from_ref(&grandparent), Some(&grandchild));
     assert!(
         undo.entries.is_empty(),
         "cycle should be rejected, no entries in undo data"
@@ -202,7 +202,7 @@ fn test_apply_reparent_rejects_self() {
     let orig_parent = doc.mindmap.nodes.get(&source).unwrap().parent_id.clone();
 
     // Try to reparent a node under itself — should be silently rejected
-    let undo = doc.apply_reparent(&[source.clone()], Some(&source));
+    let undo = doc.apply_reparent(std::slice::from_ref(&source), Some(&source));
     assert!(undo.entries.is_empty(), "self-reparent should be rejected");
     assert_eq!(doc.mindmap.nodes.get(&source).unwrap().parent_id, orig_parent);
 }
@@ -214,7 +214,7 @@ fn test_reparent_undo_restores_parent_index_and_edges() {
     let orig_parent = doc.mindmap.nodes.get(&source).unwrap().parent_id.clone();
     let orig_edges_snapshot = doc.mindmap.edges.clone();
 
-    let undo_data = doc.apply_reparent(&[source.clone()], Some(&new_parent));
+    let undo_data = doc.apply_reparent(std::slice::from_ref(&source), Some(&new_parent));
     doc.undo_stack.push(UndoAction::ReparentNodes {
         entries: undo_data.entries,
         old_edges: undo_data.old_edges,

@@ -137,11 +137,6 @@ pub(super) fn steal_key_for_modal(
         let _ = super::dispatch::dispatch_action(modal_action, ctx, None);
         return;
     }
-    let (ctrl, shift, alt) = (
-        ctx.modifiers.control_key(),
-        ctx.modifiers.shift_key(),
-        ctx.modifiers.alt_key(),
-    );
     let Some(doc) = ctx.document.as_mut() else {
         return;
     };
@@ -149,31 +144,19 @@ pub(super) fn steal_key_for_modal(
         ModalEditor::Text => super::text_edit::handle_text_edit_key(
             key_name,
             logical_key,
-            ctrl,
-            shift,
-            alt,
+            ctx.modifiers,
             ctx.keybinds,
             ctx.text_edit_state,
-            doc,
             ctx.mindmap_tree,
-            ctx.app_scene,
             ctx.renderer,
-            ctx.scene_cache,
         ),
         ModalEditor::SingleLine => super::single_line_edit::handle_single_line_edit_key(
             key_name,
             logical_key,
-            ctrl,
-            shift,
-            alt,
+            ctx.modifiers,
             ctx.keybinds,
             ctx.single_line_edit_state,
-            doc,
-            ctx.interaction_mode,
-            ctx.mindmap_tree,
-            ctx.app_scene,
-            ctx.renderer,
-            ctx.scene_cache,
+            &mut super::dispatch::cross_dispatch::rebuild_ctx!(ctx, doc),
         ),
     }
 }

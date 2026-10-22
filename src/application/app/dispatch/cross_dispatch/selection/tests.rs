@@ -14,7 +14,7 @@
 
 use super::*;
 use crate::application::document::tests_common::{load_test_doc, pinned_two_section_node};
-use crate::application::document::SectionSel;
+use crate::application::document::{GraphemeRange, SectionSel, SectionSpan};
 
 fn first_node_id(doc: &MindMapDocument) -> String {
     doc.mindmap
@@ -175,7 +175,8 @@ fn select_parent_in_walks_up_from_section_range() {
     let parent_id = doc.mindmap.nodes[&child_id].parent_id.clone().unwrap();
     doc.selection = SelectionState::SectionRange {
         sel: SectionSel::new(&child_id, 0),
-        range: (1, 3),
+        section_span: SectionSpan::single(0),
+        grapheme_range: GraphemeRange::new(1, 3),
     };
     assert!(select_parent_in(&mut doc));
     assert!(matches!(
@@ -372,7 +373,8 @@ fn select_sibling_in_drops_section_range_on_walk() {
     }
     doc.selection = SelectionState::SectionRange {
         sel: SectionSel::new(nid.clone(), 0),
-        range: (1, 3),
+        section_span: SectionSpan::single(0),
+        grapheme_range: GraphemeRange::new(1, 3),
     };
     assert!(select_sibling_in(&mut doc, true));
     assert!(
@@ -462,10 +464,7 @@ fn select_parent_in_collapses_multisection_to_first_owning_node() {
     // Two-section node has no parent in the fixture; pin that
     // up-arrow on MultiSection no-ops cleanly (rather than
     // silently no-op'ing for the wrong reason).
-    doc.selection = SelectionState::MultiSection(vec![
-        SectionSel::new(&id, 0),
-        SectionSel::new(&id, 1),
-    ]);
+    doc.selection = SelectionState::MultiSection(vec![SectionSel::new(&id, 0), SectionSel::new(&id, 1)]);
     assert!(!select_parent_in(&mut doc));
 }
 
@@ -495,8 +494,10 @@ fn select_child_in_multisection_matches_single_on_first_owning_node() {
         .expect("fixture has at least one node with a visible child");
     let parent_id = parent_with_child.0;
     let expected_child = parent_with_child.1;
-    doc_a.selection =
-        SelectionState::MultiSection(vec![SectionSel::new(&parent_id, 0), SectionSel::new(&parent_id, 1)]);
+    doc_a.selection = SelectionState::MultiSection(vec![
+        SectionSel::new(&parent_id, 0),
+        SectionSel::new(&parent_id, 1),
+    ]);
     doc_b.selection = SelectionState::Single(parent_id);
     assert!(select_child_in(&mut doc_a));
     assert!(select_child_in(&mut doc_b));

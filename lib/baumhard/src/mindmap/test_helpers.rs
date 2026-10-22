@@ -122,6 +122,8 @@ pub(crate) fn synthetic_map(nodes_vec: Vec<MindNode>, edges: Vec<MindEdge>) -> M
         edges,
         custom_mutations: vec![],
         macros: vec![],
+        unknown_keys: Default::default(),
+        skipped_constructs: Default::default(),
     }
 }
 
@@ -190,21 +192,14 @@ pub(crate) fn synthetic_portal_edge(a: &str, b: &str, color: &str) -> MindEdge {
     }
 }
 
-/// Trivial `Canvas` with `#000` background, no defaults, empty
-/// theme tables. Used by tests that need a Canvas placeholder
-/// but don't exercise canvas behavior.
+/// Trivial `Canvas` — `Canvas::default()` under the name tests
+/// reach for when they need a placeholder but don't exercise
+/// canvas behavior. Kept as a named helper so those call sites
+/// say what they mean rather than what they construct.
 ///
 /// Cost: one `String` allocation for the background hex, two
 /// empty `HashMap` allocations (theme variables + variants).
 /// Trivial.
 pub(crate) fn blank_canvas() -> Canvas {
-    Canvas {
-        background_color: "#000".into(),
-        default_border: None,
-        default_connection: None,
-        default_section_frame_border: None,
-        default_focused_section_frame_border: None,
-        theme_variables: HashMap::new(),
-        theme_variants: HashMap::new(),
-    }
+    Canvas::default()
 }

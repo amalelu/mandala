@@ -16,7 +16,7 @@ use crate::application::platform::window::{CursorIcon, PhysicalPosition};
 use super::click::rebuild_all_with_mode;
 use super::color_picker_flow::handle_color_picker_mouse_move;
 use super::input_context::InputHandlerContext;
-use super::scene_rebuild::{rebuild_after_selection_change, rebuild_all};
+use super::scene_rebuild::{rebuild_selection_highlight, RebuildTier};
 use super::throttled_interaction::{
     DragInput, EdgeHandleInteraction, EdgeLabelInteraction, MovingNodeInteraction, MovingSectionInteraction,
     NodeResizeInteraction, PortalLabelInteraction, SectionResizeInteraction, ThrottledDrag,
@@ -165,7 +165,7 @@ pub(super) fn handle_cursor_moved(
             } = &mut **press;
             let dist_x = cursor_pos_val.0 - start_pos.0;
             let dist_y = cursor_pos_val.1 - start_pos.1;
-            if dist_x * dist_x + dist_y * dist_y > super::DRAG_THRESHOLD_SQ_PX {
+            if dist_x * dist_x + dist_y * dist_y > super::POINTER_DRAG_THRESHOLD_SQ_PX {
                 // Past threshold — promote `Pending` to the
                 // appropriate drag variant. At most one of
                 // `hit_edge_label` / `hit_portal_label` is set
@@ -199,39 +199,12 @@ pub(super) fn handle_cursor_moved(
                         if let Some(original) =
                             doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)).cloned()
                         {
-                            // Capture `prev` BEFORE the assignment —
-                            // post-write capture would always read
-                            // the new EdgeLabel selection back, so
-                            // `rebuild_after_selection_change` would
-                            // see prev == new and pick scene-only
-                            // even from a `Single(node)` start. The
-                            // node's tree-text highlight would then
-                            // stay painted cyan through the drag.
-                            let prev = doc.selection.clone();
-                            doc.selection = SelectionState::EdgeLabel(
-                                crate::application::document::EdgeLabelSel::new(edge_ref.clone()),
-                            );
-                            ctx.scene_cache.clear();
-                            *ctx.drag_state = DragState::throttled(ThrottledDrag::EdgeLabel(
-                                EdgeLabelInteraction::new(edge_ref, original),
-                            ));
-                            // `rebuild_after_selection_change` picks
-                            // `rebuild_scene_only` when both the
-                            // previous and new selections are edge-
-                            // adjacent (no node-tree highlight to
-                            // shift). When the user was on a node
-                            // before and drag-starts an edge-label
-                            // in the same gesture, falls back to a
-                            // full rebuild to clear the old node
-                            // highlight from the tree's text buffer.
-                            rebuild_after_selection_change(
-                                &prev,
-                                doc,
-                                ctx.interaction_mode,
-                                ctx.mindmap_tree,
-                                ctx.app_scene,
-                                ctx.renderer,
-                                ctx.scene_cache,
+                            start_label_drag(
+                                ctx,
+                                SelectionState::EdgeLabel(crate::application::document::EdgeLabelSel::new(
+                                    edge_ref.clone(),
+                                )),
+                                ThrottledDrag::EdgeLabel(EdgeLabelInteraction::new(edge_ref, original)),
                             );
                             return;
                         }
@@ -250,22 +223,15 @@ pub(super) fn handle_cursor_moved(
                         );
                         let original = doc.mindmap.edges.iter().find(|e| edge_ref.matches(e)).cloned();
                         if let Some(original) = original {
-                            doc.selection =
+                            start_label_drag(
+                                ctx,
                                 SelectionState::PortalLabel(crate::application::document::PortalLabelSel {
                                     edge_key,
                                     endpoint_node_id: endpoint.clone(),
-                                });
-                            ctx.scene_cache.clear();
-                            *ctx.drag_state = DragState::throttled(ThrottledDrag::PortalLabel(
-                                PortalLabelInteraction::new(edge_ref, endpoint, original),
-                            ));
-                            rebuild_all(
-                                doc,
-                                ctx.interaction_mode,
-                                ctx.mindmap_tree,
-                                ctx.app_scene,
-                                ctx.renderer,
-                                ctx.scene_cache,
+                                }),
+                                ThrottledDrag::PortalLabel(PortalLabelInteraction::new(
+                                    edge_ref, endpoint, original,
+                                )),
                             );
                             return;
                         }
@@ -611,7 +577,7 @@ pub(super) fn handle_cursor_moved(
         } => {
             // Threshold-cross arm for the right-button fast-resize
             // gesture (`SECTIONS_BORDERS_RESIZE_PLAN.md` §6.3).
-            // Same `DRAG_THRESHOLD_SQ_PX` as the left-button arm
+            // Same `POINTER_DRAG_THRESHOLD_SQ_PX` as the left-button arm
             // above. The DispatchHit carries the **press-time**
             // canvas position and hit (not the threshold-cross
             // values) so anchor inference fires from "where the
@@ -620,7 +586,7 @@ pub(super) fn handle_cursor_moved(
             // continuously".
             let dist_x = cursor_pos_val.0 - start_pos.0;
             let dist_y = cursor_pos_val.1 - start_pos.1;
-            if dist_x * dist_x + dist_y * dist_y <= super::DRAG_THRESHOLD_SQ_PX {
+            if dist_x * dist_x + dist_y * dist_y <= super::POINTER_DRAG_THRESHOLD_SQ_PX {
                 return;
             }
             // Look up the bound action via `action_for_gesture` so a
@@ -660,6 +626,64 @@ pub(super) fn handle_cursor_moved(
         }
         DragState::None => {}
     }
+}
+
+/// Enter one of the two label drags at threshold-cross: write the
+/// selection the gesture targets, drop the connection samples the
+/// drag is about to invalidate, arm the drag, and rebuild at the
+/// tier the selection delta actually needs.
+///
+/// One body for both promotions, because they are the same five
+/// steps and had drifted on the last one. The edge-label arm
+/// snapshotted the previous selection and dispatched through
+/// [`RebuildTier::for_selection_change`]; the portal-label arm — the
+/// same steps, on another edge-adjacent selection variant — called
+/// `rebuild_all` unconditionally (#37 item 4). A promotion that
+/// only moves between edge-adjacent selections now runs
+/// `rebuild_scene_only` from either arm rather than a node-tree
+/// rebuild the promotion cannot have invalidated.
+///
+/// `prev` is captured **before** the write. A post-write capture
+/// would read the new selection back, so the tier would come out
+/// of a `prev == new` comparison and pick scene-only even from a
+/// `Single(node)` start, leaving the
+/// node's tree-text highlight painted cyan for the length of the
+/// drag.
+///
+/// The tier itself is [`RebuildTier::for_selection_change`]'s call:
+/// scene-only when both the previous and the new selection are
+/// edge-adjacent (no node-tree highlight to shift), a full rebuild
+/// when the user was on a node before and drag-starts a label in the
+/// same gesture, so the old node highlight is cleared out of the
+/// tree's text buffer.
+///
+/// Split into a renderer-free [`arm_label_drag`] and this shell for
+/// the reason `ReleaseCommit` / `ReleaseRefresh` split the release
+/// path: the model half is then something the harness can run, so
+/// "which tier does a portal-label promotion ask for?" stops being a
+/// question only a live wgpu device could answer.
+fn start_label_drag(ctx: &mut InputHandlerContext<'_>, selection: SelectionState, drag: ThrottledDrag) {
+    let Some(doc) = ctx.document.as_mut() else {
+        return;
+    };
+    let tier = arm_label_drag(doc, ctx.drag_state, ctx.scene_cache, selection, drag);
+    tier.execute(&mut super::dispatch::cross_dispatch::rebuild_ctx!(ctx, doc));
+}
+
+/// The renderer-free half of [`start_label_drag`]: write the
+/// selection, drop the stale connection samples, arm the drag, and
+/// name the rebuild tier the selection delta needs.
+fn arm_label_drag(
+    doc: &mut crate::application::document::MindMapDocument,
+    drag_state: &mut DragState,
+    scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
+    selection: SelectionState,
+    drag: ThrottledDrag,
+) -> RebuildTier {
+    let prev = std::mem::replace(&mut doc.selection, selection);
+    scene_cache.clear();
+    *drag_state = DragState::throttled(drag);
+    RebuildTier::for_selection_change(&prev, &doc.selection)
 }
 
 /// Project one screen-space cursor move into the canvas-space
@@ -811,46 +835,205 @@ pub(super) fn selection_after_node_drag_press(
     }
 }
 
-/// Rebuild the tree's selection highlight from the current
-/// `doc.selection`. Shared by the section-drag and whole-node
-/// drag promotion arms — both set selection then need the tree
-/// + renderer buffers refreshed to reflect the new highlight.
-fn rebuild_selection_highlight(
-    doc: &mut crate::application::document::MindMapDocument,
-    interaction_mode: &super::InteractionMode,
-    mindmap_tree: &mut Option<baumhard::mindmap::tree_builder::MindMapTree>,
-    renderer: &mut crate::application::renderer::Renderer,
-) {
-    if let Some(tree) = mindmap_tree.as_mut() {
-        // Every overlay, in the one correct order — see
-        // `build_overlaid_tree`. Highlights route through the
-        // canonical `selection_highlight_entries` helper: Section /
-        // MultiSection narrow to the selected sections, whole-node
-        // selections paint every section. `interaction_mode` is
-        // threaded in for the `NodeEdit` dim; without it a section
-        // drag mid-edit snapped every other node's text back to
-        // full opacity while its border stayed dimmed.
-        let new_tree = super::scene_rebuild::build_overlaid_tree(
-            doc,
-            interaction_mode,
-            super::scene_rebuild::selection_highlight_entries(&doc.selection),
-        );
-        renderer.rebuild_buffers_from_tree(&new_tree.tree);
-        *tree = new_tree;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_icon_for_resize_side, emits_first_pan_delta, resolve_section_drag_target,
+        arm_label_drag, cursor_icon_for_resize_side, emits_first_pan_delta, resolve_section_drag_target,
         selection_after_node_drag_press, selection_after_section_drag_press, DragState,
+        PortalLabelInteraction, RebuildTier, ThrottledDrag,
     };
     use crate::application::app::InteractionMode;
     use crate::application::document::tests_common::{load_test_doc, pinned_two_section_node};
-    use crate::application::document::{SectionSel, SelectionState};
+    use crate::application::document::{
+        EdgeRef, GraphemeRange, PortalLabelSel, SectionSel, SectionSpan, SelectionState,
+    };
     use crate::application::platform::window::CursorIcon;
+    use baumhard::mindmap::scene_cache::{EdgeKey, SampleParams, SceneConnectionCache};
     use baumhard::mindmap::tree_builder::ResizeHandleSide;
+    use baumhard::util::rust_source::{braced_block_after, production_code, statements};
+
+    /// A portal-label promotion, armed against a document whose
+    /// selection is `prev`. Returns the tier it asked for, plus the
+    /// scene-cache entry count and the drag state it left behind —
+    /// everything the promotion touches that a test can see without
+    /// a renderer.
+    fn arm_portal_label_drag(prev: SelectionState) -> (RebuildTier, usize, DragState) {
+        let mut doc = load_test_doc();
+        doc.selection = prev;
+        let edge_ref = EdgeRef::new("a", "b", "cross_link");
+        let edge_key = EdgeKey::new("a", "b", "cross_link");
+        let mut drag_state = DragState::None;
+        let mut scene_cache = SceneConnectionCache::default();
+        // Seed one entry so a `clear()` is visible as `0` rather than
+        // being indistinguishable from "was empty anyway". One sample
+        // rather than none: an entry with no points is not something
+        // the cache will store, since a refill that fills nothing
+        // evicts instead.
+        scene_cache.refill(
+            &edge_key,
+            SampleParams {
+                font_size_pt: 12.0,
+                spacing: 0.0,
+                sample_budget: 1000,
+            },
+            glam::Vec2::ZERO,
+            glam::Vec2::ZERO,
+            |out| out.push(glam::Vec2::ZERO),
+        );
+        let original = crate::application::document::defaults::default_parent_child_edge("a", "b");
+        let tier = arm_label_drag(
+            &mut doc,
+            &mut drag_state,
+            &mut scene_cache,
+            SelectionState::PortalLabel(PortalLabelSel {
+                edge_key,
+                endpoint_node_id: "a".to_string(),
+            }),
+            ThrottledDrag::PortalLabel(PortalLabelInteraction::new(edge_ref, "a".to_string(), original)),
+        );
+        (tier, scene_cache.len(), drag_state)
+    }
+
+    /// The portal-label threshold-cross promotion asks for the tier
+    /// its selection delta needs, exactly as the edge-label one does.
+    ///
+    /// #37 item 4: the two arms are the same five steps, and the
+    /// portal arm called `rebuild_all` unconditionally where the
+    /// edge-label arm snapshotted `prev` and dispatched on it. Both
+    /// now run one body, so the first row below is the tier that
+    /// used to be `All` and the second is the one that legitimately
+    /// still is.
+    ///
+    /// Fails on the first row when the promotion stops consulting
+    /// `prev` — which is the pre-fix shape and also what a post-write
+    /// `prev` capture would produce. The second row is the control
+    /// that keeps the first from being "answer `SceneOnly` always":
+    /// promoting out of a node selection still has a cyan highlight
+    /// to clear out of that node's text buffer.
+    #[test]
+    fn test_portal_label_promotion_asks_for_the_tier_its_selection_delta_needs() {
+        let (tier, cache_len, drag_state) =
+            arm_portal_label_drag(SelectionState::Edge(EdgeRef::new("a", "b", "cross_link")));
+        assert_eq!(
+            tier,
+            RebuildTier::SceneOnly,
+            "Edge -> PortalLabel touches no node text buffer"
+        );
+        assert_eq!(cache_len, 0, "the promotion must drop the stale edge samples");
+        assert!(
+            matches!(&drag_state, DragState::Throttled(d) if matches!(**d, ThrottledDrag::PortalLabel(_))),
+            "the promotion must arm the portal-label drag — got {:?}",
+            std::mem::discriminant(&drag_state)
+        );
+
+        let (tier, _, _) = arm_portal_label_drag(SelectionState::Single("n".to_string()));
+        assert_eq!(
+            tier,
+            RebuildTier::All,
+            "Single -> PortalLabel still has a node highlight to clear"
+        );
+    }
+
+    /// This module's own path, for the pin that reads it.
+    const THIS_FILE: &str = "src/application/app/event_cursor_moved.rs";
+
+    /// Both mouse threshold-crossing arms compare against
+    /// `super::POINTER_DRAG_THRESHOLD_SQ_PX` **by name**.
+    ///
+    /// A source-level pin, because no runtime assertion in this crate
+    /// can tell this file reading the shared constant from this file
+    /// carrying its own `25.0`: the arms live inside
+    /// `handle_cursor_moved`, which takes a `&Window` and an
+    /// `InputHandlerContext` and so is not callable from a test
+    /// (`TEST_CONVENTIONS.md` §T9 — the same reason the startup pins
+    /// read source). The constant's *value* is checked at runtime; what
+    /// only the source shows is which number this file compares against.
+    ///
+    /// This is the half `touch_gesture`'s
+    /// `test_pointer_drag_threshold_is_shared_by_touch_and_mouse`
+    /// cannot see. That test drives a production
+    /// `TouchGestureRecognizer` against
+    /// `POINTER_DRAG_THRESHOLD_SQ_PX`, which pins the *touch* side to
+    /// the shared number — but its "mouse side" is that same constant,
+    /// so it is two derivations from one source. The pair is the parity
+    /// claim; neither half is on its own.
+    ///
+    /// The input that makes this one fail is that re-inlining, and the
+    /// whole-file command is enough to produce it:
+    ///
+    /// ```text
+    /// sed -i 's/super::POINTER_DRAG_THRESHOLD_SQ_PX/25.0/g' src/application/app/event_cursor_moved.rs
+    /// cargo test -p mandala
+    /// ```
+    ///
+    /// Run against this file, that reports (measured, verbatim):
+    ///
+    /// ```text
+    /// test result: FAILED. 2042 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+    /// failures:
+    ///     application::app::event_cursor_moved::tests::test_the_mouse_drag_arms_name_the_shared_pointer_threshold
+    /// a mouse drag threshold must be the shared constant, not a re-inlined literal:
+    /// if dist_x * dist_x + dist_y * dist_y > 25.0
+    /// ```
+    ///
+    /// That the whole-file form works is not free: see the fragment
+    /// note at the needle below, which is what stops the same `sed`
+    /// from rewriting this test's own oracle along with the arms.
+    ///
+    /// Scoped through [`production_code`] and [`braced_block_after`],
+    /// so neither the comment naming the constant at the `PendingRight`
+    /// arm nor this test's own body can satisfy it — only a comparison
+    /// inside `handle_cursor_moved` can.
+    ///
+    /// **Conservative in one direction, by design.** The needle is the
+    /// constant's *name*, so aliasing it first — `let budget_sq =
+    /// super::POINTER_DRAG_THRESHOLD_SQ_PX;` above the arms, then
+    /// comparing against `budget_sq` — reddens this test even though
+    /// the arms still read the shared number. That is a false positive
+    /// on a legitimate refactor, and it is the direction to fail in:
+    /// the message quotes the offending comparison in full ("not a
+    /// re-inlined literal: `if dist_x * dist_x + dist_y * dist_y >
+    /// budget_sq`"), so the reader can see at a glance that it is an
+    /// alias rather than drift and extend the needle. A pin that
+    /// followed aliases would have to evaluate the file, which is the
+    /// thing `production_code` deliberately does not do.
+    #[test]
+    fn test_the_mouse_drag_arms_name_the_shared_pointer_threshold() {
+        let code = production_code(THIS_FILE);
+        let body = braced_block_after(&code, "fn handle_cursor_moved(")
+            .unwrap_or_else(|| panic!("{THIS_FILE} must still declare `handle_cursor_moved`"));
+
+        // Whitespace-flattened, so a rustfmt reflow across lines does
+        // not read as a missing comparison.
+        let compares: Vec<String> = statements(body)
+            .into_iter()
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| s.contains("dist_x * dist_x"))
+            .collect();
+        assert_eq!(
+            compares.len(),
+            2,
+            "expected exactly the left-button `Pending` and right-button `PendingRight` \
+             threshold crossings; found {compares:?}"
+        );
+        // Assembled from two fragments so the constant's full path is
+        // nowhere spelled contiguously in this file outside
+        // `handle_cursor_moved` itself. Written out in one piece, the
+        // published `sed` below — which is whole-file — would rewrite
+        // this needle to `"25.0"` in the same pass that re-inlines the
+        // arms, and the test would then assert that the arms contain
+        // `25.0`, which they would. A control that mutates its own
+        // oracle is not a control (#138), and the fragments are what
+        // keep the simple whole-file command honest.
+        let shared_constant = concat!("super::POINTER_DRAG_", "THRESHOLD_SQ_PX");
+        for compare in compares {
+            assert!(
+                compare.contains(shared_constant),
+                "a mouse drag threshold must be the shared constant, not a re-inlined \
+                 literal: {compare}"
+            );
+        }
+    }
 
     /// The `LeftDrag`-on-empty arm dispatches whatever Action the
     /// user bound, then emits the threshold frame's pan delta only
@@ -1118,7 +1301,8 @@ mod tests {
     fn test_node_drag_press_demotes_section_range_to_single() {
         let prev = SelectionState::SectionRange {
             sel: SectionSel::new("a", 1),
-            range: (3, 7),
+            section_span: SectionSpan::single(1),
+            grapheme_range: GraphemeRange::new(3, 7),
         };
         let new = selection_after_node_drag_press(&prev, "a").expect("rewrite");
         assert!(matches!(new, SelectionState::Single(id) if id == "a"));

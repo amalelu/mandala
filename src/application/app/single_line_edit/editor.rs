@@ -16,18 +16,15 @@
 //! lifecycle that only exists inside a `&mut Renderer` signature
 //! could not be tested at all.
 
-use baumhard::mindmap::scene_cache::SceneConnectionCache;
-use baumhard::mindmap::tree_builder::MindMapTree;
-
 use crate::application::document::MindMapDocument;
 use crate::application::keybinds::{Action, InputContext, ResolvedKeybinds};
-use crate::application::platform::input::Key;
+use crate::application::platform::input::{Key, Modifiers};
 use crate::application::renderer::Renderer;
 use crate::application::scene_host::AppScene;
 
+use super::super::dispatch::cross_dispatch::RebuildContext;
 use super::super::scene_rebuild::rebuild_all;
 use super::super::text_edit::insert_caret;
-use super::super::InteractionMode;
 use super::target::SingleLineEditTarget;
 use super::{route_single_line_key, seed_edit_buffer};
 
@@ -233,31 +230,22 @@ impl SingleLineEditor {
 
 /// Run the canvas work a lifecycle step asked for.
 #[allow(clippy::too_many_arguments)]
-fn apply_refresh(
-    refresh: EditRefresh,
-    state: &SingleLineEditor,
-    doc: &mut MindMapDocument,
-    interaction_mode: &InteractionMode,
-    mindmap_tree: &mut Option<MindMapTree>,
-    app_scene: &mut AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut SceneConnectionCache,
-) {
+fn apply_refresh(refresh: EditRefresh, state: &SingleLineEditor, rc: &mut RebuildContext<'_>) {
     match refresh {
         EditRefresh::None => {}
         EditRefresh::Preview => {
             if let Some(target) = state.target() {
-                target.refresh(doc, app_scene, renderer);
+                target.refresh(rc.document, rc.app_scene, rc.renderer);
             }
         }
         EditRefresh::All => {
             rebuild_all(
-                doc,
-                interaction_mode,
-                mindmap_tree,
-                app_scene,
-                renderer,
-                scene_cache,
+                rc.document,
+                &*rc.interaction_mode,
+                rc.mindmap_tree,
+                rc.app_scene,
+                rc.renderer,
+                rc.scene_cache,
             );
         }
     }
@@ -308,40 +296,45 @@ pub(in crate::application::app) fn open_single_line_edit(
 /// `InputContext::LabelEdit` is shared by both target kinds — the
 /// two editors always had identical key semantics, and the
 /// `LabelEdit*` spelling is the stable `keybinds.json` name.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::application::app) fn handle_single_line_edit_key(
     key_name: &Option<String>,
     logical_key: &Key,
-    ctrl: bool,
-    shift: bool,
-    alt: bool,
+    modifiers: &Modifiers,
     keybinds: &ResolvedKeybinds,
     state: &mut SingleLineEditor,
-    doc: &mut MindMapDocument,
-    interaction_mode: &InteractionMode,
-    mindmap_tree: &mut Option<MindMapTree>,
-    app_scene: &mut AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut SceneConnectionCache,
+    rc: &mut RebuildContext<'_>,
 ) {
-    let action = key_name
-        .as_deref()
-        .and_then(|n| keybinds.action_for_context(InputContext::LabelEdit, n, ctrl, shift, alt));
-    let input = match action {
+    let input = resolve_edit_input(key_name, logical_key, modifiers, keybinds);
+    let refresh = state.handle_input_core(input, rc.document);
+    apply_refresh(refresh, state, rc);
+}
+
+/// Renderer-free half of [`handle_single_line_edit_key`]: resolve
+/// one keystroke, modifiers included, to the [`EditInput`] the
+/// lifecycle core takes. A key bound in `InputContext::LabelEdit`
+/// becomes its `Action`; anything else stays the literal payload.
+///
+/// Split out so the modifier plumbing is reachable from a test —
+/// the shell itself needs a live `Renderer` (TEST_CONVENTIONS §T8).
+pub(in crate::application::app) fn resolve_edit_input<'k>(
+    key_name: &Option<String>,
+    logical_key: &'k Key,
+    modifiers: &Modifiers,
+    keybinds: &ResolvedKeybinds,
+) -> EditInput<'k> {
+    let action = key_name.as_deref().and_then(|n| {
+        keybinds.action_for_context(
+            InputContext::LabelEdit,
+            n,
+            modifiers.control_key(),
+            modifiers.shift_key(),
+            modifiers.alt_key(),
+        )
+    });
+    match action {
         Some(a) => EditInput::Action(a),
         None => EditInput::Key(logical_key),
-    };
-    let refresh = state.handle_input_core(input, doc);
-    apply_refresh(
-        refresh,
-        state,
-        doc,
-        interaction_mode,
-        mindmap_tree,
-        app_scene,
-        renderer,
-        scene_cache,
-    );
+    }
 }
 
 /// Apply a `LabelEdit*` cursor / delete primitive that arrived
@@ -352,28 +345,13 @@ pub(in crate::application::app) fn handle_single_line_edit_key(
 /// used to call a buffer mutator with no refresh at all, so a
 /// macro-driven cursor move left the caret painted at its old
 /// position until the next unrelated redraw.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::application::app) fn apply_single_line_edit_action(
     action: Action,
     state: &mut SingleLineEditor,
-    doc: &mut MindMapDocument,
-    interaction_mode: &InteractionMode,
-    mindmap_tree: &mut Option<MindMapTree>,
-    app_scene: &mut AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut SceneConnectionCache,
+    rc: &mut RebuildContext<'_>,
 ) {
-    let refresh = state.handle_input_core(EditInput::Action(action), doc);
-    apply_refresh(
-        refresh,
-        state,
-        doc,
-        interaction_mode,
-        mindmap_tree,
-        app_scene,
-        renderer,
-        scene_cache,
-    );
+    let refresh = state.handle_input_core(EditInput::Action(action), rc.document);
+    apply_refresh(refresh, state, rc);
 }
 
 /// Close the single-line editor. On commit, writes the buffer back
@@ -384,28 +362,13 @@ pub(in crate::application::app) fn apply_single_line_edit_action(
 ///
 /// Rebuilds so the element reflects the model state (or vanishes,
 /// if the buffer was empty and there was nothing there before).
-#[allow(clippy::too_many_arguments)]
 pub(in crate::application::app) fn close_single_line_edit(
     commit: bool,
-    doc: &mut MindMapDocument,
-    interaction_mode: &InteractionMode,
     state: &mut SingleLineEditor,
-    mindmap_tree: &mut Option<MindMapTree>,
-    app_scene: &mut AppScene,
-    renderer: &mut Renderer,
-    scene_cache: &mut SceneConnectionCache,
+    rc: &mut RebuildContext<'_>,
 ) {
-    let refresh = state.close_core(commit, doc);
-    apply_refresh(
-        refresh,
-        state,
-        doc,
-        interaction_mode,
-        mindmap_tree,
-        app_scene,
-        renderer,
-        scene_cache,
-    );
+    let refresh = state.close_core(commit, rc.document);
+    apply_refresh(refresh, state, rc);
 }
 
 #[cfg(test)]

@@ -63,7 +63,8 @@ pub(super) fn parse_action_runs_mode(s: &str) -> Option<bool> {
 /// parser's: `AddSection` reads it as "append", while
 /// `SplitSection` rejects it — the console verb requires `at=`
 /// because splitting at end-of-text silently creates an empty
-/// suffix section, and the macro path holds the same line.
+/// suffix section, and the keybind / macro path holds the same
+/// line.
 pub(super) fn parse_action_optional_usize(s: &str) -> Option<Option<usize>> {
     if s.is_empty() {
         return Some(None);
@@ -142,6 +143,11 @@ where
 /// Public-in-app so the WASM macro target's impl can call it,
 /// and so unit tests under `#[cfg(test)]` can pin the contract
 /// without spinning up a `WasmInputState`.
+// Consumer is `run_wasm/`; the host build reaches this only from
+// `#[cfg(test)]`, so arm the lint on wasm32 and silence it here
+// rather than blanket-allowing on both targets — if the browser
+// caller goes away, wasm32 says so.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(in crate::application::app) fn lift_mixed_branch_for_wasm_macro(
     action: &Action,
     double_click_residual: Option<super::cross_dispatch::DoubleClickResidual>,
@@ -349,29 +355,33 @@ pub(in crate::application::app) fn dispatch_compatible(
 
     match action {
         // ── Modal text-edit commit / cancel ───────────────────
-        // Cross-platform — `text_edit::close_text_edit` is reachable
-        // on both targets. WASM keyboard handler + click-outside
-        // path AND native modal handler all funnel through these
-        // arms; the close helper owns the `mem::replace(.., Closed)`
-        // mode-exit + tree-revert / scene-rebuild lifecycle. Inlined
-        // (not via `with_doc_rebuild`) because the helper signature
-        // takes `text_edit_state` separately from the rebuild
-        // bundle, and the closure shape can't split-borrow `core`.
-        Action::TextEditCancel | Action::TextEditCommit => {
-            let commit = matches!(action, Action::TextEditCommit);
+        // Cross-platform — both closers are reachable on both
+        // targets. WASM keyboard handler + click-outside path AND
+        // native modal handler all funnel through these arms; the
+        // closers own the `mem::replace(.., Closed)` mode-exit and
+        // the scene-rebuild (commit) or tree-revert (cancel).
+        //
+        // Commit builds the `RebuildContext` inline (not via
+        // `with_doc_rebuild`) because the closure it passes receives
+        // only the rebuild bundle, and the closer also needs
+        // `text_edit_state` — a sibling field of `core` that a
+        // closure over `core` cannot split off. Cancel never touched
+        // the model, so it takes only the mode, the tree and the
+        // renderer, and runs with or without a document: an editor
+        // left open with no document now closes instead of staying
+        // open, which no path can reach (opening one needs a node).
+        Action::TextEditCommit => {
             if let Some(doc) = core.document.as_deref_mut() {
-                super::super::text_edit::close_text_edit(
-                    commit,
-                    doc,
-                    core.interaction_mode,
-                    core.text_edit_state,
-                    core.mindmap_tree,
-                    core.app_scene,
-                    core.renderer,
-                    core.scene_cache,
-                );
+                let mut rc = super::cross_dispatch::rebuild_ctx!(core, doc);
+                super::super::text_edit::commit_text_edit(core.text_edit_state, &mut rc);
             }
         }
+        Action::TextEditCancel => super::super::text_edit::cancel_text_edit(
+            core.text_edit_state,
+            core.interaction_mode,
+            core.mindmap_tree,
+            core.renderer,
+        ),
         // ── Document-lifecycle ─────────────────────────────────
         Action::Undo => with_doc_rebuild(core, super::cross_dispatch::apply_undo),
         Action::DeleteSelection => with_doc_rebuild(core, super::cross_dispatch::apply_delete_selection),

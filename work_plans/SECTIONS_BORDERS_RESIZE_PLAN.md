@@ -113,7 +113,7 @@ earlier one wins.
    shared math, the `Flag::SectionRoot` discriminator, the
    `set_section_aabb` / `set_node_aabb` atomic setters, the
    `SectionPayload` clipboard surface, the unwired `Flag::Focused`
-   and `Flag::Mutable` flags. New chrome and new behaviours hang off
+   and `Flag::Mutable` flags. New chrome and new behaviors hang off
    these. We do not build a second tree-pass, a second resize-math
    library, a second per-section data carrier.
 
@@ -138,7 +138,7 @@ earlier one wins.
 
 ### 2.1 The three problems share one missing concept
 
-Each of the three UX cliffs has the same shape: *a discrete behaviour
+Each of the three UX cliffs has the same shape: *a discrete behavior
 that should be reified as a mode is implicit in either selection state
 or mouse-button side-effect.*
 
@@ -234,6 +234,13 @@ impl InteractionMode {
     /// True if this mode wants to absorb the next left-click as a
     /// mode-specific gesture (Reparent / Connect / Resize body-exit).
     /// Drives the click-routing fork in `event_mouse_click.rs`.
+    ///
+    /// SUPERSEDED — this predicate was deleted by #41. It shipped
+    /// with tests but never acquired a production caller: the click
+    /// router in `event_mouse_click.rs` and `click.rs` matches
+    /// `InteractionMode::Reparent` / `Connect` inline instead. Kept
+    /// in this sketch because the sketch is the historical record of
+    /// what the batch designed, not a description of today's tree.
     pub fn intercepts_left_click(&self) -> bool { ... }
 
     /// True if a click on a section-area should produce
@@ -508,14 +515,14 @@ selections instead of opening the editor directly:
   single-section nodes, or stops at NodeEdit for multi-section,
   letting the user pick which section to edit).
 - `EdgeLabel(s)` / `PortalLabel` / `PortalText` → opens the relevant
-  inline editor (today's behaviour, unchanged).
+  inline editor (today's behavior, unchanged).
 - `Multi` / `MultiSection` / `Edge` / `None` → no-op + log (today's
-  behaviour, unchanged).
+  behavior, unchanged).
 
 `EditSelectionClean` mirrors `EditSelection` but passes `clean=true`
 through to `open_text_edit` for the single-section short-circuit.
 
-This change has user-visible behaviour: pressing `Enter` on a
+This change has user-visible behavior: pressing `Enter` on a
 multi-section node now enters NodeEdit mode (showing section frames,
 making sections clickable) rather than dropping straight into the
 editor on section 0. The user then either clicks a section + presses
@@ -532,10 +539,10 @@ node/section text) is the only feedback, matching today.
 
 #### `Reparent` / `Connect` modes
 
-Today's behaviour stays: source nodes tinted orange
+Today's behavior stays: source nodes tinted orange
 (`REPARENT_SOURCE_COLOR`); hovered candidate target tinted green
 (`REPARENT_TARGET_COLOR`). No additional changes — these modes are
-already discoverable via the highlight colour change.
+already discoverable via the highlight color change.
 
 #### `NodeEdit { node_id }` mode
 
@@ -566,21 +573,21 @@ Three changes from today:
 
 #### `SectionEdit` (TextEditState::Open inside NodeEdit)
 
-Today's behaviour stays: cosmic-text caret rendered inside the
+Today's behavior stays: cosmic-text caret rendered inside the
 section's AABB; the editor's per-keystroke `apply_text_edit_to_tree`
 delivers live preview. The status bar line updates to read
 `editing text: <node-id>[<section_idx>]`.
 
 The only addition: while `TextEditState::Open`, the `Flag::Focused`
 flag is set on the active section-area's `GfxElement`. The renderer
-honours this flag by drawing a slightly thicker / brighter section
+honors this flag by drawing a slightly thicker / brighter section
 frame than the inactive sections of the same node. (Currently
 `Flag::Focused` is unused; this gives it its first consumer.)
 
 #### `Resize { target }` mode
 
 1. **Resize anchors render** on the targeted node or section
-   (replacing the auto-emit-on-selection behaviour — §6.2).
+   (replacing the auto-emit-on-selection behavior — §6.2).
 2. **A status-bar line** reads
    `resize: <target> — drag a corner or edge`. Esc exits.
 3. **The body of the targeted node tints subtly** (10% cyan tint
@@ -786,7 +793,7 @@ The `hit_test_target` fold for single-section nodes
 `HitTarget::NodeContainer` for `sections.len() == 1`. The new
 mode-gate above only fires when `hit_section.is_some()`, which
 single-section nodes never produce. So legacy single-section maps
-keep their exact current click behaviour. (Principle §1.7.)
+keep their exact current click behavior. (Principle §1.7.)
 
 The section-drag promotion (`event_cursor_moved.rs:417-454`) gets
 the same gate: `MovingSection` only promotes inside `NodeEdit`. In
@@ -1085,7 +1092,7 @@ when the active mode is `NodeEdit`. Hovering exits when the cursor
 leaves the section's AABB.
 
 This is a small affordance, but it makes the "this is the section
-you'd click on" behaviour discoverable. Cost: one BVH descent
+you'd click on" behavior discoverable. Cost: one BVH descent
 re-purposed (the same `descendant_at` path the click handler uses).
 
 ### 4.8 SelectionState lift on EnterSectionEdit / SectionRange
@@ -1129,7 +1136,7 @@ Tests under `console/commands/section.rs:204-420` and
   (multi-section node)..." message claimed there was no path for
   single-section nodes, which is wrong).
 - The MultiSection-rejection test now needs to assert fan-out
-  behaviour for `section move`, retaining rejection only for
+  behavior for `section move`, retaining rejection only for
   `section resize`.
 - New tests added for: each new doc setter (`add_section`,
   `delete_section`, `split_section`); each new console subverb;
@@ -1162,7 +1169,7 @@ or should cover):
 3. Make the conflation between `style.frame_color` and
    `style.border.color` user-visible: one verb (`border color`) writes
    the override; the other (`color border=…`) writes the cascade
-   default. `border show` lists both, labelled.
+   default. `border show` lists both, labeled.
 4. Add **live preview** for preset / color / side-pattern edits — the
    user sees the proposed border on the selected node before
    committing. This is the biggest UX leverage on top of the existing
@@ -1288,7 +1295,7 @@ the redesign:
    ```
    The user sees the dual surface and can target either explicitly.
    The dispatch difference itself stays — neither verb changes
-   behaviour, only the readout does.
+   behavior, only the readout does.
 
 3. **`preset=custom` with no glyph fields was an awkward sentinel.**
    The new grammar makes it explicit: `border preset custom` enters
@@ -1307,7 +1314,7 @@ the redesign:
    run `border preset custom` first, then set the side.
    ```
    This is a deliberate UX shift away from "do what I mean" toward
-   "tell me what I should have asked for". The auto-promote behaviour
+   "tell me what I should have asked for". The auto-promote behavior
    was a recurring confusion (per investigation §7.1).
 
 ### 5.5 New idiomatic shape
@@ -1412,7 +1419,7 @@ two places — both flagged during the review-fix passes:
   normal mode-clear path. The keybind resolver maps
   `(context, key) → Action` deterministically and can't fall
   through, so `cancel_border_preview` ships unbound by default
-  (the chain is the user-visible behaviour).
+  (the chain is the user-visible behavior).
 - **Implicit cancel on committing edits**: any of the four
   committing setters clears the preview as their first line, so
   a non-preview edit always wins.
@@ -1423,7 +1430,7 @@ multi-kv preview stays console-only),
 `Action::CommitBorderPreview`, `Action::CancelBorderPreview`.
 
 The preview slot does **not** persist through document load/save
-cycles (runtime ephemeral state, not serialised).
+cycles (runtime ephemeral state, not serialized).
 
 ### 5.7 Canvas-default editing
 
@@ -1712,7 +1719,7 @@ targeted element**. Today, handle hits are checked for any
 
 The threshold-cross priority chain in `event_cursor_moved.rs:182-538`
 is unchanged — the handle hits already take precedence over the body
-when present, and that's the right behaviour inside Resize mode
+when present, and that's the right behavior inside Resize mode
 (every press in Resize mode IS a resize). Outside Resize mode, the
 hits are never populated, so the priority chain never sees them.
 
@@ -1723,7 +1730,7 @@ exits Resize mode and returns to `Default`. Pre-fix the user was
 trapped in implicit-mode-via-selection; the explicit mode makes the
 exit affordance discoverable.
 
-#### Esc behaviour
+#### Esc behavior
 
 `Action::ExitMode` (Esc default) drops the Resize mode. Selection
 is preserved (the user wanted "resize this node", not "deselect").
@@ -1942,8 +1949,8 @@ serves the same role as cursor quadrant for anchor inference — the
 midpoint between the fingers is the cursor, the spread of the
 fingers is the size delta. This requires touch handling to be
 plumbed; per the action-investigation report, native and WASM both
-have stub paths for `WindowEvent::Touch` but no real recogniser. The
-recogniser lands in this batch (sized accordingly — this is the
+have stub paths for `WindowEvent::Touch` but no real recognizer. The
+recognizer lands in this batch (sized accordingly — this is the
 single biggest piece of new code in the plan).
 
 Implementation: a new `TouchGestureRecognizer` state machine in
@@ -1953,7 +1960,7 @@ and emits `MouseGesture::*` synthetic events into the existing
 mouse-input pipeline. This subsumes the half-wired touch
 dispatch path the action investigation flagged as aspirational.
 
-The recogniser has its own internal state machine separate from
+The recognizer has its own internal state machine separate from
 `DragState` — it observes raw touch events, identifies gestures,
 emits synthetic `MouseInput` / `CursorMoved` events. The existing
 mouse dispatch then sees them as it would mouse events. Single source
@@ -1979,10 +1986,10 @@ resize` with a selection check. They're convenient for keybinding
 ("go straight to resize mode for the section, even if my selection
 is a node — pull up section 0 if no section is selected").
 
-### 6.8 Removing the today-default behaviour
+### 6.8 Removing the today-default behavior
 
 The single change that removes today's auto-anchor-on-selection
-behaviour is in
+behavior is in
 `/home/user/mandala/src/application/document/mod.rs:520-523`:
 
 ```rust
@@ -2000,7 +2007,7 @@ let selected_section = interaction_mode.resize_handle_section();
 ```
 
 That is the diff. Everything else in the resize subsystem stays
-behaviourally identical — handles render the same way, hit-test
+behaviorally identical — handles render the same way, hit-test
 the same way, drag the same way, commit the same way; only the
 predicate that decides "should the handles render" changes.
 
@@ -2229,8 +2236,8 @@ asserts at the end.
    action_for_gesture("longpress", ...) returns Action::EnterResizeMode
    InteractionMode::Resize { Node("0") }
    ```
-   (Pending touch recogniser implementation — this scenario is
-   wired up in the touch-recogniser batch, §8.)
+   (Pending touch recognizer implementation — this scenario is
+   wired up in the touch-recognizer batch, §8.)
 
 ### 7.3 Regression-prone areas
 
@@ -2292,7 +2299,7 @@ on existing benches; new benches establish baselines.
 #### Batch 1 — Mode infrastructure (mechanical foundation)
 
 Lands the `InteractionMode` enum and migrates `AppMode` consumers to
-it. **Does not change visible behaviour** — `Reparent` and `Connect`
+it. **Does not change visible behavior** — `Reparent` and `Connect`
 work exactly as today; `Default` is the only other variant present.
 NodeEdit / SectionEdit / Resize variants are defined but not yet
 reachable.
@@ -2323,6 +2330,10 @@ Tasks:
       `interaction_mode.rs::tests` covering `intercepts_left_click`,
       `click_resolves_to_section`, `resize_handle_node`,
       `resize_handle_section`, `is_target_picker` for every variant.
+      *(Since superseded: #41 deleted `intercepts_left_click` and
+      its tests — the predicate never gained a production caller.
+      The other four predicates and their tests stand. Recorded
+      here rather than edited out; the checklist is history.)*
 
 Verification: `./test.sh` green (2274 → 2282 tests, +8 from new
 predicate tests). `./test.sh --lint` advisory clippy warnings are
@@ -2509,7 +2520,7 @@ Tasks (status post-Full-Nelson review):
       absolute), `resize w=/h=`, `resize fill` (renamed from
       `none`).
 - [x] New subverbs: `show`, `text`, `add`, `delete`, `split`.
-      `text` honours `runs=preserve|clear` (preserve uses the
+      `text` honors `runs=preserve|clear` (preserve uses the
       new `set_section_text_preserving_runs` helper; clear
       collapses via `set_section_text`).
 - [x] `node_or_section_selected` predicate added in
@@ -2664,7 +2675,7 @@ Track here so Batch 8 (or earlier follow-ups) can pick them up:
 
 #### Batch 7 — Touch parity — SHIPPED
 
-Lands the touch gesture recogniser and the `LongPress` /
+Lands the touch gesture recognizer and the `LongPress` /
 `TwoFingerDrag` MouseGesture variants. Touch input becomes a peer
 of mouse — long-press is the touch equivalent of `r`
 (EnterResizeMode), two-finger-drag is the touch equivalent of
@@ -2675,20 +2686,23 @@ users with no way into either resize gesture.
 Tasks (status post-Batch-7 ship):
 - [x] `MouseGesture::LongPress` / `TwoFingerDrag` variants
       added to `keybinds/bind.rs:84-103` with strum
-      serialisations (`"longpress"`, `"twofingerdrag"`) and
+      serializations (`"longpress"`, `"twofingerdrag"`) and
       pascal-form mappings.
 - [x] `TouchGestureRecognizer` state machine landed in
       `src/application/app/touch_gesture.rs`. Pure state
       machine: `Idle` ↔ `OneFinger` ↔ `TwoFingers`; long-press
       timer fires from `tick(now)`; two-finger-drag emits per
-      `MOVE_THRESHOLD_PX` centroid step. `LONG_PRESS_MS = 350`
-      (matches iOS / Android conventions); `MOVE_THRESHOLD_PX
-      = 4.0` (matches the existing mouse drag threshold).
+      `POINTER_DRAG_THRESHOLD_PX` centroid step. `LONG_PRESS_MS
+      = 350` (matches iOS / Android conventions). The move
+      threshold landed as a touch-local `MOVE_THRESHOLD_PX = 4.0`
+      claiming to match the mouse drag threshold, which was 5.0;
+      #46 replaced both with the one `POINTER_DRAG_THRESHOLD_PX
+      = 5.0` in `app/mod.rs`.
       Test-only `with_thresholds` constructor for state-machine
       tests so they don't sleep 350ms per case.
 - [x] Native `WindowEvent::Touch` arm in `run_native.rs:454-462`
       → `dispatch_touch_event` helper at line 295 builds the
-      `Phase` translation, drives the recogniser's `ingest` +
+      `Phase` translation, drives the recognizer's `ingest` +
       `tick`, looks up the bound action via
       `keybinds.action_for_gesture` (modifier-fixed-false), and
       dispatches through `super::dispatch::dispatch_action`.
@@ -2716,7 +2730,7 @@ Tasks (status post-Batch-7 ship):
       third-finger-ignored / `reset()` / RecognizedGesture →
       MouseGesture mapping / untracked-finger-id ignored.
 
-Long-press wake-up gap (acknowledged): the recogniser's `tick`
+Long-press wake-up gap (acknowledged): the recognizer's `tick`
 fires only from `WindowEvent::Touch` events, not on a wall-clock
 timer. A finger held with literally zero `Moved` events between
 Started and Ended would miss the long-press emission. In
@@ -2724,7 +2738,7 @@ practice touch hardware emits sub-pixel jitter `Moved` events
 constantly while a finger is down, so the gap is theoretical.
 A future improvement would set
 `ControlFlow::WaitUntil(started_at + LONG_PRESS_MS)` from the
-recogniser's `OneFinger` state — deferred to keep Batch 7's
+recognizer's `OneFinger` state — deferred to keep Batch 7's
 diff tractable.
 
 Verification: 1608 tests pass on `cargo test --bin mandala`
@@ -2825,10 +2839,12 @@ Open follow-ups deferred to a future PR (acknowledged in plan's
       depth (Security I-1/2/3 from the §4.6 review).
 - [ ] §3.9 `node edit` console subverb — sugar over `mode
       node-edit`; landed.
-- [ ] `SectionRange` grapheme-vs-section type confusion —
-      doc-comment fixed to reflect the load-bearing (section-
-      index) interpretation; the deeper fix to the editor-close
-      `lift_anchor_to_section_range` path is its own follow-up.
+- [x] `SectionRange` grapheme-vs-section type confusion —
+      resolved by #47 part C: the variant now carries
+      `section_span: SectionSpan` and `grapheme_range:
+      GraphemeRange` as distinct newtypes, and
+      `lift_anchor_to_section_range` emits the variant with both
+      fields end-to-end.
 
 Architectural follow-ups from the **whole-PR** opus review T4 —
 acknowledged honestly, deferred because each is invasive (touches
@@ -2869,17 +2885,26 @@ this commit are the BLOCKER tier (3) plus the high-value
 CRITICALs / HIGHs (10 fixes; 3 new test pins; cargo doc clean).
 The remainder are deferred here:
 
-- [ ] **WASM touch lift** (touch deep-dive CRITICAL + cross-
+- [x] **WASM touch lift** (touch deep-dive CRITICAL + cross-
       platform B1 / C1): the shipped Batch 7 default keybinds
       (`LongPress → EnterResizeMode`, `TwoFingerDrag →
-      FastResizeStart`) bind to NativeOnly Actions. WASM
-      dispatches them through `dispatch_compatible` which
-      returns `Unhandled` and silently drops. A warn-log latch
-      shipped in this commit at least surfaces the failure to
-      the dev console. The real fix is lifting `EnterResizeMode`
-      / `FastResizeStart` to `Compatible` (porting the
-      DragState + modal-stealer machinery cross-platform); a
-      cross-cutting refactor not done in this PR.
+      FastResizeStart`) both bound to NativeOnly Actions, so the
+      browser dispatched them, got `Unhandled`, and dropped them.
+      **Closed by #35, and not by the lift this item proposed.**
+      The vocabulary grew a tap, a one-finger pan and a pinch step,
+      and those three resolve to no `Action` at all — they take the
+      selection-bookkeeping and continuous-camera carve-outs
+      CODE_CONVENTIONS §3 already grants the mouse, through one
+      cross-platform `dispatch::apply_touch_effect`. So the browser
+      is usable by finger without any of the DragState /
+      modal-stealer port. `TwoFingerDrag` is gone from the
+      `MouseGesture` table: two fingers now drive the camera, and a
+      binding firing on the same event would be a conflict.
+      `LongPress → EnterResizeMode` stays NativeOnly *deliberately*
+      — it is the touch peer of the keyboard's `r`, and rebinding it
+      to something Compatible on one target only would make one
+      gesture mean two things — and keeps its warn-log. Lifting it
+      is the `InteractionMode::Resize` chrome port, still open below.
 - [ ] **WASM resize-handle hit-test** (cross-platform C2): even
       if `EnterResizeMode` were Compatible, WASM's left-click
       handler (`run_wasm/event_mouse_click.rs::handle_mouse_pressed`)
@@ -2895,36 +2920,84 @@ The remainder are deferred here:
       `WindowEvent::Touch` events. iOS Safari coalesces events so
       a finger held with no Moved between Started and Ended will
       not fire LongPress. Wire `ControlFlow::WaitUntil(started_at +
-      LONG_PRESS_MS)` on native or `setTimeout` on WASM.
+      LONG_PRESS_MS)` on native or `setTimeout` on WASM. Still open
+      for the long-press. It does **not** leak into #35's tap: the
+      tap's refusal reads the elapsed time rather than whether the
+      long-press emission happened, so a hold whose `tick` never ran
+      is refused on duration —
+      `test_tap_is_refused_for_a_long_hold_whose_timer_never_ran`.
 - [ ] **Touch coordinate-space drift** (touch deep-dive HIGH):
       `winit::Touch.location` is `PhysicalPosition<f64>` but
-      `MOVE_THRESHOLD_PX = 4.0` is doc-claimed as logical pixels.
+      `POINTER_DRAG_THRESHOLD_PX` was doc-claimed as logical pixels.
       On a 2x retina device the threshold is effectively ~2
       logical px; on iPhone ~1.3 logical px. Either divide by
       `window.scale_factor()` before ingest or rename the
       constant + fix docs.
-- [ ] **Touch clock-skew vulnerability** (touch deep-dive HIGH):
-      `tick()`'s `now.duration_since(track.started_at)` panics or
-      saturates if `now < started_at`. `web_time::Instant` on
-      Firefox bfcache restore can produce regressed timestamps.
-      Use `saturating_duration_since`.
-- [ ] **Touch `Cancelled` handling** (touch deep-dive HIGH): a
-      system-Cancelled secondary finger leaves the recogniser in a
-      latched OneFinger state; treat `Phase::Cancelled` (winit) as
-      `reset()`-equivalent for the affected finger rather than
-      collapsing into `Phase::Ended`.
-- [ ] **Touch `sqrt` on input hot path** (touch deep-dive MEDIUM
-      + CONVENTIONS violation): `update_pos` does
-      `(dx*dx+dy*dy).sqrt() > MOVE_THRESHOLD_PX`; should be
-      `dx*dx+dy*dy > MOVE_THRESHOLD_PX*MOVE_THRESHOLD_PX`.
+      **Half closed** (#46 review follow-up): the *doc* half is
+      done — the constant, `keybinds/bind.rs` and the touch module
+      now all say physical, and the constant's doc names the two
+      call sites (`handle_cursor_moved`'s `cursor_pos` store and
+      `dispatch_touch_event`'s `touch.location`) that feed raw
+      device coordinates in, plus the fact that no `scale_factor`
+      call exists anywhere under `src/application`. The item stays
+      open for the half that matters to a user: the budget is still
+      display-dependent, so the same gesture costs half the finger
+      travel on a 2x screen. Closing it is the `scale_factor`
+      division at both readers, which changes behavior on every
+      HiDPI machine and wants its own change. The mouse side is
+      equally affected, so the fix is per-pointer-path, not
+      touch-only.
+- [x] **Touch clock-skew vulnerability** (touch deep-dive HIGH):
+      both readers of the elapsed hold — `tick`'s long-press test
+      and the tap's duration clause — now use
+      `saturating_duration_since`. (The panic half of the report was
+      already wrong: `web_time`'s `duration_since` is
+      `checked_duration_since(..).unwrap_or_default()`, so it
+      saturated too. What the explicit spelling buys is that the
+      guarantee is written down at the call site rather than
+      inherited from a dependency's choice.) A regressed timestamp
+      now reads as a zero-length hold, which is the right answer for
+      both: too short to be a long-press, short enough to be a tap.
+- [x] **Touch `Cancelled` handling** (touch deep-dive HIGH):
+      `Phase` now carries its own `Cancelled`, and `touch_phase` no
+      longer folds winit's onto `Ended`. The cancelled finger clears
+      its slot exactly as a lift does — the survivor of a pair goes
+      on being tracked — and emits nothing. Folding was harmless
+      while no gesture fired on a lift; #35's tap made it a bug in
+      which the operating system commits a selection every time it
+      interrupts a finger, which is what
+      `test_a_cancelled_touch_neither_taps_nor_leaves_state_behind`
+      pins.
+- [x] **Touch `sqrt` on input hot path** (touch deep-dive MEDIUM
+      + CONVENTIONS violation): `update_pos` did
+      `(dx*dx+dy*dy).sqrt() > MOVE_THRESHOLD_PX`. Both touch emit
+      points now compare squared against
+      `POINTER_DRAG_THRESHOLD_SQ_PX`, the same form the mouse arms
+      use (#46).
 - [ ] **Touch demote latch overcorrects** (touch deep-dive MEDIUM):
       "two fingers down, lift one quickly, hold survivor 350ms" is
-      plausibly long-press intent but currently latches
-      `long_press_emitted: true` so survivor never fires.
-- [ ] **Native + WASM touch dispatch near-duplication** (architecture
+      plausibly long-press intent but the demotion latches
+      `discrete_emitted: true` so the survivor never fires. Open,
+      and deliberately so for now: #35 widened the latch's job — it
+      also refuses the survivor's *tap*, which is what stops a
+      two-finger gesture from ending in a selection change — and
+      narrowing it wants a rule that distinguishes "lifted one
+      finger to keep holding" from "finished pinching", which the
+      machine does not have. What #35 did change is that the latch
+      is now the whole mechanism: the demotion used to also
+      back-date the survivor's `started_at` under a comment claiming
+      *that* was what blocked the long-press, which was one
+      mechanism plus a decoy.
+- [x] **Native + WASM touch dispatch near-duplication** (architecture
       MEDIUM): `InitState::dispatch_touch_event` and
-      `WasmApp::handle_touch_event` carry near-identical 25-line
-      bodies. Generic-ify via a shared helper.
+      `WasmApp::handle_touch_event` carried near-identical bodies.
+      #29 lifted the recognize-and-resolve half into
+      `dispatch::drive_touch_event`; #35 lifted the *act* half into
+      `dispatch::apply_touch_effect`, which both call. What is left
+      per-target is the one thing that genuinely differs: native
+      dispatches a keybind-routed Action through `dispatch_action`
+      with its native context, the browser through
+      `dispatch_compatible` plus the `NativeOnly` warn-log.
 - [ ] **DOS resource caps** (security CRITICALs):
       `MindMapDocument.undo_stack`, `MindNode.inline_macros`,
       `MindMap.macros`, `Palette.groups`, and section/node text
@@ -2945,12 +3018,12 @@ The remainder are deferred here:
       gates on the flag (T2 fix); LMB path doesn't. User holding
       RMB for fast-resize then fumbling LMB ends the gesture
       prematurely.
-- [ ] **`SectionRange::range` dual semantics** (correctness HIGH):
-      drift check + `border preview` + `live_selection_section_pairs`
-      treat `range` as section-index range; `color text` and
-      `font` propagate it as grapheme range. T1.1 fixed the writer
-      side (lift to Section instead of SectionRange) but didn't
-      reconcile reader-side. Either rename or split the variant.
+- [x] **`SectionRange::range` dual semantics** (correctness HIGH):
+      resolved by #47 part C — the variant was split into two
+      distinctly-typed fields (`section_span: SectionSpan`,
+      `grapheme_range: GraphemeRange`); every reader consumes the
+      field it means and the editor-close lift produces the
+      variant with both.
 - [ ] **`split_section` undo doesn't pin `text_runs`** (test coverage
       CRITICAL): `split_section_pushes_undo_and_dirty` checks
       `sections.len()` and `text` after undo, not `text_runs`.
@@ -3053,7 +3126,7 @@ The remainder are deferred here:
 - [ ] **`do_*()` benchmark-reuse for `apply_view_to_slot`** (test
       coverage HIGH): hot path in `lib/baumhard/src/mindmap/border.rs`
       lacks the bench-reuse shape `TEST_CONVENTIONS §T6` calls for.
-- [ ] **Touch recogniser → Action wiring untested end-to-end**
+- [ ] **Touch recognizer → Action wiring untested end-to-end**
       (test coverage HIGH): three layers tested, the seams aren't.
 - [ ] **`resize_mode_lifecycle.rs` is a flag round-trip** (test
       coverage HIGH): manually flips `mode` instead of dispatching
@@ -3118,7 +3191,7 @@ deferring to the implementer is fine.
    accumulation feels more useful but replacement is simpler.
 
 3. **`Action::EnterNodeEdit` on a `Multi(ids)` selection — what is
-   the right behaviour?** Current spec says no-op + log. An
+   the right behavior?** Current spec says no-op + log. An
    alternative is "enter NodeEdit on the first id"; another is
    "enter NodeEdit on each id sequentially via macro". Decide on
    first implementer encounter.

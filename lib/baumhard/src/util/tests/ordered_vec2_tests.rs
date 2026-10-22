@@ -20,7 +20,7 @@ pub fn do_ordered_vec2_round_trips_through_hashmap() {
 
     assert_eq!(map.get(&OrderedVec2::new_f32(1.5, 2.5)), Some(&"a"));
     assert_eq!(map.get(&OrderedVec2::new_f32(3.0, 4.0)), Some(&"b"));
-    assert!(map.get(&OrderedVec2::new_f32(1.5, 2.6)).is_none());
+    assert!(!map.contains_key(&OrderedVec2::new_f32(1.5, 2.6)));
 }
 
 #[test]

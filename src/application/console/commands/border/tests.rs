@@ -270,12 +270,18 @@ fn border_unknown_subverb_errors_clearly() {
     assert_exec_err_contains(run("border frobnicate", &mut doc), "unknown subverb");
 }
 
-/// `border palette=My Palette` (unquoted multi-word value) tokenises
+/// `border palette=My Palette` (unquoted multi-word value) tokenizes
 /// as `["palette=My", "Palette"]` because the parser splits on
 /// whitespace. The verb sees a bare positional alongside a kv and
 /// surfaces a quoting hint rather than the generic "unknown subverb"
 /// message — the latter is technically correct but unhelpful when
 /// the user obviously meant a single multi-word value.
+///
+/// The suggested line is the *whole* line the user meant, rebuilt
+/// from their own tokens. This asserted `palette="Palette"` while
+/// the hint hardcoded the key and quoted only the trailing token,
+/// which made a message wrong in two ways read as the pinned
+/// behavior.
 #[test]
 fn border_unquoted_multi_word_value_hints_at_quoting() {
     let mut doc = fixture_doc();
@@ -287,10 +293,9 @@ fn border_unquoted_multi_word_value_hints_at_quoting() {
                 "expected quoting hint, got: {}",
                 s
             );
-            // The hint should suggest the correct quoted form.
             assert!(
-                s.contains("palette=\"Palette\""),
-                "expected the hint to show the quoted form, got: {}",
+                s.contains("`border palette=\"My Palette\"`"),
+                "expected the hint to show the line the user meant, got: {}",
                 s
             );
         }
@@ -391,10 +396,17 @@ fn border_unknown_key_error_lists_valid_keys() {
     match run("border colr=#fff", &mut doc) {
         ExecResult::Err(s) => {
             assert!(s.contains("unknown key 'colr'"), "got: {}", s);
-            assert!(s.contains("valid keys"), "got: {}", s);
-            // Cherry-pick a few keys that should appear.
+            // The list is the *form's* readable keys, named by the
+            // form: the engine's one rejection replaced eleven
+            // per-verb copies that each worded it differently.
+            assert!(s.contains("border reads"), "got: {}", s);
             for k in &["preset", "color", "palette", "top"] {
-                assert!(s.contains(*k), "expected '{}' in valid-keys list, got: {}", k, s);
+                assert!(
+                    s.contains(*k),
+                    "expected '{}' in the readable-key list, got: {}",
+                    k,
+                    s
+                );
             }
         }
         other => panic!("expected Err, got {:?}", other),
@@ -463,8 +475,12 @@ fn apply_border_field_returns_false_on_invalid_value() {
     let mut doc = fixture_doc();
     let id = first_node_id(&doc);
     doc.selection = SelectionState::Single(id.clone());
-    // `stage_kv` rejects unknown presets — the core silently no-ops
-    // (Action arm warns upstream; verb path surfaces the typed err).
+    // `stage_kv` rejects unknown presets. The comment here used to
+    // say the Action arm warned upstream; it did not —
+    // `apply_set_border_field` forwards the bool and says nothing,
+    // so this was the silent no-op the report named. The core warns
+    // itself now; see
+    // `apply_border_field_warns_only_where_the_binding_can_never_work`.
     assert!(!super::apply_border_field_to_selection(
         &mut doc,
         "preset",
@@ -919,7 +935,7 @@ fn border_show_works_on_section_selection() {
 
 #[test]
 fn border_show_works_on_section_range_selection() {
-    use crate::application::document::SectionSel;
+    use crate::application::document::{GraphemeRange, SectionSel, SectionSpan};
     let mut doc = fixture_doc();
     let id = first_node_id(&doc);
     doc.selection = SelectionState::SectionRange {
@@ -927,7 +943,8 @@ fn border_show_works_on_section_range_selection() {
             node_id: id.clone(),
             section_idx: 0,
         },
-        range: (0, 0),
+        section_span: SectionSpan::single(0),
+        grapheme_range: GraphemeRange::new(0, 1),
     };
     assert!(
         matches!(run("border show", &mut doc), ExecResult::Lines(_)),
@@ -941,28 +958,40 @@ fn border_show_works_on_section_range_selection() {
 fn border_on_with_extra_kv_errors() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::Single(first_node_id(&doc));
-    assert_exec_err_contains(run("border on preset=heavy", &mut doc), "takes no arguments");
+    // The engine names the key rather than saying "takes no
+    // arguments": `border on` reads none, and a user who typed
+    // `preset=heavy` is told where it does belong.
+    assert_exec_err_contains(run("border on preset=heavy", &mut doc), "border on takes no keys");
 }
 
 #[test]
 fn border_off_with_extra_positional_errors() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::Single(first_node_id(&doc));
-    assert_exec_err_contains(run("border off something", &mut doc), "takes no arguments");
+    assert_exec_err_contains(
+        run("border off something", &mut doc),
+        "unexpected extra positional 'something'",
+    );
 }
 
 #[test]
 fn border_toggle_with_extra_kv_errors() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::Single(first_node_id(&doc));
-    assert_exec_err_contains(run("border toggle padding=8", &mut doc), "takes no arguments");
+    assert_exec_err_contains(
+        run("border toggle padding=8", &mut doc),
+        "border toggle takes no keys",
+    );
 }
 
 #[test]
 fn border_reset_with_extras_errors() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::Single(first_node_id(&doc));
-    assert_exec_err_contains(run("border reset preset=heavy", &mut doc), "takes no arguments");
+    assert_exec_err_contains(
+        run("border reset preset=heavy", &mut doc),
+        "border reset takes no keys",
+    );
 }
 
 // ─── Opus review T5 (API/UX) pins ────────────────────────────────
@@ -1300,16 +1329,25 @@ fn border_preset_cycle_falls_through_to_canvas_default() {
     );
 }
 
-/// **Verb-strict vs macro-permissive contract** (Plan §5.4 #3
-/// + Architecture A5 from the Batch-6 opus review): the verb
+/// **Verb-strict vs Action-permissive contract** (Plan §5.4 #3 +
+/// Architecture A5 from the Batch-6 opus review): the verb
 /// path (`border side`/`corner`) errors with the explicit
 /// "preset custom first" hint when the resolved preset isn't
-/// custom. The macro path (`Action::SetBorderField { field:
-/// "top", value: "..." }` → `apply_border_field_to_selection`
+/// custom. The keybind / macro path (`Action::SetBorderField {
+/// field: "top", value: "..." }` → `apply_border_field_to_selection`
 /// → `set_node_border_config` → data-layer auto-promote) still
 /// silently promotes the preset to "custom" — by design, for
 /// kv-form back-compat. Pin both legs so a future contributor
 /// who tightens one without the other trips this test.
+///
+/// "Macro path" alone is the wrong name for the second leg and
+/// was the name used here: `SetBorderField` is a parametric
+/// `Action`, reachable from a `keybinds.json` binding exactly as
+/// from a `MacroStep::Action`, and it is not on
+/// `SourceTier::allows_action`'s gated list, so no tier is
+/// required for it either. `cross_dispatch/style.rs` calls the
+/// same leg "the keybind / macro path", and that is the whole of
+/// it.
 #[test]
 fn apply_border_field_to_selection_auto_promotes_preset_to_custom() {
     let mut doc = fixture_doc();
@@ -1329,11 +1367,12 @@ fn apply_border_field_to_selection_auto_promotes_preset_to_custom() {
         Some("heavy"),
         "fixture: preset should be heavy before the side write"
     );
-    // Macro-tier write — bypasses the verb-layer gate. Auto-promotes.
+    // Keybind / macro write — bypasses the verb-layer gate.
+    // Auto-promotes.
     let changed = super::apply_border_field_to_selection(&mut doc, "top", "###(*)###");
     assert!(
         changed,
-        "macro write must succeed (verb-strict gate is verb-layer-only)"
+        "keybind / macro write must succeed (verb-strict gate is verb-layer-only)"
     );
     assert_eq!(
         doc.mindmap
@@ -1345,8 +1384,8 @@ fn apply_border_field_to_selection_auto_promotes_preset_to_custom() {
             .as_ref()
             .map(|c| c.preset.as_str()),
         Some("custom"),
-        "macro path should auto-promote preset to 'custom' silently \
-         (kv-form back-compat — verb path errors instead, see \
+        "keybind / macro path should auto-promote preset to 'custom' \
+         silently (kv-form back-compat — verb path errors instead, see \
          border_side_on_non_custom_preset_errors_with_hint)"
     );
 }
@@ -1447,4 +1486,350 @@ fn toggle_core_rejects_a_non_node_selection() {
     let mut doc = fixture_doc();
     doc.selection = SelectionState::None;
     assert!(super::toggle_border_visible_on_selection(&mut doc).is_err());
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Silent-failure reporting on the parametric Action path.
+//
+// `apply_border_field_to_selection` is reached from a keybind, a
+// palette press or a macro step, none of which has scrollback, so a
+// returned `false` is the whole of what the user sees. Two of its
+// three `false`s are permanent — the binding can never work — and
+// those now say so at `warn!`, which survives into release
+// (CODE_CONVENTIONS §9). The third, "nothing selected", is answered
+// by selecting something and stays at `debug!`.
+// ─────────────────────────────────────────────────────────────────
+
+/// A binding whose value the staging parser rejects warns once,
+/// carrying the parser's own message, and a binding that merely has
+/// nothing selected does not.
+///
+/// Fails when: the `warn!` on the stage-error path goes (the first
+/// block finds no line), when it is downgraded below `warn!` (the
+/// recorder only keeps `warn!` and above, so the line disappears),
+/// or when the no-selection path is raised to `warn!` (the second
+/// block finds one) — which would put a line in every release
+/// build's stderr for every stray keypress against an empty
+/// selection.
+///
+/// The needles are unique strings so the process-global recorder,
+/// which holds lines from every test in the binary, can be searched
+/// without serializing the suite.
+#[test]
+fn apply_border_field_warns_only_where_the_binding_can_never_work() {
+    baumhard::util::test_logger::install();
+
+    let mut doc = fixture_doc();
+    let id = first_node_id(&doc);
+    doc.selection = SelectionState::Single(id);
+    assert!(!super::apply_border_field_to_selection(
+        &mut doc,
+        "preset",
+        "zzz-not-a-preset-9f31"
+    ));
+    let logged = baumhard::util::test_logger::lines_containing("zzz-not-a-preset-9f31");
+    assert_eq!(
+        logged.len(),
+        1,
+        "an unstageable value must be reported exactly once, logged: {logged:?}"
+    );
+    assert!(
+        logged[0].starts_with("WARN "),
+        "a binding that can never apply is a warning, not instrumentation: {}",
+        logged[0]
+    );
+    assert!(
+        logged[0].contains("preset"),
+        "the message must name the field the binding sets: {}",
+        logged[0]
+    );
+
+    // Control: the transient failure on the same function must stay
+    // out of a release build's stderr. `#a1b2c3` stages fine; what
+    // fails is that nothing is selected.
+    let mut doc = fixture_doc();
+    doc.selection = SelectionState::None;
+    assert!(!super::apply_border_field_to_selection(
+        &mut doc, "color", "#a1b2c3"
+    ));
+    assert!(
+        baumhard::util::test_logger::lines_containing("#a1b2c3").is_empty(),
+        "an empty selection is not a defect and must not warn: {:?}",
+        baumhard::util::test_logger::lines_containing("#a1b2c3")
+    );
+}
+
+/// A glyph the setter refuses is reported too. It stages cleanly —
+/// the ceiling is enforced by the setter, not the parser — so
+/// before this it was the one failure that reached the model layer
+/// and came back with nothing said.
+///
+/// Fails when: `outcome.rejected` is dropped on the floor again.
+/// The `changed == false` assertion is what pins the refusal as
+/// atomic rather than half-applied.
+#[test]
+fn apply_border_field_warns_when_the_setter_refuses_the_glyph() {
+    baumhard::util::test_logger::install();
+    let mut doc = fixture_doc();
+    let id = first_node_id(&doc);
+    doc.selection = SelectionState::Single(id.clone());
+
+    // One cluster over MAX_BORDER_GLYPH_CLUSTERS, spelled with a
+    // marker the recorder can be searched for.
+    let over_ceiling = format!(
+        "zq9f31{}",
+        "x".repeat(baumhard::mindmap::model::validate::MAX_BORDER_GLYPH_CLUSTERS)
+    );
+    assert!(!super::apply_border_field_to_selection(
+        &mut doc,
+        "tl",
+        &over_ceiling
+    ));
+    assert!(
+        doc.mindmap.nodes[&id].style.border.is_none(),
+        "a refused glyph must leave the node's border slot alone"
+    );
+
+    let logged = baumhard::util::test_logger::lines_containing("glyphs.top_left");
+    assert!(
+        logged.iter().any(|l| l.starts_with("WARN ")),
+        "a refused edit must be reported at warn level, logged: {logged:?}"
+    );
+}
+
+// ============================================================
+// Completion — the popup the declared grammar produces
+// ============================================================
+
+mod completion {
+    use crate::application::console::completion::{complete, Completion};
+    use crate::application::console::ConsoleContext;
+    use crate::application::document::MindMapDocument;
+
+    fn fixture_doc() -> MindMapDocument {
+        crate::application::document::tests_common::load_test_doc()
+    }
+
+    fn popup(line: &str, doc: &MindMapDocument) -> Vec<Completion> {
+        let ctx = ConsoleContext::from_document(doc);
+        complete(line, line.len(), &ctx)
+    }
+
+    /// `border <TAB>` at token 0 surfaces every subverb plus every
+    /// kv key — the user gets a scannable menu of every operation
+    /// the verb supports.
+    #[test]
+    fn complete_token_zero_offers_verbs_and_kv_keys() {
+        let doc = fixture_doc();
+        let labels: Vec<String> = popup("border ", &doc).into_iter().map(|c| c.display).collect();
+        for v in &["on", "off", "show", "reset"] {
+            assert!(
+                labels.iter().any(|l| l == v),
+                "expected verb '{}' in completions: {:?}",
+                v,
+                labels
+            );
+        }
+        for k in &["preset=", "font=", "size=", "color=", "palette="] {
+            assert!(
+                labels.iter().any(|l| l == k),
+                "expected kv key '{}' in completions: {:?}",
+                k,
+                labels
+            );
+        }
+    }
+
+    /// `border preset=<TAB>` lists the presets the *kv* form
+    /// accepts, and not `cycle`.
+    ///
+    /// `cycle` is a positional-only sentinel: `stage_preset`
+    /// validates `preset=` against `BORDER_PRESETS`, which does not
+    /// contain it, so `border preset=cycle` has always been
+    /// rejected — while the popup offered it, because one completer
+    /// served both slots. The two slots declare their own
+    /// vocabularies now.
+    #[test]
+    fn complete_preset_kv_value_lists_presets_without_cycle() {
+        let doc = fixture_doc();
+        let labels: Vec<String> = popup("border preset=", &doc)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        for p in &["light", "heavy", "double", "rounded", "custom"] {
+            assert!(
+                labels.iter().any(|l| l == p),
+                "expected preset '{}' in completions: {:?}",
+                p,
+                labels
+            );
+        }
+        assert!(
+            !labels.iter().any(|l| l == "cycle"),
+            "`preset=cycle` is rejected by `stage_preset`, so the popup must not offer it: {:?}",
+            labels
+        );
+        // …and the positional slot, which *does* accept it, still
+        // does. Without this half the assertion above would pass on
+        // a completer that had simply lost the sentinel.
+        let positional: Vec<String> = popup("border preset ", &doc)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert!(
+            positional.iter().any(|l| l == "cycle"),
+            "`border preset cycle` runs, so the positional slot must offer it: {:?}",
+            positional
+        );
+    }
+
+    /// `border palette=<TAB>` lists every palette in the document
+    /// plus the `off` sentinel for clearing. Dynamic — reaches into
+    /// `doc.mindmap.palettes`.
+    #[test]
+    fn complete_palette_value_lists_doc_palettes_and_off() {
+        let doc = fixture_doc();
+        let labels: Vec<String> = popup("border palette=", &doc)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert!(
+            labels.iter().any(|l| l == "off"),
+            "expected 'off' sentinel: {:?}",
+            labels
+        );
+        for name in doc.mindmap.palettes.keys() {
+            assert!(
+                labels.iter().any(|l| l == name.as_str()),
+                "expected palette '{}' in completions: {:?}",
+                name,
+                labels
+            );
+        }
+    }
+
+    /// `border field=<TAB>` lists the four palette fields.
+    #[test]
+    fn complete_field_value_lists_four_channels() {
+        let doc = fixture_doc();
+        let labels: Vec<String> = popup("border field=", &doc).into_iter().map(|c| c.text).collect();
+        for f in &["frame", "background", "text", "title"] {
+            assert!(
+                labels.iter().any(|l| l == f),
+                "expected field '{}' in completions: {:?}",
+                f,
+                labels
+            );
+        }
+    }
+
+    /// `border font=<TAB>` reuses the font-family completer: every
+    /// family row carries `font_family = Some(<name>)` so the
+    /// renderer shapes the candidate label in that face, and the
+    /// inserted `text` quotes a whitespace-bearing name so
+    /// tab-accept yields one token rather than two.
+    ///
+    /// The one row that is not a family is `off`, this slot's
+    /// override-clearing sentinel — untagged, because there is no
+    /// face to shape it in.
+    #[test]
+    fn complete_font_value_rows_carry_family_tag() {
+        baumhard::font::fonts::init();
+        let doc = fixture_doc();
+        let out = popup("border font=", &doc);
+        assert!(!out.is_empty(), "loaded fonts list must not be empty");
+        let (families, sentinels): (Vec<_>, Vec<_>) = out.into_iter().partition(|c| c.font_family.is_some());
+        assert_eq!(
+            sentinels.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["off"],
+            "the only untagged row is the `off` sentinel"
+        );
+        assert!(!families.is_empty(), "loaded fonts list must not be empty");
+        for c in &families {
+            assert_eq!(
+                c.font_family.as_deref(),
+                Some(c.display.as_str()),
+                "every font-completion row must tag its display family"
+            );
+            let want = if c.display.chars().any(char::is_whitespace) {
+                format!("\"{}\"", c.display)
+            } else {
+                c.display.clone()
+            };
+            assert_eq!(
+                c.text, want,
+                "tab-accepting {:?} must insert one parseable token",
+                c.display
+            );
+        }
+    }
+
+    /// The positional value slots: `preset` offers `cycle` beside
+    /// the presets, `side` / `corner` offer their selectors, and the
+    /// slot after each selector offers the `reset` sentinel.
+    #[test]
+    fn positional_value_slots_offer_their_declared_vocabularies() {
+        let doc = fixture_doc();
+        let labels =
+            |line: &str| -> Vec<String> { popup(line, &doc).into_iter().map(|c| c.display).collect() };
+        for v in &["light", "heavy", "double", "rounded", "custom", "cycle"] {
+            assert!(
+                labels("border preset ").iter().any(|l| l == v),
+                "preset slot: {v}"
+            );
+        }
+        for v in &["top", "bottom", "left", "right", "all"] {
+            assert!(labels("border side ").iter().any(|l| l == v), "side slot: {v}");
+        }
+        for v in &["tl", "tr", "bl", "br", "all"] {
+            assert!(
+                labels("border corner ").iter().any(|l| l == v),
+                "corner slot: {v}"
+            );
+        }
+        assert!(labels("border side top ").iter().any(|l| l == "reset"));
+        assert!(labels("border corner tl ").iter().any(|l| l == "reset"));
+        assert!(labels("border color ").iter().any(|l| l == "accent"));
+        assert!(labels("border palette ").iter().any(|l| l == "off"));
+    }
+
+    /// Every preset row the popup renders carries a non-empty
+    /// hint — including `cycle`, which is not a preset but shares
+    /// the row shape. A blank hint column is the symptom the
+    /// baumhard-side table fold exists to prevent, so pin it at the
+    /// surface the user actually sees.
+    #[test]
+    fn preset_completion_rows_all_carry_a_hint() {
+        let doc = fixture_doc();
+        let rows = popup("border preset ", &doc);
+        assert!(!rows.is_empty(), "preset completion must offer rows");
+        for row in &rows {
+            let hint = row
+                .hint
+                .as_deref()
+                .unwrap_or_else(|| panic!("preset row '{}' has no hint", row.display));
+            assert!(!hint.is_empty(), "preset row '{}' has an empty hint", row.display);
+        }
+    }
+
+    /// `border show <TAB>` offers the readout's own flag and key,
+    /// and `border show side=<TAB>` the five sides it validates
+    /// against. `side` is a key of the *readout*, so the composed
+    /// kv slot must not offer it.
+    #[test]
+    fn show_offers_its_own_flag_and_key_and_the_composed_form_does_not() {
+        let doc = fixture_doc();
+        let labels =
+            |line: &str| -> Vec<String> { popup(line, &doc).into_iter().map(|c| c.display).collect() };
+        assert!(labels("border show ").iter().any(|l| l == "side="));
+        assert!(labels("border show ").iter().any(|l| l == "verbose"));
+        assert_eq!(
+            labels("border show side="),
+            vec!["top", "bottom", "left", "right", "all"]
+        );
+        assert!(
+            !labels("border ").iter().any(|l| l == "side="),
+            "`side=` belongs to `show`, not to the composed border form"
+        );
+    }
 }

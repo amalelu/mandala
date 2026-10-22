@@ -80,6 +80,291 @@ fn test_hit_test_edge_respects_tolerance() {
     assert!(hit_test_edge(shifted, &doc.mindmap, 100.0).is_some());
 }
 
+/// `hit_test_edge` as it stood at `bf9aa96d`: build every visible
+/// edge's path, measure the unbounded `distance_to_path`, keep the
+/// nearest one within `tolerance`.
+///
+/// Spelled out here rather than called so the tests below compare the
+/// early-out against the filter it replaced, not against itself. The
+/// visibility rules are copied deliberately: an eligibility change
+/// both forms shared would be invisible to this, and eligibility is
+/// not what these tests are about.
+fn reference_hit(
+    canvas_pos: Vec2,
+    map: &baumhard::mindmap::model::MindMap,
+    tolerance: f32,
+) -> Option<EdgeRef> {
+    use baumhard::mindmap::connection;
+
+    let mut best: Option<(EdgeRef, f32)> = None;
+    for edge in &map.edges {
+        if !edge.visible {
+            continue;
+        }
+        let (Some(from_node), Some(to_node)) = (map.nodes.get(&edge.from_id), map.nodes.get(&edge.to_id))
+        else {
+            continue;
+        };
+        if map.is_hidden_by_fold(from_node) || map.is_hidden_by_fold(to_node) {
+            continue;
+        }
+        let path = connection::build_connection_path(
+            from_node.pos_vec2(),
+            from_node.size_vec2(),
+            &edge.anchor_from,
+            to_node.pos_vec2(),
+            to_node.size_vec2(),
+            &edge.anchor_to,
+            &edge.control_points,
+        );
+        let dist = connection::distance_to_path(canvas_pos, &path);
+        if dist > tolerance {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, best_dist)| dist < *best_dist) {
+            best = Some((EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type), dist));
+        }
+    }
+    best.map(|(e, _)| e)
+}
+
+/// A click on a curved edge whose control polygon is axis-aligned,
+/// far from the origin, still selects that edge.
+///
+/// This is the shape that broke the bounding-box early-out, and it is
+/// entirely ordinary content: two nodes stacked vertically at the same
+/// x, and an edge curved with control offsets whose x is 0 — "curve
+/// this edge straight up". Every control point of the resulting cubic
+/// then shares one x, so the control-point box is **zero-width** on
+/// that axis and any rounding in the curve evaluation leaves it. The
+/// escape scales with the coordinate, which is why the same map near
+/// the origin is fine and the same map at x = 10⁴ is not.
+///
+/// The probe points are the edge's own samples, so they are hits by
+/// construction — `distance_to_path` answers them at ~0. A reject that
+/// does not allow for the sampler's escape answers `None` instead, and
+/// a user watches clicks land on nothing.
+#[test]
+fn test_hit_test_edge_finds_an_axis_aligned_curved_edge_far_from_the_origin() {
+    use baumhard::mindmap::connection;
+    use baumhard::mindmap::model::ControlPoint;
+
+    let mut doc = load_test_doc();
+    doc.mindmap.nodes.clear();
+    doc.mindmap.edges.clear();
+
+    let mut expected_refs = Vec::new();
+    for (index, offset) in [1.0e2f32, 1.1e3, 1.0e4, 1.0e5, 1.0e6].iter().enumerate() {
+        let top = format!("top{index}");
+        let bottom = format!("bottom{index}");
+        doc.mindmap
+            .nodes
+            .insert(top.clone(), default_orphan_node(&top, Vec2::new(*offset, 0.0)));
+        doc.mindmap.nodes.insert(
+            bottom.clone(),
+            default_orphan_node(&bottom, Vec2::new(*offset, 900.0)),
+        );
+        let mut edge = default_cross_link_edge(&top, &bottom);
+        // Offsets from the respective node centers, x = 0: the curve
+        // bulges along y only, so every control point keeps the nodes'
+        // shared x.
+        edge.control_points = vec![
+            ControlPoint { x: 0.0, y: 260.0 },
+            ControlPoint { x: 0.0, y: -260.0 },
+        ];
+        expected_refs.push(EdgeRef::new(&edge.from_id, &edge.to_id, &edge.edge_type));
+        doc.mindmap.edges.push(edge);
+    }
+
+    let mut probed = 0usize;
+    let mut hits = 0usize;
+    for (index, _expected) in expected_refs.iter().enumerate() {
+        let edge = &doc.mindmap.edges[index];
+        let from_node = &doc.mindmap.nodes[&edge.from_id];
+        let to_node = &doc.mindmap.nodes[&edge.to_id];
+        let path = connection::build_connection_path(
+            from_node.pos_vec2(),
+            from_node.size_vec2(),
+            &edge.anchor_from,
+            to_node.pos_vec2(),
+            to_node.size_vec2(),
+            &edge.anchor_to,
+            &edge.control_points,
+        );
+        // Precondition: the control polygon really is axis-aligned, or
+        // this is probing an ordinary curve and proves nothing.
+        let (min, max) = connection::path_bounds(&path);
+        assert_eq!(
+            min.x, max.x,
+            "edge {index} must have a zero-width control-point box; got {min:?}..{max:?}"
+        );
+
+        let samples = connection::sample_path(&path, 4.0, connection::MAX_PATH_SAMPLES);
+        assert!(
+            samples.len() > 50,
+            "edge {index} must sample densely; got {}",
+            samples.len()
+        );
+        let step = (samples.len() / 12).max(1);
+        for sample in samples.iter().step_by(step) {
+            // The tolerance a click carries is `EDGE_HIT_TOLERANCE_PX`
+            // scaled by canvas-per-pixel, so it shrinks as the user
+            // zooms *in*. The small values are that view: a tenth of a
+            // canvas unit is an ordinary tolerance at high zoom, and it
+            // is where an escape of a tenth of a unit stops being a
+            // knife edge and starts dropping the click outright.
+            for tolerance in [0.02f32, 0.1, 0.5, 4.0, 8.0, 12.0] {
+                for probe in [
+                    *sample,
+                    // Just inside the tolerance on either side, which
+                    // is the other half of the failure: a click the
+                    // reference accepts by a hair.
+                    *sample + Vec2::new(tolerance * 0.999, 0.0),
+                    *sample - Vec2::new(tolerance * 0.999, 0.0),
+                ] {
+                    let expected_hit = reference_hit(probe, &doc.mindmap, tolerance);
+                    assert_eq!(
+                        hit_test_edge(probe, &doc.mindmap, tolerance),
+                        expected_hit,
+                        "edge {index} at {probe:?} (tolerance {tolerance}): \
+                         the early-out disagreed with the unbounded filter"
+                    );
+                    if expected_hit.is_some() {
+                        hits += 1;
+                    }
+                    probed += 1;
+                }
+            }
+        }
+    }
+    assert!(probed > 500, "the sweep must actually run; probed {probed}");
+    // Agreement on "nothing" is what every implementation manages.
+    assert!(
+        hits > 200,
+        "the sweep must land on the edges it built; hit {hits} of {probed}"
+    );
+}
+
+/// The bounding-box early-out `hit_test_edge` now opens with must
+/// not change which edge it picks, on any point.
+///
+/// The reference is the filter it replaced — `distance_to_path`
+/// against the tolerance — run over the same visibility-filtered
+/// edge set and the same "nearest wins" rule, spelled out here
+/// rather than called so the two derivations do not share the line
+/// that could be wrong.
+///
+/// The sweep walks a grid over the fixture's own node extent at
+/// several tolerances, so it covers points on an edge, points beside
+/// one, points between two, and points nowhere near any. The input
+/// that makes it fail is a box that does not contain its path — the
+/// early-out then rejects an edge the reference accepts.
+#[test]
+fn test_hit_test_edge_agrees_with_the_unbounded_distance_filter() {
+    use baumhard::mindmap::connection;
+
+    let doc = load_test_doc();
+    // Anchor the grid on the fixture's own geometry rather than on
+    // round numbers, so the points land where the edges are.
+    let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    for node in doc.mindmap.nodes.values() {
+        min = min.min(node.pos_vec2());
+        max = max.max(node.pos_vec2() + node.size_vec2());
+    }
+    assert!(min.x < max.x && min.y < max.y, "the fixture must have an extent");
+
+    let mut hits = 0usize;
+    let mut probes = 0usize;
+    let mut compare = |point: Vec2, tolerance: f32| {
+        let expected = reference_hit(point, &doc.mindmap, tolerance);
+        let actual = hit_test_edge(point, &doc.mindmap, tolerance);
+        assert_eq!(actual, expected, "at {point:?} with tolerance {tolerance}");
+        if expected.is_some() {
+            hits += 1;
+        }
+        probes += 1;
+    };
+
+    const STEPS: usize = 24;
+    for tolerance in [1.0f32, 8.0, 40.0] {
+        for ix in 0..=STEPS {
+            for iy in 0..=STEPS {
+                let t = |i: usize, lo: f32, hi: f32| lo + (hi - lo) * (i as f32 / STEPS as f32);
+                compare(Vec2::new(t(ix, min.x, max.x), t(iy, min.y, max.y)), tolerance);
+            }
+        }
+    }
+
+    // A grid is blind to the case that matters most: a point sitting
+    // *on* a curved edge, where a bounding box drawn from the two
+    // anchors instead of the four control points would wrongly reject
+    // the edge it belongs to. Probe every visible edge's own samples.
+    let mut curved_probes = 0usize;
+    for edge in &doc.mindmap.edges {
+        if !edge.visible || edge.control_points.is_empty() {
+            continue;
+        }
+        let (Some(from_node), Some(to_node)) = (
+            doc.mindmap.nodes.get(&edge.from_id),
+            doc.mindmap.nodes.get(&edge.to_id),
+        ) else {
+            continue;
+        };
+        let path = connection::build_connection_path(
+            from_node.pos_vec2(),
+            from_node.size_vec2(),
+            &edge.anchor_from,
+            to_node.pos_vec2(),
+            to_node.size_vec2(),
+            &edge.anchor_to,
+            &edge.control_points,
+        );
+        for sample in connection::sample_path(&path, 4.0, connection::MAX_PATH_SAMPLES) {
+            compare(sample, 1.0);
+            curved_probes += 1;
+        }
+    }
+
+    assert!(probes > 1_500, "the sweep must actually run; probed {probes}");
+    assert!(
+        curved_probes > 100,
+        "the fixture must still carry curved edges for the on-path probes to mean anything;          probed {curved_probes}"
+    );
+    // Without a hit somewhere the sweep only proves both forms agree
+    // on saying "nothing", which every implementation does.
+    assert!(hits > 20, "the sweep must land on edges; hit {hits} times");
+}
+
+/// A non-finite cursor selects no edge.
+///
+/// This is a deliberate change of behavior, not a preserved one. The
+/// filter this replaced was `distance > tolerance { continue }`, and
+/// `NaN > tolerance` is false — so a `NaN` cursor fell through the
+/// filter and became a candidate at an unordered distance, taking
+/// whichever eligible edge came first. The tolerance-bounded form
+/// asks `distance <= tolerance`, which `NaN` fails, so there is no
+/// candidate at all.
+#[test]
+fn test_hit_test_edge_rejects_a_non_finite_cursor() {
+    let doc = load_test_doc();
+    // The fixture has visible edges, so "no hit" here is a decision
+    // about the cursor rather than about an empty map.
+    let (_, on_path) = pick_test_edge(&doc);
+    assert!(hit_test_edge(on_path, &doc.mindmap, 2.0).is_some());
+
+    for cursor in [
+        Vec2::new(f32::NAN, 0.0),
+        Vec2::new(0.0, f32::NAN),
+        Vec2::splat(f32::NAN),
+    ] {
+        assert_eq!(
+            hit_test_edge(cursor, &doc.mindmap, 1.0e9),
+            None,
+            "a non-finite cursor at {cursor:?} must select no edge"
+        );
+    }
+}
+
 #[test]
 fn test_remove_edge_returns_index_and_edge() {
     let mut doc = load_test_doc();
@@ -662,7 +947,11 @@ fn test_connection_pass_highlights_selected_edge() {
     let (edge_ref, _) = pick_test_edge(&doc);
 
     // Without selection: the edge renders with its model color
-    let scene_normal = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
+    let scene_normal = crate::application::document::tests_common::project_roles(
+        &doc,
+        1.0,
+        InteractionModeOverrides::none(),
+    );
     let normal_colors: Vec<String> = scene_normal
         .connection_elements
         .iter()
@@ -671,7 +960,11 @@ fn test_connection_pass_highlights_selected_edge() {
 
     // With edge selected: its element color should be the cyan highlight
     doc.selection = SelectionState::Edge(edge_ref);
-    let scene_selected = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
+    let scene_selected = crate::application::document::tests_common::project_roles(
+        &doc,
+        1.0,
+        InteractionModeOverrides::none(),
+    );
     let highlighted_count = scene_selected
         .connection_elements
         .iter()
@@ -860,7 +1153,7 @@ fn test_orphan_selection_promotes_to_root_and_keeps_subtree() {
     let child_of_node = doc.mindmap.nodes.get(&child).unwrap().parent_id.clone();
     assert_eq!(child_of_node.as_deref(), Some(parent_having_child.as_str()));
 
-    let undo = doc.apply_orphan_selection(&[parent_having_child.clone()]);
+    let undo = doc.apply_orphan_selection(std::slice::from_ref(&parent_having_child));
     assert_eq!(undo.entries.len(), 1);
 
     // The orphaned node is now a root...
@@ -891,7 +1184,7 @@ fn test_orphan_selection_undo_reattaches() {
         .expect("at least one non-root node");
     let original_parent = doc.mindmap.nodes.get(&non_root).unwrap().parent_id.clone();
 
-    let undo = doc.apply_orphan_selection(&[non_root.clone()]);
+    let undo = doc.apply_orphan_selection(std::slice::from_ref(&non_root));
     doc.undo_stack.push(UndoAction::ReparentNodes {
         entries: undo.entries,
         old_edges: undo.old_edges,
@@ -912,7 +1205,7 @@ fn test_orphan_selection_on_root_is_noop() {
     let root = doc.mindmap.root_nodes().first().map(|n| n.id.clone()).unwrap();
     let orig_edges_len = doc.mindmap.edges.len();
 
-    let undo = doc.apply_orphan_selection(&[root.clone()]);
+    let undo = doc.apply_orphan_selection(std::slice::from_ref(&root));
     // The node is already a root, so there are entries (it's a valid
     // "move-to-last-root-index" op), but nothing meaningful changed:
     // parent_id is still None.

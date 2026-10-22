@@ -67,6 +67,7 @@ use baumhard::mindmap::tree_builder::MindMapTree;
 use super::super::scene_rebuild::rebuild_all;
 
 mod camera;
+mod canvas_per_pixel;
 mod edges;
 mod fps;
 mod lifecycle;
@@ -79,6 +80,7 @@ mod style;
 // WASM dispatchers, and `tests_mutations` in `document/`) keeps
 // working unchanged.
 pub(in crate::application::app) use camera::*;
+pub(in crate::application::app) use canvas_per_pixel::*;
 pub(in crate::application::app) use edges::*;
 pub(in crate::application::app) use fps::*;
 pub(in crate::application::app) use lifecycle::*;

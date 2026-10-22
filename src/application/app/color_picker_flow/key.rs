@@ -22,7 +22,7 @@
 //!   fall-through verdict for every other key.
 
 use crate::application::clipboard;
-use crate::application::color_picker::ColorPickerState;
+use crate::application::color_picker::{ColorPickerState, OpenPicker};
 use crate::application::console::traits::{ClipboardContent, HandlesCopy, HandlesCut, HandlesPaste, Outcome};
 use crate::application::document::MindMapDocument;
 use crate::application::keybinds::Action;
@@ -195,13 +195,13 @@ pub(in crate::application::app) fn apply_picker_nudge(
     doc: &mut MindMapDocument,
     picker_hover: &mut ColorPickerHoverInteraction,
 ) -> bool {
-    let ColorPickerState::Open {
+    let Some(OpenPicker {
         hue_deg,
         sat,
         val,
         hover_preview,
         ..
-    } = state
+    }) = state.as_open_mut()
     else {
         return false;
     };
@@ -392,7 +392,7 @@ mod tests {
     /// renderer, which this path never touches.
     fn open_contextual_picker(hsv: (f32, f32, f32)) -> ColorPickerState {
         use crate::application::color_picker::{PickerHandle, PickerMode, CROSSHAIR_CENTER_CELL};
-        ColorPickerState::Open {
+        ColorPickerState::Open(Box::new(OpenPicker {
             mode: PickerMode::Contextual {
                 handle: PickerHandle::Edge(0),
                 seed_var_ref: None,
@@ -418,7 +418,7 @@ mod tests {
             hover_preview: None,
             pending_error_flash: false,
             last_dynamic_apply: None,
-        }
+        }))
     }
 
     /// The nudge actually lands: HSV moves on the picker, the
@@ -444,10 +444,10 @@ mod tests {
             &mut hover
         ));
 
-        let ColorPickerState::Open { hue_deg, .. } = state else {
+        let Some(OpenPicker { hue_deg, .. }) = state.as_open() else {
             panic!("nudge must not close the picker");
         };
-        assert_eq!(hue_deg, 25.0);
+        assert_eq!(*hue_deg, 25.0);
         let preview = doc
             .color_picker_preview
             .expect("nudge restamps the document's transient preview");
@@ -467,7 +467,7 @@ mod tests {
     fn test_apply_picker_nudge_clears_a_stale_hover_preview() {
         let mut doc = crate::application::document::tests_common::load_test_doc();
         let mut state = open_contextual_picker((10.0, 0.5, 0.5));
-        if let ColorPickerState::Open { hover_preview, .. } = &mut state {
+        if let Some(OpenPicker { hover_preview, .. }) = state.as_open_mut() {
             *hover_preview = Some((200.0, 0.1, 0.9));
         }
         let mut hover = ColorPickerHoverInteraction::default();
@@ -479,14 +479,14 @@ mod tests {
             &mut hover
         ));
 
-        let ColorPickerState::Open {
+        let Some(OpenPicker {
             hover_preview, sat, ..
-        } = state
+        }) = state.as_open()
         else {
             panic!("nudge must not close the picker");
         };
-        assert_eq!(hover_preview, None);
-        assert_eq!(sat, 0.6);
+        assert_eq!(*hover_preview, None);
+        assert_eq!(*sat, 0.6);
     }
 
     /// A nudge against a closed picker is a no-op, not a panic —

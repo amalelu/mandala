@@ -53,21 +53,27 @@ authors don't accidentally write maps that depend on them.
   natural seat for a perpetual border animation. **But** the
   field is `#[serde(skip)]` and the dispatcher in
   `tick_animations` only handles the no-followup case. The
-  test suite explicitly pins `test_followup_is_never_deserialized`
-  so a future deserializer change is forced through review.
-- **`core/animation.rs::Timeline` / `TimelineEvent` skeleton.**
-  A generic `Timeline = Vec<TimelineEvent>` machine with
-  `Terminate`, `Goto`, `WaitMillis`, `Mutator(u16)`, and
-  `Interpolation { mutator, num_frames, duration }` events.
-  Documented in the module header as "deliberately replaces"
-  the live runtime — unreachable today, intended as the
-  long-form scheduling primitive.
+  test suite explicitly pins
+  `test_an_authored_followup_reaches_no_field` so a future
+  deserializer change is forced through review.
 - **`apply_position_mutations_to_node`** in
   `src/application/document/animations.rs` covers `NudgeLeft /
   Right / Up / Down` only. Every other `GlyphAreaCommand` is a
   no-op on the snapshot today. So a `CustomMutation` that
   changes (say) glyph text would compile and dispatch but
   wouldn't animate — it would jump to the post-state.
+
+A fourth entry used to sit here: `core/animation.rs`'s generic
+`Timeline` / `TimelineEvent` skeleton, offered as the long-form
+scheduling primitive. It is gone (#41). It was not a partial
+implementation of the item below — it was an API that could not
+have worked: its `AnimationDef` boxed *values* rather than
+mutators, its `update` took its instance by value and returned
+nothing, and its `Mutable` bound had no implementers, so no
+scheduler could have driven it without a rewrite. The long-form
+scheduling need it stood for is real and is item 3 below;
+whoever lands it starts from `AnimationTiming` + `Followup`,
+which already speak the model this crate animates.
 
 ## What's missing for animated borders specifically
 
@@ -80,7 +86,7 @@ around a node's border" needs:
    `OnTimer { interval_ms }` or `OnLoad` (start once at map
    load, run forever).
 2. **A per-tick mutation surface for border `GlyphArea` leaves.**
-   Today `tree_builder/border.rs` rebuilds the four border runs
+   Today `tree_builder/border.rs` rebuilds the eight border runs
    from `node.style.border` on every scene rebuild. A per-tick
    animation either (a) dirties the model's `border` field and
    triggers `rebuild_all` every tick — expensive and wasteful —

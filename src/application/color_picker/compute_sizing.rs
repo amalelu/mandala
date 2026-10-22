@@ -34,7 +34,6 @@ pub(super) struct Sizing {
     pub(super) ring_r: f32,
     pub(super) side: f32,
     pub(super) step: f32,
-    pub(super) cell_advance: f32,
 }
 
 pub(super) fn derive_sizing(
@@ -84,8 +83,18 @@ pub(super) fn derive_sizing(
     let font_from_target = target_side / wheel_side_in_fonts.max(1.0);
     let font_clamped = font_from_target.clamp(g.font_min, g.font_max);
     let max_font_for_h = (screen_h / (wheel_side_in_fonts + 12.0)).max(1.0);
-    let chip_width_in_fonts: f32 = 32.0;
-    let max_font_for_w = (screen_w / (wheel_side_in_fonts + 2.0).max(chip_width_in_fonts)).max(1.0);
+    // Width fit is the wheel plus one font of margin per side. It
+    // used to be `.max(32.0)`, reserving room for a theme-variable
+    // chip row that has since been retired (see
+    // `app::color_picker_flow::commit`). That clamp was inert, not
+    // merely unused: `cell_factor` is floored at
+    // `preview_size_scale * 0.5 + bar_to_preview_padding_scale`
+    // above, which puts `wheel_side_in_fonts + 2.0` at 37.76 at its
+    // smallest, and `GeometrySpec` is `include_str!`-loaded rather
+    // than user-supplied, so the 32 could never win. Deleting it is
+    // a deletion of dead arithmetic and changes no layout on any
+    // viewport.
+    let max_font_for_w = (screen_w / (wheel_side_in_fonts + 2.0)).max(1.0);
     let font_size = font_clamped.min(max_font_for_h).min(max_font_for_w).max(1.0);
 
     let char_width = monospace_advance(font_size);
@@ -100,9 +109,8 @@ pub(super) fn derive_sizing(
     let desired_ring_r = (inner_extent + bar_to_ring_padding).max(min_ring_r);
 
     // Backdrop side derived from the now-canonical ring_r. Clamps
-    // are defensive against rounding and the rare case where the
-    // chip-row constraint forced a smaller font than the wheel-side
-    // formula expected.
+    // are defensive against rounding and against a viewport too
+    // small for the font size the formula above settled on.
     let ring_outer = desired_ring_r + ring_font_size * 0.5;
     let side_from_ring = (ring_outer + font_size) * 2.0;
     let max_side_for_w = (screen_w - font_size * 2.0).max(0.0);
@@ -131,6 +139,5 @@ pub(super) fn derive_sizing(
         ring_r,
         side,
         step: actual_cell_advance,
-        cell_advance,
     }
 }

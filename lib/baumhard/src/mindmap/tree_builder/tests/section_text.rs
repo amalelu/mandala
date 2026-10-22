@@ -13,7 +13,7 @@
 //! owns the rectangle the user's next keystroke lands in.
 
 use super::fixtures::*;
-use crate::mindmap::model::{MindSection, Position, Size};
+use crate::mindmap::model::{MindSection, Position, Size, TextRun};
 use crate::mindmap::tree_builder::build_mindmap_tree;
 
 /// One projected section area, reduced to the three things these
@@ -198,4 +198,81 @@ fn test_empty_section_still_yields_border_and_clip_aabb() {
         "border emission stays node-level"
     );
     assert_eq!(projected.node_aabbs.len(), 1, "the node still clips connections");
+}
+
+/// A `TextRun` covering `[0, end)` at `size_pt`, with everything
+/// else at the shape a size-only run takes on disk.
+fn sized_run(end: usize, size_pt: f32) -> TextRun {
+    TextRun {
+        start: 0,
+        end,
+        bold: false,
+        italic: false,
+        underline: false,
+        font: String::new(),
+        size_pt,
+        color: String::new(),
+        hyperlink: None,
+    }
+}
+
+/// [`effective_section_scale`] answers "what size is this section
+/// laid out at?" with the **largest** run size, so a small opening
+/// run cannot shrink the line height a later 96pt run needs.
+///
+/// The fixture puts the largest size in the middle on purpose: a
+/// `first()`-shaped implementation reads 10 and a `last()`-shaped
+/// one reads 14, and both would pass against `[96, 10]` or
+/// `[10, 96]`. The two fallback clauses fail against any
+/// implementation that returns the fold's `0.0` identity — a
+/// section laid out at zero scale renders nothing at all, which is
+/// why the guard is `> 0.0` and not `is_empty()`.
+#[test]
+fn test_effective_section_scale_takes_the_largest_run_size() {
+    use crate::mindmap::tree_builder::{effective_section_scale, DEFAULT_SECTION_FONT_SCALE};
+
+    let three = MindSection::new_default(
+        "abc".to_string(),
+        vec![sized_run(1, 10.0), sized_run(2, 96.0), sized_run(3, 14.0)],
+    );
+    assert_eq!(effective_section_scale(&three), 96.0);
+
+    let runless = MindSection::new_default("abc".to_string(), Vec::new());
+    assert_eq!(effective_section_scale(&runless), DEFAULT_SECTION_FONT_SCALE);
+
+    let zero_sized = MindSection::new_default("abc".to_string(), vec![sized_run(3, 0.0)]);
+    assert_eq!(effective_section_scale(&zero_sized), DEFAULT_SECTION_FONT_SCALE);
+}
+
+/// The section area the builder emits is laid out at exactly
+/// [`effective_section_scale`], with the line height
+/// [`LINE_HEIGHT_FACTOR`] declares. Both halves used to be
+/// open-coded here, which is what let the app's auto-size
+/// measurement — the other reader of both numbers — drift from
+/// what the builder actually draws.
+///
+/// The input that makes it fail is a re-inlined max-else-default
+/// block that disagrees about the run-less case, or a re-inlined
+/// `1.2` on either side of the boundary: the 96pt run is not the
+/// first run, and 96 × 1.2 = 115.2 is far enough from 14 × 1.2 that
+/// no rounding slack hides a wrong pick.
+#[test]
+fn test_section_area_is_laid_out_at_the_effective_scale() {
+    use crate::mindmap::tree_builder::{effective_section_scale, LINE_HEIGHT_FACTOR};
+
+    let mut node = synthetic_node("scaled", None, 0.0, 0.0);
+    node.sections[0].text = "abc".to_string();
+    node.sections[0].text_runs = vec![sized_run(1, 10.0), sized_run(3, 96.0)];
+    let map = synthetic_map(vec![node.clone()], vec![]);
+    let result = build_mindmap_tree(&map);
+
+    let section_id = result
+        .section_arena_id("scaled", 0)
+        .expect("the node has one section");
+    let area = glyph_area_of(&result.tree, section_id);
+
+    let scale = effective_section_scale(&node.sections[0]);
+    assert_eq!(scale, 96.0, "the fixture must exercise the largest-run branch");
+    assert_eq!(area.scale.0, scale);
+    assert_eq!(area.line_height.0, scale * LINE_HEIGHT_FACTOR);
 }

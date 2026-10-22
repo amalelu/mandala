@@ -837,3 +837,71 @@ pub fn do_insert_regions_at_empty_returns_false() {
     assert!(!absorbed);
     assert_eq!(regions.num_regions(), 0);
 }
+
+#[test]
+fn test_same_content_separates_a_recolor_from_equality() {
+    do_same_content_separates_a_recolor_from_equality();
+}
+
+/// `same_content` sees the font and color pins that `Eq` — which is
+/// range identity, so the owning `BTreeSet` can find a region from a
+/// bare range — deliberately does not.
+///
+/// Each pair below is asserted **both** ways round: `==` says the
+/// same thing about it, and `same_content` disagrees. Without the
+/// `==` half these would pass against a `same_content` that was a
+/// plain alias for `==`, which is exactly the implementation the
+/// renderer's overlay re-shape cache cannot use — under it a
+/// color-picker hover recolors a cell inside an unchanged range and
+/// the cell keeps its old shaped buffers.
+pub fn do_same_content_separates_a_recolor_from_equality() {
+    let range = Range::new(0, 4);
+    let red = ColorFontRegion::new(range, None, Some([1.0, 0.0, 0.0, 1.0]));
+    let blue = ColorFontRegion::new(range, None, Some([0.0, 0.0, 1.0, 1.0]));
+    let red_pinned = ColorFontRegion::new(range, Some(AppFont::AppleTea), Some([1.0, 0.0, 0.0, 1.0]));
+
+    assert!(red.same_content(&red));
+    assert_eq!(red, blue, "range identity is what `Eq` means here");
+    assert!(!red.same_content(&blue), "a recolor is a content change");
+    assert_eq!(red, red_pinned);
+    assert!(!red.same_content(&red_pinned), "a font pin is a content change");
+
+    // Same, at the table level the renderer actually compares.
+    let reds = ColorFontRegions::new_from(vec![red]);
+    let blues = ColorFontRegions::new_from(vec![blue]);
+    assert_eq!(reds, blues);
+    assert!(!reds.same_content(&blues));
+    assert!(reds.same_content(&ColorFontRegions::new_from(vec![red])));
+}
+
+#[test]
+fn test_same_content_compares_whole_tables() {
+    do_same_content_compares_whole_tables();
+}
+
+/// Table-level `same_content` is length-sensitive and positional:
+/// a differing region anywhere in the table is a difference, and a
+/// table that is a prefix of another is not equal to it.
+pub fn do_same_content_compares_whole_tables() {
+    let build = |second_color: [f32; 4]| {
+        ColorFontRegions::new_from(vec![
+            ColorFontRegion::new(Range::new(0, 4), None, Some([1.0, 1.0, 1.0, 1.0])),
+            ColorFontRegion::new(Range::new(4, 8), None, Some(second_color)),
+        ])
+    };
+    let base = build([1.0, 0.0, 0.0, 1.0]);
+    assert!(base.same_content(&build([1.0, 0.0, 0.0, 1.0])));
+    assert!(
+        !base.same_content(&build([0.0, 1.0, 0.0, 1.0])),
+        "a change in the last region must not hide behind an equal first one"
+    );
+
+    let shorter = ColorFontRegions::new_from(vec![ColorFontRegion::new(
+        Range::new(0, 4),
+        None,
+        Some([1.0, 1.0, 1.0, 1.0]),
+    )]);
+    assert!(!shorter.same_content(&base));
+    assert!(!base.same_content(&shorter));
+    assert!(ColorFontRegions::new_empty().same_content(&ColorFontRegions::new_empty()));
+}

@@ -53,7 +53,7 @@ fn node_with_text(id: &str, x: f64, y: f64, text: &str) -> crate::mindmap::model
         italic: false,
         underline: false,
         font: String::new(),
-        size_pt: 14,
+        size_pt: 14.0,
         color: "#ffffff".into(),
         hyperlink: None,
     }];

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Per-node and per-section-geometry setters and node-style
-//! helpers. Section text / colour / font / runs / payload
+//! helpers. Section text / color / font / runs / payload
 //! setters live in `section_text.rs`. Every setter here routes
 //! through the shared envelope in `undo_envelope.rs`, which owns
 //! the snapshot → verdict → undo-push → auto-fit sequence; a
@@ -30,8 +30,85 @@ pub use border::{BorderConfigEdits, BorderEditOutcome, BorderPreview, BorderPrev
 // it against `apply_view_to_slot`.
 #[cfg(test)]
 pub(in crate::application) use border::apply_glyph_border_edits_to_slot;
+// Test-only: the shipped callers are inside `border` itself.
+#[cfg(test)]
+pub(in crate::application::document) use border::merge_outcome;
 pub use option_edit::OptionEdit;
-pub(in crate::application::document) use section_text::clamp_runs_to_text;
+pub(in crate::application::document) use section_text::{
+    clamp_runs_to_text, section_runs_all_match, write_every_section_run,
+};
+
+/// Which of a node's three color channels a per-node write
+/// targets.
+///
+/// Named rather than written out three times: *where* the value
+/// lands — the node's own `color_schema.overrides` on a themed
+/// node, `node.style` otherwise — is one rule, and the three
+/// channels differ only in which field it picks. Three copies of
+/// that rule is how "change this node's fill" came to be broken on
+/// themed nodes while "change its text color" happened to survive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeColorChannel {
+    Background,
+    Frame,
+    Text,
+}
+
+impl NodeColorChannel {
+    /// The color this channel has on a node nothing has said
+    /// anything about — [`default_orphan_node`]'s `NodeStyle`.
+    ///
+    /// Only the **unthemed** half of a clear reaches this. A
+    /// themed node clears to its palette group, which is the
+    /// natural default it actually has; an unthemed node has no
+    /// tier underneath `style`, so the floor has to be named.
+    ///
+    /// [`default_orphan_node`]: super::defaults::default_orphan_node
+    fn unthemed_default(self) -> &'static str {
+        use super::defaults::{
+            DEFAULT_NODE_BACKGROUND_COLOR, DEFAULT_NODE_FRAME_COLOR, DEFAULT_NODE_TEXT_COLOR,
+        };
+        match self {
+            NodeColorChannel::Background => DEFAULT_NODE_BACKGROUND_COLOR,
+            NodeColorChannel::Frame => DEFAULT_NODE_FRAME_COLOR,
+            NodeColorChannel::Text => DEFAULT_NODE_TEXT_COLOR,
+        }
+    }
+
+    /// Whether the empty string is a *value* on this channel.
+    ///
+    /// Only on `background`, where it spells "no fill, let the
+    /// canvas show through" and every reader passes it along. On
+    /// `frame` and `text` there is no transparent spelling — a
+    /// frame is switched off with `show_frame` and text has no off
+    /// — so the readers skip an empty value and take the next
+    /// tier (`MindMap::node_frame_theme_tier`,
+    /// `MindMap::node_text_color`). Writing one there would report
+    /// success and paint nothing new, which is the whole defect
+    /// this branch exists to close.
+    fn empty_is_a_color(self) -> bool {
+        self == NodeColorChannel::Background
+    }
+}
+
+/// What a per-node color write is asking for, once the empty
+/// string has been read against the channel it landed on.
+///
+/// The two arms are genuinely different requests, and the tier
+/// the node has decides how each is spelled — which is why this
+/// resolution happens in one place rather than at the three
+/// public setters. See [`MindMapDocument::set_node_color_channel`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeColorWrite<'a> {
+    /// Paint this channel this color.
+    Set(&'a str),
+    /// This node has no color of its own on this channel: take
+    /// whatever it would have had. On a themed node that is the
+    /// palette group, reached by clearing the override slot; on an
+    /// unthemed node there is nothing below `style`, so it is
+    /// [`NodeColorChannel::unthemed_default`].
+    Clear,
+}
 
 /// Snapshot of a `MindSection`'s user-facing fields, used by the
 /// structured-clipboard path (`ClipboardContent::Section` carries
@@ -167,6 +244,9 @@ impl MindMapDocument {
     /// **post-mutation** AABB so a gesture that shifts offset and
     /// grows size in the same frame doesn't fail on the
     /// intermediate state.
+    // Native-driver-only, with `set_node_aabb`: both are written by
+    // the native resize state machine.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn set_section_aabb(
         &mut self,
         node_id: &str,
@@ -227,6 +307,7 @@ impl MindMapDocument {
     /// Same post-grow no-op-gate discipline as
     /// [`Self::set_node_size`] — see there for the framed-node
     /// idempotency rationale.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn set_node_aabb(
         &mut self,
         node_id: &str,
@@ -335,75 +416,233 @@ impl MindMapDocument {
         .is_some()
     }
 
-    /// Set the background color on a node's `style.background_color`.
+    /// Set this node's **fill** color, or clear it with `None`.
     /// Returns `true` if the value actually changed. Pushes one
-    /// `UndoAction::EditNodeStyle` entry so undo restores both the
-    /// `NodeStyle` *and* the `text_runs` (unchanged for this setter,
-    /// but the variant always carries both so the undo arm has a
-    /// single shape).
+    /// `UndoAction::EditNodeStyle` entry so undo restores the
+    /// `NodeStyle`, the `ColorSchema` *and* the `text_runs`
+    /// (unchanged for this setter, but the variant always carries
+    /// all three so the undo arm has a single shape).
+    ///
+    /// **Where the value lands depends on whether the node is
+    /// themed**, because it has to land where the read path looks
+    /// (`MindMap::node_background_color`). A themed node's fill
+    /// comes from its palette group, which shadows
+    /// `style.background_color` entirely, so writing `style` there
+    /// would report success and change nothing on screen; the
+    /// write goes to the node's own `color_schema.overrides`
+    /// instead. An unthemed node has no such tier and takes the
+    /// `style` write directly. See `format/palettes.md`.
+    ///
+    /// `None` means "this node has no fill of its own": a themed
+    /// node goes back to its palette group, an unthemed one to
+    /// [`DEFAULT_NODE_BACKGROUND_COLOR`]. `Some("")` is *not* the
+    /// same request — on this channel the empty string is a color,
+    /// the transparent one, and it is written through.
+    ///
+    /// [`DEFAULT_NODE_BACKGROUND_COLOR`]: super::defaults::DEFAULT_NODE_BACKGROUND_COLOR
     ///
     /// No-op on missing node id, matching the `EditEdge` pattern.
-    pub fn set_node_bg_color(&mut self, node_id: &str, color: String) -> bool {
-        self.mutate_node_with_style_undo(node_id, NodeEditTail::None, |node| {
-            if node.style.background_color == color {
-                return None;
-            }
-            node.style.background_color = color;
-            Some(())
-        })
-        .is_some()
+    pub fn set_node_bg_color(&mut self, node_id: &str, color: Option<&str>) -> bool {
+        self.set_node_color_channel(node_id, NodeColorChannel::Background, color)
     }
 
-    /// Set the frame (border) color on a node's `style.frame_color`.
-    /// Returns `true` on change.
-    pub fn set_node_border_color(&mut self, node_id: &str, color: String) -> bool {
-        self.mutate_node_with_style_undo(node_id, NodeEditTail::None, |node| {
-            if node.style.frame_color == color {
-                return None;
-            }
-            node.style.frame_color = color;
-            Some(())
-        })
-        .is_some()
-    }
-
-    /// Set the *default* text color on a node. Writes
-    /// `style.text_color` directly, and for every `TextRun` whose
-    /// `color` matches the pre-edit default, rewrites that run's
-    /// `color` to the new value — so a node whose runs all inherited
-    /// the default gets visually recolored, while runs the user
-    /// explicitly colored by hand keep their per-span override.
+    /// Set this node's **frame** (border) color, or clear it with
+    /// `None`. Returns `true` on change. Lands in the same two
+    /// places for the same reason as [`Self::set_node_bg_color`].
     ///
-    /// The match is byte-exact on the pre-edit `style.text_color`
-    /// string. This is deliberately strict: if the user wrote
-    /// `"#FFFFFF"` (uppercase) as the default but an authored run
-    /// carries `"#ffffff"`, the run is *not* considered
-    /// default-following and keeps its lowercase override. Matches the
-    /// convention in `baumhard::util::color::hex_to_rgba_safe` —
-    /// colors are strings in the model and comparisons are literal.
-    pub fn set_node_text_color(&mut self, node_id: &str, color: String) -> bool {
-        // `NodeEditTail::None`: color never shifts a glyph
-        // advance, so there is nothing to re-measure.
+    /// This is the cascade *base* the border resolver sits on: a
+    /// node carrying an explicit `style.border.color` keeps
+    /// painting that, and this setter does not touch it — the
+    /// `border color=` verb is the one that does.
+    ///
+    /// `None` clears: back to the palette group on a themed node,
+    /// to [`DEFAULT_NODE_FRAME_COLOR`] on an unthemed one. Unlike
+    /// the fill channel, `Some("")` clears too — a frame has no
+    /// transparent spelling (that is `show_frame`), the readers
+    /// skip an empty frame, and writing one would report success
+    /// and paint nothing new.
+    ///
+    /// [`DEFAULT_NODE_FRAME_COLOR`]: super::defaults::DEFAULT_NODE_FRAME_COLOR
+    pub fn set_node_border_color(&mut self, node_id: &str, color: Option<&str>) -> bool {
+        self.set_node_color_channel(node_id, NodeColorChannel::Frame, color)
+    }
+
+    /// Set the *default* text color on a node, and recolor every
+    /// [`TextRun`] that was
+    /// following that default. `None` clears instead of setting.
+    ///
+    /// The default itself lands in the same two places as
+    /// [`Self::set_node_bg_color`] — the node's own overrides when
+    /// it is themed, `style.text_color` when it is not — and
+    /// clears the same way: back to the palette group when themed,
+    /// to [`DEFAULT_NODE_TEXT_COLOR`] when not. `Some("")` clears
+    /// as well, for the same reason it does on the frame channel.
+    ///
+    /// [`DEFAULT_NODE_TEXT_COLOR`]: super::defaults::DEFAULT_NODE_TEXT_COLOR
+    ///
+    /// Runs are treated in three groups, which is the whole
+    /// content of "following the default":
+    ///
+    /// - A run with an **empty** `color` defers to the node's text
+    ///   color by construction. It needs no rewrite and gets none;
+    ///   it follows the new value for free, and rewriting it would
+    ///   opt those graphemes out of the cascade for good.
+    /// - A run whose `color` byte-matches the **effective** pre-edit
+    ///   text color is a baked copy of the old default — the shape
+    ///   `maptool convert --legacy` leaves behind — and is rewritten
+    ///   so the node recolors as a whole.
+    /// - Every other run is a deliberate per-span override and is
+    ///   left alone.
+    ///
+    /// The match is byte-exact, deliberately: if the effective
+    /// default is `"#FFFFFF"` but a run carries `"#ffffff"`, the
+    /// run is *not* considered default-following and keeps its
+    /// lowercase override. Colors are strings in the model and
+    /// comparisons are literal, matching
+    /// `baumhard::util::color::hex_to_rgba_safe`.
+    ///
+    /// Comparing against the *effective* color rather than
+    /// `style.text_color` is what makes this work on a themed node:
+    /// there, `style.text_color` is a stale copy the palette
+    /// shadows, and a run baked from the palette would never match
+    /// it.
+    ///
+    /// On a **clear**, the baked runs are rewritten to the empty
+    /// string rather than to the node's new effective color. That
+    /// is the run tier's own spelling for "follow the node", so
+    /// the graphemes rejoin the cascade instead of being re-pinned
+    /// one tier down — which is the same trap `DEFAULT_RUN_COLOR`
+    /// exists to avoid.
+    ///
+    /// **The un-bake alone is a change, so a clear can report
+    /// `true` while nothing on screen moves.** On an unthemed node
+    /// already sitting at
+    /// [`DEFAULT_NODE_TEXT_COLOR`] the `style` half of the write
+    /// is a genuine no-op, but a run carrying that same hex is
+    /// opted *out* of the cascade and clearing it opts the
+    /// graphemes back in: identical pixels today, and the next
+    /// `color text=` or retheme carries them along instead of
+    /// stranding them. Undo has to be able to put the bake back,
+    /// which is why the entry is pushed rather than suppressed —
+    /// "changed nothing on screen" is not the test, "changed
+    /// nothing in the model" is, and the caller is told the truth
+    /// about the model. A second clear finds nothing left to
+    /// un-bake and is the no-op, so the gesture converges rather
+    /// than growing the stack.
+    pub fn set_node_text_color(&mut self, node_id: &str, color: Option<&str>) -> bool {
+        self.set_node_color_channel(node_id, NodeColorChannel::Text, color)
+    }
+
+    /// Shared body of the three per-node color setters — the one
+    /// place that decides *where* a per-node color write lands and
+    /// what an absent color means once it gets there.
+    ///
+    /// Reads the effective pre-edit color through the same cascade
+    /// the renderer uses, then writes the node's own
+    /// `color_schema.overrides` when the node is themed and
+    /// `node.style` when it is not. `NodeEditTail::None`: color
+    /// never shifts a glyph advance, so there is nothing to
+    /// re-measure.
+    ///
+    /// `color` is `None` for a clear, and an empty string counts
+    /// as one on every channel where the empty string is not
+    /// itself a color ([`NodeColorChannel::empty_is_a_color`]).
+    /// Each tier spells a clear its own way: the override tier by
+    /// dropping the slot, so the palette group shows through;
+    /// `style`, which has nothing underneath it, by naming
+    /// [`NodeColorChannel::unthemed_default`].
+    ///
+    /// Returns `true` when it wrote anything.
+    fn set_node_color_channel(
+        &mut self,
+        node_id: &str,
+        channel: NodeColorChannel,
+        color: Option<&str>,
+    ) -> bool {
+        let Some(node) = self.mindmap.nodes.get(node_id) else {
+            return false;
+        };
+        // Captured before the envelope's mutable borrow, and read
+        // through the cascade rather than off `style`: on a themed
+        // node `style.text_color` is a value the palette shadows,
+        // so a run baked from the palette would never match it and
+        // the whole node would refuse to recolor.
+        let effective_before = match channel {
+            NodeColorChannel::Background => self.mindmap.node_background_color(node),
+            NodeColorChannel::Frame => self.mindmap.node_frame_color(node),
+            NodeColorChannel::Text => self.mindmap.node_text_color(node),
+        }
+        .to_string();
+
+        let write = match color {
+            Some(c) if !c.is_empty() || channel.empty_is_a_color() => NodeColorWrite::Set(c),
+            _ => NodeColorWrite::Clear,
+        };
+        // Both halves of the write are settled here, off the
+        // mutable borrow, so the closure below only compares and
+        // assigns. `run_target` is what a baked run follows the
+        // node to: the new color when there is one, and the run
+        // tier's "defer to the node" empty string on a clear.
+        let themed_slot = match write {
+            NodeColorWrite::Set(c) => Some(c.to_string()),
+            NodeColorWrite::Clear => None,
+        };
+        let style_value = match write {
+            NodeColorWrite::Set(c) => c.to_string(),
+            NodeColorWrite::Clear => channel.unthemed_default().to_string(),
+        };
+        let run_target = match write {
+            NodeColorWrite::Set(c) => c.to_string(),
+            NodeColorWrite::Clear => String::new(),
+        };
+
         self.mutate_node_with_style_undo(node_id, NodeEditTail::None, move |node| {
-            let old_default = node.style.text_color.clone();
-            let any_run_changes = node
-                .sections
-                .iter()
-                .flat_map(|s| s.text_runs.iter())
-                .any(|r| r.color == old_default && r.color != color);
-            if old_default == color && !any_run_changes {
-                return None;
-            }
-            node.style.text_color = color.clone();
-            for section in node.sections.iter_mut() {
-                clamp_runs_to_text(section);
-                for run in section.text_runs.iter_mut() {
-                    if run.color == old_default {
-                        run.color = color.clone();
+            let mut changed = match node.color_schema.as_mut() {
+                // Themed: the palette group shadows `style`
+                // entirely, so `style` is not where the read path
+                // looks and not where the write may land.
+                Some(schema) => {
+                    let slot = match channel {
+                        NodeColorChannel::Background => &mut schema.overrides.background,
+                        NodeColorChannel::Frame => &mut schema.overrides.frame,
+                        NodeColorChannel::Text => &mut schema.overrides.text,
+                    };
+                    let differs = *slot != themed_slot;
+                    if differs {
+                        *slot = themed_slot.clone();
+                    }
+                    differs
+                }
+                // Unthemed: `style` is the only tier there is.
+                None => {
+                    let slot = match channel {
+                        NodeColorChannel::Background => &mut node.style.background_color,
+                        NodeColorChannel::Frame => &mut node.style.frame_color,
+                        NodeColorChannel::Text => &mut node.style.text_color,
+                    };
+                    let differs = *slot != style_value;
+                    if differs {
+                        slot.clone_from(&style_value);
+                    }
+                    differs
+                }
+            };
+            // Runs that carry a baked copy of the old default
+            // follow the node; runs that left `color` empty follow
+            // it already and must keep doing so; everything else is
+            // a deliberate per-span override.
+            if channel == NodeColorChannel::Text {
+                for section in node.sections.iter_mut() {
+                    clamp_runs_to_text(section);
+                    for run in section.text_runs.iter_mut() {
+                        if !run.color.is_empty() && run.color == effective_before && run.color != run_target {
+                            run.color.clone_from(&run_target);
+                            changed = true;
+                        }
                     }
                 }
             }
-            Some(())
+            changed.then_some(())
         })
         .is_some()
     }
@@ -415,29 +654,42 @@ impl MindMapDocument {
     /// size runs would already have been flattened by the text
     /// editor's collapse step in `set_node_text`).
     ///
-    /// `size_pt` is rounded to the nearest positive integer; values
-    /// below 1 clamp to 1.
+    /// `size_pt` is clamped into the domain the loader accepts —
+    /// floor 1, ceiling `MAX_FONT_SIZE_PT`. Both ends matter: below
+    /// the floor a run shrinks into invisibility, and above the
+    /// ceiling the loader refuses the saved file. Fractional sizes
+    /// are stored as written — `size_pt` is an `f32` in the model.
+    /// See `custom::sync::clamp_run_size_pt`.
+    ///
+    /// A section carrying text but no runs — a loadable shape,
+    /// see `MindSection::text_runs` — gets one authored at the
+    /// requested size rather than being skipped. It used to be
+    /// skipped, silently and while returning `false`, because
+    /// `all` over an empty run list is vacuously true; see
+    /// `write_every_section_run`. A section with no text at all
+    /// stays run-less: there is nothing to size, and a
+    /// zero-length run is a shape `text_run_ops` panics on.
     pub fn set_node_font_size(&mut self, node_id: &str, size_pt: f32) -> bool {
         if !size_pt.is_finite() {
             return false;
         }
-        let size_u = size_pt.round().max(1.0) as u32;
+        // Clamped into the loader's run domain: the console's
+        // `font size=` takes any positive finite f32, and a value
+        // past the ceiling writes a map that will not reopen. See
+        // `custom::sync::clamp_run_size_pt`.
+        let size = crate::application::document::custom::sync::clamp_run_size_pt(size_pt);
         // `NodeEditTail::Grow`: larger text needs a larger box.
         // Monotonic floor — grow on demand, never shrink.
         self.mutate_node_with_style_undo(node_id, NodeEditTail::Grow, |node| {
             let already = node
                 .sections
                 .iter()
-                .flat_map(|s| s.text_runs.iter())
-                .all(|r| r.size_pt == size_u);
+                .all(|s| section_runs_all_match(s, |r| r.size_pt == size));
             if already {
                 return None;
             }
             for section in node.sections.iter_mut() {
-                clamp_runs_to_text(section);
-                for run in section.text_runs.iter_mut() {
-                    run.size_pt = size_u;
-                }
+                write_every_section_run(section, |r| r.size_pt = size);
             }
             Some(())
         })
@@ -456,6 +708,10 @@ impl MindMapDocument {
     /// job; an unknown family lands in the data model and degrades
     /// at render time per CODE_CONVENTIONS §9.
     ///
+    /// A run-less section carrying text gets a run authored at
+    /// the requested family, on the same terms as
+    /// [`Self::set_node_font_size`].
+    ///
     /// Capture / undo: piggybacks on the existing
     /// `UndoAction::EditNodeStyle` envelope (which already includes
     /// the full `text_runs` snapshot via `before_runs`), so a
@@ -472,16 +728,12 @@ impl MindMapDocument {
             let already = node
                 .sections
                 .iter()
-                .flat_map(|s| s.text_runs.iter())
-                .all(|r| r.font == target);
+                .all(|s| section_runs_all_match(s, |r| r.font == target));
             if already {
                 return None;
             }
             for section in node.sections.iter_mut() {
-                clamp_runs_to_text(section);
-                for run in section.text_runs.iter_mut() {
-                    run.font = target.clone();
-                }
+                write_every_section_run(section, |r| r.font = target.clone());
             }
             Some(())
         })
@@ -533,16 +785,40 @@ impl MindMapDocument {
     }
 }
 
-/// Validate a candidate `(x, y)` for a node — finite components
-/// only. Nodes float freely on the canvas (no parent AABB), so
-/// negative coordinates are legal — a node can sit at a negative
-/// canvas-x to the left of the origin.
+/// Validate a candidate `(x, y)` for a node: finite components,
+/// each inside `MAX_CANVAS_COORD`. Nodes float freely on the canvas
+/// (no parent AABB), so negative coordinates are legal — a node can
+/// sit at a negative canvas-x to the left of the origin — but the
+/// *magnitude* is bounded, because the loader bounds it too.
+// Native-driver-only: guards the native drag/resize commits.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn validate_node_position(pos: baumhard::mindmap::model::Position) -> Result<(), String> {
+    use baumhard::mindmap::model::validate::MAX_CANVAS_COORD;
     if !pos.x.is_finite() || !pos.y.is_finite() {
         return Err(format!(
             "node.position has non-finite component (x={}, y={})",
             pos.x, pos.y
         ));
+    }
+    // Magnitude too, not just finiteness. The loader bounds
+    // `node.position` at `MAX_CANVAS_COORD`, so a setter that took
+    // any finite `f64` let the editor write a map it would then
+    // refuse to reopen — `set_node_aabb` with `x: 1e30` returned
+    // `Ok(true)` and the saved file would not load.
+    //
+    // Rejected rather than clamped, unlike the font metrics: this
+    // guard already returns `Result` and its callers already refuse
+    // a bad position, so silently relocating a node to the boundary
+    // would be a bigger surprise than declining the write. (It is
+    // also why `validate::clamp_to_bound` is not used here — it
+    // takes `f32` and these coordinates are `f64`.)
+    for (name, value) in [("x", pos.x), ("y", pos.y)] {
+        if value.abs() > MAX_CANVAS_COORD {
+            return Err(format!(
+                "node.position.{name} ({value}) is outside the ±{MAX_CANVAS_COORD} bound the \
+                 loader enforces"
+            ));
+        }
     }
     Ok(())
 }
@@ -603,8 +879,10 @@ mod tests {
     fn set_node_border_config_signals_preset_auto_promotion() {
         let mut doc = fixture_doc();
         let id = first_node_id(&doc);
-        let mut edits = BorderConfigEdits::default();
-        edits.preset = OptionEdit::Set("heavy".into());
+        let mut edits = BorderConfigEdits {
+            preset: OptionEdit::Set("heavy".into()),
+            ..BorderConfigEdits::default()
+        };
         edits
             .with_side_pattern(BorderSide::Top, "###(*)###")
             .expect("pattern parses");
@@ -623,7 +901,7 @@ mod tests {
             .style
             .border
             .as_ref()
-            .expect("config materialised");
+            .expect("config materialized");
         assert_eq!(cfg.preset, "custom");
     }
 
@@ -637,8 +915,10 @@ mod tests {
         let mut doc = fixture_doc();
         let id = first_node_id(&doc);
         let before_border = doc.mindmap.nodes.get(&id).unwrap().style.border.clone();
-        let mut edits = BorderConfigEdits::default();
-        edits.preset = OptionEdit::Set("double".into());
+        let edits = BorderConfigEdits {
+            preset: OptionEdit::Set("double".into()),
+            ..BorderConfigEdits::default()
+        };
         let outcome = doc.set_node_border_config(&id, edits);
         assert!(outcome.changed);
         // Sanity: the edit landed.
@@ -675,8 +955,10 @@ mod tests {
         doc.mindmap.nodes.get_mut(&id).unwrap().style.border = None;
         doc.dirty = false;
         let undo_len_before = doc.undo_stack.len();
-        let mut edits = BorderConfigEdits::default();
-        edits.clear = true;
+        let edits = BorderConfigEdits {
+            clear: true,
+            ..BorderConfigEdits::default()
+        };
         let outcome = doc.set_node_border_config(&id, edits);
         assert!(!outcome.changed);
         assert!(!doc.dirty, "no-op clear must not mark the document dirty");

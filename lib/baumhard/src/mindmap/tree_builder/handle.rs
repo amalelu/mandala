@@ -21,6 +21,7 @@ use crate::gfx_structs::area::{DeltaGlyphArea, GlyphArea};
 use crate::gfx_structs::element::GfxElement;
 use crate::gfx_structs::mutator::{GfxMutator, Mutation};
 use crate::gfx_structs::tree::{MutatorTree, Tree};
+use crate::mindmap::SELECTION_HIGHLIGHT;
 use crate::util::color;
 
 /// Per-instance view a handle element exposes to the generic
@@ -48,7 +49,10 @@ pub trait HandleVisual {
 /// the initial-build and in-place mutator paths emit. Single
 /// source of truth — the two paths cannot drift.
 fn handle_layout<E: HandleVisual>(elem: &E) -> (usize, GlyphArea) {
-    let color_rgba = color::hex_to_rgba_safe(elem.color(), [0.0, 0.9, 1.0, 1.0]);
+    // Every handle emitter writes `SELECTION_HIGHLIGHT_HEX`, so the
+    // parse-failure fallback is that same cyan rather than a fourth
+    // spelling of it.
+    let color_rgba = color::hex_to_rgba_safe(elem.color(), SELECTION_HIGHLIGHT.to_float());
     // Handle glyphs are centered on the position with the same
     // half-glyph offset the legacy renderer used.
     let half_w = elem.font_size_pt() * 0.3;
@@ -80,14 +84,13 @@ pub fn handle_identity_sequence<E: HandleVisual>(elements: &[E]) -> Vec<usize> {
 /// same kind-derived channel across drag frames.
 pub fn build_handle_tree<E: HandleVisual>(elements: &[E]) -> Tree<GfxElement, GfxMutator> {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
-    let mut unique_id: usize = 1;
 
-    for elem in elements {
+    for (idx, elem) in elements.iter().enumerate() {
+        // Ids run 1.. in insertion order.
+        let unique_id = idx + 1;
         let (channel, area) = handle_layout(elem);
         let element_node = GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
-        unique_id += 1;
-        let leaf = tree.arena.new_node(element_node);
-        tree.root.append(leaf, &mut tree.arena);
+        tree.root.append_value(element_node, &mut tree.arena);
     }
 
     tree
@@ -105,10 +108,10 @@ pub fn build_handle_mutator_tree<E: HandleVisual>(elements: &[E]) -> MutatorTree
     for elem in elements {
         let (channel, area) = handle_layout(elem);
         let delta = DeltaGlyphArea::full_assign_from(&area);
-        let leaf = mt
-            .arena
-            .new_node(GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), channel));
-        mt.root.append(leaf, &mut mt.arena);
+        mt.root.append_value(
+            GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), channel),
+            &mut mt.arena,
+        );
     }
     mt
 }

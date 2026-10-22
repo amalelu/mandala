@@ -409,7 +409,7 @@ fn accumulate_wheel_lines_handles_large_deltas_without_panicking() {
     let mut accum = 0.0f32;
     let lines = accumulate_wheel_lines(&mut accum, 12345.678);
     assert_eq!(lines, 12345);
-    assert!(accum < 1.0 && accum >= 0.0);
+    assert!((0.0..1.0).contains(&accum));
 }
 
 #[test]

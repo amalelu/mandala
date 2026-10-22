@@ -4,38 +4,42 @@
 //! selected edge. Edge-specific.
 
 use super::Command;
-use crate::application::console::completion::{
-    kv_key_completions, prefix_filter, Completion, CompletionContext, CompletionState,
-};
-use crate::application::console::helpers::{collect_kvs_or_usage, require_edge_or_portal, ApplyTally};
+use crate::application::console::helpers::{require_edge_or_portal, ApplyTally};
 use crate::application::console::parser::Args;
 use crate::application::console::predicates::edge_selected;
-use crate::application::console::{ConsoleContext, ConsoleEffects, ExecResult};
+use crate::application::console::spec::descent::descend;
+use crate::application::console::spec::{bare_words, kvs, usage, Bare, Form, Grammar, Key, Vocabulary, Word};
+use crate::application::console::{ConsoleEffects, ExecResult};
 use crate::application::document::MindMapDocument;
 
-pub const KEYS: &[&str] = &["from", "to"];
 pub const NAMES: &[&str] = &["arrow", "circle", "diamond", "none"];
+const CAP_WORDS: &[Word] = &bare_words::<4>(NAMES);
+
+const KEYS: &[Key] = &[
+    Key::new(
+        "from",
+        "cap glyph at the edge's start",
+        Vocabulary::Words(CAP_WORDS),
+    ),
+    Key::new("to", "cap glyph at the edge's end", Vocabulary::Words(CAP_WORDS)),
+];
+
+pub static GRAMMAR: Grammar = Grammar {
+    label: "cap",
+    subverb_sets: &[],
+    key_sets: &[KEYS],
+    bare: Some(Bare::new("composed", &[Form::opt(&["from", "to"])])),
+};
 
 pub const COMMAND: Command = Command {
     name: "cap",
     aliases: &[],
     summary: "Set the start/end cap glyph of the selected edge",
-    usage: "cap from=<arrow|circle|diamond|none> to=<arrow|circle|diamond|none>",
-    tags: &["edge", "cap", "arrow", "end", "start"],
     applicable: edge_selected,
-    complete: complete_cap,
+    grammar: &GRAMMAR,
+    synonyms: &["edge", "end", "start"],
     execute: execute_cap,
 };
-
-fn complete_cap(state: &CompletionState, _ctx: &ConsoleContext) -> Vec<Completion> {
-    match &state.context {
-        CompletionContext::Token { .. } => kv_key_completions(KEYS, state.partial),
-        CompletionContext::KvValue { key } if KEYS.iter().any(|k| k == key) => {
-            prefix_filter(NAMES, state.partial)
-        }
-        _ => Vec::new(),
-    }
-}
 
 pub(crate) fn resolve_cap(endpoint_from: bool, name: &str) -> Option<Option<&'static str>> {
     match (endpoint_from, name) {
@@ -94,28 +98,26 @@ fn execute_cap(args: &Args, eff: &mut ConsoleEffects) -> ExecResult {
     if let Err(r) = require_edge_or_portal(eff) {
         return r;
     }
-    let kvs = match collect_kvs_or_usage(args, "usage: cap from=<name> to=<name>") {
-        Ok(k) => k,
-        Err(r) => return r,
+    let descent = descend(&GRAMMAR, args.tokens());
+    let pairs = match kvs::read_strict(&descent, args) {
+        Ok(pairs) => pairs,
+        Err(msg) => return ExecResult::err(msg),
     };
+    if pairs.is_empty() {
+        return ExecResult::err(usage::no_arguments_message(&GRAMMAR));
+    }
 
     let mut tally = ApplyTally::new();
-    for (k, v) in kvs {
-        let is_from = match k.as_str() {
-            "from" => true,
-            "to" => false,
-            other => {
-                tally.note_error(format!("unknown key '{}'", other));
-                continue;
-            }
-        };
+    for pair in &pairs {
+        let (k, v) = (pair.key.name, pair.value);
+        let is_from = k == "from";
         // Pre-validate the preset so the verb surfaces a typed
         // error; only then route through the slot core.
-        if resolve_cap(is_from, &v).is_none() {
+        if resolve_cap(is_from, v).is_none() {
             tally.note_error(format!("'{}': expected arrow|circle|diamond|none", v));
             continue;
         }
-        let changed = apply_cap_slot_to_selection(eff.document, is_from, &v);
+        let changed = apply_cap_slot_to_selection(eff.document_mut(), is_from, v);
         tally.note(changed, || format!("cap {} already {}", k, v));
     }
     tally.finalize("cap")

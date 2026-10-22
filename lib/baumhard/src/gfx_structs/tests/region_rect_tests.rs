@@ -453,7 +453,9 @@ pub fn do_rect_exhaustive_12x12_grid() {
     // cell_size = 4x4, 3x3 grid.
 
     // Test a representative sample of rectangles.
-    let cases: Vec<((usize, usize), (usize, usize), Vec<usize>)> = vec![
+    // (start cell, end cell, expected regions)
+    type Cell = (usize, usize);
+    let cases: Vec<(Cell, Cell, Vec<usize>)> = vec![
         // Single cell.
         ((0, 0), (3, 3), vec![0]),
         ((4, 0), (7, 3), vec![1]),

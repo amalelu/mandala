@@ -83,21 +83,51 @@ pub(in crate::application::app) enum ThrottledRelease {
 /// reason PR #91 in this epic needed: unit tests on the interactions
 /// cannot see a caller that finalizes the wrong gestures, and both
 /// dispatchers need a live renderer, which TEST_CONVENTIONS §T8
-/// keeps out of the harness. The four cases are the whole contract.
+/// keeps out of the harness.
 ///
-/// The left button finalizes unconditionally: a left-started gesture
-/// is the common case, and a right-started one is unreachable here
-/// (a left press during an in-flight drag replaces the drag state
-/// with `Pending` rather than reaching the release path). The right
-/// button finalizes only what it started, so a stray right-click
-/// mid-drag does not end a left-button gesture.
+/// **The button that started the gesture is the one that finalizes
+/// it.** A release from any other button hands the drag back
+/// untouched, because ending someone else's gesture mid-flight is
+/// what #37 item 5 is about: the user is still holding the button
+/// that owns the drag, and the commit lands wherever the pointer
+/// happened to be when the stray release arrived.
+///
+/// The left half of that rule is newly load-bearing. It used to read
+/// "the left button finalizes unconditionally … a right-started
+/// gesture is unreachable here (a left press during an in-flight
+/// drag replaces the drag state with `Pending` rather than reaching
+/// the release path)", and that parenthetical stopped being true the
+/// moment `DragState::would_abandon_gesture` started refusing the
+/// left press instead. Refusing the press is what makes the state
+/// *survive* to the left release: right press → threshold →
+/// `Throttled(NodeResize { started_with_right: true })` → left press
+/// (refused) → left release. Committing there ends a fast-resize the
+/// user is still performing with the right button down, and every
+/// later right-drag sample lands on `DragState::None` and does
+/// nothing. Handing it back instead leaves the gesture live, and the
+/// right release — which the user has to deliver, since the button
+/// is down — commits it.
+///
+/// `PutBack` cannot strand the gesture: both dispatchers restore the
+/// drag state on that answer (`finalize_or_put_back`'s `None` arm
+/// writes `DragState::Throttled(drag)` back), which is also why the
+/// middle button's answer is `PutBack` rather than a third case. It
+/// never reaches here — `route_middle_button` answers `Keep` — but a
+/// button that could not have started the gesture has no business
+/// ending it, whichever button it is.
 pub(in crate::application::app) fn resolve_release(
     released: MouseButton,
     started_with_right: bool,
 ) -> ThrottledRelease {
-    match released {
-        MouseButton::Right if !started_with_right => ThrottledRelease::PutBack,
-        _ => ThrottledRelease::Commit,
+    let owner = if started_with_right {
+        MouseButton::Right
+    } else {
+        MouseButton::Left
+    };
+    if released == owner {
+        ThrottledRelease::Commit
+    } else {
+        ThrottledRelease::PutBack
     }
 }
 
@@ -166,10 +196,15 @@ impl ReleaseRefresh {
 mod tests {
     use super::*;
 
-    /// All four cases of the release resolver. The three-Commit /
-    /// one-PutBack shape is the whole gate: widen it and a stray
-    /// right-click ends a left-button drag mid-gesture; narrow it
-    /// and a fast-resize never commits at all.
+    /// All four cases of the release resolver. The diagonal —
+    /// commit on the owning button, put back on the other — is the
+    /// whole gate: widen it and a stray click ends a drag the user
+    /// is still performing; narrow it and a gesture never commits at
+    /// all.
+    ///
+    /// Fails on the `(Left, true)` row for the shipped-before-#37
+    /// spelling, `match released { Right if !started_with_right =>
+    /// PutBack, _ => Commit }`, which answered `Commit` there.
     #[test]
     fn test_resolve_release_covers_both_buttons_and_both_origins() {
         assert_eq!(
@@ -179,8 +214,9 @@ mod tests {
         );
         assert_eq!(
             resolve_release(MouseButton::Left, true),
-            ThrottledRelease::Commit,
-            "a left release still finalizes rather than stranding the gesture"
+            ThrottledRelease::PutBack,
+            "a left release must not end a right-started fast-resize: the \
+             right button is still down and its release will commit"
         );
         assert_eq!(
             resolve_release(MouseButton::Right, true),
@@ -195,15 +231,21 @@ mod tests {
     }
 
     /// The middle button never reaches the throttled release path —
-    /// its own arm resets the drag state — but the resolver must not
-    /// answer `PutBack` for it if that ever changes, because a
-    /// put-back with the state already replaced would strand the
-    /// gesture invisibly.
+    /// its own arm keeps a `Throttled` state rather than routing it
+    /// (`route_middle_button` answers `Keep`) — but it must not be a
+    /// finalizer if that ever changes: it cannot have started either
+    /// gesture, so the answer is the same `PutBack` a wrong-button
+    /// release gets, and `finalize_or_put_back` restores the state on
+    /// it rather than stranding the drag.
     #[test]
-    fn test_resolve_release_treats_any_non_right_button_as_a_finalizer() {
+    fn test_resolve_release_finalizes_only_the_button_that_started_the_gesture() {
         assert_eq!(
             resolve_release(MouseButton::Middle, false),
-            ThrottledRelease::Commit
+            ThrottledRelease::PutBack
+        );
+        assert_eq!(
+            resolve_release(MouseButton::Middle, true),
+            ThrottledRelease::PutBack
         );
     }
 }

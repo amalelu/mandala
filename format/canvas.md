@@ -9,8 +9,8 @@ console verb; the data model lives at
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `theme_variables` | object | `{}` | Map-wide CSS-variable-style colour palette. Every `var(--name)` reference in node / edge / section styles resolves through this table. Authoring via `theme set <name> <value>`. |
-| `palettes` | object | `{}` | Named colour cycles. Every `color_palette = "…"` reference (on a node / section / border) resolves to one of these. Authoring via `palette …` console verbs. |
+| `theme_variables` | object | `{}` | Map-wide CSS-variable-style color palette. Every `var(--name)` reference in node / edge / section styles resolves through this table. Authoring via `theme set <name> <value>`. |
+| `palettes` | object | `{}` | Named color palettes, serving two consumers: a node's `color_schema` resolves its fill / frame / text / title through one (see [palettes.md](./palettes.md)), and every `color_palette = "…"` reference (on a node / section / border) cycles one per glyph. Authoring via `palette …` console verbs. Note this key lives on the **map**, not inside `canvas` — it is listed here because it is map-wide shared state. |
 | `default_border` | object\|null | `null` | The map-wide border every framed node falls back to. Same shape as `MindNode.style.border`. Authoring via `canvas border …`. |
 | `default_section_frame_border` | object\|null | `null` | The map-wide default for the cyan rectangle drawn around an unfocused section in NodeEdit mode. Same shape as `MindNode.style.border`. Authoring via `canvas section-frame …`. |
 | `default_focused_section_frame_border` | object\|null | `null` | The map-wide default for the focused section's frame (the section currently being text-edited). Same shape; falls back to `default_section_frame_border` then to a hardcoded heavy floor. Authoring via `canvas section-frame focused …`. |

@@ -37,10 +37,20 @@ pub struct ConsoleOverlayGeometry {
     /// Which completion is highlighted. `None` when `completions` is
     /// empty. Index into `completions` otherwise.
     pub selected_completion: Option<usize>,
-    /// Font family name passed to cosmic-text via
-    /// `Attrs::new().family(Family::Name(..))`. Empty string means
-    /// "use cosmic-text's default family", which lets cosmic-text's
-    /// own fallback chain resolve it.
+    /// Font family name from the user's `console_font` config.
+    ///
+    /// **Carried and not read — a defect, not a seam.** The console
+    /// pass resolves a face per line and per completion candidate
+    /// from the `Option<String>` on those rows, and falls back to
+    /// cosmic-text's default when a row carries `None`; it never
+    /// consults this overlay-level family, so a user who sets
+    /// `console_font` sees no change. The consumer is
+    /// `renderer::console_pass`'s `shape_line` closure, which needs
+    /// this as its `None` fallback. Held rather than deleted because
+    /// deleting it would drop the setting out of the model as well
+    /// as out of the render; reported out of #41 rather than fixed
+    /// there.
+    #[allow(dead_code)]
     pub font_family: String,
     /// Font size in pixels. The whole overlay scales with this value;
     /// row height, frame extents, and border repetition counts are

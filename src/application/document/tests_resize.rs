@@ -30,7 +30,11 @@ fn test_default_mode_with_single_selection_emits_no_resize_handles() {
     let mut doc = load_test_doc();
     let id = first_testament_node_id(&doc);
     doc.selection = SelectionState::Single(id);
-    let scene = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
+    let scene = crate::application::document::tests_common::project_roles(
+        &doc,
+        1.0,
+        InteractionModeOverrides::none(),
+    );
     assert!(
         scene.node_resize_handles.is_empty(),
         "Default mode + Single selection must NOT emit node resize handles"
@@ -52,7 +56,11 @@ fn test_default_mode_with_section_selection_emits_no_resize_handles() {
         node_id: id,
         section_idx: 1,
     });
-    let scene = crate::application::document::tests_common::project_roles(&doc, 1.0, InteractionModeOverrides::none());
+    let scene = crate::application::document::tests_common::project_roles(
+        &doc,
+        1.0,
+        InteractionModeOverrides::none(),
+    );
     assert!(
         scene.node_resize_handles.is_empty(),
         "Default mode + Section selection must NOT emit node resize handles"
@@ -70,7 +78,8 @@ fn test_default_mode_with_section_selection_emits_no_resize_handles() {
 fn test_resize_mode_node_target_emits_eight_node_handles() {
     let doc = load_test_doc();
     let id = first_testament_node_id(&doc);
-    let scene = crate::application::document::tests_common::project_roles(&doc, 
+    let scene = crate::application::document::tests_common::project_roles(
+        &doc,
         1.0,
         InteractionModeOverrides {
             node: Some(id.as_str()),
@@ -103,7 +112,8 @@ fn test_resize_mode_node_target_emits_eight_node_handles() {
 #[test]
 fn test_resize_mode_section_target_emits_eight_section_handles() {
     let (doc, id) = pinned_two_section_node();
-    let scene = crate::application::document::tests_common::project_roles(&doc, 
+    let scene = crate::application::document::tests_common::project_roles(
+        &doc,
         1.0,
         InteractionModeOverrides {
             node: None,
@@ -143,7 +153,8 @@ fn test_resize_mode_section_target_fill_parent_emits_no_handles() {
             s.size = None;
         }
     }
-    let scene = crate::application::document::tests_common::project_roles(&doc, 
+    let scene = crate::application::document::tests_common::project_roles(
+        &doc,
         1.0,
         InteractionModeOverrides {
             node: None,

@@ -450,13 +450,8 @@ fn resolved_for_falls_back_to_canvas_default() {
         ..GlyphConnectionConfig::default()
     };
     let canvas = Canvas {
-        background_color: "#000".to_string(),
-        default_border: None,
         default_connection: Some(canvas_cfg),
-        default_section_frame_border: None,
-        default_focused_section_frame_border: None,
-        theme_variables: std::collections::HashMap::new(),
-        theme_variants: std::collections::HashMap::new(),
+        ..Canvas::default()
     };
     let resolved = GlyphConnectionConfig::resolved_for(&edge, &canvas);
     assert_eq!(resolved.body, "═");
@@ -516,8 +511,7 @@ fn display_mode_portal_round_trips_through_json() {
 #[test]
 fn test_documented_portal_edge_example_deserializes() {
     let doc = crate::util::doc_fixtures::format_doc_path("schema.md");
-    let published =
-        crate::util::doc_fixtures::documented_json_block(&doc, "### Portal-mode edges", 0);
+    let published = crate::util::doc_fixtures::documented_json_block(&doc, "### Portal-mode edges", 0);
 
     let edge: MindEdge = serde_json::from_str(&published).unwrap_or_else(|e| {
         panic!("format/schema.md's portal-edge example must deserialize: {e}\n{published}")
@@ -527,12 +521,15 @@ fn test_documented_portal_edge_example_deserializes() {
     assert_eq!(edge.to_id, "1.7.2");
     assert_eq!(edge.glyph_connection.as_ref().unwrap().body, "◈");
 
-    // `label` has no `skip_serializing_if`, so every serializer
-    // writes it. The spec must show it, or the two portal-edge
-    // examples in `format/` disagree about the shape on disk.
+    // `label` is omitted when unset (#47 part B) — an unlabeled
+    // edge no longer serializes `"label": null`, and the spec's
+    // example shows the shape the saver actually writes. This
+    // assertion held the opposite while the field lacked its
+    // `skip_serializing_if`.
+    assert_eq!(edge.label, None);
     assert!(
-        published.contains("\"label\""),
-        "the published portal edge must carry `label`, which is always serialized:\n{published}"
+        !published.contains("\"label\""),
+        "the published portal edge is unlabeled and the saver omits an unset `label`:\n{published}"
     );
 }
 
@@ -646,34 +643,55 @@ fn zoom_window_skip_default_and_round_trip_on_every_struct() {
 /// pattern; the border inherits the resolved window by
 /// construction (see `tree_builder::node_clip`), so there is
 /// no separate border serde surface.
+///
+/// The node arrives inside a map through
+/// [`crate::mindmap::loader::load_from_str`], not through a bare
+/// `serde_json::from_str::<MindNode>`. `serde` alone is one half of
+/// what a file goes through: `check_invariants` runs afterwards, so
+/// a fixture typed straight into `MindNode` can hold a shape the
+/// app would refuse to open — which is what happened here. This
+/// fixture predates sections and carried none, `sections` is
+/// `#[serde(default)]`, and `detect_zero_section_node` rejects
+/// exactly that; the direct deserialize was the only reason it
+/// still passed. Going through the loader means the fixture is
+/// exercised the way real input is, and cannot drift back.
 #[test]
 fn mindnode_zoom_window_round_trips() {
-    // Deserialize a minimal node with both zoom fields set and
-    // check the pair survives. Constructed as raw JSON rather
+    // Deserialize a minimal one-node map with both zoom fields set
+    // and check the pair survives. Constructed as raw JSON rather
     // than a struct literal so this test also pins the on-disk
     // key names (authors grep for `min_zoom_to_render` in the
     // format docs; breaking either name breaks that contract).
     let raw = r##"{
-        "id":"0","parent_id":null,
-        "position":{"x":0,"y":0},
-        "size":{"width":100,"height":100},
-        "sections":[{"text":""}],
-        "style":{
-            "background_color":"#000","frame_color":"#000","text_color":"#fff",
-            "shape":"rectangle","corner_radius_percent":0,"frame_thickness":0,
-            "show_frame":false,"show_shadow":false
-        },
-        "layout":{"type":"map","direction":"auto","spacing":0},
-        "folded":false,"notes":"","color_schema":null,
-        "min_zoom_to_render":0.25,
-        "max_zoom_to_render":4.0
+        "version":"1.0","name":"zoom_window_fixture",
+        "canvas":{"background_color":"#141414","theme_variables":{}},
+        "edges":[],
+        "nodes":{"0":{
+            "id":"0","parent_id":null,
+            "position":{"x":0,"y":0},
+            "size":{"width":100,"height":100},
+            "sections":[{"text":""}],
+            "style":{
+                "background_color":"#000","frame_color":"#000","text_color":"#fff",
+                "shape":"rectangle","corner_radius_percent":0,"frame_thickness":0,
+                "show_frame":false,"show_shadow":false
+            },
+            "layout":{"type":"map","direction":"auto","spacing":0},
+            "folded":false,"notes":"","color_schema":null,
+            "min_zoom_to_render":0.25,
+            "max_zoom_to_render":4.0
+        }}
     }"##;
-    let node: MindNode = serde_json::from_str(raw).expect("parses");
+    let map = loader::load_from_str(raw).expect("the fixture must survive the real load path");
+    let node = map
+        .nodes
+        .get("0")
+        .expect("the loaded map carries the fixture node");
     assert_eq!(node.min_zoom_to_render, Some(0.25));
     assert_eq!(node.max_zoom_to_render, Some(4.0));
 
     // Reserialize and confirm the pair is preserved.
-    let back_json = serde_json::to_string(&node).unwrap();
+    let back_json = serde_json::to_string(node).unwrap();
     assert!(back_json.contains("\"min_zoom_to_render\":0.25"));
     assert!(back_json.contains("\"max_zoom_to_render\":4.0"));
 }
@@ -949,18 +967,9 @@ fn test_mindsection_frame_border_round_trip() {
 #[test]
 fn test_canvas_section_frame_defaults_round_trip() {
     use crate::mindmap::model::{Canvas, GlyphBorderConfig};
-    use std::collections::HashMap;
 
     // Empty canvas: neither field appears in JSON.
-    let plain = Canvas {
-        background_color: "#000".into(),
-        default_border: None,
-        default_connection: None,
-        default_section_frame_border: None,
-        default_focused_section_frame_border: None,
-        theme_variables: HashMap::new(),
-        theme_variants: HashMap::new(),
-    };
+    let plain = Canvas::default();
     let json = serde_json::to_string(&plain).expect("serializes");
     assert!(
         !json.contains("default_section_frame_border"),
@@ -1172,10 +1181,10 @@ fn fold_hidden_set_traverses_orphan_component() {
 fn test_edge_colors_bottom_out_at_edge_color() {
     let edge = synthetic_edge("a", "b", "auto", "auto");
     let canvas = blank_canvas();
-    assert_eq!(edge.body_color(&canvas), "#fff");
-    assert_eq!(edge.label_color(&canvas), "#fff");
-    assert_eq!(edge.portal_endpoint_color(&canvas, None), "#fff");
-    assert_eq!(edge.portal_endpoint_text_color(&canvas, None), "#fff");
+    assert_eq!(edge.body_color(&canvas, None), "#fff");
+    assert_eq!(edge.label_color(&canvas, None), "#fff");
+    assert_eq!(edge.portal_endpoint_color(&canvas, None, None), "#fff");
+    assert_eq!(edge.portal_endpoint_text_color(&canvas, None, None), "#fff");
 }
 
 /// The canvas default connection supplies the body color for an
@@ -1189,8 +1198,8 @@ fn test_edge_body_color_falls_back_to_canvas_default_connection() {
         color: Some("#canvas".into()),
         ..GlyphConnectionConfig::default()
     });
-    assert_eq!(edge.body_color(&canvas), "#canvas");
-    assert_eq!(edge.label_color(&canvas), "#canvas");
+    assert_eq!(edge.body_color(&canvas, None), "#canvas");
+    assert_eq!(edge.label_color(&canvas, None), "#canvas");
 }
 
 /// **Struct-level, not field-level.** Once an edge forks a
@@ -1209,7 +1218,7 @@ fn test_edge_body_color_ignores_canvas_default_once_forked() {
         ..GlyphConnectionConfig::default()
     });
     assert_eq!(
-        edge.body_color(&canvas),
+        edge.body_color(&canvas, None),
         "#fff",
         "a forked edge with color=None uses edge.color, not the canvas default"
     );
@@ -1229,7 +1238,7 @@ fn test_edge_body_color_prefers_glyph_connection_override() {
         color: Some("#canvas".into()),
         ..GlyphConnectionConfig::default()
     });
-    assert_eq!(edge.body_color(&canvas), "#body");
+    assert_eq!(edge.body_color(&canvas, None), "#body");
 }
 
 /// The label channel detaches from the body when it authors its
@@ -1242,13 +1251,13 @@ fn test_edge_label_color_override_detaches_from_body() {
         ..GlyphConnectionConfig::default()
     });
     let canvas = blank_canvas();
-    assert_eq!(edge.label_color(&canvas), "#body");
+    assert_eq!(edge.label_color(&canvas, None), "#body");
     edge.label_config = Some(EdgeLabelConfig {
         color: Some("#label".into()),
         ..EdgeLabelConfig::default()
     });
-    assert_eq!(edge.label_color(&canvas), "#label");
-    assert_eq!(edge.body_color(&canvas), "#body", "body is unaffected");
+    assert_eq!(edge.label_color(&canvas, None), "#label");
+    assert_eq!(edge.body_color(&canvas, None), "#body", "body is unaffected");
 }
 
 /// A portal endpoint's icon color overrides the body cascade,
@@ -1264,9 +1273,9 @@ fn test_portal_endpoint_color_channels_are_independent() {
         ..PortalEndpointState::default()
     });
     let from = portal_endpoint_state(&edge, "a");
-    assert_eq!(edge.portal_endpoint_color(&canvas, from), "#icon");
+    assert_eq!(edge.portal_endpoint_color(&canvas, from, None), "#icon");
     assert_eq!(
-        edge.portal_endpoint_text_color(&canvas, from),
+        edge.portal_endpoint_text_color(&canvas, from, None),
         "#icon",
         "text with no override follows the icon"
     );
@@ -1277,8 +1286,8 @@ fn test_portal_endpoint_color_channels_are_independent() {
         ..PortalEndpointState::default()
     });
     let from = portal_endpoint_state(&edge, "a");
-    assert_eq!(edge.portal_endpoint_color(&canvas, from), "#icon");
-    assert_eq!(edge.portal_endpoint_text_color(&canvas, from), "#text");
+    assert_eq!(edge.portal_endpoint_color(&canvas, from, None), "#icon");
+    assert_eq!(edge.portal_endpoint_text_color(&canvas, from, None), "#text");
 }
 
 /// An endpoint with no state at all inherits the body cascade on
@@ -1294,6 +1303,299 @@ fn test_portal_endpoint_color_does_not_leak_across_endpoints() {
     });
     let to = portal_endpoint_state(&edge, "b");
     assert!(to.is_none());
-    assert_eq!(edge.portal_endpoint_color(&canvas, to), "#edge");
-    assert_eq!(edge.portal_endpoint_text_color(&canvas, to), "#edge");
+    assert_eq!(edge.portal_endpoint_color(&canvas, to, None), "#edge");
+    assert_eq!(edge.portal_endpoint_text_color(&canvas, to, None), "#edge");
+}
+
+/// **The clamp helpers must not reintroduce the panic this module
+/// exists to name.** `f32::clamp` aborts on `min > max` or a `NaN`
+/// bound, and `clamp_to_bound` builds that pair from a
+/// caller-supplied `limit` — so a negative limit spelled the pair
+/// backwards and a `NaN` limit made both bounds `NaN`. Both
+/// panicked, inside the module whose own header cites inverted
+/// `f32::clamp` bounds as a hazard it exists to prevent.
+#[test]
+fn test_clamp_to_bound_is_total_over_hostile_limits() {
+    use super::validate::clamp_to_bound;
+
+    // Ordinary cases are unchanged.
+    assert_eq!(clamp_to_bound(5.0, 10.0, 0.0), 5.0);
+    assert_eq!(clamp_to_bound(50.0, 10.0, 0.0), 10.0);
+    assert_eq!(clamp_to_bound(-50.0, 10.0, 0.0), -10.0);
+
+    // A negative limit is a caller bug, not a crash: taken by
+    // magnitude, so the pair is ordered.
+    assert_eq!(clamp_to_bound(50.0, -10.0, 0.0), 10.0);
+    assert_eq!(clamp_to_bound(-50.0, -10.0, 0.0), -10.0);
+
+    // A NaN limit has no usable bound, so the caller's previous
+    // value is the answer rather than a NaN or an abort.
+    assert_eq!(clamp_to_bound(5.0, f64::NAN, 3.0), 3.0);
+
+    // A non-finite value still falls back rather than propagating
+    // NaN into every downstream comparison.
+    assert_eq!(clamp_to_bound(f32::NAN, 10.0, 3.0), 3.0);
+    assert_eq!(clamp_to_bound(f32::INFINITY, 10.0, 3.0), 3.0);
+
+    // A limit past f32::MAX casts to infinity — total, if useless
+    // as a bound.
+    assert_eq!(clamp_to_bound(5.0, f64::MAX, 0.0), 5.0);
+}
+
+/// `clamp_canvas_coord` is the `f64` sibling and takes the same
+/// treatment: a computed `NaN` resolves rather than poisoning every
+/// comparison it reaches.
+#[test]
+fn test_clamp_canvas_coord_is_total() {
+    use super::validate::{clamp_canvas_coord, MAX_CANVAS_COORD};
+    assert_eq!(clamp_canvas_coord(5.0), 5.0);
+    assert_eq!(clamp_canvas_coord(1.0e30), MAX_CANVAS_COORD);
+    assert_eq!(clamp_canvas_coord(-1.0e30), -MAX_CANVAS_COORD);
+    assert_eq!(clamp_canvas_coord(f64::NAN), 0.0);
+    assert_eq!(clamp_canvas_coord(f64::INFINITY), 0.0);
+}
+
+// ──────────────────────────────────────────────────────────
+// TextRun serde: only `start` / `end` are required. Every
+// styling field defaults to the value that renders like the
+// uncovered text around it, and the saver omits fields still
+// sitting at those defaults (issue #47 part A).
+// ──────────────────────────────────────────────────────────
+
+/// The loader-edge shape (§T1): a run carrying nothing but its
+/// range. Every default is asserted against its literal, not
+/// against the constants the deserializer reads — a drifted
+/// default fails here instead of being mirrored.
+#[test]
+fn test_text_run_minimal_shape_defaults() {
+    let run: TextRun = serde_json::from_str(r#"{"start": 0, "end": 5}"#).unwrap();
+    assert!(!run.bold && !run.italic && !run.underline);
+    assert_eq!(run.font, "", "empty font = no pin (format/fonts.md)");
+    assert_eq!(
+        run.size_pt, 14.0,
+        "the render-neutral default — the scale run-less text renders at"
+    );
+    assert_eq!(
+        run.color, "",
+        "empty color = defer to the node's effective text color"
+    );
+    assert_eq!(run.hyperlink, None);
+}
+
+/// The defaults must not blanket the whole struct: the range is
+/// the run's identity and stays required. Each case names the
+/// specific field serde must complain about, so a universal
+/// "missing field" prefix cannot satisfy the wrong case.
+#[test]
+fn test_text_run_start_and_end_stay_required() {
+    for (json, missing) in [
+        (r#"{}"#, "start"),
+        (r#"{"bold": true}"#, "start"),
+        (r#"{"start": 0}"#, "end"),
+        (r#"{"end": 5, "size_pt": 12.0}"#, "start"),
+    ] {
+        let err = serde_json::from_str::<TextRun>(json).expect_err("a range-less run must be refused");
+        assert!(
+            err.to_string().contains(&format!("missing field `{missing}`")),
+            "{json} must be refused for missing `{missing}`, got: {err}"
+        );
+    }
+}
+
+/// Negative control for the defaults (issue #138's
+/// default-shadowed shape): a run that authors every field keeps
+/// every authored value, including a fractional `size_pt` —
+/// `format/schema.md` types the field "number", and `14.5` was a
+/// parse error while the model held a `u32`.
+#[test]
+fn test_text_run_defaults_do_not_shadow_authored_values() {
+    let run: TextRun = serde_json::from_str(
+        r##"{"start": 1, "end": 4, "bold": true, "italic": true, "underline": true,
+             "font": "Vollkorn", "size_pt": 14.5, "color": "#123456",
+             "hyperlink": "https://example.com"}"##,
+    )
+    .unwrap();
+    assert_eq!((run.start, run.end), (1, 4));
+    assert!(run.bold && run.italic && run.underline);
+    assert_eq!(run.font, "Vollkorn");
+    assert_eq!(run.size_pt, 14.5);
+    assert_eq!(run.color, "#123456");
+    assert_eq!(run.hyperlink.as_deref(), Some("https://example.com"));
+}
+
+/// The save side of the contract: a run holding nothing but
+/// defaults serializes as bare `{"start", "end"}`, and the same
+/// fields reappear the moment they hold anything else — so the
+/// omission cannot be the whole struct quietly disappearing.
+/// Reloading the terse form restores the identical run.
+#[test]
+fn test_text_run_save_omits_exactly_the_default_valued_fields() {
+    let minimal: TextRun = serde_json::from_str(r#"{"start": 0, "end": 5}"#).unwrap();
+    let value = serde_json::to_value(&minimal).unwrap();
+    let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        ["end", "start"],
+        "every styling field sits at its default and must be omitted"
+    );
+    let back: TextRun = serde_json::from_value(value).unwrap();
+    assert_eq!(back, minimal, "the terse form must reload as the same run");
+
+    // Control: flip each omitted field off its default and its key
+    // must come back — the omission is per-value, not per-field.
+    let authored: TextRun = serde_json::from_str(
+        r##"{"start": 0, "end": 5, "bold": true, "italic": true, "underline": true,
+             "font": "Vollkorn", "size_pt": 22.0, "color": "#123456",
+             "hyperlink": "https://example.com"}"##,
+    )
+    .unwrap();
+    let value = serde_json::to_value(&authored).unwrap();
+    let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        [
+            "bold",
+            "color",
+            "end",
+            "font",
+            "hyperlink",
+            "italic",
+            "size_pt",
+            "start",
+            "underline"
+        ],
+        "a non-default value must always be written"
+    );
+}
+
+/// `format/text-runs.md`'s opening example, loaded as written —
+/// issue #47's acceptance criterion. The example omits `italic`,
+/// `underline` and `hyperlink`, which failed the typed loader
+/// while every `TextRun` field was required. Read out of the spec
+/// rather than restated, per `util::doc_fixtures` (a hard-copied
+/// literal would keep passing after the doc drifted).
+#[test]
+fn test_documented_text_runs_example_loads_as_written() {
+    let doc = crate::util::doc_fixtures::format_doc_path("text-runs.md");
+    let published = crate::util::doc_fixtures::documented_json_block(&doc, "# Text Runs", 0);
+
+    #[derive(serde::Deserialize)]
+    struct SectionsFragment {
+        sections: Vec<MindSection>,
+    }
+    let fragment: SectionsFragment = serde_json::from_str(&published).unwrap_or_else(|e| {
+        panic!("format/text-runs.md's own example must load as written: {e}\n{published}")
+    });
+    let section = &fragment.sections[0];
+    assert_eq!(section.text, "Hello world");
+    let run = &section.text_runs[0];
+    assert_eq!((run.start, run.end), (0, 5));
+    assert!(run.bold, "the example authors bold");
+    assert!(
+        !run.italic && !run.underline,
+        "the fields the example omits default to false"
+    );
+    assert_eq!(run.font, "LiberationSans");
+    assert_eq!(run.size_pt, 14.0);
+    assert_eq!(run.color, "#ffffff");
+}
+
+/// An unlabeled edge no longer serializes `"label": null` (#47
+/// part B) — one line of noise per edge, on maps that are mostly
+/// unlabeled edges. The labeled control pins the other direction,
+/// so the omission cannot be the field quietly vanishing from the
+/// format; the terse form reloads as the same unlabeled edge.
+#[test]
+fn test_unlabeled_edge_omits_label_and_labeled_edge_keeps_it() {
+    let unlabeled = synthetic_edge_with_label(None, None);
+    let json = serde_json::to_string(&unlabeled).unwrap();
+    assert!(
+        !json.contains("\"label\""),
+        "an unset label must not serialize: {json}"
+    );
+    let back: MindEdge = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.label, None, "the terse form reloads unlabeled");
+
+    let labeled = synthetic_edge_with_label(Some("named"), None);
+    let json = serde_json::to_string(&labeled).unwrap();
+    assert!(
+        json.contains(r#""label":"named""#),
+        "an authored label must always be written: {json}"
+    );
+
+    // An explicit `null` on the way in still reads as "no label",
+    // so maps saved before the omission keep loading unchanged.
+    let spelled: MindEdge =
+        serde_json::from_str(&json.replace(r#""label":"named""#, r#""label":null"#)).unwrap();
+    assert_eq!(spelled.label, None);
+}
+
+/// `dewey_cmp` orders ids the way a reader does, which
+/// lexicographic order does not.
+///
+/// Fails when: the segment split goes (the `"0.10"` vs `"0.2"` row
+/// and the `"10"` vs `"2"` row are exactly the pairs `str::cmp`
+/// gets backwards), when the numeric parse goes (same two rows),
+/// or when a prefix stops sorting first (the `"0.2"` vs `"0.2.1"`
+/// row).
+///
+/// The control against the defect it exists to fix is the
+/// `str::cmp` assertion beside each of the two numeric rows: they
+/// state that plain string order gives the *opposite* answer, so a
+/// `dewey_cmp` that quietly became `str::cmp` fails here rather
+/// than passing on rows where the two agree.
+#[test]
+fn test_dewey_cmp_orders_segments_numerically_not_lexicographically() {
+    use std::cmp::Ordering;
+
+    assert_eq!(dewey_cmp("0.2", "0.10"), Ordering::Less);
+    assert_eq!(
+        "0.2".cmp("0.10"),
+        Ordering::Greater,
+        "the control: this is the pair string order gets backwards"
+    );
+
+    assert_eq!(dewey_cmp("2", "10"), Ordering::Less);
+    assert_eq!("2".cmp("10"), Ordering::Greater, "and so is this one");
+
+    // A parent precedes its children.
+    assert_eq!(dewey_cmp("0.2", "0.2.1"), Ordering::Less);
+    assert_eq!(dewey_cmp("0.2.1", "0.2"), Ordering::Greater);
+
+    // Equality, and depth beyond the first differing segment.
+    assert_eq!(dewey_cmp("1.2.3", "1.2.3"), Ordering::Equal);
+    assert_eq!(dewey_cmp("1.2.3", "1.3.0"), Ordering::Less);
+
+    // Non-numeric segments keep a total order instead of collapsing
+    // onto zero, which is what `id_sort_key`'s `unwrap_or(0)` would
+    // do to every one of them.
+    assert_eq!(dewey_cmp("alpha", "beta"), Ordering::Less);
+    assert_eq!(dewey_cmp("0", "alpha"), Ordering::Less);
+    assert_eq!(dewey_cmp("edge[2]", "edge[10]"), "edge[2]".cmp("edge[10]"));
+}
+
+/// Sorting a shuffled list is the property the two call sites
+/// actually depend on, and it is not implied by the pairwise rows
+/// above: a comparator can be right on every pair a test names and
+/// still not be a total order.
+///
+/// Fails when: the comparator becomes inconsistent enough for
+/// `sort_by` to produce an order that depends on the input
+/// permutation. Two different starting permutations must land on
+/// the same sequence, which is the check a single sorted list
+/// cannot make.
+#[test]
+fn test_dewey_cmp_sorts_a_mixed_id_list_into_reading_order() {
+    let expected = ["0", "0.2", "0.10", "1", "2", "10", "10.1"];
+
+    let mut forward: Vec<&str> = vec!["10", "0.10", "2", "0", "10.1", "1", "0.2"];
+    forward.sort_by(|a, b| dewey_cmp(a, b));
+    assert_eq!(forward, expected);
+
+    let mut reversed: Vec<&str> = expected.iter().rev().copied().collect();
+    reversed.sort_by(|a, b| dewey_cmp(a, b));
+    assert_eq!(
+        reversed, expected,
+        "a different starting permutation must reach the same order"
+    );
 }

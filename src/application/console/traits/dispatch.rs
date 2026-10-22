@@ -24,6 +24,22 @@ pub struct DispatchReport {
     /// True if every pair was either Invalid or had no applicable
     /// target — `execute` then wants to turn the report into an Err.
     pub all_failed: bool,
+    /// The [`Outcome::Invalid`] messages this dispatch produced, in
+    /// the order the pairs were applied. Empty when nothing was
+    /// rejected for being an unusable *value*.
+    ///
+    /// Separate from [`Self::messages`], which already carries the
+    /// same text, because the two questions are different: the
+    /// scrollback wants every line in one list, while a caller
+    /// deciding *how loudly* to report a silent no-op needs to know
+    /// which kind of failure it was. Asking that of `messages` means
+    /// matching substrings, and an `Invalid` message is whatever the
+    /// target wrote — there is no substring to match. That is how a
+    /// keybinding carrying an unparseable value came to be the
+    /// quietest failure on the parametric path: `not applicable`
+    /// matched, `already set` matched, and the one that could never
+    /// work matched nothing. See `log_not_applicable_if_silent`.
+    pub invalid: Vec<String>,
 }
 
 /// Apply a list of kv-pairs to a TargetView list, dispatching each
@@ -46,6 +62,7 @@ where
 
     let mut any_applied = false;
     let mut messages: Vec<String> = Vec::new();
+    let mut invalid: Vec<String> = Vec::new();
     let mut any_pair_succeeded = false;
 
     for (k, v) in kvs {
@@ -70,7 +87,9 @@ where
         }
         if !tally.invalid.is_empty() {
             for m in tally.invalid {
-                messages.push(format!("{}: {}", k, m));
+                let line = format!("{}: {}", k, m);
+                invalid.push(line.clone());
+                messages.push(line);
             }
             continue;
         }
@@ -94,6 +113,7 @@ where
         any_applied,
         messages,
         all_failed,
+        invalid,
     }
 }
 
@@ -135,6 +155,8 @@ fn no_target_report() -> DispatchReport {
         any_applied: false,
         messages: vec!["no target for command (select a node, edge, or portal first)".into()],
         all_failed: true,
+        // Having nothing selected is not an unusable value.
+        invalid: Vec::new(),
     }
 }
 
@@ -168,8 +190,10 @@ impl OutcomeTally {
 /// to scope messages to.
 fn aggregate_single_op(tally: OutcomeTally, targets: &[TargetId]) -> DispatchReport {
     let mut messages: Vec<String> = Vec::new();
+    let mut invalid: Vec<String> = Vec::new();
     let mut any_pair_succeeded = false;
     if !tally.invalid.is_empty() {
+        invalid.extend(tally.invalid.iter().cloned());
         messages.extend(tally.invalid);
     } else if tally.applied == 0 {
         if tally.unchanged > 0 {
@@ -188,6 +212,7 @@ fn aggregate_single_op(tally: OutcomeTally, targets: &[TargetId]) -> DispatchRep
         any_applied,
         messages,
         all_failed,
+        invalid,
     }
 }
 

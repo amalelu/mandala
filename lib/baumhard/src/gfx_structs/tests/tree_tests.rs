@@ -2,6 +2,9 @@
 
 //! Tests for [`crate::gfx_structs::tree::Tree`] — arena operations,
 //! mutations, events, and subscriber dispatch (§T1).
+//!
+//! Follows the `do_*()` / `test_*()` split from §T2.2: every `do_*`
+//! body is benchmarkable from `benches/test_bench.rs`.
 
 use glam::Vec2;
 use indextree::NodeId;
@@ -42,10 +45,10 @@ use crate::util::ordered_vec2::OrderedVec2;
 
 #[test]
 pub fn test_basics_solo_mutation() {
-    basics_solo_mutation();
+    do_basics_solo_mutation();
 }
 
-pub fn basics_solo_mutation() {
+pub fn do_basics_solo_mutation() {
     // This is necessary to initialize lazy statics
     fonts::init();
     let mut element = GfxElement::new_area_non_indexed_with_id(
@@ -61,14 +64,14 @@ pub fn basics_solo_mutation() {
         .glyph_area_mut()
         .unwrap()
         .regions
-        .submit_region(color_font_region.clone());
+        .submit_region(color_font_region);
 
     assert_element_delta(
         &element,
         vec![
             GlyphAreaField::Text("test".to_string()),
             GlyphAreaField::scale(1.0),
-            GlyphAreaField::ColorFontRegions(ColorFontRegions::new_from(vec![color_font_region.clone()])),
+            GlyphAreaField::ColorFontRegions(ColorFontRegions::new_from(vec![color_font_region])),
             GlyphAreaField::position(10.0, 10.0),
         ],
     );
@@ -372,10 +375,10 @@ lazy_static!(
 
 #[test]
 fn test_model_block_commands() {
-    model_block_commands();
+    do_model_block_commands();
 }
 
-pub fn model_block_commands() {
+pub fn do_model_block_commands() {
     fonts::init();
 
     let mut reference_model = GfxElement::new_model_non_indexed_with_id(GlyphModel::new(), 0, 0);
@@ -458,10 +461,10 @@ pub fn model_block_commands() {
 
 #[test]
 pub fn test_area_block_commands() {
-    area_block_commands();
+    do_area_block_commands();
 }
 
-pub fn area_block_commands() {
+pub fn do_area_block_commands() {
     // This is necessary to initialize lazy statics
     fonts::init();
     let mut reference_block = GfxElement::new_area_non_indexed_with_id(
@@ -509,14 +512,36 @@ pub fn area_block_commands() {
                                 assert_eq!(my_text, reference_text.to_owned() + text.as_str())
                             }
                             GlyphAreaField::Scale(scale) => {
+                                // Additive composition still holds, but
+                                // inside a domain: the scale is a
+                                // `cosmic_text::Metrics` term, so the
+                                // setter forces it into the shaper's
+                                // usable range rather than letting a
+                                // delta drive it to zero (an abort) or
+                                // negative (nonsense). The delta is
+                                // still applied — it is the *result*
+                                // that is bounded.
+                                let reference = reference_block.glyph_area().unwrap().scale;
+                                let expected = crate::font::fonts::clamp_font_metric(
+                                    (scale + reference).into_inner(),
+                                    reference.into_inner(),
+                                );
                                 assert_eq!(
-                                    scale + reference_block.glyph_area().unwrap().scale,
+                                    ordered_float::OrderedFloat::from(expected),
                                     my_block.glyph_area().unwrap().scale
                                 )
                             }
                             GlyphAreaField::LineHeight(line_height) => {
+                                // Same domain as `Scale` above — the
+                                // other half of `Metrics::new`, and the
+                                // half the zero-line-height assert names.
+                                let reference = reference_block.glyph_area().unwrap().line_height;
+                                let expected = crate::font::fonts::clamp_font_metric(
+                                    (line_height + reference).into_inner(),
+                                    reference.into_inner(),
+                                );
                                 assert_eq!(
-                                    line_height + reference_block.glyph_area().unwrap().line_height,
+                                    ordered_float::OrderedFloat::from(expected),
                                     my_block.glyph_area().unwrap().line_height
                                 )
                             }
@@ -612,7 +637,7 @@ pub fn area_block_commands() {
                         GfxElementField::Id(_) => {}
                         // AREA_COMMANDS never produces a GlyphModel field
                         // — glyph-model deltas are covered by the
-                        // MODEL_COMMANDS pass (see `model_block_commands`).
+                        // MODEL_COMMANDS pass (see `do_model_block_commands`).
                         // If a new AREA_COMMANDS entry starts emitting
                         // `GfxElementField::GlyphModel`, write the Add-branch
                         // assertion here.
@@ -1082,10 +1107,10 @@ fn ancestry_seq(sequence: &[usize]) -> String {
 
 #[test]
 pub fn test_event_propagation_complex_symmetric() {
-    event_propagation_complex_symmetric();
+    do_event_propagation_complex_symmetric();
 }
 
-pub fn event_propagation_complex_symmetric() {
+pub fn do_event_propagation_complex_symmetric() {
     // This is necessary to initialize lazy statics
     fonts::init();
     let region_params = Rc::new(RegionParams::new(10, (1000, 1000)));
@@ -1160,19 +1185,19 @@ pub fn event_propagation_complex_symmetric() {
     // Now both trees are completed, we can apply mutator to the target
     walk_tree_from(
         &mut model,
-        &mut mutator,
-        model_index.get("0").unwrap().clone(),
-        mutator_index.get("0").unwrap().clone(),
+        &mutator,
+        *model_index.get("0").unwrap(),
+        *mutator_index.get("0").unwrap(),
     );
 }
 
 #[test]
-pub fn test_event_propagation() {
+pub fn test_event_propagation_simple() {
     // This is mainly a smoke test
-    event_propagation_simple();
+    do_event_propagation_simple();
 }
 
-pub fn event_propagation_simple() {
+pub fn do_event_propagation_simple() {
     // This is necessary to initialize lazy statics
     fonts::init();
     let mut model: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
@@ -1219,15 +1244,15 @@ pub fn event_propagation_simple() {
     let event_id = mutator.arena.new_node(event);
     let event_baby_id = mutator.arena.new_node(event_baby);
     event_id.append(event_baby_id, &mut mutator.arena);
-    walk_tree_from(&mut model, &mut mutator, model_root_id, event_id);
+    walk_tree_from(&mut model, &mutator, model_root_id, event_id);
 }
 
 #[test]
 pub fn test_complex_tree_mutation() {
-    complex_tree_mutation();
+    do_complex_tree_mutation();
 }
 
-pub fn complex_tree_mutation() {
+pub fn do_complex_tree_mutation() {
     // This is necessary to initialize lazy statics
     fonts::init();
     let mut mutator_c: MutatorTree<GfxMutator> = MutatorTree::new();
@@ -1486,7 +1511,7 @@ pub fn complex_tree_mutation() {
     c_instruction.append(mutator_child_c, &mut mutator_c.arena);
 
     // Apply mutation
-    walk_tree_from(&mut model, &mut mutator_c, root_id, c_instruction);
+    walk_tree_from(&mut model, &mutator_c, root_id, c_instruction);
     // The root node should not be mutated, because by specification it is the children of the instruction-node that
     // should be applied to the children of the target node. If we want to also mutate the root, then we can do that
     // a few ways. For example a mutator can be set in the instruction node that specifically targets the root
@@ -1709,9 +1734,9 @@ pub fn complex_tree_mutation() {
     ));
 
     a_instruction.append(mutator_child_a, &mut mutator_a.arena);
-    assert_eq!(mutator_a.get(a_instruction).is_some(), true);
+    assert!(mutator_a.get(a_instruction).is_some());
 
-    walk_tree_from(&mut model, &mut mutator_a, root_id, a_instruction);
+    walk_tree_from(&mut model, &mutator_a, root_id, a_instruction);
 
     let a = model.get(node_a_id).unwrap();
     assert_eq!(
@@ -1871,10 +1896,10 @@ pub fn complex_tree_mutation() {
 
 #[test]
 pub fn test_simple_tree_mutation() {
-    simple_tree_mutation();
+    do_simple_tree_mutation();
 }
 
-pub fn simple_tree_mutation() {
+pub fn do_simple_tree_mutation() {
     // This is necessary to initialize lazy statics
     fonts::init();
     let mut mutator: MutatorTree<GfxMutator> = MutatorTree::new();
@@ -2002,7 +2027,7 @@ pub fn simple_tree_mutation() {
     mutator_c.append(mutator_ca, &mut mutator.arena);
 
     // Do mutation
-    walk_tree_from(&mut model, &mut mutator, root_id, mutator_root);
+    walk_tree_from(&mut model, &mutator, root_id, mutator_root);
 
     let root = model.get(root_id).unwrap();
     assert_eq!(root.get().position(), Vec2::new(50.0, 50.0));
@@ -2141,4 +2166,119 @@ fn assert_element_delta(element: &GfxElement, fields: Vec<GlyphAreaField>) {
             GlyphAreaField::Operation(_) => {}
         }
     }
+}
+
+#[test]
+fn test_font_metric_setters_clamp_to_the_shaper_domain() {
+    do_font_metric_setters_clamp_to_the_shaper_domain();
+}
+
+/// **The clamp that survives a writer the loader never sees.**
+///
+/// The document trust boundary screens authored geometry, but the
+/// scale and line height are also written at runtime — by a
+/// map-carried `CustomMutation` firing on a click, by a console
+/// verb, by a macro, by IPC. All of those land on these setters, and
+/// the value becomes a `cosmic_text::Metrics` term where zero trips
+/// an `assert!` that aborts the process outright.
+///
+/// So the invariant lives on the field, not on the callers: whatever
+/// arrives, what is stored is a metric the shaper can survive.
+pub fn do_font_metric_setters_clamp_to_the_shaper_domain() {
+    use crate::font::fonts::{MAX_FONT_SIZE_PT, MIN_FONT_SIZE_PT};
+    use crate::gfx_structs::area::GlyphArea;
+    use glam::Vec2;
+
+    let fresh = || GlyphArea::new(14.0, 16.8, Vec2::ZERO, Vec2::new(100.0, 40.0));
+
+    // Zero is the value that aborts the process.
+    let mut area = fresh();
+    area.set_font_size(&0.0);
+    assert_eq!(area.scale.into_inner(), MIN_FONT_SIZE_PT);
+    area.set_line_height(&0.0);
+    assert_eq!(area.line_height.into_inner(), MIN_FONT_SIZE_PT);
+
+    // A delta must not be able to walk the metric out of the domain.
+    let mut area = fresh();
+    area.shrink_font(&1.0e9);
+    assert_eq!(area.scale.into_inner(), MIN_FONT_SIZE_PT);
+    area.grow_font(&1.0e9);
+    assert_eq!(area.scale.into_inner(), MAX_FONT_SIZE_PT);
+
+    let mut area = fresh();
+    area.shrink_line_height(&1.0e9);
+    assert_eq!(area.line_height.into_inner(), MIN_FONT_SIZE_PT);
+    area.grow_line_height(&1.0e9);
+    assert_eq!(area.line_height.into_inner(), MAX_FONT_SIZE_PT);
+
+    // A non-finite write keeps the previous metric rather than
+    // poisoning every downstream comparison with NaN — `f32::clamp`
+    // propagates NaN, so this needs its own screen.
+    let mut area = fresh();
+    area.set_font_size(&f32::NAN);
+    assert_eq!(area.scale.into_inner(), 14.0);
+    area.set_font_size(&f32::INFINITY);
+    assert_eq!(area.scale.into_inner(), MAX_FONT_SIZE_PT);
+    area.set_line_height(&f32::NAN);
+    assert_eq!(area.line_height.into_inner(), 16.8);
+
+    // An ordinary edit is untouched.
+    let mut area = fresh();
+    area.set_font_size(&24.0);
+    assert_eq!(area.scale.into_inner(), 24.0);
+    area.grow_font(&6.0);
+    assert_eq!(area.scale.into_inner(), 30.0);
+}
+
+/// The same invariant on the **delta** path, which is a different
+/// door into the same two fields.
+///
+/// `apply_operation` is what a map-carried `CustomMutation` reaches
+/// — a `GlyphAreaField::Scale` under `ApplyOperation::Add` — and it
+/// composes into a local before storing, so `Add` still adds while
+/// the *result* is what gets bounded. `do_area_block_commands` drives
+/// this path but only with in-domain values, where the clamp is the
+/// identity function; this is the case that makes it bind.
+#[test]
+fn test_apply_operation_clamps_the_shaper_metrics() {
+    do_apply_operation_clamps_the_shaper_metrics();
+}
+
+pub fn do_apply_operation_clamps_the_shaper_metrics() {
+    use crate::core::primitives::ApplyOperation;
+    use crate::font::fonts::{MAX_FONT_SIZE_PT, MIN_FONT_SIZE_PT};
+    use crate::gfx_structs::area::{DeltaGlyphArea, GlyphArea};
+    use glam::Vec2;
+
+    let fresh = || GlyphArea::new(14.0, 16.8, Vec2::ZERO, Vec2::new(100.0, 40.0));
+
+    // An additive delta far past the ceiling.
+    let mut area = fresh();
+    area.apply_operation(&DeltaGlyphArea::new(vec![
+        GlyphAreaField::Operation(ApplyOperation::Add),
+        GlyphAreaField::Scale(ordered_float::OrderedFloat::from(1.0e9)),
+        GlyphAreaField::LineHeight(ordered_float::OrderedFloat::from(1.0e9)),
+    ]));
+    assert_eq!(area.scale.into_inner(), MAX_FONT_SIZE_PT);
+    assert_eq!(area.line_height.into_inner(), MAX_FONT_SIZE_PT);
+
+    // And past the floor, which is the value that aborts the
+    // process inside cosmic-text rather than merely looking wrong.
+    let mut area = fresh();
+    area.apply_operation(&DeltaGlyphArea::new(vec![
+        GlyphAreaField::Operation(ApplyOperation::Add),
+        GlyphAreaField::Scale(ordered_float::OrderedFloat::from(-1.0e9)),
+        GlyphAreaField::LineHeight(ordered_float::OrderedFloat::from(-1.0e9)),
+    ]));
+    assert_eq!(area.scale.into_inner(), MIN_FONT_SIZE_PT);
+    assert_eq!(area.line_height.into_inner(), MIN_FONT_SIZE_PT);
+
+    // An in-domain delta still composes additively — the clamp
+    // bounds the result, it does not replace the operation.
+    let mut area = fresh();
+    area.apply_operation(&DeltaGlyphArea::new(vec![
+        GlyphAreaField::Operation(ApplyOperation::Add),
+        GlyphAreaField::Scale(ordered_float::OrderedFloat::from(6.0)),
+    ]));
+    assert_eq!(area.scale.into_inner(), 20.0);
 }

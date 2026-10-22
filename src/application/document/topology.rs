@@ -34,7 +34,7 @@ impl MindMapDocument {
         //     node and destroy data (issue #1); and
         //   * the cascade into that fresh prefix can never collide with an
         //     unrelated node, so `cascade_rename`'s guard never trips here.
-        let mut next_root = self.next_free_root_segment();
+        let first_root = self.next_free_root_segment();
 
         // Remove the node *before* any cascade. Ids and tree structure can
         // diverge — `apply_reparent` / `apply_orphan_selection` re-point
@@ -62,11 +62,10 @@ impl MindMapDocument {
             .map(|n| n.id.clone())
             .collect();
         let mut orphaned_children: Vec<(String, String)> = Vec::new();
-        for cid in &child_ids {
-            let new_root_id = next_root.to_string();
-            next_root += 1;
+        for (root_segment, cid) in (first_root..).zip(&child_ids) {
+            let new_root_id = root_segment.to_string();
             if !self.cascade_rename(cid, &new_root_id) {
-                // Unreachable in normal operation: `next_root` sits above
+                // Unreachable in normal operation: `first_root` sits above
                 // every live leading segment, so the target prefix is empty.
                 // If a future divergence ever trips the guard, degrade
                 // without corrupting (CODE_CONVENTIONS §9): reverse the
@@ -357,6 +356,10 @@ impl MindMapDocument {
     }
 
     /// Create a default-styled cross_link edge between two nodes.
+    // Native-driver-only, with the four below: edge creation and
+    // node moves are reached from native-gated click / drag
+    // handlers and console verbs.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn create_cross_link_edge(&mut self, source_id: &str, target_id: &str) -> Option<usize> {
         if source_id == target_id {
             return None;
@@ -378,26 +381,26 @@ impl MindMapDocument {
     }
 
     /// Apply a position delta to a node and all its descendants.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn apply_move_subtree(&mut self, node_id: &str, dx: f64, dy: f64) -> Vec<(String, Position)> {
         let mut ids = vec![node_id.to_string()];
         ids.extend(self.mindmap.all_descendants(node_id));
         let mut original_positions = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(node) = self.mindmap.nodes.get_mut(id) {
-                original_positions.push((id.clone(), node.position.clone()));
-                node.position.x += dx;
-                node.position.y += dy;
+                original_positions.push((id.clone(), node.position));
+                node.offset_position_clamped(dx, dy);
             }
         }
         original_positions
     }
 
     /// Apply a position delta to a single node only.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn apply_move_single(&mut self, node_id: &str, dx: f64, dy: f64) -> Option<(String, Position)> {
         if let Some(node) = self.mindmap.nodes.get_mut(node_id) {
-            let original = (node_id.to_string(), node.position.clone());
-            node.position.x += dx;
-            node.position.y += dy;
+            let original = (node_id.to_string(), node.position);
+            node.offset_position_clamped(dx, dy);
             Some(original)
         } else {
             None
@@ -405,6 +408,7 @@ impl MindMapDocument {
     }
 
     /// Move multiple root nodes at once, with subtree deduplication.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn apply_move_multiple(
         &mut self,
         node_ids: &[String],
@@ -429,6 +433,7 @@ impl MindMapDocument {
 
     /// Filter a list of node IDs to only the "roots" — nodes not
     /// descendant of any other node in the list.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) fn dedup_subtree_roots(&self, node_ids: &[String]) -> Vec<String> {
         let id_set: std::collections::HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
         node_ids

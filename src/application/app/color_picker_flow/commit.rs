@@ -87,11 +87,13 @@ pub(in crate::application::app) fn commit_color_picker(
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
-    use crate::application::color_picker::{ColorPickerState, NodeColorAxis, PickerHandle, SectionColorAxis};
+    use crate::application::color_picker::{
+        ColorPickerState, NodeColorAxis, OpenPicker, PickerHandle, SectionColorAxis,
+    };
     use baumhard::util::color::hsv_to_hex;
 
-    let (handle, hue_deg, sat, val, seed_var_ref, seed_hsv) = match state {
-        ColorPickerState::Open {
+    let (handle, hue_deg, sat, val, seed_var_ref, seed_hsv) = match state.as_open() {
+        Some(OpenPicker {
             mode:
                 crate::application::color_picker::PickerMode::Contextual {
                     handle,
@@ -102,7 +104,7 @@ pub(in crate::application::app) fn commit_color_picker(
             sat,
             val,
             ..
-        } => (
+        }) => (
             handle.clone(),
             *hue_deg,
             *sat,
@@ -114,14 +116,14 @@ pub(in crate::application::app) fn commit_color_picker(
         // `commit_color_picker_to_selection` instead; this function
         // is Contextual-only. Being reached in Standalone mode means
         // the caller picked the wrong commit path.
-        ColorPickerState::Open { .. } => {
+        Some(_) => {
             log::warn!(
                 "commit_color_picker called in non-contextual mode; \
                  use commit_color_picker_to_selection for Standalone mode"
             );
             return;
         }
-        ColorPickerState::Closed => return,
+        None => return,
     };
 
     // Close the modal state first so the subsequent rebuilds don't
@@ -146,14 +148,18 @@ pub(in crate::application::app) fn commit_color_picker(
             let targets = node_commit_targets(&doc.selection, &id);
             for nid in &targets {
                 match axis {
+                    // The wheel always commits a concrete value —
+                    // a hex or the seed's `var(--name)` — so every
+                    // axis passes `Some`. Clearing a channel is a
+                    // `color …=reset`, not a picker gesture.
                     NodeColorAxis::Bg => {
-                        doc.set_node_bg_color(nid, to_write.clone());
+                        doc.set_node_bg_color(nid, Some(&to_write));
                     }
                     NodeColorAxis::Text => {
-                        doc.set_node_text_color(nid, to_write.clone());
+                        doc.set_node_text_color(nid, Some(&to_write));
                     }
                     NodeColorAxis::Border => {
-                        doc.set_node_border_color(nid, to_write.clone());
+                        doc.set_node_border_color(nid, Some(&to_write));
                     }
                 }
             }
@@ -172,7 +178,8 @@ pub(in crate::application::app) fn commit_color_picker(
                 // (different sections have different lengths).
                 // Single-section / Section commit fans through
                 // `section_commit_targets` as before.
-                if let Some((rs, re)) = range {
+                if let Some(r) = range {
+                    let (rs, re) = (r.start(), r.end());
                     let applied =
                         doc.set_section_text_color_range(&node_id, section_idx, rs, re, to_write.clone());
                     if !applied {
@@ -204,10 +211,26 @@ pub(in crate::application::app) fn commit_color_picker(
     }
 
     renderer.rebuild_color_picker_overlay_buffers(app_scene, None);
-    // `set_edge_color` / `set_node_*_color` mutate edge/node color
-    // fields the connection pass caches per-edge (body glyph, color,
-    // font). Clear so the rebuild re-samples against the committed
-    // model.
+    // A conservative flush, and no longer a required one. This used to
+    // say the setters below mutate "fields the connection pass caches
+    // per-edge (body glyph, color, font)"; none of those are cached
+    // any more — the connection cache holds sampled geometry, the
+    // `SampleParams` it was sampled under, and the endpoints, and
+    // resolves every styling value from the live model on every path.
+    //
+    // Checked rather than assumed: the six setters this function
+    // reaches (`set_edge_color`, `set_node_bg_color`,
+    // `set_node_border_color`, `set_node_text_color`,
+    // `set_section_text_color`, `set_section_text_color_range`) write
+    // color fields only, and none of them moves a node position or
+    // size, an anchor, a control point, or the border *size* that
+    // `node_clip_aabbs` reads — which is the whole of what the cache
+    // still depends on the caller for.
+    //
+    // Left in place deliberately: dropping it is a behavior change to
+    // the picker's commit path (edges would reuse their samples
+    // instead of resampling) and belongs in its own commit with its
+    // own test, not in a documentation round.
     scene_cache.clear();
     rebuild_all(
         doc,
@@ -236,19 +259,19 @@ pub(in crate::application::app) fn apply_picker_preview(
     doc: &mut MindMapDocument,
     picker_hover: &mut ColorPickerHoverInteraction,
 ) {
-    use crate::application::color_picker::{ColorPickerState, PickerHandle};
+    use crate::application::color_picker::{OpenPicker, PickerHandle};
     use crate::application::document::ColorPickerPreview;
     use baumhard::util::color::hsv_to_hex;
 
-    let (handle, eff_hue, eff_sat, eff_val) = match state {
-        ColorPickerState::Open {
+    let (handle, eff_hue, eff_sat, eff_val) = match state.as_open() {
+        Some(OpenPicker {
             mode,
             hue_deg,
             sat,
             val,
             hover_preview,
             ..
-        } => {
+        }) => {
             let handle = match mode {
                 crate::application::color_picker::PickerMode::Contextual { handle, .. } => {
                     Some(handle.clone())
@@ -263,7 +286,7 @@ pub(in crate::application::app) fn apply_picker_preview(
             let (eh, es, ev) = hover_preview.unwrap_or((*hue_deg, *sat, *val));
             (handle, eh, es, ev)
         }
-        ColorPickerState::Closed => return,
+        None => return,
     };
     let hex = hsv_to_hex(eff_hue, eff_sat, eff_val);
     if let Some(handle) = handle {
@@ -326,17 +349,17 @@ pub(in crate::application::app) fn commit_color_picker_to_selection(
     renderer: &mut Renderer,
     scene_cache: &mut baumhard::mindmap::scene_cache::SceneConnectionCache,
 ) {
-    use crate::application::color_picker::{request_error_flash, ColorPickerState, FlashKind};
+    use crate::application::color_picker::{request_error_flash, FlashKind, OpenPicker};
     use crate::application::console::traits::{
         selection_targets, view_for, AcceptsWheelColor, ColorValue, Outcome,
     };
     use baumhard::util::color::hsv_to_hex;
 
-    let (hue_deg, sat, val) = match state {
-        ColorPickerState::Open {
+    let (hue_deg, sat, val) = match state.as_open() {
+        Some(OpenPicker {
             hue_deg, sat, val, ..
-        } => (*hue_deg, *sat, *val),
-        ColorPickerState::Closed => return,
+        }) => (*hue_deg, *sat, *val),
+        None => return,
     };
     let color = ColorValue::Hex(hsv_to_hex(hue_deg, sat, val));
 
@@ -362,9 +385,10 @@ pub(in crate::application::app) fn commit_color_picker_to_selection(
     }
 
     if any_accepted {
-        // Same rationale as `commit_color_picker`: the wheel-color
-        // writes land on cached edge fields, so clear before the
-        // rebuild.
+        // Same situation as `commit_color_picker` above, including
+        // that the stated reason was false: the wheel-color writes do
+        // not land on cached edge fields, because no styling field is
+        // cached any more. Conservative flush, same deferral.
         scene_cache.clear();
         // Rebuild the whole scene so the newly-colored items repaint
         // next frame. The picker itself stays open — no state change

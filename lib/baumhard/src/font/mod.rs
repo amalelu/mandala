@@ -8,9 +8,10 @@
 
 /// `ColorFontRegions` → cosmic-text bridges
 /// ([`attrs::attrs_list_from_regions`] for `Editor::insert_string`,
-/// [`attrs::RegionFamilies`] +
-/// [`attrs::rich_text_spans_from_regions`] for
-/// `Buffer::set_rich_text`).
+/// [`attrs::RegionFamilies`] + [`attrs::rich_text_spans_into`] for
+/// `Buffer::set_rich_text`, with
+/// [`attrs::rich_text_spans_from_regions`] as the allocating
+/// convenience shape over the same body).
 pub mod attrs;
 /// Float-RGBA ↔ `cosmic_text::Color` bridge — the boundary helpers
 /// every render path uses to hand cosmic-text a color or read one
@@ -26,6 +27,10 @@ pub mod fonts;
 /// Routes through [`color::cosmic_color_from_rgba`] for the actual
 /// quantization.
 pub mod hex;
+/// Per-`(face, size, grapheme)` measured glyph advances + ink
+/// heights, cached. Replaces `metrics::monospace_advance` at every
+/// border-rail callsite.
+pub mod metric_cache;
 /// Font-metric approximations (`monospace_advance` + the underlying
 /// `MONOSPACE_ADVANCE_RATIO`) usable without a live `FontSystem`.
 /// Deprecated in favor of [`metric_cache::glyph_advance`] for any
@@ -33,10 +38,6 @@ pub mod hex;
 /// measured advance from cosmic-text and the ratio's static
 /// calibration drift goes away.
 pub mod metrics;
-/// Per-`(face, size, grapheme)` measured glyph advances + ink
-/// heights, cached. Replaces `metrics::monospace_advance` at every
-/// border-rail callsite.
-pub mod metric_cache;
 /// Naming and ordering rules for the compiled-in font table.
 ///
 /// `build.rs` scans `src/font/fonts/` and emits the `AppFont` enum
@@ -73,6 +74,13 @@ pub mod metric_cache;
 pub mod name_rules;
 /// Test bodies exposed via `pub mod tests` so `benches/test_bench.rs`
 /// can reuse the `do_*()` functions as micro-benchmarks (§B8).
+/// `#[allow(clippy::unwrap_used)]` because this is a tests tree
+/// (§T2.2): it carries no `cfg(test)` gate — the criterion harness
+/// imports its bodies — so the crate-root `warn(clippy::unwrap_used)`
+/// sees it as shipped code. `unwrap()` in a test is the correct
+/// spelling; the gate that matters for shipped code is
+/// `util::unwrap_posture`, which excludes these trees by path.
+#[allow(clippy::unwrap_used)]
 pub mod tests;
 
 // ── cosmic-text re-exports ───────────────────────────────────────
@@ -82,12 +90,12 @@ pub mod tests;
 // directly. The crate boundary stays here; a future swap to a
 // different shaper / layout engine is one edit per site below.
 
-/// Cosmic-text `Attrs` — span-level styling threaded into
-/// `Buffer::set_rich_text` and `Buffer::set_text`.
-pub use cosmic_text::Attrs;
 /// Cosmic-text `Align` — text alignment passed to the rich-text /
 /// set-text API.
 pub use cosmic_text::Align;
+/// Cosmic-text `Attrs` — span-level styling threaded into
+/// `Buffer::set_rich_text` and `Buffer::set_text`.
+pub use cosmic_text::Attrs;
 /// Cosmic-text `Buffer` — the shaped glyph cache the renderer hands
 /// to glyphon. Constructors are wrapped in [`buffer::create`] so the
 /// `Metrics::new(...)` boilerplate doesn't repeat at every callsite.
@@ -96,7 +104,7 @@ pub use cosmic_text::Buffer;
 /// common defaults the renderer used to write inline.
 pub use cosmic_text::Color;
 /// Long-lived font system (database + atlas). One per process;
-/// owned by [`fonts::FONT_SYSTEM`].
+/// owned by `fonts::FONT_SYSTEM`.
 pub use cosmic_text::FontSystem;
 /// Per-buffer font / line-height metrics — one `Metrics::new(...)`
 /// per [`Buffer`] construction.

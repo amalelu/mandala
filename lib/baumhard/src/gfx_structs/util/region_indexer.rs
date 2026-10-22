@@ -82,25 +82,26 @@ impl RegionIndexer {
     /// updates the reverse (element→regions) map when that map is
     /// enabled. O(log n) into the `BTreeSet`; one `BTreeSet`
     /// allocation on first insert of a given element when the
-    /// reverse index is live.
+    /// reverse index is live. One hash lookup on the reverse map,
+    /// not the three (`contains_key`, `insert`, `get_mut`) the
+    /// entry-less spelling used to cost.
     pub fn insert(&mut self, element_id: usize, region: usize) {
         self.index[region].insert(element_id);
         if self.use_reverse_index {
-            if !self.reverse_index.contains_key(&element_id) {
-                self.reverse_index.insert(element_id, BTreeSet::new());
-            }
-            self.reverse_index.get_mut(&element_id).unwrap().insert(region);
+            self.reverse_index.entry(element_id).or_default().insert(region);
         }
     }
 
     /// Undo a prior [`insert`](Self::insert) — drop the element from
     /// `region` in both the forward and (when enabled) reverse index.
-    /// O(log n); missing entries are silent no-ops.
+    /// O(log n); missing entries are silent no-ops. One hash lookup
+    /// on the reverse map rather than a `contains_key` followed by a
+    /// `get_mut` that could only repeat its answer.
     pub fn remove(&mut self, element_id: usize, region: usize) {
         self.index[region].remove(&element_id);
         if self.use_reverse_index {
-            if self.reverse_index.contains_key(&element_id) {
-                self.reverse_index.get_mut(&element_id).unwrap().remove(&region);
+            if let Some(regions) = self.reverse_index.get_mut(&element_id) {
+                regions.remove(&region);
             }
         }
     }

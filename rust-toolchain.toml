@@ -1,0 +1,20 @@
+# The toolchain every `./test.sh` run builds with, here and in CI
+# (`.github/workflows/test.yml` installs exactly this file).
+#
+# Pinned because `./test.sh --lint` holds clippy, rustdoc and rustfmt
+# to a zero-warning baseline with `-D warnings`, and each new stable
+# release can add or widen a lint. On an unpinned toolchain that turns
+# untouched code red on whichever machine updated first, while a
+# machine that has not updated stays green. Bumping the toolchain is
+# therefore a change of its own: edit `channel`, run
+# `./test.sh --lint`, and fix whatever the new lints report in the
+# same PR.
+#
+# The wasm32 target is listed so that the wasm32 legs of `./test.sh`
+# (the type-check, the clippy and doc legs, and the font-lock probe)
+# run instead of skipping with a note on a machine that has never run
+# `rustup target add`.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Border tree builder tests — void-per-framed, frame filters, drag offset, theme resolution, stable channels, mutator round-trip, identity sequence.
+//! Border tree builder tests — void-per-framed, frame filters, drag offset, theme resolution, stable channels, mutator round-trip, structural signature. The signatures' own coverage lives in [`super::canvas_signature`].
 
 use super::super::*;
 use super::fixtures::*;
@@ -193,7 +193,7 @@ fn border_mutator_round_trip_matches_full_rebuild() {
     // the parity loop actually exercises the border mutator
     // delta's `GlyphAreaField::ZoomVisibility` write (§B2):
     // a regression dropping that field from the assign delta
-    // would leave `tree_a`'s four border runs at the unbounded
+    // would leave `tree_a`'s eight border runs at the unbounded
     // default while a fresh build picks up `{0.5, 2.0}`, and
     // the per-field assertion below trips on `zoom_visibility`.
     if let Some(node_a) = map.nodes.get_mut("a") {
@@ -245,8 +245,8 @@ fn border_mutator_round_trip_matches_full_rebuild() {
 }
 
 /// A node's zoom-visibility window is stamped onto every one
-/// of its four border `GlyphArea` runs — top, bottom, left,
-/// right — so the frame renders only when the owning node
+/// of its eight border `GlyphArea` runs — four fill rails and
+/// four corners — so the frame renders only when the owning node
 /// does. Without this assertion, a regression in
 /// `BorderNodeData::zoom_visibility` propagation (either at
 /// the initial-build stamp site in `border_node_data` or at
@@ -295,12 +295,17 @@ fn border_runs_default_to_unbounded_when_node_has_no_window() {
 }
 
 /// Toggling `show_frame = false` on a node shifts the
-/// identity sequence so the dispatcher in
+/// structural signature so the dispatcher in
 /// `CanvasFrame::update_border_tree` falls back to a full
 /// rebuild. Without this, applying a mutator against a tree
 /// whose parent set has changed would silently misalign.
+///
+/// The emitted id list is asserted beside the signature on
+/// purpose: a `u64` that moved says nothing about *why*, and the
+/// framed-node set is the thing the signature is claiming to
+/// track.
 #[test]
-fn border_identity_sequence_changes_on_show_frame_toggle() {
+fn test_border_structure_signature_changes_on_show_frame_toggle() {
     let mut map = synthetic_map(
         vec![
             synthetic_node("a", None, 0.0, 0.0),
@@ -308,23 +313,33 @@ fn border_identity_sequence_changes_on_show_frame_toggle() {
         ],
         vec![],
     );
-    let before = border_identity_sequence(&border_node_data(
+    let nodes_before = border_node_data(
         &map,
         &HashMap::new(),
         BorderChromeOverrides::default(),
         &map.fold_hidden_set(),
-    ));
-    assert_eq!(before, vec!["a".to_string(), "b".to_string()]);
+    );
+    assert_eq!(framed_ids(&nodes_before), vec!["a", "b"]);
+    let before = border_structure_signature(&nodes_before);
 
     map.nodes.get_mut("b").unwrap().style.show_frame = false;
-    let after = border_identity_sequence(&border_node_data(
+    let nodes_after = border_node_data(
         &map,
         &HashMap::new(),
         BorderChromeOverrides::default(),
         &map.fold_hidden_set(),
-    ));
-    assert_eq!(after, vec!["a".to_string()]);
+    );
+    assert_eq!(framed_ids(&nodes_after), vec!["a"]);
+    let after = border_structure_signature(&nodes_after);
     assert_ne!(before, after);
+}
+
+/// The framed-node ids a border pass emitted, in tree-insertion
+/// order — what [`border_structure_signature`] folds into its
+/// hash, spelled out so a failing assertion names a node instead
+/// of a `u64`.
+fn framed_ids(nodes: &[BorderNodeData]) -> Vec<&str> {
+    nodes.iter().map(|n| n.node_id.as_str()).collect()
 }
 
 /// `row_count` for the side columns now uses `.floor()` (post-

@@ -205,7 +205,7 @@ fn action_multi_section_error(len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::document::SectionSel;
+    use crate::application::document::{GraphemeRange, SectionSel, SectionSpan};
 
     fn section_sel(node_id: &str, section_idx: usize) -> SectionSel {
         SectionSel {
@@ -330,7 +330,8 @@ mod tests {
     fn resolve_action_section_target_handles_section_range() {
         let sel = SelectionState::SectionRange {
             sel: section_sel("n", 2),
-            range: (0, 1),
+            section_span: SectionSpan::single(2),
+            grapheme_range: GraphemeRange::new(0, 1),
         };
         assert_eq!(resolve_action_section_target(&sel), Some(("n".into(), 2)));
     }

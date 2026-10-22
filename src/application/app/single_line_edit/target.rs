@@ -174,7 +174,7 @@ impl SingleLineEditTarget {
         renderer: &Renderer,
     ) {
         let offsets = std::collections::HashMap::new();
-        let frame = CanvasFrame::new(
+        let mut frame = CanvasFrame::new(
             doc,
             &offsets,
             crate::application::document::InteractionModeOverrides::none(),

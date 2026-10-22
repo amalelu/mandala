@@ -15,6 +15,13 @@ mod ast;
 mod build;
 mod context;
 
+/// `#[allow(clippy::unwrap_used)]` because this is a tests tree
+/// (§T2.2): it carries no `cfg(test)` gate — the criterion harness
+/// imports its bodies — so the crate-root `warn(clippy::unwrap_used)`
+/// sees it as shipped code. `unwrap()` in a test is the correct
+/// spelling; the gate that matters for shipped code is
+/// `util::unwrap_posture`, which excludes these trees by path.
+#[allow(clippy::unwrap_used)]
 pub mod tests;
 
 // `InstructionSpec` and `MutationListSrc` are retained as `pub`

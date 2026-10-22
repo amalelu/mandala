@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Border-tree builder: emits one per-node Void parent and four
-//! `GlyphArea` runs (top, bottom, left, right) per framed node.
-//! Sorted lexicographically by node id so the per-node Void
+//! Border-tree builder: emits one per-node Void parent and the
+//! eight `GlyphArea` runs
+//! [`border_run_specs`](crate::mindmap::border::border_run_specs)
+//! lays out — four fill rails plus four corners — per framed
+//! node. Sorted lexicographically by node id so the per-node Void
 //! channel is stable across rebuilds — the precondition for the
 //! in-place mutator path `build_border_mutator_tree_from_nodes`.
 
@@ -29,8 +31,8 @@ use super::overrides::{BorderConfigEditsView, BorderPreview, BorderPreviewTarget
 /// [`build_border_mutator_tree`] (in-place §B2 update). The
 /// `parent_channel` is the 1-based index of this node in the
 /// sorted visible-framed-nodes sequence, so the channel is
-/// *stable across rebuilds* as long as the identity sequence
-/// (see [`border_identity_sequence`]) is unchanged.
+/// *stable across rebuilds* as long as the structural signature
+/// (see [`border_structure_signature`]) is unchanged.
 #[derive(Clone, Debug)]
 pub struct BorderNodeData {
     pub node_id: String,
@@ -42,7 +44,7 @@ pub struct BorderNodeData {
     pub size_x: f32,
     pub size_y: f32,
     /// Zoom window inherited from the owning node. Stamped onto
-    /// each of the four border runs at both initial-build and
+    /// each of the eight border runs at both initial-build and
     /// mutator-update time so the frame disappears atomically
     /// with its node at any zoom level.
     pub zoom_visibility: ZoomVisibility,
@@ -170,8 +172,8 @@ pub fn border_node_data(
         if !(node.style.show_frame || (preview_targets_this_node && preview_force_show_frame)) {
             continue;
         }
-        // The glyph frame is laid out as four axis-aligned text
-        // runs along the node's bounding box, which only makes
+        // The glyph frame is laid out as axis-aligned text runs
+        // along the node's bounding box, which only makes
         // sense for `NodeShape::Rectangle`. For any other shape we
         // suppress the frame; a curved / shape-aware border is
         // tracked as follow-up work (see CLAUDE.md). Authors still
@@ -190,7 +192,16 @@ pub fn border_node_data(
             continue;
         }
         let (ox, oy) = offsets.get(&node.id).copied().unwrap_or((0.0, 0.0));
-        let frame_color_hex = color::resolve_var(&node.style.frame_color, vars);
+        // Palette first, `style.frame_color` second — the node color
+        // cascade lives on `MindMap` so this pass and the container
+        // pass cannot disagree about what a themed node's frame is.
+        // The two halves stay apart because the canvas-wide border
+        // default sits *between* them: a per-node theme outranks a
+        // map-wide border color, and `style.frame_color` does not.
+        let themed_frame = map
+            .node_frame_theme_tier(node)
+            .map(|c| color::resolve_var(c, vars));
+        let style_frame_hex = color::resolve_var(&node.style.frame_color, vars);
         // Border preview: when this node is a `Nodes(ids)` target,
         // fold the staged edits into a clone of its committed slot
         // before resolution. A `CanvasDefault` preview instead
@@ -220,7 +231,8 @@ pub fn border_node_data(
         // border cascade in a frame: the clip-AABB pass needs just
         // the extent and takes `resolve_border_font_size_pt`, and
         // nothing downstream of here resolves it again.
-        let mut border_style = resolve_border_style(node_slot_ref, canvas_default_ref, frame_color_hex);
+        let mut border_style =
+            resolve_border_style(node_slot_ref, canvas_default_ref, themed_frame, style_frame_hex);
         // NodeEdit dimming: every node *other* than the active
         // target renders its frame at half alpha so the active
         // node visually pops. `node_edit_for == None` (Default
@@ -262,18 +274,121 @@ pub fn border_node_data(
     out
 }
 
-/// Identity sequence for a slice of [`BorderNodeData`] — the
-/// sorted sequence of `node_id`s in tree-insertion order. Two
-/// sequences match iff the same set of nodes is framed in the
-/// same order. Drag, text-edit, color-preview, and preset-swap
-/// all leave this stable (preset swaps change the character
-/// content of each run but not the tree shape — the mutator's
-/// `Text::Assign` picks up the new glyphs); adding or removing a
+/// Structural signature for a slice of [`BorderNodeData`] — the
+/// `(node_id, parent_channel)` sequence in tree-insertion order,
+/// hashed.
+///
+/// Two slices match iff the same nodes are framed, in the same
+/// order, under the same per-node Void channels. That is the
+/// precondition for [`build_border_mutator_tree_from_nodes`]'s
+/// output to line up against an already-registered tree:
+/// `align_child_walks` pairs mutator children with target children
+/// by ascending channel. Drag, text-edit, color-preview and
+/// preset-swap all leave it stable (a preset swap changes each
+/// run's characters but not the tree's shape — the mutator's
+/// `Text::Assign` carries the new glyphs); adding or removing a
 /// framed node, toggling `show_frame`, or folding an ancestor
-/// drops the equality and forces a full rebuild via the
-/// dispatcher in `CanvasFrame::update_border_tree`.
-pub fn border_identity_sequence(nodes: &[BorderNodeData]) -> Vec<String> {
-    nodes.iter().map(|n| n.node_id.clone()).collect()
+/// moves it, and the dispatcher in
+/// `CanvasFrame::update_border_tree` takes the full rebuild.
+///
+/// **Deliberately a subset of the fields, and the only signature
+/// here that is.** A signature that moved on every color change
+/// would push a color-picker hover down the full-rebuild arm —
+/// the arena reallocation the §B2 mutator path exists to avoid.
+/// [`border_content_signature`] asks the finer question second,
+/// and carries the completeness obligation.
+///
+/// What the subset rests on: the per-node sub-tree is one Void
+/// plus exactly the runs
+/// [`border_run_specs`](crate::mindmap::border::border_run_specs)
+/// emits, and that function pushes a fixed eight at channels
+/// 1..=8 on every input. Both halves of that are asserted, by two
+/// tests rather than one:
+/// `border_tree_has_one_void_parent_per_framed_node` pins the
+/// count, and `border_tree_run_channels_are_stable_1_to_8` pins
+/// the channels the mutator aligns on. Should a future run count
+/// vary per node, it becomes part of the tree's *shape* and
+/// belongs in this hash.
+///
+/// # Costs
+///
+/// O(total node-id bytes). No allocation: the fields stream into
+/// the hasher rather than materializing a `Vec<String>` whose only
+/// consumer was the hash.
+pub fn border_structure_signature(nodes: &[BorderNodeData]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    nodes.len().hash(&mut h);
+    for node in nodes {
+        let BorderNodeData {
+            node_id,
+            parent_channel,
+            ..
+        } = node;
+        node_id.as_str().hash(&mut h);
+        parent_channel.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Content signature for a slice of [`BorderNodeData`] — every
+/// field either border projection reads, hashed.
+///
+/// Answers the question the structural signature deliberately does
+/// not: *would rebuilding the border tree from this slice produce
+/// anything different from what is registered?* When it says no,
+/// `CanvasFrame::update_border_tree` skips building and applying
+/// the mutator entirely — so the completeness of this hash is
+/// load-bearing in the silent direction. A field that moves a
+/// glyph run but not this hash leaves stale glyphs on screen.
+///
+/// Two things keep it complete rather than remembered. The body
+/// destructures [`BorderNodeData`] exhaustively, so a new field
+/// does not compile until it is hashed here; and the style axes go
+/// through
+/// [`BorderStyle::hash_content`](crate::mindmap::border::BorderStyle::hash_content),
+/// which destructures in turn. Floats are hashed as `to_bits`,
+/// which distinguishes `-0.0` from `0.0` — the safe direction,
+/// since it can only cost a redundant update.
+///
+/// # Costs
+///
+/// O(total node-id + style bytes + palette entries). No
+/// allocation.
+pub fn border_content_signature(nodes: &[BorderNodeData]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    nodes.len().hash(&mut h);
+    for node in nodes {
+        let BorderNodeData {
+            node_id,
+            parent_channel,
+            border_style,
+            color_rgba,
+            pos_x,
+            pos_y,
+            size_x,
+            size_y,
+            zoom_visibility,
+            palette_cycle,
+        } = node;
+        node_id.as_str().hash(&mut h);
+        parent_channel.hash(&mut h);
+        border_style.hash_content(&mut h);
+        color_rgba.map(f32::to_bits).hash(&mut h);
+        pos_x.to_bits().hash(&mut h);
+        pos_y.to_bits().hash(&mut h);
+        size_x.to_bits().hash(&mut h);
+        size_y.to_bits().hash(&mut h);
+        zoom_visibility.hash(&mut h);
+        palette_cycle.len().hash(&mut h);
+        for entry in palette_cycle {
+            entry.map(f32::to_bits).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// Build the border tree from the given `MindMap` + drag offsets.
@@ -285,10 +400,14 @@ pub fn border_identity_sequence(nodes: &[BorderNodeData]) -> Vec<String> {
 /// ```text
 /// Void (root)
 /// ├── Void (per node — channel = 1-based sorted index)
-/// │   ├── GlyphArea (top run, channel = 1)
-/// │   ├── GlyphArea (bottom run, channel = 2)
+/// │   ├── GlyphArea (top fill rail, channel = 1)
+/// │   ├── GlyphArea (bottom fill rail, channel = 2)
 /// │   ├── GlyphArea (left column, channel = 3)
-/// │   └── GlyphArea (right column, channel = 4)
+/// │   ├── GlyphArea (right column, channel = 4)
+/// │   ├── GlyphArea (top-left corner, channel = 5)
+/// │   ├── GlyphArea (top-right corner, channel = 6)
+/// │   ├── GlyphArea (bottom-left corner, channel = 7)
+/// │   └── GlyphArea (bottom-right corner, channel = 8)
 /// ├── Void (next node)
 /// │   └── ...
 /// ```
@@ -322,7 +441,7 @@ pub fn build_border_tree(
 
 /// Variant of [`build_border_tree`] that consumes pre-computed
 /// node data. Use this in the dispatch path that already called
-/// [`border_node_data`] to derive the identity sequence — saves
+/// [`border_node_data`] to derive the dispatch signatures — saves
 /// one walk over `MindMap.nodes`.
 pub fn build_border_tree_from_nodes(nodes: &[BorderNodeData]) -> Tree<GfxElement, GfxMutator> {
     let mut tree: Tree<GfxElement, GfxMutator> = Tree::new_non_indexed();
@@ -339,7 +458,7 @@ pub fn build_border_tree_from_nodes(nodes: &[BorderNodeData]) -> Tree<GfxElement
 /// with [`build_border_tree`] — both consume
 /// [`border_node_data`], so applying this mutator to a tree built
 /// from a node slice with the same
-/// [`border_identity_sequence`] updates each run's variable
+/// [`border_structure_signature`] updates each run's variable
 /// fields in place.
 ///
 /// The hot-path case this closes: when the color picker is open,
@@ -373,8 +492,9 @@ pub fn build_border_mutator_tree_from_nodes(
 
     let mut mt: MutatorTree<GfxMutator> = MutatorTree::new_with(GfxMutator::new_void(0));
     for node in nodes {
-        let parent_node = mt.arena.new_node(GfxMutator::new_void(node.parent_channel));
-        mt.root.append(parent_node, &mut mt.arena);
+        let parent_node = mt
+            .root
+            .append_value(GfxMutator::new_void(node.parent_channel), &mut mt.arena);
 
         let specs = crate::mindmap::border::border_run_specs(
             &node.border_style,
@@ -398,17 +518,16 @@ pub fn build_border_mutator_tree_from_nodes(
             area.regions = regions;
             area.zoom_visibility = node.zoom_visibility;
             let delta = DeltaGlyphArea::full_assign_from(&area);
-            let leaf = mt.arena.new_node(GfxMutator::new(
-                Mutation::AreaDelta(Box::new(delta)),
-                spec.channel,
-            ));
-            parent_node.append(leaf, &mut mt.arena);
+            parent_node.append_value(
+                GfxMutator::new(Mutation::AreaDelta(Box::new(delta)), spec.channel),
+                &mut mt.arena,
+            );
         }
     }
     mt
 }
 
-/// Build one per-node sub-tree (Void parent + 4 GlyphArea runs) and
+/// Build one per-node sub-tree (Void parent + 8 GlyphArea runs) and
 /// append it under `tree.root`. Kept as a private helper so
 /// `build_border_tree` stays readable. `BorderNodeData.parent_channel`
 /// is the stable 1-based sorted-index channel — see
@@ -424,16 +543,16 @@ fn append_border_sub_tree(
         (node.size_x, node.size_y),
     );
 
-    // Per-node Void parent — groups the four runs for targeted
+    // Per-node Void parent — groups the eight runs for targeted
     // mutation. The parent's channel is the stable sorted-index
     // value so distinct nodes never collide across rebuilds.
-    let parent_id = tree
-        .arena
-        .new_node(GfxElement::new_void_with_id(node.parent_channel, *unique_id));
-    tree.root.append(parent_id, &mut tree.arena);
+    let parent_id = tree.root.append_value(
+        GfxElement::new_void_with_id(node.parent_channel, *unique_id),
+        &mut tree.arena,
+    );
     *unique_id += 1;
 
-    // Stable channels 1..=4 inside each border sub-tree. The
+    // Stable channels 1..=8 inside each border sub-tree. The
     // per-node Void parent already disambiguates across nodes.
     // Palette offsets sweep top → right → bottom → left around
     // the rectangle so a color cycle wraps cleanly. See
@@ -495,6 +614,5 @@ pub(super) fn append_border_run(
     area.regions = build_border_regions(cluster_count, palette_cycle, color_rgba, palette_offset);
 
     let element = GfxElement::new_area_non_indexed_with_id(area, channel, unique_id);
-    let node = tree.arena.new_node(element);
-    parent_id.append(node, &mut tree.arena);
+    parent_id.append_value(element, &mut tree.arena);
 }

@@ -39,14 +39,15 @@ pub(in crate::application::app) mod native;
 // callable without callers learning the sub-module split.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::application::app) use native::{
-    apply_label_edit_action_to_buffer, dispatch_action, dispatch_macro,
+    apply_label_edit_action_to_buffer, dispatch_action, dispatch_macro, run_macro_steps,
 };
 
 // Cross-platform re-exports — both dispatchers and the
 // `tests_mutations` parity tests import via the shorter
 // `super::dispatch::*` form.
 pub(in crate::application::app) use cross_dispatch::{
-    dispatch_custom_mutation_for_key, drive_touch_event, touch_phase, DispatchHit, DispatchOutcome,
+    apply_touch_effect, dispatch_custom_mutation_for_key, drive_touch_event, edge_under_pointer, touch_phase,
+    CanvasPerPixel, DispatchHit, DispatchOutcome, TouchStep,
 };
 // One-target consumers of cross-platform items. Each body lives in
 // `cross_dispatch` and is unit-tested on the host (§T9); only the
@@ -57,9 +58,14 @@ pub(in crate::application::app) use cross_dispatch::{
 //   `classify_unhandled_pointer_dispatch` instead of directly.
 // - the unhandled-pointer split — the browser's mouse handlers report
 //   on it; native has a fall-through arm rather than a report.
+// - `compute_node_click_selection` — the tap path calls it inside
+//   `cross_dispatch` on both targets; only the *re-export* is
+//   one-target, for native's `click.rs`, which was its home until the
+//   tap needed the same ladder.
 #[allow(unused_imports)]
 pub(in crate::application::app) use cross_dispatch::{
-    classify_unhandled_pointer_dispatch, edge_label_target, UnhandledPointerDispatch,
+    classify_unhandled_pointer_dispatch, compute_node_click_selection, edge_label_target,
+    UnhandledPointerDispatch,
 };
 // `pub(crate)` so `tests_mutations` (in `document/`) and the
 // WASM run loop (`run_wasm/mod.rs`) can both reach it through this

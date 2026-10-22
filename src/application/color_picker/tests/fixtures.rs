@@ -16,11 +16,9 @@ pub(in crate::application) fn sample_geometry() -> ColorPickerOverlayGeometry {
     // so the layout tests see the classic em-box centering
     // unless a test explicitly overrides them.
     ColorPickerOverlayGeometry {
-        target_label: "edge",
         hue_deg: 0.0,
         sat: 1.0,
         val: 1.0,
-        preview_hex: "#ff0000".to_string(),
         hex_visible: false,
         max_cell_advance: 16.0,
         max_ring_advance: 24.0,
@@ -33,7 +31,6 @@ pub(in crate::application) fn sample_geometry() -> ColorPickerOverlayGeometry {
         arm_left_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
         arm_right_ink_offsets: [(0.0, 0.0); CROSSHAIR_CENTER_CELL],
         preview_ink_offset: (0.0, 0.0),
-        selection_hint: None,
     }
 }
 

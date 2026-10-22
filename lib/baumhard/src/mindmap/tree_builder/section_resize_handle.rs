@@ -11,6 +11,7 @@ use glam::Vec2;
 
 use crate::mindmap::model::MindMap;
 use crate::mindmap::SELECTION_HIGHLIGHT_HEX;
+use crate::util::geometry::aabb_center;
 
 /// Which of the eight resize handles on a `Some`-sized section
 /// the cursor is targeting. Order is the conventional clockwise-
@@ -143,7 +144,7 @@ impl ResizeHandleSide {
 /// exactly on the centerline rounds south and east (`>=` on both
 /// axes). Tested as a pure function — no GPU, no scene state.
 pub fn infer_resize_anchor(cursor_canvas: Vec2, aabb_pos: Vec2, aabb_size: Vec2) -> ResizeHandleSide {
-    let center = aabb_pos + aabb_size * 0.5;
+    let center = aabb_center(aabb_pos, aabb_size);
     let east = cursor_canvas.x >= center.x;
     let south = cursor_canvas.y >= center.y;
     match (east, south) {
@@ -231,8 +232,8 @@ pub fn resize_handle_positions(pos: Vec2, size: Vec2) -> Option<[(ResizeHandleSi
     }
     let (x, y) = (pos.x, pos.y);
     let (w, h) = (size.x, size.y);
-    let cx = x + w * 0.5;
-    let cy = y + h * 0.5;
+    let center = aabb_center(pos, size);
+    let (cx, cy) = (center.x, center.y);
     let right = x + w;
     let bottom = y + h;
     Some([

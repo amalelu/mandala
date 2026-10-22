@@ -23,7 +23,7 @@ pub mod matrix;
 /// (high-level commands).
 pub mod mutator;
 
-pub use component::{GlyphComponent, GlyphComponentField};
+pub use component::GlyphComponent;
 pub use glyph_model::GlyphModel;
 pub use line::GlyphLine;
 pub use matrix::GlyphMatrix;
